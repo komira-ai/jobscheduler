@@ -2,7 +2,7 @@
 //! best first.
 
 use js_elastic::{Demand, Offer, PriceUnit};
-use js_types::{Arch, ExecMode, normalise_arch};
+use js_types::{Arch, ExecMode, accelerator_of, normalise_arch};
 
 use crate::model::{Architecture, InstanceTypeOffer};
 use crate::options::OptionTable;
@@ -78,8 +78,7 @@ pub(crate) fn offers(
                 cpu_millis: u64::from(kind.vcpus) * 1000,
                 memory_bytes: u64::from(kind.memory_gib) * GIB,
                 disk_bytes: kind.storage_gib.saturating_mul(GIB),
-                gpus: kind.gpus,
-                gpu_class: Some(row.gpu_class.clone()),
+                accelerator: Some(accelerator_of(&row.gpu_class, kind.gpus, None)),
                 os: OS.to_owned(),
                 arch: arch_name(&kind.architecture),
                 // The catalog does not say which ISA level an instance type's CPU reaches,
@@ -111,7 +110,7 @@ pub(crate) fn candidates(offers: &[Offer], demand: &Demand) -> Vec<Offer> {
         (
             o.price_cents_per_hour.is_none(),
             o.price_cents_per_hour,
-            o.gpus,
+            o.accelerator.as_ref().map_or(0, |a| a.count),
         )
     };
     fits.sort_by(|a, b| {
@@ -158,6 +157,7 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: None,
         }
     }
 

@@ -862,6 +862,7 @@ impl Elastic<'_> {
             arch: None,
             isa_level: None,
             exec,
+            accelerator: built.floor.need(),
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);

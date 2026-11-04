@@ -13,7 +13,7 @@ use js_elastic::{
 };
 use js_lease_server::bootstrap::{BootSecrets, payload};
 use js_lease_server::network::{DefaultMode, NetworkMode};
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 
 use crate::fake::{AUTH_KEY, Fake};
 use crate::support::{TEN_MINUTES, clock, ctx, mode, plan};
@@ -80,8 +80,11 @@ fn offer() -> Offer {
         cpu_millis: 8000,
         memory_bytes: 1 << 34,
         disk_bytes: 1 << 38,
-        gpus: 1,
-        gpu_class: None,
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-sample").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,

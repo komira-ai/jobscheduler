@@ -5,7 +5,9 @@ mod common;
 use common::{broken, expect, hello, long, map};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
-use js_agent_wire::{GpuDevice, HeldRun, HeldState, Hello, InstanceIdentity, ProtocolRange, Rule};
+use js_agent_wire::{
+    GpuDevice, HeldRun, HeldState, Hello, InstanceIdentity, ProtocolRange, Rule, WireAccelerator,
+};
 
 fn check(edit: impl FnOnce(&mut Hello)) -> js_agent_wire::ValidationError {
     broken(&hello(), edit, Hello::validate)
@@ -363,4 +365,182 @@ fn protocol_range_is_checked() {
     ok.protocol = ProtocolRange { min: 1, max: 9 };
     assert_eq!(ok.validate(), Ok(()));
     assert_eq!(ok.negotiate(), Ok(1));
+}
+
+/// The accelerator the fixture hello (one GPU of class `nvidia-a100`, 64 GiB) states about
+/// itself, as the agent would send it.
+fn stated() -> WireAccelerator {
+    WireAccelerator {
+        vendor: "nvidia".into(),
+        model: "nvidia-a100".into(),
+        variant_spelling: None,
+        count: 1,
+        memory_per_device_bytes: Some(1 << 36),
+    }
+}
+
+/// Asserts that a `shape.accelerator` that agrees with the class, the count and the
+/// devices is accepted (whatever memory it states, as memory is measured), and that one
+/// whose model, variant, count or vendor disagrees, or that has no `gpu_class` to
+/// derive from, is refused naming `shape.accelerator`; and that an over-long or
+/// bad-character string is refused at its own field. It catches a server that believes a
+/// host's claim of another model or more devices than its shape says, and a hostile
+/// string that reaches the registry.
+#[test]
+fn a_hello_whose_accelerator_disagrees_with_its_devices_is_refused() {
+    let mut ok = hello();
+    ok.shape.accelerator = Some(stated());
+    assert_eq!(ok.validate(), Ok(()));
+    ok.shape.accelerator = Some(WireAccelerator {
+        memory_per_device_bytes: None,
+        ..stated()
+    });
+    assert_eq!(ok.validate(), Ok(()));
+    ok.shape.accelerator = Some(WireAccelerator {
+        memory_per_device_bytes: Some(1),
+        ..stated()
+    });
+    assert_eq!(ok.validate(), Ok(()));
+
+    let lies = [
+        WireAccelerator {
+            model: "nvidia-h100".into(),
+            ..stated()
+        },
+        WireAccelerator {
+            variant_spelling: Some("nvidia-a100-sxm4-80gb".into()),
+            ..stated()
+        },
+        WireAccelerator {
+            count: 2,
+            ..stated()
+        },
+        WireAccelerator {
+            vendor: "apple".into(),
+            ..stated()
+        },
+    ];
+    for lie in lies {
+        let err = check(move |h| h.shape.accelerator = Some(lie));
+        expect(
+            err,
+            "shape.accelerator",
+            Rule::Inconsistent,
+            refusal::INVALID_HELLO,
+        );
+    }
+
+    let err = check(|h| {
+        h.shape.gpu_class = Some("nvidia-a100-sxm4-80gb".into());
+        h.shape.accelerator = Some(stated());
+    });
+    expect(
+        err,
+        "shape.accelerator",
+        Rule::Inconsistent,
+        refusal::INVALID_HELLO,
+    );
+
+    let err = check(|h| {
+        h.shape.gpus = 0;
+        h.shape.gpu_class = None;
+        h.gpu_devices.clear();
+        h.shape.accelerator = Some(stated());
+    });
+    expect(
+        err,
+        "shape.accelerator",
+        Rule::Inconsistent,
+        refusal::INVALID_HELLO,
+    );
+
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            model: long(MAX_ID_LEN + 1),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.model",
+        Rule::TooLong,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            vendor: "nv idia".into(),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.vendor",
+        Rule::BadChars,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            variant_spelling: Some("a\nb".into()),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.variant_spelling",
+        Rule::BadChars,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            memory_per_device_bytes: Some(MAX_MEMORY_BYTES + 1),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.memory_per_device_bytes",
+        Rule::OutOfRange,
+        refusal::INVALID_HELLO,
+    );
+}
+
+/// Asserts that a hello is not refused for the alias table the agent was built with: an
+/// agent of a newer release that names a class this server's table does not know, with
+/// the family its own table gives and the class as the variant spelling, is accepted, and
+/// so is an agent of an older release that passes a class this server knows as a variant
+/// through as its own model; while a vendor or family that contradicts this server's
+/// table for a class it knows is still refused. Catches a cross-check that refuses every
+/// agent whose table differs from the server's, which would refuse new data on an older
+/// server (or old data on a newer one) after a release adds a row.
+#[test]
+fn a_hello_from_an_agent_with_another_alias_table_is_accepted() {
+    let with = |class: &str, model: &str, variant: Option<&str>, vendor: &str| {
+        let mut h = hello();
+        h.shape.gpu_class = Some(class.into());
+        h.shape.accelerator = Some(WireAccelerator {
+            vendor: vendor.into(),
+            model: model.into(),
+            variant_spelling: variant.map(str::to_owned),
+            ..stated()
+        });
+        h.validate()
+    };
+    let newer = "nvidia-b300-sxm6-288gb";
+    assert_eq!(with(newer, "nvidia-b300", Some(newer), "nvidia"), Ok(()));
+    let known = "nvidia-a100-sxm4-80gb";
+    assert_eq!(with(known, known, None, "nvidia"), Ok(()));
+    assert_eq!(with(known, "nvidia-a100", Some(known), "nvidia"), Ok(()));
+    for refused in [
+        with(known, "nvidia-h100", Some(known), "nvidia"),
+        with(known, "nvidia-a100", Some(known), "amd"),
+        with(known, "nvidia-a100", None, "nvidia"),
+        with(newer, "nvidia-b300", Some("nvidia-b300-other"), "nvidia"),
+    ] {
+        expect(
+            refused.unwrap_err(),
+            "shape.accelerator",
+            Rule::Inconsistent,
+            refusal::INVALID_HELLO,
+        );
+    }
 }

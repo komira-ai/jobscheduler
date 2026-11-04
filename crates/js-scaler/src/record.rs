@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use js_elastic::{AcquireId, GpuClass, Offer, PriceUnit};
-use js_types::{ExecMode, normalise_arch};
+use js_elastic::{AcquireId, Offer, PriceUnit};
+use js_types::{Accelerator, ExecMode, Model, accelerator_of, normalise_arch};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::time::Millis;
@@ -141,8 +141,11 @@ impl StoredOffer {
             cpu_millis: offer.cpu_millis,
             memory_bytes: offer.memory_bytes,
             disk_bytes: offer.disk_bytes,
-            gpus: offer.gpus,
-            gpu_class: offer.gpu_class.as_ref().map(|c| c.as_str().to_owned()),
+            gpus: offer.accelerator.as_ref().map_or(0, |a| a.count),
+            gpu_class: offer.accelerator.as_ref().map(|a| {
+                let spelling = a.variant.as_ref().unwrap_or(&a.model);
+                spelling.as_str().to_owned()
+            }),
             os: offer.os.clone(),
             arch: offer.arch.clone(),
             isa_level: offer.isa_level.map(|level| level.name().to_owned()),
@@ -171,6 +174,14 @@ impl StoredOffer {
         }
     }
 
+    /// The accelerator the stored count and class spell, with the memory the alias table
+    /// states for the variant. A class that is not a model name (a file edited by hand)
+    /// states none.
+    pub(crate) fn accelerator(&self) -> Option<Accelerator> {
+        let model = Model::parse(self.gpu_class.as_deref()?).ok()?;
+        Some(accelerator_of(&model, self.gpus, None))
+    }
+
     /// The offer this shape was taken from, priced at `price`, available. The architecture
     /// is read in the one spelling, so a record written when offers spelt Arm `aarch64`
     /// rebuilds an `arm64` offer. The ISA level is the one held; a held name that is not a
@@ -183,11 +194,7 @@ impl StoredOffer {
             cpu_millis: self.cpu_millis,
             memory_bytes: self.memory_bytes,
             disk_bytes: self.disk_bytes,
-            gpus: self.gpus,
-            gpu_class: self
-                .gpu_class
-                .as_deref()
-                .and_then(|class| GpuClass::parse(class).ok()),
+            accelerator: self.accelerator(),
             os: self.os.clone(),
             arch: normalise_arch(&self.arch).to_owned(),
             isa_level: self.isa_level.as_deref().and_then(|name| name.parse().ok()),

@@ -13,14 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, GpuClass, HostName, Offer,
-    PriceUnit, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, HostName, Offer, PriceUnit,
+    SchedulerId,
 };
 use js_provider_lambdalabs::{
     ApiKey, Architecture, ElasticConfig, FakeLambda, HttpApi, InstanceTypeOffer, LambdaProvider,
     ManualClock, OptionTable, Region,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 use support::{PATIENT, Reply, Scratch, Server, fixture};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -81,8 +81,11 @@ fn ask(acquire: &str) -> AcquireRequest {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 512 << 30,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            accelerator: Some(accelerator_of(
+                &Model::parse("nvidia-sample").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,

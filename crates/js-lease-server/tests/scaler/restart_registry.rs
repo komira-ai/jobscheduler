@@ -143,6 +143,7 @@ fn hello() -> Hello {
             disk_bytes: 0,
             gpu_class: Some("nvidia-a10".to_owned()),
             max_leases: None,
+            accelerator: None,
         },
         capabilities: BTreeMap::new(),
         gpu_devices: Vec::new(),

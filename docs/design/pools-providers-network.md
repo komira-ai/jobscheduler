@@ -405,7 +405,7 @@ message naming pool and field:
 | unknown table or field anywhere | `pool "gpu": provider.api_keyfile: unknown field; known: api_key_file, regions, types, ssh_key, api_url` |
 | unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs, static` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
-| type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (`GpuClass::parse`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
+| type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (a `js_types::Model`: lower-case words joined by single `-`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
 | elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
@@ -482,7 +482,7 @@ pub struct Offer {
     pub id: String,                  // the provider's name for it; opaque to the core
     pub zone: Option<String>,        // one Offer per zone with capacity
     pub cpu_millis: u64, pub memory_bytes: u64, pub disk_bytes: u64,
-    pub gpus: u32, pub gpu_class: Option<GpuClass>,
+    pub accelerator: Option<Accelerator>,  // vendor, canonical model, count, memory per device, form factor, interconnect
     pub os: String, pub arch: String, pub exec: ExecMode,   // ExecMode: Container | SandboxExec
     pub price_cents_per_hour: Option<u64>, pub price_unit: PriceUnit,
     pub available: bool,             // capacity now, per the catalog
@@ -1446,7 +1446,9 @@ field. A launched host must not reach these routes: the ACL gives it the agent p
     "network_check": { "ok": false, "reason": "oauth: invalid_client", "checked_at_ms": 0 },
     "instances": { "n": 1, "max": 4, "spend_cents_per_hour": 129, "max_spend_cents_per_hour": 1200 },
     "blocked": null,       // max_instances | max_spend | max_spend_day | max_spend_total | boot_failed | unavailable
-    "no_offer": null,      // or { "request": "...", "dimension": "gpus" }
+    "no_offer": null,      // or { "request": "...", "dimension": "gpus" }: os, arch, isa_level, exec, cpu_millis,
+                           // memory_bytes, disk_bytes, accelerator_vendor, gpu_class (the model), gpus (the count),
+                           // accelerator_memory, accelerator_interconnect, accelerator_form_factor
     "last_launch": { "at_ms": 0, "outcome": "accepted", "host": "js-ab12-cd34" },
     "machines": [ { "host": "js-ab12-cd34", "state": "registered", "offer": "gpu_1x_a10",
                     "zone": "us-west-1", "price_cents_per_hour": 129, "idle_since_ms": null } ],

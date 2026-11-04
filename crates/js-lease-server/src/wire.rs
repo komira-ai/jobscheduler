@@ -7,6 +7,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use js_agent_wire::limits;
+use js_caps::{AcceleratorRequest, check_stated, request_need};
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
 use js_types::{
@@ -50,7 +51,7 @@ const PROBE_HOST_INVALID: &str = "probe_host is not a valid host id";
 const REQUEST_ID_INVALID: &str = "request_id is not a valid request id";
 
 /// The resources of an [`AcquireBody`]; a dimension left out is zero.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ResourcesBody {
     #[serde(default)]
@@ -66,6 +67,44 @@ struct ResourcesBody {
     /// from a client that predates the field does.
     #[serde(default)]
     disk_bytes: Option<u64>,
+    /// The accelerator the lease needs, beside `gpus` and `gpu_class` (which keep their
+    /// meaning): read at the resources level because it states what those two state, the
+    /// devices the lease books. Left out (or null), the lease is as before, and the key is
+    /// left out of the body when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accelerator: Option<AcceleratorBody>,
+}
+
+/// The `resources.accelerator` object of an [`AcquireBody`]; every field is optional and a
+/// field left out matches anything.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AcceleratorBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_per_device_gib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interconnect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    form_factor: Option<String>,
+}
+
+impl From<AcceleratorBody> for AcceleratorRequest {
+    fn from(body: AcceleratorBody) -> Self {
+        Self {
+            vendor: body.vendor,
+            model: body.model,
+            count: body.count,
+            memory_per_device_gib: body.memory_per_device_gib,
+            interconnect: body.interconnect,
+            form_factor: body.form_factor,
+        }
+    }
 }
 
 impl AcquireBody {
@@ -77,21 +116,49 @@ impl AcquireBody {
     }
 
     /// The request and the ttl asked for, or the 400 for a body that names an id, a
-    /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib`, `exec` or `isa_level`
-    /// capability that is not a requirement (the registry and the scaler read them as the
-    /// job's disk, mode and least ISA level).
+    /// GPU class, an accelerator or a `disk_bytes` the types refuse, or a `disk-gib`, `exec`,
+    /// `isa_level` or `accelerator.*` capability that is not a requirement (the registry and
+    /// the scaler read them as the job's disk, mode, least ISA level and accelerator).
+    ///
+    /// `resources.gpus` and `resources.gpu_class` are what they were: the devices the lease
+    /// books and their class, and a body with only them parses to the request it parsed to
+    /// before (no capability added, so a repeated acquire matches a lease either release
+    /// stored). An optional `resources.accelerator` object is stated as `accelerator.*`
+    /// capabilities merged into the request's own ([`request_need`]); it, and any
+    /// `accelerator.*` capability the body names itself, must agree with the pair
+    /// ([`check_stated`]).
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
         let probe_host = self.probe_host.as_deref().map(HostId::new).transpose();
         let probe_host = probe_host.map_err(|_| ApiError::bad_request(PROBE_HOST_INVALID))?;
-        let resources = &self.resources;
-        let (cpu, memory, gpus) = (resources.cpu_millis, resources.memory_bytes, resources.gpus);
-        let resources =
-            Resources::new(cpu, memory, gpus, self.resources.gpu_class).map_err(|_| {
+        let ResourcesBody {
+            cpu_millis,
+            memory_bytes,
+            gpus,
+            gpu_class,
+            disk_bytes,
+            accelerator,
+        } = self.resources;
+        let object = accelerator.map(AcceleratorRequest::from);
+        check_stated(&self.capabilities, gpus, gpu_class.as_deref())
+            .map_err(ApiError::bad_request)?;
+        let need = request_need(gpus, gpu_class.as_deref(), object.as_ref())
+            .map_err(ApiError::bad_request)?;
+        let resources = Resources::new(cpu_millis, memory_bytes, need.gpus, need.gpu_class)
+            .map_err(|_| {
                 ApiError::bad_request("gpu_class must be named exactly when gpus is above zero")
             })?;
-        let resources = match self.resources.disk_bytes {
+        let mut capabilities = self.capabilities;
+        for (key, value) in need.capabilities {
+            let stated = capabilities.insert(key.to_owned(), value.clone());
+            if stated.is_some_and(|stated| stated != value) {
+                return Err(ApiError::bad_request(format!(
+                    "capability {key} differs from the accelerator the resources state"
+                )));
+            }
+        }
+        let resources = match disk_bytes {
             None => resources,
             Some(disk) if (1..=limits::MAX_DISK_BYTES).contains(&disk) => {
                 resources.with_disk_bytes(disk)
@@ -105,7 +172,7 @@ impl AcquireBody {
         let request = Request {
             class,
             resources,
-            capabilities: self.capabilities,
+            capabilities,
             max_wall: Duration::from_secs(self.max_wall_seconds),
             labels: self.labels,
             validation_run: self.validation_run,
@@ -114,11 +181,17 @@ impl AcquireBody {
         Requirements::try_from_request(&request).map_err(|why| {
             ApiError::bad_request(match why {
                 RequirementsError::BadDisk(_) => {
-                    "disk-gib must be a whole number of GiB below 2^34"
+                    "disk-gib must be a whole number of GiB below 2^34".to_owned()
                 }
-                RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+                RequirementsError::BadExec(_) => {
+                    "exec must be container or sandbox-exec".to_owned()
+                }
                 RequirementsError::BadIsaLevel(_) => {
-                    "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a"
+                    "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a".to_owned()
+                }
+                RequirementsError::BadAccelerator(why) => format!("accelerator: {why}"),
+                RequirementsError::CountWithoutModel => {
+                    "accelerator.model is required when accelerator.count is above zero".to_owned()
                 }
             })
         })?;
@@ -721,5 +794,174 @@ mod tests {
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(err.code, "wall-time-above-ceiling");
         assert_eq!(err.reason, None);
+    }
+
+    /// The 400 reason of a body with these `resources` and `capabilities`.
+    fn refused(resources: &str, capabilities: &str) -> String {
+        let text = format!(
+            r#"{{"class":"c","resources":{resources},"capabilities":{capabilities},"max_wall_seconds":60}}"#
+        );
+        let err = parse::<AcquireBody>(text.as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST, "{resources}");
+        assert_eq!(err.code, "bad-request");
+        err.reason.unwrap()
+    }
+
+    /// The request of a body with these `resources` and `capabilities`.
+    fn accepted(resources: &str, capabilities: &str) -> Request {
+        let text = format!(
+            r#"{{"class":"c","resources":{resources},"capabilities":{capabilities},"max_wall_seconds":60}}"#
+        );
+        let body = parse::<AcquireBody>(text.as_bytes()).unwrap();
+        body.into_parts().unwrap().0
+    }
+
+    /// Asserts that an `accelerator` object that names another model than `gpu_class`, or
+    /// another count than `gpus`, is a 400 whose reason names `accelerator` and both
+    /// values, and that one that agrees (the same family, the same count) is taken.
+    /// Catches a lease booked as one model and matched as another.
+    #[test]
+    fn a_body_with_gpu_class_and_a_conflicting_accelerator_is_a_400_naming_accelerator() {
+        let pair = r#""gpus":4,"gpu_class":"nvidia-a100""#;
+        assert_eq!(
+            refused(
+                &format!(r#"{{{pair},"accelerator":{{"model":"nvidia-h100"}}}}"#),
+                "{}"
+            ),
+            "accelerator.model \"nvidia-h100\" names another model than gpu_class \"nvidia-a100\""
+        );
+        assert_eq!(
+            refused(&format!(r#"{{{pair},"accelerator":{{"count":2}}}}"#), "{}"),
+            "accelerator.count 2 differs from gpus 4"
+        );
+        let agreed = accepted(
+            &format!(r#"{{{pair},"accelerator":{{"model":"nvidia-a100","count":4}}}}"#),
+            "{}",
+        );
+        assert_eq!(agreed.resources.gpus(), 4);
+        assert_eq!(agreed.resources.gpu_class(), Some("nvidia-a100"));
+    }
+
+    /// Asserts that a body with no accelerator object and no GPUs parses to the request it
+    /// parsed to before the accelerator existed (the resources and capabilities as written,
+    /// no `accelerator.*` capability added), that its `resources` serialize to the keys the
+    /// previous release wrote (the object's key left out) and are read by it, and that a
+    /// body that books GPUs as `gpus` and `gpu_class` keeps its booking. Catches a key
+    /// written when unset, which an older server would refuse, and a capability added to a
+    /// request that asked for no accelerator.
+    #[test]
+    fn a_body_without_accelerator_or_gpu_class_is_byte_identical_to_today() {
+        let request = accepted(
+            r#"{"cpu_millis":1000,"memory_bytes":2}"#,
+            r#"{"os":"linux","isa":"x86-64-v3"}"#,
+        );
+        let expected = Request {
+            class: ClassId::new("c").unwrap(),
+            resources: Resources::new(1000, 2, 0, None).unwrap(),
+            capabilities: [("os", "linux"), ("isa", "x86-64-v3")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            max_wall: Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+            probe_host: None,
+        };
+        assert_eq!(request, expected);
+        let text = r#"{"class":"c","resources":{"cpu_millis":1000,"memory_bytes":2},"max_wall_seconds":60}"#;
+        let body = parse::<AcquireBody>(text.as_bytes()).unwrap();
+        let written = serde_json::to_string(&body.resources).unwrap();
+        assert_eq!(
+            written,
+            r#"{"cpu_millis":1000,"memory_bytes":2,"gpus":0,"gpu_class":null,"disk_bytes":null}"#
+        );
+        assert!(parse::<PreviousResourcesBody>(written.as_bytes()).is_ok());
+        assert_eq!(
+            serde_json::to_string(&AcceleratorBody::default()).unwrap(),
+            "{}"
+        );
+        let booked = accepted(r#"{"gpus":2,"gpu_class":"nvidia-a100-sxm4-80gb"}"#, "{}");
+        assert_eq!(booked.resources.gpus(), 2);
+        assert_eq!(booked.resources.gpu_class(), Some("nvidia-a100-sxm4-80gb"));
+    }
+
+    /// Asserts that a count with no model, in the object or as an `accelerator.count`
+    /// capability, is the 400 that names `accelerator.model`, and that a vendor alone (which
+    /// books no GPU) is taken. Catches GPUs booked with no class, which a previous release
+    /// would read back as a whole host.
+    #[test]
+    fn a_count_only_accelerator_is_a_400_naming_accelerator_model() {
+        let said = "accelerator.model is required when accelerator.count is above zero";
+        assert_eq!(refused(r#"{"accelerator":{"count":4}}"#, "{}"), said);
+        assert_eq!(refused("{}", r#"{"accelerator.count":"4"}"#), said);
+        let vendor = accepted(r#"{"accelerator":{"vendor":"nvidia"}}"#, "{}");
+        assert_eq!(vendor.resources.gpus(), 0);
+        assert_eq!(vendor.capabilities.len(), 1);
+        assert_eq!(vendor.capabilities["accelerator.vendor"], "nvidia");
+    }
+
+    /// Asserts that an accelerator object alone books its count of its model and states
+    /// every field as an `accelerator.*` capability (memory in GiB), that `gpus` and
+    /// `gpu_class` alone add no capability (the request is stored as the previous release
+    /// stores it), and that an unknown key in the object is the parser's 400. Catches a field
+    /// read and dropped, or a key added to today's body that would make a repeated acquire
+    /// differ from the lease the previous release stored.
+    #[test]
+    fn an_accelerator_object_books_its_devices_and_states_its_need() {
+        let object = r#"{"accelerator":{"vendor":"nvidia","model":"nvidia-a100","count":4,"memory_per_device_gib":80,"interconnect":"nvlink-domain>=8","form_factor":"sxm"}}"#;
+        let request = accepted(object, "{}");
+        assert_eq!(request.resources.gpus(), 4);
+        assert_eq!(request.resources.gpu_class(), Some("nvidia-a100"));
+        let stated: Vec<(&str, &str)> = request
+            .capabilities
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                ("accelerator.count", "4"),
+                ("accelerator.form-factor", "sxm"),
+                ("accelerator.interconnect", "nvlink-domain>=8"),
+                ("accelerator.memory-gib", "80"),
+                ("accelerator.model", "nvidia-a100"),
+                ("accelerator.vendor", "nvidia"),
+            ]
+        );
+        let pair = accepted(r#"{"gpus":2,"gpu_class":"nvidia-a100-sxm4-80gb"}"#, "{}");
+        assert!(pair.capabilities.is_empty());
+        let text = r#"{"class":"c","resources":{"accelerator":{"cores":4}},"max_wall_seconds":60}"#;
+        let unknown = parse::<AcquireBody>(text.as_bytes()).unwrap_err();
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    }
+
+    /// Asserts that a client capability naming another model or count than `gpus` and
+    /// `gpu_class` book is a 400 naming it, that one that agrees (the same family, the same
+    /// count) is taken, that one naming another value than the object states is a 400
+    /// naming the key, and that an `accelerator.*` capability that is not valid is a 400
+    /// naming `accelerator`. Catches a lease whose booking and requirement disagree.
+    #[test]
+    fn an_accelerator_capability_must_agree_with_the_resources_and_be_valid() {
+        let pair = r#"{"gpus":1,"gpu_class":"nvidia-a100"}"#;
+        assert_eq!(
+            refused(pair, r#"{"accelerator.model":"nvidia-h100"}"#),
+            "accelerator.model \"nvidia-h100\" names another model than gpu_class \"nvidia-a100\""
+        );
+        assert_eq!(
+            refused(pair, r#"{"accelerator.count":"2"}"#),
+            "accelerator.count 2 differs from gpus 1"
+        );
+        let same = accepted(pair, r#"{"accelerator.model":"nvidia-a100"}"#);
+        assert_eq!(same.capabilities["accelerator.model"], "nvidia-a100");
+        let object = r#"{"accelerator":{"model":"nvidia-a100","count":1}}"#;
+        assert_eq!(
+            refused(object, r#"{"accelerator.model":"nvidia-h100"}"#),
+            "capability accelerator.model differs from the accelerator the resources state"
+        );
+        let reason = refused("{}", r#"{"accelerator.form-factor":"tpu"}"#);
+        assert!(reason.starts_with("accelerator: "), "{reason}");
     }
 }

@@ -4,6 +4,7 @@
 //! the agent routes, the layering of the sources of hosts, the restart, and the container
 //! runs a lease holder queues on a registered host.
 
+mod accelerator_requests;
 mod agents;
 mod agents_contract;
 mod agents_cordon;

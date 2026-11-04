@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use js_types::{HostId, ProviderId, Resources, Shape, TypeError};
+use js_types::{
+    Accelerator, HostId, Model, ProviderId, Resources, Shape, TypeError, accelerator_of,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
@@ -91,6 +93,75 @@ pub struct WireShape {
     /// [`limits::MAX_LEASE_CAP`]. Absent means the host states no cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_leases: Option<u64>,
+    /// The accelerator the host reports, resolved by the agent: present exactly when the
+    /// host states a `gpu_class`. A hello from a host that predates the field has none, and
+    /// [`Hello::accelerator`] derives the same facts from `gpu_class`, `gpus` and the
+    /// devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerator: Option<WireAccelerator>,
+}
+
+/// The accelerator of a host on the wire: the canonical family, the spelling the host read
+/// it as and the least memory any device reported. The server derives the same vendor,
+/// family, spelling and count from the shape and refuses a hello that says otherwise;
+/// only the memory is taken as measured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAccelerator {
+    /// Who makes it, such as `nvidia`.
+    pub vendor: String,
+    /// The canonical family, such as `nvidia-a100`.
+    pub model: String,
+    /// The full spelling the host read (`nvidia-a100-sxm4-80gb`), when it is not the
+    /// family name itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_spelling: Option<String>,
+    /// How many devices; equals `shape.gpus`.
+    pub count: u32,
+    /// The least memory of any device, in bytes, when the host measured it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_per_device_bytes: Option<u64>,
+}
+
+impl WireAccelerator {
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::ident(at.field("shape.accelerator.vendor"), &self.vendor)?;
+        check::ident(at.field("shape.accelerator.model"), &self.model)?;
+        if let Some(spelling) = &self.variant_spelling {
+            check::ident(at.field("shape.accelerator.variant_spelling"), spelling)?;
+        }
+        let count = at.field("shape.accelerator.count");
+        check::range(count, u64::from(self.count), 0, limits::MAX_GPUS)?;
+        if let Some(bytes) = self.memory_per_device_bytes {
+            let memory = at.field("shape.accelerator.memory_per_device_bytes");
+            check::range(memory, bytes, 0, limits::MAX_MEMORY_BYTES)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this agrees with `derived`, what the server derives from the hello's own
+    /// `gpu_class` (`class`) and `gpus`. The count must equal `gpus`; a variant spelling must
+    /// be the class, and without one the model must be the class itself (the agent read the
+    /// class as a family, or as a name its table does not know). With a variant spelling the
+    /// model must be this server's family for the class when this server's alias table
+    /// knows it, and the vendor must be the table's whenever it does. A class this server's
+    /// table does not know is not held to it: an agent of a newer release may know it, so a
+    /// hello is never refused for the table either side was built with.
+    fn agrees_with(&self, derived: &Accelerator, class: &Model) -> bool {
+        let known = class.canonical().known;
+        let model_agrees = match &self.variant_spelling {
+            None => self.model == class.as_str(),
+            Some(spelling) => {
+                spelling == class.as_str() && (!known || self.model == derived.model.as_str())
+            }
+        };
+        [
+            model_agrees,
+            !known || self.vendor == derived.vendor.as_str(),
+            self.count == derived.count,
+        ]
+        .into_iter()
+        .all(|same| same)
+    }
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -107,7 +178,19 @@ impl WireShape {
             disk_bytes: resources.disk_bytes(),
             gpu_class: resources.gpu_class().map(str::to_string),
             max_leases: None,
+            accelerator: None,
         }
+    }
+
+    /// The accelerator the shape and its devices state: the `gpu_class` read as a model,
+    /// `gpus` devices of it, and the least memory of `devices` as the measured memory
+    /// (the variant's nominal memory when the alias table knows the class). `None` when
+    /// there is no class, or the class is not a model name.
+    pub fn derived_accelerator(&self, devices: &[GpuDevice]) -> Option<Accelerator> {
+        let model = Model::parse(self.gpu_class.as_deref()?).ok()?;
+        let count = u32::try_from(self.gpus).unwrap_or(u32::MAX);
+        let measured = devices.iter().map(|device| device.memory_bytes).min();
+        Some(accelerator_of(&model, count, measured))
     }
 
     /// The resource vector, refusing a GPU class that does not match the GPU count.
@@ -119,6 +202,21 @@ impl WireShape {
             self.gpu_class.clone(),
         )
         .map(|resources| resources.with_disk_bytes(self.disk_bytes))
+    }
+
+    /// The [`WireAccelerator`] an agent sends for this shape and its devices: the facts
+    /// of [`WireShape::derived_accelerator`] in wire form, with the least memory any of
+    /// `devices` reported as the measured memory (`None` when none is listed). `None`
+    /// when there is no accelerator to derive.
+    pub fn wire_accelerator(&self, devices: &[GpuDevice]) -> Option<WireAccelerator> {
+        let derived = self.derived_accelerator(devices)?;
+        Some(WireAccelerator {
+            vendor: derived.vendor.to_string(),
+            model: derived.model.to_string(),
+            variant_spelling: derived.variant.as_ref().map(Model::to_string),
+            count: derived.count,
+            memory_per_device_bytes: devices.iter().map(|device| device.memory_bytes).min(),
+        })
     }
 
     fn check(&self, at: At) -> Result<(), ValidationError> {
@@ -137,6 +235,9 @@ impl WireShape {
         }
         if let Some(cap) = self.max_leases {
             check::range(at.field("shape.max_leases"), cap, 1, limits::MAX_LEASE_CAP)?;
+        }
+        if let Some(accelerator) = &self.accelerator {
+            accelerator.check(at)?;
         }
         Ok(())
     }
@@ -234,6 +335,25 @@ impl Hello {
         Ok(Shape::new(resources, self.capabilities.clone()))
     }
 
+    /// The accelerator of the host: what `shape.gpu_class`, `shape.gpus` and the least
+    /// device memory of `gpu_devices` state, through the alias table. A hello from an
+    /// agent that predates `shape.accelerator` has the same answer as one that sends it.
+    /// `None` when the host has no GPU class.
+    pub fn accelerator(&self) -> Option<Accelerator> {
+        self.shape.derived_accelerator(&self.gpu_devices)
+    }
+
+    fn check_accelerator(&self, at: At) -> Result<(), ValidationError> {
+        let Some(stated) = &self.shape.accelerator else {
+            return Ok(());
+        };
+        let class = self.shape.gpu_class.as_deref().map(Model::parse);
+        match (self.accelerator(), class) {
+            (Some(derived), Some(Ok(class))) if stated.agrees_with(&derived, &class) => Ok(()),
+            _ => Err(at.field("shape.accelerator").fail(Rule::Inconsistent)),
+        }
+    }
+
     /// The protocol major to answer with: the newest both sides speak. A range that is
     /// empty, or shares no major with this crate's, is refused; the second reports
     /// [`refusal::UNSUPPORTED_PROTOCOL`] so the agent can tell it from a malformed hello.
@@ -270,6 +390,7 @@ impl Hello {
         self.shape.check(at)?;
         self.check_capabilities(at.field("capabilities"))?;
         self.check_gpu_devices(at.field("gpu_devices"))?;
+        self.check_accelerator(at)?;
         check::labels(at.field("labels"), &self.labels)?;
         crate::heartbeat::check_held(at.field("held"), &self.held)
     }

@@ -19,8 +19,9 @@
 //!
 //! - a type's `name` is 1 to 64 lower case letters, digits or `_`, and no two types have
 //!   one name;
-//! - a type's `gpu` is a class in the agent's spelling ([`GpuClass::parse`]), and a pool
-//!   has one class: every type names the class of the first;
+//! - a type's `gpu` is a class in the agent's spelling (a `js_types::Model`: lower-case
+//!   letters and digits joined by single `-`, at most 64 long), and a pool has one class:
+//!   every type names the class of the first;
 //! - a type's `gpus` is a whole number from 1;
 //! - `api_key_file` is read through the service's reader of secret files, never directly,
 //!   and holds one key.
@@ -35,14 +36,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{GpuClass, SchedulerId};
+use js_elastic::SchedulerId;
+use js_types::Model;
 use toml::{Table, Value};
 
 use crate::clock::Clock;
 use crate::config::ElasticConfig;
 use crate::http::HttpApi;
 use crate::key::ApiKey;
-use crate::options::{OptionRow, OptionTable};
+use crate::options::{OptionRow, OptionTable, class};
 use crate::provider::LambdaProvider;
 
 /// The address of Lambda's API when the table has no `api_url`. The client appends the
@@ -108,7 +110,7 @@ pub struct Built {
     /// The fewest GPUs of any type of the pool.
     pub gpus: u64,
     /// The class of the pool's GPUs.
-    pub gpu_class: GpuClass,
+    pub gpu_class: Model,
 }
 
 /// A string field, if the table has it.
@@ -152,8 +154,8 @@ fn type_row(at: &str, value: &Value, earlier: &[OptionRow]) -> Result<OptionRow,
         let reason = format!("{name:?} is listed twice");
         return Err(refused(&format!("{at}.name"), reason));
     }
-    let class = GpuClass::parse(row_string(at, row, "gpu")?)
-        .map_err(|why| refused(&format!("{at}.gpu"), why))?;
+    let class =
+        class(row_string(at, row, "gpu")?).map_err(|why| refused(&format!("{at}.gpu"), why))?;
     if let Some(first) = earlier.first().filter(|first| first.gpu_class != class) {
         let reason = format!(
             "a pool has one gpu class; {:?} is the class of types[1], not {:?}",
@@ -182,7 +184,7 @@ fn type_row(at: &str, value: &Value, earlier: &[OptionRow]) -> Result<OptionRow,
 struct Types {
     rows: Vec<OptionRow>,
     gpus: u64,
-    gpu_class: GpuClass,
+    gpu_class: Model,
 }
 
 /// The rows of `types`, the fewest GPUs of any of them and their class.

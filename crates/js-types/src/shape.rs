@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::job::{ARCH_KEY, ISA_LEVEL_KEY};
-use crate::{DISK_GIB_KEY, IsaLevel, MemoryPercent, Resources, normalise_arch};
+use crate::{
+    ACCEL_KEYS, Accelerator, AcceleratorNeed, DISK_GIB_KEY, IsaLevel, MemoryPercent, Model,
+    Resources, accelerator_of, normalise_arch,
+};
 
 /// Typed key/value facts a host reports, or a request needs (design section 3).
 pub type Capabilities = BTreeMap<String, String>;
@@ -54,29 +57,79 @@ impl Shape {
     ///   and those below, as a pool's shape may name it); otherwise the two texts must be
     ///   equal, as before levels were compared, so every pairing that satisfied before
     ///   still does. A host that states no level satisfies no level.
+    /// - The `accelerator.*` keys are one need ([`AcceleratorNeed`]), resolved through the
+    ///   alias table and compared with [`AcceleratorNeed::met_by`] against the host's
+    ///   accelerator ([`Self::accelerator`]). A request without them that books GPUs of a
+    ///   class that is a model name is held to the need that booking states
+    ///   ([`AcceleratorNeed::booked`]): the class is the model, so a full spelling fits only
+    ///   its variant and a family every variant. Either way the request is held to the
+    ///   host's GPU count, not to its GPU class. A request that books GPUs of a class that
+    ///   is not a model name is held to the class exactly, as before.
     pub fn satisfies(&self, wanted: &Resources, required: &Capabilities) -> bool {
-        let caps_ok = required.iter().all(|(key, value)| {
-            let have = self.capabilities.get(key);
-            match key.as_str() {
-                DISK_GIB_KEY => have
-                    .and_then(|have| have.parse::<u64>().ok())
-                    .zip(value.parse::<u64>().ok())
-                    .is_some_and(|(have, want)| want <= have),
-                ARCH_KEY => have.is_some_and(|have| normalise_arch(have) == normalise_arch(value)),
-                ISA_LEVEL_KEY => {
-                    let listed = have.map(String::as_str).and_then(IsaLevel::highest_listed);
-                    match listed.zip(IsaLevel::highest_listed(value)) {
-                        Some((have, want)) => have.satisfies(want),
-                        None => have == Some(value),
-                    }
-                }
-                _ => have == Some(value),
+        let stated = AcceleratorNeed::from_capabilities(required)
+            .map(|stated| stated.or_else(|| AcceleratorNeed::booked(wanted)));
+        let resources_ok = match stated {
+            Ok(None) => wanted.fits_in(&self.resources),
+            Ok(Some(need)) => {
+                need.met_by(self.accelerator().as_ref()).is_ok()
+                    && counts_fit(wanted, &self.resources)
             }
-        });
-        [wanted.fits_in(&self.resources), caps_ok]
-            .into_iter()
-            .all(|ok| ok)
+            Err(_) => false,
+        };
+        let caps_ok = required
+            .iter()
+            .filter(|(key, _)| !ACCEL_KEYS.contains(&key.as_str()))
+            .all(|(key, value)| {
+                let have = self.capabilities.get(key);
+                match key.as_str() {
+                    DISK_GIB_KEY => have
+                        .and_then(|have| have.parse::<u64>().ok())
+                        .zip(value.parse::<u64>().ok())
+                        .is_some_and(|(have, want)| want <= have),
+                    ARCH_KEY => {
+                        have.is_some_and(|have| normalise_arch(have) == normalise_arch(value))
+                    }
+                    ISA_LEVEL_KEY => {
+                        let listed = have.map(String::as_str).and_then(IsaLevel::highest_listed);
+                        match listed.zip(IsaLevel::highest_listed(value)) {
+                            Some((have, want)) => have.satisfies(want),
+                            None => have == Some(value),
+                        }
+                    }
+                    _ => have == Some(value),
+                }
+            });
+        [resources_ok, caps_ok].into_iter().all(|ok| ok)
     }
+
+    /// The host's accelerators: what its `accelerator.*` capabilities state when it reports
+    /// them, else its GPU count of its GPU class resolved through the alias table
+    /// ([`accelerator_of`]; no memory is measured). `None` when it has no GPU, or a class
+    /// that is not a model name, or reports keys that are not valid.
+    #[must_use]
+    pub fn accelerator(&self) -> Option<Accelerator> {
+        match Accelerator::from_capabilities(&self.capabilities) {
+            Ok(Some(reported)) => return Some(reported),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        let model = Model::parse(self.resources.gpu_class()?).ok()?;
+        let count = u32::try_from(self.resources.gpus()).unwrap_or(u32::MAX);
+        Some(accelerator_of(&model, count, None))
+    }
+}
+
+/// Whether `offered` has at least the CPU, memory, GPUs and disk of `wanted`, whatever the
+/// GPU class.
+fn counts_fit(wanted: &Resources, offered: &Resources) -> bool {
+    [
+        wanted.cpu_millis() <= offered.cpu_millis(),
+        wanted.memory_bytes() <= offered.memory_bytes(),
+        wanted.gpus() <= offered.gpus(),
+        wanted.disk_bytes() <= offered.disk_bytes(),
+    ]
+    .into_iter()
+    .all(|ok| ok)
 }
 
 #[cfg(test)]
@@ -225,5 +278,132 @@ mod tests {
         assert_eq!(cut.resources().gpu_class(), Some("a100"));
         assert_eq!(cut.capabilities(), shape.capabilities());
         assert_eq!(shape.with_memory_percent(MemoryPercent::FULL), shape);
+    }
+
+    /// A host of `gpus` GPUs of `class` with ample CPU, memory and disk.
+    fn gpu_host(gpus: u64, class: &str, reported: &[(&str, &str)]) -> Shape {
+        let resources = Resources::new(64_000, 1 << 40, gpus, Some(class.into()))
+            .unwrap()
+            .with_disk_bytes(1 << 40);
+        Shape::new(resources, caps(reported))
+    }
+
+    /// Asserts the capability-key path of `satisfies`: a family need fits every variant of
+    /// the family a host's class spells, a full spelling only its own variant, an unknown
+    /// name only an identical class, the count is at least, the booked class is not
+    /// compared on this path (a family request books its family name), a request without
+    /// keys is held to the need its booked class states, and one whose class is not a
+    /// model name to that class exactly. Catches a family request that never places on a
+    /// host that reports a full spelling, or a full spelling widened to its family.
+    #[test]
+    fn accelerator_keys_resolve_the_hosts_class_through_the_table() {
+        let a100_80 = gpu_host(8, "nvidia-a100-sxm4-80gb", &[]);
+        let a100_40 = gpu_host(8, "nvidia-a100-sxm4-40gb", &[]);
+        let gb300 = gpu_host(8, "nvidia-gb300", &[]);
+        let family = Resources::new(1000, 1, 4, Some("nvidia-a100".into())).unwrap();
+        let need = |pairs: &[(&str, &str)]| caps(pairs);
+        let family_need = need(&[
+            ("accelerator.model", "nvidia-a100"),
+            ("accelerator.count", "4"),
+        ]);
+        assert!(a100_80.satisfies(&family, &family_need));
+        assert!(a100_40.satisfies(&family, &family_need));
+        assert!(!gb300.satisfies(&family, &family_need));
+        let full = Resources::new(1000, 1, 4, Some("nvidia-a100-sxm4-80gb".into())).unwrap();
+        let full_need = need(&[
+            ("accelerator.model", "nvidia-a100-sxm4-80gb"),
+            ("accelerator.count", "4"),
+        ]);
+        assert!(a100_80.satisfies(&full, &full_need));
+        assert!(!a100_40.satisfies(&full, &full_need));
+        let unknown = Resources::new(1000, 1, 4, Some("nvidia-gb300".into())).unwrap();
+        let unknown_need = need(&[
+            ("accelerator.model", "nvidia-gb300"),
+            ("accelerator.count", "4"),
+        ]);
+        assert!(gb300.satisfies(&unknown, &unknown_need));
+        assert!(!a100_80.satisfies(&unknown, &unknown_need));
+        let nine = Resources::new(1000, 1, 9, Some("nvidia-a100".into())).unwrap();
+        let nine_need = need(&[
+            ("accelerator.model", "nvidia-a100"),
+            ("accelerator.count", "9"),
+        ]);
+        assert!(!a100_80.satisfies(&nine, &nine_need));
+        let eight = Resources::new(1000, 1, 8, Some("nvidia-a100".into())).unwrap();
+        let eight_need = need(&[
+            ("accelerator.model", "nvidia-a100"),
+            ("accelerator.count", "8"),
+        ]);
+        assert!(
+            a100_80.satisfies(&eight, &eight_need),
+            "exactly the host's count"
+        );
+        assert!(
+            a100_80.satisfies(&family, &caps(&[])),
+            "without keys the booked class is the need: a family fits every variant"
+        );
+        assert!(a100_80.satisfies(&full, &caps(&[])));
+        assert!(
+            !a100_40.satisfies(&full, &caps(&[])),
+            "a booked full spelling fits only its variant"
+        );
+        let odd = Resources::new(1000, 1, 1, Some("A100_X".into())).unwrap();
+        assert!(gpu_host(8, "A100_X", &[]).satisfies(&odd, &caps(&[])));
+        assert!(
+            !gpu_host(8, "A100_Y", &[]).satisfies(&odd, &caps(&[])),
+            "a class that is not a model name is compared exactly"
+        );
+        assert!(!a100_80.satisfies(&family, &need(&[("accelerator.model", "A100")])));
+        let cpu = Resources::new(1000, 1, 0, None).unwrap();
+        assert!(a100_80.satisfies(&cpu, &need(&[("accelerator.vendor", "nvidia")])));
+        assert!(!a100_80.satisfies(&cpu, &need(&[("accelerator.vendor", "amd")])));
+        let too_big = Resources::new(64_001, 1, 4, Some("nvidia-a100".into())).unwrap();
+        assert!(
+            !a100_80.satisfies(&too_big, &family_need),
+            "CPU is still compared"
+        );
+    }
+
+    /// Asserts where a host's accelerator comes from: the `accelerator.*` capabilities it
+    /// reports when it reports them, else its class and count through the table (the
+    /// variant's nominal memory), and none for a host without GPUs, with a class that is
+    /// not a model name, or with keys that are not valid. Catches a host whose reported
+    /// accelerator is ignored for its class, or a GPU host that reads as having none.
+    #[test]
+    fn a_hosts_accelerator_is_reported_or_derived_from_its_class() {
+        let derived = gpu_host(8, "nvidia-h100-80gb-hbm3", &[])
+            .accelerator()
+            .unwrap();
+        assert_eq!(derived.model.as_str(), "nvidia-h100");
+        assert_eq!(derived.vendor.as_str(), "nvidia");
+        assert_eq!(
+            (derived.count, derived.memory_per_device),
+            (8, Some(80 << 30))
+        );
+        let reported = gpu_host(
+            8,
+            "nvidia-h100-80gb-hbm3",
+            &[
+                ("accelerator.model", "nvidia-gb300"),
+                ("accelerator.count", "4"),
+                ("accelerator.memory-gib", "279"),
+            ],
+        )
+        .accelerator()
+        .unwrap();
+        assert_eq!(reported.model.as_str(), "nvidia-gb300");
+        assert_eq!(
+            (reported.count, reported.memory_per_device),
+            (4, Some(279 << 30))
+        );
+        let plain = Shape::new(Resources::new(1, 1, 0, None).unwrap(), caps(&[]));
+        assert_eq!(plain.accelerator(), None);
+        assert_eq!(gpu_host(1, "A100_X", &[]).accelerator(), None);
+        let bad = gpu_host(1, "nvidia-a100", &[("accelerator.count", "many")]);
+        assert_eq!(bad.accelerator(), None);
+        assert!(!bad.satisfies(
+            &Resources::new(1, 1, 1, Some("nvidia-a100".into())).unwrap(),
+            &caps(&[("accelerator.count", "x")])
+        ));
     }
 }

@@ -190,6 +190,7 @@ fn round_trip_of_every_message() {
         disk_bytes: 0,
         gpu_class: None,
         max_leases: None,
+        accelerator: None,
     };
     round_trip(&cpu_only);
     let text = serde_json::to_string(&cpu_only).unwrap();

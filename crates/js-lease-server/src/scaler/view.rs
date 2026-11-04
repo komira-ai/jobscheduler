@@ -1,7 +1,7 @@
 //! The registry's words turned into the scaler's: a host as [`HostFacts`], a waiting
 //! request as [`Waiting`].
 
-use js_elastic::{GpuClass, Offer, PriceUnit};
+use js_elastic::{Offer, PriceUnit};
 use js_registry::{HostMark, HostState, HostView, Waiting as Request};
 use js_scaler::{HostFacts, HostState as Hearing, Mark, Waiting};
 use js_types::{ExecMode, IsaLevel, Shape, normalise_arch};
@@ -50,10 +50,7 @@ fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
         cpu_millis: resources.cpu_millis(),
         memory_bytes: resources.memory_bytes(),
         disk_bytes,
-        gpus: u32::try_from(resources.gpus()).unwrap_or(u32::MAX),
-        gpu_class: resources
-            .gpu_class()
-            .and_then(|class| GpuClass::parse(class).ok()),
+        accelerator: shape.accelerator(),
         os: text("os"),
         arch: normalise_arch(&text("arch")).to_owned(),
         isa_level: booked
@@ -172,6 +169,7 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: None,
         };
         let none = offer_of(&shape(0, &[]), &shape(0, &[]), ExecMode::Container);
         let some = offer_of(&shape(0, &[]), &shape(10 << 30, &[]), ExecMode::Container);

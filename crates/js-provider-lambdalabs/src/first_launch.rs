@@ -295,6 +295,7 @@ impl Runner<'_, '_> {
             arch: Some("x86_64".to_owned()),
             isa_level: None,
             exec: None,
+            accelerator: None,
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,
@@ -336,7 +337,7 @@ impl Runner<'_, '_> {
             args.base_url,
             offer.id,
             offer.zone.as_deref().unwrap_or_default(),
-            offer.gpus,
+            offer.accelerator.as_ref().map_or(0, |a| a.count),
             price_cents_per_hour,
             state_file.display(),
             args.boot_deadline.as_secs(),

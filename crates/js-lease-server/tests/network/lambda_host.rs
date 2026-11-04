@@ -4,11 +4,11 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_elastic::{ElasticProvider, GpuClass, Offer, PriceUnit, SchedulerId};
+use js_elastic::{ElasticProvider, Offer, PriceUnit, SchedulerId};
 use js_lease_server::bootstrap::{Fill, render};
 use js_lease_server::network::{DefaultMode, NetworkMode};
 use js_provider_lambdalabs::{ElasticConfig, FakeLambda, LambdaProvider, ManualClock, OptionTable};
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 
 use crate::support::{TEN_MINUTES, ctx, host, plan};
 
@@ -38,8 +38,11 @@ fn offer(disk_gib: u64) -> Offer {
         cpu_millis: 30_000,
         memory_bytes: 200 << 30,
         disk_bytes: disk_gib << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a10").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,

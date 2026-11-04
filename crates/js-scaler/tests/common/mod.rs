@@ -5,13 +5,15 @@
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, Demand, GpuClass, Held, HostRef, HostStatus, Offer, PriceUnit, SchedulerId,
+    AcquireId, Acquired, Demand, Held, HostRef, HostStatus, Offer, PriceUnit, SchedulerId,
 };
 use js_scaler::{
     AcquirePlan, AcquireResult, Action, Budgets, Health, HostFacts, HostState, Input, LaunchMode,
     Millis, Phase, PoolInput, Record, Settings, State, StoredOffer, Waiting, step,
 };
-use js_types::{ExecMode, HostId, RequestId, Resources};
+use js_types::{
+    Accelerator, AcceleratorNeed, ExecMode, HostId, Model, RequestId, Resources, accelerator_of,
+};
 
 /// The time the tests start at: well past one day, so a day window has room behind it.
 pub const START: u64 = 1_000_000_000_000;
@@ -30,6 +32,11 @@ pub fn minutes(count: u64) -> Duration {
     Duration::from_secs(60 * count)
 }
 
+/// `count` accelerators of the spelling `class`, as a provider reports them.
+pub fn accel(class: &str, count: u32) -> Option<Accelerator> {
+    Some(accelerator_of(&Model::parse(class).unwrap(), count, None))
+}
+
 /// An offer of a linux x86_64 machine with one a10 gpu, at `price` cents per hour.
 pub fn offer(id: &str, price: u64) -> Offer {
     Offer {
@@ -38,8 +45,7 @@ pub fn offer(id: &str, price: u64) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: accel("nvidia-a10", 1),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -59,6 +65,11 @@ pub fn demand() -> Demand {
         arch: Some("x86_64".to_owned()),
         isa_level: None,
         exec: Some(ExecMode::Container),
+        accelerator: Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a10").unwrap()),
+            count: 1,
+            ..AcceleratorNeed::default()
+        }),
     }
 }
 

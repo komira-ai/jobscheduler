@@ -229,8 +229,7 @@ fn a_stored_offer_rebuilds_its_offer() {
         ..offer("mac", 40)
     };
     let bare = Offer {
-        gpu_class: None,
-        gpus: 0,
+        accelerator: None,
         ..offer("cpu", 10)
     };
     for original in [offer("a10", 60), sandbox, bare] {
@@ -244,7 +243,7 @@ fn a_stored_offer_rebuilds_its_offer() {
     assert_eq!(unknown.exec, StoredExec::Container);
     let shown = unknown.to_offer(5);
     assert_eq!(shown.cpu_millis, 0);
-    assert_eq!(shown.gpu_class, None);
+    assert_eq!(shown.accelerator, None);
 }
 
 /// Asserts that a record written when offers spelt Arm `aarch64` rebuilds an `arm64`
@@ -476,4 +475,59 @@ fn a_brake_with_an_unknown_field_and_no_failures_reads() {
     let read = Records::decode(&text).unwrap();
     assert_eq!(read.brake["gpu"].failures, 0);
     assert_eq!(read.brake["gpu"].tripped_at, Some(at(7 * MINUTE)));
+}
+
+/// Asserts that an offer with an accelerator round-trips through the record with its
+/// family, variant, count and the variant's nominal memory, and that the keys written are
+/// still `gpus` and `gpu_class` (the variant spelling, else the family). Catches a record
+/// that drops the variant or the memory, or one that writes a key the release before
+/// refuses.
+#[test]
+fn an_offer_with_an_accelerator_round_trips_through_the_record() {
+    let original = Offer {
+        accelerator: accel("nvidia-a100-sxm4-80gb", 4),
+        ..offer("a100", 300)
+    };
+    let stored = StoredOffer::from_offer(&original);
+    assert_eq!(stored.gpus, 4);
+    assert_eq!(stored.gpu_class.as_deref(), Some("nvidia-a100-sxm4-80gb"));
+    let rebuilt = stored.to_offer(300);
+    assert_eq!(rebuilt, original);
+    let held = rebuilt.accelerator.unwrap();
+    assert_eq!(held.model.as_str(), "nvidia-a100");
+    assert_eq!(held.variant.unwrap().as_str(), "nvidia-a100-sxm4-80gb");
+    assert_eq!(held.count, 4);
+    assert_eq!(held.memory_per_device, Some(80 << 30));
+
+    let json = serde_json::to_value(&stored).unwrap();
+    assert_eq!(json["gpus"], 4);
+    assert_eq!(json["gpu_class"], "nvidia-a100-sxm4-80gb");
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "arch",
+            "cpu_millis",
+            "disk_bytes",
+            "exec",
+            "gpu_class",
+            "gpus",
+            "id",
+            "memory_bytes",
+            "os",
+            "zone"
+        ]
+    );
+
+    let family = StoredOffer::from_offer(&offer("a10", 60));
+    assert_eq!(family.gpu_class.as_deref(), Some("nvidia-a10"));
+    let mut hand_edited = family;
+    hand_edited.gpu_class = Some("Not A Model".to_owned());
+    assert_eq!(hand_edited.to_offer(60).accelerator, None);
 }

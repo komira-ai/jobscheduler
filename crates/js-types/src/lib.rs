@@ -6,7 +6,9 @@
 //! resource class as data, [`Shape`] is what a host offers, [`LeaseId`] identifies a
 //! lease, [`Labels`] carry the reserved `jobscheduler.dev/` schema, and [`Request`] is
 //! what a caller asks for. [`ContainerSpec`] and [`Requirements`] say what a job runs and
-//! what it needs of a host, in the CPU vocabulary of [`Arch`] and [`IsaLevel`].
+//! what it needs of a host, in the CPU vocabulary of [`Arch`] and [`IsaLevel`] and the
+//! accelerator vocabulary of [`Accelerator`] and [`AcceleratorNeed`], resolved through the
+//! alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports.
 //!
 //! The [`sched`] module holds the scheduler's own vocabulary (operations, leases,
 //! control-log records, QoS, farm time, the state-machine trait). It shares names with
@@ -15,6 +17,7 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod accel;
 mod class;
 mod digest;
 pub mod env;
@@ -28,6 +31,12 @@ mod resources;
 pub mod sched;
 mod shape;
 
+pub use accel::{
+    ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ALIASES, APPLE_M, AccelError,
+    Accelerator, AcceleratorMiss, AcceleratorNeed, Alias, FAMILIES, Family, FormFactor,
+    Interconnect, Model, Resolved, Variant, Vendor, accelerator_of, vendor_of,
+};
 pub use class::{Admission, ClassError, ResourceClass};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};

@@ -34,6 +34,7 @@ pub fn hello() -> Hello {
             disk_bytes: 0,
             gpu_class: Some("nvidia-a100".into()),
             max_leases: Some(4),
+            accelerator: None,
         },
         capabilities: map(&[("os", "macos")]),
         gpu_devices: vec![GpuDevice {

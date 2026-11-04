@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_elastic::{Acquired, Extra, Held, HostStatus, RefusalCode, Released};
+use js_types::{AcceleratorNeed, Model};
 
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
 use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
@@ -81,18 +82,28 @@ fn listed(record: &Record, held: &Held) -> bool {
 }
 
 /// Whether a host's announced shape is below the offer its machine was launched from, in
-/// cpu, memory, gpus or gpu class. A host whose shape is not known is not below anything.
+/// cpu, memory, accelerator count or accelerator model: the offer's class is read as a
+/// model through the alias table, so a family offer is met by any variant and a variant
+/// offer only by that variant (a 40 GB host of an 80 GB offer is below it). A host whose
+/// shape is not known is not below anything.
 fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
     host.is_some_and(|host| {
+        let count = host.accelerator.as_ref().map_or(0, |own| own.count);
         let holds = [
             host.cpu_millis >= offer.cpu_millis,
             host.memory_bytes >= offer.memory_bytes,
-            host.gpus >= offer.gpus,
-            offer.gpu_class.as_deref().is_none_or(|class| {
-                host.gpu_class
-                    .as_ref()
-                    .is_some_and(|own| own.as_str() == class)
-            }),
+            count >= offer.gpus,
+            offer
+                .gpu_class
+                .as_deref()
+                .and_then(|class| Model::parse(class).ok())
+                .is_none_or(|model| {
+                    let wanted = AcceleratorNeed {
+                        model: Some(model),
+                        ..AcceleratorNeed::default()
+                    };
+                    wanted.met_by(host.accelerator.as_ref()).is_ok()
+                }),
         ];
         !holds.into_iter().all(|ok| ok)
     })
@@ -735,5 +746,51 @@ impl<'a> Pass<'a> {
                 self.silent_now.insert(name, since);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use js_elastic::{Offer, PriceUnit};
+    use js_types::{ExecMode, accelerator_of};
+
+    use super::*;
+
+    /// An offer of eight devices spelt `class`, with ample CPU and memory.
+    fn offer(class: &str) -> Offer {
+        let model = Model::parse(class).unwrap();
+        Offer {
+            id: "gpu_8x".to_owned(),
+            zone: None,
+            cpu_millis: 8000,
+            memory_bytes: 64 << 30,
+            disk_bytes: 0,
+            accelerator: Some(accelerator_of(&model, 8, None)),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            isa_level: None,
+            exec: ExecMode::Container,
+            price_cents_per_hour: Some(1),
+            price_unit: PriceUnit::UsCents,
+            available: true,
+        }
+    }
+
+    /// Asserts that a host is below a variant offer when it reports another variant of the
+    /// same family (a 40 GB host of an 80 GB offer, and the reverse), and is not when it
+    /// reports that variant; that a host of any variant meets a family offer; and that a
+    /// host of another family is below either. Catches a check that compares families only,
+    /// which keeps a machine that came up smaller than what was paid for.
+    #[test]
+    fn a_host_of_another_variant_is_below_a_variant_offer() {
+        let (a80, a40) = ("nvidia-a100-sxm4-80gb", "nvidia-a100-sxm4-40gb");
+        let stored = |class| StoredOffer::from_offer(&offer(class));
+        assert!(below(&stored(a80), Some(&offer(a40))));
+        assert!(below(&stored(a40), Some(&offer(a80))));
+        assert!(!below(&stored(a80), Some(&offer(a80))));
+        assert!(!below(&stored("nvidia-a100"), Some(&offer(a40))));
+        assert!(!below(&stored("nvidia-a100"), Some(&offer(a80))));
+        assert!(below(&stored("nvidia-a100"), Some(&offer("nvidia-h100"))));
+        assert!(!below(&stored(a80), None));
     }
 }

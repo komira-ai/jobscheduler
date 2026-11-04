@@ -301,7 +301,7 @@ pub(crate) struct NoOffer {
 }
 
 /// The names of the dimensions an offer can fail, as the status page spells them.
-const DIMENSIONS: [(Dimension, &str); 9] = [
+const DIMENSIONS: [(Dimension, &str); 13] = [
     (Dimension::Os, "os"),
     (Dimension::Arch, "arch"),
     (Dimension::IsaLevel, "isa_level"),
@@ -309,27 +309,53 @@ const DIMENSIONS: [(Dimension, &str); 9] = [
     (Dimension::CpuMillis, "cpu_millis"),
     (Dimension::MemoryBytes, "memory_bytes"),
     (Dimension::DiskBytes, "disk_bytes"),
-    (Dimension::Gpus, "gpus"),
-    (Dimension::GpuClass, "gpu_class"),
+    (Dimension::AcceleratorVendor, "accelerator_vendor"),
+    (Dimension::AcceleratorModel, "gpu_class"),
+    (Dimension::AcceleratorCount, "gpus"),
+    (Dimension::AcceleratorMemory, "accelerator_memory"),
+    (
+        Dimension::AcceleratorInterconnect,
+        "accelerator_interconnect",
+    ),
+    (Dimension::AcceleratorFormFactor, "accelerator_form_factor"),
 ];
 
 /// The cheapest offer with capacity that serves `demand`: lowest price, then fewest GPUs,
 /// then id, then zone. Else the dimension that fails.
 fn choose<'a>(offers: &'a [Offer], demand: &Demand) -> Result<&'a Offer, String> {
     let fits: Vec<(&Offer, Result<(), Dimension>)> =
-        offers.iter().map(|o| (o, o.fit(demand))).collect();
+        offers.iter().map(|o| (o, fit_named(o, demand))).collect();
     let buyable = fits
         .iter()
         .filter(|(offer, fit)| fit.is_ok() && offer.available)
         .map(|(offer, _)| *offer);
     let cheapest = buyable.min_by_key(|o| {
         let price = o.price_cents_per_hour.unwrap_or(u64::MAX);
-        (price, o.gpus, o.id.clone(), o.zone.clone())
+        (
+            price,
+            o.accelerator.as_ref().map_or(0, |have| have.count),
+            o.id.clone(),
+            o.zone.clone(),
+        )
     });
     match cheapest {
         Some(offer) => Ok(offer),
         None => Err(missing(&fits)),
     }
+}
+
+/// [`Offer::fit`], except that an offer with no accelerators at all fails a demand for
+/// them by `gpus` (the count it lacks), as the status page always said, not by the vendor
+/// or model, which it has none of either.
+fn fit_named(offer: &Offer, demand: &Demand) -> Result<(), Dimension> {
+    offer.fit(demand).map_err(|dimension| match dimension {
+        Dimension::AcceleratorVendor | Dimension::AcceleratorModel
+            if offer.accelerator.is_none() =>
+        {
+            Dimension::AcceleratorCount
+        }
+        other => other,
+    })
 }
 
 /// Why no offer serves: the first dimension some offer fails, else that the ones that fit
@@ -384,8 +410,7 @@ mod tests {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 100 << 30,
-            gpus: 0,
-            gpu_class: None,
+            accelerator: None,
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: level.map(|name| name.parse().unwrap()),
@@ -394,6 +419,50 @@ mod tests {
             price_unit: js_elastic::PriceUnit::UsCents,
             available: true,
         }
+    }
+
+    /// Asserts that the pools page names the missing count (`gpus`) for an offer with no
+    /// accelerators against a demand for some, the model (`gpu_class`) for an offer of
+    /// another model, and the vendor for an offer of another vendor. Catches a status that
+    /// names the model of a CPU-only catalog, which has none to differ.
+    #[test]
+    fn an_offer_without_accelerators_is_named_by_its_count() {
+        use js_types::{AcceleratorNeed, Model, accelerator_of};
+        let mut demand = Demand::from_request(&js_types::Request {
+            class: js_types::ClassId::new("whole-node").unwrap(),
+            resources: js_types::Resources::new(1000, 1 << 30, 0, None).unwrap(),
+            capabilities: BTreeMap::new(),
+            max_wall: Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+            probe_host: None,
+        });
+        demand.accelerator = Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a10").unwrap()),
+            count: 1,
+            ..AcceleratorNeed::default()
+        });
+        let with = |name: &str| Offer {
+            accelerator: Some(accelerator_of(&Model::parse(name).unwrap(), 1, None)),
+            ..offer_at("gpu", None)
+        };
+        let named = |offers: &[Offer], demand: &Demand| choose(offers, demand).err();
+        assert_eq!(
+            named(&[offer_at("cpu", None)], &demand),
+            Some("gpus".to_owned())
+        );
+        assert_eq!(
+            named(&[with("nvidia-h100")], &demand),
+            Some("gpu_class".to_owned())
+        );
+        demand.accelerator = Some(AcceleratorNeed {
+            vendor: Some(js_types::Vendor::parse("amd").unwrap()),
+            ..AcceleratorNeed::default()
+        });
+        assert_eq!(
+            named(&[with("nvidia-h100")], &demand),
+            Some("accelerator_vendor".to_owned())
+        );
     }
 
     /// Asserts the spelling the pools page gives a request whose offers miss only on the

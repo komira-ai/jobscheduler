@@ -3,14 +3,14 @@
 //! A job never names a cloud, an image of a machine or an instance type; those live in
 //! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
-//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib` and `exec`
-//! from the capabilities the request requires.
+//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib`, `exec` and
+//! the `accelerator.*` keys from the capabilities the request requires.
 
 use std::fmt;
 use std::str::FromStr;
 
 use crate::digest::{DigestRef, DigestRefError};
-use crate::{IsaLevel, Request, Resources, normalise_arch};
+use crate::{AccelError, AcceleratorNeed, IsaLevel, Request, Resources, normalise_arch};
 
 /// The capability key a request names its operating system by.
 const OS_KEY: &str = "os";
@@ -143,9 +143,14 @@ pub struct Requirements {
     pub isa_level: Option<IsaLevel>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
+    /// The accelerators the job needs, as the request's `accelerator.*` keys state them, or
+    /// else as its booked GPU count and class (`model` the class as spelt, `count` the
+    /// count). `None`: none asked for.
+    pub accelerator: Option<AcceleratorNeed>,
 }
 
-/// Why a request's `disk-gib`, `exec` or `isa_level` capability is not a requirement.
+/// Why a request's `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
+/// requirement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RequirementsError {
     /// `disk-gib` is not a whole number of GiB that fits in bytes.
@@ -157,15 +162,23 @@ pub enum RequirementsError {
     /// `isa_level` names no ISA level.
     #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
     BadIsaLevel(String),
+    /// An `accelerator.*` key holds a value that is not valid.
+    #[error(transparent)]
+    BadAccelerator(#[from] AccelError),
+    /// `accelerator.count` asks for devices without `accelerator.model`. A booked GPU
+    /// count needs a class (a lease is stored with both), so a count names its model.
+    #[error("accelerator.count above zero needs accelerator.model")]
+    CountWithoutModel,
 }
 
 impl Requirements {
     /// The requirements of a lease request: its resources, and `os`, `arch` (through
-    /// [`normalise_arch`]), `isa_level`, `disk-gib` and `exec` from the capabilities it
-    /// requires. A capability the request does not name is `None`: any. A `disk-gib`,
-    /// `exec` or `isa_level` that is not valid also reads as `None` here, and so do the
-    /// other two; [`Request::validate`] refuses such a request, so none that was admitted
-    /// has one ([`Self::try_from_request`] says why).
+    /// [`normalise_arch`]), `isa_level`, `disk-gib`, `exec` and the accelerator from the
+    /// capabilities it requires. A capability the request does not name is `None`: any. A
+    /// `disk-gib`, `exec`, `isa_level` or `accelerator.*` key that is not valid makes all
+    /// four read as not asked here, the accelerator then as the booked GPU count and class;
+    /// [`Request::validate`] refuses such a request, so none that was admitted has one
+    /// ([`Self::try_from_request`] says why).
     pub fn from_request(request: &Request) -> Self {
         Self::try_from_request(request).unwrap_or_else(|_| Self {
             resources: request.resources.clone(),
@@ -174,18 +187,21 @@ impl Requirements {
             arch: arch_of(request),
             isa_level: None,
             exec: None,
+            accelerator: AcceleratorNeed::booked(&request.resources),
         })
     }
 
-    /// [`Self::from_request`], refusing a `disk-gib`, `exec` or `isa_level` that is not
-    /// valid.
+    /// [`Self::from_request`], refusing a `disk-gib`, `exec`, `isa_level` or
+    /// `accelerator.*` key that is not valid.
     ///
     /// # Errors
     ///
     /// [`RequirementsError::BadDisk`] when `disk-gib` is not a whole number of GiB whose
     /// size in bytes fits 64 bits; [`RequirementsError::BadExec`] when `exec` is not a
     /// mode name; [`RequirementsError::BadIsaLevel`] when `isa_level` is not a level
-    /// name. `disk-gib=0` is valid and asks for nothing.
+    /// name; [`RequirementsError::BadAccelerator`] when an `accelerator.*` key is not
+    /// valid; [`RequirementsError::CountWithoutModel`] when `accelerator.count` is above
+    /// zero and `accelerator.model` is absent. `disk-gib=0` is valid and asks for nothing.
     pub fn try_from_request(request: &Request) -> Result<Self, RequirementsError> {
         let caps = &request.capabilities;
         let disk_bytes = caps
@@ -217,7 +233,20 @@ impl Requirements {
             arch: arch_of(request),
             isa_level,
             exec,
+            accelerator: need_of(request)?,
         })
+    }
+}
+
+/// The accelerator need of `request`: its `accelerator.*` keys when it names any, else
+/// its booked GPU count and class.
+fn need_of(request: &Request) -> Result<Option<AcceleratorNeed>, RequirementsError> {
+    match AcceleratorNeed::from_capabilities(&request.capabilities)? {
+        Some(need) if need.count > 0 && need.model.is_none() => {
+            Err(RequirementsError::CountWithoutModel)
+        }
+        Some(need) => Ok(Some(need)),
+        None => Ok(AcceleratorNeed::booked(&request.resources)),
     }
 }
 
@@ -233,7 +262,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{Capabilities, ClassId};
+    use crate::{Capabilities, ClassId, Model};
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -251,6 +280,15 @@ mod tests {
             validation_run: None,
             probe_host: None,
         }
+    }
+
+    /// The need the test request's booked GPU states: one `nvidia-a10`.
+    fn a10() -> Option<AcceleratorNeed> {
+        Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a10").unwrap()),
+            count: 1,
+            ..AcceleratorNeed::default()
+        })
     }
 
     /// Asserts that both modes parse from and print as the names a pool and a hello use,
@@ -335,6 +373,7 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: a10(),
         };
         assert_eq!(read(&[]), Ok(none.clone()));
         for arch in ["x86_64", "arm64"] {
@@ -402,6 +441,7 @@ mod tests {
                 arch: Some("arm64".to_owned()),
                 isa_level: None,
                 exec: None,
+                accelerator: a10(),
             };
             assert_eq!(lenient, want, "{refusal}");
         }
@@ -529,5 +569,116 @@ mod tests {
             Err(ImageRefError::BadName)
         );
         assert!(ImageRefError::NoDigest.to_string().contains("digest"));
+    }
+
+    /// Asserts that the `accelerator.*` keys are read as the need (memory in GiB, the model
+    /// as spelt, every field), that a vendor-only need books nothing and is valid, and that
+    /// a request with no keys reads its booked GPU count and class as the need. Catches a
+    /// requirement that drops a key, or one that loses today's GPU class when no key is
+    /// named.
+    #[test]
+    fn the_accelerator_comes_from_its_keys_or_the_booked_gpus() {
+        use crate::{FormFactor, Interconnect, Vendor};
+        let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
+        let full = read(&[
+            ("accelerator.vendor", "nvidia"),
+            ("accelerator.model", "nvidia-a100-sxm4-80gb"),
+            ("accelerator.count", "4"),
+            ("accelerator.memory-gib", "80"),
+            ("accelerator.interconnect", "nvlink-domain>=72"),
+            ("accelerator.form-factor", "sxm"),
+        ])
+        .unwrap();
+        let want = AcceleratorNeed {
+            vendor: Some(Vendor::parse("nvidia").unwrap()),
+            model: Some(Model::parse("nvidia-a100-sxm4-80gb").unwrap()),
+            count: 4,
+            memory_per_device: Some(80 << 30),
+            interconnect: Some(Interconnect::new("nvlink-domain", 72).unwrap()),
+            form_factor: Some(FormFactor::Sxm),
+        };
+        assert_eq!(full.accelerator, Some(want));
+        let vendor_only = read(&[("accelerator.vendor", "nvidia")]).unwrap();
+        let want = AcceleratorNeed {
+            vendor: Some(Vendor::parse("nvidia").unwrap()),
+            ..AcceleratorNeed::default()
+        };
+        assert_eq!(vendor_only.accelerator, Some(want));
+        assert_eq!(read(&[]).unwrap().accelerator, a10());
+        let mut cpu_only = request(&[]);
+        cpu_only.resources = Resources::new(1000, 1, 0, None).unwrap();
+        assert_eq!(Requirements::from_request(&cpu_only).accelerator, None);
+        let mut odd_class = request(&[]);
+        odd_class.resources = Resources::new(1000, 1, 2, Some("A100_X".into())).unwrap();
+        assert_eq!(
+            Requirements::from_request(&odd_class).accelerator,
+            None,
+            "a class that is not a model name is matched by the class alone"
+        );
+    }
+
+    /// Asserts that a count without a model, and each key holding a value that is not
+    /// valid, is refused naming what is wrong, and that the lenient read then falls back to
+    /// the booked GPU count and class. Catches a count-only need reaching a lease, which
+    /// would be stored as GPUs of no class.
+    #[test]
+    fn a_count_without_a_model_or_a_bad_key_is_refused() {
+        let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
+        let count_only = [("accelerator.count", "4")];
+        assert_eq!(read(&count_only), Err(RequirementsError::CountWithoutModel));
+        assert_eq!(
+            RequirementsError::CountWithoutModel.to_string(),
+            "accelerator.count above zero needs accelerator.model"
+        );
+        assert!(read(&[("accelerator.count", "0")]).is_ok());
+        let bad = [
+            (
+                "accelerator.vendor",
+                "NVIDIA",
+                AccelError::BadVendor("NVIDIA".into()),
+            ),
+            (
+                "accelerator.model",
+                "a--b",
+                AccelError::BadModel("a--b".into()),
+            ),
+            (
+                "accelerator.count",
+                "four",
+                AccelError::BadNumber {
+                    key: "accelerator.count",
+                    value: "four".into(),
+                },
+            ),
+            (
+                "accelerator.memory-gib",
+                "-1",
+                AccelError::BadNumber {
+                    key: "accelerator.memory-gib",
+                    value: "-1".into(),
+                },
+            ),
+            (
+                "accelerator.interconnect",
+                "nvlink",
+                AccelError::BadInterconnect("nvlink".into()),
+            ),
+            (
+                "accelerator.form-factor",
+                "oam",
+                AccelError::BadFormFactor("oam".into()),
+            ),
+        ];
+        for (key, value, why) in bad {
+            assert_eq!(
+                read(&[(key, value)]),
+                Err(RequirementsError::BadAccelerator(why)),
+                "{key}"
+            );
+            let lenient = Requirements::from_request(&request(&[(key, value)]));
+            assert_eq!(lenient.accelerator, a10(), "{key}");
+        }
+        let lenient = Requirements::from_request(&request(&count_only));
+        assert_eq!(lenient.accelerator, a10());
     }
 }

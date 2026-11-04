@@ -7,14 +7,14 @@ use std::thread;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, GpuClass, HostName, Offer,
-    PriceUnit, Reason, Refusal, RefusalCode, Released, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, HostName, Offer, PriceUnit,
+    Reason, Refusal, RefusalCode, Released, SchedulerId,
 };
 use js_provider_lambdalabs::{
     ApiError, ApiKey, ElasticConfig, ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider,
     LaunchRequest, ManualClock, OptionTable, Tag,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 use serde_json::{Value, json};
 
 use crate::reads::client;
@@ -196,8 +196,11 @@ fn ask() -> AcquireRequest {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 100 << 30,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            accelerator: Some(accelerator_of(
+                &Model::parse("nvidia-sample").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,

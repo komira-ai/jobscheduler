@@ -39,7 +39,7 @@ pub use boot::{
     Artifact, BootPlan, BootStep, CONTAINER_BIN, RUNTIME, SCRATCH_ROOT, STATE_ROOT, SlotName,
 };
 pub use ids::{AcquireId, HostName, HostRef, InvalidId, SchedulerId};
-pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
+pub use offer::{Demand, Dimension, Offer, PriceUnit};
 pub use provider::{AcquireRequest, CheckResult, ElasticProvider, ProviderError};
 pub use read::ReadHandle;
 pub use secret::{BootPayload, Secret};

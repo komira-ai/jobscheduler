@@ -33,6 +33,88 @@ fn nvidia_csv_gives_devices_and_a_class() {
     assert!(found.warnings.is_empty());
 }
 
+/// Asserts that the agent reports the alias table's family (`nvidia-a100`), the class it
+/// read as the variant spelling, the count, and the least memory of any device as the
+/// memory per device: two identical A100-SXM4-80GB lines of 81920 and 81000 MiB report
+/// 81000 MiB, and the hello it sends says the same. A different model on one line still
+/// refuses. It catches a memory that is summed, taken from the largest device or the
+/// first, a class sent without its family, and a mixed host that is let through.
+#[test]
+fn the_agent_reports_the_family_the_variant_and_the_minimum_memory() {
+    const MIB: u64 = 1024 * 1024;
+    let unequal = "0, GPU-3f1c9a52-0b7e-4d0a-9a55-6f1d2c8b7e01, NVIDIA A100-SXM4-80GB, 81920
+1, GPU-77a0c2d4-5e19-4b3f-8c66-0d9e1f2a3b02, NVIDIA A100-SXM4-80GB, 81000
+";
+    let mut host = linux_host();
+    host.commands = host.commands.with(NVIDIA_CMD, Ok(unequal));
+    let found = detect(&host.platform, &host.commands, &host.files).unwrap();
+    let reported = found.gpus.accelerator().unwrap();
+    assert_eq!(reported.vendor, "nvidia");
+    assert_eq!(reported.model, "nvidia-a100");
+    assert_eq!(
+        reported.variant_spelling.as_deref(),
+        Some("nvidia-a100-sxm4-80gb")
+    );
+    assert_eq!(reported.count, 2);
+    assert_eq!(reported.memory_per_device_bytes, Some(81000 * MIB));
+
+    let replies = vec![crate::support::welcome(1)];
+    let (ran, sent, _) = run_scripted(&["--host-id", "fine"], &host, replies, 1);
+    assert_eq!(ran.status(), crate::support::code(0), "{}", ran.err);
+    assert_eq!(
+        sent.borrow()[0].1["shape"]["accelerator"],
+        serde_json::json!({
+            "vendor": "nvidia",
+            "model": "nvidia-a100",
+            "variant_spelling": "nvidia-a100-sxm4-80gb",
+            "count": 2,
+            "memory_per_device_bytes": 81000 * MIB,
+        })
+    );
+
+    let mut mixed = linux_host();
+    mixed.commands = mixed.commands.with(NVIDIA_CMD, Ok(NVIDIA_MIXED));
+    let found = detect(&mixed.platform, &mixed.commands, &mixed.files).unwrap();
+    assert_eq!(found.gpus, js_agent::Gpus::none());
+    assert_eq!(found.gpus.accelerator(), None);
+    assert!(
+        found.warnings[0].contains("more than one model"),
+        "{:?}",
+        found.warnings
+    );
+}
+
+/// Asserts that `--gpu-class nvidia-a100-sxm4-80gb` goes through the alias table like a
+/// name read from the driver: on a host whose devices print as H100s, the hello reports
+/// the A100 family with the override text as the variant spelling, and the memory is still
+/// the least the devices measured. It catches an override that is sent as a bare class
+/// with no family, or one that keeps the detected model.
+#[test]
+fn the_override_flag_goes_through_the_table() {
+    const MIB: u64 = 1024 * 1024;
+    let h100s = "0, GPU-3f1c9a52-0b7e-4d0a-9a55-6f1d2c8b7e01, NVIDIA H100 80GB HBM3, 81559
+1, GPU-88b1d3e5-6f2a-4c40-9d77-1e0f2a3b4c03, NVIDIA H100 80GB HBM3, 81559
+";
+    let mut host = linux_host();
+    host.commands = host.commands.with(NVIDIA_CMD, Ok(h100s));
+    let flags = ["--host-id", "fine", "--gpu-class", "nvidia-a100-sxm4-80gb"];
+    let replies = vec![crate::support::welcome(1)];
+    let (ran, sent, _) = run_scripted(&flags, &host, replies, 1);
+    assert_eq!(ran.status(), crate::support::code(0), "{}", ran.err);
+    let shape = sent.borrow()[0].1["shape"].clone();
+    assert_eq!(shape["gpu_class"], "nvidia-a100-sxm4-80gb");
+    assert_eq!(
+        shape["accelerator"],
+        serde_json::json!({
+            "vendor": "nvidia",
+            "model": "nvidia-a100",
+            "variant_spelling": "nvidia-a100-sxm4-80gb",
+            "count": 2,
+            "memory_per_device_bytes": 81559 * MIB,
+        })
+    );
+}
+
 /// Asserts that `nvidia-smi` printing nothing (a driver and no device) offers no GPU and
 /// no warning: nothing failed.
 #[test]
@@ -114,6 +196,15 @@ fn an_apple_gpu_is_one_gpu_of_class_apple_m() {
     assert_eq!(found.gpus.count, 1);
     assert_eq!(found.gpus.class.as_deref(), Some(APPLE_GPU_CLASS));
     assert!(found.gpus.devices.is_empty());
+    let apple = found.gpus.accelerator().unwrap();
+    assert_eq!(
+        (apple.vendor.as_str(), apple.model.as_str(), apple.count),
+        ("apple", "apple-m", 1)
+    );
+    assert_eq!(
+        (apple.variant_spelling, apple.memory_per_device_bytes),
+        (None, None)
+    );
     assert!(found.warnings.is_empty());
     let ran = host.commands.ran.borrow();
     assert!(!ran.iter().any(|line| line.contains("nvidia-smi")));

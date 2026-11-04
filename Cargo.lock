@@ -1465,6 +1465,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "hyper-util",
+ "js-caps",
  "prost",
  "prost-types",
  "protox",

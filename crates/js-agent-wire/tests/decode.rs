@@ -90,6 +90,8 @@ fn minimal_hello_takes_defaults() {
     assert!(hello.labels.is_empty() && hello.held.is_empty() && hello.gpu_devices.is_empty());
     assert_eq!(hello.shape.gpu_class, None);
     assert_eq!(hello.shape.max_leases, None);
+    assert_eq!(hello.shape.accelerator, None);
+    assert_eq!(hello.accelerator(), None);
     assert_eq!(hello.instance, None);
     assert_eq!(hello.protocol, ProtocolRange { min: 1, max: 1 });
     assert!(!hello.accepts_host_credential);
@@ -302,4 +304,48 @@ fn exclusive_ready_and_reply_exclusive_decode() {
     assert_eq!(beat.exclusive_ready.as_deref(), Some("9-2"));
     let reply: HeartbeatReply = serde_json::from_value(json!({"exclusive": "9-2"})).unwrap();
     assert_eq!(reply.exclusive.as_deref(), Some("9-2"));
+}
+
+/// Asserts that a hello from an agent that predates `shape.accelerator` (GPUs, a class and
+/// devices with memory, and no accelerator) decodes and validates, and that
+/// `accelerator()` derives the family `nvidia-a100`, the count and the variant's nominal
+/// 80 GiB for a class the table knows, and the least device memory for a class it does
+/// not. It catches a field that became required, and a derivation that sums or maximises
+/// the device memory.
+#[test]
+fn old_hello_with_gpu_class_still_registers() {
+    const GIB: u64 = 1 << 30;
+    let body = |class: &str, first: u64, second: u64| {
+        json!({
+            "host_id": "a", "pool": "p", "agent_version": "1",
+            "shape": {"cpu_millis": 1, "memory_bytes": 2, "gpus": 2, "gpu_class": class},
+            "gpu_devices": [
+                {"index": 0, "uuid": "GPU-0", "model": "X", "memory_bytes": first},
+                {"index": 1, "uuid": "GPU-1", "model": "X", "memory_bytes": second}
+            ],
+            "phase": "serving"
+        })
+    };
+    let hello: Hello =
+        serde_json::from_value(body("nvidia-a100-sxm4-80gb", 80 * GIB, 79 * GIB)).unwrap();
+    assert_eq!(hello.shape.accelerator, None);
+    assert_eq!(hello.validate(), Ok(()));
+    let found = hello.accelerator().unwrap();
+    assert_eq!(found.vendor.as_str(), "nvidia");
+    assert_eq!(found.model.as_str(), "nvidia-a100");
+    assert_eq!(
+        found.variant.as_ref().map(|v| v.as_str()),
+        Some("nvidia-a100-sxm4-80gb")
+    );
+    assert_eq!(found.count, 2);
+    assert_eq!(found.memory_per_device, Some(80 * GIB));
+
+    let unknown: Hello = serde_json::from_value(body("nvidia-zz9000", 48 * GIB, 40 * GIB)).unwrap();
+    assert_eq!(unknown.validate(), Ok(()));
+    let found = unknown.accelerator().unwrap();
+    assert_eq!(found.vendor.as_str(), "nvidia");
+    assert_eq!(found.model.as_str(), "nvidia-zz9000");
+    assert_eq!(found.variant, None);
+    assert_eq!(found.count, 2);
+    assert_eq!(found.memory_per_device, Some(40 * GIB));
 }

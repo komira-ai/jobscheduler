@@ -12,7 +12,7 @@ use js_types::normalise_arch;
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
 use crate::cli::Cli;
 use crate::facts::{
-    CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
+    self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
 };
 
 /// The hello, and what the operator should be told about how it was made.
@@ -218,12 +218,13 @@ pub fn offer(
     );
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;
-    let devices = detected
+    let devices: Vec<_> = detected
         .gpus
         .devices
         .into_iter()
         .take(usize::try_from(gpus).unwrap_or(usize::MAX))
         .collect();
+    let accelerator = facts::accelerator(gpu_class.as_deref(), gpus, &devices);
     Ok(Offer {
         hello: Hello {
             protocol: ProtocolRange::THIS,
@@ -238,6 +239,7 @@ pub fn offer(
                 disk_bytes,
                 gpu_class,
                 max_leases: None,
+                accelerator,
             },
             capabilities,
             gpu_devices: devices,

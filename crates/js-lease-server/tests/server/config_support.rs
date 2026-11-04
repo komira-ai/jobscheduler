@@ -5,8 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, ElasticProvider, GpuClass, Held, HostRef, Offer,
-    ProviderError, Released,
+    AcquireRequest, Acquired, BootStep, ElasticProvider, Held, HostRef, Offer, ProviderError,
+    Released,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
@@ -14,7 +14,7 @@ use js_lease_server::{
     StartupError,
 };
 use js_pool_static::EXAMPLE_CONFIG;
-use js_types::ExecMode;
+use js_types::{ExecMode, Model};
 
 use crate::support::{Scratch, T0, TOKEN};
 
@@ -65,7 +65,7 @@ fn built(gpus: u64, exec: Vec<ExecMode>) -> Built {
         provider: Box::new(NullElastic),
         floor: Floor {
             gpus,
-            gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a10").unwrap()),
         },
         exec,
     })

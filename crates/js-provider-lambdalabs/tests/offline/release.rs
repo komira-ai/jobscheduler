@@ -7,7 +7,7 @@ use js_elastic::{
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, SCHEDULER_TAG, TerminateEffect,
 };
-use js_types::Resources;
+use js_types::{AcceleratorNeed, Model, Resources};
 
 use crate::rig::{INTERVAL, Rig, SCHEDULER, ask, host, id, live, offer, rig, rig_with, row, tag};
 
@@ -312,7 +312,17 @@ fn request(gpus: u64) -> Demand {
         arch: Some("x86_64".to_owned()),
         isa_level: None,
         exec: None,
+        accelerator: booked("nvidia-sample", gpus),
     }
+}
+
+/// The need a request that books `gpus` GPUs of `class` states.
+fn booked(class: &str, gpus: u64) -> Option<AcceleratorNeed> {
+    Some(AcceleratorNeed {
+        model: Some(Model::parse(class).unwrap()),
+        count: u32::try_from(gpus).unwrap(),
+        ..AcceleratorNeed::default()
+    })
 }
 
 fn names(rig: &Rig, wanted: &Demand) -> Vec<(String, String)> {
@@ -458,6 +468,7 @@ fn cpu_memory_and_class_must_fit() {
     assert!(names(&rig, &wanted).iter().all(|c| c.0 != "gpu_1x_sample"));
     let other_class = Demand {
         resources: Resources::new(4000, 16 << 30, 1, Some("nvidia-other".to_owned())).unwrap(),
+        accelerator: booked("nvidia-other", 1),
         ..request(1)
     };
     assert!(names(&rig, &other_class).is_empty());
@@ -489,7 +500,7 @@ fn the_catalog_has_one_offer_per_region_with_capacity_and_the_facts_of_the_type(
     );
     // The rig's 8 vcpus, 64 GiB, 100 GiB of storage, one GPU and 75 cents per hour.
     assert_eq!(offers[0], crate::rig::candidate("region-a"));
-    assert_eq!(offers[2].gpus, 8);
+    assert_eq!(offers[2].accelerator.as_ref().map(|a| a.count), Some(8));
     assert_eq!(offers[2].price_cents_per_hour, Some(1200));
 }
 
