@@ -247,16 +247,29 @@ fn a_registry_bundle_is_ensured_by_digest_and_an_unknown_one_is_refused() {
 
 /// A fetch begins at once and the bundle is held when it ends; one that fails reports its
 /// failure to the next call, once, and the call after begins again; a digest that names an
-/// index is reported as one. It catches a fetch that blocks the lifecycle's worker, a
-/// failure that is lost, and a failure that is reported for ever.
+/// index that lists a further index is reported as one. It catches a fetch that blocks the
+/// lifecycle's worker, a failure that is lost, and a failure that is reported for ever.
 #[test]
 fn a_fetch_runs_in_the_background_and_reports_its_failure_once() {
     let dir = Scratch::new("place-fetch");
     let bundle = standard(&dir);
     let (_runtime, fixture) = served(&bundle);
-    let index = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
-    let index_digest = Digest::of(index);
-    fixture.publish_manifest_as(&index_digest, index);
+    // An index whose darwin/arm64 entry is itself an index: one level only, so it is refused
+    // as an index even though the pin may name an index.
+    let nested = Digest::of(b"nested");
+    let index = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": nested.to_string(),
+            "size": 1,
+            "platform": {"os": "darwin", "architecture": "arm64"},
+        }],
+    });
+    let index = serde_json::to_vec(&index).unwrap();
+    let index_digest = Digest::of(&index);
+    fixture.publish_manifest_as(&index_digest, &index);
     let store = placer(&dir, fixture.client());
     let name = format!("{}/{REPO}", fixture.at(REGISTRY));
     assert_eq!(store.fetch(&name, &bundle.digest()), Fetch::Started);

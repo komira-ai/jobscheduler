@@ -17,14 +17,18 @@
 //!   holds is checked by its length and digest, wherever the file is linked from;
 //! - an `oci-layout` that does not say version `1.0.0`;
 //! - a blob that is absent;
-//! - a manifest that `index.json` does not list.
+//! - a manifest that `index.json` does not list (the pin; the platform manifest an
+//!   index names is read from its blob, and `index.json` need not list it).
 //!
 //! `index.json` is read up to the kind's manifest limit ([`crate::Limits::manifest`]),
 //! the same cap as a manifest; `oci-layout` up to 4 KiB.
 //!
 //! What a registry also refuses is refused by the same code: the manifest's digest, an
-//! index, the kind's types and limits ([`crate::manifest`]), and each blob's length and
-//! digest while it is read ([`crate::verify`]). A blob whose bytes do not hash to its
+//! index (unless the kind selects a platform, which then reads the platform manifest
+//! from `blobs/sha256` by the digest the index gives, and refuses it when that blob is
+//! absent or hashes to something else), the kind's types and limits
+//! ([`crate::manifest`]), and each blob's length and digest while it is read
+//! ([`crate::verify`]). A blob whose bytes do not hash to its
 //! name is a [`Error::BlobDigest`], exactly as a registry that serves it would give.
 
 use std::io;
@@ -38,6 +42,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt as _;
 
 use crate::client::BlobSink;
+use crate::index::{self, Read};
 use crate::manifest::{self, Descriptor, Kind, Manifest};
 use crate::source::BundleSource;
 use crate::text::{escape, shown};
@@ -244,7 +249,14 @@ impl BundleSource for Layout {
             return Err(Error::Layout(LayoutFault::NotListed(digest.to_string())));
         }
         let bytes = self.read(&["blobs", "sha256", digest.hex()], limit).await?;
-        manifest::parse(&bytes, digest, kind)
+        match index::read(&bytes, digest, kind)? {
+            Read::Manifest(manifest) => Ok(manifest),
+            Read::Child(child) => {
+                // `index.json` lists the pin only; the platform manifest is a blob.
+                let bytes = self.read(&["blobs", "sha256", child.hex()], limit).await?;
+                manifest::parse(&bytes, &child, kind)
+            }
+        }
     }
 
     async fn fetch_blob(&self, blob: &Descriptor, sink: &mut dyn BlobSink) -> Result<(), Error> {
