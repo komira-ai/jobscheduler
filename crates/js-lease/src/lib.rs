@@ -73,6 +73,15 @@
 //! [lease.shares]            # optional: only a lease of a class that books part of a host
 //! cpu_millis = 4000         # ... what it books there (gpus, gpu_class and disk_bytes
 //! memory_bytes = 8589934592 # are left out when zero); absent means the whole host
+//!
+//! [lease.request]           # optional: only a lease acquired under a request id
+//! id = "nightly-42"         # ... the id, and what that acquire asked for beyond the
+//! class = "whole-node"      # labels and validation run above (probe_host is left out
+//! max_wall_ms = 3600000     # when there is none, capabilities when empty)
+//!
+//! [lease.request.resources] # as lease.shares
+//! cpu_millis = 4000
+//! memory_bytes = 8589934592
 //! ```
 //!
 //! [`read_bookings`] reports `shares` as [`Booking::shares`], so a provider that lets
@@ -114,6 +123,36 @@
 //! deadline has been observed is kept in memory: after a restart the lease is observed
 //! once more.
 //!
+//! # Request ids
+//!
+//! A lease acquired with [`LeaseTable::acquire_with_id`] keeps the consumer's request id,
+//! and what the request asked for, in its `request` row for as long as the lease is in the
+//! file; nothing else remembers an id, so a lease that is gone (released, expired, dropped)
+//! takes its id with it. A repeat of the acquire under the id is answered from that lease,
+//! without calling the provider, and one that asks for another request is refused
+//! [`AcquireError::RequestIdConflict`]. The two are compared as the row records them: the
+//! class, the resources, the capabilities, the probe host, the labels, the validation run
+//! and the wall time (`max_wall_ms`, whole milliseconds up to `i64::MAX`, the largest
+//! integer the file holds, and `max_wall_nanos`, the nanoseconds below a millisecond, left
+//! out when zero), so a repeat that matched before a restart matches after it, and a wall
+//! time below a millisecond reads back as the positive wall time it was. The ttl is not
+//! compared. A row's fields of a later version are kept and written back, and a file in
+//! which two leases keep one request id is an [`OpenError::Corrupt`]. A provider that queues the request
+//! ([`js_provider::Provider::waits`]) leaves the lease pending, and each tick presents it
+//! again under the same lease and request id, which keeps its place and lets the start
+//! that finds it a host book it; the prepare deadline counts from the last presentation
+//! that found it waiting. On open, a pending whole lease with a `request` row is presented
+//! at the first tick, which binds it to whatever the provider restored for the id
+//! ([`LeaseTable::request_ids`] lists the leases kept with an id, for a caller that binds
+//! them sooner). A row that is not a valid request (an id, class, host or resources the
+//! types refuse, or a request [`js_types::Request::validate`] refuses) is an
+//! [`OpenError::Corrupt`]. [`LeaseTable::release_then`] and [`LeaseTable::tick_then`] write
+//! the leases a release or a tick changed and the reservation ledger the provider's calls
+//! left in one replace, for a caller whose provider keeps its waiting requests in that
+//! ledger. The row is additive: a file without it loads as before, a build
+//! that predates it keeps it on rewrite and serves the lease as one acquired without an id,
+//! and a file with no lease acquired under an id is written byte for byte as before.
+//!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
 //!
@@ -142,7 +181,7 @@
 //! meanwhile, so a slow disk stalls every call on the table. [`Timings`] times each save
 //! on a monotonic clock ([`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
 //! another) under the step that made it (`open`, `acquire`, `acquire-settled`, `renew`,
-//! `release`, `release-settled`, `tick`), and the server's handlers time their wait for
+//! `release`, `release-settled`, `tick`, `reservations`), and the server's handlers time their wait for
 //! the table's lock under `wait-` and the call's name. A step that takes over one second
 //! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
 //! operation and `took_ms`. [`Timings::report`] gives, per operation, how many steps were

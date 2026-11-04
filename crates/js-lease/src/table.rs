@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_provider::{Provider, StartSpec};
-use js_types::{LeaseId, Request};
+use js_types::{LeaseId, Request, RequestId};
 
-use crate::book::{self, Book, Seen, Step};
+use crate::book::{self, Book, Presented, Seen, Step};
 use crate::clock::{Clock, Monotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
@@ -75,6 +75,44 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         request: Request,
         ttl: Option<Duration>,
     ) -> Result<Lease, AcquireError> {
+        self.begin(request, ttl, None)
+    }
+
+    /// Acquires a lease for `request` as [`Self::acquire`] does, under the consumer's
+    /// request id `id`, so that a repeat of the acquire (its answer was lost) finds the
+    /// lease it made instead of making a second.
+    ///
+    /// The id is kept with the lease, in the file, for as long as the lease is in the
+    /// table: pending, held or releasing. While it is, an acquire under the same id asks
+    /// the provider nothing and answers from the lease: held, the lease (its expiry as it
+    /// stands); pending, [`AcquireError::Unconfirmed`] with its id; releasing, refused
+    /// `LeaseEnded`. One that asks for another request (anything but the ttl differs) is
+    /// an [`AcquireError::RequestIdConflict`]. Once the lease is gone (released, expired,
+    /// dropped or refused) the id names nothing and an acquire under it is a new lease.
+    ///
+    /// The provider sees the id on the start ([`StartSpec::with_request_id`]). When it
+    /// holds the request on its wait list ([`Provider::waits`]), the lease stays pending
+    /// and [`Self::tick`] presents it again, under the same lease and request id, until
+    /// the provider places or refuses it; its prepare deadline counts from the last
+    /// presentation that found it waiting, so a wait for a host is not a prepare.
+    pub fn acquire_with_id(
+        &mut self,
+        id: RequestId,
+        request: Request,
+        ttl: Option<Duration>,
+    ) -> Result<Lease, AcquireError> {
+        match self.book.repeat(&id, &request) {
+            Some(answer) => answer,
+            None => self.begin(request, ttl, Some(id)),
+        }
+    }
+
+    fn begin(
+        &mut self,
+        request: Request,
+        ttl: Option<Duration>,
+        request_id: Option<RequestId>,
+    ) -> Result<Lease, AcquireError> {
         let ttl = self.book.grant(ttl).ok_or(AcquireError::TtlNotPositive)?;
         if let Some(ceiling) = self
             .book
@@ -87,10 +125,16 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         let id = self.book.next_id().ok_or(AcquireError::IdsExhausted)?;
         let known = self.provider.classes();
         let spec = StartSpec::new(id, request, &known).map_err(AcquireError::Refused)?;
+        let spec = match request_id {
+            Some(request_id) => spec.with_request_id(request_id),
+            None => spec,
+        };
         let record = self.book.insert_pending(&spec, now, ttl);
         self.save("acquire")?;
         let ack = self.provider.start(spec);
         let settled = self.book.settle_start(record, ack);
+        let waits = self.provider.waits(&id);
+        self.book.note_waiting(&id, waits);
         let _ = self.save("acquire-settled");
         settled
     }
@@ -124,10 +168,31 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// leaves the lease releasing, with its booking counted, for [`Self::tick`] to
     /// retry. Releasing a lease that is already releasing stops it again.
     pub fn release(&mut self, id: &LeaseId) -> Result<ReleaseOutcome, ReleaseError> {
+        self.release_then(id, || None)
+    }
+
+    /// Releases a lease as [`Self::release`] does, and asks `ledger`, after the provider's
+    /// stop and before the write that follows it, for the reservation ledger as the stop
+    /// left it. `Some` replaces the table's ledger, so the lease's end and the ledger the
+    /// provider changed with it (a waiting request it cancelled) are written in one replace
+    /// of the file, and no crash can keep one without the other; `None` keeps the ledger.
+    ///
+    /// The first write, before the stop, holds the lease as releasing and the ledger as it
+    /// was. A crash after it, or a failure of the second write, leaves that file: the next
+    /// start finds the lease releasing and stops it again, which cancels its request then.
+    pub fn release_then(
+        &mut self,
+        id: &LeaseId,
+        ledger: impl FnOnce() -> Option<Vec<ReservationRecord>>,
+    ) -> Result<ReleaseOutcome, ReleaseError> {
         let marked = self.book.mark_releasing(id);
         marked.ok_or(ReleaseError::Unknown(*id))?;
         self.save("release")?;
         let freed = self.stop(id);
+        let after = ledger();
+        after
+            .into_iter()
+            .for_each(|records| self.book.set_reservations(records));
         let _ = self.save("release-settled");
         match freed {
             true => Ok(ReleaseOutcome::Freed),
@@ -141,10 +206,27 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// whole lease at its prepare deadline is observed first, so the provider can end it
     /// as a failed prepare, and is expired only if that observation still has no answer;
     /// a pending one still in time is observed (present makes it held, absent drops it,
-    /// unknown keeps it).
+    /// unknown keeps it). A pending lease whose request waits on the provider's wait list
+    /// is presented again instead, whatever its deadline (see [`Self::acquire_with_id`]):
+    /// a refusal drops it, a request that still waits keeps it pending with its deadline
+    /// the prepare timeout from now, and one placed is observed as above.
     /// The file is written once at the end when anything changed or an earlier save failed,
     /// and a failure is reported in the result.
     pub fn tick(&mut self) -> TickReport {
+        self.tick_then(|| None)
+    }
+
+    /// Ticks as [`Self::tick`] does, and asks `ledger`, after every stop, observation and
+    /// presentation of the tick and before its one write, for the reservation ledger as they
+    /// left it. `Some` replaces the table's ledger, so what the provider did to its waiting
+    /// requests during the tick (one cancelled by the stop of a releasing lease, placed or
+    /// refused by a presentation) is written in the same replace as the leases the tick
+    /// changed, and no crash or failed write can keep one without the other; `None` keeps
+    /// the ledger. A failed write leaves the file as it was before the tick.
+    pub fn tick_then(
+        &mut self,
+        ledger: impl FnOnce() -> Option<Vec<ReservationRecord>>,
+    ) -> TickReport {
         let now = self.clock.now();
         let mut report = TickReport::default();
         for id in self.book.ids() {
@@ -162,18 +244,18 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
                         report.freed.push(id);
                     }
                 }
-                Step::Resolve => {
-                    let seen = self.provider.observe(&id);
-                    match self.book.settle_observe(&id, seen, now) {
-                        Seen::Confirmed => report.confirmed.push(id),
-                        Seen::Gone => report.dropped.push(id),
-                        Seen::Unsure => {}
-                    }
+                step @ (Step::Resolve | Step::Present) => {
+                    let seen = self.settle_pending(&id, step, now);
+                    note_seen(&mut report, id, seen);
                 }
             }
         }
         report.pending = self.book.count(LeaseState::Pending);
         report.releasing = self.book.count(LeaseState::Releasing);
+        let after = ledger();
+        after
+            .into_iter()
+            .for_each(|records| self.book.set_reservations(records));
         if report.changed() | self.book.unsaved() {
             report.save_error = self.save("tick").err();
         }
@@ -190,6 +272,12 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// decides nothing about them.
     pub fn set_reservations(&mut self, records: Vec<ReservationRecord>) {
         self.book.set_reservations(records);
+    }
+
+    /// Every lease the table keeps with a request id ([`Self::acquire_with_id`]), with that
+    /// id, in lease order: pending, held or releasing, as long as it is in the table.
+    pub fn request_ids(&self) -> Vec<(LeaseId, RequestId)> {
+        self.book.request_ids()
     }
 
     /// The reservation ledger, in request id order: as set, or as the open restored it
@@ -213,6 +301,35 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// The provider, mutably. Tests use it to script the fake.
     pub fn provider_mut(&mut self) -> &mut P {
         &mut self.provider
+    }
+
+    /// Settles pending lease `id` as `step` says: a lease whose request waits on the
+    /// provider is presented again, any other is observed.
+    fn settle_pending(&mut self, id: &LeaseId, step: Step, now: Timestamp) -> Seen {
+        match step {
+            Step::Present => self.present(id, now),
+            _ => self.resolve(id, now),
+        }
+    }
+
+    /// Observes pending lease `id` and applies the answer.
+    fn resolve(&mut self, id: &LeaseId, now: Timestamp) -> Seen {
+        let seen = self.provider.observe(id);
+        self.book.settle_observe(id, seen, now)
+    }
+
+    /// Presents waiting lease `id` to the provider again, as its consumer's poll, and
+    /// applies what that found.
+    fn present(&mut self, id: &LeaseId, now: Timestamp) -> Seen {
+        let known = self.provider.classes();
+        let spec = self.book.presentation(id, &known);
+        let ack = spec.map(|spec| self.provider.start(spec));
+        let waits = self.provider.waits(id);
+        match self.book.settle_presented(id, ack, waits, now) {
+            Presented::Gone => Seen::Gone,
+            Presented::Waiting => Seen::Unsure,
+            Presented::Placed => self.resolve(id, now),
+        }
     }
 
     fn stop(&mut self, id: &LeaseId) -> bool {
@@ -241,6 +358,15 @@ impl<P, C> LeaseTable<P, C> {
     /// Gives the provider back, dropping the table and its clock.
     pub fn into_provider(self) -> P {
         self.provider
+    }
+}
+
+/// Counts what a tick's observation of pending lease `id` found.
+fn note_seen(report: &mut TickReport, id: LeaseId, seen: Seen) {
+    match seen {
+        Seen::Confirmed => report.confirmed.push(id),
+        Seen::Gone => report.dropped.push(id),
+        Seen::Unsure => {}
     }
 }
 

@@ -25,7 +25,7 @@
 //! ```text
 //! js lease acquire --class gpu-host [--gpus N --gpu-class X --cpu-millis N --memory-bytes N]
 //!                  --max-wall <dur> [--ttl <dur>] [--label k=v ...] [--validation-run ID]
-//!                  [--probe-host HOST] [--wait-pending <dur>]
+//!                  [--probe-host HOST] [--request-id ID] [--wait-pending <dur>]
 //! js lease renew <id> [--ttl <dur>]
 //! js lease release <id>
 //! js lease list
@@ -49,6 +49,18 @@
 //! `-too-small` (all exit 3); a host with no room yet is `no-capacity`, as for any start.
 //! The flag is sent only when given, so a server that predates it takes every other start.
 //!
+//! `--request-id ID` names the start (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`, of
+//! your choosing). An `acquire` repeated with the same id and the same flags is answered
+//! with the lease the first one made (held, or still pending) and takes no second host,
+//! for as long as that lease is on the server; the same id with another request (any flag
+//! but `--ttl` and `--wait-pending` changed) is refused `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
+//! a host instead of being refused `no-capacity`: it is pending until a host is set aside,
+//! drained and prepared for it, so give `--wait-pending` as long as you mean to wait (the
+//! pending lease is released when it runs out, which cancels the request). On `run` the id
+//! does not make a repeat safe, since every `run` adds its own random label (below), which
+//! the server compares: a second `run` under the id while the first run's lease is on the
+//! server is refused `request-id-conflict`. The flag is sent only when given.
+//!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
 //! `lease <id> host <host> expires <ms>` (`expires` is the server's clock in
 //! milliseconds). A start the provider has not confirmed (202) is looked at in the
@@ -60,7 +72,8 @@
 //! A start is sent once. When its answer is lost (the connection fails, the server
 //! answers 5xx or something this client does not know, or the body is unusable) the
 //! lease may exist, and `js` exits 1 saying so and telling you to run `js lease list`
-//! before trying again (the JSON kind is `acquire-unconfirmed`). `acquire` does no more.
+//! before trying again (the JSON kind is `acquire-unconfirmed`); an `acquire` that gave
+//! `--request-id` can instead be run again as it was. `acquire` does no more.
 //!
 //! `run` acquires like `acquire`, with one more label, `js-run=<128 random bits in hex>`,
 //! and starts the command as a child process with `JS_LEASE_ID` and `JS_LEASE_HOST` set
@@ -128,7 +141,7 @@
 //! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
 //! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
+//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
 //! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |

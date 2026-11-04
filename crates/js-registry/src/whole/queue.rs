@@ -35,7 +35,7 @@
 //! list keeps its place and is never put out by a newcomer.
 
 use js_lease::Timestamp;
-use js_types::{Request, RequestId};
+use js_types::{LeaseId, Request, RequestId};
 
 /// The most requests the list holds at once.
 pub const MAX_WAITING_REQUESTS: usize = 1024;
@@ -48,6 +48,10 @@ struct Entry {
     /// its wall time from here. `None` for an entry restored from the ledger that the
     /// consumer has not presented since.
     request: Option<Request>,
+    /// The lease that last presented the request: a stop of that lease takes the request
+    /// off the list ([`WaitList::cancel_lease`]). `None` for a restored entry not presented
+    /// since.
+    lease: Option<LeaseId>,
     /// The first presentation: how long the request has waited counts from here.
     since: Timestamp,
     /// The last time the consumer presented the request.
@@ -99,14 +103,15 @@ impl WaitList {
         self.entries.push(Entry {
             id,
             request: None,
+            lease: None,
             since,
             seen: now,
             unservable_since: None,
         });
     }
 
-    /// The consumer presents request `id` at `now`. `capable` says whether some host
-    /// could ever be given whole to it.
+    /// The consumer presents request `id`, under lease `lease`, at `now`. `capable` says
+    /// whether some host could ever be given whole to it.
     ///
     /// A request not on the list enters at the back, keeping `request` for the reservation,
     /// if `capable` and the list holds fewer than [`MAX_WAITING_REQUESTS`] (else it is
@@ -114,10 +119,12 @@ impl WaitList {
     /// list keeps its place, whatever the
     /// number of presentations, and is seen again at `now`; while no host is capable it
     /// keeps waiting until `grace_ms` have passed since the first presentation that saw
-    /// none, then it is `Unservable` and leaves the list.
+    /// none, then it is `Unservable` and leaves the list. Either way the entry now belongs
+    /// to `lease`, the lease that presented it last.
     pub(crate) fn present(
         &mut self,
         id: &RequestId,
+        lease: LeaseId,
         request: &Request,
         capable: bool,
         now: Timestamp,
@@ -131,6 +138,7 @@ impl WaitList {
                     self.entries.push(Entry {
                         id: id.clone(),
                         request: Some(request.clone()),
+                        lease: Some(lease),
                         since: now,
                         seen: now,
                         unservable_since: None,
@@ -143,6 +151,7 @@ impl WaitList {
         let entry = &mut self.entries[at];
         entry.seen = now;
         entry.request.get_or_insert_with(|| request.clone());
+        entry.lease = Some(lease);
         entry.unservable_since = match capable {
             true => None,
             false => Some(entry.unservable_since.unwrap_or(now)),
@@ -164,6 +173,29 @@ impl WaitList {
         let before = self.entries.len();
         self.entries.retain(|entry| entry.id != *id);
         self.entries.len() < before
+    }
+
+    /// Binds the waiting request `id` to `lease`, as if `lease` had presented it, without
+    /// a presentation: a stop of `lease` then takes it off the list. Whether `id` waits.
+    pub(crate) fn bind(&mut self, id: &RequestId, lease: LeaseId) -> bool {
+        let entry = self.entries.iter_mut().find(|entry| entry.id == *id);
+        entry.map(|entry| entry.lease = Some(lease)).is_some()
+    }
+
+    /// Removes the request lease `lease` presented last, at once; its id, if one waited.
+    pub(crate) fn cancel_lease(&mut self, lease: &LeaseId) -> Option<RequestId> {
+        let at = self.position_of(lease)?;
+        Some(self.entries.remove(at).id)
+    }
+
+    /// Whether a request lease `lease` presented last is waiting.
+    pub(crate) fn holds_lease(&self, lease: &LeaseId) -> bool {
+        self.position_of(lease).is_some()
+    }
+
+    fn position_of(&self, lease: &LeaseId) -> Option<usize> {
+        let mut entries = self.entries.iter();
+        entries.position(|entry| entry.lease == Some(*lease))
     }
 
     /// The waiting requests the consumer has presented, front first: the id, what it asks

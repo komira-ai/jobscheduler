@@ -140,6 +140,15 @@ pub(crate) struct AcquireArgs {
     /// the server can probe).
     #[arg(long, value_name = "HOST")]
     pub(crate) probe_host: Option<String>,
+    /// The request's id, of your choosing (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`,
+    /// `-`): an acquire repeated with the same id and flags answers the lease the first one
+    /// made instead of taking a second, and a whole-node request waits for a host instead
+    /// of being refused for lack of one. Every flag that shapes the request counts; `--ttl`
+    /// and `--wait-pending` do not. The same id with another request is refused
+    /// `request-id-conflict` while the first lease is on the server, and so is a second
+    /// `lease run` under it then (each run adds its own random label).
+    #[arg(long, value_name = "ID")]
+    pub(crate) request_id: Option<String>,
     /// How long to wait for a start the provider has not confirmed (202) to settle.
     #[arg(long, default_value = WAIT_PENDING, value_parser = parse_duration)]
     pub(crate) wait_pending: Duration,
@@ -147,8 +156,8 @@ pub(crate) struct AcquireArgs {
 
 impl AcquireArgs {
     /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels. A probe
-    /// host is sent only when asked for, so a server that predates the field takes the
-    /// body of every other start.
+    /// host and a request id are each sent only when asked for, so a server that predates
+    /// the field takes the body of every other start.
     pub(crate) fn body(&self, tag: Option<&RunTag>) -> Value {
         let mut labels: serde_json::Map<String, Value> = self
             .labels
@@ -171,6 +180,9 @@ impl AcquireArgs {
         });
         if let Some(host) = &self.probe_host {
             body["probe_host"] = json!(host);
+        }
+        if let Some(id) = &self.request_id {
+            body["request_id"] = json!(id);
         }
         body
     }
@@ -377,6 +389,26 @@ mod tests {
         let mut with = expected;
         with["probe_host"] = json!("mac-07");
         assert_eq!(probe, with);
+    }
+
+    /// Asserts the body of a start with `--request-id`: without the flag the body has no
+    /// `request_id` key at all (a server that predates the field refuses an unknown key);
+    /// with it the key carries the id and the rest of the body is the same, and `lease run`
+    /// sends it too. It catches a key sent when unset (which an older server would refuse
+    /// for every start), a flag parsed and dropped, and one left off `lease run`.
+    #[test]
+    fn the_request_id_is_in_the_body_only_when_asked_for() {
+        let plain = acquire(&[]).body(None);
+        assert!(plain.get("request_id").is_none(), "{plain}");
+        let named = acquire(&["--request-id", "nightly-42"]).body(None);
+        let mut with = plain;
+        with["request_id"] = json!("nightly-42");
+        assert_eq!(named, with);
+        let words = BASE
+            .iter()
+            .chain(&["--request-id", "nightly-42", "--", "true"]);
+        let run = Run::try_parse_from(words).unwrap().args;
+        assert_eq!(run.acquire.body(None)["request_id"], "nightly-42");
     }
 
     /// Asserts that `lease run` takes `--probe-host` as `lease acquire` does and sends it.

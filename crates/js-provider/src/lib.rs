@@ -69,4 +69,14 @@ pub trait Provider {
 
     /// Every host the provider lists, with its shape and the lease holding it.
     fn capacity(&self) -> Vec<HostCapacity>;
+
+    /// Whether the provider holds the lease's request on a wait list: the request carried
+    /// a request id ([`StartSpec::with_request_id`]), no host is booked for it yet, and the
+    /// provider has neither placed nor refused it. A start of the same spec again is a poll
+    /// that keeps its place, and the start that finds it a host books the lease. A stop
+    /// takes it off the list. A provider that queues nothing answers `false`, the default.
+    fn waits(&self, lease: &LeaseId) -> bool {
+        let _ = lease;
+        false
+    }
 }

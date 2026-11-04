@@ -215,6 +215,11 @@ impl Rig {
         }
     }
 
+    /// The lease file this rig's server writes.
+    pub(super) fn file(&self) -> std::path::PathBuf {
+        Self::dir(&self.name).join("leases.toml")
+    }
+
     pub(super) fn advance(&self, seconds: u64) {
         self.clock.advance(Duration::from_secs(seconds));
     }

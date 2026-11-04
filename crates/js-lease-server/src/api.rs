@@ -162,18 +162,19 @@ impl Shared {
         self.save_errors.load(Ordering::SeqCst)
     }
 
-    /// Hands the table the registry's reservation ledger when it changed, ticks the table
-    /// (which writes both), then advances the agent registry (when the server has one) so
-    /// its reservations and prepare deadlines act on this tick, logs what changed and
-    /// counts a failed write. The table's lock is held for those two steps alone.
+    /// Ticks the table, which writes the leases the tick changed and, when it changed, the
+    /// registry's reservation ledger as the tick's stops and presentations left it, in one
+    /// replace; then advances the agent registry (when the server has one) so its
+    /// reservations and prepare deadlines act on this tick, logs what changed and counts a
+    /// failed write. The table's lock is held for the tick alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = {
             let mut table = self.table.lock().await;
-            if let Some(agents) = &self.agents {
-                // The registry's reservations are written with the leases of this tick.
-                self.handed.hand_over(&agents.registry, &mut table);
-            }
-            table.tick()
+            // The registry's reservations, as the tick's stops and presentations leave
+            // them, are written in the same replace as the leases of this tick.
+            let handed = &self.handed;
+            let agents = self.agents.as_ref();
+            table.tick_then(|| agents.and_then(|agents| handed.changed(&agents.registry)))
         };
         let counts = match &self.agents {
             Some(agents) => {
@@ -364,8 +365,16 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
 }
 
 async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let (request, ttl) = parse::<AcquireBody>(&body)?.into_parts()?;
-    let outcome = shared.lock("wait-acquire").await.acquire(request, ttl);
+    let body = parse::<AcquireBody>(&body)?;
+    let request_id = body.request_id()?;
+    let (request, ttl) = body.into_parts()?;
+    let outcome = {
+        let mut table = shared.lock("wait-acquire").await;
+        match request_id {
+            Some(id) => table.acquire_with_id(id, request, ttl),
+            None => table.acquire(request, ttl),
+        }
+    };
     match outcome {
         Ok(lease) => {
             let granted = Granted {
@@ -417,7 +426,18 @@ async fn release(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
-    let outcome = shared.lock("wait-release").await.release(&id)?;
+    let outcome = {
+        let mut table = shared.lock("wait-release").await;
+        // A release of a waiting lease cancels its request in the registry: the lease's
+        // end and the ledger the stop left are written in one replace, before the answer.
+        match &shared.agents {
+            Some(agents) => {
+                let handed = &shared.handed;
+                table.release_then(&id, || Some(handed.take(&agents.registry)))?
+            }
+            None => table.release(&id)?,
+        }
+    };
     Ok(match outcome {
         ReleaseOutcome::Freed => json(StatusCode::OK, &Released { state: "freed" }),
         ReleaseOutcome::Releasing => json(StatusCode::ACCEPTED, &Released { state: "releasing" }),
@@ -447,6 +467,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
 
 #[cfg(test)]
 mod probe_tests;
+#[cfg(test)]
+mod request_id_tests;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]

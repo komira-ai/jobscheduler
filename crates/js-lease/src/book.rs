@@ -2,18 +2,23 @@
 //! [`crate::LeaseTable`] calls the provider and hands each answer here, so every branch
 //! is one non-generic function.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_provider::{Observed, StartAck, StartSpec, StopAck};
-use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey, Resources};
+use js_provider::{Observed, RefusalCode, StartAck, StartSpec, StopAck};
+use js_types::{
+    Admission, ClassId, HostId, LabelError, Labels, LeaseId, Request, RequestId, ReservedKey,
+    ResourceClass, Resources,
+};
 
 use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
-use crate::store::{self, Document, FORMAT_VERSION, SharesRow, StoredLease, StoredShares};
+use crate::store::{
+    self, Document, FORMAT_VERSION, SharesRow, StoredLease, StoredRequest, StoredShares,
+};
 use crate::timings::Timings;
 use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
 
@@ -28,6 +33,20 @@ pub(crate) enum Step {
     Retry,
     /// Pending: observe (a pending whole lease at its deadline too, once).
     Resolve,
+    /// Pending, its request on the provider's wait list: present it again.
+    Present,
+}
+
+/// What presenting a waiting lease again found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presented {
+    /// The provider refused the request, and the record is gone.
+    Gone,
+    /// The request still waits for a host.
+    Waiting,
+    /// The request left the wait list without a refusal: resolve the lease as any
+    /// pending one.
+    Placed,
 }
 
 /// What an observation of a pending or reloaded lease found.
@@ -47,6 +66,85 @@ pub(crate) enum Seen {
 struct Token {
     ttl: Duration,
     wall: Duration,
+}
+
+/// The request id a lease was acquired under and what that acquire asked for: a repeat
+/// of the id is compared with it, and a lease whose request waits on the provider is
+/// presented again with it. `extra` holds the fields of the file's row that this build
+/// does not know, written back as read.
+#[derive(Debug, Clone)]
+struct Asked {
+    id: RequestId,
+    request: Request,
+    extra: toml::Table,
+}
+
+impl Asked {
+    fn new(id: RequestId, request: Request) -> Self {
+        Self {
+            id,
+            request,
+            extra: toml::Table::new(),
+        }
+    }
+
+    /// The request a stored lease row records, or `None` when a part of it is not valid or
+    /// the request breaks a rule every request meets ([`Request::validate`]). The labels and
+    /// validation run are the row's own.
+    fn restore(row: &StoredRequest, stored: &StoredLease) -> Option<Self> {
+        let probe_host = row.probe_host.as_deref().map(HostId::new);
+        let request = Request {
+            class: ClassId::new(&row.class).ok()?,
+            resources: row.resources.resources()?,
+            capabilities: row.capabilities.clone(),
+            max_wall: Duration::from_millis(row.max_wall_ms)
+                .saturating_add(Duration::from_nanos(row.max_wall_nanos)),
+            labels: stored.labels.clone(),
+            validation_run: stored.validation_run.clone(),
+            probe_host: probe_host.transpose().ok()?,
+        };
+        request.validate().ok()?;
+        let id = RequestId::new(&row.id).ok()?;
+        let extra = row.extra.clone();
+        Some(Self { id, request, extra })
+    }
+
+    fn stored(&self) -> StoredRequest {
+        StoredRequest {
+            id: self.id.to_string(),
+            extra: self.extra.clone(),
+            ..shape(&self.request)
+        }
+    }
+
+    /// Whether `request` asks for what this lease's request asked for, as the file records
+    /// it: the class, the resources, the capabilities, the wall time, the probe host, the
+    /// labels and the validation run. Comparing the recorded form keeps the
+    /// answer the same before and after a restart.
+    fn asks_for(&self, request: &Request) -> bool {
+        let mine = &self.request;
+        let same = [
+            shape(mine) == shape(request),
+            mine.labels == request.labels,
+            mine.validation_run == request.validation_run,
+        ];
+        same.into_iter().all(|same| same)
+    }
+}
+
+/// What the file records of `request` beyond its labels and validation run, with no id and
+/// no fields of a later version.
+fn shape(request: &Request) -> StoredRequest {
+    StoredRequest {
+        id: String::new(),
+        class: request.class.to_string(),
+        max_wall_ms: millis_of(request.max_wall).min(store::LARGEST),
+        max_wall_nanos: u64::from(request.max_wall.subsec_nanos() % 1_000_000),
+        probe_host: (request.probe_host.as_ref()).map(|host| host.as_str().to_string()),
+        resources: StoredShares::of(&request.resources),
+        capabilities: request.capabilities.clone(),
+        extra: toml::Table::new(),
+    }
 }
 
 /// Millis of `duration` as the file holds them, saturating.
@@ -79,6 +177,12 @@ pub(crate) struct Record {
     labels: Labels,
     /// What the lease books on its host when its class lets leases share one.
     shares: Option<Resources>,
+    /// The request id the lease was acquired under, with the request.
+    asked: Option<Asked>,
+    /// Set (in memory only) while the provider holds the lease's request on its wait
+    /// list: a tick presents it again instead of observing it, and its deadline counts
+    /// from the last presentation that found it waiting. See [`Record::step`].
+    waiting: bool,
     extra: toml::Table,
 }
 
@@ -101,6 +205,16 @@ impl Record {
         let labels = labels_of(&stored.labels, stored.validation_run.as_deref());
         let labels = labels.map_err(|err| err.to_string())?;
         let token = Self::restore_token(stored)?;
+        let asked = stored
+            .request
+            .as_ref()
+            .map(|row| Asked::restore(row, stored));
+        let asked = asked.map(|asked| asked.ok_or_else(|| Self::bad_request(stored)));
+        let asked = asked.transpose()?;
+        // A pending whole lease kept with its request may have been waiting when the
+        // file was written: it is presented again at the first tick, which tells.
+        let pending_whole = stored.whole & (stored.state == LeaseState::Pending);
+        let waiting = pending_whole & asked.is_some();
         Ok(Self {
             id: LeaseId::new(stored.term, stored.sequence),
             state: stored.state,
@@ -118,8 +232,16 @@ impl Record {
             validation_run: stored.validation_run.clone(),
             labels,
             shares: Self::restore_shares(stored),
+            asked,
+            waiting,
             extra: stored.extra.clone(),
         })
+    }
+
+    /// Why the stored lease's `request` row was refused.
+    fn bad_request(stored: &StoredLease) -> String {
+        let lease = LeaseId::new(stored.term, stored.sequence);
+        format!("lease {lease}: its request is not a valid request")
     }
 
     /// What the stored lease books when its class lets leases share a host. A row that is
@@ -188,6 +310,7 @@ impl Record {
                 .shares
                 .as_ref()
                 .map(|shares| SharesRow::Good(StoredShares::of(shares))),
+            request: self.asked.as_ref().map(Asked::stored),
             extra: self.extra.clone(),
         }
     }
@@ -219,6 +342,11 @@ impl Record {
     fn step(&self, now: Timestamp) -> Step {
         if self.state == LeaseState::Releasing {
             return Step::Retry;
+        }
+        // A lease whose request waits is presented again whatever its deadline: the
+        // deadline counts from the last presentation that found it waiting.
+        if self.waiting {
+            return Step::Present;
         }
         let unasked = [
             self.whole,
@@ -252,8 +380,15 @@ fn restore_all(path: &Path, document: &Document) -> Result<BTreeMap<LeaseId, Rec
     let restored = restored.collect::<Result<Vec<_>, _>>();
     let restored = restored.map_err(|reason| store::corrupt(path, reason))?;
     let mut leases = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for record in restored {
         let id = record.id;
+        let request = record.asked.as_ref().map(|asked| asked.id.clone());
+        let twice = request.filter(|request| !seen.insert(request.clone()));
+        if let Some(request) = twice {
+            let reason = format!("the request id {request} is kept by two leases");
+            return Err(store::corrupt(path, reason));
+        }
         if leases.insert(id, record).is_some() {
             return Err(store::corrupt(path, format!("lease {id} is listed twice")));
         }
@@ -399,6 +534,13 @@ impl Book {
         self.unsaved = true;
     }
 
+    /// Every lease kept with a request id, with that id, in lease order.
+    pub(crate) fn request_ids(&self) -> Vec<(LeaseId, RequestId)> {
+        let kept = self.leases.values();
+        let kept = kept.filter_map(|record| Some((record.id, record.asked.as_ref()?.id.clone())));
+        kept.collect()
+    }
+
     pub(crate) fn reservations(&self) -> Vec<ReservationRecord> {
         self.ledger.values().cloned().collect()
     }
@@ -466,6 +608,8 @@ impl Book {
             labels: spec.labels().clone(),
             shares: (!spec.class().admission().books_whole_host())
                 .then(|| request.resources.clone()),
+            asked: (spec.request_id()).map(|id| Asked::new(id.clone(), request.clone())),
+            waiting: false,
             extra: toml::Table::new(),
         };
         self.leases.insert(record.id, record.clone());
@@ -497,6 +641,81 @@ impl Book {
                 Err(AcquireError::Refused(code))
             }
             StartAck::Unknown => Err(AcquireError::Unconfirmed(record.id)),
+        }
+    }
+
+    /// What a repeat of the acquire under request id `id`, asking for `request`, answers:
+    /// `None` when no lease of the table was acquired under the id, so the acquire is a
+    /// new one. A lease that was, for another request, is a
+    /// [`AcquireError::RequestIdConflict`]; otherwise the lease as it stands: held, the
+    /// lease; pending, [`AcquireError::Unconfirmed`]; releasing, refused `LeaseEnded`.
+    pub(crate) fn repeat(
+        &self,
+        id: &RequestId,
+        request: &Request,
+    ) -> Option<Result<Lease, AcquireError>> {
+        let (record, asked) = self.leases.values().find_map(|record| {
+            let asked = record.asked.as_ref().filter(|asked| asked.id == *id)?;
+            Some((record, asked))
+        })?;
+        if !asked.asks_for(request) {
+            return Some(Err(AcquireError::RequestIdConflict(record.id)));
+        }
+        Some(match (record.state, record.host.clone()) {
+            (LeaseState::Held, Some(host)) => Ok(Lease {
+                id: record.id,
+                host,
+                expires_at: record.expires_at,
+                labels: record.labels.clone(),
+            }),
+            (LeaseState::Releasing, _) => Err(AcquireError::Refused(RefusalCode::LeaseEnded)),
+            _ => Err(AcquireError::Unconfirmed(record.id)),
+        })
+    }
+
+    /// Notes whether the provider holds the request of lease `id` on its wait list; only
+    /// a lease kept with its request id can be presented again, so only such a lease
+    /// waits.
+    pub(crate) fn note_waiting(&mut self, id: &LeaseId, waits: bool) {
+        let record = self.leases.get_mut(id);
+        let _ = record.map(|record| record.waiting = waits & record.asked.is_some());
+    }
+
+    /// The start that presents lease `id` again: its request under its request id.
+    /// `None` for a lease without a request id, or whose request none of `known` takes.
+    pub(crate) fn presentation(&self, id: &LeaseId, known: &[ResourceClass]) -> Option<StartSpec> {
+        let asked = self.leases.get(id)?.asked.as_ref()?;
+        let spec = StartSpec::new(*id, asked.request.clone(), known).ok()?;
+        Some(spec.with_request_id(asked.id.clone()))
+    }
+
+    /// Applies what presenting waiting lease `id` again at `now` found: `ack`, the
+    /// answer to the start (`None` when there was no start to make), and `waits`, whether
+    /// the provider still holds the request on its wait list. A refusal drops the lease.
+    /// Otherwise its deadline is the prepare timeout from `now`: a lease that still waits
+    /// keeps waiting, and one that left the list without a refusal (a host was committed
+    /// to it) is resolved from here as any pending lease, its prepare counted from now.
+    pub(crate) fn settle_presented(
+        &mut self,
+        id: &LeaseId,
+        ack: Option<StartAck>,
+        waits: bool,
+        now: Timestamp,
+    ) -> Presented {
+        if let Some(StartAck::Refused(_)) = ack {
+            self.leases.remove(id);
+            return Presented::Gone;
+        }
+        let deadline = now.plus(self.settings.prepare_timeout());
+        let record = self.leases.get_mut(id);
+        let _ = record.map(|record| {
+            record.waiting = waits;
+            record.expires_at = deadline;
+            record.deadline_observed = false;
+        });
+        match waits {
+            true => Presented::Waiting,
+            false => Presented::Placed,
         }
     }
 

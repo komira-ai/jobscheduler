@@ -140,8 +140,10 @@ impl StartSpec {
     }
 
     /// This spec carrying the id the consumer gave the request. A provider that queues
-    /// reads it to tell a repeat of a request from a new one; it is never persisted by
-    /// the lease table, and a spec without one is unchanged.
+    /// reads it to tell a repeat of a request from a new one. The lease table keeps it
+    /// with the lease it was acquired under, so a repeated acquire of the id finds that
+    /// lease and a waiting one is presented again with the same id; a spec without one is
+    /// unchanged.
     pub fn with_request_id(mut self, id: RequestId) -> Self {
         self.request_id = Some(id);
         self

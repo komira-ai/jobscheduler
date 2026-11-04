@@ -9,6 +9,7 @@ mod expiry;
 mod ids;
 mod persistence;
 mod renew_release;
+mod request_id;
 mod reservations;
 mod shares;
 mod slow_save;

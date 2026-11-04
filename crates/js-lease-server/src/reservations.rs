@@ -10,7 +10,17 @@
 //! - The table is opened with a restart grace ([`with_restart_grace`]): a restored
 //!   deadline is at least the boot plus [`RESERVATION_BOOT_GRACE`].
 //! - Once the table is open, the registry is given the ledger it read ([`restore`]), before
-//!   any host says hello. The registry drops and counts what cannot stand.
+//!   any host says hello. The registry drops and counts what cannot stand. Each restored
+//!   waiting request is then bound to the pending lease the file keeps it with, so a
+//!   release of that lease cancels it even before the first tick presents it again.
+//! - A release writes the lease's end and the ledger its stop left in one replace of the
+//!   file ([`Handed::take`] gives the ledger to `LeaseTable::release_then`), and a tick
+//!   writes the leases it changed and the ledger its stops and presentations left in one
+//!   replace too ([`Handed::changed`] gives it to `LeaseTable::tick_then`), so no crash and
+//!   no failed write can keep a lease without its request's state or the other way round.
+//!   A crash between a release's two writes leaves the lease releasing with its request in
+//!   the ledger: the next start binds the two, and its first tick stops the lease again,
+//!   which cancels the request in the same write that removes the lease.
 //! - Nothing about estimates is kept: the registry's drain choice reads them again.
 //!
 //! The file format is additive: a build from before the ledger, or from before the wait
@@ -47,10 +57,12 @@ pub(crate) fn with_restart_grace(settings: Settings, whole: Option<&WholeNodeCon
 pub(crate) fn restore(registry: &Registry, table: &Table) {
     let records = table.reservations();
     let restored = registry.restore_reservations(&records);
+    let bound = registry.bind_waiting(&table.request_ids());
     if !records.is_empty() {
         info!(
             resumed = restored.resumed,
             dropped = restored.dropped,
+            bound,
             "reservations restored from the lease file"
         );
     }
@@ -69,16 +81,26 @@ impl Handed {
         Self(Mutex::new(ledger))
     }
 
-    /// Hands `table` the registry's ledger if it is not the one handed last (the first
-    /// call always hands it), for the tick that follows to write. The registry's lock is
-    /// taken under the table's, as the lock order says.
-    pub(crate) fn hand_over(&self, registry: &Registry, table: &mut Table) {
+    /// The registry's ledger if it is not the one handed last (the first call always gives
+    /// it), noted as handed, for the tick to write with its leases; `None` when it is. The
+    /// registry's lock is taken under the table's, as the lock order says.
+    pub(crate) fn changed(&self, registry: &Registry) -> Option<Vec<ReservationRecord>> {
         let ledger = registry.reservation_ledger();
         let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if last.as_ref() != Some(&ledger) {
-            table.set_reservations(ledger.clone());
-            *last = Some(ledger);
-        }
+        let changed = last.as_ref() != Some(&ledger);
+        changed.then(|| {
+            *last = Some(ledger.clone());
+            ledger
+        })
+    }
+
+    /// The registry's ledger now, noted as the one handed last, for a release to write with
+    /// the lease's end in one replace.
+    pub(crate) fn take(&self, registry: &Registry) -> Vec<ReservationRecord> {
+        let ledger = registry.reservation_ledger();
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *last = Some(ledger.clone());
+        ledger
     }
 }
 

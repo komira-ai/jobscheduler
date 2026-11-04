@@ -67,6 +67,52 @@ fn acquire_sends_its_flags() {
     assert_eq!(labels["k"], "vw");
 }
 
+/// Asserts the round trip of `--request-id` through the client and a real server: a start
+/// repeated with the same id and flags prints the lease the first one made (same id, same
+/// host, same expiry) and takes no second host, while the same id with another label is
+/// refused `request-id-conflict` (exit 3) and leaves that lease as it was; a bad id is a
+/// 400 naming the field (exit 4). It catches a flag that never reaches the server (the
+/// repeat would take the second host), a server that books again under a known id, and a
+/// conflict answered with a lease.
+#[test]
+fn a_start_repeated_under_its_request_id_answers_the_same_lease() {
+    let h = Harness::new("acquire_request_id");
+    let first = h.js.go(&acquire_words(&["--request-id", "nightly-42"]));
+    assert_eq!(first.code, 0, "{}", first.err);
+    let expected = format!("lease 1-1 host gpu-01 expires {}\n", T0 + 600_000);
+    assert_eq!(first.out, expected);
+    let again = h.js.go(&acquire_words(&["--request-id", "nightly-42"]));
+    assert_eq!(
+        (again.code, again.out.as_str()),
+        (0, expected.as_str()),
+        "{}",
+        again.err
+    );
+    let other = h.js.go(&acquire_words(&[
+        "--request-id",
+        "nightly-42",
+        "--label",
+        "k=v",
+    ]));
+    assert_eq!(other.code, 3, "{}", other.err);
+    assert_eq!(other.err, "js: refused: request-id-conflict\n");
+    let bad = h.js.go(&acquire_words(&["--request-id", "not an id"]));
+    assert_eq!(bad.code, 4, "{}", bad.err);
+    assert!(
+        bad.err
+            .starts_with("js: rejected: bad-request: request_id is not a valid request id"),
+        "{}",
+        bad.err
+    );
+    let listed = h.js.go(&["--json", "lease", "list"]).json();
+    let leases = listed["leases"].as_array().unwrap();
+    let ids: Vec<&str> = leases
+        .iter()
+        .map(|lease| lease["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["1-1"]);
+}
+
 /// Asserts that each answer of the server maps to its status and prints the code:
 /// 409 refusals are exit 3 (no capacity once both hosts are taken, no fit for a request
 /// no host satisfies), 422 and 400 refusals are exit 4 with the reason when there is
