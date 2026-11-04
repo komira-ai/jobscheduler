@@ -1,0 +1,12 @@
+SubmitJob
+GetJob
+ListJobs
+CancelJob
+GetResult
+GetLogs
+ListHosts
+CordonHost
+UncordonHost
+ListPools
+ListProviders
+GetUsage
