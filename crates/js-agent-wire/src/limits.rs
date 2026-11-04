@@ -16,7 +16,7 @@
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | `run` and native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
 //! | `run` and native `args` | as `args` |
-//! | `run` and native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
+//! | `run` and native `env`, and a job start's `env` (one check, [`crate::check_env`]) | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
 //! | `run` and native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
@@ -45,14 +45,14 @@ pub const MAX_ARG_LEN: usize = 16 * 1024;
 pub const MAX_ARGS_TOTAL_BYTES: usize = 256 * 1024;
 /// Longest `program` of a run or a native job, in bytes.
 pub const MAX_PROGRAM_LEN: usize = 4096;
-/// Most environment entries on a run or a native job.
+/// Most environment entries on a run, a native job or a job start.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
 pub const MAX_ENV_KEY_LEN: usize = js_types::env::MAX_ENV_NAME_LEN;
 /// Longest environment variable value, in bytes.
 pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
-/// Most bytes the names and values of one run's or native job's environment may hold
-/// together.
+/// Most bytes the names and values of one run's, native job's or job start's environment
+/// may hold together.
 pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
 /// Most inputs on a run or a native job.
 pub const MAX_INPUTS: usize = 256;

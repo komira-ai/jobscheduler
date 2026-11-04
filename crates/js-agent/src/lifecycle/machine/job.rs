@@ -39,6 +39,8 @@ pub(super) enum Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
     pub(super) spec: JobSpec,
+    /// The environment of a job start, empty for a run start ([`RunSpec::env`]).
+    pub(super) env: Vec<(String, String)>,
     pub(super) mounts: Vec<ResolvedMount>,
     pub(super) slot: u32,
     /// The disk the run books.
@@ -594,13 +596,14 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
     }
 }
 
-/// The run of a start: the spec's own labels with the agent's over them, and the body the
-/// start names, a container's or a native program's.
+/// The run of a start: the spec's own labels with the agent's over them, the body the
+/// start names, a container's or a native program's, and the environment of a job start
+/// (`env`, by name in order; empty for a run start). `made` is what the lifecycle made for
+/// the run: its resolved mounts, its scratch directory and its files directory.
 pub(super) fn run_spec(
     (spec, keyed): (&JobSpec, Keyed),
-    mounts: Vec<ResolvedMount>,
-    scratch: std::path::PathBuf,
-    files: Option<std::path::PathBuf>,
+    env: &[(String, String)],
+    (mounts, scratch, files): (Vec<ResolvedMount>, PathBuf, Option<PathBuf>),
     slot: u32,
     disk_bytes: u64,
 ) -> RunSpec {
@@ -639,6 +642,7 @@ pub(super) fn run_spec(
                 args: spec.args.clone(),
             },
         },
+        env: env.to_vec(),
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         pids: spec.limits.pids,

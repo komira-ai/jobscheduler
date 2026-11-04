@@ -427,6 +427,27 @@ fn a_container_body_is_refused_before_any_user_is_made() {
     assert_eq!(rig.fake.verbs(), ["boot-reset"]);
 }
 
+/// Asserts that the native runtime does not take a job start's environment: asked at
+/// admission it answers `env-unsupported` for a non-empty one and passes an empty one, and a
+/// run handed to it directly with one fails before the helper is asked for a user. It
+/// catches a native run made without the environment its job start named.
+#[test]
+fn a_run_with_a_job_env_is_refused_before_any_user_is_made() {
+    let mut rig = Rig::new("job-env");
+    assert_eq!(rig.rt.check_env(&[]), Ok(()));
+    let env = vec![("A".to_owned(), "1".to_owned())];
+    let refused = rig.rt.check_env(&env).unwrap_err();
+    assert_eq!(refused.code, refusal::ENV_UNSUPPORTED);
+    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    spec.env = env;
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert_eq!(
+        error.0,
+        "this runtime does not carry a job start's environment"
+    );
+    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
+}
+
 /// Asserts the boot reset at open: asked for once; a helper that has reset already is fine;
 /// any other refusal, and a helper that cannot be reached, are errors that name the reset.
 /// It catches a runtime that works against a helper that refuses every verb, and one that

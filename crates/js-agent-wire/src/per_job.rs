@@ -27,7 +27,7 @@ use crate::image;
 use crate::limits;
 use crate::network;
 use crate::refusal;
-use crate::run::{self, RunSpec};
+use crate::run::RunSpec;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
@@ -137,10 +137,12 @@ pub struct JobStartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<Arch>,
     /// The environment, literal and not secret, held to the rules of a run's
-    /// ([`RunSpec::env`]) by the same check: at most [`limits::MAX_ENV`] entries, names
-    /// `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values without NUL. An agent of this version answers a start whose environment is not empty
-    /// `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing, until its
-    /// runtimes can set it (`js-agent-job-env-runtimes`).
+    /// ([`RunSpec::env`]) by the one check, [`crate::check_env`], naming `env`: at most
+    /// [`limits::MAX_ENV`] entries, names `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values
+    /// without NUL. A container agent sets it in the job's container over the image's own
+    /// variables (a name in both takes the job's value); an agent whose runtime cannot
+    /// carry it (the macOS native runtime) answers a start whose environment is not empty
+    /// `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Files the agent writes for the job before it starts, as [`crate::JobSpec::files`],
@@ -187,7 +189,7 @@ impl JobStartSpec {
                 return Err(at.field("command").fail(Rule::Inconsistent));
             }
         }
-        run::check_env(At::new("env", refusal::INVALID_ENV), &self.env)?;
+        crate::env::check_env("env", &self.env)?;
         files::validate_files(&self.files)?;
         self.booked.check(at)?;
         if self.wall_ms == 0 {

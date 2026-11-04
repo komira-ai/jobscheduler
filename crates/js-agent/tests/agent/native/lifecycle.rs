@@ -9,7 +9,10 @@ use std::sync::Arc;
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
 use js_agent::lifecycle::{Config, Event, Lifecycle};
 use js_agent::native::{Enforcer, HandOver, NativeChecks};
-use js_agent_wire::{Command, InputRef, JobSpec, NetworkLevel, Outcome, RunSpec};
+use js_agent_wire::{
+    BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
+    refusal,
+};
 use js_mac_pool::seatbelt::{AbsPath, Net};
 use js_oci::{Allow, Digest};
 use js_types::{Arch, Os};
@@ -271,6 +274,80 @@ fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some("image-unsupported-here"));
     }
+}
+
+/// A job start of `job_id`, named by its image, with the environment `env`.
+fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
+    Command::JobStart(Box::new(job_start_spec(job_id, env)))
+}
+
+/// The body of [`job_start`].
+fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
+    JobStartSpec {
+        job_id: job_id.to_owned(),
+        allocation_id: format!("alloc-{job_id}"),
+        image: crate::lifecycle::job(job_id).image,
+        command: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
+        env: env
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        files: Vec::new(),
+        booked: BookedResources {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            disk_bytes: None,
+            gpu_indices: Vec::new(),
+        },
+        wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
+    }
+}
+
+/// Asserts that a job start with an environment on the native runtime is answered
+/// `failed_to_start` with `env-unsupported`, before the image is looked at, and makes
+/// nothing (the helper sees no user, no scratch directory, the booking intact); and that
+/// the same start without an environment is answered for its image instead
+/// (`image-unsupported-here`). It catches the native path running a job without the
+/// environment it names, and the environment refusal lost behind the image's.
+#[test]
+fn the_native_runtime_still_answers_env_unsupported() {
+    let mut h = Native::new("job-env");
+    let events = h.apply(vec![job_start("j1", &[("A", "1")]), job_start("j2", &[])]);
+    assert_eq!(
+        events,
+        [
+            format!("refused j1 {}", refusal::ENV_UNSUPPORTED),
+            format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE),
+        ]
+    );
+    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    assert!(!h.scratch_of("j1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    let details: Vec<(String, Option<String>)> = h
+        .life
+        .held_jobs()
+        .into_iter()
+        .map(|job| {
+            let result = job.result.expect("a result");
+            assert_eq!(result.outcome, Outcome::FailedToStart);
+            (job.job_id, result.detail)
+        })
+        .collect();
+    assert_eq!(
+        details,
+        [
+            ("j1".to_owned(), Some(refusal::ENV_UNSUPPORTED.to_owned())),
+            (
+                "j2".to_owned(),
+                Some(refusal::IMAGE_UNSUPPORTED_HERE.to_owned())
+            ),
+        ]
+    );
 }
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
@@ -601,6 +678,25 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
         assert!(s.served.fx.requests().is_empty(), "{code}");
         s.made_no_user();
     }
+}
+
+/// Asserts that a job start with a `run` and an environment, on a Mac runtime that runs
+/// image starts (it holds a bundle store), is still refused `env-unsupported` before its
+/// bundle is fetched or a user is made: the native runtime does not carry a job start's
+/// environment, and the job must not run without it. It catches the job's environment
+/// dropped on the one path where a job start reaches the native runtime.
+#[test]
+fn an_image_job_start_with_env_is_refused_env_unsupported_before_its_bundle_is_fetched() {
+    let mut s = imaged("job-env");
+    let mut spec = job_start_spec("j1", &[("A", "1")]);
+    spec.image = s.image();
+    spec.run = Some(RunSpec::from(native("@bundle/tool", &[])));
+    spec.os = Some(Os::Macos);
+    spec.arch = Some(Arch::Arm64);
+    let events = s.h.apply(vec![Command::JobStart(Box::new(spec))]);
+    assert_eq!(events, [format!("refused j1 {}", refusal::ENV_UNSUPPORTED)]);
+    assert!(s.served.fx.requests().is_empty());
+    s.made_no_user();
 }
 
 /// An image run that asks for the network is held to the packet-filter check as a native
