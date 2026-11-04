@@ -7,9 +7,9 @@
 # crates/xtask/tests/js_agent_farm_unit.rs pins the settings described here. The setup script
 # does not start or enable the unit: the switch from the engine unit is a step of its own.
 #
-# `--runtime crun` is named here and nowhere else: the packaged Docker unit and the elastic
-# boot payload name `--runtime docker`, and an agent given no `--runtime` keeps the engine of
-# `--container-bin`, as it always did.
+# `--runtime crun` is written out here, though an agent given no `--runtime` on Linux runs crun
+# too: crun is the default Linux runtime. The packaged Docker unit and the elastic boot payload
+# name `--runtime docker --allow-container-engine`, the opt-in to the engine fallback.
 #
 # The agent stays root and runs every `crun` as the job user (`--job-user`), a system account
 # with a subuid and subgid range of 65536 ids or more that the setup script makes. At start the

@@ -103,6 +103,7 @@ fn directories() -> Vec<(PathBuf, u32)> {
 fn the_unit_runs_the_agent_with_the_crun_runtime_and_flags_the_agent_accepts() {
     let cli = agent_cli();
     assert_eq!(cli.runtime, Some(RuntimeKind::Crun));
+    assert!(!cli.allow_container_engine, "the opt-in to the engine");
     assert_eq!(cli.crun_bin.as_deref(), Some(Path::new("/usr/bin/crun")));
     assert_eq!(cli.job_user.as_deref(), Some("jsjob"));
     assert_eq!(
