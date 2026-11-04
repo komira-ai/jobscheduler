@@ -405,6 +405,35 @@ fn a_oneof_conflict_names_no_field() {
     );
 }
 
+/// Asserts every path of the search for the offending field in this test binary's copy of
+/// the crate: an unknown key, a wrong value after a field that decodes, a field inside a
+/// message, a message field that is not an object, a list element, a map field (named
+/// without its key), and two fields of one oneof (named by none). Catches a path of the
+/// search that only the integration tests' copy runs.
+#[test]
+fn the_offending_field_is_found_on_every_path() {
+    let request = good_pool()
+        .get_message_by_name("gatewaytest.Req")
+        .expect("defined");
+    let wrong = "the field is unknown, or does not hold a value of its type";
+    let cases = [
+        (&br#"{"bogus":1}"#[..], Some("bogus")),
+        (&br#"{"count":1,"id":5}"#[..], Some("id")),
+        (&br#"{"inner":{"name":5}}"#[..], Some("inner.name")),
+        (&br#"{"inner":5}"#[..], Some("inner")),
+        (&br#"{"tags":["a",5]}"#[..], Some("tags[1]")),
+        (&br#"{"labels":{"a":5}}"#[..], Some("labels")),
+        (&br#"{"left":"a","right":"b"}"#[..], None),
+    ];
+    for (body, field) in cases {
+        let refused = crate::input::build(&request, true, &[], None, body);
+        assert_eq!(
+            refused.map(|_| ()),
+            Err(Answer::invalid(field.map(str::to_owned), wrong))
+        );
+    }
+}
+
 /// Asserts that `src/gateway.rs` is exactly what `src/codegen.rs` writes for the job
 /// service's options, and that the check fails for a route list that lost a route. Catches
 /// a checked-in file edited by hand or left behind by a change of the options.
