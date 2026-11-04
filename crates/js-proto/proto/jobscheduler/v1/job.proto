@@ -27,8 +27,8 @@ enum NetworkLevel {
   // Only the endpoints and DNS resolvers the host's agent is configured with. The list is
   // the operator's; a job picks the level and cannot add endpoints.
   NETWORK_LEVEL_ALLOW_LIST = 2;
-  // Any address except what the agent always denies: the cloud metadata range
-  // 169.254.0.0/16, IPv6, and spoofed source addresses.
+  // Any address except what the agent always denies: the link-local range where clouds
+  // serve instance metadata, IPv6, and spoofed source addresses.
   NETWORK_LEVEL_OPEN = 3;
 }
 

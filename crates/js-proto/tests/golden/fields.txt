@@ -1,7 +1,8 @@
 # Every shipped field and enum value of package jobscheduler.v1, read by
 # tests/schema.rs (shipped_fields_are_a_subset_of_current_fields). A field row is
 # `Message.field = number : type`, with `repeated` or `optional` before the type when the
-# field has that label and a map field written `map<key, value>`; an enum row is
+# field has that label, a map field written `map<key, value>`, and ` (oneof NAME)` after
+# the type of a member of a real oneof (none has shipped); an enum row is
 # `Enum.VALUE = number`. Types of this package are named without the package. Each row must
 # still hold in the descriptor set, so a field cannot be removed, renamed, renumbered or
 # retyped; a field the descriptor has and this file does not is new and passes. A new

@@ -566,8 +566,8 @@ async fn every_method_round_trips_through_a_stub() {
     );
 }
 
-/// A server that refuses every submit as a job id conflict.
-struct Refusing;
+/// A server that refuses every submit as a job id conflict, with its detail text.
+struct Refusing(&'static str);
 
 #[tonic::async_trait]
 impl JobService for Refusing {
@@ -575,24 +575,22 @@ impl JobService for Refusing {
         &self,
         _: Request<SubmitJobRequest>,
     ) -> Result<Response<SubmitJobResponse>, Status> {
-        Err(refusal_status(
-            RefusalCode::JobIdConflict,
-            "job-1 names another job",
-        ))
+        Err(refusal_status(RefusalCode::JobIdConflict, self.0))
     }
 }
 
 /// Asserts that a refusal a server answers reaches the client as a status with the
-/// refusal's gRPC code whose details still decode to the same code and detail. Catches the
-/// details being lost between the server and the client.
+/// refusal's gRPC code, the detail as its message, and details that still decode to the same
+/// code and detail. Catches the details being lost between the server and the client.
 #[tokio::test]
 async fn stub_refusal_reaches_the_client_as_a_refusal() {
-    let mut client = connect(Refusing).await;
+    let mut client = connect(Refusing("job-1 names another job")).await;
     let status = client
         .submit_job(requests::submit_job())
         .await
         .expect_err("the stub refuses");
     assert_eq!(status.code(), Code::AlreadyExists);
+    assert_eq!(status.message(), "job-1 names another job");
     assert_eq!(
         refusal_of(&status),
         Some(Refusal {
@@ -600,6 +598,30 @@ async fn stub_refusal_reaches_the_client_as_a_refusal() {
             detail: "job-1 names another job".to_owned(),
         })
     );
+}
+
+/// Asserts that an empty detail, and one holding characters that the transport has to
+/// escape in a status message (a percent sign, a literal percent escape, non-ASCII letters
+/// and symbols, a line break and a carriage return), reach the client unchanged, both as the
+/// status message and in the decoded refusal.
+#[tokio::test]
+async fn refusal_details_with_any_text_reach_the_client_unchanged() {
+    for detail in ["", "100% sûr: ½ ✓ %41\nline two\r\nend"] {
+        let mut client = connect(Refusing(detail)).await;
+        let status = client
+            .submit_job(requests::submit_job())
+            .await
+            .expect_err("the stub refuses");
+        assert_eq!(status.code(), Code::AlreadyExists, "{detail:?}");
+        assert_eq!(status.message(), detail);
+        assert_eq!(
+            refusal_of(&status),
+            Some(Refusal {
+                code: RefusalCode::JobIdConflict.into(),
+                detail: detail.to_owned(),
+            })
+        );
+    }
 }
 
 /// A server that implements `GetJob` alone.

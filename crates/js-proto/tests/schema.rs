@@ -10,7 +10,7 @@ use prost::Message;
 use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{
     DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
-    FileDescriptorSet, MethodDescriptorProto,
+    FileDescriptorSet, MethodDescriptorProto, OneofDescriptorProto,
 };
 
 /// The package every file of the service is in.
@@ -21,13 +21,16 @@ const CAPACITY_WORDS: [&str; 7] = [
     "acquire", "renew", "release", "lease", "reserve", "allocat", "book",
 ];
 
-/// The one type whose name may carry a capacity word: the read-only view of what is booked
-/// on a host.
-const READ_ONLY_TYPE: &str = "HostBooking";
+/// The one type whose name may carry a capacity word, by its full name: the read-only view
+/// of what is booked on a host.
+const READ_ONLY_TYPE: &str = ".jobscheduler.v1.HostBooking";
 
-/// The one field name that may carry a capacity word: the bookings a host or a usage
-/// record shows.
-const READ_ONLY_FIELD: &str = "booked";
+/// The only fields whose name may carry a capacity word, by owning message and name: the
+/// bookings a host and a usage record show, both in answers.
+const READ_ONLY_FIELDS: [(&str, &str); 2] = [
+    (".jobscheduler.v1.Host", "booked"),
+    (".jobscheduler.v1.UsageRecord", "booked"),
+];
 
 fn descriptor_set() -> FileDescriptorSet {
     FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).expect("the descriptor set decodes")
@@ -130,9 +133,21 @@ fn field_type(types: &Types<'_>, field: &FieldDescriptorProto) -> String {
     }
 }
 
+/// The name of the oneof `field` is a member of, if it is a real one: the oneof protobuf
+/// makes for a proto3 `optional` field holds that field alone and is not a membership.
+fn real_oneof<'a>(message: &'a DescriptorProto, field: &FieldDescriptorProto) -> Option<&'a str> {
+    let index = usize::try_from(field.oneof_index?).ok()?;
+    if field.proto3_optional() {
+        return None;
+    }
+    message.oneof_decl.get(index).map(|o| o.name())
+}
+
 /// Every field and enum value of the package as golden rows: `Message.field` to
-/// `number : type`, and `Enum.VALUE` to `number`. A map entry type is written as the map
-/// field's type, not as rows of its own.
+/// `number : type`, with ` (oneof NAME)` after the type of a member of a real oneof, and
+/// `Enum.VALUE` to `number`. A map entry type is written as the map field's type, not as
+/// rows of its own. So a shipped field that moves into or out of a oneof changes its row:
+/// fields that were present together would overwrite each other in one.
 fn rows(set: &FileDescriptorSet) -> BTreeMap<String, String> {
     let types = Types::of(set);
     let mut rows = BTreeMap::new();
@@ -141,10 +156,11 @@ fn rows(set: &FileDescriptorSet) -> BTreeMap<String, String> {
             continue;
         }
         for field in &message.field {
-            rows.insert(
-                format!("{}.{}", short(name), field.name()),
-                format!("{} : {}", field.number(), field_type(&types, field)),
-            );
+            let mut row = format!("{} : {}", field.number(), field_type(&types, field));
+            if let Some(oneof) = real_oneof(message, field) {
+                row.push_str(&format!(" (oneof {oneof})"));
+            }
+            rows.insert(format!("{}.{}", short(name), field.name()), row);
         }
     }
     for (name, e) in &types.enums {
@@ -190,8 +206,8 @@ fn broken_rows(
         .collect()
 }
 
-/// A name seen on the service's surface: a method, a type a call reaches, or a field of
-/// such a type.
+/// A name seen on the service's surface: a method, a type a call reaches (by its full
+/// name), or a field of such a type (by the full name of its message and its own name).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Name {
     Method(String),
@@ -200,16 +216,18 @@ enum Name {
 }
 
 impl Name {
+    /// The name as it is spelt in the schema: a type by its last component.
     fn text(&self) -> &str {
         match self {
-            Self::Method(n) | Self::Type(n) | Self::Field(_, n) => n,
+            Self::Method(n) | Self::Field(_, n) => n,
+            Self::Type(n) => n.rsplit('.').next().unwrap_or_default(),
         }
     }
 
     fn is_read_only_exception(&self) -> bool {
         match self {
             Self::Type(n) => n == READ_ONLY_TYPE,
-            Self::Field(_, n) => n == READ_ONLY_FIELD,
+            Self::Field(message, n) => READ_ONLY_FIELDS.iter().any(|(m, f)| m == message && f == n),
             Self::Method(_) => false,
         }
     }
@@ -239,17 +257,16 @@ fn surface(set: &FileDescriptorSet) -> BTreeSet<Name> {
         if !seen.insert(type_name.clone()) {
             continue;
         }
-        let simple = type_name.rsplit('.').next().unwrap_or_default().to_owned();
         if let Some(message) = types.messages.get(&type_name) {
-            names.insert(Name::Type(simple.clone()));
+            names.insert(Name::Type(type_name.clone()));
             for field in &message.field {
-                names.insert(Name::Field(simple.clone(), field.name().to_owned()));
+                names.insert(Name::Field(type_name.clone(), field.name().to_owned()));
                 if !field.type_name().is_empty() {
                     work.push(field.type_name().to_owned());
                 }
             }
         } else if types.enums.contains_key(&type_name) {
-            names.insert(Name::Type(simple));
+            names.insert(Name::Type(type_name));
         }
     }
     names
@@ -311,19 +328,19 @@ fn method_list_matches_golden() {
 
 /// Asserts that no method, no type a request or response reaches and no field of such a
 /// type is named for acquiring, renewing, releasing, leasing, reserving, allocating or
-/// booking capacity, but for the read-only `HostBooking` and `booked`; and that the check
-/// sees both exceptions and names a method, a message and a field that break the rule.
+/// booking capacity, but for the read-only `jobscheduler.v1.HostBooking` and the `booked`
+/// fields of `Host` and `UsageRecord`; that the check sees those three; and that it names a
+/// method, a message, fields, a `booked` field of a request, and a `HostBooking` of another
+/// scope that break the rule.
 #[test]
 fn no_method_acquires_renews_or_releases_capacity() {
     let set = descriptor_set();
     let names = surface(&set);
     assert_eq!(capacity_names(&names), Vec::<Name>::new());
     assert!(names.contains(&Name::Type(READ_ONLY_TYPE.to_owned())));
-    assert!(names.contains(&Name::Field("Host".to_owned(), READ_ONLY_FIELD.to_owned())));
-    assert!(names.contains(&Name::Field(
-        "UsageRecord".to_owned(),
-        READ_ONLY_FIELD.to_owned()
-    )));
+    for (message, field) in READ_ONLY_FIELDS {
+        assert!(names.contains(&Name::Field(message.to_owned(), field.to_owned())));
+    }
 
     let mut broken = set.clone();
     let service = broken
@@ -358,13 +375,30 @@ fn no_method_acquires_renews_or_releases_capacity() {
     message_mut(&mut broken, "CordonHostRequest")
         .field
         .push(string_field("lease_secs", 100));
+    message_mut(&mut broken, "SubmitJobRequest")
+        .field
+        .push(string_field("booked", 100));
+    let mut nested_booking = DescriptorProto {
+        name: Some("HostBooking".to_owned()),
+        ..DescriptorProto::default()
+    };
+    nested_booking.field.push(string_field("job_id", 1));
+    let get_job = message_mut(&mut broken, "GetJobResponse");
+    get_job.nested_type.push(nested_booking);
+    let mut held = string_field("held", 101);
+    held.r#type = Some(Type::Message.into());
+    held.type_name = Some(full("GetJobResponse.HostBooking"));
+    get_job.field.push(held);
+    let field = |message: &str, name: &str| Name::Field(full(message), name.to_owned());
     assert_eq!(
         capacity_names(&surface(&broken)),
         [
             Name::Method("AcquireCapacity".to_owned()),
-            Name::Type("Allocation".to_owned()),
-            Name::Field("CordonHostRequest".to_owned(), "lease_secs".to_owned()),
-            Name::Field("GetJobResponse".to_owned(), "allocation".to_owned()),
+            Name::Type(full("Allocation")),
+            Name::Type(full("GetJobResponse.HostBooking")),
+            field("CordonHostRequest", "lease_secs"),
+            field("GetJobResponse", "allocation"),
+            field("SubmitJobRequest", "booked"),
         ]
     );
 }
@@ -423,8 +457,8 @@ fn a_field_added_after_the_golden_still_passes() {
 }
 
 /// Asserts that a shipped field that is removed, renamed, renumbered or retyped, a shipped
-/// map whose value type changes, and a shipped enum value that is renumbered are each named
-/// by the check.
+/// map whose value type changes, two shipped fields moved into one oneof, and a shipped enum
+/// value that is renumbered are each named by the check.
 #[test]
 fn each_breaking_change_of_a_shipped_field_is_named() {
     let golden = golden_rows();
@@ -500,6 +534,25 @@ fn each_breaking_change_of_a_shipped_field_is_named() {
     );
     assert_eq!(
         breaks(&|set| {
+            let result = message_mut(set, "JobResult");
+            result.oneof_decl.push(OneofDescriptorProto {
+                name: Some("outcome".to_owned()),
+                ..OneofDescriptorProto::default()
+            });
+            let at = i32::try_from(result.oneof_decl.len() - 1).expect("a small index");
+            for field in &mut result.field {
+                if field.name() == "times" || field.name() == "usage" {
+                    field.oneof_index = Some(at);
+                }
+            }
+        }),
+        [
+            "JobResult.times: was `10 : JobTimes`, now `10 : JobTimes (oneof outcome)`",
+            "JobResult.usage: was `11 : ResourceUsage`, now `11 : ResourceUsage (oneof outcome)`",
+        ]
+    );
+    assert_eq!(
+        breaks(&|set| {
             let state = set
                 .file
                 .iter_mut()
@@ -509,5 +562,65 @@ fn each_breaking_change_of_a_shipped_field_is_named() {
             state.value[1].number = Some(11);
         }),
         ["JobState.JOB_STATE_QUEUED: was `1`, now `11`"]
+    );
+}
+
+/// The values of `RefusalCode` that are not exactly the four of design section 5.3 and
+/// `UNSPECIFIED`, by name and number, one line each: a value missing, renumbered, or added.
+fn refusal_code_differences(set: &FileDescriptorSet) -> Vec<String> {
+    let expected: BTreeMap<&str, i32> = [
+        ("REFUSAL_CODE_UNSPECIFIED", 0),
+        ("REFUSAL_CODE_JOB_ID_CONFLICT", 1),
+        ("REFUSAL_CODE_NO_CAPABLE_HOST", 2),
+        ("REFUSAL_CODE_WALL_TIME_NOT_POSITIVE", 3),
+        ("REFUSAL_CODE_WALL_TIME_ABOVE_CEILING", 4),
+    ]
+    .into_iter()
+    .collect();
+    let types = Types::of(set);
+    let actual: BTreeMap<&str, i32> = types.enums[&full("RefusalCode")]
+        .value
+        .iter()
+        .map(|v| (v.name(), v.number()))
+        .collect();
+    let mut differences = Vec::new();
+    for (name, number) in &expected {
+        match actual.get(name) {
+            Some(n) if n == number => {}
+            Some(n) => differences.push(format!("{name} is {n}, not {number}")),
+            None => differences.push(format!("{name} is missing")),
+        }
+    }
+    for (name, number) in &actual {
+        if !expected.contains_key(name) {
+            differences.push(format!("{name} = {number} is not a refusal of the design"));
+        }
+    }
+    differences
+}
+
+/// Asserts that `RefusalCode` holds exactly `UNSPECIFIED` and the four refusals of design
+/// section 5.3 at their numbers, and that the check names a fifth value added at a number
+/// that does not follow the last (where a look at the next number alone would miss it).
+#[test]
+fn refusal_code_values_are_exactly_the_four_and_unspecified() {
+    let set = descriptor_set();
+    assert_eq!(refusal_code_differences(&set), Vec::<String>::new());
+    let mut extended = set;
+    extended
+        .file
+        .iter_mut()
+        .flat_map(|f| &mut f.enum_type)
+        .find(|e| e.name() == "RefusalCode")
+        .expect("RefusalCode is defined")
+        .value
+        .push(EnumValueDescriptorProto {
+            name: Some("REFUSAL_CODE_QUOTA_EXCEEDED".to_owned()),
+            number: Some(10),
+            ..EnumValueDescriptorProto::default()
+        });
+    assert_eq!(
+        refusal_code_differences(&extended),
+        ["REFUSAL_CODE_QUOTA_EXCEEDED = 10 is not a refusal of the design"]
     );
 }

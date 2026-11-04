@@ -88,7 +88,15 @@ pub fn refusal_status(code: RefusalCode, detail: impl Into<String>) -> Status {
 /// The [`Refusal`] a status carries, if it carries one: the first detail of
 /// [`REFUSAL_TYPE_URL`] in the status's `google.rpc.Status`. `None` for a status without
 /// details, with details that do not decode as a `google.rpc.Status`, with no detail of
-/// that type URL, or with one whose value does not decode as a [`Refusal`].
+/// that type URL, or with a first such detail whose value does not decode as a [`Refusal`]
+/// (a later detail of the URL is not tried; a detail text that is not UTF-8 does not
+/// decode).
+///
+/// The refusal is returned as it was written. Its code is kept as a number, so a code a
+/// newer server added comes back as that number and [`Refusal::code`] reads it as
+/// [`RefusalCode::Unspecified`]; an empty value is a refusal with that code and no detail.
+/// The status's own code and the `google.rpc.Status` code are not compared with the
+/// refusal's: a refusal is read from the details alone.
 #[must_use]
 pub fn refusal_of(status: &Status) -> Option<Refusal> {
     let details = RpcStatus::decode(status.details()).ok()?;
@@ -212,6 +220,66 @@ mod tests {
                 detail: "no host has 8 GPUs".to_owned(),
             }
         );
+    }
+
+    /// A `google.rpc.Status` with code 9 whose details are `values`, each under the
+    /// refusal's type URL.
+    fn packed(values: Vec<Vec<u8>>) -> Vec<u8> {
+        RpcStatus {
+            code: 9,
+            message: "m".to_owned(),
+            details: values
+                .into_iter()
+                .map(|value| Any {
+                    type_url: REFUSAL_TYPE_URL.to_owned(),
+                    value,
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    fn refusal(code: i32, detail: &str) -> Refusal {
+        Refusal {
+            code,
+            detail: detail.to_owned(),
+        }
+    }
+
+    /// Asserts what `refusal_of` reads from details at the edges of what it documents: an
+    /// empty value is a refusal with code unspecified and no detail; a code this version
+    /// does not know keeps its number and reads as unspecified; of two refusal details the
+    /// first is taken, and a first one that does not decode gives no refusal; a detail text
+    /// that is not UTF-8 gives no refusal; and a status whose codes disagree with the
+    /// refusal's still gives the refusal.
+    #[test]
+    fn refusal_of_reads_the_first_refusal_detail_as_it_was_written() {
+        let read = |details: Vec<u8>| refusal_of(&with(details));
+        assert_eq!(read(packed(vec![Vec::new()])), Some(refusal(0, "")));
+
+        let unknown = read(packed(vec![refusal(99, "newer").encode_to_vec()]));
+        assert_eq!(unknown, Some(refusal(99, "newer")));
+        assert_eq!(unknown.map(|r| r.code()), Some(RefusalCode::Unspecified));
+
+        let first = refusal(RefusalCode::NoCapableHost.into(), "first");
+        let second = refusal(RefusalCode::JobIdConflict.into(), "second");
+        assert_eq!(
+            read(packed(vec![first.encode_to_vec(), second.encode_to_vec()])),
+            Some(first)
+        );
+        // A length-delimited field 2 that claims more bytes than follow.
+        let broken = vec![0x12, 0x05, b'x'];
+        assert_eq!(read(packed(vec![broken, second.encode_to_vec()])), None);
+
+        // Field 2 (detail) holding two bytes that are not UTF-8.
+        assert_eq!(read(packed(vec![vec![0x12, 0x02, 0xff, 0xfe]])), None);
+
+        let disagreeing = Status::with_details(
+            Code::Unknown,
+            "m",
+            packed(vec![second.encode_to_vec()]).into(),
+        );
+        assert_eq!(refusal_of(&disagreeing), Some(second));
     }
 
     /// Asserts that a status with no details at all is not read as a refusal (an empty

@@ -20,6 +20,8 @@
 //! [`refusal`] makes one and reads one back. [`FILE_DESCRIPTOR_SET`] is the encoded
 //! descriptor set of the package, with its comments, for reflection and for the tests.
 
+use std::fmt;
+
 pub mod refusal;
 
 /// The messages, enums, client and server of package `jobscheduler.v1`, generated from the
@@ -29,9 +31,59 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/jobscheduler.v1.rs"));
 }
 
+/// A job file's contents are secret (they can hold presigned URLs or tokens), so `Debug`
+/// prints the name and the length of the contents and nothing else, as the agent's
+/// `RunFile` does: no log line or panic message that prints a job leaks them.
+impl fmt::Debug for v1::JobFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobFile")
+            .field("name", &self.name)
+            .field("contents_len", &self.contents.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The encoded `google.protobuf.FileDescriptorSet` of package `jobscheduler.v1`: its four
 /// files, with their comments.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/jobscheduler_v1_descriptor_set.bin"
 ));
+
+#[cfg(test)]
+mod tests {
+    use super::v1::{JobFile, JobSpec, SubmitJobRequest};
+
+    fn secret_file() -> JobFile {
+        JobFile {
+            name: "upload-url".to_owned(),
+            contents: "s3cr3t-presigned".to_owned(),
+        }
+    }
+
+    /// Asserts the whole `Debug` text of a job file and of a submit that carries one: the
+    /// name and the length of the contents, never the contents. Catches the generated
+    /// `Debug`, which prints every field, coming back.
+    #[test]
+    fn debug_of_a_job_file_shows_the_name_and_length_only() {
+        assert_eq!(
+            format!("{:?}", secret_file()),
+            r#"JobFile { name: "upload-url", contents_len: 16, .. }"#
+        );
+        let request = SubmitJobRequest {
+            spec: Some(JobSpec {
+                files: vec![secret_file()],
+                ..JobSpec::default()
+            }),
+        };
+        assert_eq!(
+            format!("{request:?}"),
+            concat!(
+                r#"SubmitJobRequest { spec: Some(JobSpec { job_id: "", image: "", command: "", "#,
+                r#"args: [], env: {}, needs: None, constraints: None, wall_limit_seconds: None, "#,
+                r#"network: Unspecified, ports: [], files: [JobFile { name: "upload-url", "#,
+                r#"contents_len: 16, .. }], priority: 0, labels: {} }) }"#,
+            )
+        );
+    }
+}
