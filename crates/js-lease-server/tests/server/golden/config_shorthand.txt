@@ -1,0 +1,4 @@
+machine_provider +static: kind static; keys -
+machine_provider +gpu.lambdalabs: kind lambdalabs; keys api_key_file
+platform +gpu: kind default; hosts yes; machine_providers +static, +gpu.lambdalabs
+pool gpu: platforms +gpu; max_machines 4; max_queue_wait 1h; start_timeout 15m; path_grace 15s

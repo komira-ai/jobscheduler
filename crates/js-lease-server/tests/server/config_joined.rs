@@ -144,14 +144,15 @@ async fn the_shared_pool_token_still_admits_hosts() {
     assert_eq!(client.status, 401, "{}", client.body);
 }
 
-/// Asserts that a joined pool counts as the one pool that registers agents: beside another
-/// joined pool or an elastic pool, the later one is refused naming it; and a joined pool
-/// beside a static pool is served. It catches two registries built from one file.
+/// Asserts that a joined pool counts as a pool that registers agents: beside another joined
+/// pool or an elastic pool the file is valid, and the server refuses to start on it, naming
+/// the later pool; and a joined pool beside a static pool is served. It catches two
+/// registries built from one file.
 #[test]
 fn two_registering_pools_are_refused() {
     let scratch = Scratch::new("joined_two");
     let server = server_with_agents(&scratch);
-    let message = "pool \"second\": only one pool may register agents in this version";
+    let message = "pool \"second\": several pools register agents; running them needs the ordered walk of design 5.6";
     let second = PoolText::joined("second");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&joined(), &second])),
@@ -167,8 +168,10 @@ fn two_registering_pools_are_refused() {
 }
 
 /// Asserts that each key of a pool that launches is refused on a joined pool, naming the
-/// pool and the key, and that a bad `join_token_file` is refused naming it. It catches a
-/// joined pool that takes a spend cap or a network it cannot use.
+/// pool and the key, that a bad `join_token_file` is refused naming it, and that an elastic
+/// pool giving the joined pool's `max_machines` beside `max_instances` is refused naming
+/// both (on an elastic pool the two are one cap). It catches a joined pool that takes a
+/// spend cap or a network it cannot use.
 #[test]
 fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
     let scratch = Scratch::new("joined_refusals");
@@ -212,9 +215,9 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
     assert_eq!(said, "pool \"burst\": max_machines: required");
     let elastic = PoolText::elastic(&scratch).set("max_machines", "3");
     let said = refusal(&scratch, &file(&server, &[&elastic]));
-    assert!(
-        said.starts_with("pool \"gpu\": max_machines: unknown field"),
-        "{said}"
+    assert_eq!(
+        said,
+        "pool \"gpu\": max_machines: and max_instances are one cap by two names; give one"
     );
 }
 

@@ -20,6 +20,8 @@ mod cordon;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]
+mod crun_default;
+#[cfg(target_os = "linux")]
 mod crun_gpu;
 #[cfg(target_os = "linux")]
 mod crun_host;

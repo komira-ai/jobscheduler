@@ -35,6 +35,7 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod cpu_slack;
 mod placement;
+mod resolve;
 mod retention;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use placement::Placement;
@@ -536,7 +537,12 @@ impl Config {
             client_token,
             hosts,
             mut warnings,
+            unrunnable,
+            ..
         } = file::load(path, &load)?;
+        if let Some(refusal) = unrunnable {
+            return Err(refusal);
+        }
         let (hosts, elastic) = match hosts {
             LoadedHosts::Static(source) => (Hosts::Static(source), None),
             LoadedHosts::Registering {

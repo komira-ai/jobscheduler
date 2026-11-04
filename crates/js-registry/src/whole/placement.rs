@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use js_provider::{HostCapacity, RefusalCode, StartAck, StartSpec};
-use js_types::HostId;
+use js_types::{Capabilities, HostId, Resources};
 
 use super::queue::Verdict;
 use super::requests::{RequestKey, Requests};
@@ -18,19 +18,34 @@ pub(crate) struct Asking<'a> {
     pub(crate) tainted: &'a BTreeSet<HostId>,
 }
 
-/// Whether some listed host could ever be given whole to the request: it fits the
-/// request's shape, is untainted and is not barred for the request's life. A busy, lost
-/// or reserved host counts as capable.
+/// Whether some listed host could ever be given whole to the request: it could hold it
+/// ([`could_hold`]) and is not barred for the request's life. A busy, lost or reserved
+/// host counts as capable.
 pub(crate) fn capable(asking: &Asking<'_>, requests: &Requests) -> bool {
     let wanted = asking.spec.request();
     asking.hosts.iter().any(|host| {
-        let fits = host
-            .shape
-            .satisfies(&wanted.resources, &wanted.capabilities);
-        let clean = !asking.tainted.contains(&host.host);
+        let holds = could_hold(
+            host,
+            &wanted.resources,
+            &wanted.capabilities,
+            asking.tainted,
+        );
         let barred = requests.barred_for_life(asking.key, &host.host);
-        fits & clean & !barred
+        holds & !barred
     })
+}
+
+/// Whether `host` could ever hold a request for `resources` that requires `required`: it
+/// fits them and is not in `tainted`. Whether it is busy, lost or reserved does not
+/// matter: it could free.
+pub(crate) fn could_hold(
+    host: &HostCapacity,
+    resources: &Resources,
+    required: &Capabilities,
+    tainted: &BTreeSet<HostId>,
+) -> bool {
+    let fits = host.shape.satisfies(resources, required);
+    fits & !tainted.contains(&host.host)
 }
 
 /// The answer to a whole-node start of a request that fits the pool but found no free

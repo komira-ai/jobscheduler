@@ -1313,6 +1313,7 @@ dependencies = [
  "js-jobs",
  "js-lease",
  "js-lease-server",
+ "js-platform",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
@@ -1463,6 +1464,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "js-platform"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "thiserror",
 ]
 
 [[package]]
