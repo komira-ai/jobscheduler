@@ -70,6 +70,10 @@ fn restarted(rig: &Rig) -> Rig {
     let mut fresh = Rig::new(settings("gpu"));
     fresh.input = rig.input.clone();
     fresh.state = State::new(Records::decode(&text).unwrap());
+    // The restarted caller draws fresh entropy, so a launch after the restart gets an
+    // acquire id of its own rather than repeating the first one (which would be refused
+    // as a repeat and launch nothing, whatever the cover).
+    fresh.drawn = rig.drawn;
     fresh
 }
 
