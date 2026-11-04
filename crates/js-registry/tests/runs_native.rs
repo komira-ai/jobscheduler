@@ -6,7 +6,7 @@
 mod support;
 
 use js_agent_wire::{Command, Hello, Isolation, JobSpec, Limits, NativeSpec, NetworkLevel};
-use js_provider::Provider;
+use js_provider::Pool;
 use support::*;
 
 const BUNDLE: &str =

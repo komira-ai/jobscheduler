@@ -8,7 +8,7 @@ use js_lease::{
     RenewError, Settings, SettingsError, SystemClock, Timestamp,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::{Call, HostCapacity, Provider, RefusalCode};
+use js_provider::{Call, HostCapacity, Pool, RefusalCode};
 use js_types::{ClassId, LeaseId, ProviderId, Request, Resources};
 
 use crate::support::{

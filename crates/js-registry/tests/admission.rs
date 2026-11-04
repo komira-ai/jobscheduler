@@ -38,7 +38,7 @@ fn booked_shape_is_the_pool_shape_not_the_claim() {
     let mut wanted = request();
     wanted.resources = js_types::Resources::new(6000, 1, 0, None).unwrap();
     let spec = js_provider::StartSpec::new(lease(1), wanted, &[class()]).unwrap();
-    let ack = js_provider::Provider::start(&mut fx.provider, spec);
+    let ack = js_provider::Pool::start(&mut fx.provider, spec);
     assert_eq!(
         ack,
         js_provider::StartAck::Refused(js_provider::RefusalCode::NoFit)
@@ -250,7 +250,7 @@ fn hosts_lists_what_the_operator_needs() {
     let mut fx = fixture(4);
     let epoch = fx.join("a", "t");
     fx.join("b", "t");
-    let ack = js_provider::Provider::start(&mut fx.provider, spec(1));
+    let ack = js_provider::Pool::start(&mut fx.provider, spec(1));
     assert_eq!(started_on(&ack), Some("a"));
     let listed = fx.registry.hosts();
     assert_eq!(listed.len(), 2);

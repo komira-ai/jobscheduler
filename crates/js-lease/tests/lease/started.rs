@@ -13,7 +13,7 @@ use crate::support::{
     Scratch, T0, at, break_dir, clock, fake_with_plain, open_err, request, secs, settings, states,
 };
 
-type PlainTable = LeaseTable<js_provider_fake::FakeProvider, ManualClock>;
+type PlainTable = LeaseTable<js_provider_fake::FakePool, ManualClock>;
 
 fn table(scratch: &Scratch, clock: &ManualClock, boot: Boot) -> PlainTable {
     let provider = fake_with_plain();

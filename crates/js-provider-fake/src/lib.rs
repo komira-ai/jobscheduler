@@ -1,23 +1,21 @@
-//! A fake delegated provider: an in-memory host table with scripted Unknown answers
-//! and switchable defects.
+//! A fake [`js_provider::Pool`], the lease-level allocation port: an in-memory host
+//! table with scripted Unknown answers and switchable defects.
 //!
-//! The fake is the executable spec of the delegated flavour (design 13.1). Script an
-//! Unknown with [`FakeProvider::script_unknown`] to see a timeout: the call answers
+//! The fake is the executable spec of the allocation port (design 13.1). Script an
+//! Unknown with [`FakePool::script_unknown`] to see a timeout: the call answers
 //! `Unknown`, and the effect lands or not as scripted. Switch on a [`Defect`] to build
 //! a deliberately broken provider; the conformance suite must report exactly the
 //! rules that defect breaks (13.2), which is how the suite is shown able to fail.
 //! The fake remembers every lease id it has stopped, as an exact set, and refuses a
 //! start of one with `LeaseEnded`; see the static pool for why the set and not a
 //! high-water mark.
-//! [`FakeProvider::booked`] reads the host table directly, for conformance hooks.
+//! [`FakePool::booked`] reads the host table directly, for conformance hooks.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_provider::{
-    Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
+use js_provider::{Call, HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, ResourceClass, Shape};
 
 /// Which free fitting host the fake picks first (design 6.1: rank is the provider's).
@@ -64,7 +62,7 @@ struct Host {
 
 /// An in-memory delegated provider serving the `gpu-host` class.
 #[derive(Debug)]
-pub struct FakeProvider {
+pub struct FakePool {
     id: ProviderId,
     hosts: BTreeMap<HostId, Host>,
     script: Vec<(Call, bool)>,
@@ -76,7 +74,7 @@ pub struct FakeProvider {
     defect: Option<Defect>,
 }
 
-impl FakeProvider {
+impl FakePool {
     /// A fake over these hosts, all free, with no script and no defect.
     pub fn new(id: ProviderId, hosts: Vec<(HostId, Shape)>) -> Self {
         let hosts = hosts
@@ -237,13 +235,9 @@ impl FakeProvider {
     }
 }
 
-impl Provider for FakeProvider {
+impl Pool for FakePool {
     fn id(&self) -> ProviderId {
         self.id.clone()
-    }
-
-    fn flavour(&self) -> Flavour {
-        Flavour::Delegated
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
@@ -300,7 +294,7 @@ impl Provider for FakeProvider {
     }
 }
 
-impl FakeProvider {
+impl FakePool {
     fn stop_now(&mut self, lease: &LeaseId) -> StopAck {
         self.ended.insert(*lease);
         if self.defect_is(Defect::StopKeepsBooking) {

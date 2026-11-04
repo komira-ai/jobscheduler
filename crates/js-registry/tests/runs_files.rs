@@ -6,7 +6,7 @@ mod support;
 
 use js_agent_wire::{Command, Hello, Isolation, JobSpec, Limits, RunFile};
 use js_caps::{FLAG_SET, RUN_FILES};
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::RunRefusal;
 use support::*;
 

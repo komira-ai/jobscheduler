@@ -3,7 +3,7 @@
 mod support;
 
 use js_agent_wire::{JobSpec, refusal};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal, RunRefusal, WholeNodeConfig};
 use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
 use support::world::{HOUR_S, World};

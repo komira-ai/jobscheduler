@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use js_provider::Provider;
+use js_provider::Pool;
 use js_scaler::Phase;
 
 use crate::scaler_support::{

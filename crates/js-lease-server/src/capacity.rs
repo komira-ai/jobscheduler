@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use js_lease::Booking;
 use js_pool_static::StaticPool;
-use js_provider::Provider;
+use js_provider::Pool;
 use js_types::{MemoryPercent, ProviderId, ResourceClass};
 
 use crate::error::StartupError;
@@ -12,7 +12,7 @@ use crate::error::StartupError;
 /// A provider built for a start, and the bookings of the lease file it could not honour.
 pub struct Seated {
     /// The provider the lease table runs on.
-    pub provider: Box<dyn Provider + Send>,
+    pub provider: Box<dyn Pool + Send>,
     /// The bookings the source was given and could not put back, with why. The table
     /// then finds the provider ignorant of each lease and drops it; the server logs them.
     pub unseated: Vec<Unseated>,
@@ -20,7 +20,7 @@ pub struct Seated {
 
 impl Seated {
     /// A provider that needed no bookings put back, or took them all.
-    pub fn all(provider: Box<dyn Provider + Send>) -> Self {
+    pub fn all(provider: Box<dyn Pool + Send>) -> Self {
         Self {
             provider,
             unseated: Vec::new(),

@@ -23,6 +23,9 @@ subtle.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# tests/capacity.rs runs the registered set of the machine-provider conformance suite
+# against `StaticCapacity`.
+js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-sim = { path = "../js-sim" }
 serde_json.workspace = true
 

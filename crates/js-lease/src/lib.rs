@@ -1,4 +1,4 @@
-//! The lease table a lease service serves: leases a client acquires on a provider,
+//! The lease table a lease service serves: leases a client acquires on a pool,
 //! keeps alive by renewing, and gives back by releasing or letting them lapse.
 //!
 //! This is design section 3 (a lease is the scheduler's grant of resources on a
@@ -9,7 +9,7 @@
 //! # Rules
 //!
 //! - **Commit before start.** [`LeaseTable::acquire`] writes the lease to the file as
-//!   `pending` before it calls [`js_provider::Provider::start`]. A crash between the
+//!   `pending` before it calls [`js_provider::Pool::start`]. A crash between the
 //!   two leaves a record that the next boot resolves by observing, never a booking
 //!   nobody knows about.
 //! - **Unknown never frees.** A start that answers Unknown leaves the lease `pending`;
@@ -137,8 +137,8 @@
 //! out when zero), so a repeat that matched before a restart matches after it, and a wall
 //! time below a millisecond reads back as the positive wall time it was. The ttl is not
 //! compared. A row's fields of a later version are kept and written back, and a file in
-//! which two leases keep one request id is an [`OpenError::Corrupt`]. A provider that queues the request
-//! ([`js_provider::Provider::waits`]) leaves the lease pending, and each tick presents it
+//! which two leases keep one request id is an [`OpenError::Corrupt`]. A pool that queues the request
+//! ([`js_provider::Pool::waits`]) leaves the lease pending, and each tick presents it
 //! again under the same lease and request id, which keeps its place and lets the start
 //! that finds it a host book it; the prepare deadline counts from the last presentation
 //! that found it waiting. On open, a pending whole lease with a `request` row is presented

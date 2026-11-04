@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
 use js_lease::{Booking, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings};
-use js_provider::{Provider, StartSpec};
+use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_state::SystemClock;
 use js_state::sqlite::{Options, SqliteStore};
@@ -21,7 +21,7 @@ use js_types::{Admission, ClassId, HostId, LeaseId, Request, RequestId, Resource
 use js_usage::{NoUsage, ProfileCurves, ProfileKey, ProfileStore, RunMinute, RunSeries, UsageSink};
 use serde_json::json;
 
-use crate::adapt::{BoxedProvider, SharedClock};
+use crate::adapt::{BoxedPool, SharedClock};
 use crate::agents::{Agents, assemble};
 use crate::config::{Cli, Config};
 
@@ -436,7 +436,7 @@ fn started(
     extra: &[&str],
     sink: Option<Arc<dyn UsageSink>>,
     clock: &SharedClock,
-) -> (LeaseTable<BoxedProvider, SharedClock>, Arc<Agents>) {
+) -> (LeaseTable<BoxedPool, SharedClock>, Arc<Agents>) {
     let config = config_booted(dir, boot, extra);
     let config = match sink {
         Some(sink) => config.with_usage_sink(sink),
@@ -446,7 +446,7 @@ fn started(
     let (source, agents) = assemble(config.hosts, config.usage, clock, &config.state_file).unwrap();
     let seated = source.provider(&bookings).unwrap();
     assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
-    let provider = BoxedProvider(seated.provider);
+    let provider = BoxedPool(seated.provider);
     let table = LeaseTable::open(
         provider,
         clock.clone(),
