@@ -22,7 +22,7 @@ use js_agent::crun::{
 use js_agent::crun_host::{CrunHost, start};
 use js_agent::lifecycle::{DirLayout, Local};
 use js_agent::quota::{Call, ProjectId};
-use js_agent::{Backend, Cli, Handle, Platform, RuntimeBuild, System};
+use js_agent::{Backend, Cli, Handle, Machine as _, Platform, RuntimeBuild, System};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
