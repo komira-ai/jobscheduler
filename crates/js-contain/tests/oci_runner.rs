@@ -137,6 +137,7 @@ impl Node {
                 read_only,
             })
             .to_vec(),
+            devices: Vec::new(),
         }
     }
 }

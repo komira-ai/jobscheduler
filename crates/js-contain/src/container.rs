@@ -126,6 +126,30 @@ pub struct ContainerSpec {
     /// and the shared trees: the run's scratch directory, the `--mount-root` mounts, the
     /// run's files.
     pub mounts: Vec<HostMount>,
+    /// The host's character devices the container is given, each at its own path: the
+    /// GPUs a run booked. Empty for a container that is given none, whose bundle then has
+    /// no device entry and no device rule.
+    pub devices: Vec<DeviceNode>,
+}
+
+/// A character device of the host, given to a container at the same path, as the host's
+/// `stat` of it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceNode {
+    /// Where it is on the host and in the container: an absolute, normalized path below
+    /// `/dev`.
+    pub path: String,
+    /// The device's major number.
+    pub major: u32,
+    /// The device's minor number.
+    pub minor: u32,
+    /// The uid that owns the node.
+    pub uid: u32,
+    /// The gid that owns the node.
+    pub gid: u32,
+    /// The node's permission bits (`st_mode & 0o7777`). The container's node is given at
+    /// most `0666` of them.
+    pub mode: u32,
 }
 
 /// A host directory bound at an absolute place in the container.
@@ -224,6 +248,7 @@ pub(crate) mod tests {
                     read_only: true,
                 },
             ],
+            devices: Vec::new(),
         }
     }
 }

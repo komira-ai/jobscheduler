@@ -101,6 +101,8 @@ pub(super) fn container_spec(
         },
         shared: Vec::new(),
         mounts,
+        // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
+        devices: Vec::new(),
     }
 }
 

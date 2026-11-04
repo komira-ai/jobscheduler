@@ -62,6 +62,43 @@ Every refusal is found before the first write: a dry run shows the same refusals
 A rerun on a host that is set up changes nothing and exits 3, so it is safe to run again after an
 interruption or to check a host.
 
+## GPU hosts
+
+The script installs no driver and sets no GPU flag. On a host whose GPUs the agent should give its
+jobs, install the driver first (the host's software lifecycle does that, not the agent), then add
+the GPU flags to the unit's `ExecStart`. The agent discovers nothing: it reads no CDI spec and runs
+no vendor hook. It gives a job that booked GPU indices exactly what the flags list:
+
+- `--gpu-device PATH`, repeatable: a character device below `/dev`. A path with `{index}` is one
+  GPU's node and is given only for the indices the job booked; a path without it is given to every
+  GPU job. The job's device cgroup allows these nodes and denies every other device.
+- `--gpu-mount SRC:DST`, repeatable: a directory bound read-only (`nosuid`, `nodev`) at `DST`.
+  The source must be a directory: a file bound where the image has none would be made in the
+  image's unpacked root, which every job of that image shares.
+- `--gpu-env NAME=VALUE`, repeatable: a variable set over the image's of that name.
+
+A job that books no GPU gets none of it. At start every node must be a character device, for every
+GPU the host offers (`--gpus` lowers that), or the agent exits 2 naming the flag; with the flags in
+place the hello reports `gpu-passthrough`. Without `--gpu-device` a start that books a GPU is
+refused `gpu-unsupported`, as before.
+
+An example for an NVIDIA driver, to adapt: the device names are the driver's; the directories are
+ones you make, holding copies of the driver's user-space libraries and programs (the files of the
+driver's own package for that version; a link to a file outside the directory does not resolve in
+the job's container), so that nothing else of the host's library directory is given to the job.
+
+```text
+--gpu-device /dev/nvidiactl --gpu-device /dev/nvidia-uvm --gpu-device /dev/nvidia-uvm-tools \
+--gpu-device '/dev/nvidia{index}' \
+--gpu-mount /opt/gpu-driver/lib:/usr/local/gpu-driver/lib \
+--gpu-mount /opt/gpu-driver/bin:/usr/local/gpu-driver/bin \
+--gpu-env LD_LIBRARY_PATH=/usr/local/gpu-driver/lib
+```
+
+A job then runs the driver's programs by their path (`/usr/local/gpu-driver/bin/nvidia-smi`). A
+pool whose `exec` is `container` and whose shape has GPUs also asks for `gpu-toolkit`, which only
+the engine runtime's `--gpu-toolkit-hook` reports: such a pool does not admit a crun host yet.
+
 ## The scratch quota
 
 The agent puts a project quota on each run's directory, which needs the scratch XFS filesystem

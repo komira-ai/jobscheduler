@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::spec::{Placement, SpecError, action_config, render};
 use crate::container::tests::spec;
-use crate::container::{ContainerSpec, HostMount, NPROC_HIGH};
+use crate::container::{ContainerSpec, DeviceNode, HostMount, NPROC_HIGH};
 use crate::subids::DaemonIds;
 
 fn config_with(spec: &ContainerSpec) -> Result<Value, SpecError> {
@@ -294,4 +294,135 @@ fn the_ceiling_is_the_daemons_hard_process_limit() {
         hard.parse().expect("number")
     };
     assert_eq!(crate::container::own_nproc_hard_limit(), want);
+}
+
+/// The node `/dev/<name>` of device `major`:`minor`, owned by `uid`:`gid`, mode `mode`.
+fn node(name: &str, (major, minor): (u32, u32), (uid, gid): (u32, u32), mode: u32) -> DeviceNode {
+    DeviceNode {
+        path: format!("/dev/{name}"),
+        major,
+        minor,
+        uid,
+        gid,
+        mode,
+    }
+}
+
+/// The reference job given the GPU nodes a run that booked indices 1 and 3 is given.
+fn gpu_job() -> ContainerSpec {
+    let mut spec = spec();
+    spec.devices = vec![
+        node("nvidiactl", (195, 255), (0, 0), 0o666),
+        node("nvidia1", (195, 1), (0, 44), 0o660),
+        node("nvidia3", (195, 3), (0, 44), 0o660),
+    ];
+    spec
+}
+
+/// Proves a container given device nodes gets exactly those, each a character device at its
+/// own path with its numbers and owner, and a device cgroup that denies every device and then
+/// allows each of them, and nothing else, to be read and written (podman's `--device`, with
+/// the default deny of its device rules). Catches a container that is given another node than
+/// its run booked, a rule that allows a whole major number (every GPU), one that allows
+/// `mknod`, and a list that does not deny first.
+#[test]
+fn a_container_given_devices_gets_their_nodes_and_rules_that_allow_only_them() {
+    let config = config_with(&gpu_job()).expect("config");
+    assert_eq!(
+        config["linux"]["devices"],
+        json!([
+            {"path": "/dev/nvidiactl", "type": "c", "major": 195, "minor": 255,
+             "fileMode": 0o666, "uid": 0, "gid": 0},
+            {"path": "/dev/nvidia1", "type": "c", "major": 195, "minor": 1,
+             "fileMode": 0o660, "uid": 0, "gid": 44},
+            {"path": "/dev/nvidia3", "type": "c", "major": 195, "minor": 3,
+             "fileMode": 0o660, "uid": 0, "gid": 44},
+        ])
+    );
+    let resources = &config["linux"]["resources"];
+    assert_eq!(
+        resources["devices"],
+        json!([
+            {"allow": false, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 195, "minor": 255, "access": "rw"},
+            {"allow": true, "type": "c", "major": 195, "minor": 1, "access": "rw"},
+            {"allow": true, "type": "c", "major": 195, "minor": 3, "access": "rw"},
+        ])
+    );
+    // The other limits of the cgroup are there beside the rules.
+    assert_eq!(resources["pids"], json!({"limit": 101}));
+    assert_eq!(resources["unified"], json!({"memory.oom.group": "1"}));
+}
+
+/// Proves a device node is given at most `0666`, and a node whose own mode is narrower keeps
+/// its own: the set-id and sticky bits and execute bits are never given. Catches a node
+/// handed to the job wider than the host's, and one given wider than read and write.
+#[test]
+fn a_device_node_is_given_at_most_read_and_write() {
+    let mut spec = spec();
+    spec.devices = [0o7777, 0o666, 0o640, 0o600, 0o000]
+        .iter()
+        .enumerate()
+        .map(|(n, mode)| node(&format!("d{n}"), (10, 200), (0, 0), *mode))
+        .collect();
+    let config = config_with(&spec).expect("config");
+    let modes: Vec<u64> = config["linux"]["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .map(|device| device["fileMode"].as_u64().expect("a mode"))
+        .collect();
+    assert_eq!(modes, [0o666, 0o666, 0o640, 0o600, 0o000]);
+}
+
+/// Proves a container given no device has no device section at all (neither nodes nor
+/// rules), so the bundle of every job without a GPU is what it was before devices were
+/// given. Catches a device rule list written for every container.
+#[test]
+fn a_container_given_no_device_has_no_device_section() {
+    let config = config();
+    assert!(config["linux"].get("devices").is_none(), "{config}");
+    assert!(
+        config["linux"]["resources"].get("devices").is_none(),
+        "{config}"
+    );
+}
+
+/// Proves a device whose path is not a normalized path below `/dev` is refused, naming the
+/// device path: a node made outside the container's own `/dev` tmpfs would be made in the
+/// image's root, which every lease of the image shares. Catches a relative path, one that
+/// climbs out with `..`, `/dev` itself and a path elsewhere being written into the bundle.
+#[test]
+fn a_device_path_outside_dev_is_refused() {
+    for bad in [
+        "/tmp/nvidia0",
+        "dev/nvidia0",
+        "/dev/../etc/x",
+        "/dev/",
+        "/dev",
+        "/dev//x",
+    ] {
+        let mut spec = gpu_job();
+        spec.devices[1].path = bad.to_owned();
+        let why = config_with(&spec).expect_err(bad).to_string();
+        assert!(
+            why.starts_with(&format!("device path {bad:?} ")),
+            "{bad}: {why}"
+        );
+    }
+}
+
+/// Proves the GPU's nodes give the job no capability: with devices, every capability set is
+/// still empty and new privileges are still refused, so a job cannot remount what it is given
+/// (`CAP_SYS_ADMIN`) or make another node (`CAP_MKNOD`). Catches device support that widens
+/// the capability set.
+#[test]
+fn a_container_given_devices_still_holds_no_capability() {
+    let config = config_with(&gpu_job()).expect("config");
+    let sets = config["process"]["capabilities"].as_object().expect("sets");
+    assert_eq!(sets.len(), 5);
+    for (name, set) in sets {
+        assert_eq!(set, &json!([]), "{name}");
+    }
+    assert_eq!(config["process"]["noNewPrivileges"], true);
 }

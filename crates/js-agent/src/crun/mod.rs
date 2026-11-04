@@ -97,14 +97,21 @@
 //! keeps it with the end, so it can be read again. A container never started has an empty
 //! tail; one still running has what it wrote so far.
 //!
+//! # GPUs
+//!
+//! A runtime opened with a device list ([`CrunSettings::gpus`], from `--gpu-device`) runs GPU
+//! jobs: a run that booked GPU indices is given their nodes, a device cgroup that allows only
+//! those, and the listed driver mounts and variables (the module `gpu`). Without one,
+//! `supports_gpus` is false and a start naming a GPU is refused.
+//!
 //! # Not here
 //!
-//! No network (a job has loopback only; `check_egress` has nothing to check), no GPUs
-//! (`supports_gpus` is false and a start naming one is refused), no host jobs and no
-//! read-back of the container's mounts.
+//! No network (a job has loopback only; `check_egress` has nothing to check), no host jobs
+//! and no read-back of the container's mounts.
 
 mod claim;
 mod dirs;
+mod gpu;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
@@ -113,9 +120,10 @@ mod spec;
 mod tests;
 mod wire;
 
-use dirs::{make_dir, project_of, take_dir};
+use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
+pub use gpu::{GpuPassthrough, GpuSettings, INDEX, NO_GPUS, ReadNode, read_node};
 
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
@@ -193,6 +201,8 @@ pub struct CrunSettings {
     pub pull_threads: usize,
     /// The root of the runs' files, when the agent has one.
     pub files: Option<FilesRoot>,
+    /// The GPUs a run is given, when the agent passes them (`--gpu-device`).
+    pub gpus: Option<GpuSettings>,
 }
 
 /// What a runtime does that a test replaces: giving a file away and reading the clock.
@@ -300,8 +310,8 @@ pub enum CrunError {
 enum Fault {
     #[error("this runtime runs contained jobs only")]
     NotContained,
-    #[error("containers on this runtime cannot use a GPU")]
-    Gpu,
+    #[error("{0}")]
+    Gpu(String),
     #[error("this runtime runs container jobs only")]
     Native,
     #[error("{0}")]
@@ -365,6 +375,7 @@ pub struct CrunRuntime {
     host_id: String,
     configs: PathBuf,
     files: Option<FilesRoot>,
+    gpus: Option<GpuSettings>,
     /// Whether the leases' directories are made beside the runs' own
     /// ([`OciConfig::leases_in`]), where [`Runtime::lease_dir`] names them.
     leases_beside: bool,
@@ -456,6 +467,7 @@ impl CrunRuntime {
             host_id: settings.host_id,
             configs,
             files: settings.files,
+            gpus: settings.gpus,
             leases_beside,
             store: settings.scratch.clone(),
             hooks,
@@ -656,9 +668,8 @@ impl CrunRuntime {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
         }
-        if !spec.gpu_indices.is_empty() {
-            return Err(Fault::Gpu);
-        }
+        // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
+        let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
         let Body::Container { image: given, args } = &spec.body else {
             return Err(Fault::Native);
         };
@@ -680,7 +691,7 @@ impl CrunRuntime {
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
         let (container, lease, cgroup) =
-            match self.make_recorded(spec, (given, &image), args, &name) {
+            match self.make_recorded(spec, (given, &image), args, &name, gpu) {
                 Ok(made) => made,
                 Err(fault) => {
                     // What the failed step left; none of it is a container. The sidecar goes with
@@ -707,14 +718,15 @@ impl CrunRuntime {
         Ok(name)
     }
 
-    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and the
-    /// resources of the lease `name`, whose sidecar is recorded.
+    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and what
+    /// its GPUs give it, and the resources of the lease `name`, whose sidecar is recorded.
     fn make_recorded(
         &self,
         spec: &RunSpec,
         (given, image): (&str, &PinnedImage),
         args: &[String],
         name: &str,
+        gpu: gpu::Wiring,
     ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
         // Before the image is made sure of: from then on no agent on the store removes it
         // until the lease is torn down.
@@ -741,6 +753,7 @@ impl CrunRuntime {
         let lease = self.oci.lease_dirs(name);
         let mut container = container_spec(name, spec, image, &lease, cgroup.name());
         config.apply(args, &mut container)?;
+        gpu.apply(&mut container);
         self.make_resources(spec, &container, &lease, &cgroup)?;
         Ok((container, lease, cgroup))
     }
@@ -846,44 +859,6 @@ impl CrunRuntime {
 /// `result`, with the step that failed named.
 fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, String> {
     result.map_err(|why| format!("{what}: {why}"))
-}
-
-/// Where an older agent kept the lease `name` in `store`; `None` for a name that is not
-/// exactly one ordinary path component (empty, with a `/`, `.` or `..`), which names no lease
-/// and must never reach a path.
-fn legacy_lease(store: &Path, name: &str) -> Option<PathBuf> {
-    let mut parts = Path::new(name).components();
-    match (parts.next(), parts.next()) {
-        (Some(std::path::Component::Normal(part)), None) if part == name => Some(store.join(name)),
-        _ => None,
-    }
-}
-
-/// The path of `file` of the cgroup `dir` in [`JOB_OWNED_FILES`], where the empty name is the
-/// directory itself (not `dir/`, whose trailing slash would make a no-follow open follow).
-fn owned(dir: &Path, file: &str) -> PathBuf {
-    if file.is_empty() {
-        dir.to_owned()
-    } else {
-        dir.join(file)
-    }
-}
-
-/// Makes the cgroup `dir` of the helper containers (once: one that is there is kept), hands
-/// the controllers to its children and gives it to the job user.
-fn make_helper_cgroup(dir: &Path, chown: Chown, (uid, gid): (u32, u32)) -> io::Result<()> {
-    if !dir.is_dir() {
-        std::fs::create_dir(dir)?;
-    }
-    std::fs::write(dir.join("cgroup.subtree_control"), "+cpu +memory +pids")?;
-    JOB_OWNED_FILES
-        .iter()
-        .try_for_each(|file| chown(&dir.join(file), uid, gid))
-}
-
-/// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
-fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
-    mount.join(name.trim_start_matches('/'))
 }
 
 /// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.
@@ -1021,7 +996,7 @@ impl Runtime for CrunRuntime {
     }
 
     fn supports_gpus(&self) -> bool {
-        false
+        self.gpus.is_some()
     }
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {

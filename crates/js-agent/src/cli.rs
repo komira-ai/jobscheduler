@@ -332,6 +332,29 @@ pub struct Cli {
     /// gid above 0. The agent stays root. Required with `--runtime crun`, and needs it.
     #[arg(long, value_name = "USER")]
     pub job_user: Option<String>,
+    /// A character device a job of `--runtime crun` that booked a GPU is given, by its
+    /// absolute path below `/dev`; repeatable. A path with `{index}` (`/dev/nvidia{index}`)
+    /// is the node of one GPU, given for each GPU index the job booked and for no other; a
+    /// path without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) is given to every job that
+    /// booked a GPU. At start each must be a character device, for every GPU the host
+    /// offers, and the host must offer one; a missing node stops the agent. A job that
+    /// books no GPU is given none. With it the crun runtime runs GPU jobs and the hello
+    /// reports `gpu-passthrough`. Needs `--runtime crun`.
+    #[arg(long = "gpu-device", value_name = "PATH")]
+    pub gpu_devices: Vec<String>,
+    /// A host directory a job of `--runtime crun` that booked a GPU is given read-only
+    /// (`nosuid`, `nodev`), as `SRC:DST`: the driver's libraries and programs; repeatable.
+    /// Both are absolute. The source must be a directory, not below `/proc`, `/sys` or
+    /// `/dev`; the destination not below those or `/scratch`, and no two share one. Needs
+    /// `--gpu-device`.
+    #[arg(long = "gpu-mount", value_name = "SRC:DST")]
+    pub gpu_mounts: Vec<String>,
+    /// A variable set in the environment of a job of `--runtime crun` that booked a GPU,
+    /// over the image's variable of the same name: `NAME=VALUE`, such as the driver's
+    /// library path; repeatable. The name is `[A-Z_][A-Z0-9_]*`, does not start with `JS_`
+    /// and is given once. Needs `--gpu-device`.
+    #[arg(long = "gpu-env", value_name = "NAME=VALUE")]
+    pub gpu_env: Vec<String>,
     /// The network containers join: the name of a user-defined network. By default
     /// `none`, no network at all. `host` is refused. Any named network gives the job
     /// egress to whatever that network reaches, the host's metadata endpoint included;
@@ -586,6 +609,17 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The flags of the GPUs a crun job is given, with whether each was given: an agent
+    /// that does not run the crun runtime refuses them all.
+    #[must_use]
+    pub fn gpu_flags(&self) -> [(&'static str, bool); 3] {
+        [
+            ("--gpu-device", !self.gpu_devices.is_empty()),
+            ("--gpu-mount", !self.gpu_mounts.is_empty()),
+            ("--gpu-env", !self.gpu_env.is_empty()),
+        ]
+    }
+
     /// Every `--native-*` flag with whether it was given, kept beside the fields so that a
     /// runtime that takes none of them refuses them all; a test walks the flags clap knows
     /// and fails when one is missing here.

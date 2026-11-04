@@ -347,6 +347,7 @@ impl Cell {
             limits: shape.limits,
             shared: Vec::new(),
             mounts: shape.mounts,
+            devices: Vec::new(),
         };
         Lease {
             spec,
