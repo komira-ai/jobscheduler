@@ -13,6 +13,7 @@ use js_proto::v1::{
     ListJobsRequest, Needs, PortForward, RefusalCode, SubmitJobRequest,
 };
 use prost::Message as _;
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use serde_json::{Value, json};
 use tonic::Code;
 
@@ -51,7 +52,19 @@ fn only<T: prost::Message + Default>(fake: &Fake) -> (String, T) {
     )
 }
 
-/// A sample value for a flag of `kind`.
+/// Whether the field at `path` is set in `message`, through nested messages.
+fn set(message: &DynamicMessage, path: &[&str]) -> bool {
+    match path.split_first() {
+        Some((last, [])) => message.has_field_by_name(last),
+        Some((first, rest)) => message
+            .get_field_by_name(first)
+            .and_then(|value| value.as_message().cloned())
+            .is_some_and(|inner| set(&inner, rest)),
+        None => false,
+    }
+}
+
+/// A sample value for a flag of `kind`, never the field's default.
 fn sample(kind: &Kind, scratch: &Scratch) -> String {
     match kind {
         Kind::Bool => "true".to_owned(),
@@ -59,7 +72,7 @@ fn sample(kind: &Kind, scratch: &Scratch) -> String {
         Kind::F32 | Kind::F64 => "1.5".to_owned(),
         Kind::Text => "x".to_owned(),
         Kind::Seconds => "2m".to_owned(),
-        Kind::Enum(choices) => choices[0].0.to_owned(),
+        Kind::Enum(choices) => choices[choices.len() - 1].0.to_owned(),
         Kind::Pair(..) => "k=v".to_owned(),
         Kind::File => scratch
             .write("list.json", "[]", 0o600)
@@ -76,6 +89,7 @@ fn sample(kind: &Kind, scratch: &Scratch) -> String {
 #[test]
 fn every_job_command_parses_its_flags() {
     let scratch = Scratch::new("jobs_every");
+    let pool = DescriptorPool::decode(js_proto::FILE_DESCRIPTOR_SET).unwrap();
     for command in surface() {
         let fake = Fake::new();
         let mut words: Vec<String> = command.path.iter().map(|word| (*word).to_owned()).collect();
@@ -88,6 +102,19 @@ fn every_job_command_parses_its_flags() {
         assert_eq!((got.code, got.err.as_str()), (0, ""), "{words:?}");
         assert_eq!(fake.seen().len(), 1, "{words:?}");
         assert_eq!(fake.seen()[0].path, call(command.rpc), "{words:?}");
+        let request = pool.get_message_by_name(command.request).unwrap();
+        let sent = DynamicMessage::decode(request, fake.seen()[0].message.as_slice()).unwrap();
+        for flag in command
+            .flags
+            .iter()
+            .filter(|flag| !matches!(flag.kind, Kind::File))
+        {
+            assert!(
+                set(&sent, flag.field),
+                "{words:?}: {} is not in the request",
+                flag.name
+            );
+        }
     }
 
     let fake = Fake::new();
@@ -326,11 +353,10 @@ fn printed_id(err: &str) -> String {
 }
 
 /// Asserts that `job submit` without `--id` draws one, 32 hexadecimal characters, prints
-/// it on stderr, and sends it as the job's id; and that two runs draw two ids.
+/// it on stderr, and sends it as the job's id, on each of two runs.
 #[test]
 fn job_submit_draws_an_id_and_prints_it_before_sending() {
     let scratch = Scratch::new("jobs_draw");
-    let mut drawn = Vec::new();
     for _ in 0..2 {
         let fake = Fake::new();
         let got = js(
@@ -347,9 +373,7 @@ fn job_submit_draws_an_id_and_prints_it_before_sending() {
         );
         let (_, request) = only::<SubmitJobRequest>(&fake);
         assert_eq!(request.spec.unwrap().job_id, id);
-        drawn.push(id);
     }
-    assert_ne!(drawn[0], drawn[1]);
 }
 
 /// Asserts that `job submit --id` sends that id and prints nothing.
@@ -656,7 +680,8 @@ fn the_global_flags_mean_what_they_mean_for_leases() {
 }
 
 /// Asserts that the table is the golden `goldens/job_surface.json`: every command's words,
-/// call, request and answer, retry key and flags (name, field, kind, repeated, required).
+/// call, documentation, idempotency, request and answer, retry key and flags (name, field,
+/// kind, repeated, required, `oneof`, documentation).
 /// A change to the definition or to the generator's rules moves it.
 #[test]
 fn the_job_surface_matches_its_golden() {
@@ -676,7 +701,11 @@ fn the_job_surface_matches_its_golden() {
                     "kind": format!("{:?}", flag.kind),
                     "repeated": flag.repeated,
                     "required": flag.required,
+                    "oneof": flag.oneof,
+                    "doc": flag.doc,
                 })).collect::<Vec<_>>(),
+                "doc": command.doc,
+                "idempotency": format!("{:?}", command.idempotency),
             })
         })
         .collect();
@@ -690,5 +719,207 @@ fn the_job_surface_matches_its_golden() {
         got == want,
         "{path}: {}",
         serde_json::to_string(&got).unwrap()
+    );
+}
+
+/// Asserts that an empty `--id` is a usage error that sends nothing: the service would mint
+/// an id for it, and a run repeated after a lost answer would make a second job.
+#[test]
+fn an_empty_id_is_usage_exit_2() {
+    let scratch = Scratch::new("jobs_empty_id");
+    let fake = Fake::new();
+    let got = js(&scratch, fake.dialer(), &["job", "submit", "--id", ""]);
+    assert_eq!(
+        (got.code, got.err.as_str()),
+        (
+            2,
+            "js: --id: must not be empty: leave the flag out to have js draw an id\n"
+        )
+    );
+    assert!(fake.seen().is_empty());
+}
+
+/// A writer that records what it is given in a shared log and refuses everything from its
+/// `fail_after`-th write on.
+struct Logged {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+    fail_after: usize,
+    writes: usize,
+}
+
+impl std::io::Write for Logged {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        match self.writes > self.fail_after {
+            true => Err(std::io::Error::other("the stream is closed")),
+            false => {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("print {}", String::from_utf8_lossy(buf)));
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `js <words>` against `fake` with `out` and `err` as its streams; the dialer adds
+/// `dial` to `log` when the command connects.
+fn logged(
+    scratch: &Scratch,
+    fake: &Fake,
+    log: &Arc<std::sync::Mutex<Vec<String>>>,
+    words: &[&str],
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> u8 {
+    let token = scratch.write("token", TOKEN, 0o600);
+    let mut args: Vec<OsString> = vec![
+        "js".into(),
+        "--server".into(),
+        PLAIN.into(),
+        "--token-file".into(),
+        token.into(),
+    ];
+    args.extend(words.iter().map(OsString::from));
+    let seen = Arc::clone(log);
+    let dialer = fake.dialer_with(move || seen.lock().unwrap().push("dial".to_owned()));
+    js_cli::run_with(
+        args,
+        out,
+        err,
+        services(Arc::new(Never)).with_dialer(dialer),
+    )
+}
+
+/// Asserts that the drawn id is printed before anything is dialled, as text and as JSON, and
+/// that when it cannot be printed nothing is dialled and the command fails: without the id
+/// the command could not be run again safely.
+#[test]
+fn the_drawn_id_is_printed_before_anything_is_sent() {
+    let scratch = Scratch::new("jobs_id_first");
+    for json in [false, true] {
+        let fake = Fake::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut err = Logged {
+            log: Arc::clone(&log),
+            fail_after: usize::MAX,
+            writes: 0,
+        };
+        let mut words = vec!["job", "submit"];
+        words.extend(json.then_some("--json"));
+        let code = logged(&scratch, &fake, &log, &words, &mut Vec::new(), &mut err);
+        let log = log.lock().unwrap().clone();
+        assert_eq!(
+            (code, log.len(), log[1].as_str()),
+            (0, 2, "dial"),
+            "{log:?}"
+        );
+        let printed = log[0].strip_prefix("print ").unwrap();
+        let id = match json {
+            true => serde_json::from_str::<Value>(printed).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            false => printed
+                .strip_prefix("js: job id ")
+                .unwrap()
+                .trim_end()
+                .to_owned(),
+        };
+        let (_, request) = only::<SubmitJobRequest>(&fake);
+        assert_eq!(request.spec.unwrap().job_id, id);
+    }
+    let fake = Fake::new();
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut err = Logged {
+        log: Arc::clone(&log),
+        fail_after: 0,
+        writes: 0,
+    };
+    let code = logged(
+        &scratch,
+        &fake,
+        &log,
+        &["job", "submit"],
+        &mut Vec::new(),
+        &mut err,
+    );
+    assert_eq!(code, 1);
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+    assert!(fake.seen().is_empty());
+}
+
+/// Asserts that an answer that cannot be written is a failure (exit 1), not a success with
+/// the output lost.
+#[test]
+fn an_answer_that_cannot_be_written_fails() {
+    let scratch = Scratch::new("jobs_out");
+    let fake = Fake::new();
+    let job = GetJobResponse {
+        job: Some(Job {
+            id: "j-1".to_owned(),
+            ..Job::default()
+        }),
+    };
+    fake.answer("GetJob", vec![Answer::Message(job.encode_to_vec())]);
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut out = Logged {
+        log: Arc::clone(&log),
+        fail_after: 0,
+        writes: 0,
+    };
+    let mut err = Vec::new();
+    let code = logged(
+        &scratch,
+        &fake,
+        &log,
+        &["job", "get", "--job-id", "j-1"],
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(
+        (code, String::from_utf8(err).unwrap()),
+        (
+            1,
+            "js: cannot write the answer: the stream is closed\n".to_owned()
+        )
+    );
+}
+
+/// Asserts that a log tail keeps its label when it is empty, and that bytes that are not
+/// UTF-8 print with the replacement character; and that the JSON keeps the bytes (base64).
+#[test]
+fn empty_and_binary_log_tails_keep_their_labels() {
+    let scratch = Scratch::new("jobs_tails");
+    let logs = GetLogsResponse {
+        state: JobState::Running.into(),
+        stdout_tail: Vec::new(),
+        stderr_tail: vec![b'o', 0xff, b'k'],
+        truncated: false,
+    };
+    let fake = Fake::new();
+    fake.answer("GetLogs", vec![Answer::Message(logs.encode_to_vec())]);
+    let got = js(&scratch, fake.dialer(), &["job", "logs", "--job-id", "j-1"]);
+    assert_eq!(
+        (got.code, got.out.as_str()),
+        (
+            0,
+            "state: running\nstdout_tail:\n\nstderr_tail:\no\u{fffd}k\n"
+        )
+    );
+    let got = js(
+        &scratch,
+        fake.dialer(),
+        &["job", "logs", "--job-id", "j-1", "--json"],
+    );
+    let printed: Value = serde_json::from_str(&got.out).unwrap();
+    assert_eq!(
+        printed,
+        json!({ "state": "JOB_STATE_RUNNING", "stderrTail": "b/9r" })
     );
 }

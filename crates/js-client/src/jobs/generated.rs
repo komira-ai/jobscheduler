@@ -14,28 +14,29 @@ impl JobClient {
     /// before the answer; the call never waits for placement. A refusal records nothing.
     ///
     /// After [`JobError::MayHaveActed`], sending the same request again, with the same
-    /// `spec.job_id`, is safe: the service answers from what the first request made. The client
-    /// never chooses or changes the id; the caller does.
+    /// non-empty `spec.job_id`, is safe: the service answers from what the first request made. An empty id
+    /// lets the service mint one, so a repeat of it may make a second job. The client never
+    /// chooses or changes the id; the caller does.
     pub async fn submit_job(&mut self, request: v1::SubmitJobRequest) -> Result<v1::SubmitJobResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.submit_job(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.submit_job(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Reads a job: its state, its host once placed, its times and its host's silence.
     /// Changes nothing.
     pub async fn get_job(&mut self, request: v1::GetJobRequest) -> Result<v1::GetJobResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.get_job(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.get_job(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lists jobs by state, label and the time they were queued, a page at a time. Changes
     /// nothing.
     pub async fn list_jobs(&mut self, request: v1::ListJobsRequest) -> Result<v1::ListJobsResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.list_jobs(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.list_jobs(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Cancels a job. Idempotent on the job: cancelling twice is the same as once. A queued
@@ -43,66 +44,66 @@ impl JobClient {
     /// cancelled when its host reports it stopped; an ended job is unchanged.
     pub async fn cancel_job(&mut self, request: v1::CancelJobRequest) -> Result<v1::CancelJobResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.cancel_job(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.cancel_job(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Reads the result of an ended job, for the retention window after it ended. A job that
     /// has not ended has no result, and the call is refused. Changes nothing.
     pub async fn get_result(&mut self, request: v1::GetResultRequest) -> Result<v1::GetResultResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.get_result(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.get_result(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Reads the log tail held so far, also for a running job, and for the retention window
     /// after the job ended. Changes nothing.
     pub async fn get_logs(&mut self, request: v1::GetLogsRequest) -> Result<v1::GetLogsResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.get_logs(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.get_logs(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lists the hosts, each with the resources booked on it. Changes nothing.
     pub async fn list_hosts(&mut self, request: v1::ListHostsRequest) -> Result<v1::ListHostsResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.list_hosts(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.list_hosts(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Takes a host out of placement for a time, or extends a cordon already there. A cordon
     /// lapses unless it is extended. Jobs already on the host go on.
     pub async fn cordon_host(&mut self, request: v1::CordonHostRequest) -> Result<v1::CordonHostResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.cordon_host(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.cordon_host(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
     pub async fn uncordon_host(&mut self, request: v1::UncordonHostRequest) -> Result<v1::UncordonHostResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.uncordon_host(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.uncordon_host(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lists the pools. Changes nothing.
     pub async fn list_pools(&mut self, request: v1::ListPoolsRequest) -> Result<v1::ListPoolsResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.list_pools(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.list_pools(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lists the machine providers. Changes nothing.
     pub async fn list_providers(&mut self, request: v1::ListProvidersRequest) -> Result<v1::ListProvidersResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.list_providers(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.list_providers(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Lists the ended bookings, a page at a time. Changes nothing.
     pub async fn get_usage(&mut self, request: v1::GetUsageRequest) -> Result<v1::GetUsageResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.get_usage(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.get_usage(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 }

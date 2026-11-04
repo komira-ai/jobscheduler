@@ -3,7 +3,7 @@
 //! set, so that a call added to the definition appears in both with no hand-written code
 //! (design section 3.6). `docs/job-surface.md` says how to add a call.
 //!
-//! [`generate`] reads the descriptor set into a [`Surface`] (per call its name, its request
+//! [`generate`] reads the descriptor set into a typed surface (per call its name, its request
 //! with every field and the field's comment, its response, whether the response streams,
 //! the idempotency level) and renders two files from it and from nothing else:
 //!
@@ -19,23 +19,21 @@
 //! (the repository root), or with `--check` renders them in memory and fails naming each
 //! checked-in file that differs; the test `generated_files_are_current` runs it so.
 //!
-//! How a call becomes a command and a field a flag is in [`cli`]; the rules are listed for
-//! users in the crate docs of js-cli.
+//! How a call becomes a command and a field a flag is in the module docs of `cli` (private)
+//! and, for users, in the crate docs of js-cli.
 
 use std::path::{Path, PathBuf};
 
 use prost::Message as _;
 use prost_types::FileDescriptorSet;
 
-pub mod cli;
-pub mod client;
-pub mod surface;
-pub mod words;
+mod cli;
+mod client;
+mod surface;
+mod words;
 
 #[cfg(test)]
 mod tests;
-
-pub use surface::Surface;
 
 /// The generated client methods, from the repository root.
 pub const CLIENT_FILE: &str = "crates/js-client/src/jobs/generated.rs";
@@ -71,6 +69,15 @@ pub enum GenError {
         rpc: String,
         /// What is missing.
         why: String,
+    },
+    /// A call's request or response is a message of another package, which the client
+    /// cannot name: js-proto exposes the messages of the service's own package.
+    #[error("{rpc}: {message} is not in the service's package")]
+    Foreign {
+        /// The call.
+        rpc: String,
+        /// The message's full name.
+        message: String,
     },
     /// A call streams its requests, which a command line cannot send.
     #[error("{0} streams its requests; a generated command sends one request")]
@@ -122,8 +129,11 @@ pub struct Generated {
 ///
 /// # Errors
 ///
-/// [`GenError::Decode`] for bytes that are not a descriptor set, and the errors of
-/// [`surface::read`] and [`cli::table`].
+/// [`GenError::Decode`] for bytes that are not a descriptor set; the errors of reading the
+/// surface (no single service, an unresolved type, a request that streams, a message of
+/// another package, a retry-key entry that no longer matches); and those of the command
+/// table (a command without words, on a taken word or where another is; a reserved or
+/// doubled flag).
 pub fn generate(descriptor: &[u8]) -> Result<Generated, GenError> {
     let set = FileDescriptorSet::decode(descriptor)?;
     let surface = surface::read(&set)?;

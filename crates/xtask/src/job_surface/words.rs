@@ -28,6 +28,20 @@ pub fn snake(name: &str) -> String {
     lower_words(&camel_words(name)).join("_")
 }
 
+/// The UpperCamel spelling prost gives a protobuf name: its words (split at `_` and at case
+/// changes), each with a capital first letter and the rest in lower case. `HTTPRequest` is
+/// `HttpRequest`, `job_spec` is `JobSpec`.
+pub fn upper_camel(name: &str) -> String {
+    let words = name.split('_').flat_map(camel_words);
+    words
+        .map(|word| {
+            let mut chars = word.chars();
+            let first = chars.next().map(|ch| ch.to_uppercase().collect::<String>());
+            first.unwrap_or_default() + &chars.as_str().to_lowercase()
+        })
+        .collect()
+}
+
 /// The words in lower case.
 pub fn lower_words(words: &[String]) -> Vec<String> {
     words.iter().map(|word| word.to_lowercase()).collect()
@@ -89,6 +103,9 @@ mod tests {
         assert_eq!(camel_words("X"), ["X"]);
         assert_eq!(snake("UncordonHost"), "uncordon_host");
         assert_eq!(kebab("cpu_millis"), "cpu-millis");
+        assert_eq!(upper_camel("HTTPRequest"), "HttpRequest");
+        assert_eq!(upper_camel("job_spec"), "JobSpec");
+        assert_eq!(upper_camel("SubmitJobRequest"), "SubmitJobRequest");
     }
 
     /// Asserts that one trailing `s` is dropped, and that `s` alone and a word without one

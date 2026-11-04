@@ -2,7 +2,7 @@
 //! the messages of `js-proto`, and the reader of a streamed answer when a call streams.
 
 use super::surface::{Rpc, Surface};
-use super::words::snake;
+use super::words::{snake, upper_camel};
 
 /// The comment that opens both generated files.
 pub fn header(surface: &Surface) -> String {
@@ -18,13 +18,22 @@ fn module(package: &str) -> &str {
     package.rsplit('.').next().unwrap_or(package)
 }
 
-/// The Rust path of the message `full` (a full name in `package`).
+/// The Rust path prost gives the message `full` (a full name in `package`): a nested
+/// message is in the module of each message around it (`Outer.Inner` is `outer::Inner`),
+/// and every name is spelt as prost spells it (`HTTPRequest` is `HttpRequest`).
 fn type_path(package: &str, full: &str) -> String {
     let local = full
         .strip_prefix(package)
         .unwrap_or(full)
         .trim_start_matches('.');
-    format!("{}::{local}", module(package))
+    let mut parts: Vec<&str> = local.split('.').collect();
+    let name = parts.pop().unwrap_or_default();
+    let modules: Vec<String> = parts.iter().map(|part| snake(&upper_camel(part))).collect();
+    let path: Vec<String> = std::iter::once(module(package).to_owned())
+        .chain(modules)
+        .chain(std::iter::once(upper_camel(name)))
+        .collect();
+    path.join("::")
 }
 
 /// The text of [`super::CLIENT_FILE`] for `surface`.
@@ -87,7 +96,7 @@ fn method(surface: &Surface, rpc: &Rpc) -> String {
         false => (response, "answer.map(tonic::Response::into_inner)"),
     };
     format!(
-        "{doc}{retry}    pub async fn {name}(&mut self, request: {request}) -> Result<{returns}, JobError> {{\n        let (attempt, request) = self.begin(request);\n        let answer = self.service.{name}(request).await;\n        {answer}.map_err(|status| self.classify(attempt, &status))\n    }}\n"
+        "{doc}{retry}    pub async fn {name}(&mut self, request: {request}) -> Result<{returns}, JobError> {{\n        let (attempt, request) = self.begin(request);\n        let answer = tokio::time::timeout(self.limit, self.service.{name}(request)).await;\n        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| {answer}.map_err(|status| self.classify(attempt, &status)))\n    }}\n"
     )
 }
 
@@ -102,6 +111,25 @@ fn doc_line(line: &str) -> String {
 /// The paragraph a call idempotent on the id field `field` adds to its method's docs.
 fn retry_doc(field: &str) -> String {
     format!(
-        "    ///\n    /// After [`JobError::MayHaveActed`], sending the same request again, with the same\n    /// `{field}`, is safe: the service answers from what the first request made. The client\n    /// never chooses or changes the id; the caller does.\n"
+        "    ///\n    /// After [`JobError::MayHaveActed`], sending the same request again, with the same\n    /// non-empty `{field}`, is safe: the service answers from what the first request made. An empty id\n    /// lets the service mint one, so a repeat of it may make a second job. The client never\n    /// chooses or changes the id; the caller does.\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts the Rust path of a message as prost spells it: a top-level message, a nested
+    /// one in the module of the message around it, and a name prost respells.
+    #[test]
+    fn message_paths_are_spelt_as_prost_spells_them() {
+        assert_eq!(
+            type_path("jobscheduler.v1", "jobscheduler.v1.GetJobRequest"),
+            "v1::GetJobRequest"
+        );
+        assert_eq!(
+            type_path("p.v2", "p.v2.Outer.HTTPInner"),
+            "v2::outer::HttpInner"
+        );
+    }
 }

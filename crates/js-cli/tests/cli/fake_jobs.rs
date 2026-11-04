@@ -74,8 +74,14 @@ impl Fake {
 
     /// A dialer whose every connection is served by this fake.
     pub fn dialer(&self) -> Dialer {
+        self.dialer_with(|| {})
+    }
+
+    /// A dialer whose every connection is served by this fake, calling `on_dial` first.
+    pub fn dialer_with(&self, on_dial: impl Fn() + Send + Sync + 'static) -> Dialer {
         let fake = self.clone();
         Dialer::new(move |_host, _port| {
+            on_dial();
             let (client, server) = tokio::io::duplex(1 << 16);
             let task = tokio::spawn(serve(fake.clone(), server));
             fake.tasks.lock().unwrap().push(task.abort_handle());

@@ -86,14 +86,18 @@ impl From<ClientError> for JobError {
 /// [`JobError::NotSent`]: the same `UNAVAILABLE` is `NotSent` when the connection failed
 /// before the request and [`JobError::MayHaveActed`] after it, so the record of the write
 /// decides, not the code alone.
-pub(crate) fn classify(base: &str, written: bool, status: &Status) -> JobError {
-    let message = printable(status.message());
-    match (status.code(), written) {
-        (Code::Unauthenticated | Code::PermissionDenied, _) => {
+pub(crate) fn classify(base: &str, secret: &str, written: bool, status: &Status) -> JobError {
+    let message = clean(status.message(), secret);
+    let local = LOCAL
+        .iter()
+        .any(|prefix| status.message().starts_with(prefix));
+    match (status.code(), written, local) {
+        (Code::Unauthenticated | Code::PermissionDenied, _, _) => {
             NotSent::Token(code_name(&status.code())).into()
         }
-        (_, false) => NotSent::Unreached(format!("cannot reach {base}: {message}")).into(),
-        (
+        (_, false, _) => NotSent::Unreached(format!("cannot reach {base}: {message}")).into(),
+        (_, true, true)
+        | (
             Code::Unknown
             | Code::Internal
             | Code::Unavailable
@@ -101,24 +105,47 @@ pub(crate) fn classify(base: &str, written: bool, status: &Status) -> JobError {
             | Code::Cancelled
             | Code::DataLoss,
             true,
+            false,
         ) => JobError::MayHaveActed(format!(
             "no answer from {base} after the request was sent: {message}"
         )),
-        (code, true) => JobError::Rejected {
+        (code, true, false) => JobError::Rejected {
             code,
-            reason: reason(status, message),
+            reason: reason(status, message, secret),
         },
+    }
+}
+
+/// The beginnings of the messages of the statuses tonic makes itself when it cannot read an
+/// answer (one too large, compressed in a way the client did not offer, or that does not
+/// decompress): they come with codes a server could send too, but say nothing of what the
+/// server did with the request.
+const LOCAL: [&str; 3] = [
+    "Error, decoded message length too large",
+    "Content is compressed with",
+    "Error decompressing",
+];
+
+/// The failure of a call that got no complete answer within its limit: before the request
+/// was written nothing reached the server; after it, the call may have taken effect.
+pub(crate) fn timed_out(base: &str, written: bool, limit: std::time::Duration) -> JobError {
+    let seconds = limit.as_secs();
+    match written {
+        true => JobError::MayHaveActed(format!(
+            "no answer from {base} within {seconds}s after the request was sent"
+        )),
+        false => NotSent::Unreached(format!("cannot reach {base} within {seconds}s")).into(),
     }
 }
 
 /// The reason of a definite refusal: the refusal's code and detail when the status carries
 /// a refusal (`no-capable-host: <detail>`), the message otherwise.
-fn reason(status: &Status, message: String) -> String {
+fn reason(status: &Status, message: String, secret: &str) -> String {
     let refusal = js_proto::refusal::refusal_of(status);
     refusal.map_or(message, |refusal| {
         let parts = [
             refusal.code().as_str().to_owned(),
-            printable(&refusal.detail),
+            clean(&refusal.detail, secret),
         ];
         let parts: Vec<String> = parts.into_iter().filter(|part| !part.is_empty()).collect();
         parts.join(": ")
@@ -135,10 +162,13 @@ pub(crate) fn code_name(code: &Code) -> String {
     dashed.collect()
 }
 
-/// `text` without its control characters: what a server sends is printed, never obeyed by
-/// the terminal.
-fn printable(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_control()).collect()
+/// What a server sent, fit to keep in an error: without its control characters (it is
+/// printed, never obeyed by the terminal) and with the token, should the server repeat it,
+/// replaced by `<token>`.
+fn clean(text: &str, secret: &str) -> String {
+    let printable: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    // The token is never empty: the token file's rules refuse an empty one.
+    printable.replace(secret, "<token>")
 }
 
 #[cfg(test)]
@@ -153,7 +183,7 @@ mod tests {
     fn statuses_classify_by_the_write_and_the_code() {
         let base = "https://jobs.example";
         let kind = |written: bool, code: Code| {
-            let error = classify(base, written, &Status::new(code, "why\u{7}"));
+            let error = classify(base, "tok-1", written, &Status::new(code, "why\u{7}"));
             format!("{error:?}")
         };
         assert_eq!(
@@ -188,7 +218,7 @@ mod tests {
             Code::FailedPrecondition,
             Code::AlreadyExists,
         ] {
-            let got = classify(base, true, &Status::new(code, "why"));
+            let got = classify(base, "tok-1", true, &Status::new(code, "why"));
             assert_eq!(
                 format!("{got:?}"),
                 format!("Rejected {{ code: {code:?}, reason: \"why\" }}")
@@ -203,7 +233,8 @@ mod tests {
     fn a_refusal_is_its_code_and_detail() {
         use js_proto::refusal::refusal_status;
         use js_proto::v1::RefusalCode;
-        let rejected = |status: Status| classify("https://j.example", true, &status).to_string();
+        let rejected =
+            |status: Status| classify("https://j.example", "tok-1", true, &status).to_string();
         let status = refusal_status(RefusalCode::NoCapableHost, "no host has\u{1b} 64 GPUs");
         assert_eq!(
             rejected(status),
@@ -213,6 +244,64 @@ mod tests {
         assert_eq!(
             rejected(status),
             "wall-time-not-positive (invalid-argument)"
+        );
+    }
+
+    /// Asserts that the token, when a server repeats it in a message or in a refusal's
+    /// detail, is kept out of every kind of error: a refusal, a lost answer and a failure
+    /// before the write, by their whole text.
+    #[test]
+    fn a_token_the_server_repeats_is_replaced() {
+        use js_proto::refusal::refusal_status;
+        use js_proto::v1::RefusalCode;
+        let said = |written: bool, status: Status| {
+            classify("https://j.example", "tok-1", written, &status).to_string()
+        };
+        assert_eq!(
+            said(true, Status::not_found("no job for tok-1")),
+            "no job for <token> (not-found)"
+        );
+        assert_eq!(
+            said(true, Status::internal("lost tok-1")),
+            "no answer from https://j.example after the request was sent: lost <token>"
+        );
+        assert_eq!(
+            said(false, Status::unavailable("tok-1?")),
+            "cannot reach https://j.example: <token>?"
+        );
+        let refusal = refusal_status(RefusalCode::NoCapableHost, "tok-1 is not a host");
+        assert_eq!(
+            said(true, refusal),
+            "no-capable-host: <token> is not a host (failed-precondition)"
+        );
+    }
+
+    /// Asserts that the statuses tonic makes itself when it cannot read an answer (too
+    /// large, compressed unasked, not decompressing) are lost answers after the write, while
+    /// the same codes from a server are definite refusals; and the kinds of a call that ran
+    /// out of time before and after its request was written.
+    #[test]
+    fn an_answer_the_client_could_not_read_may_have_acted() {
+        let kind =
+            |status: Status| classify("https://j.example", "tok-1", true, &status).may_have_acted();
+        let large = "Error, decoded message length too large: found 9 bytes, the limit is: 4 bytes";
+        assert!(kind(Status::out_of_range(large)));
+        assert!(kind(Status::unimplemented(
+            "Content is compressed with `gzip` which isn't supported"
+        )));
+        assert!(kind(Status::resource_exhausted(
+            "Error decompressing: size limit"
+        )));
+        assert!(!kind(Status::out_of_range("page token past the end")));
+        assert!(!kind(Status::unimplemented("no such method")));
+        let limit = std::time::Duration::from_secs(30);
+        assert_eq!(
+            timed_out("https://j.example", true, limit).to_string(),
+            "no answer from https://j.example within 30s after the request was sent"
+        );
+        assert_eq!(
+            format!("{:?}", timed_out("https://j.example", false, limit)),
+            "NotSent(Unreached(\"cannot reach https://j.example within 30s\"))"
         );
     }
 

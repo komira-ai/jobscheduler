@@ -5,6 +5,8 @@ syntax = "proto3";
 
 package jobsurface.v1;
 
+import "google/protobuf/timestamp.proto";
+
 // How a thing looks.
 enum Shade {
   // Not given.
@@ -58,7 +60,15 @@ message PutThingRequest {
   double price = 11;
   // Whether it is on show.
   bool shown = 12;
+  // When it was made: a well-known type, read from a file.
+  google.protobuf.Timestamp made = 13;
+  // A mark with nothing in it: only its presence says something.
+  Mark mark = 14;
+  bool loud = 15; // Whether it squeaks (a trailing comment only).
 }
+
+// A mark: a message without fields.
+message Mark {}
 
 // One part of a thing.
 message Part {

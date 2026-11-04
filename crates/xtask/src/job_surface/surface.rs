@@ -112,8 +112,8 @@ pub struct Field {
     pub label: Label,
     /// What the field holds.
     pub kind: Kind,
-    /// The field is a member of a real `oneof` (not the one proto3 makes for `optional`).
-    pub in_oneof: bool,
+    /// The real `oneof` the field is a member of (not the one proto3 makes for `optional`).
+    pub oneof: Option<String>,
 }
 
 /// How many values a field holds.
@@ -138,8 +138,8 @@ pub enum Kind {
     Message(Message),
     /// A map from a scalar key to a value.
     Map(Scalar, Box<Kind>),
-    /// A message already being read further up (a recursive type), by its full name.
-    Cycle(String),
+    /// A message already being read further up (a recursive type).
+    Cycle,
 }
 
 /// The scalar types, grouped as Rust holds them.
@@ -168,8 +168,6 @@ pub enum Scalar {
 /// An enum and its values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Enumeration {
-    /// The full name, without the leading dot.
-    pub name: String,
     /// Each value's name and number, in the order the definition names them.
     pub values: Vec<(String, i32)>,
 }
@@ -190,6 +188,7 @@ const METHOD: i32 = 2;
 /// [`GenError::Services`] unless `set` holds exactly one service; [`GenError::Unresolved`]
 /// for a type name that names no message or enum of the set;
 /// [`GenError::ClientStreaming`] for a call whose request streams;
+/// [`GenError::Foreign`] for a call whose request or response is in another package;
 /// [`GenError::RetryKey`] when an entry of [`RETRY_KEYS`] names this service and its call or
 /// field is not there.
 pub fn read(set: &FileDescriptorSet) -> Result<Surface, GenError> {
@@ -218,6 +217,20 @@ pub fn read(set: &FileDescriptorSet) -> Result<Surface, GenError> {
             index.rpc(method, doc(&comments, &path))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let inside = format!("{}.", file.package());
+    let foreign = rpcs.iter().find_map(|rpc| {
+        let names = [rpc.request.name.as_str(), rpc.response.as_str()];
+        names
+            .into_iter()
+            .find(|name| !name.starts_with(&inside))
+            .map(|name| (rpc, name))
+    });
+    foreign.map_or(Ok(()), |(rpc, name)| {
+        Err(GenError::Foreign {
+            rpc: rpc.name.clone(),
+            message: name.to_owned(),
+        })
+    })?;
     let full = format!("{}.{}", file.package(), service.name());
     let keys = RETRY_KEYS.iter().filter(|entry| entry.service == full);
     keys.into_iter()
@@ -241,7 +254,7 @@ fn attach(rpcs: &mut [Rpc], entry: &KeyEntry) -> Result<(), GenError> {
     let found = field_at(&rpc.request, &field);
     let text = found.is_some_and(|field| {
         matches!(
-            (field.label, &field.kind, field.in_oneof),
+            (field.label, &field.kind, field.oneof.is_some()),
             (Label::Singular, Kind::Scalar(Scalar::Text), false)
         )
     });
@@ -266,7 +279,11 @@ fn field_at<'a>(message: &'a Message, path: &[String]) -> Option<&'a Field> {
     let field = message.fields.iter().find(|field| field.name == *first)?;
     match (rest.is_empty(), &field.kind) {
         (true, _) => Some(field),
-        (false, Kind::Message(inner)) => field_at(inner, rest),
+        // The flags reach a nested field only through a singular message outside a `oneof`.
+        (false, Kind::Message(inner)) => match (field.label, field.oneof.is_some()) {
+            (Label::Singular | Label::Optional, false) => field_at(inner, rest),
+            _ => None,
+        },
         (false, _) => None,
     }
 }
@@ -279,12 +296,21 @@ fn index_of(at: usize) -> i32 {
 /// The comments of a file's elements, by the path of the element.
 type Comments = BTreeMap<Vec<i32>, Vec<String>>;
 
-/// The leading comment of every element of `file` that has one, each line trimmed and the
+/// The comment of every element of `file` that has one: its leading comment, or its trailing
+/// one (`int32 limit = 2; // ...`) when it has no leading comment; each line trimmed and the
 /// trailing blank lines dropped.
 fn comments(file: &FileDescriptorProto) -> Comments {
     let locations = file.source_code_info.iter().flat_map(|info| &info.location);
     locations
-        .map(|location| (location.path.clone(), lines(location.leading_comments())))
+        .map(|location| {
+            let leading = lines(location.leading_comments());
+            let trailing = lines(location.trailing_comments());
+            let comment = match leading.is_empty() {
+                true => trailing,
+                false => leading,
+            };
+            (location.path.clone(), comment)
+        })
         .collect()
 }
 
@@ -403,7 +429,13 @@ impl<'a> Index<'a> {
             .map(|(at, field)| {
                 let mut field_path = path.clone();
                 field_path.extend([FIELD, index_of(at)]);
-                self.field(field, doc(&comments, &field_path), reading)
+                let oneof = field.oneof_index.and_then(|at| {
+                    message
+                        .oneof_decl
+                        .get(usize::try_from(at).unwrap_or(usize::MAX))
+                });
+                let oneof = oneof.map(|decl| decl.name().to_owned());
+                self.field(field, oneof, doc(&comments, &field_path), reading)
             })
             .collect::<Result<Vec<_>, _>>();
         reading.pop();
@@ -417,6 +449,7 @@ impl<'a> Index<'a> {
     fn field(
         &self,
         field: &FieldDescriptorProto,
+        oneof: Option<String>,
         doc: Vec<String>,
         reading: &mut Vec<String>,
     ) -> Result<Field, GenError> {
@@ -431,7 +464,7 @@ impl<'a> Index<'a> {
             doc,
             label,
             kind: self.kind(field, reading)?,
-            in_oneof: field.oneof_index.is_some() & !optional,
+            oneof: oneof.filter(|_| !optional),
         })
     }
 
@@ -459,7 +492,7 @@ impl<'a> Index<'a> {
         let cycle = reading.iter().any(|name| name == type_name);
         match (is_map, cycle) {
             (true, _) => self.map(message, reading),
-            (false, true) => Ok(Kind::Cycle(type_name.trim_start_matches('.').to_owned())),
+            (false, true) => Ok(Kind::Cycle),
             (false, false) => self.message(type_name, reading).map(Kind::Message),
         }
     }
@@ -485,7 +518,6 @@ impl<'a> Index<'a> {
         let found = self.enums.get(type_name);
         let item = found.ok_or_else(|| GenError::Unresolved(type_name.to_owned()))?;
         Ok(Enumeration {
-            name: type_name.trim_start_matches('.').to_owned(),
             values: item
                 .value
                 .iter()

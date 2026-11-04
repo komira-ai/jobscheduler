@@ -33,6 +33,8 @@ pub enum Answer {
     Hang,
     /// An HTTP redirect to another origin.
     Redirect,
+    /// The response headers, and then a body that never ends.
+    Stall,
 }
 
 /// One request the fake read.
@@ -40,6 +42,8 @@ pub enum Answer {
 pub struct Seen {
     /// The call's path, such as `/jobscheduler.v1.JobService/SubmitJob`.
     pub path: String,
+    /// The request's whole URI, scheme and authority included.
+    pub uri: String,
     /// The `authorization` metadata.
     pub authorization: Option<String>,
     /// The message bytes, without gRPC's five-byte frame prefix.
@@ -52,7 +56,7 @@ pub struct Fake {
     answers: Arc<Mutex<BTreeMap<String, Vec<Answer>>>>,
     seen: Arc<Mutex<Vec<Seen>>>,
     tasks: Arc<Mutex<Vec<AbortHandle>>>,
-    dials: Arc<Mutex<usize>>,
+    dials: Arc<Mutex<Vec<(String, u16)>>>,
 }
 
 impl Fake {
@@ -76,16 +80,21 @@ impl Fake {
 
     /// How many connections the client dialled.
     pub fn dials(&self) -> usize {
-        *self.dials.lock().unwrap()
+        self.dials.lock().unwrap().len()
+    }
+
+    /// The host and port of each connection the client dialled.
+    pub fn destinations(&self) -> Vec<(String, u16)> {
+        self.dials.lock().unwrap().clone()
     }
 
     /// A dialer whose every connection is served by this fake, inside TLS with `tls` when it
     /// is given.
     pub fn dialer(&self, tls: Option<Arc<rustls::ServerConfig>>) -> Dialer {
         let fake = self.clone();
-        Dialer::new(move |_host, _port| {
+        Dialer::new(move |host, port| {
             let (client, server) = tokio::io::duplex(1 << 16);
-            *fake.dials.lock().unwrap() += 1;
+            fake.dials.lock().unwrap().push((host.to_owned(), port));
             let task = tokio::spawn(serve(fake.clone(), server, tls.clone()));
             fake.tasks.lock().unwrap().push(task.abort_handle());
             Box::pin(async move { Ok(Box::new(client) as Box<dyn Io>) })
@@ -147,6 +156,7 @@ impl Service<http::Request<Body>> for Fake {
         let fake = self.clone();
         Box::pin(async move {
             let path = request.uri().path().to_owned();
+            let uri = request.uri().to_string();
             let authorization = request
                 .headers()
                 .get("authorization")
@@ -161,6 +171,7 @@ impl Service<http::Request<Body>> for Fake {
             let message = body.get(5..).unwrap_or_default().to_vec();
             fake.seen.lock().unwrap().push(Seen {
                 path: path.clone(),
+                uri,
                 authorization,
                 message,
             });
@@ -172,6 +183,13 @@ impl Service<http::Request<Body>> for Fake {
                     .header("location", "https://elsewhere.example/")
                     .body(Body::empty())
                     .unwrap(),
+                Answer::Stall => {
+                    let never = tokio_stream::pending::<Result<Frame<Bytes>, Status>>();
+                    http::Response::builder()
+                        .header("content-type", "application/grpc")
+                        .body(Body::new(http_body_util::StreamBody::new(never)))
+                        .unwrap()
+                }
                 Answer::Hang => {
                     fake.tasks
                         .lock()
@@ -255,4 +273,9 @@ pub fn tls_server() -> (Arc<rustls::ServerConfig>, String) {
         .unwrap();
     config.alpn_protocols = vec![b"h2".to_vec()];
     (Arc::new(config), made.cert.pem())
+}
+
+/// A dialer that never opens its stream.
+pub fn stalling() -> Dialer {
+    Dialer::new(|_host, _port| Box::pin(std::future::pending()))
 }

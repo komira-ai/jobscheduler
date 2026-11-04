@@ -16,10 +16,12 @@
 //!
 //! **Flags.** One flag per leaf of the request, named by the field names in kebab case joined
 //! by dots: a nested message (singular or `optional`) is walked, so `--spec.needs.cpu-millis`.
-//! A scalar or enum takes one value, or repeats when the field is repeated; a map takes
+//! A scalar or enum takes one value, or repeats when the field is repeated (an enum by the
+//! short name of any of its values, the one numbered 0 too); a map takes
 //! `KEY=VALUE` and repeats; an integer field named `*_seconds` or `*_secs` takes a duration.
 //! A field the flags cannot spell (`bytes`, a repeated message, a map of messages, a `oneof`
-//! member, a recursive message) is `--<name>-file <path>`, a file holding the field's value in
+//! member (of one `oneof`, one flag at most may be given), a recursive message, a well-known
+//! type of `google.protobuf`, a message without fields) is `--<name>-file <path>`, a file holding the field's value in
 //! proto3 JSON, so no call is out of reach. The field a call is idempotent on
 //! ([`super::surface::RETRY_KEYS`]) gets the entry's flag in place of its dotted name
 //! (`--id` for `spec.job_id` of `SubmitJob`), is not required, and is the command's
@@ -73,6 +75,9 @@ pub struct Flag {
     pub repeated: bool,
     /// The flag must be given (the request's subject).
     pub required: bool,
+    /// The `oneof` of the field, named by its path from the request (`spec.how`): of the
+    /// flags of one `oneof`, at most one may be given.
+    pub oneof: Option<String>,
     /// The field's comment as one paragraph.
     pub doc: String,
 }
@@ -156,7 +161,7 @@ fn subject(request: &Message) -> Option<&Field> {
         .fields
         .iter()
         .filter(|field| {
-            let singular = matches!(field.label, Label::Singular) & !field.in_oneof;
+            let singular = matches!(field.label, Label::Singular) & field.oneof.is_none();
             singular & matches!(field.kind, Kind::Scalar(_))
         })
         .collect();
@@ -298,6 +303,11 @@ impl Walk<'_> {
             kind,
             repeated,
             required: subject,
+            oneof: field.oneof.as_ref().map(|oneof| {
+                let mut path = at.to_vec();
+                path.push(oneof.clone());
+                path.join(".")
+            }),
             doc: paragraph(&field.doc),
         }
     }
@@ -305,7 +315,13 @@ impl Walk<'_> {
 
 /// What `field` becomes (the module docs give the rule).
 fn leaf(field: &Field) -> Leaf<'_> {
-    match (&field.kind, field.label, field.in_oneof) {
+    // A well-known type (its proto3 JSON is not an object of its fields) and a message
+    // without fields (whose presence is all it says) are read from a file.
+    let special = match &field.kind {
+        Kind::Message(inner) => well_known_or_empty(inner),
+        _ => false,
+    };
+    match (&field.kind, field.label, field.oneof.is_some() | special) {
         (_, _, true) => Leaf::File,
         (Kind::Message(inner), Label::Singular | Label::Optional, false) => Leaf::Nested(inner),
         (Kind::Map(key, value), _, false) => {
@@ -320,10 +336,15 @@ fn leaf(field: &Field) -> Leaf<'_> {
     }
 }
 
+/// Whether `message` is a well-known type (package `google.protobuf`) or has no fields.
+fn well_known_or_empty(message: &Message) -> bool {
+    message.name.starts_with("google.protobuf.") | message.fields.is_empty()
+}
+
 /// What a flag of one value of `kind` takes, or `None` when a flag cannot spell it.
 fn value_kind(kind: &Kind, name: &str) -> Option<FlagKind> {
     match kind {
-        Kind::Scalar(Scalar::Bytes) | Kind::Message(_) | Kind::Map(..) | Kind::Cycle(_) => None,
+        Kind::Scalar(Scalar::Bytes) | Kind::Message(_) | Kind::Map(..) | Kind::Cycle => None,
         Kind::Scalar(scalar) => Some(seconds_or(*scalar, name)),
         Kind::Enum(enumeration) => Some(FlagKind::Enum(choices(enumeration))),
     }
@@ -342,8 +363,8 @@ fn seconds_or(scalar: Scalar, name: &str) -> FlagKind {
     }
 }
 
-/// The values a flag of `enumeration` takes: every value but the one numbered 0, by its
-/// short name, each with its own name.
+/// The values a flag of `enumeration` takes: every value, the one numbered 0 too (a
+/// repeated, map or `optional` enum can hold it), by its short name, each with its own name.
 fn choices(enumeration: &Enumeration) -> Vec<(String, String)> {
     let names: Vec<&str> = enumeration
         .values
@@ -355,7 +376,6 @@ fn choices(enumeration: &Enumeration) -> Vec<(String, String)> {
         .values
         .iter()
         .zip(short)
-        .filter(|((_, number), _)| *number != 0)
         .map(|((name, _), short)| (short, name.clone()))
         .collect()
 }
@@ -415,12 +435,15 @@ fn command_text(command: &Command) -> String {
 fn flag_text(flag: &Flag) -> String {
     let field: Vec<String> = flag.field.iter().map(|part| format!("{part:?}")).collect();
     format!(
-        "            Flag {{ name: {:?}, field: &[{}], kind: {}, repeated: {}, required: {}, doc: {:?} }},\n",
+        "            Flag {{ name: {:?}, field: &[{}], kind: {}, repeated: {}, required: {}, oneof: {}, doc: {:?} }},\n",
         flag.name,
         field.join(", "),
         kind_text(&flag.kind),
         flag.repeated,
         flag.required,
+        flag.oneof
+            .as_ref()
+            .map_or("None".to_owned(), |oneof| format!("Some({oneof:?})")),
         flag.doc,
     )
 }

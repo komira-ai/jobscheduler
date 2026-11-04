@@ -34,17 +34,21 @@ use crate::server_url::ServerUrl;
 use crate::token;
 
 /// A client of the job service at one origin, holding one token. It never prints the token:
-/// it has no `Debug`.
+/// it has no `Debug`, and a server's text that repeats the token reads `<token>` in an error.
 ///
 /// A call that fails says whether it may have taken effect ([`JobError::may_have_acted`]).
 /// The client never retries and never changes a request: a caller that tries again sends
-/// the same request.
-#[derive(Clone)]
+/// the same request. The client is not `Clone` and every call takes it by `&mut`: one call at
+/// a time is in flight on its connection, so the record of what was written is that call's.
 pub struct JobClient {
     service: JobServiceClient<Channel>,
     bearer: MetadataValue<Ascii>,
+    /// The token itself, to keep it out of what a server says back.
+    token: String,
     base: String,
-    /// How many requests the client's connections have begun to write.
+    /// The most a call may take, from its start to its whole answer.
+    limit: Duration,
+    /// How many requests the client's connection has begun to write.
     begun: Arc<AtomicU64>,
 }
 
@@ -55,7 +59,9 @@ struct Attempt(u64);
 impl JobClient {
     /// Checks the flags and builds the client, as [`crate::Client::connect`] does: the URL,
     /// the owner-only token file and, for `https://`, the roots to trust. Every call is
-    /// limited to `limit`, connecting included. Nothing is dialled until the first call.
+    /// limited to `limit` from its start to its whole answer, connecting included; a call that
+    /// runs out of time is `NotSent` when its request was not written and `MayHaveActed` when
+    /// it was. Nothing is dialled until the first call.
     ///
     /// # Errors
     ///
@@ -87,17 +93,33 @@ impl JobClient {
         let mut bearer = MetadataValue::try_from(bearer.as_str())
             .map_err(|why| JobError::flag("--token-file", why))?;
         bearer.set_sensitive(true);
+        let token = bearer
+            .strip_prefix("Bearer ")
+            .unwrap_or_default()
+            .to_owned();
         let begun = Arc::new(AtomicU64::new(0));
         let connector = wire::Connector::new(&server, ca_cert, dialer, Arc::clone(&begun))?;
-        let endpoint = Endpoint::from_shared(server.base.clone())
+        // The connector does TLS itself, so the channel's own address is plain `http://` (a
+        // tonic built with its TLS features would otherwise wrap or refuse the stream), and
+        // the origin the requests carry is the server's, `https://` included.
+        let origin: tonic::codegen::http::Uri = server
+            .base
+            .parse()
+            .map_err(|why| JobError::flag("--server", why))?;
+        let authority = origin
+            .authority()
+            .map(|a| a.as_str().to_owned())
+            .unwrap_or_default();
+        let endpoint = Endpoint::from_shared(format!("http://{authority}"))
             .map_err(|why| JobError::flag("--server", why))?
-            .timeout(limit)
-            .connect_timeout(limit);
+            .origin(origin);
         let channel = endpoint.connect_with_connector_lazy(connector);
         Ok(Self {
             service: JobServiceClient::new(channel),
             bearer,
+            token,
             base: server.base,
+            limit,
             begun,
         })
     }
@@ -115,7 +137,16 @@ impl JobClient {
     /// The kind of failure `status` is for the call that began at `attempt`: the request
     /// was written when a request began after it.
     fn classify(&self, attempt: Attempt, status: &tonic::Status) -> JobError {
-        let written = self.begun.load(Ordering::SeqCst) > attempt.0;
-        error::classify(&self.base, written, status)
+        error::classify(&self.base, &self.token, self.written(attempt), status)
+    }
+
+    /// The failure of the call that began at `attempt` and ran out of its limit.
+    fn timed_out(&self, attempt: Attempt) -> JobError {
+        error::timed_out(&self.base, self.written(attempt), self.limit)
+    }
+
+    /// Whether a request began after `attempt`: the call's own, as only one is in flight.
+    fn written(&self, attempt: Attempt) -> bool {
+        self.begun.load(Ordering::SeqCst) > attempt.0
     }
 }

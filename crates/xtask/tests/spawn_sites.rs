@@ -852,8 +852,9 @@ fn what_cannot_be_read_is_an_error() {
 
 /// A dependency that `include!`s code the check cannot read fails the walk when the agent
 /// depends on it plainly, and when its crate turns the dependency on by default; it is left
-/// out only as an `optional` dependency of a crate with no default feature, which a build
-/// of the agent does not link. It catches a walk that, to leave the job client out, stops
+/// out only as an `optional` dependency of a crate with no default feature that no crate it
+/// reads turns on (by `features = [...]`, or by forwarding `crate/feature`), which a build of
+/// the agent does not link. It catches a walk that, to leave the job client out, stops
 /// following the dependencies that are built.
 #[test]
 fn only_an_optional_dependency_off_by_default_is_left_out() {
@@ -893,6 +894,35 @@ fn only_an_optional_dependency_off_by_default_is_left_out() {
     tree.manifest("gen", "");
     tree.put("crates/gen/src/lib.rs", generated);
     assert_eq!(tree.error(), error);
+
+    // The agent turns the feature on itself, or through a feature of a crate between.
+    let optional = "[dependencies]\ngen = { path = \"../gen\", optional = true }\n[features]\njobs = [\"dep:gen\"]\n";
+    for (name, agent, middle) in [
+        (
+            "caller-enabled",
+            "[dependencies]\nlib = { path = \"../lib\", features = [\"jobs\"] }\n",
+            None,
+        ),
+        (
+            "forwarded",
+            "[dependencies]\nmid = { path = \"../mid\" }\n",
+            Some(
+                "[dependencies]\nlib = { path = \"../lib\" }\n[features]\ndefault = [\"all\"]\nall = [\"lib/jobs\"]\n",
+            ),
+        ),
+    ] {
+        let tree = Tree::new(name);
+        tree.manifest("js-agent", agent);
+        tree.manifest("lib", optional);
+        tree.put("crates/lib/src/lib.rs", "");
+        middle.iter().for_each(|middle| {
+            tree.manifest("mid", middle);
+            tree.put("crates/mid/src/lib.rs", "");
+        });
+        tree.manifest("gen", "");
+        tree.put("crates/gen/src/lib.rs", generated);
+        assert_eq!(tree.error(), error, "{name}");
+    }
 }
 
 /// The features a build of `package` alone resolves for `dependency`, by `cargo tree`

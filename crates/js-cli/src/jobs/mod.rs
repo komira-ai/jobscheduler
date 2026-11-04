@@ -79,6 +79,9 @@ pub struct Flag {
     pub repeated: bool,
     /// The flag must be given.
     pub required: bool,
+    /// The `oneof` the field is a member of, by its path from the request: of the flags of
+    /// one `oneof`, at most one may be given (more is a usage error).
+    pub oneof: Option<&'static str>,
     /// The field's comment, as one paragraph.
     pub doc: &'static str,
 }
@@ -168,6 +171,31 @@ fn with_flags(target: clap::Command, command: &'static Command) -> clap::Command
         .about(summary.trim_end().to_owned())
         .long_about(command.doc)
         .args(command.flags.iter().map(arg))
+        .groups(oneofs(command))
+}
+
+/// One group per `oneof` of `command`'s request, holding the flags of its members, at most
+/// one of which may be given.
+fn oneofs(command: &'static Command) -> Vec<clap::ArgGroup> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for oneof in command.flags.iter().filter_map(|flag| flag.oneof) {
+        match names.contains(&oneof) {
+            true => {}
+            false => names.push(oneof),
+        }
+    }
+    names
+        .into_iter()
+        .map(|oneof| {
+            let members = command
+                .flags
+                .iter()
+                .filter(|flag| flag.oneof == Some(oneof));
+            clap::ArgGroup::new(oneof)
+                .args(members.map(|flag| flag.name))
+                .multiple(false)
+        })
+        .collect()
 }
 
 /// Where the call's own flags stand in a command's help: after the four global flags (whose
@@ -354,13 +382,17 @@ pub(crate) fn run(
             .transpose()?
             .unwrap_or_default(),
     );
-    drawn.into_iter().for_each(|(_, id)| {
-        let _ = err.write_all(
-            render
-                .drawn(command.path.first().copied().unwrap_or_default(), id)
-                .as_bytes(),
-        );
-    });
+    // A drawn id is the only way to run the command again safely, so nothing is sent unless
+    // it was printed.
+    let group = command.path.first().copied().unwrap_or_default();
+    drawn
+        .map(|(_, id)| show(err, &render.drawn(group, id)))
+        .transpose()
+        .map_err(|why| {
+            Failure::Server(format!(
+                "cannot print the drawn id, so nothing was sent: {why}"
+            ))
+        })?;
     let response = message(&pool, command.response)?;
     let mut sink = |answer: &[u8]| print(&response, answer, render, out);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -431,6 +463,12 @@ fn retry_key(
         .map(str::to_owned);
     match (flag, given) {
         (None, _) => Ok(None),
+        // An empty id would let the service choose one, and a run repeated after a lost answer
+        // would then make a second job.
+        (Some(flag), Some(id)) if id.is_empty() => Err(Failure::flag(
+            &format!("--{}", flag.name),
+            "must not be empty: leave the flag out to have js draw an id",
+        )),
         (Some(flag), Some(id)) => Ok(Some((flag, id))),
         (Some(flag), None) => fresh_id(draw()).map(|id| Some((flag, id))),
     }
@@ -477,8 +515,14 @@ fn print(
 ) -> Result<(), Failure> {
     let message = DynamicMessage::decode(response.clone(), answer)
         .map_err(|why| mismatch(response.full_name(), &why))?;
-    let _ = out.write_all(render.answer(&message).as_bytes());
-    Ok(())
+    show(out, &render.answer(&message))
+        .map_err(|why| Failure::Server(format!("cannot write the answer: {why}")))
+}
+
+/// Writes `text` to `to` and flushes it.
+fn show(to: &mut dyn Write, text: &str) -> std::io::Result<()> {
+    to.write_all(text.as_bytes())?;
+    to.flush()
 }
 
 /// The descriptor set of the job service.
@@ -570,6 +614,98 @@ mod tests {
         .map(value_name)
         .collect();
         assert_eq!(names, ["BOOL", "N", "X", "X", "TEXT", "DURATION", "PATH"]);
+    }
+
+    /// A command whose request has a `oneof` of two members, and a flag outside it.
+    static SHAPE: [Command; 1] = [Command {
+        path: &["thing", "shape"],
+        rpc: "ShapeThing",
+        doc: "Shapes a thing.",
+        idempotency: Idempotency::Idempotent,
+        request: "jobsurface.v1.ShapeThingRequest",
+        response: "jobsurface.v1.ShapeThingResponse",
+        streaming: false,
+        retry_key: None,
+        flags: &[
+            Flag {
+                name: "tool-file",
+                field: &["tool"],
+                kind: Kind::File,
+                repeated: false,
+                required: false,
+                oneof: Some("how"),
+                doc: "",
+            },
+            Flag {
+                name: "machine-file",
+                field: &["machine"],
+                kind: Kind::File,
+                repeated: false,
+                required: false,
+                oneof: Some("how"),
+                doc: "",
+            },
+            Flag {
+                name: "thing-id",
+                field: &["thing_id"],
+                kind: Kind::Text,
+                repeated: false,
+                required: false,
+                oneof: None,
+                doc: "",
+            },
+        ],
+    }];
+
+    /// Asserts that of the flags of one `oneof` one may be given and two are a usage error,
+    /// in either order: the request could hold only one of them.
+    #[test]
+    fn two_members_of_one_oneof_are_refused() {
+        let js = clap::Command::new("js").subcommands(commands(&SHAPE));
+        let parse = |words: &[&str]| {
+            js.clone()
+                .try_get_matches_from(words)
+                .map(|_| ())
+                .map_err(|e| e.kind())
+        };
+        assert_eq!(
+            parse(&[
+                "js",
+                "thing",
+                "shape",
+                "--tool-file",
+                "a",
+                "--thing-id",
+                "t"
+            ]),
+            Ok(())
+        );
+        for words in [
+            [
+                "js",
+                "thing",
+                "shape",
+                "--tool-file",
+                "a",
+                "--machine-file",
+                "b",
+            ],
+            [
+                "js",
+                "thing",
+                "shape",
+                "--machine-file",
+                "b",
+                "--tool-file",
+                "a",
+            ],
+        ] {
+            assert_eq!(
+                parse(&words),
+                Err(clap::error::ErrorKind::ArgumentConflict),
+                "{words:?}"
+            );
+        }
     }
 
     /// A command of `idempotency` with no flags, for the failures below.

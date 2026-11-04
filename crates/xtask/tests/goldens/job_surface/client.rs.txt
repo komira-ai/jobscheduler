@@ -13,23 +13,23 @@ impl JobClient {
     /// A thing already there is replaced.
     pub async fn put_thing(&mut self, request: v1::PutThingRequest) -> Result<v1::PutThingResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.put_thing(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.put_thing(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Watches the things on the shelf: one event per change, until the server ends the
     /// stream.
     pub async fn watch_things(&mut self, request: v1::WatchThingsRequest) -> Result<Replies<v1::ThingEvent>, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.watch_things(request).await;
-        answer.map(|stream| Replies { stream: stream.into_inner(), base: self.base.clone() }).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.watch_things(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(|stream| Replies { stream: stream.into_inner(), base: self.base.clone() }).map_err(|status| self.classify(attempt, &status)))
     }
 
     /// Shapes a thing: its size and its shade.
     pub async fn shape_thing(&mut self, request: v1::ShapeThingRequest) -> Result<v1::ShapeThingResponse, JobError> {
         let (attempt, request) = self.begin(request);
-        let answer = self.service.shape_thing(request).await;
-        answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status))
+        let answer = tokio::time::timeout(self.limit, self.service.shape_thing(request)).await;
+        answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 }
 

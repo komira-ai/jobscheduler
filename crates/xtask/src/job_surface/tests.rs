@@ -213,12 +213,40 @@ fn the_retry_key_entry_fails_when_the_definition_loses_it() {
     let flat = message("Req", vec![field("spec", 1, Type::String, "")]);
     let lost = "jobscheduler.v1.JobService.SubmitJob has no singular string field spec.job_id, which the generator's retry-key entry names";
     assert_eq!(service(vec![submit.clone()], vec![flat]), lost);
+    let mut repeated = field("spec", 1, Type::Message, ".jobscheduler.v1.Spec");
+    repeated.label = Some(Label::Repeated.into());
+    let text_id = message("Spec", vec![field("job_id", 1, Type::String, "")]);
+    assert_eq!(
+        service(
+            vec![submit.clone()],
+            vec![message("Req", vec![repeated]), text_id]
+        ),
+        lost
+    );
     let nested = message(
         "Req",
         vec![field("spec", 1, Type::Message, ".jobscheduler.v1.Spec")],
     );
     let spec = message("Spec", vec![field("job_id", 1, Type::Uint64, "")]);
     assert_eq!(service(vec![submit], vec![nested, spec]), lost);
+}
+
+/// Asserts that a call whose request is a message of another package is refused by name:
+/// the client names the messages of the service's own package only.
+#[test]
+fn a_message_of_another_package_is_refused() {
+    let one = set("p", vec![method("GetThing", ".q.Thing")], Vec::new());
+    let mut file = FileDescriptorSet::decode(one.as_slice()).unwrap_or_default();
+    file.file.push(FileDescriptorProto {
+        name: Some("q.proto".to_owned()),
+        package: Some("q".to_owned()),
+        message_type: vec![message("Thing", Vec::new())],
+        ..FileDescriptorProto::default()
+    });
+    assert_eq!(
+        refused(&file.encode_to_vec()),
+        "GetThing: q.Thing is not in the service's package"
+    );
 }
 
 /// The directory of this crate, which holds no generated file.

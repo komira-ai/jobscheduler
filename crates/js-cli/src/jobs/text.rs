@@ -1,8 +1,9 @@
-//! An answer as text: one `path: value` line per field that is set, in the order of the
-//! field numbers, a nested message's fields under its name with a dot (`job.spec.image`),
+//! An answer as text: one `path: value` line per field that is set, in the order the
+//! definition names the fields, a nested message's fields under its name with a dot (`job.spec.image`),
 //! a list's elements by index (`jobs[0].id`) and a map's entries by key, in key order
 //! (`job.spec.labels.team`). An enum value is its short name (`queued`); a `bytes` field
-//! (a log tail) is its label on a line of its own and then its text, so `GetLogs` prints the
+//! (a log tail) is its label on a line of its own and then its text, even when it is empty
+//! (bytes that are not UTF-8 print with the replacement character), so `GetLogs` prints the
 //! standard output tail and then the standard error tail, each under its label, and a
 //! `truncated: true` line when a stream was cut. Control characters are left out of what
 //! the server sent, except the line breaks and tabs of a log tail.
@@ -18,13 +19,15 @@ pub(crate) fn lines(message: &DynamicMessage) -> String {
 
 /// The lines of the fields of `message`, each path starting with `prefix`.
 fn fields(message: &DynamicMessage, prefix: &str, out: &mut String) {
-    for (field, value) in message.fields() {
-        put(
-            &format!("{prefix}{}", field.name()),
-            &field.kind(),
-            value,
-            out,
-        );
+    for field in message.descriptor().fields() {
+        let path = format!("{prefix}{}", field.name());
+        let tail = matches!(field.kind(), Kind::Bytes) & !field.is_list();
+        match (message.has_field(&field), tail) {
+            (true, _) => put(&path, &field.kind(), &message.get_field(&field), out),
+            // A log tail keeps its label when it is empty, so both tails are always shown.
+            (false, true) => put(&path, &Kind::Bytes, &Value::Bytes(Default::default()), out),
+            (false, false) => {}
+        }
     }
 }
 

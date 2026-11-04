@@ -29,12 +29,17 @@ const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens/job_su
 fn definition(calls: usize) -> FileDescriptorSet {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support");
     let mut compiler = protox::Compiler::new([dir]).expect("the include directory");
-    compiler.include_source_info(true);
+    compiler.include_source_info(true).include_imports(true);
     compiler
         .open_files(["surface.proto"])
         .expect("the test definition compiles");
     let mut set = compiler.file_descriptor_set();
-    set.file[0].service[0].method.truncate(calls);
+    let file = set
+        .file
+        .iter_mut()
+        .find(|file| !file.service.is_empty())
+        .expect("the service's file");
+    file.service[0].method.truncate(calls);
     set
 }
 
@@ -166,6 +171,14 @@ fn a_new_rpc_appears_as_a_subcommand() {
     let before = tree(&rendered(2).cli);
     let after = tree(&rendered(3).cli);
     assert_eq!(
+        order(&rendered(2).cli),
+        ["thing", "thing put", "thing watch"]
+    );
+    assert_eq!(
+        order(&rendered(3).cli),
+        ["thing", "thing put", "thing watch", "thing shape"]
+    );
+    assert_eq!(
         before.keys().collect::<Vec<_>>(),
         ["thing put", "thing watch"]
     );
@@ -190,6 +203,19 @@ fn a_new_rpc_appears_as_a_subcommand() {
             "machine-file",
         ]
     );
+}
+
+/// The groups and commands js-cli's interpreter builds from a rendered table, in the order
+/// it builds them.
+fn order(cli: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for group in js_cli::jobs::commands(surface_of(cli)) {
+        found.push(group.get_name().to_owned());
+        for sub in group.get_subcommands() {
+            found.push(format!("{} {}", group.get_name(), sub.get_name()));
+        }
+    }
+    found
 }
 
 /// The commands js-cli's interpreter builds from a rendered table, by their words: each
@@ -328,9 +354,13 @@ fn leaf_fields(
         path.push(field.name().to_owned());
         let inner = messages.get(field.type_name());
         let map = inner.is_some_and(|m| m.options.as_ref().is_some_and(|o| o.map_entry()));
+        // A well-known type and a message without fields are read from a file.
+        let file = inner.is_some_and(|m| m.field.is_empty())
+            || field.type_name().starts_with(".google.protobuf.");
         let walk = field.r#type() == Type::Message
             && field.label() != Label::Repeated
             && !map
+            && !file
             && !walking.iter().any(|w| w == field.type_name())
             && (field.oneof_index.is_none() || field.proto3_optional());
         if walk {
@@ -477,6 +507,10 @@ fn flag_of(expr: &Expr) -> Flag {
         kind: kind_of(&fields["kind"]),
         repeated: boolean(&fields["repeated"]),
         required: boolean(&fields["required"]),
+        oneof: match last_segment(&fields["oneof"]).as_str() {
+            "Some" => Some(text(&arguments(&fields["oneof"])[0])),
+            _ => None,
+        },
         doc: text(&fields["doc"]),
     }
 }

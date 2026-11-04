@@ -165,7 +165,14 @@ fn roots(ca_cert: Option<&Path>) -> Result<RootCertStore, JobError> {
     let mut store = RootCertStore::empty();
     match ca_cert {
         Some(path) => {
-            store.add_parsable_certificates(crate::client::pem_roots(path)?);
+            // Every certificate of the file must be one: one that does not parse is refused
+            // rather than left out.
+            let refuse = |why: rustls::Error| {
+                JobError::flag("--ca-cert", format!("{}: {why}", path.display()))
+            };
+            crate::client::pem_roots(path)?
+                .into_iter()
+                .try_for_each(|cert| store.add(cert).map_err(refuse))?;
         }
         None => store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
     }
@@ -308,6 +315,20 @@ mod tests {
             let (first, second) = bytes.split_at(cut);
             assert_eq!(frames.feed(first) + frames.feed(second), 2, "cut at {cut}");
         }
+    }
+
+    /// Asserts the count at each point of a `HEADERS` frame written in pieces: nothing while
+    /// its header is incomplete, one once its last header byte is written, and nothing more
+    /// for its payload.
+    #[test]
+    fn a_headers_frame_counts_when_its_header_is_whole() {
+        let mut frames = Frames::default();
+        assert_eq!(frames.feed(&[0; PREFACE]), 0);
+        let header = frame(HEADERS, 2);
+        assert_eq!(frames.feed(&header[..5]), 0);
+        assert_eq!(frames.feed(&header[5..8]), 0);
+        assert_eq!(frames.feed(&header[8..]), 1);
+        assert_eq!(frames.feed(&[0, 0]), 0);
     }
 
     /// Asserts that a write the stream refuses counts nothing, so a request whose bytes

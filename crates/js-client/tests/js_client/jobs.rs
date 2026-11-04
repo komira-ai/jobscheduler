@@ -15,7 +15,7 @@ use js_proto::v1::{
 use prost::Message as _;
 use tonic::Code;
 
-use crate::fake_jobs::{Answer, Fake, refusing, tls_server};
+use crate::fake_jobs::{Answer, Fake, refusing, stalling, tls_server};
 use crate::support::Scratch;
 
 /// The limit of every call; nothing in these tests waits for it.
@@ -401,4 +401,147 @@ async fn the_tcp_dialer_reaches_a_loopback_server() {
     .unwrap();
     jobs.list_pools(ListPoolsRequest {}).await.unwrap();
     assert_eq!(fake.seen().len(), 1);
+}
+
+/// Asserts that a call is limited from its start to its whole answer: a server that sends
+/// the response headers and then never the body fails the call at the limit as a lost
+/// answer (the request was written), and a connection that never opens fails it as not sent.
+/// The clock is paused, so the limit passes with no real waiting.
+#[tokio::test(start_paused = true)]
+async fn a_call_is_limited_to_its_whole_answer() {
+    let dir = Scratch::new("jobs_limit");
+    let fake = Fake::new();
+    fake.answer("GetJob", vec![Answer::Stall]);
+    let mut stalled = client(&dir, PLAIN, None, fake.dialer(None)).await.unwrap();
+    let error = stalled.get_job(get()).await.err().unwrap();
+    assert_eq!(
+        (error.to_string(), error.may_have_acted()),
+        (
+            "no answer from http://localhost:7070 within 20s after the request was sent".to_owned(),
+            true
+        )
+    );
+    assert_eq!(fake.seen().len(), 1);
+    let mut unopened = client(&dir, PLAIN, None, stalling()).await.unwrap();
+    let error = unopened.get_job(get()).await.err().unwrap();
+    assert_eq!(
+        (error.to_string(), error.may_have_acted()),
+        (
+            "cannot reach http://localhost:7070 within 20s".to_owned(),
+            false
+        )
+    );
+}
+
+/// Asserts that the dialer is given the server's own host and port: an IPv6 address without
+/// its brackets and an explicit port, and the default ports of `https://` and `http://`;
+/// and that a request carries the server's origin, `https://` included, though the client
+/// does TLS itself.
+#[tokio::test]
+async fn the_dialer_gets_the_servers_host_and_port_and_requests_its_origin() {
+    let dir = Scratch::new("jobs_destination");
+    let fake = Fake::new();
+    for server in [
+        "https://[::1]:8443",
+        "https://jobs.example",
+        "http://localhost",
+    ] {
+        let mut jobs = client(&dir, server, None, fake.dialer(None)).await.unwrap();
+        let _ = jobs.list_hosts(ListHostsRequest {}).await;
+    }
+    assert_eq!(
+        fake.destinations(),
+        [
+            ("::1".to_owned(), 8443),
+            ("jobs.example".to_owned(), 443),
+            ("localhost".to_owned(), 80)
+        ]
+    );
+    let (server, pem) = tls_server();
+    let ours = dir.write("ours.pem", pem.as_bytes(), 0o644);
+    let tls = Fake::new();
+    let mut jobs = client(
+        &dir,
+        "https://jobs.example",
+        Some(&ours),
+        tls.dialer(Some(server)),
+    )
+    .await
+    .unwrap();
+    jobs.list_hosts(ListHostsRequest {}).await.unwrap();
+    assert_eq!(
+        tls.seen()[0].uri,
+        "https://jobs.example/jobscheduler.v1.JobService/ListHosts"
+    );
+}
+
+/// Asserts that a trusted certificate made for another name is refused before the request
+/// is written, and that a `--ca-cert` file whose certificate does not parse is refused by
+/// name rather than left out.
+#[tokio::test]
+async fn a_certificate_for_another_name_or_one_that_does_not_parse_is_refused() {
+    let dir = Scratch::new("jobs_cert_name");
+    let (server, pem) = tls_server();
+    let ours = dir.write("ours.pem", pem.as_bytes(), 0o644);
+    let fake = Fake::new();
+    let mut jobs = client(
+        &dir,
+        "https://other.example",
+        Some(&ours),
+        fake.dialer(Some(server)),
+    )
+    .await
+    .unwrap();
+    let error = jobs.list_hosts(ListHostsRequest {}).await.err().unwrap();
+    let said = error.to_string();
+    assert!(
+        said.starts_with(
+            "cannot reach https://other.example: TLS with other.example: invalid peer certificate: "
+        ),
+        "{said}"
+    );
+    assert!(!error.may_have_acted());
+    assert!(fake.seen().is_empty());
+    let junk = dir.write(
+        "junk.pem",
+        b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        0o644,
+    );
+    let said = refused(client(&dir, "https://jobs.example", Some(&junk), fake.dialer(None)).await);
+    assert!(
+        said.starts_with(&format!("--ca-cert: {}: ", junk.display())),
+        "{said}"
+    );
+}
+
+/// Asserts that after the connection dropped with a submit's answer unread (it may have
+/// acted), the same submit sent again reconnects and puts the same bytes on the wire: its
+/// map and its files included.
+#[tokio::test]
+async fn a_submit_retried_after_a_dropped_connection_resends_identical_bytes() {
+    let dir = Scratch::new("jobs_retry_drop");
+    let fake = Fake::new();
+    fake.answer("SubmitJob", vec![Answer::Hang, Answer::Message(Vec::new())]);
+    let mut jobs = client(&dir, PLAIN, None, fake.dialer(None)).await.unwrap();
+    let request = SubmitJobRequest {
+        spec: Some(JobSpec {
+            job_id: "nightly-43".to_owned(),
+            env: [("B", "2"), ("A", "1")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            files: vec![js_proto::v1::JobFile {
+                name: "url".to_owned(),
+                contents: "presigned".to_owned(),
+            }],
+            ..JobSpec::default()
+        }),
+    };
+    let first = jobs.submit_job(request.clone()).await.err().unwrap();
+    assert!(first.may_have_acted(), "{first}");
+    jobs.submit_job(request.clone()).await.unwrap();
+    let seen = fake.seen();
+    assert_eq!((seen.len(), fake.dials()), (2, 2));
+    assert_eq!(seen[0].message, request.encode_to_vec());
+    assert_eq!(seen[1].message, seen[0].message);
 }
