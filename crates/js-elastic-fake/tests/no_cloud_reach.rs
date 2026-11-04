@@ -7,7 +7,8 @@
 //! where the scan reads. It fails on
 //!
 //! - the name of a cloud's API host anywhere but the one place a provider keeps its default
-//!   address;
+//!   address (and the one file that writes protobuf type URLs, whose standard prefix is
+//!   such a name but is never reached);
 //! - the name of a purchase API (the path or method that makes a machine) anywhere but in
 //!   the provider crate that guards it;
 //! - the names of the provider's raw API types outside that crate, because holding
@@ -47,6 +48,12 @@ const LAMBDA_CRATE: &str = "crates/js-provider-lambdalabs/";
 /// `lambdalabs` kind, which a pool's `api_url` overrides.
 const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs";
 
+/// The one file that writes protobuf type URLs: the refusal a gRPC status carries is packed
+/// in a `google.protobuf.Any` whose type URL has the standard prefix
+/// `type.` followed by Google's API domain, which names a type, not a host anything
+/// connects to.
+const PROTO_TYPE_URLS: &str = "crates/js-proto/src/refusal.rs";
+
 /// Parts joined, so that this file does not hold what it looks for.
 fn joined(parts: &[&str]) -> String {
     parts.concat()
@@ -66,7 +73,7 @@ fn rules() -> Vec<Rule> {
                 joined(&["windows", ".net"]),
                 joined(&["oracle", "cloud.com"]),
             ],
-            allowed: vec![LAMBDA_DEFAULT_ADDRESS],
+            allowed: vec![LAMBDA_DEFAULT_ADDRESS, PROTO_TYPE_URLS],
         },
         Rule {
             what: "a purchase API",
@@ -191,6 +198,7 @@ fn file(path: &str, text: &str) -> File {
 fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
     let rules = rules();
     let host = joined(&["https://api.", "lambda", "labs.com/v1"]);
+    let type_url = joined(&["type.", "google", "apis.com/jobscheduler.v1.Refusal"]);
     let planted = [
         file("crates/js-lease-server/tests/x.rs", &host),
         file(
@@ -232,8 +240,15 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
             "crates/js-scaler/src/lib.rs",
             "a pure crate that names nothing",
         ),
+        file(PROTO_TYPE_URLS, &type_url),
     ];
     assert_eq!(violations(&guarded, &rules), Vec::<String>::new());
+
+    let other_file_of_the_proto_crate = file("crates/js-proto/src/lib.rs", &type_url);
+    assert_eq!(
+        violations(&[other_file_of_the_proto_crate], &rules).len(),
+        1
+    );
 
     let other_file_of_the_provider = file("crates/js-provider-lambdalabs/tests/t.rs", &host);
     assert_eq!(violations(&[other_file_of_the_provider], &rules).len(), 1);
