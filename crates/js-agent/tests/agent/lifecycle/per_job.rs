@@ -241,7 +241,7 @@ fn job_keyed_jobs_do_not_appear_in_the_run_listing() {
     assert_eq!(h.held(), ["r1"]);
     assert_eq!(listed(&h), ["j1"]);
     assert!(
-        h.fake.created()[1].labels.get(label::KEYING).is_none(),
+        !h.fake.created()[1].labels.contains_key(label::KEYING),
         "a run start's container is not labelled as a job's"
     );
     h.stop("j1");
