@@ -1,12 +1,11 @@
 //! A job's life on the host: from the `Start` that names it, through its container, to the
 //! result the server acknowledges and the slot that frees (design 5.4 and 5.10).
 //!
-//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a
-//! [`CheckHook`] and a [`Clock`]. It consumes the wire types in memory only (it reads a
-//! [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
+//! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a [`CheckHook`] and a
+//! [`Clock`]. It reads a [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
 //! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s, the
-//! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat), and
-//! it reads no clock but the one it is given and sleeps never.
+//! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat; it
+//! reads no clock but the one it is given and sleeps never.
 //!
 //! # What the agent guarantees per job
 //!
@@ -21,9 +20,9 @@
 //!   `valid_for_ms`, so no lease bounds it) and goes through the same admission, refusals,
 //!   slots and wall clock: the wall limit counts from the moment the container is made, so a
 //!   start delayed in delivery is neither shortened nor stretched. It is idempotent on the
-//!   job id, and job ids share the bounded set of retired run ids above (in memory: a
-//!   restart forgets them, so a late start of a stopped job can run again: design section
-//!   8, row 31). Such a job is listed in the heartbeat's `jobs` alone, with its
+//!   job id, and job ids share the bounded set of retired run ids above (kept in the state
+//!   root, so a late start of a stopped job does not run after a restart either). Such a
+//!   job is listed in the heartbeat's `jobs` alone, with its
 //!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
 //!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
 //!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
@@ -34,8 +33,8 @@
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
 //!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
-//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it (the
-//!   Docker and Podman path; `crun` adopts nothing yet) lists it as a job again.
+//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
+//!   lists it as a job again.
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
@@ -149,12 +148,9 @@
 //!   backend reads back where each mount was bound and refuses a container whose mounts
 //!   differ; the time between the agent's resolution and the daemon's bind stays open (see
 //!   [`MountRoots`]).
-//! - **Held and retired state is in memory.** After a restart an unacknowledged result
-//!   whose container was removed is lost, and the agent forgets which run and job ids it
-//!   was told to stop and which retired job ids it still owed the server; a late `Start`
-//!   or `JobStart` for one of them runs. Containers that still exist are
-//!   re-adopted (and a run that exited in the meantime is reported as its container
-//!   says). The scheduler reruns a lease the agent no longer reports.
+//! - **Held results and retired ids survive a restart** as files in the state root (see
+//!   `held`); the `retired_jobs` still owed the server do not. Containers that still exist
+//!   are re-adopted, an exited one as its container says.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
 //! - **Each run has a slot, and each slot a user of its own.** A run in slot `k` (the lowest
@@ -261,9 +257,9 @@ pub mod detail {
     /// The job is a host job and carries run files, which only a container can be given
     /// (they are mounted read-only at `/run/js-files`). Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
-    /// The network the job would get is not limited as the agent was told
-    /// (`--container-egress-allow`): the firewall table or the network is missing or
-    /// changed. Nothing is created.
+    /// The network the job would get is not limited as the agent was told: the `crun`
+    /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
+    /// is missing or changed. Nothing is created.
     pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
@@ -328,6 +324,10 @@ pub mod code {
     /// The records of owed checks in the state root could not be listed when the agent
     /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
     pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
+    /// A held result or the retired list could not be written to the state root.
+    pub const HELD_FAILED: &str = "held-record-failed";
+    /// A held result or the retired list in the state root could not be read at start.
+    pub const HELD_UNREADABLE: &str = "held-record-unreadable";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
@@ -541,8 +541,8 @@ pub struct Local {
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
     pub files_warning: Option<String>,
-    /// `--container-bin`, `--container-network` and `--container-user`, when containers
-    /// are enabled by `--container-bin`.
+    /// `--container-bin` and the container flags beside it, when containers are enabled by
+    /// `--container-bin`.
     pub container: Option<Settings>,
     /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
     /// together with [`Local::container`].
@@ -652,14 +652,11 @@ impl Local {
         let from_flags = Settings::from_flags(
             &Flags {
                 bin: cli.container_bin.as_deref(),
-                network: cli.container_network.as_deref(),
                 user: cli.container_user.as_deref(),
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
                 add_hosts: &cli.container_add_host,
-                egress_allow: &cli.container_egress_allow,
-                nft: cli.container_nft.as_deref(),
                 actions_cgroup: cli.actions_cgroup.as_deref(),
                 subuid: cli.container_subuid.as_deref(),
             },
@@ -845,8 +842,8 @@ impl Local {
 }
 
 /// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
-/// `crun` enforces a ceiling and `--container-network` is the Podman runtime's own, so either
-/// clash is refused rather than run with no network at all or the wrong one.
+/// `crun` enforces a ceiling, so a ceiling above none on another runtime is refused rather
+/// than run with no network at all.
 fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
     use crate::egress::{Config, Flags, Mode};
     let config = Config::from_flags(&Flags {
@@ -860,17 +857,10 @@ fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
         nsenter: cli.egress_nsenter.as_deref(),
     })
     .map_err(|why| why.to_string())?;
-    if config.mode() != Mode::None && cli.container_network.is_some() {
-        return Err(
-            "--egress and --container-network: --egress is the crun runtime's network and \
-             --container-network the Podman runtime's; give only one"
-                .to_owned(),
-        );
-    }
     if config.mode() != Mode::None && !crun {
         return Err(format!(
-            "--egress {}: needs --runtime crun, the only runtime that enforces it; with \
-             --container-bin the network is --container-network",
+            "--egress {}: needs --runtime crun, the only runtime that enforces it; a job run \
+             through --container-bin has network none",
             config.mode()
         ));
     }

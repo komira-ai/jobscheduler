@@ -162,6 +162,45 @@ fn create_builds_the_documented_argv() {
     );
 }
 
+/// Asserts that the opt-in to the engine leaves its GPU jobs as they were: the command line
+/// `--runtime docker --allow-container-engine --container-bin <engine>` parses to the engine
+/// runtime with the opt-in set, and a runtime over that `--container-bin` gives a job that
+/// booked GPUs 0 and 1 exactly those (`--gpus "device=0,1"`) with network none. The opt-in
+/// gates the start only (see the flag tests); the runtime it lets the agent open is the one
+/// whose GPU argv the tests above pin. It catches the fallback losing its GPU devices ahead
+/// of GPU passthrough on crun, which is what keeps GPU jobs on the engine.
+#[test]
+fn a_gpu_job_still_runs_on_the_fallback() {
+    use clap::Parser as _;
+    let cli = js_agent::Cli::try_parse_from([
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "gpu",
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        super::super::BIN,
+    ])
+    .unwrap();
+    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
+    assert!(cli.allow_container_engine);
+    let bin = cli.container_bin.as_deref().unwrap();
+    let set = js_agent::cli_runtime::Settings::new(bin, None).unwrap();
+    let world = docker();
+    let mut rt = open_with(&world, "linux", set);
+    let mut job = spec("r1");
+    job.gpu_indices = vec![0, 1];
+    rt.create_and_start(&job).unwrap();
+    let args = created(&world, "r1");
+    let gpus: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
+    assert_eq!(gpus, [strings(&["--gpus", "\"device=0,1\""])]);
+    let networks: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--network").collect();
+    assert_eq!(networks, [strings(&["--network", "none"])]);
+}
+
 /// Asserts that a Podman runtime is given the same job with CDI devices in place of
 /// `--gpus`, its own `--pid private` (Docker takes no such value), no Docker-only mount
 /// option, and nothing else different; and that no `info` call is made for it.
@@ -372,16 +411,14 @@ fn the_agents_own_labels_win() {
     assert_eq!(labels.len(), 5);
 }
 
-/// Asserts that the network, user, pull policy and `/tmp` size flags reach the
-/// container: a named network instead of none, the configured uid and gid, `--pull
-/// missing`, and the size in the tmpfs option. It catches a flag that is checked and then
-/// ignored.
+/// Asserts that the user, pull policy and `/tmp` size flags reach the container: the
+/// configured uid and gid, `--pull missing`, and the size in the tmpfs option; and that the
+/// network stays `none`. It catches a flag that is checked and then ignored.
 #[test]
-fn a_configured_network_and_user_are_used() {
+fn a_configured_user_is_used_and_the_network_is_none() {
     let world = docker();
     let set = js_agent::cli_runtime::Settings::new(
         std::path::Path::new(super::super::BIN),
-        Some("jobs"),
         Some("2000:3000"),
     )
     .unwrap()
@@ -396,7 +433,7 @@ fn a_configured_network_and_user_are_used() {
         let at = args.iter().position(|a| a == flag).unwrap();
         args[at + 1].clone()
     };
-    assert_eq!(value("--network"), "jobs");
+    assert_eq!(value("--network"), "none");
     assert_eq!(value("--user"), "2000:3000");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=1g");

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use js_lease::Booking;
-use js_pool_static::SeatError;
+use js_provider::SeatError;
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
@@ -14,7 +14,7 @@ use crate::registry::Registry;
 ///
 /// It answers from memory and never blocks, as the table calls it under its lock. Each
 /// host is leased whole, as the static pool does, and the rules a lease follows are the
-/// ones [`js_pool_static::HostBook`] holds for both. What differs is which host may be
+/// ones [`js_provider::HostBook`] holds for both. What differs is which host may be
 /// booked and what a read can say:
 ///
 /// - **Start** books the first host by id that is unbooked, live (heard from within the
@@ -83,7 +83,7 @@ impl RegisteredProvider {
     /// `Unknown` (not `Present`, as the host has not been heard, and not `Absent`), the
     /// host is not bookable, and it counts toward the pool's limit. When the agent says
     /// hello, the host is admitted as any other and the lease observes `Present` on it.
-    /// The refusals are those of [`js_pool_static::StaticPool::seat`] except `Unlisted`,
+    /// The refusals are those of [`js_provider::HostBook::seat`] except `Unlisted`,
     /// which this never returns.
     ///
     /// For a whole-node pool the booking is put back `Committed`, unless the host lists
@@ -118,7 +118,7 @@ impl RegisteredProvider {
     /// start call, so a whole-node lease, whose recorded start is the moment it was ready,
     /// is costed after a restart from up to its preparation time later. The
     /// booking's `state` is not read. The refusals are those of
-    /// [`js_pool_static::HostBook::seat_as`] except `Unlisted`.
+    /// [`js_provider::HostBook::seat_as`] except `Unlisted`.
     pub fn seat_booked(
         &self,
         booking: &Booking,

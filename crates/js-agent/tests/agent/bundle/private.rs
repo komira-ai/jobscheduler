@@ -171,3 +171,43 @@ fn a_bundle_entry_without_credentials_is_fetched_anonymously() {
     );
     assert!(with_basic(&fx).is_empty(), "{:?}", fx.requests());
 }
+
+/// Proves the credentials a `--registry-credentials` flag gives an `--image-allow` entry
+/// reach the store's client for that entry (public, as on Linux) and only its registry's
+/// token realm: a manifest or blob request carries the bearer token and never the basic
+/// credentials. It catches an image entry the store's client never learns of, credentials
+/// attached to the wrong list, and credentials sent to anything but the realm.
+#[test]
+fn registry_credentials_for_an_image_allow_entry_reach_only_the_token_realm() {
+    let dir = Scratch::new("bundle-private-image");
+    let bundle = standard(&dir);
+    let (_runtime, fx) = private_registry(&bundle);
+    let entry = format!("{}/team", fx.at(REGISTRY));
+    let file = credentials_file(&dir);
+    let settings = settings(&dir, "--image-allow", &entry, Some(&file));
+    assert!(settings.registries.is_empty());
+    let allow = settings.registry_allow().unwrap();
+    let want = Allow::parse(&entry)
+        .unwrap()
+        .with_credentials(Credentials::new("puller", "s3cret-pw").unwrap());
+    assert_eq!(allow, [want]);
+    let client = fx.client_with(allow.into_iter().map(Allow::loopback).collect());
+    let store = placer(&dir, client);
+    store
+        .ensure_registry(&format!("{entry}/bundle"), &bundle.digest())
+        .unwrap();
+    let token = format!(
+        "{} GET /token?service=fake-registry&scope=repository:{REPO}:pull [{BASIC}]",
+        fx.at(REGISTRY)
+    );
+    let sent = with_basic(&fx);
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|line| *line == token), "{sent:?}");
+    let fetched = fx.requests();
+    assert!(
+        fetched
+            .iter()
+            .any(|line| line.contains("/manifests/") && !line.contains(" [Basic ")),
+        "{fetched:?}"
+    );
+}

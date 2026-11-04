@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use js_pool_static::Candidate;
-use js_provider::{Pool, StartSpec};
+use js_provider::{Candidate, Pool, StartSpec};
 use js_registry::{
     ERROR_EDGES_MS, MarkedTails, Placer, PoolConfig, ProfileLives, TailCounters, WholeNodeConfig,
 };

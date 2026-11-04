@@ -20,6 +20,8 @@ mod cordon;
 mod credential;
 mod credential_e2e;
 #[cfg(target_os = "linux")]
+mod crun_default;
+#[cfg(target_os = "linux")]
 mod crun_gpu;
 #[cfg(target_os = "linux")]
 mod crun_host;
@@ -37,6 +39,7 @@ mod lifecycle;
 mod native;
 mod quota;
 mod readiness;
+mod retired;
 mod runtime_conformance;
 #[path = "../runtime_suite/mod.rs"]
 mod runtime_suite;

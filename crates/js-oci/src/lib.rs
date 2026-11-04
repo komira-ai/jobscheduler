@@ -4,9 +4,13 @@
 //! What is verified, and when:
 //! - the manifest's bytes hash to the digest the artifact is pinned by, before anything
 //!   in them is believed; an image index (or Docker manifest list) is refused, since an
-//!   index digest names a different artifact on each platform; the manifest must be of
-//!   the [`Kind`] the caller asks for (media types, `artifactType`, layer count and
-//!   sizes);
+//!   index digest names a different artifact on each platform, unless the [`Kind`]
+//!   selects a platform ([`Kind::bundle_from_index`], [`IndexPolicy::SelectPlatform`]):
+//!   then an index that hashes to the pin gives the one manifest listed for the kind's
+//!   platform (none, or two with different digests, is refused; an entry that is itself
+//!   an index is refused), which is fetched by the digest the index gives and read as a
+//!   manifest pinned by that digest; the manifest must be of the [`Kind`] the caller
+//!   asks for (media types, `artifactType`, layer count and sizes);
 //! - the config blob and every layer blob are hashed while they arrive and compared with
 //!   the manifest's digest and size before the caller's [`BlobSink`] is told they are
 //!   whole;
@@ -92,7 +96,7 @@
 //! Where the bytes come from is a [`BundleSource`]: a [`Repository`] of a registry, or a
 //! [`Layout`], an OCI image-layout directory on disk (a release asset unpacked for a host
 //! with no registry, or a test). Both run the same checks (the manifest's digest, kind,
-//! limits and index refusal, and each blob's length and digest), so what one accepts the
+//! limits and index handling, and each blob's length and digest), so what one accepts the
 //! other accepts, and the bytes are the same. A layout is read without following a
 //! symlink below its root and refuses a version it does not know.
 //!
@@ -112,6 +116,7 @@ mod credentials;
 mod digest;
 mod error;
 mod http;
+mod index;
 mod layout;
 mod location;
 mod manifest;
@@ -127,6 +132,6 @@ pub use error::Error;
 pub use http::{Connect, Io, RootSummary, Timeouts};
 pub use layout::{Layout, LayoutFault};
 pub use location::{Authority, Location};
-pub use manifest::{Descriptor, Kind, Limits, Manifest, Platform, media};
+pub use manifest::{Descriptor, IndexPolicy, Kind, Limits, Manifest, Platform, media};
 pub use policy::{AddressClass, Allow, Policy, classify};
-pub use source::BundleSource;
+pub use source::{BundleSource, Selected};

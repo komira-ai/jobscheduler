@@ -278,14 +278,14 @@ async fn pass(
 
 /// When the next pass is due.
 #[derive(Debug, Clone, Copy)]
-struct Schedule {
+pub(crate) struct Schedule {
     due: Timestamp,
     failures: u32,
 }
 
 impl Schedule {
     /// A pass is due at `now`.
-    fn first(now: Timestamp) -> Self {
+    pub(crate) fn first(now: Timestamp) -> Self {
         Self {
             due: now,
             failures: 0,
@@ -335,12 +335,18 @@ impl Checker {
         let mut schedule = Schedule::first(self.clock.now());
         loop {
             let tick = ticker.next().await;
-            let now = self.clock.now();
-            if schedule.is_due(now) {
-                let held = self.once().await;
-                schedule.after(now, held);
-            }
+            self.step(&mut schedule).await;
             tick.finish();
+        }
+    }
+
+    /// One tick of the check loop: a pass when `schedule` finds one due by the injected
+    /// clock, and `schedule` moved on after it by whether every check held.
+    pub(crate) async fn step(&self, schedule: &mut Schedule) {
+        let now = self.clock.now();
+        if schedule.is_due(now) {
+            let held = self.once().await;
+            schedule.after(now, held);
         }
     }
 

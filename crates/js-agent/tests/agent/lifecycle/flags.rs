@@ -111,6 +111,9 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
     let (data_s, inner) = (format!("data={}", data.display()), s(&data.join("inner")));
     let missing = s(&dir.path("missing"));
     let containers: Vec<&str> = vec![
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
         "--container-bin",
         &exec,
         "--container-user",
@@ -340,6 +343,9 @@ fn this_platform_refuses_container_jobs() {
     let mut host = crate::support::mac_host();
     host.platform = js_agent::Platform::current();
     let args = [
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
         "--container-bin",
         &exec,
         "--container-user",
@@ -378,6 +384,9 @@ fn container_jobs_are_refused_on_a_mac() {
         scratch.display().to_string(),
     );
     let args = [
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
         "--container-bin",
         &exec,
         "--container-user",

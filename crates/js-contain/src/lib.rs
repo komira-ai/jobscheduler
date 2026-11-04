@@ -19,8 +19,9 @@
 //!   and the environment scrub ([`oci::EnvScrub`]).
 //! - [`unpack`], [`unpack_layers`], [`give`] and [`modes`]: the helper modes of the
 //!   daemon's own binary that [`oci`]'s helper containers run: applying an image's layer
-//!   tars to a root, and giving directories to the job's ids. The embedding process calls
-//!   [`modes::dispatch`] first in `main`.
+//!   tars to a root, and giving directories to the job's ids; and the supervise mode
+//!   ([`oci::supervise`]) that runs one container to its end beside the daemon and records
+//!   how it ended. The embedding process calls [`modes::dispatch`] first in `main`.
 //! - [`running`]: one `crun run`, on a thread of its own.
 //! - [`keeper`]: the handle of the process that kills a lease's cgroup if the daemon dies.
 //! - [`remove`]: removing a scratch directory without recursion and without following
