@@ -1,30 +1,44 @@
 //! The record of a lease booking that ended ([`js_usage::EndedRow`]): what the registry
-//! knows of it when the lease is stopped, and the log it hands the record to.
+//! knows of it when the booking ends, and the log it hands the record to.
 //!
-//! The record is read in [`Registry::stop`] before the stop changes anything, and handed to
-//! the log after the registry's lock is released: a log never runs under it. A lease booked
-//! on a host gives one record, at the stop that frees the booking; a stop of a lease whose
-//! whole-node request still waited for a host gives one with no host; a later stop of the
-//! same lease finds neither and gives none.
+//! A booking ends in one of two ways, and each gives one record:
 //!
-//! What the registry can tell of why a lease ended: its host was lost (`lost`), or it ended
-//! at or after the latest end its wall limit allows (`stopped-at-wall-limit`), or its request
-//! was cancelled while it waited (`cancelled-while-waiting`); anything else is `released`. A
-//! stop does not say whether the lease was released or ran out of time, and a whole-node
-//! prepare that failed frees its booking outside a stop, so neither `expired` nor
-//! `failed-to-start` is written here.
+//! * [`Registry::stop`] of a lease booked on a host. The record is read before the stop
+//!   changes anything. A stop of a lease whose whole-node request still waits for a host
+//!   gives a record with no host; a later stop of the same lease finds neither and gives
+//!   none.
+//! * A whole-node prepare that failed (refused by the agent, or not ready within
+//!   `prepare_timeout`) frees its booking under the registry's lock, in a heartbeat or an
+//!   advance; the failure is noted then, and the record is read before the lock is
+//!   released ([`Registry::release`]).
+//!
+//! Either way the record goes to the log after the registry's lock is released: a log never
+//! runs under it.
+//!
+//! What the registry can tell of why a booking ended: its prepare failed
+//! (`failed-to-start`), its host was lost (`lost`), it ended at or after the latest end its
+//! wall limit allows (`stopped-at-wall-limit`), or its request was cancelled while it waited
+//! (`cancelled-while-waiting`); anything else is `released`. A stop does not say whether the
+//! lease was released or ran out of time, so `expired` is not written here.
+//!
+//! The estimated end is read once for a stopped lease ([`Registry::estimate_of`]), and the
+//! same value goes into the record and the tail counters. The profile is the first a run of
+//! the lease was queued with, kept by the runs table until the lease stops, however soon the
+//! run itself is dropped.
 
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 
 use js_lease::Timestamp;
 use js_provider::Observed;
 use js_types::{Admission, HostId, LeaseId};
-use js_usage::{AllocationId, AllocationLog, Booked, DrainOutcome, EndedReason, EndedRow};
+use js_usage::{
+    AllocationId, AllocationLog, Booked, DrainOutcome, EndedReason, EndedRow, ProfileKey,
+};
 
-use super::record::Queue;
+use super::record::{Bound, Queue};
 use super::{HostState, Registry, State};
 use crate::lives;
-use crate::whole::requests::RequestKey;
+use crate::whole::requests::{FailedPrepare, RequestKey};
 
 /// A record and the log it goes to.
 pub(super) type Ended = Option<(Arc<dyn AllocationLog>, EndedRow)>;
@@ -37,12 +51,40 @@ fn error_ms(actual: u64, estimate: u64) -> i64 {
     i64::try_from(error).unwrap_or_default()
 }
 
+/// The host `lease` is booked on, if it is.
+fn host_of(state: &State, lease: &LeaseId) -> Option<HostId> {
+    match state.book.read(lease) {
+        Observed::Present { host } => Some(host),
+        Observed::Absent | Observed::Unknown => None,
+    }
+}
+
+/// The bound `host` keeps for `lease`: its start, latest end and queue.
+fn bound_of(state: &State, host: &HostId, lease: &LeaseId) -> Option<Bound> {
+    let record = state.records.get(host)?;
+    record
+        .bounds
+        .iter()
+        .copied()
+        .find(|bound| bound.lease == *lease)
+}
+
+/// How a booking ended: when, at what estimated end, why, what it booked and the profile
+/// of its runs.
+struct HowEnded {
+    ended_at: u64,
+    estimate: Option<u64>,
+    reason: EndedReason,
+    booked: Option<Booked>,
+    profile: Option<ProfileKey>,
+}
+
 impl Registry {
     /// Gives the registry the log that takes the record of every lease booking that ends
-    /// ([`js_usage::AllocationLog`]): from then on each stop that frees a booking, or
-    /// cancels a whole-node request still waiting for a host, hands it one record, after the
-    /// registry's lock is released. A registry with no log records nothing. The log is set
-    /// once (a `OnceLock`): only the first call takes effect.
+    /// ([`js_usage::AllocationLog`]): from then on each stop that frees a booking or cancels
+    /// a whole-node request still waiting for a host, and each failed prepare, hands it one
+    /// record, after the registry's lock is released. A registry with no log records
+    /// nothing. The log is set once (a `OnceLock`): only the first call takes effect.
     pub fn set_allocation_log(&self, log: Arc<dyn AllocationLog>) {
         let _ = self.shared.log.set(log);
     }
@@ -52,14 +94,47 @@ impl Registry {
         matches!(self.shared.config.class().admission(), Admission::Whole)
     }
 
-    /// The record of `lease` ending at `ended_at` (ms on the registry's clock) as `state`
-    /// stands before the stop, with the log it goes to; `None` without a log, or for a lease
-    /// neither booked nor waiting.
-    pub(super) fn ended_row(&self, state: &State, lease: &LeaseId, ended_at: u64) -> Ended {
+    /// The end the estimate feed gives `lease` as `state` stands: its start plus the
+    /// largest P90 among the profiles of its runs. `None` for a lease not booked, without a
+    /// source of lives or a bound, or with no keyed run that has a P90.
+    pub(super) fn estimate_of(&self, state: &State, lease: &LeaseId) -> Option<u64> {
+        let host = host_of(state, lease)?;
+        self.estimate_on(state, &host, lease)
+    }
+
+    fn estimate_on(&self, state: &State, host: &HostId, lease: &LeaseId) -> Option<u64> {
+        let bound = bound_of(state, host, lease)?;
+        let lives = self.shared.lives.get()?;
+        let profiles = state.runs.profiles_of(lease);
+        lives::estimate_end(bound.started_at, &profiles, &**lives)
+    }
+
+    /// The record of `lease` stopped at `ended_at` (ms on the registry's clock) as `state`
+    /// stands before the stop, with `estimate` its estimated end, and the log it goes to;
+    /// `None` without a log, or for a lease neither booked nor waiting.
+    pub(super) fn ended_row(
+        &self,
+        state: &State,
+        lease: &LeaseId,
+        (ended_at, estimate): (u64, Option<u64>),
+    ) -> Ended {
         let log = self.shared.log.get()?.clone();
-        let row = match state.book.read(lease) {
-            Observed::Present { host } => self.booked_row(state, lease, host, ended_at),
-            Observed::Absent | Observed::Unknown => waiting_row(state, lease, ended_at)?,
+        let row = match host_of(state, lease) {
+            Some(host) => {
+                let ending = HowEnded {
+                    ended_at,
+                    estimate,
+                    reason: self.reason_of(state, &host, lease, ended_at),
+                    booked: state.book.held(lease).map(|held| Booked {
+                        whole_host: held.whole,
+                        cpu_milli: held.resources.cpu_millis(),
+                        memory_bytes: held.resources.memory_bytes(),
+                    }),
+                    profile: state.runs.lease_profile(lease),
+                };
+                self.hosted_row(state, lease, host, ending)
+            }
+            None => waiting_row(state, lease, ended_at)?,
         };
         Some((log, row))
     }
@@ -69,62 +144,103 @@ impl Registry {
         ended.into_iter().for_each(|(log, row)| log.ended(row));
     }
 
-    /// The record of `lease`, booked on `host`.
-    fn booked_row(&self, state: &State, lease: &LeaseId, host: HostId, ended_at: u64) -> EndedRow {
-        let record = state.records.get(&host);
-        let bounds = record.into_iter().flat_map(|record| record.bounds.iter());
-        let bound = bounds.copied().find(|bound| bound.lease == *lease);
-        let profiles = state.runs.profiles_of(lease);
-        let source = self.shared.lives.get();
-        let estimate = bound
-            .zip(source)
-            .and_then(|(bound, lives)| lives::estimate_end(bound.started_at, &profiles, &**lives));
+    /// Releases `state`, handing the log the records of the prepares that failed while it was
+    /// held. Every call that can fail a prepare (an advance, a heartbeat) releases its lock
+    /// through here.
+    pub(super) fn release(&self, mut state: MutexGuard<'_, State>) {
+        let failed = state.requests.take_failed();
+        let rows: Vec<EndedRow> = failed
+            .iter()
+            .map(|failed| self.failed_row(&state, failed))
+            .collect();
+        drop(state);
+        let deliver = self.shared.log.get().map(|log| (log, rows));
+        deliver
+            .into_iter()
+            .for_each(|(log, rows)| rows.into_iter().for_each(|row| log.ended(row)));
+    }
+
+    /// The record of the booking a failed prepare freed: the whole host, ended when it failed.
+    fn failed_row(&self, state: &State, failed: &FailedPrepare) -> EndedRow {
+        let shape = self.shared.config.booked();
+        let ending = HowEnded {
+            ended_at: failed.at.millis(),
+            estimate: self.estimate_on(state, &failed.host, &failed.lease),
+            reason: EndedReason::FailedToStart,
+            booked: Some(Booked {
+                whole_host: true,
+                cpu_milli: shape.resources().cpu_millis(),
+                memory_bytes: shape.resources().memory_bytes(),
+            }),
+            profile: failed.profile.clone(),
+        };
+        self.hosted_row(state, &failed.lease, failed.host.clone(), ending)
+    }
+
+    /// Why `lease`, booked on `host`, ended at `ended_at` as far as a stop can tell.
+    fn reason_of(
+        &self,
+        state: &State,
+        host: &HostId,
+        lease: &LeaseId,
+        ended_at: u64,
+    ) -> EndedReason {
         let now = Timestamp::from_millis(ended_at);
-        let grace = self.grace_ms();
-        let lost = record.is_some_and(|record| record.state(now, grace) == HostState::Lost);
+        let record = state.records.get(host);
+        let lost =
+            record.is_some_and(|record| record.state(now, self.grace_ms()) == HostState::Lost);
+        let bound = bound_of(state, host, lease);
         let at_limit = bound.is_some_and(|bound| ended_at >= bound.end.millis());
-        let ended_reason = match (lost, at_limit) {
+        match (lost, at_limit) {
             (true, _) => EndedReason::Lost,
             (false, true) => EndedReason::StoppedAtWallLimit,
             (false, false) => EndedReason::Released,
-        };
+        }
+    }
+
+    /// The record of `lease`, booked on `host`, that ended as `ending` says.
+    fn hosted_row(
+        &self,
+        state: &State,
+        lease: &LeaseId,
+        host: HostId,
+        ending: HowEnded,
+    ) -> EndedRow {
+        let bound = bound_of(state, &host, lease);
         // A lease put back after a restart without a source of lives has no bound.
         let queue = bound.map_or(Queue::restored(self.whole_admission()), |bound| bound.queue);
-        let booked = state.book.held(lease).map(|held| Booked {
-            whole_host: held.whole,
-            cpu_milli: held.resources.cpu_millis(),
-            memory_bytes: held.resources.memory_bytes(),
-        });
+        let ended_at = ending.ended_at;
         EndedRow {
             id: AllocationId::of_lease(lease),
-            profile: profiles.into_iter().next(),
+            profile: ending.profile,
             host: Some(host),
-            booked,
+            booked: ending.booked,
             queued_ms: queue.queued_ms,
             run_ms: bound.map(|bound| ended_at.saturating_sub(bound.started_at)),
-            ended_reason,
+            ended_reason: ending.reason,
             drain_outcome: queue.drain,
             give_up_outcome: queue.give_ups,
-            estimated_end: estimate,
+            estimated_end: ending.estimate,
             actual_end: ended_at,
-            error_ms: estimate.map(|estimate| error_ms(ended_at, estimate)),
+            error_ms: ending.estimate.map(|estimate| error_ms(ended_at, estimate)),
             used: None,
         }
     }
 }
 
 /// The record of `lease` whose whole-node request waits for a host and is cancelled by the
-/// stop at `ended_at`; `None` when no request of the lease waits.
+/// stop at `ended_at`; `None` when no request of the lease waits. Its mark was dropped if it
+/// held one at any time while it waited, or gave a host up.
 fn waiting_row(state: &State, lease: &LeaseId, ended_at: u64) -> Option<EndedRow> {
     let (id, since) = state.waiting.presented_by(lease)?;
-    let drain = match state.marks.host_of(id).is_some() {
+    let give_ups = state.requests.give_ups(&RequestKey::from(id));
+    let drain = match state.marks.ever_marked(id) | (give_ups > 0) {
         true => DrainOutcome::MarkDropped,
         false => DrainOutcome::NoMark,
     };
-    let give_ups = state.requests.give_ups(&RequestKey::from(id));
     Some(EndedRow {
         id: AllocationId::of_lease(lease),
-        profile: state.runs.profiles_of(lease).into_iter().next(),
+        profile: state.runs.lease_profile(lease),
         host: None,
         booked: None,
         queued_ms: Some(ended_at.saturating_sub(since.millis())),
@@ -152,17 +268,22 @@ mod tests {
     fn a_queue_is_the_wait_the_mark_and_the_give_ups_of_the_request() {
         let now = Timestamp::from_millis(50_000);
         let since = Some(Timestamp::from_millis(10_000));
-        let held = Queue::whole(now, since, true, 2);
+        let held = Queue::whole(now, since, (true, true), 2);
         let expected = Queue {
             queued_ms: Some(40_000),
             drain: DrainOutcome::MarkHeld,
             give_ups: Some(2),
         };
         assert_eq!(held, expected);
-        let drain = |held, give_ups| Queue::whole(now, since, held, give_ups).drain;
-        assert_eq!(drain(false, 1), DrainOutcome::MarkDropped);
-        assert_eq!(drain(false, 0), DrainOutcome::NoMark);
-        assert_eq!(Queue::whole(now, None, false, 0).queued_ms, Some(0));
+        let drain =
+            |held, marked, give_ups| Queue::whole(now, since, (held, marked), give_ups).drain;
+        assert_eq!(drain(false, false, 1), DrainOutcome::MarkDropped);
+        assert_eq!(drain(false, true, 0), DrainOutcome::MarkDropped);
+        assert_eq!(drain(false, false, 0), DrainOutcome::NoMark);
+        assert_eq!(
+            Queue::whole(now, None, (false, false), 0).queued_ms,
+            Some(0)
+        );
         assert_eq!(Queue::restored(false), Queue::ORDINARY);
         let restored = (None, DrainOutcome::Unknown, None);
         let whole = Queue::restored(true);

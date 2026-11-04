@@ -59,7 +59,7 @@
 //! The pass reads the table as [`HostFacts`], which the registry builds under its lock, so
 //! it holds no clock and no lock of its own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_lease::Timestamp;
@@ -124,9 +124,10 @@ pub struct Reservation {
     pub tail_end: Option<u64>,
 }
 
-/// The marks of a pool: host to mark.
+/// The marks of a pool: host to mark, and the waiting requests that have held a mark (for
+/// the record of how a request's drain went; kept while the request waits).
 #[derive(Debug, Default)]
-pub(crate) struct Marks(BTreeMap<HostId, Mark>);
+pub(crate) struct Marks(BTreeMap<HostId, Mark>, BTreeSet<RequestId>);
 
 impl Marks {
     /// The host and mark of request `id`.
@@ -159,7 +160,15 @@ impl Marks {
     /// it holds one; a host that is marked already keeps its mark, so a host carries one.
     fn place(&mut self, host: HostId, mark: Mark) {
         self.drop_request(&mark.request);
-        self.0.entry(host).or_insert(mark);
+        let request = mark.request.clone();
+        let kept = self.0.entry(host).or_insert(mark);
+        let placed = kept.request == request;
+        self.1.extend(placed.then_some(request));
+    }
+
+    /// Whether request `id` has held a mark while it waited, whether or not it holds one now.
+    pub(crate) fn ever_marked(&self, id: &RequestId) -> bool {
+        self.1.contains(id)
     }
 
     /// Puts back a mark from the ledger on its host: whether it was, which it is not when
@@ -178,6 +187,7 @@ impl Marks {
             tail_end: mark.tail_end,
             claim_by: Some(mark.claim_by),
         };
+        self.1.insert(revived.request.clone());
         self.0.insert(mark.host, revived);
         true
     }
@@ -216,6 +226,7 @@ impl Marks {
     /// Drops every mark whose request is not on the wait list.
     pub(crate) fn retain_waiting(&mut self, waiting: &WaitList) {
         self.0.retain(|_, mark| waiting.holds(&mark.request));
+        self.1.retain(|id| waiting.holds(id));
     }
 
     /// The marks, host order.

@@ -601,7 +601,8 @@
 //! start. `--usage-off` leaves the usage side out altogether.
 //!
 //! The same file keeps the record of every ended allocation (`docs/usage-store.md`): when a
-//! lease's booking ends, the registry hands the usage side one record (the lease, its host,
+//! lease's booking ends (a stop, or a whole-node prepare that failed), the registry hands the
+//! usage side one record (the lease, its host,
 //! what it booked and was measured to use, its queue wait and run time, why it ended, its
 //! drain and give-up outcome, its estimated against its actual end), with the registry's lock
 //! released; the record is queued in memory and written by the next tick, and kept for

@@ -342,6 +342,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let mut state = self.lock_at(now);
         self.advance_at(&mut state, now);
+        self.release(state);
     }
 
     fn advance_at(&self, state: &mut State, now: Timestamp) {
@@ -511,25 +512,24 @@ impl Registry {
     /// booking. Per-host tokens or client certificates close that later (design D18). A binding is
     /// not upgraded by a later hello that names an instance.
     ///
-    /// The pool-full check does not stop a holder of the pool token from locking the pool
-    /// out: retention bounds only silent squatters. Such a holder can say hello for
-    /// `max_machines` made-up ids and keep them live with the sessions it was issued, or
-    /// refill the pool every grace plus retention, and every real new host then gets
-    /// pool-full. The transport must rate-limit hellos per credential, and per-host
-    /// credentials (design D18) close it; there is no per-credential cap here.
+    /// The pool-full check does not stop a holder of the pool token from locking the pool out:
+    /// retention bounds only silent squatters. Such a holder can say hello for `max_machines`
+    /// made-up ids and keep them live with the sessions it was issued, or refill the pool every
+    /// grace plus retention, and every real new host then gets pool-full. The transport must
+    /// rate-limit hellos per credential, and per-host credentials (design D18) close it; there is
+    /// no per-credential cap here.
     ///
-    /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
-    /// quota default does not count (see `quota_default`) or is more than the pool's disk.
-    /// A pool that books no disk and does not name `scratch-quota` refuses (also
-    /// `shape-not-accepted`) a host that reports a quota with a default that counts: the
-    /// pool would book nothing for runs the host books at its default.
+    /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose quota
+    /// default does not count (see `quota_default`) or is more than the pool's disk. A pool that
+    /// books no disk and does not name `scratch-quota` refuses (also `shape-not-accepted`) a host
+    /// that reports a quota with a default that counts: the pool would book nothing for runs the
+    /// host books at its default.
     ///
-    /// The runs a hello lists as held are never adopted. A run the registry holds a live
-    /// record of stays as it is, now listed by the host; every other listed run is
-    /// answered with a cancel in the host's next heartbeat reply (a welcome carries no
-    /// commands), and the host takes no new lease until a heartbeat lists none. A queued
-    /// run the hello does not list will never be listed, since the host was lost or only
-    /// awaited before it said hello, and is given up.
+    /// The runs a hello lists as held are never adopted. A run the registry holds a live record of
+    /// stays as it is, now listed by the host; every other listed run is answered with a cancel in
+    /// the host's next heartbeat reply (a welcome carries no commands), and the host takes no new
+    /// lease until a heartbeat lists none. A queued run the hello does not list will never be
+    /// listed, since the host was lost or only awaited before it said hello, and is given up.
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
         let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
         let protocol = hello.negotiate().map_err(Refusal::Invalid)?;
@@ -800,39 +800,39 @@ impl Registry {
             unready: record.exclusive.awaits_ready(),
         };
         let reply = runs.answer(&host, heartbeat, standing, (book, now.millis()));
-        Ok(HeartbeatReply {
+        let reply = HeartbeatReply {
             taint_ack: heartbeat.taint.is_some(),
             exclusive: record.exclusive.granted(),
             ..reply
-        })
+        };
+        self.release(guard);
+        Ok(reply)
     }
 
-    /// Queues `spec` as a run of `lease` on `host`, to go out on the host's next
-    /// heartbeat reply. The caller (the transport) has found that the lease is held on
-    /// `host`, filled `spec.run_id` with an id it minted and bounded `spec.limits.wall_ms`
-    /// and `spec.valid_for_ms` by the lease's remaining time; the registry fills
-    /// `lease_id` and `heartbeat_seq`. A `spec.valid_for_ms` above zero is the time the
-    /// lease has left: the registry keeps the instant it ends and makes every start from
-    /// the time left then, so the wall limit and the validity of a start that goes out
-    /// late are cut again to what is left (`spec.limits.wall_ms` is the most the run may
-    /// have). Zero is no bound.
+    /// Queues `spec` as a run of `lease` on `host`, to go out on the host's next heartbeat reply.
+    /// The caller (the transport) has found that the lease is held on `host`, filled `spec.run_id`
+    /// with an id it minted and bounded `spec.limits.wall_ms` and `spec.valid_for_ms` by the
+    /// lease's remaining time; the registry fills `lease_id` and `heartbeat_seq`. A
+    /// `spec.valid_for_ms` above zero is the time the lease has left: the registry keeps the
+    /// instant it ends and makes every start from the time left then, so the wall limit and the
+    /// validity of a start that goes out late are cut again to what is left (`spec.limits.wall_ms`
+    /// is the most the run may have). Zero is no bound.
     ///
-    /// Refused, in this order: [`RunRefusal::HostNotRegistered`] for a host that did not
-    /// register itself; the job when it breaks a wire rule ([`RunRefusal::Invalid`]),
-    /// asks for host isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the
-    /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); a job with run files for a
-    /// host whose hello did not report the `run-files` capability
-    /// ([`RunRefusal::FilesUnsupported`]); a job with `limits.disk_bytes` for a host whose
-    /// hello did not report `scratch-quota` with a default ([`RunRefusal::DiskUnsupported`]);
-    /// a native job for a host whose hello did not report `exec` as `sandbox-exec`
-    /// ([`RunRefusal::NativeUnsupported`]); a job that pins a bundle for a host whose hello
-    /// reported no `bundle-root` ([`RunRefusal::BundleUnsupported`]); [`RunRefusal::HostLost`]
-    /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
-    /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
-    /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
-    /// draining or releasing ([`Registry::drain`]), is out of the serving phase or the
-    /// run does not fit what is left of the booked shape (the limits of the host's live
-    /// runs, the GPU indices they hold, and [`crate::MAX_LIVE_RUNS`]);
+    /// Refused, in this order: [`RunRefusal::HostNotRegistered`] for a host that did not register
+    /// itself; the job when it breaks a wire rule ([`RunRefusal::Invalid`]), asks for host
+    /// isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the booked shape alone
+    /// ([`RunRefusal::LimitsExceedShape`]); a job with run files for a host whose hello did not
+    /// report the `run-files` capability ([`RunRefusal::FilesUnsupported`]); a job with
+    /// `limits.disk_bytes` for a host whose hello did not report `scratch-quota` with a default
+    /// ([`RunRefusal::DiskUnsupported`]); a native job for a host whose hello did not report
+    /// `exec` as `sandbox-exec` ([`RunRefusal::NativeUnsupported`]); a job that pins a bundle for
+    /// a host whose hello reported no `bundle-root` ([`RunRefusal::BundleUnsupported`]);
+    /// [`RunRefusal::HostLost`] for a host not heard within the grace period;
+    /// [`RunRefusal::NotHeld`] when the registry's booking of `host` is not `lease`;
+    /// [`RunRefusal::HostTainted`] for a host that reported a taint; [`RunRefusal::NoCapacity`]
+    /// when the host is marked draining or releasing ([`Registry::drain`]), is out of the serving
+    /// phase or the run does not fit what is left of the booked shape (the limits of the host's
+    /// live runs, the GPU indices they hold, and [`crate::MAX_LIVE_RUNS`]);
     /// [`RunRefusal::RunExists`] for an id in use. A refusal changes nothing.
     ///
     /// A run's limits count against the budget until it leaves the host's held list, and

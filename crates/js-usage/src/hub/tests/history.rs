@@ -2,6 +2,7 @@
 //! and the rows reach the sink at the next tick, in order, without loss while the sink fails.
 
 use super::*;
+use crate::{NoKeys, Recorder, TAIL_MINUTE};
 
 /// The row of the lease `1-n`, ending at `end`, with nothing measured.
 fn ended_row(n: u64, end: u64) -> EndedRow {
@@ -189,4 +190,219 @@ fn at_most_max_pending_ended_rows_wait_and_the_oldest_are_dropped() {
     let rows = written(&fake);
     assert_eq!(rows[0].actual_end, 3);
     assert_eq!(rows.last().map(|row| row.actual_end), Some(total));
+}
+
+/// A sink whose readings go through the real [`Recorder`], that keeps the records of ended
+/// allocations it is given, can hold the first such write until released, and can panic.
+#[derive(Default)]
+struct Recording {
+    recorder: Mutex<Recorder>,
+    written: Mutex<Vec<EndedRow>>,
+    /// Signals when the held write has begun, and waits for the release.
+    gate: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    panics: AtomicBool,
+}
+
+impl UsageSink for Recording {
+    fn observe(
+        &self,
+        host: &HostId,
+        epoch: u64,
+        load: &LoadIn,
+        limits: Limits,
+        now: u64,
+    ) -> Observation {
+        let mut recorder = self.recorder.lock().unwrap();
+        let (observed, fresh) = recorder.observe(host, epoch, load, limits, now);
+        Observation { observed, fresh }
+    }
+
+    fn run_ended(&self, _: &RunEnd, _: u64) -> Result<(), UsageFault> {
+        Ok(())
+    }
+
+    fn flush(&self, _: u64) -> Result<Vec<(HostId, NodeMinute)>, UsageFault> {
+        Ok(Vec::new())
+    }
+
+    fn prune(&self, _: u64) -> Result<(), UsageFault> {
+        Ok(())
+    }
+
+    fn node_rows(
+        &self,
+        _: &HostId,
+        _: u64,
+        _: u64,
+        _: NonZeroUsize,
+    ) -> Result<Vec<NodeMinute>, UsageFault> {
+        Ok(Vec::new())
+    }
+
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        Ok(None)
+    }
+
+    fn counters(&self) -> SinkCounters {
+        SinkCounters::default()
+    }
+
+    fn allocation_ended(&self, row: &EndedRow) -> Result<(), UsageFault> {
+        assert!(!self.panics.load(Ordering::SeqCst), "the sink is broken");
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        self.written.lock().unwrap().push(row.clone());
+        Ok(())
+    }
+}
+
+impl Recording {
+    fn written(&self) -> Vec<u64> {
+        let rows = self.written.lock().unwrap();
+        rows.iter().map(|row| row.actual_end).collect()
+    }
+
+    /// Holds the next write until the returned sender is sent to; the receiver hears when
+    /// that write has begun.
+    fn hold_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, began) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        *self.gate.lock().unwrap() = Some((entered, held));
+        (began, release)
+    }
+}
+
+/// The hub over `sink`.
+fn hub_on(sink: &Arc<Recording>) -> Arc<UsageHub> {
+    let limits = Limits {
+        threads: 8,
+        memory_bytes: 1 << 34,
+    };
+    Arc::new(UsageHub::new(sink.clone(), Arc::new(NoKeys), limits, T0))
+}
+
+/// A reading with `minutes` of lease `1-n` as `(index, mean cores, working set)`: the
+/// `seq`th of a host that runs one core.
+fn reading(seq: u64, n: u64, minutes: &[(u16, u32, u64)]) -> BeatLoad {
+    let minute = |(index, mean, ws): &(u16, u32, u64)| MinuteIn {
+        lease: lease(n),
+        minute: *index,
+        mean_cores_milli: *mean,
+        peak_window_milli: *mean,
+        working_set_max_bytes: *ws,
+    };
+    BeatLoad::Read {
+        load: LoadIn {
+            seq,
+            mono_usec: seq * 60_000_000,
+            cpu_usage_usec: seq * 60_000_000,
+            working_set_bytes: 1,
+            actions_cpu_limited: false,
+            covered: vec![lease(n)],
+            minutes: minutes.iter().map(minute).collect(),
+            clocks: Vec::new(),
+        },
+        records_dropped: 0,
+    }
+}
+
+/// Catches: the mean counting the folded tail minute once more each time the agent sends
+/// it again as it grows (through the real recorder, which hands the raised tail on as
+/// fresh): minute 0 at one core and the tail at two give a mean of 1.5 cores however often
+/// the tail comes again; with the tail risen to three, 2 cores.
+#[test]
+fn the_folded_tail_minute_is_one_minute_of_the_mean() {
+    let sink = Arc::new(Recording::default());
+    let hub = hub_on(&sink);
+    let first = [(0, 1000, 10), (TAIL_MINUTE, 2000, 20)];
+    send(&hub, "a", reading(1, 1, &first), &[]);
+    send(&hub, "a", reading(2, 1, &[(TAIL_MINUTE, 2000, 50)]), &[]);
+    send(&hub, "a", reading(3, 2, &first), &[]);
+    send(&hub, "a", reading(4, 2, &[(TAIL_MINUTE, 3000, 20)]), &[]);
+    hub.ended(ended_row(1, 1));
+    hub.ended(ended_row(2, 2));
+    hub.write_history();
+    let rows = sink.written.lock().unwrap().clone();
+    let expected = Used {
+        cpu_milli: 2000,
+        memory_bytes: 50,
+        cpu_mean_milli: 1500,
+    };
+    assert_eq!(rows[0].used, Some(expected));
+    assert_eq!(rows[1].used.map(|used| used.cpu_mean_milli), Some(2000));
+}
+
+/// Catches: a second write that runs beside one held in the sink and writes a newer row
+/// first, and a row the first write leaves for it to write twice. The second write waits
+/// for the first, which writes every row in order; the second then has nothing to write.
+#[test]
+fn writes_take_turns_and_keep_the_order() {
+    let sink = Arc::new(Recording::default());
+    let hub = hub_on(&sink);
+    hub.ended(ended_row(1, 1));
+    let (began, release) = sink.hold_next();
+    let first = std::thread::spawn({
+        let hub = hub.clone();
+        move || hub.write_history()
+    });
+    began.recv().unwrap();
+    hub.ended(ended_row(2, 2));
+    let second = std::thread::spawn({
+        let hub = hub.clone();
+        move || hub.write_history()
+    });
+    release.send(()).unwrap();
+    assert_eq!(first.join().unwrap(), Some(Ok(2)));
+    assert_eq!(second.join().unwrap(), None);
+    assert_eq!(sink.written(), [1, 2]);
+}
+
+/// Catches: the row being written dropped twice when the queue overflows meanwhile (the
+/// write would then remove a newer row), and rows queued while a write is held lost. The
+/// queue is filled past [`MAX_PENDING_ENDED`] while the first row is held in the sink: the
+/// oldest two queued go (the held one among them, which the sink still takes once), and
+/// the write finishes with the rest.
+#[test]
+fn rows_arriving_past_the_limit_during_a_held_write_drop_the_oldest_once() {
+    let sink = Arc::new(Recording::default());
+    let hub = hub_on(&sink);
+    hub.ended(ended_row(1, 1));
+    let (began, release) = sink.hold_next();
+    let writer = std::thread::spawn({
+        let hub = hub.clone();
+        move || hub.write_history()
+    });
+    began.recv().unwrap();
+    let total = MAX_PENDING_ENDED as u64 + 1;
+    for n in 2..=total + 1 {
+        hub.ended(ended_row(n, n));
+    }
+    release.send(()).unwrap();
+    let written = writer.join().unwrap();
+    assert_eq!(written, Some(Ok(MAX_PENDING_ENDED as u64 + 1)));
+    let ends = sink.written();
+    assert_eq!(ends.len(), MAX_PENDING_ENDED + 1);
+    assert_eq!((ends[0], ends[1]), (1, 3));
+    assert_eq!(hub.counters().history_dropped, 2);
+}
+
+/// Catches: a sink that panics on a record taking the queue with it, the panic reaching the
+/// caller (the tick), and the failure not counted: the row stays queued and is written once
+/// the sink works again.
+#[test]
+fn a_sink_that_panics_on_a_record_leaves_it_queued_and_counts_the_failure() {
+    let sink = Arc::new(Recording::default());
+    let hub = hub_on(&sink);
+    hub.ended(ended_row(1, 1));
+    hub.ended(ended_row(2, 2));
+    sink.panics.store(true, Ordering::SeqCst);
+    let panicked = UsageFault("the sink panicked on a record".to_string());
+    assert_eq!(hub.write_history(), Some(Err(panicked)));
+    assert_eq!(hub.counters().history_failed, 1);
+    sink.panics.store(false, Ordering::SeqCst);
+    assert_eq!(hub.write_history(), Some(Ok(2)));
+    assert_eq!(sink.written(), [1, 2]);
 }

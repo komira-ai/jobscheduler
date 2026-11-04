@@ -380,6 +380,9 @@ pub(crate) struct Standing {
 pub(crate) struct Runs {
     map: BTreeMap<String, Run>,
     next_order: u64,
+    /// The first profile name a run of each lease was queued with: kept for the record of
+    /// the lease's end until the lease stops, however soon its finished runs are dropped.
+    named: BTreeMap<LeaseId, ProfileKey>,
 }
 
 impl Runs {
@@ -518,6 +521,9 @@ impl Runs {
             disk,
         };
         self.next_order = self.next_order.saturating_add(1);
+        run.profile.iter().for_each(|key| {
+            self.named.entry(*lease).or_insert_with(|| key.clone());
+        });
         let view = run.view();
         self.map.insert(run.spec.run_id.clone(), run);
         Ok(view)
@@ -536,8 +542,16 @@ impl Runs {
         runs.filter_map(|run| run.profile.clone()).collect()
     }
 
-    /// Asks every live run of `lease` to stop: the lease ended or is being released.
+    /// The first profile name a run of `lease` was queued with, if one was; kept until the
+    /// lease stops, whether or not the run is still known.
+    pub(crate) fn lease_profile(&self, lease: &LeaseId) -> Option<ProfileKey> {
+        self.named.get(lease).cloned()
+    }
+
+    /// Asks every live run of `lease` to stop: the lease ended or is being released. Its
+    /// profile name ([`Runs::lease_profile`]) is forgotten.
     pub(crate) fn stop_lease(&mut self, lease: &LeaseId) {
+        self.named.remove(lease);
         let runs = self.map.values_mut().filter(|run| run.lease == *lease);
         runs.for_each(Run::ask_stop);
     }

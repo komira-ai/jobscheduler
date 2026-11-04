@@ -12,7 +12,6 @@ use js_lease::Timestamp;
 use super::record::{Bound, Queue};
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
-use crate::lives;
 use crate::whole::exclusive::Exclusive;
 
 impl Registry {
@@ -27,9 +26,10 @@ impl Registry {
     /// cancels a waiting request hands the log the record of it, once the lock is released.
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
         let ended_at = self.shared.clock.now().millis();
-        let source = self.shared.lives.get().map(|lives| &**lives);
         let mut guard = self.lock();
-        let ended = self.ended_row(&guard, lease, ended_at);
+        // Read once: the record of the end and the tail counters see the same estimate.
+        let estimate = self.estimate_of(&guard, lease);
+        let ended = self.ended_row(&guard, lease, (ended_at, estimate));
         let State {
             book,
             records,
@@ -63,7 +63,7 @@ impl Registry {
                     .filter(|bound| bound.lease == *lease)
                     .map(|bound| (bound.lease, bound.started_at))
                     .collect();
-                let estimates = lives::est_ends(source, runs, &started);
+                let estimates = started.iter().map(|_| estimate);
                 estimates
                     .into_iter()
                     .for_each(|estimate| tail.ended(ended_at, estimate));
@@ -101,7 +101,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let mut state = self.lock_at(now);
         self.advance_at(&mut state, now);
-        match state.book.read(lease) {
+        let observed = match state.book.read(lease) {
             Observed::Present { host } => {
                 let record = state.records.get(&host);
                 let live = record
@@ -113,7 +113,9 @@ impl Registry {
                 }
             }
             absent => absent,
-        }
+        };
+        self.release(state);
+        observed
     }
 
     pub(crate) fn capacity(&self) -> Vec<HostCapacity> {

@@ -409,3 +409,247 @@ fn the_empty_log_takes_a_row_and_keeps_nothing() {
     let log: &dyn AllocationLog = &NoLog;
     log.ended(row(1));
 }
+
+/// Writes raw `value` under the row key of `end` and `id`, unconditionally.
+fn put_raw(store: &dyn Store, key: String, value: Vec<u8>) {
+    store
+        .txn(Txn::new().put(key, value, Cond::Any))
+        .unwrap()
+        .unwrap();
+}
+
+/// Catches: an allocation recorded a second time under a later end (a lease put back after
+/// a restart and stopped again), an index entry that does not name the row, and a prune
+/// that leaves the index entry of a row it deleted.
+#[test]
+fn an_allocation_is_recorded_once_whatever_end_a_later_write_gives_it() {
+    on_both("ended-index", |store| {
+        let history = EndedHistory::new(store);
+        let first = row(20_000);
+        assert_eq!(history.put(&first), Ok(true));
+        assert_eq!(history.put(&row(30_000)), Ok(false));
+        assert_eq!(all(store).rows, [first.clone()]);
+        let index = store.get(&ended_id_key(&first.id)).unwrap().unwrap();
+        assert_eq!(index.value, ended_key(20_000, &first.id).into_bytes());
+        assert_eq!(history.prune(20_001, 0), Ok(1));
+        assert!(store.scan_prefix(ENDED_PREFIX).unwrap().is_empty());
+        assert!(store.scan_prefix(ENDED_ID_PREFIX).unwrap().is_empty());
+    });
+}
+
+/// Catches: a row returned under a key its own end and id do not give (it would be read
+/// in another range, and out of order), and such a row counted as read.
+#[test]
+fn a_row_under_a_key_its_end_and_id_do_not_give_is_skipped() {
+    on_both("ended-mismatch", |store| {
+        let moved = format!("{ENDED_PREFIX}{:020}/7-123", 20);
+        put_raw(store, moved, encode(&row(10)));
+        let renamed = ended_key(10, &AllocationId::parse("9-9").unwrap());
+        put_raw(store, renamed, encode(&row(10)));
+        let read = all(store);
+        assert_eq!((read.rows.len(), read.skipped), (0, 2));
+        let early = EndedHistory::new(store)
+            .range(0, 15, NonZeroUsize::MIN)
+            .unwrap();
+        assert_eq!((early.rows.len(), early.skipped), (0, 1));
+    });
+}
+
+/// Catches: a read that stops at a page holding no readable row (300 unreadable rows fill
+/// more than a page) and so misses the rows after it, unreadable rows using up a small
+/// limit, and a range of unreadable rows only read as an error.
+#[test]
+fn an_unreadable_page_is_read_past_to_the_rows_after_it() {
+    on_both("ended-unreadable", |store| {
+        let id = AllocationId::parse("x").unwrap();
+        for end in 1..=300 {
+            put_raw(store, ended_key(end, &id), vec![9]);
+        }
+        put_all(store, &[row(1_000)]);
+        let history = EndedHistory::new(store);
+        let first = history.range(0, u64::MAX, NonZeroUsize::MIN).unwrap();
+        assert_eq!((ends(&first), first.skipped), (vec![1_000], 300));
+        let none = history.range(0, 500, NonZeroUsize::MIN).unwrap();
+        assert_eq!((none.rows.len(), none.skipped), (0, 300));
+    });
+}
+
+/// Catches: a key of the first or the last millisecond a row can name that a range or a
+/// prune bound leaves out or lets in wrongly.
+#[test]
+fn rows_at_the_ends_of_time_are_read_and_pruned() {
+    on_both("ended-extremes", |store| {
+        put_all(store, &[bare(0, "first"), bare(u64::MAX, "last")]);
+        let history = EndedHistory::new(store);
+        let one = NonZeroUsize::new(10).unwrap();
+        assert_eq!(ends(&history.range(0, 0, one).unwrap()), [0]);
+        assert_eq!(
+            ends(&history.range(u64::MAX, u64::MAX, one).unwrap()),
+            [u64::MAX]
+        );
+        assert_eq!(ends(&all(store)), [0, u64::MAX]);
+        assert_eq!(history.prune(u64::MAX, 0), Ok(1));
+        assert_eq!(ends(&all(store)), [u64::MAX]);
+    });
+}
+
+/// A fake store that fails the `n`th scan or batch on cue, and can rewrite a key right
+/// after a scan (as a second writer would between a prune's scan and its delete).
+struct Hooked {
+    inner: Fake,
+    scans: std::sync::atomic::AtomicUsize,
+    batches: std::sync::atomic::AtomicUsize,
+    fail_scan: std::sync::atomic::AtomicUsize,
+    fail_batch: std::sync::atomic::AtomicUsize,
+    after_scan: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+}
+
+impl Hooked {
+    fn new() -> Self {
+        let zero = || std::sync::atomic::AtomicUsize::new(0);
+        Self {
+            inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
+            scans: zero(),
+            batches: zero(),
+            fail_scan: zero(),
+            fail_batch: zero(),
+            after_scan: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Fails the `n`th scan from now on (counting from 1), and no other.
+    fn fail_scan(&self, n: usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.fail_scan.store(self.scans.load(SeqCst) + n, SeqCst);
+    }
+
+    /// Fails the `n`th batch from now on (counting from 1), and no other.
+    fn fail_batch(&self, n: usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.fail_batch.store(self.batches.load(SeqCst) + n, SeqCst);
+    }
+}
+
+/// Counts one call on `counter` and says whether it is the one to fail.
+fn hit(counter: &std::sync::atomic::AtomicUsize, fail_at: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    counter.fetch_add(1, SeqCst) + 1 == fail_at.load(SeqCst)
+}
+
+impl Store for Hooked {
+    fn apply_batch(
+        &self,
+        batch: Vec<Txn>,
+    ) -> Result<Vec<Result<js_state::Commit, js_state::Conflict>>, js_state::StoreError> {
+        match hit(&self.batches, &self.fail_batch) {
+            true => Err(js_state::StoreError::Failed("down".to_owned())),
+            false => self.inner.apply_batch(batch),
+        }
+    }
+
+    fn get(&self, key: &str) -> Result<Option<js_state::Versioned>, js_state::StoreError> {
+        self.inner.get(key)
+    }
+
+    fn scan_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, js_state::Versioned)>, js_state::StoreError> {
+        self.inner.scan_prefix(prefix)
+    }
+
+    fn scan_range(&self, scan: ScanRange<'_>) -> Result<js_state::ScanPage, js_state::StoreError> {
+        if hit(&self.scans, &self.fail_scan) {
+            return Err(js_state::StoreError::Failed("down".to_owned()));
+        }
+        let page = self.inner.scan_range(scan)?;
+        let rewrite = self.after_scan.lock().unwrap().take();
+        rewrite
+            .into_iter()
+            .for_each(|(key, value)| put_raw(&self.inner, key, value));
+        Ok(page)
+    }
+
+    fn changes(
+        &self,
+        after: js_state::Revision,
+        limit: usize,
+    ) -> Result<js_state::Changes, js_state::StoreError> {
+        self.inner.changes(after, limit)
+    }
+
+    fn reap_expired(&self) -> Result<usize, js_state::StoreError> {
+        self.inner.reap_expired()
+    }
+
+    fn commit_stats(&self) -> js_state::CommitStats {
+        self.inner.commit_stats()
+    }
+
+    fn now(&self) -> js_state::StoreTime {
+        self.inner.now()
+    }
+}
+
+/// `n` rows ending at 1 to `n`, each its own allocation.
+fn many(n: u64) -> Vec<EndedRow> {
+    (1..=n).map(|end| bare(end, &format!("r{end}"))).collect()
+}
+
+/// Catches: a failed scan, on the first page or on a later one, read as fewer rows rather
+/// than reported.
+#[test]
+fn a_scan_that_fails_on_any_page_fails_the_read() {
+    let store = Hooked::new();
+    put_all(&store, &many(300));
+    let history = EndedHistory::new(&store);
+    let limit = NonZeroUsize::new(1_000).unwrap();
+    for page in [1, 2] {
+        store.fail_scan(page);
+        let failed = history.range(0, u64::MAX, limit);
+        assert!(matches!(failed, Err(UsageError::Store(_))), "page {page}");
+    }
+    assert_eq!(history.range(0, u64::MAX, limit).unwrap().rows.len(), 300);
+}
+
+/// Catches: a prune whose delete fails after an earlier page's deletes reporting success,
+/// losing the deletes already made, or not finishing on its next run; and a scan failure
+/// of a prune swallowed.
+#[test]
+fn a_prune_that_fails_part_way_keeps_what_it_deleted_and_finishes_on_a_retry() {
+    let store = Hooked::new();
+    put_all(&store, &many(300));
+    let history = EndedHistory::new(&store);
+    store.fail_batch(2);
+    assert!(matches!(
+        history.prune(10_000, 0),
+        Err(UsageError::Store(_))
+    ));
+    assert_eq!(all(&store).rows.len(), 44);
+    store.fail_scan(1);
+    assert!(matches!(
+        history.prune(10_000, 0),
+        Err(UsageError::Store(_))
+    ));
+    assert_eq!(history.prune(10_000, 0), Ok(44));
+    assert!(all(&store).rows.is_empty());
+}
+
+/// Catches: a row rewritten by another writer between the prune's scan and its delete
+/// deleted anyway (the delete is conditional on the version the scan saw), and its index
+/// entry deleted without it.
+#[test]
+fn a_row_rewritten_between_the_scan_and_its_delete_is_kept() {
+    let store = Hooked::new();
+    let history = EndedHistory::new(&store);
+    let rows = many(3);
+    for row in &rows {
+        assert_eq!(history.put(row), Ok(true));
+    }
+    let key = ended_key(2, &rows[1].id);
+    *store.after_scan.lock().unwrap() = Some((key.clone(), encode(&rows[1])));
+    assert_eq!(history.prune(10_000, 0), Ok(2));
+    assert_eq!(ends(&all(&store)), [2]);
+    let index = store.get(&ended_id_key(&rows[1].id)).unwrap();
+    assert_eq!(index.map(|held| held.value), Some(key.into_bytes()));
+}

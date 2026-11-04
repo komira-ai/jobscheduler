@@ -18,7 +18,15 @@
 //! released, on the thread that ended the lease, so a log never blocks: [`crate::UsageHub`],
 //! the log a server runs, adds what it measured of the lease and queues the row, and its tick
 //! writes the queue through [`crate::UsageSink::allocation_ended`] where blocking is allowed.
-//! A row is written only if its key is absent, so a row written twice is written once.
+//!
+//! **One row per allocation.** Beside each row, `usage/ended-id/<id>` holds the row's key,
+//! and both are written in one transaction only if both are absent. An allocation recorded
+//! once is not recorded again, whatever end a later write gives it (a lease put back after a
+//! restart and stopped a second time ends later than it did the first time). The prune
+//! removes the two together.
+//!
+//! **Reading.** A row is returned only if it decodes and its key is the one its own end and
+//! id give; any other row under the prefix is skipped and counted.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -37,6 +45,10 @@ pub(crate) use row::{decode, encode};
 
 /// The key prefix of every ended-allocation row.
 pub const ENDED_PREFIX: &str = "usage/ended/";
+
+/// The key prefix of the index of the allocations recorded: `usage/ended-id/<id>` holds the
+/// key of the allocation's row.
+pub const ENDED_ID_PREFIX: &str = "usage/ended-id/";
 
 /// The longest an [`AllocationId`] may be, in bytes.
 pub const MAX_ALLOCATION_ID_LEN: usize = 63;
@@ -255,6 +267,12 @@ pub fn ended_key(ended_at_ms: u64, id: &AllocationId) -> String {
     format!("{ENDED_PREFIX}{ended_at_ms:020}/{id}")
 }
 
+/// The key of the index entry of allocation `id`.
+#[must_use]
+pub fn ended_id_key(id: &AllocationId) -> String {
+    format!("{ENDED_ID_PREFIX}{id}")
+}
+
 /// Where the record of each ended allocation goes.
 ///
 /// [`AllocationLog::ended`] is called on the thread that ended the allocation, after the
@@ -295,20 +313,25 @@ impl<'a> EndedHistory<'a> {
         Self { store }
     }
 
-    /// Writes `row` under its key unless a row is there already; whether it wrote. A row
-    /// written again (a retry after a write whose answer was lost) changes nothing.
+    /// Writes `row` and its index entry unless the allocation is recorded already (under
+    /// any end); whether it wrote. A row written again, a retry after a write whose answer
+    /// was lost or a second stop of the same allocation, changes nothing.
     ///
     /// # Errors
     /// [`UsageError::Store`] when the store fails; nothing is written.
     pub fn put(&self, row: &EndedRow) -> Result<bool, UsageError> {
         let key = ended_key(row.actual_end, &row.id);
-        let txn = Txn::new().put(key, encode(row), Cond::Absent);
+        let index = ended_id_key(&row.id);
+        let txn = Txn::new()
+            .put(index, key.clone().into_bytes(), Cond::Absent)
+            .put(key, encode(row), Cond::Absent);
         Ok(self.store.txn(txn)?.is_ok())
     }
 
     /// At most `limit` rows of the allocations that ended from `from_ms` to `to_ms`, both
     /// included, oldest end first (rows of one end in id order). A row this build does not
-    /// read is skipped and counted, and does not count towards `limit`.
+    /// read, or whose key is not the one its end and id give, is skipped and counted, and
+    /// does not count towards `limit`.
     ///
     /// # Errors
     /// [`UsageError::Store`] when the store fails.
@@ -335,10 +358,12 @@ impl<'a> EndedHistory<'a> {
                 scan = scan.resume(token);
             }
             let page = self.store.scan_range(scan)?;
-            for (_, held) in &page.rows {
-                match decode(&held.value) {
-                    Ok(row) => read.rows.push(row),
-                    Err(_) => read.skipped += 1,
+            for (key, held) in &page.rows {
+                let row = decode(&held.value).ok();
+                let row = row.filter(|row| ended_key(row.actual_end, &row.id) == *key);
+                match row {
+                    Some(row) => read.rows.push(row),
+                    None => read.skipped += 1,
                 }
             }
             match page.resume {
@@ -350,9 +375,10 @@ impl<'a> EndedHistory<'a> {
         Ok(read)
     }
 
-    /// Deletes every row of an allocation that ended before `now_ms` less `retention_ms`; a
-    /// row that ended exactly then is kept. Run it from the daily prune. How many rows it
-    /// deleted; a row rewritten between the scan and its delete is left for the next prune.
+    /// Deletes every row of an allocation that ended before `now_ms` less `retention_ms`,
+    /// with its index entry; a row that ended exactly then is kept. Run it from the daily
+    /// prune. How many rows it deleted; a row rewritten between the scan and its delete is
+    /// left, with its index entry, for the next prune.
     ///
     /// # Errors
     /// [`UsageError::Store`] when a scan or a delete fails; rows already deleted stay so.
@@ -372,9 +398,14 @@ impl<'a> EndedHistory<'a> {
                 scan = scan.resume(token);
             }
             let page = self.store.scan_range(scan)?;
-            // One transaction per row: each is judged on its own version.
+            // One transaction per row: each is judged on its own version. The id is the
+            // last component of the row's key.
             let delete = |(key, held): (String, Versioned)| {
-                Txn::new().delete(key, Cond::Version(held.version))
+                let id = key.rsplit('/').next().unwrap_or_default();
+                let index = format!("{ENDED_ID_PREFIX}{id}");
+                Txn::new()
+                    .delete(index, Cond::Any)
+                    .delete(key, Cond::Version(held.version))
             };
             let txns: Vec<Txn> = page.rows.into_iter().map(delete).collect();
             if !txns.is_empty() {

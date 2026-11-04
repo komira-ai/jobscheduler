@@ -305,8 +305,9 @@ impl Registry {
             let end = now.plus(wanted.max_wall);
             tail.started(marks.holder(host), spec.request_id());
             let own_mark = id.is_some_and(|id| marks.holder(host) == Some(id));
+            let marked = id.is_some_and(|id| marks.ever_marked(id));
             let queue = match whole {
-                true => Queue::whole(now, since, own_mark, requests.give_ups(&key)),
+                true => Queue::whole(now, since, (own_mark, marked), requests.give_ups(&key)),
                 false => Queue::ORDINARY,
             };
             let here = book.leases().remove(host).unwrap_or_default();

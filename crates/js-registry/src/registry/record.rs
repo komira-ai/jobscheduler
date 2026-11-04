@@ -34,15 +34,17 @@ impl Queue {
 
     /// A whole-node request started at `now`: it waited from `since`, its first presentation
     /// (`None` for one that never waited, which waited for nothing); `held` says it started on
-    /// the host its mark set aside, and `give_ups` is how many hosts it had given up.
+    /// the host its mark set aside, `marked` that it held a mark at some time while it waited,
+    /// and `give_ups` is how many hosts it had given up. A request that held a mark, or gave a
+    /// host up, and did not start on its mark's host had its mark dropped.
     pub(super) fn whole(
         now: Timestamp,
         since: Option<Timestamp>,
-        held: bool,
+        (held, marked): (bool, bool),
         give_ups: u32,
     ) -> Self {
         let waited = since.map_or(0, |since| now.millis().saturating_sub(since.millis()));
-        let drain = match (held, give_ups > 0) {
+        let drain = match (held, marked | (give_ups > 0)) {
             (true, _) => DrainOutcome::MarkHeld,
             (false, true) => DrainOutcome::MarkDropped,
             (false, false) => DrainOutcome::NoMark,

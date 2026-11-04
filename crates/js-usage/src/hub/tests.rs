@@ -618,6 +618,7 @@ fn the_schedule_is_five_minutes_for_a_flush_and_a_day_for_a_prune() {
         last_prune_day: None,
         used: BTreeMap::new(),
         pending: VecDeque::new(),
+        next_pending: 0,
     };
     assert_eq!(books.due(16), (false, true));
     assert_eq!(books.due(20), (false, false));
