@@ -174,9 +174,11 @@ impl Mount {
 /// as before for this release; [`JobSpec::downgrade_for`] writes a start in them for a host
 /// that did not report the `one-job` capability.
 ///
-/// Fields the design gives a start that are not here yet: the fence, the booking, the
-/// deadline, named assignments beyond `gpu_indices`, and environment by reference. The
-/// run-delivery change adds them, as optional fields.
+/// Fields the design gives a start that are not here yet: the booking, the deadline,
+/// named assignments beyond `gpu_indices`, and environment by reference. The run-delivery
+/// change adds them, as optional fields. The fence is the job start's pair of job id and
+/// allocation id ([`crate::JobStartSpec`], [`crate::START_FENCE_CAPABILITY`]); a run start
+/// is fenced by its run id alone, as before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSpec {
     /// The run's id; the key of every idempotent step.

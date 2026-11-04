@@ -45,10 +45,14 @@
 //!   and stop and lists those jobs in `jobs` ([`js_agent_wire::PER_JOB_CAPABILITY`]), so a
 //!   server sends them only to a host that reports it. A native agent does not report it (a
 //!   job start carries an image, which it cannot run). An operator cannot set it either.
+//! - `start-fence` is `true` wherever `per-job` is: the agent judges a job start by its
+//!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
+//!   and stops every job after a silence of the server
+//!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
 
 use std::path::Path;
 
-use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY};
+use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
     SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
@@ -116,13 +120,17 @@ fn report_run_files(hello: &mut Hello, run_files: bool) {
     }
 }
 
-/// Says that the agent takes the job-keyed start and stop: every agent that runs containers
-/// does. A native agent does not say it: a job start carries an image, which its runtime
-/// cannot run.
+/// Says that the agent takes the job-keyed start and stop, and that it fences them (it
+/// refuses a start whose fence it retired and stops its jobs after a silence): every agent
+/// that runs containers does. A native agent says neither: a job start carries an image,
+/// which its runtime cannot run.
 fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(PER_JOB_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
@@ -244,6 +252,32 @@ mod tests {
         );
         assert!(!hello.capabilities.contains_key(GPU_TOOLKIT));
         hello
+    }
+
+    /// Asserts that `start-fence` is reported as `true`, beside `per-job`, by the hello of an
+    /// agent that runs containers (its lifecycle judges a job start by its fence and stops its
+    /// jobs after a silence), that the hello still validates, and that a native agent's hello
+    /// carries neither. It catches a server told of a fence an agent does not enforce (a
+    /// native agent, which takes no job start), and one never told that a container agent
+    /// enforces it.
+    #[test]
+    fn the_hello_reports_start_fence_only_when_enforced() {
+        let contained = reported(&Config::none());
+        let flag = |hello: &Hello, key: &str| hello.capabilities.get(key).cloned();
+        assert_eq!(
+            flag(&contained, START_FENCE_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(
+            flag(&contained, PER_JOB_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(contained.validate(), Ok(()));
+        let mut native = hello();
+        assert!(report_native(&mut native, true, Ceiling::Off).is_empty());
+        assert_eq!(flag(&native, START_FENCE_CAPABILITY), None);
+        assert_eq!(flag(&native, PER_JOB_CAPABILITY), None);
+        assert_eq!(START_FENCE_CAPABILITY, "start-fence");
     }
 
     /// Catches a container agent that does not say its ceiling, says it under another key,

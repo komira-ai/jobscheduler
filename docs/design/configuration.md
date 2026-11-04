@@ -127,6 +127,32 @@ that waits past `max_queue_wait` or does not start within `start_timeout`; whole
 `path_grace`; the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit names a launching
 machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is refused.
 
+## Live logs: `[logs]` (Planned)
+
+The table of [live-logs.md](live-logs.md), section 6, which gives each key's type, default and bound. It is in the `--config` file only,
+beside `[server]`, and has no flags; an unknown key is refused; `sink = "none"` (the default, also when the table is absent) with any
+other key present is refused, naming the key. The keys are files, never inline secrets, and each file is owner-only like every other
+key file. The server does not read the table yet.
+
+```toml
+[logs]
+sink            = "object_store"                        # "object_store" | "none"; default "none"
+url             = "s3://bucket/prefix"                  # required with object_store; the prefix is optional
+region          = "us-east-1"                           # required with object_store
+endpoint        = "https://objects.example"             # optional; default the region's AWS endpoint
+path_style      = false                                 # optional; true for stores that need /bucket/key URLs
+read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
+credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
+sts_endpoint    = "https://objects.example"             # optional; default endpoint, or the region's AWS STS endpoint
+role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts
+mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
+credential_ttl  = "1h"                                  # 15m to 12h
+max_follow      = 256                                   # most GetLogs calls waiting at once
+```
+
+The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a job whose
+start carries a log sink.
+
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
 ```toml
