@@ -345,8 +345,10 @@ pub struct Cli {
     /// A host directory a job of `--runtime crun` that booked a GPU is given read-only
     /// (`nosuid`, `nodev`), as `SRC:DST`: the driver's libraries and programs; repeatable.
     /// Both are absolute. The source must be a directory, not below `/proc`, `/sys` or
-    /// `/dev`; the destination not below those or `/scratch`, and no two share one. Needs
-    /// `--gpu-device`.
+    /// `/dev`; the destination not below those or `/scratch`, and no two share one. A file
+    /// source is refused: binding a file where the image has none would leave a file in the
+    /// image's root that every job of that image shares. A GPU job whose image has a file at
+    /// the destination is refused when it starts. Needs `--gpu-device`.
     #[arg(long = "gpu-mount", value_name = "SRC:DST")]
     pub gpu_mounts: Vec<String>,
     /// A variable set in the environment of a job of `--runtime crun` that booked a GPU,

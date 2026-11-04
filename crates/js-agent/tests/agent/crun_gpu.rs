@@ -30,15 +30,22 @@ fn run_agent(extra: &[&str], host: &crate::support::Host) -> (String, String, bo
 /// Proves each GPU flag that cannot work stops the agent with status 2, naming the flag, and
 /// sends nothing: a relative device path, one outside `/dev`, one with `..`, a second
 /// `{index}`, a path that is not a character device, a missing node, a mount source below
-/// `/proc`, two mounts at one destination, a reserved variable, `--gpu-mount` and `--gpu-env`
-/// without `--gpu-device`, and the flags with `--runtime docker`, with the engine by default
-/// and on a Mac. Catches a flag that is accepted and then ignored, a check that runs after the
+/// `/proc`, a mount source that is a file, two mounts at one destination, a reserved
+/// variable, `--gpu-mount` and `--gpu-env` without `--gpu-device`, and the flags with
+/// `--runtime docker`, with the engine by default and on a Mac. Catches a flag that is accepted and then ignored, a check that runs after the
 /// host registered, and a runtime that ignores GPU flags it cannot honour.
 #[test]
 fn gpu_flags_are_validated_naming_the_flag() {
     let tmp = std::fs::canonicalize(std::env::temp_dir()).expect("the temporary directory");
     let tmp = tmp.display().to_string();
     let twice = format!("{tmp}:/usr/local/driver");
+    let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "crun-gpu-file-source");
+    let library = std::fs::canonicalize(dir.path())
+        .expect("canonical")
+        .join("libdriver.so.1");
+    std::fs::write(&library, b"").expect("a file");
+    let library = library.display().to_string();
+    let file_source = format!("{library}:/usr/local/driver/libdriver.so.1");
     let crun_cases: Vec<(Vec<&str>, String)> = vec![
         (
             vec!["--gpu-device", "dev/nvidia0"],
@@ -78,6 +85,10 @@ fn gpu_flags_are_validated_naming_the_flag() {
                 &twice,
             ],
             format!("--gpu-mount: {twice}: another mount has the destination /usr/local/driver"),
+        ),
+        (
+            vec!["--gpu-device", "/dev/null", "--gpu-mount", &file_source],
+            format!("--gpu-mount: {file_source}: the source {library} is not a directory"),
         ),
         (
             vec!["--gpu-device", "/dev/null", "--gpu-env", "JS_RUN=1"],

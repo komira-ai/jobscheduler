@@ -25,6 +25,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::Path;
 
 use js_contain::container::{ContainerSpec, DeviceNode, HostMount};
+use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 
 use crate::Cli;
 use crate::cli_runtime::SCRATCH_TARGET;
@@ -305,6 +306,29 @@ pub(super) fn wiring(gpus: Option<&GpuSettings>, indices: &[u32]) -> Result<Wiri
 }
 
 impl Wiring {
+    /// Refuses a driver mount whose destination is something other than a directory in the
+    /// image's root `rootfs` (a file such as a library): `crun` could not bind a directory
+    /// over it, and the start would fail later in the container. The destination is looked up
+    /// as the container sees it (links resolved inside the root, never on the host); one the
+    /// image does not have is fine (`crun` makes it).
+    ///
+    /// # Errors
+    /// The text names `--gpu-mount` and the destination.
+    pub(super) fn check_targets(&self, rootfs: &Path) -> Result<(), String> {
+        for mount in &self.mounts {
+            if let Ok(kind) = kind_in(rootfs, &mount.target)
+                && kind != FileType::Directory
+            {
+                return Err(format!(
+                    "--gpu-mount: the destination {} is not a directory in the image, so the \
+                     driver directory cannot be bound over it",
+                    mount.target
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Gives `container` (whose image config is applied) the nodes, the mounts after its
     /// own, and the variables, each over the image's of the same name.
     pub(super) fn apply(self, container: &mut ContainerSpec) {
@@ -317,6 +341,16 @@ impl Wiring {
             }
         }
     }
+}
+
+/// The type of what `target` (an absolute path in the container) is in the root `rootfs`,
+/// resolved as if `rootfs` were `/` (`RESOLVE_IN_ROOT`: a link cannot leave it).
+fn kind_in(rootfs: &Path, target: &str) -> std::io::Result<FileType> {
+    let flags = OFlags::PATH | OFlags::CLOEXEC;
+    let root = rustix::fs::open(rootfs, flags | OFlags::DIRECTORY, Mode::empty())?;
+    let relative = target.trim_start_matches('/');
+    let found = rustix::fs::openat2(&root, relative, flags, Mode::empty(), ResolveFlags::IN_ROOT)?;
+    Ok(FileType::from_raw_mode(rustix::fs::fstat(&found)?.st_mode))
 }
 
 #[cfg(test)]

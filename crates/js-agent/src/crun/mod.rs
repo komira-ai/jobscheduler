@@ -748,6 +748,8 @@ impl CrunRuntime {
                 .block_on(ensure_image(&self.oci, image, limit))
                 .map_err(Fault::Image)?;
         }
+        let rootfs = js_contain::oci::image::published_root(&self.store, &image.digest);
+        gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
         let config = ImageConfig::kept(&self.configs, &image.digest)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);

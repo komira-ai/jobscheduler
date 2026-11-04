@@ -267,6 +267,9 @@ fn the_mounts_are_read_only_and_the_job_cannot_remount() {
     ];
     flags.extend(["--gpu-mount", &mount]);
     flags.extend(env);
+    // The image has the destination as a directory: the bind goes over it.
+    let image_dir = image_root(&node).join("usr/local/driver");
+    std::fs::create_dir_all(&image_dir).expect("a directory in the image");
     let mut runtime = open_with_gpus(&node, passthrough(&flags), four_gpus);
     let id = runtime.stage(&run(&node, "r1-hold", &[0])).expect("staged");
     let config = bundle(&node, &id);
@@ -296,5 +299,56 @@ fn the_mounts_are_read_only_and_the_job_cannot_remount() {
         assert_eq!(set, &json!([]), "{name}");
     }
     assert_eq!(config["process"]["noNewPrivileges"], true);
+    runtime.remove(&id).expect("removed");
+}
+
+/// The unpacked root of the node's image.
+fn image_root(node: &Node) -> PathBuf {
+    js_contain::oci::image::published_root(&node.scratch, &node.digest)
+}
+
+/// Proves a driver mount whose destination is a file in the image (a library where the
+/// operator named a directory) refuses the GPU run before anything is made, naming
+/// `--gpu-mount` and the destination, even when the file is reached through a link in the
+/// image; a run without GPUs of the same image still stages, and a GPU run whose destination
+/// the image lacks stages too. Catches a start that `crun` fails
+/// half way, with a lease, cgroup or sidecar left behind and an error that names no flag.
+#[test]
+fn a_mount_over_a_file_in_the_image_refuses_the_run_and_makes_nothing() {
+    let node = Node::new("gpu-over-file");
+    let driver = node.dir.join("driver");
+    std::fs::create_dir_all(&driver).expect("a driver directory");
+    let root = image_root(&node);
+    std::fs::create_dir_all(root.join("usr/lib")).expect("a library directory");
+    std::fs::write(root.join("usr/lib/libdriver.so.1"), b"").expect("a library");
+    std::os::unix::fs::symlink("/usr/lib/libdriver.so.1", root.join("usr/lib/linked.so"))
+        .expect("a link in the image");
+    for target in ["/usr/lib/libdriver.so.1", "/usr/lib/linked.so"] {
+        let mount = format!("{}:{target}", driver.display());
+        let mut flags = DEVICES.to_vec();
+        flags.extend(["--gpu-mount", &mount]);
+        let mut runtime = open_with_gpus(&node, passthrough(&flags), four_gpus);
+        let why = runtime
+            .stage(&run(&node, "r1-hold", &[0]))
+            .expect_err("refused");
+        assert_eq!(
+            why.to_string(),
+            format!(
+                "--gpu-mount: the destination {target} is not a directory in the image, so the \
+                 driver directory cannot be bound over it"
+            )
+        );
+        assert_eq!(left(&node, "r1-hold"), Vec::<PathBuf>::new(), "{target}");
+        let id = runtime
+            .stage(&node.spec("r2-hold"))
+            .expect("a run without GPUs");
+        runtime.remove(&id).expect("removed");
+    }
+    // A destination the image does not have is made by `crun`: the run stages.
+    let mount = format!("{}:/opt/driver", driver.display());
+    let mut flags = DEVICES.to_vec();
+    flags.extend(["--gpu-mount", &mount]);
+    let mut runtime = open_with_gpus(&node, passthrough(&flags), four_gpus);
+    let id = runtime.stage(&run(&node, "r3-hold", &[0])).expect("staged");
     runtime.remove(&id).expect("removed");
 }
