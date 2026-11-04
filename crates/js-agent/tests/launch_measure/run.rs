@@ -57,7 +57,7 @@ use crate::runtime_host::{RuntimeHost, Setup};
 use crate::table::{self, Facts, Method, Sample, Samples, Variant};
 
 /// The job: one write to the FIFO, its first instruction.
-// In /scratch, a bind of the run's scratch directory: /work is an overlayfs, where a FIFO does not share a pipe with the host.
+// /scratch, not /work: /work is an overlayfs, where a FIFO does not share the host's pipe.
 const SCRIPT: &str = "echo up > /scratch/up";
 
 /// The FIFO's name in the run's scratch directory, which the job sees at `/scratch`.
@@ -99,7 +99,7 @@ pub fn main() -> ExitCode {
     };
     if !rustix::process::geteuid().is_root() {
         eprintln!(
-            "js-launch-measure: run it as root (sudo -E): the crun runtime and the egress it \
+            "js-launch-measure: run it as root: the crun runtime and the egress it \
              measures are the root agent's"
         );
         return ExitCode::from(2);
