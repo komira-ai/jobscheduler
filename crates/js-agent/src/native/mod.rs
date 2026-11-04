@@ -69,7 +69,10 @@
 //!
 //! What this runtime does not do yet: run a start named by its image (`image`, with or
 //! without `run`; it is refused `image-unsupported-here` until the bundle is pulled by its
-//! digest), stage inputs or collect outputs (a start that names either is refused
+//! digest), carry a job start's environment (`RunSpec::env`: a start with one is refused
+//! `env-unsupported` at admission and before the image is looked at, and a run handed here
+//! with one fails before a user is made; the native body's own `env` is applied; the job
+//! start's comes with the one job definition), stage inputs or collect outputs (a start that names either is refused
 //! `native-unsupported`), adopt a run after the agent restarts (the
 //! journal ends it), stop a run softly (the helper only kills), or grant the user's
 //! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
@@ -483,6 +486,11 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
+        if !spec.env.is_empty() {
+            return Err(RuntimeError::new(
+                "this runtime does not carry a job start's environment",
+            ));
+        }
         check_env(native)?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
@@ -629,6 +637,19 @@ impl Runtime for NativeRuntime {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
             why: "this agent runs native bodies only and pulls no image".to_owned(),
         })
+    }
+
+    /// A job start's environment would be set in the native process, which this runtime
+    /// does not do yet: a start with one is refused before anything is made, never run
+    /// without it.
+    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        match env.is_empty() {
+            true => Ok(()),
+            false => Err(NativeRefusal {
+                code: refusal::ENV_UNSUPPORTED,
+                why: "this agent does not carry a job start's environment".to_owned(),
+            }),
+        }
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {

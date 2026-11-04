@@ -443,6 +443,38 @@ fn a_job_start_with_env_no_longer_fails_to_start_with_env_unsupported() {
     assert!(h.life.results().is_empty());
 }
 
+/// Asserts that on a runtime that carries no job start's environment (as the Mac one) a
+/// job start that names one is answered `failed_to_start` with `env-unsupported` in the
+/// job's listing and creates nothing (no container, no scratch directory, no booking), that
+/// the same start delivered again adds no second result, and that a start with an empty
+/// environment beside it runs. It catches a job run without the environment it names, and a
+/// runtime's refusal the lifecycle does not ask for.
+#[test]
+fn a_runtime_that_cannot_carry_env_refuses_the_job_start_and_creates_nothing() {
+    let mut h = Harness::new("job-env-refused");
+    h.fake.refuse_env();
+    let mut spec = start("j1");
+    spec.env.insert("LANG".to_owned(), "C".to_owned());
+    let events = h.apply(vec![job_start(spec.clone()), job_start(start("j2"))]);
+    assert_eq!(
+        names(&events),
+        [
+            format!("refused j1 {}", refusal::ENV_UNSUPPORTED),
+            "started j2".to_owned()
+        ]
+    );
+    assert_eq!(h.fake.created().len(), 1);
+    assert_eq!(h.fake.created()[0].run_id, "j2");
+    assert!(h.scratch_of("j1").metadata().is_err());
+    assert_eq!(h.life.free().cpu_millis, 3000);
+    let result = listing(&h, "j1").result.expect("a result");
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    assert_eq!(result.detail.as_deref(), Some(refusal::ENV_UNSUPPORTED));
+    assert!(h.apply(vec![job_start(spec)]).is_empty());
+    assert_eq!(listed(&h), ["j1", "j2"]);
+    assert_eq!(h.fake.created().len(), 1);
+}
+
 /// Asserts that a job start with a `run` body is answered `failed_to_start` with
 /// `run-unsupported` in the job's listing and creates nothing, as a run start with one is:
 /// this agent runs an image's own command and no run body yet. It catches a run body

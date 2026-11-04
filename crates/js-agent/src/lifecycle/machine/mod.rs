@@ -369,8 +369,13 @@ impl Lifecycle {
         }
     }
 
-    /// Whether a start may run now, and its mounts resolved when it may.
-    fn admit(&self, spec: &JobSpec) -> Result<Vec<ResolvedMount>, Refusal> {
+    /// Whether a start may run now, and its mounts resolved when it may. `env` is the
+    /// environment of a job start, empty for a run start.
+    fn admit(
+        &self,
+        spec: &JobSpec,
+        env: &[(String, String)],
+    ) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -389,6 +394,11 @@ impl Lifecycle {
                 Some(bundle) => bundle.admit(spec)?,
             }
         }
+        // The runtime must carry the job's environment; asked before the image, so a runtime
+        // that runs neither answers for the environment (`env-unsupported`).
+        self.runtime
+            .check_env(env)
+            .map_err(|refused| (refused.code, refused.why))?;
         // A start named by its image: the runtime must run images, and a `run` beside the
         // image has no consumer on any runtime yet, so it is refused rather than dropped.
         if spec.native.is_none() {
@@ -702,7 +712,7 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec)
+            .admit(spec, env)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,

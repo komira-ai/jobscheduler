@@ -9,7 +9,9 @@ use std::sync::Arc;
 use js_agent::bundle::{Admission, Placer};
 use js_agent::lifecycle::{Event, Lifecycle};
 use js_agent::native::NativeChecks;
-use js_agent_wire::{Command, InputRef, JobSpec, Outcome, RunFile, RunSpec};
+use js_agent_wire::{
+    BookedResources, Command, InputRef, JobSpec, JobStartSpec, Outcome, RunFile, RunSpec, refusal,
+};
 use js_mac_pool::seatbelt::AbsPath;
 use js_types::{Arch, Os};
 use serde_json::json;
@@ -235,6 +237,73 @@ fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
         assert_eq!(result.outcome, Outcome::FailedToStart);
         assert_eq!(result.detail.as_deref(), Some("image-unsupported-here"));
     }
+}
+
+/// A job start of `job_id`, named by its image, with the environment `env`.
+fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
+    Command::JobStart(Box::new(JobStartSpec {
+        job_id: job_id.to_owned(),
+        allocation_id: format!("alloc-{job_id}"),
+        image: crate::lifecycle::job(job_id).image,
+        command: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
+        env: env
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        files: Vec::new(),
+        booked: BookedResources {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            disk_bytes: None,
+            gpu_indices: Vec::new(),
+        },
+        wall_ms: 60_000,
+    }))
+}
+
+/// Asserts that a job start with an environment on the native runtime is answered
+/// `failed_to_start` with `env-unsupported`, before the image is looked at, and makes
+/// nothing (the helper sees no user, no scratch directory, the booking intact); and that
+/// the same start without an environment is answered for its image instead
+/// (`image-unsupported-here`). It catches the native path running a job without the
+/// environment it names, and the environment refusal lost behind the image's.
+#[test]
+fn the_native_runtime_still_answers_env_unsupported() {
+    let mut h = Native::new("job-env");
+    let events = h.apply(vec![job_start("j1", &[("A", "1")]), job_start("j2", &[])]);
+    assert_eq!(
+        events,
+        [
+            format!("refused j1 {}", refusal::ENV_UNSUPPORTED),
+            format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE),
+        ]
+    );
+    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    assert!(!h.scratch_of("j1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    let details: Vec<(String, Option<String>)> = h
+        .life
+        .held_jobs()
+        .into_iter()
+        .map(|job| {
+            let result = job.result.expect("a result");
+            assert_eq!(result.outcome, Outcome::FailedToStart);
+            (job.job_id, result.detail)
+        })
+        .collect();
+    assert_eq!(
+        details,
+        [
+            ("j1".to_owned(), Some(refusal::ENV_UNSUPPORTED.to_owned())),
+            (
+                "j2".to_owned(),
+                Some(refusal::IMAGE_UNSUPPORTED_HERE.to_owned())
+            ),
+        ]
+    );
 }
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code

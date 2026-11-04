@@ -105,7 +105,8 @@ pub struct RunSpec {
     /// container over the image's own variables (a name in both takes this value). Empty
     /// for a run start and for a native body, whose environment is its own
     /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
-    /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one.
+    /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one
+    /// ([`Runtime::check_env`]).
     pub env: Vec<(String, String)>,
     /// Thousandths of a CPU core.
     pub cpu_millis: u64,
@@ -358,6 +359,20 @@ pub trait Runtime {
             code: refusal::NATIVE_UNSUPPORTED,
             why: "this agent runs no native jobs".to_owned(),
         })
+    }
+
+    /// Whether this runtime carries a job start's environment (`env`, by name in order),
+    /// asked at admission for every start, before anything is created and before
+    /// [`Runtime::check_image`], so a start the runtime cannot give its environment is
+    /// answered for that and not for another reason. The default carries it, which is every
+    /// container runtime; the runtime a Mac agent has refuses a non-empty one
+    /// (`env-unsupported`): a job must never run without the environment it names.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_env(&self, _env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        Ok(())
     }
 
     /// Whether this runtime runs a start named by its image (an `image`, with or without a
