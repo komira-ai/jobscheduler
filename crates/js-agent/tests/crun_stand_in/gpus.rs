@@ -217,7 +217,7 @@ fn left(node: &Node, run_id: &str) -> Vec<PathBuf> {
 /// a runtime that claims GPUs without a device list.
 #[test]
 fn without_gpu_device_flags_a_gpu_start_is_still_refused() {
-    let node = Node::new("gpu-refused");
+    let node = Node::new("gpu-unsupported");
     let mut runtime = node.open();
     assert!(!runtime.supports_gpus());
     let why = runtime
