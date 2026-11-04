@@ -87,8 +87,7 @@ pub(crate) fn start_of(
             container: port.container,
         })
         .collect();
-    let covered =
-        ceiling.allows(network) && ports.iter().all(|port| ceiling.forwards(port.host));
+    let covered = ceiling.allows(network) && ports.iter().all(|port| ceiling.forwards(port.host));
     if !covered {
         return Err(Unsendable::AboveCeiling);
     }
@@ -132,3 +131,7 @@ pub(crate) fn start_of(
         })?;
     Ok(start)
 }
+
+#[cfg(test)]
+#[path = "job_start_tests.rs"]
+mod tests;

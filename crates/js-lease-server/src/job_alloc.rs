@@ -3,14 +3,16 @@
 //! An allocation is freed only when the host confirms the job's container is gone
 //! ([`Freed::HostConfirmed`]) or the provider reads the host absent
 //! ([`Freed::ProviderAbsent`]). A host that is only silent frees nothing: unknown is not
-//! absent. Every path that frees calls [`free_allocation`], which records why in the
-//! allocation's row from the job's end, so there is no second way to free.
+//! absent. Every path that frees is in this module: [`free_allocation`], which records why
+//! in the allocation's row from the job's end, and [`answer_retired`], which ends a cancelled
+//! job and frees its allocation in the same commit.
 
 use js_jobs::{
-    AllocationRecord, EndReason, IdSource, JobId, JobRecord, JobState, JobStore, JobStoreError,
-    ResultReason, StartFailure,
+    AllocationRecord, AllocationStep, EndReason, IdSource, JobEnd, JobId, JobRecord, JobState,
+    JobStore, JobStoreError, Output, ResultReason, StartFailure,
 };
 use js_state::Store;
+use js_types::HostId;
 
 /// What says an allocation's container is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +52,7 @@ pub(crate) fn free_allocation<S: Store, I: IdSource>(
     let reason = match freed {
         Freed::ProviderAbsent => EndReason::HostAbsent,
         Freed::HostConfirmed => match &job {
-            Some(job) if !job.state.is_ended() && !job.cancel_requested => {
+            Some(job) if !job.state.is_ended() & !job.cancel_requested => {
                 return Err(JobStoreError::NotReleasable { id: id.clone() });
             }
             Some(job) => reason_of(job),
@@ -60,6 +62,44 @@ pub(crate) fn free_allocation<S: Store, I: IdSource>(
         },
     };
     store.free(id, reason)
+}
+
+/// Answers the host `host` retiring the job `id`: it was told to stop a job it does not hold,
+/// and that answer counts as stopped and gone (design section 5.3, the cancel bullets, and
+/// section 8, row 38). When the job's live allocation is on `host`:
+///
+/// - a job with a cancel intent that has not ended becomes cancelled and its allocation
+///   freed in one commit, so the host is not left booked and the job is never started after;
+/// - a job that has ended (a start timeout, say) has its allocation freed, as on any
+///   confirmation.
+///
+/// Anything else (an id the store does not know, an allocation freed or on another host, a
+/// job neither ended nor asked to cancel) is left as it is: nothing is revived or made.
+///
+/// # Errors
+/// As [`JobStore::end_and_free`] and [`free_allocation`].
+pub(crate) fn answer_retired<S: Store, I: IdSource>(
+    store: &JobStore<S, I>,
+    host: &HostId,
+    id: &JobId,
+) -> Result<(), JobStoreError> {
+    let (job, allocation) = (store.get_job(id)?, store.get_allocation(id)?);
+    let held_here = |allocation: &AllocationRecord| {
+        (allocation.host == *host) & (allocation.step != AllocationStep::Freed)
+    };
+    let Some(job) = job.filter(|_| allocation.as_ref().is_some_and(held_here)) else {
+        return Ok(());
+    };
+    if job.state.is_ended() {
+        free_allocation(store, id, Freed::HostConfirmed)?;
+    } else if job.cancel_requested {
+        let cancelled = JobEnd::Cancelled {
+            exit_code: None,
+            output: Output::default(),
+        };
+        store.end_and_free(id, cancelled, EndReason::Cancelled)?;
+    }
+    Ok(())
 }
 
 /// Why the allocation of `job`, ended or asked to cancel, is freed once its host confirms the
@@ -87,3 +127,7 @@ fn reason_of(job: &JobRecord) -> EndReason {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "job_alloc_tests.rs"]
+mod tests;

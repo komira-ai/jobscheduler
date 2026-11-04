@@ -26,6 +26,7 @@ use crate::{
 mod clock;
 mod compat;
 mod failures;
+mod hosts;
 mod idempotency;
 mod lifecycle;
 mod paging;
@@ -37,6 +38,7 @@ mod rows;
 pub use clock::*;
 pub use compat::*;
 pub use failures::*;
+pub use hosts::*;
 pub use idempotency::*;
 pub use lifecycle::*;
 pub use paging::*;
@@ -67,6 +69,8 @@ where
     a_requeued_job_gets_a_new_allocation(backend);
     a_repeated_allocation_id_is_drawn_again(backend);
     booked_on_sums_the_live_allocations_of_a_host(backend);
+    live_on_lists_the_live_allocations_of_one_host(backend);
+    end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
     a_move_that_loses_its_job_version_is_stale(backend);
     a_cancel_that_loses_to_a_placement_is_stale(backend);
@@ -142,6 +146,8 @@ macro_rules! job_store_tests {
             a_requeued_job_gets_a_new_allocation,
             a_repeated_allocation_id_is_drawn_again,
             booked_on_sums_the_live_allocations_of_a_host,
+            live_on_lists_the_live_allocations_of_one_host,
+            end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
             a_move_that_loses_its_job_version_is_stale,
             a_cancel_that_loses_to_a_placement_is_stale,

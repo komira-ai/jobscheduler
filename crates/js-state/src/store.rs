@@ -281,11 +281,9 @@ mod tests {
         };
         let prefix = <Arc<dyn Store> as Store>::scan_prefix(&handle, "k/").expect("store");
         assert_eq!(keys(prefix), ["k/a", "k/b", "k/c"]);
-        let page = <Arc<dyn Store> as Store>::scan_range(
-            &handle,
-            ScanRange::new("k/", NonZeroUsize::MIN),
-        )
-        .expect("store");
+        let page =
+            <Arc<dyn Store> as Store>::scan_range(&handle, ScanRange::new("k/", NonZeroUsize::MIN))
+                .expect("store");
         assert_eq!(keys(page.rows), ["k/a"]);
         assert!(page.resume.is_some());
         let feed = <Arc<dyn Store> as Store>::changes(&handle, Revision(0), 10).expect("store");
