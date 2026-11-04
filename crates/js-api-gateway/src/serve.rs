@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use http_body_util::LengthLimitError;
 use js_proto::v1::job_service_server::JobService;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+use serde::ser::{Error as _, Serialize, Serializer};
 
 use crate::annotation::{Segment, Template};
 use crate::answer::Answer;
@@ -185,7 +186,21 @@ async fn read(body: Body) -> Result<Bytes, Answer> {
 }
 
 /// The success answer `status` of a call's response, written by the proto3 JSON mapping
-/// (`DynamicMessage`'s own serialization, the default options of prost-reflect).
+/// (`DynamicMessage`'s own serialization, the default options of prost-reflect), with the
+/// keys of every object in order ([`Ordered`]).
 fn respond(status: StatusCode, output: &DynamicMessage) -> Response {
-    (status, Json(output)).into_response()
+    (status, Json(Ordered(output))).into_response()
+}
+
+/// A message written with the keys of every JSON object in order. prost-reflect keeps a map
+/// field in a hash map, whose order changes from one process to the next, so the message is
+/// first made a `serde_json::Value`, whose objects keep their keys sorted: the same message
+/// is always the same bytes.
+struct Ordered<'a>(&'a DynamicMessage);
+
+impl Serialize for Ordered<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = serde_json::to_value(self.0).map_err(S::Error::custom)?;
+        value.serialize(serializer)
+    }
 }

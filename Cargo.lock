@@ -1098,6 +1098,7 @@ dependencies = [
  "prost",
  "prost-reflect",
  "protox",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
