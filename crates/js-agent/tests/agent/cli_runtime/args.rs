@@ -205,7 +205,7 @@ fn hardening_flags_always_present() {
 /// the memory, and a Docker container given writable directories it did not have.
 #[test]
 fn podman_hardens_var_tmp_and_run_like_tmp() {
-    let set = Settings::new(Path::new(BIN), None, None)
+    let set = Settings::new(Path::new(BIN), None)
         .unwrap()
         .with_tmp_size(Some("2g"))
         .unwrap();
@@ -292,11 +292,13 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
     }
 }
 
-/// Asserts that the settings reach the hardening list: the network, the pull policy and
-/// the size of `/tmp`; the user is not in it (it is the slot's, see `create.rs`). It catches a flag that is checked and not used.
+/// Asserts that the settings reach the hardening list: the pull policy and the size of
+/// `/tmp`; that the network is `none` whatever the settings (there is no network setting);
+/// and that the user is not in it (it is the slot's, see `create.rs`). It catches a flag that
+/// is checked and not used.
 #[test]
 fn hardening_follows_the_settings() {
-    let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
+    let set = Settings::new(Path::new(BIN), Some("5:6"))
         .unwrap()
         .with_pull(Some("missing"))
         .unwrap()
@@ -304,7 +306,7 @@ fn hardening_follows_the_settings() {
         .unwrap();
     let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
-    assert_eq!(value("--network"), "jobs");
+    assert_eq!(value("--network"), "none");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }
@@ -317,7 +319,7 @@ fn hardening_follows_the_settings() {
 #[test]
 fn the_actions_cgroup_becomes_the_cgroup_parent() {
     let with = |dir: &str| {
-        Settings::new(Path::new(BIN), None, None)
+        Settings::new(Path::new(BIN), None)
             .unwrap()
             .with_actions_cgroup(Some(Path::new(dir)))
             .unwrap()
@@ -598,7 +600,7 @@ fn add_hosts_reach_create() {
     let none = hardening_args(&settings(), Engine::Podman, PROFILE);
     assert!(!none.iter().any(|a| a == "--add-host"));
     let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
-    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+    let set = Settings::new(Path::new(BIN), None)
         .unwrap()
         .with_add_hosts(&entries)
         .unwrap();

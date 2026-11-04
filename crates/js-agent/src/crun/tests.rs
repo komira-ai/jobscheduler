@@ -94,6 +94,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         bundle: None,
         labels: BTreeMap::new(),
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

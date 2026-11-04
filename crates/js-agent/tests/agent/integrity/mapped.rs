@@ -89,7 +89,7 @@ fn a_process_outside_the_mapped_range_is_not_found() {
 /// It catches checks that watch a range the jobs do not run in.
 #[test]
 fn the_checks_use_the_resolved_range_and_never_read_the_id_files() {
-    let unresolved = Settings::new(std::path::Path::new("/bin/sh"), None, None)
+    let unresolved = Settings::new(std::path::Path::new("/bin/sh"), None)
         .unwrap()
         .with_subuid("jobmap")
         .unwrap();
