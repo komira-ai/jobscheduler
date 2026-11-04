@@ -45,13 +45,16 @@
 //! A path variable sets the request field it names, percent-decoded exactly once (a
 //! malformed escape or text that is not UTF-8 is a 400 naming the field); literal segments
 //! and custom verbs are matched as written. A body or query that names a field the path
-//! sets is a 400, whatever it holds (`null` and the default too). A POST route takes the request message
-//! as its JSON body (an empty body is `{}`) and no query string. A GET route takes no body;
+//! sets is a 400, whatever it holds (`null` and the default too). A route whose option has
+//! `body: "*"` (every POST of the job service) takes the request message as its JSON body
+//! (an empty body is `{}`) and no query string. Any other route (every GET) takes no body;
 //! its query string sets the other fields: `name=value` for a singular field (once),
 //! repeated for a list (`states=JOB_STATE_QUEUED&states=JOB_STATE_RUNNING`), and
 //! `name[key]=value` for each entry of a map (`labels[team]=ml`), names and values
 //! percent-decoded once with `+` as a space (a malformed escape is a 400). A field may be
-//! named by its JSON name or its proto name, but not by both in one request.
+//! named by its JSON name or its proto name, but not by both in one request. A 400 about a
+//! query parameter names the field without a map key (`labels`, not `labels[a]`), since the
+//! key is a value of the request.
 //!
 //! A `job_id` (1 to 63 bytes of letters, digits, dot, underscore and dash, design section
 //! 5.3 and `job.proto`) is checked before the call, in the path, the body and the query
@@ -149,8 +152,8 @@ include!("gateway.rs");
 /// lease server's routes.
 pub const BODY_LIMIT: usize = 64 * 1024;
 
-/// One route of the gateway, as the build script generated it from a method's
-/// `google.api.http` option.
+/// One route of the gateway, as `src/codegen.rs` writes it into the checked-in
+/// `src/gateway.rs` from a method's `google.api.http` option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
     /// The HTTP method.

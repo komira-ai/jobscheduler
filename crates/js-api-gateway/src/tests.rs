@@ -153,26 +153,31 @@ fn binding(route: &'static crate::Route) -> crate::serve::Binding {
     }
 }
 
-/// A test route.
-const fn route(verb: Verb, template: &'static str, rpc: crate::Rpc) -> crate::Route {
-    crate::Route {
-        verb,
-        template,
-        rpc,
-        body: false,
-        status: 200,
-        input: "jobscheduler.v1.GetJobRequest",
-        output: "jobscheduler.v1.GetJobRequest",
-    }
-}
+/// A test route of `GetJob` at `/v1/things/{job_id}`.
+static BY_ID: crate::Route = crate::Route {
+    verb: Verb::Get,
+    template: "/v1/things/{job_id}",
+    rpc: crate::Rpc::GetJob,
+    body: false,
+    status: 200,
+    input: "jobscheduler.v1.GetJobRequest",
+    output: "jobscheduler.v1.GetJobRequest",
+};
 
-static BY_ID: crate::Route = route(Verb::Get, "/v1/things/{job_id}", crate::Rpc::GetJob);
-static LISTED: crate::Route = route(Verb::Get, "/v1/things/list", crate::Rpc::ListJobs);
-static CANCEL: crate::Route = route(
-    Verb::Post,
-    "/v1/things/{job_id}:cancel",
-    crate::Rpc::CancelJob,
-);
+/// A test route of `ListJobs` at the literal `/v1/things/list`.
+static LISTED: crate::Route = crate::Route {
+    template: "/v1/things/list",
+    rpc: crate::Rpc::ListJobs,
+    ..BY_ID
+};
+
+/// A test route of `CancelJob` at `/v1/things/{job_id}:cancel`.
+static CANCEL: crate::Route = crate::Route {
+    verb: Verb::Post,
+    template: "/v1/things/{job_id}:cancel",
+    rpc: crate::Rpc::CancelJob,
+    ..BY_ID
+};
 
 /// The method `find` picks for `method path` over `routes` in that order, or the answer
 /// it refuses with.
@@ -255,6 +260,31 @@ async fn a_response_that_does_not_serialize_is_internal() {
 fn the_strict_reader_expects_a_json_value() {
     let expected: &dyn serde::de::Expected = &crate::input::StrictVisitor;
     assert_eq!(expected.to_string(), "a JSON value");
+}
+
+/// Asserts that a query sets any call's optional, bytes and 64-bit fields by the proto3 JSON
+/// mapping: base64 bytes (with `+`, `/` and `=` percent-encoded, since a bare `+` is a
+/// space), the largest `u64` and the smallest `i64` as decimal strings, and an optional
+/// field given as zero present; and that an absent optional field stays absent. Catches a
+/// query mapping that only handles the job calls' current fields.
+#[test]
+fn a_query_sets_bytes_and_64_bit_values() {
+    let request = good_pool()
+        .get_message_by_name("gatewaytest.Req")
+        .expect("defined");
+    let query = "blob=%2B%2F8%3D&big=18446744073709551615&small=-9223372036854775808";
+    let message = crate::input::build(&request, false, &[], Some(query), b"").expect("decodes");
+    let field = |name: &str| {
+        message
+            .get_field_by_name(name)
+            .map(|value| value.into_owned())
+    };
+    assert_eq!(field("blob"), Some(Value::Bytes(vec![0xfb, 0xff].into())));
+    assert_eq!(field("big"), Some(Value::U64(u64::MAX)));
+    assert_eq!(field("small"), Some(Value::I64(i64::MIN)));
+    let zero = crate::input::build(&request, false, &[], Some("big=0"), b"").expect("decodes");
+    assert!(zero.has_field_by_name("big"));
+    assert!(!zero.has_field_by_name("small"));
 }
 
 /// Asserts that two fields of one oneof, each valid alone, are a 400 that names no field

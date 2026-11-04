@@ -6,11 +6,12 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request as HttpRequest, StatusCode};
+use js_api_gateway::router;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     Availability, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory, Pool,
@@ -26,7 +27,7 @@ use js_proto::v1::{
     SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use prost::Message;
-use prost_reflect::DescriptorPool;
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use tonic::{Request, Response, Status};
 use tower::ServiceExt;
 
@@ -502,4 +503,56 @@ pub fn fixture(file: &str) -> DescriptorPool {
         .open_file(file)
         .expect("the test descriptor compiles");
     compiler.descriptor_pool()
+}
+
+/// The pool of the job service, with the options.
+pub fn pool() -> DescriptorPool {
+    DescriptorPool::decode(js_proto::FILE_DESCRIPTOR_SET).expect("the descriptor set decodes")
+}
+
+/// A stub and the router over it.
+pub fn serve() -> (Arc<Stub>, axum::Router) {
+    let stub = Arc::new(Stub::default());
+    let router = router(stub.clone());
+    (stub, router)
+}
+
+/// `template` with every `{variable}` replaced by `x-1`, a valid id of every grammar.
+pub fn fill(template: &str) -> String {
+    let mut path = String::new();
+    let mut rest = template;
+    while let Some((before, after)) = rest.split_once('{') {
+        path.push_str(before);
+        let (_, tail) = after.split_once('}').expect("a variable closes");
+        path.push_str("x-1");
+        rest = tail;
+    }
+    path.push_str(rest);
+    path
+}
+
+/// Decodes a JSON body as the message `name` by the proto3 JSON mapping and converts it to
+/// `M`.
+pub fn from_json<M: Message + Default>(name: &str, body: &[u8]) -> M {
+    let descriptor = pool()
+        .get_message_by_name(name)
+        .expect("the message is defined");
+    let json: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+    DynamicMessage::deserialize(descriptor, json)
+        .expect("the body decodes")
+        .transcode_to::<M>()
+        .expect("the message converts")
+}
+
+/// The text of a submit body before its command.
+pub const HEAD: &str = r#"{"spec":{"jobId":"job-1","command":""#;
+
+/// The text of a submit body after its command.
+pub const TAIL: &str = r#""}}"#;
+
+/// A submit body of exactly `size` bytes of valid JSON.
+pub fn submit_body(size: usize) -> String {
+    let body = format!("{HEAD}{}{TAIL}", "x".repeat(size - HEAD.len() - TAIL.len()));
+    assert_eq!(body.len(), size);
+    body
 }

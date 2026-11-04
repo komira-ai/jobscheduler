@@ -63,10 +63,10 @@ the call; there is no offset, limit or stream.
 - The path decides before the method: of the routes whose path matches, the most specific
   count (a custom verb before none, then more literal segments), so `GET /v1/jobs/x:cancel`
   is a 405 of the cancel route allowing POST, not a read of the job `x:cancel`.
-- A POST takes the request message as its JSON body (an empty body reads as `{}`) and no query
-  string. A body or query field the path sets (`{"jobId": ...}` on a cancel, `?jobId=` on a
+- A route whose option has `body: "*"` (every POST here) takes the request message as its JSON
+  body (an empty body reads as `{}`) and no query string. A body or query field the path sets (`{"jobId": ...}` on a cancel, `?jobId=` on a
   read) is refused, whatever it holds, `null` and the default included.
-- A GET takes no body. Its query string sets the other fields: `name=value` for a singular
+- Any other route (every GET here) takes no body. Its query string sets the other fields: `name=value` for a singular
   field (once), the same name repeated for a list, and `name[key]=value` for each entry of a
   map (`labels[]` is the empty key; brackets inside a key are kept), names and values
   percent-decoded once, with `+` read as a space; a malformed escape (`%`, `%4`, `%zz`) is a

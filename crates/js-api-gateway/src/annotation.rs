@@ -1,7 +1,8 @@
 //! The routes of a service, read from the `google.api.http` option of its methods, and the
-//! checks each must pass. The build script includes this file as a module of its own and
-//! generates the gateway from [`routes`] over `jobscheduler.v1.JobService`; the crate's tests
-//! run the same function over test descriptors. It uses nothing else of the crate.
+//! checks each must pass. `src/codegen.rs` writes the checked-in `src/gateway.rs` from what
+//! [`routes`] reads for `jobscheduler.v1.JobService`, and the build script (which includes
+//! this file as a module of its own) and the crate's tests check the file against it; the
+//! tests also run [`routes`] over test descriptors. It uses nothing else of the crate.
 //!
 //! What the gateway serves of the option; anything else is a [`Fault`], and the build fails
 //! with the method's name and the fault:

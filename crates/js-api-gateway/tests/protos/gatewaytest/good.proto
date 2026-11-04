@@ -35,6 +35,12 @@ message Req {
   map<string, bool> switches = 8;
   // Another id.
   string other_id = 9;
+  // Bytes, base64 in JSON and in a query.
+  bytes blob = 12;
+  // An optional unsigned 64-bit number, a decimal string in JSON.
+  optional uint64 big = 13;
+  // An optional signed 64-bit number.
+  optional int64 small = 14;
   // A choice of one.
   oneof choice {
     // The left one.

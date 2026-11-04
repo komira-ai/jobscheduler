@@ -235,7 +235,7 @@ fn query_object(
     for (key, text) in pairs(query)? {
         let (name, entry) = split_key(&key);
         let Some(field) = lookup(input, name) else {
-            return Err(Answer::invalid(Some(key), UNKNOWN_FIELD));
+            return Err(Answer::invalid(Some(name.to_owned()), UNKNOWN_FIELD));
         };
         let json_name = field.json_name().to_owned();
         let entry = entry.map(str::to_owned);
@@ -246,7 +246,7 @@ fn query_object(
                     .insert(entry, scalar(&map_value_kind(&field), text))
                     .is_some()
                 {
-                    return Err(Answer::invalid(Some(key), TWICE));
+                    return Err(Answer::invalid(Some(name.to_owned()), TWICE));
                 }
             }
             (false, true, None) => lists
@@ -258,10 +258,10 @@ fn query_object(
                     .insert(json_name, scalar(&field.kind(), text))
                     .is_some()
                 {
-                    return Err(Answer::invalid(Some(key), TWICE));
+                    return Err(Answer::invalid(Some(name.to_owned()), TWICE));
                 }
             }
-            _ => return Err(Answer::invalid(Some(key), MALFORMED_KEY)),
+            _ => return Err(Answer::invalid(Some(name.to_owned()), MALFORMED_KEY)),
         }
     }
     let mut object = singles;
