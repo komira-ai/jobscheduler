@@ -473,10 +473,11 @@ impl Config {
             }
             let clock = SharedClock::new(SystemClock);
             let config = Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
-            return Ok(match simulated {
+            let config = match simulated {
                 Some(hosts) => config.with_capacity_source(hosts),
                 None => config,
-            });
+            };
+            return Ok(config);
         }
         if cli.pool_config.is_some() {
             return Err(StartupError::new("--pool-config", flags::AGENTLESS_REMOVED));
