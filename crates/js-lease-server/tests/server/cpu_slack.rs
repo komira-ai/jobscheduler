@@ -84,13 +84,18 @@ fn the_flag_is_read_and_defaults_to_the_engines_slack() {
 fn cpu_slack_values_outside_the_range_are_refused() {
     let scratch = Scratch::new("cpu_slack_refused");
     for bad in ["0.9", "2.5", "abc", ""] {
-        let said = parsed(args(&scratch, &["--placement", "js-sched", "--cpu-slack", bad]))
-            .err()
-            .unwrap();
+        let said = parsed(args(
+            &scratch,
+            &["--placement", "js-sched", "--cpu-slack", bad],
+        ))
+        .err()
+        .unwrap();
         assert!(said.contains("'--cpu-slack <CPU_SLACK>'"), "{bad}: {said}");
         assert!(said.contains(&out_of_range(bad)), "{bad}: {said}");
     }
-    let said = parsed(args(&scratch, &["--cpu-slack", "1.1"])).err().unwrap();
+    let said = parsed(args(&scratch, &["--cpu-slack", "1.1"]))
+        .err()
+        .unwrap();
     assert_eq!(said, "--cpu-slack: requires --placement js-sched");
     let registry = ["--placement", "registry", "--cpu-slack", "1.1"];
     let said = parsed(args(&scratch, &registry)).err().unwrap();

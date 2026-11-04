@@ -20,6 +20,9 @@ pub(super) struct Gate {
     outside: BTreeMap<WorkerId, Option<u64>>,
     /// The worker each operation held last round, with its start time.
     last: BTreeMap<OperationId, (WorkerId, Option<u64>)>,
+    /// The workers an operation may be placed on, for an operation held to some
+    /// ([`Scheduler::place_only_on`]).
+    only: BTreeMap<OperationId, BTreeSet<WorkerId>>,
 }
 
 /// The holds of one placement round.
@@ -61,6 +64,16 @@ impl Gate {
             .insert(operation, (worker.clone(), start));
     }
 
+    /// The workers `operation` may be placed on, when it is held to some.
+    pub(super) fn only(&self, operation: OperationId) -> Option<&BTreeSet<WorkerId>> {
+        self.only.get(&operation)
+    }
+
+    /// Forgets what is kept for `operation`, which is gone.
+    pub(super) fn forget(&mut self, operation: OperationId) {
+        self.only.remove(&operation);
+    }
+
     /// The end of a round: its holds are the ones the next round keeps.
     pub(super) fn end_round(&mut self, holds: Holds) {
         self.last = holds.by_operation;
@@ -100,6 +113,24 @@ impl Scheduler {
     pub fn reserve_outside(&mut self, worker: WorkerId, start: Option<FarmTime>) {
         let start = start.map(FarmTime::as_millis);
         self.backfill.outside.insert(worker, start);
+    }
+
+    /// Ends the hold [`Scheduler::reserve_outside`] put on `worker`: from the next round
+    /// it takes work as any worker does. A worker not held outside is left as it is.
+    pub fn release_outside(&mut self, worker: &WorkerId) {
+        self.backfill.outside.remove(worker);
+    }
+
+    /// Holds `operation` to `workers`: from the next placement round it is placed on none
+    /// but them, and on an empty set on none at all, whatever else would take it. A second
+    /// call replaces the set. The set is dropped with the operation (retired or forgotten
+    /// as queued). An operation never given a set is placed as before.
+    ///
+    /// The lease server's registry offers each start only the hosts eligible for it, and
+    /// passes them this way; once the start is booked it passes an empty set, so the
+    /// operation is never placed again by the scheduler alone.
+    pub fn place_only_on(&mut self, operation: OperationId, workers: BTreeSet<WorkerId>) {
+        self.backfill.only.insert(operation, workers);
     }
 
     /// How long queued `operation` counts for backfill ([`Backfill`]): its max wall time

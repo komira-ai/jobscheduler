@@ -1,10 +1,13 @@
 //! The provider side of the registry: the booking, stop and observation calls the lease
-//! table makes through [`crate::RegisteredProvider`].
+//! table makes through [`crate::RegisteredProvider`], and what the placer is told of the
+//! books between starts ([`crate::Placer::host_up`], [`crate::Placer::heard`],
+//! [`crate::Placer::ended`]).
 
 use std::collections::BTreeMap;
 
 use js_pool_static::SeatError;
 use js_provider::{HostCapacity, Observed};
+use js_types::sched::usage::NodeLoad;
 use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
 
 use js_lease::Timestamp;
@@ -67,7 +70,11 @@ impl Registry {
                 record.exclusive = record.exclusive.stopped();
             });
         }
-        book.stop(lease)
+        let read = book.stop(lease);
+        if let Some(placer) = self.shared.placer.get() {
+            placer.ended(*lease);
+        }
+        read
     }
 
     /// Binds each restored waiting request of `held` to the lease the lease file keeps it
@@ -173,5 +180,21 @@ impl Registry {
             });
         }
         seated
+    }
+
+    /// Tells the placer, if there is one, that `host` said hello, booked as the pool's
+    /// shape.
+    pub(super) fn tell_up(&self, host: &HostId) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.host_up(host, self.shared.config.booked());
+        }
+    }
+
+    /// Tells the placer, if there is one, that a heartbeat of `host` was accepted, with
+    /// the reading it brought ([`crate::Placer::heard`]).
+    pub(super) fn tell_heard(&self, host: &HostId, reading: Option<&NodeLoad>) {
+        if let Some(placer) = self.shared.placer.get() {
+            placer.heard(host, reading);
+        }
     }
 }

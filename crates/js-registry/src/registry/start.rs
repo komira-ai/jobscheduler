@@ -271,12 +271,14 @@ impl Registry {
                 .all(|ok| ok)
         };
         // Without a placer the book books the first host that qualifies, stopping at it;
-        // with one it is shown every host that qualifies. The placer runs under this
-        // registry's lock and costs time in the hosts and leases it is shown.
+        // with one it is shown every host that qualifies, and may read every host listed.
+        // The placer runs under this registry's lock.
         let ack = match placer {
             Some(placer) => {
-                let choose = |open: &[Candidate]| placer.pick(spec, open, &marked);
-                book.start_by(spec, gate, &eligible, &choose)
+                let choose = |open: &[Candidate], every: &dyn Fn() -> Vec<Candidate>| {
+                    placer.pick_over(spec, open, &marked, every)
+                };
+                book.start_over(spec, gate, &eligible, &choose)
             }
             None => book.start_where(spec, gate, &eligible),
         };

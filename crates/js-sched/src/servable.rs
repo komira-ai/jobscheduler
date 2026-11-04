@@ -63,6 +63,9 @@ pub(crate) struct Attempt<'a> {
     pub(crate) avoid: &'a BTreeSet<WorkerId>,
     /// A key floor raised its memory: a worker it would own whole is out.
     pub(crate) not_whole: bool,
+    /// The only workers it may go on, when it is held to some
+    /// ([`crate::Scheduler::place_only_on`]).
+    pub(crate) only: Option<&'a BTreeSet<WorkerId>>,
     /// What it is charged if placed now (before the clamp to a worker's capacity).
     pub(crate) cost: LeaseCost,
     /// How it is charged over time, if it is (see [`Admission::profile_of`]).
@@ -78,11 +81,14 @@ impl Attempt<'_> {
     /// Whether the request may go on `worker` at `now`: a worker no one holds, or a held
     /// one where it fits as backfill ([`backfill::fits`]).
     fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
-        !self.reserved.contains(worker)
-            || self
-                .starts
+        let allowed = self.only.is_none_or(|only| only.contains(worker));
+        let held = self.reserved.contains(worker);
+        let backfills = || {
+            self.starts
                 .get(worker)
                 .is_some_and(|start| backfill::fits(now.as_millis(), self.backfill, *start))
+        };
+        allowed && (!held || backfills())
     }
 }
 

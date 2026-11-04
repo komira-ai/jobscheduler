@@ -105,16 +105,20 @@ impl Kept {
     ///   changes (a delayed or repeated heartbeat).
     /// - Otherwise the `seq` is recorded, and the reading replaces the stored one; one
     ///   that does not pass [`vet`](WireLoad::vet) or convert leaves the host with none.
-    pub(crate) fn take(&mut self, wire: Option<&WireLoad>) {
+    ///
+    /// Answers the reading this heartbeat brought, as stored: `None` for no load, a
+    /// repeated one, or one dropped.
+    pub(crate) fn take(&mut self, wire: Option<&WireLoad>) -> Option<&NodeLoad> {
         let Some(wire) = wire else {
             self.latest = None;
-            return;
+            return None;
         };
         if self.seen.is_some_and(|seen| wire.seq <= seen) {
-            return;
+            return None;
         }
         self.seen = Some(wire.seq);
         let mut vetted = wire.clone();
         self.latest = vetted.vet().ok().and_then(|()| node_load(&vetted).ok());
+        self.latest.as_ref()
     }
 }

@@ -464,6 +464,7 @@ impl Scheduler {
             self.max_walls.remove(&id);
             self.drain.forget(id);
             self.admission.forget(id);
+            self.backfill.forget(id);
         }
     }
 
@@ -687,6 +688,7 @@ impl Scheduler {
                 backfill,
                 avoid: &avoid,
                 not_whole: key_raised,
+                only: self.backfill.only(id),
                 cost,
                 profile: profile.clone(),
                 lease,
@@ -832,6 +834,7 @@ impl Scheduler {
                     backfill,
                     avoid: &op.avoid,
                     not_whole: key_raised,
+                    only: self.backfill.only(id),
                     cost,
                     profile,
                     lease,

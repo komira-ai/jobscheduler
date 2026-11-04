@@ -6,10 +6,12 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use js_registry::PoolConfig;
-use js_sched::Backfill;
+use js_sched::{Backfill, MEMORY_SCHEDULABLE_PERCENT, MemoryPercent};
 
 use super::CpuSlack;
+use crate::adapt::SharedClock;
 use crate::error::StartupError;
+use crate::sched::engine::Settings;
 use crate::sched::map;
 use crate::sched::place::SchedPlacer;
 
@@ -62,20 +64,83 @@ impl Placement {
         }
     }
 
+    /// `pool` as the registry books it under this choice, and the share of each host's
+    /// memory the placement engine books. Under `registry` the registry cuts the shape it
+    /// books to the pool's `memory_schedulable_percent`, as it always did, and the engine
+    /// is not built. Under `js-sched` the share is the engine's rule: the registry books
+    /// the whole shape, and the engine is given the pool's percent, checked again by
+    /// js-sched's own rule (1 to 100).
+    ///
+    /// # Errors
+    /// A percent js-sched refuses, naming `memory_schedulable_percent`.
+    pub(crate) fn split(
+        self,
+        pool: PoolConfig,
+    ) -> Result<(PoolConfig, MemoryPercent), StartupError> {
+        match self {
+            Self::Registry => Ok((pool, MemoryPercent::FULL)),
+            Self::JsSched => {
+                let percent = engine_percent(u32::from(pool.memory_percent().get()))?;
+                let whole = pool.with_memory_percent(js_types::MemoryPercent::FULL);
+                Ok((whole, percent))
+            }
+        }
+    }
+
     /// The placer the registry takes for this choice; none for `registry`. Under
-    /// `js-sched` a lease may backfill a host a whole-node request has set aside: the lease
-    /// table ends every lease at its wall time, so every bound is enforced, up to
-    /// `max_lease_wall` (`server.max_lease_wall`; none: any wall time the table took).
+    /// `js-sched` the placer's one engine is built with `cpu_slack`, the share `memory` of
+    /// each host's memory, and backfill: a lease may backfill a host a whole-node request
+    /// has set aside, since the lease table ends every lease at its wall time, so every
+    /// bound is enforced, up to `max_lease_wall` (`server.max_lease_wall`; none: any wall
+    /// time the table took). `clock` is the registry's.
     pub(crate) fn placer(
         self,
         max_lease_wall: Option<Duration>,
-    ) -> Option<Arc<dyn js_registry::Placer>> {
+        cpu_slack: CpuSlack,
+        memory: MemoryPercent,
+        clock: &SharedClock,
+    ) -> Option<Arc<SchedPlacer>> {
         match self {
             Self::Registry => None,
             Self::JsSched => {
                 let ceiling = max_lease_wall.unwrap_or(Duration::MAX);
-                Some(Arc::new(SchedPlacer::new(Backfill::enforced(ceiling))))
+                let settings = Settings {
+                    backfill: Backfill::enforced(ceiling),
+                    load: cpu_slack.load_config(),
+                    memory,
+                };
+                Some(Arc::new(SchedPlacer::new(settings, clock.clone())))
             }
         }
+    }
+}
+
+/// The engine's share for a pool's `percent`, by js-sched's own rule: 1 to 100. The pool's
+/// parse refuses anything else first, so this refusal is reached only by a value that
+/// passed some other way.
+///
+/// # Errors
+/// js-sched's [`js_sched::PercentError`], at `memory_schedulable_percent`.
+fn engine_percent(percent: u32) -> Result<MemoryPercent, StartupError> {
+    MemoryPercent::new(percent).map_err(|err| StartupError::at(MEMORY_SCHEDULABLE_PERCENT, err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches: a percent outside 1 to 100 reaching the engine unchecked. js-sched's own
+    /// rule refuses 0 and 101 with its own text, naming the key, and takes 1 and 100.
+    #[test]
+    fn a_percent_outside_one_to_a_hundred_never_reaches_the_engine() {
+        for bad in [0, 101, u32::MAX] {
+            let said = engine_percent(bad).unwrap_err().to_string();
+            let expected = format!(
+                "memory_schedulable_percent: memory_schedulable_percent must be an integer from 1 to 100, got {bad}"
+            );
+            assert_eq!(said, expected);
+        }
+        assert_eq!(engine_percent(1).unwrap().get(), 1);
+        assert_eq!(engine_percent(100).unwrap().get(), 100);
     }
 }

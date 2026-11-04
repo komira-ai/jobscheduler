@@ -6,14 +6,15 @@ use std::time::Duration;
 use js_agent_wire::Phase;
 use js_pool_static::Candidate;
 use js_provider::{RefusalCode, StartSpec};
-use js_types::{HostId, Shape};
+use js_types::sched::usage::NodeLoad;
+use js_types::{HostId, LeaseId, Shape};
 
 /// What the registry knows of the host a probe ([`js_types::Request::probe_host`]) names,
 /// for [`Placer::admit_probe`]. Facts only: the rule that judges them is the placer's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeHost {
-    /// The shape the host is booked as: its memory after the memory_schedulable_percent
-    /// cut.
+    /// The shape the host is booked as: the pool's booked shape (its memory after the
+    /// pool's memory_schedulable_percent cut, all of it when the pool cuts none).
     pub shape: Shape,
     /// Whether the host is cordoned now: its own cordon has not lapsed.
     pub cordoned: bool,
@@ -38,15 +39,16 @@ pub type MarkedTails = BTreeMap<HostId, Option<Duration>>;
 /// registry with no placer ([`crate::Registry::set_placer`]) books the first candidate,
 /// and refuses a class that books part of a host, since no host could share.
 ///
-/// Why a trait here: the placer that ships, `SchedPlacer` of `js-lease-server`, builds a
-/// `js-sched` scheduler and maps hosts and requests into it with the server's own
-/// conversions. This crate is in the runtime layer (`layers.toml`) and the server is above
+/// Why a trait here: the placer that ships, `SchedPlacer` of `js-lease-server`, keeps a
+/// `js-sched` scheduler for the life of the server and maps hosts and requests into it with
+/// the server's own conversions; it learns the registry's books from the calls below the
+/// two that place ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`]). This crate is in the runtime layer (`layers.toml`) and the server is above
 /// it, so the registry cannot name that placer; it can only hold something the server
 /// hands it, which is this seam. A boxed `Fn` would be the same seam with the same one
 /// call; the trait is used instead so that the contract of the call (the index, the order
 /// of `open`, never asked with no candidate) is written once on [`Placer::pick`], and so
-/// that an implementation can carry state of its own, as `SchedPlacer` keeps its fallback
-/// counters. The registry's own tests place with small implementations of it.
+/// that an implementation can carry state of its own, as `SchedPlacer` keeps its scheduler
+/// and its counters. The registry's own tests place with small implementations of it.
 pub trait Placer: Send + Sync {
     /// The index in `open` of the candidate to book for `spec`, or `None` to book none (the
     /// start then answers `NoCapacity`). `open` is in host id order and is never empty: with
@@ -81,5 +83,49 @@ pub trait Placer: Send + Sync {
     ) -> Result<(), RefusalCode> {
         let _ = (spec, pin, host);
         Err(RefusalCode::ProbeUnsupported)
+    }
+
+    /// [`Placer::pick`], for a placer that keeps a picture of the registry's books between
+    /// starts: `every` reads every host the registry lists, eligible or not, with its
+    /// shape and the leases booked on it, in host id order. It costs time in hosts plus
+    /// leases, so a placer reads it only when its picture and `open` disagree. The
+    /// registry asks this; the default ignores `every` and asks [`Placer::pick`].
+    fn pick_over(
+        &self,
+        spec: &StartSpec,
+        open: &[Candidate],
+        marked: &MarkedTails,
+        every: &dyn Fn() -> Vec<Candidate>,
+    ) -> Option<usize> {
+        let _ = every;
+        self.pick(spec, open, marked)
+    }
+
+    /// The thousandths above a host's cores that the leases sharing it may book together:
+    /// the registry's book lets them, and books no more of any other dimension. Read once,
+    /// when the placer is set ([`crate::Registry::set_placer`]). The default, 0, books no
+    /// more CPU than the shape has.
+    fn cpu_slack_permille(&self) -> u32 {
+        0
+    }
+
+    /// `host` said hello and is listed, booked as `shape`, the pool's shape: a new host,
+    /// or one that comes back. Told under the registry's lock. The default does nothing.
+    fn host_up(&self, host: &HostId, shape: &Shape) {
+        let _ = (host, shape);
+    }
+
+    /// The registry accepted a heartbeat of `host`; `load` is the reading it brought, as
+    /// the registry vetted and converted it, when it brought a new one that passed (a beat
+    /// with no reading, a repeated one, or one the vet drops gives `None`). Told under the
+    /// registry's lock. The default does nothing.
+    fn heard(&self, host: &HostId, load: Option<&NodeLoad>) {
+        let _ = (host, load);
+    }
+
+    /// `lease` was stopped: its booking is gone. Told under the registry's lock. The
+    /// default does nothing.
+    fn ended(&self, lease: LeaseId) {
+        let _ = lease;
     }
 }

@@ -127,7 +127,11 @@ mod tests {
             ("2.000", 1000),
         ];
         for (text, permille) in cases {
-            assert_eq!(CpuSlack::parse(text).map(CpuSlack::permille), Ok(permille), "{text}");
+            assert_eq!(
+                CpuSlack::parse(text).map(CpuSlack::permille),
+                Ok(permille),
+                "{text}"
+            );
         }
         let slack = CpuSlack::parse("1.25").unwrap();
         assert_eq!(slack.load_config().s_cpu_permille, 250);
@@ -140,8 +144,26 @@ mod tests {
     #[test]
     fn values_outside_one_to_two_or_not_decimals_are_refused() {
         let bad = [
-            "", "0.9", "0.999", "2.001", "2.5", "3", "abc", "1.", ".5", "1.0001", "-1.1",
-            "+1.1", " 1.1", "1.1 ", "1e0", "1,1", "1..1", "1.a", "NaN", "inf",
+            "",
+            "0.9",
+            "0.999",
+            "2.001",
+            "2.5",
+            "3",
+            "abc",
+            "1.",
+            ".5",
+            "1.0001",
+            "-1.1",
+            "+1.1",
+            " 1.1",
+            "1.1 ",
+            "1e0",
+            "1,1",
+            "1..1",
+            "1.a",
+            "NaN",
+            "inf",
             "99999999999999999999",
         ];
         for text in bad {

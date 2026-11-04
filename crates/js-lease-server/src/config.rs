@@ -531,7 +531,11 @@ impl Config {
                 server.agents.placement().check(&pool, "server.placement")?;
                 let given = server.agents.cpu_slack();
                 let needs = "server.placement = \"js-sched\"";
-                let cpu_slack = server.agents.placement().slack(given, "server.cpu_slack", needs)?;
+                let cpu_slack =
+                    server
+                        .agents
+                        .placement()
+                        .slack(given, "server.cpu_slack", needs)?;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,

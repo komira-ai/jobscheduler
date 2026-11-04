@@ -65,6 +65,10 @@ pub(crate) struct Agents {
     /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
     /// call has returned.
     pub(crate) usage: Option<Arc<Usage>>,
+    /// The placer the registry was given, under `--placement js-sched`, for a test that
+    /// reads its counters.
+    #[cfg(test)]
+    pub(crate) placer: Option<Arc<crate::sched::place::SchedPlacer>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
@@ -104,6 +108,7 @@ pub(crate) fn assemble(
                 require_host_credential,
                 placement,
                 estimate_feed,
+                cpu_slack,
                 max_lease_wall,
             } = *agents;
             let path = state_path(state_file, ".agents");
@@ -116,12 +121,15 @@ pub(crate) fn assemble(
             let bindings = agent_state::load(&path)?;
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+            // `--placement js-sched`: the scheduler picks the host of a start, and books
+            // the share of each host's memory the pool's percent says; the registry books
+            // the whole shape. Under `registry` the registry cuts it, as it always did.
+            let (pool, memory) = placement.split(pool)?;
             let registry = Registry::new(pool, clock.clone());
-            // `--placement js-sched`: the scheduler picks the host of a start.
-            let placers = placement.placer(max_lease_wall);
-            placers
-                .into_iter()
-                .for_each(|placer| registry.set_placer(placer));
+            let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
+            if let Some(placer) = &placer {
+                registry.set_placer(placer.clone());
+            }
             let usage = usage.build(clock, limits, &registry)?;
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
@@ -146,6 +154,8 @@ pub(crate) fn assemble(
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
                 usage,
+                #[cfg(test)]
+                placer,
             };
             Ok((Box::new(source), Some(Arc::new(agents))))
         }
@@ -185,6 +195,7 @@ impl Agents {
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
             usage: None,
+            placer: None,
         }
     }
 

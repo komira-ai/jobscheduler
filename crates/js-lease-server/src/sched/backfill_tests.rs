@@ -410,15 +410,19 @@ fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
     }];
     let marked =
         js_registry::MarkedTails::from([(open[0].host.clone(), Some(Duration::from_secs(600)))]);
-    let five = crate::config::Placement::JsSched
-        .placer(Some(Duration::from_secs(300)))
-        .unwrap();
+    let placer = |wall: Option<Duration>, placement: crate::config::Placement| {
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+        let slack = crate::config::CpuSlack::default();
+        placement.placer(wall, slack, js_sched::MemoryPercent::FULL, &clock)
+    };
+    let js_sched = crate::config::Placement::JsSched;
+    let five = placer(Some(Duration::from_secs(300)), js_sched).unwrap();
     let wall = |s: u64| share_for(1, Duration::from_secs(s));
     assert_eq!(five.pick(&wall(300), &open, &marked), Some(0));
     assert_eq!(five.pick(&wall(301), &open, &marked), None);
-    let none = crate::config::Placement::JsSched.placer(None).unwrap();
+    let none = placer(None, js_sched).unwrap();
     assert_eq!(none.pick(&wall(301), &open, &marked), Some(0));
-    assert!(crate::config::Placement::Registry.placer(None).is_none());
+    assert!(placer(None, crate::config::Placement::Registry).is_none());
 }
 
 /// Asserts, through the server's lease table, that backfill ends at its enforced wall and

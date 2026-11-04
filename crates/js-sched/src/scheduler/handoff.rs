@@ -36,6 +36,7 @@ impl Scheduler {
         self.max_walls.remove(&operation);
         self.drain.forget(operation);
         self.admission.forget(operation);
+        self.backfill.forget(operation);
         Some(op.waiters)
     }
 }
