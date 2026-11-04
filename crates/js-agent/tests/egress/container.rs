@@ -383,8 +383,8 @@ impl RuntimeHost {
         let hex = "d".repeat(64);
         let rootfs = store.join("oci-images").join(&hex).join("rootfs");
         busybox_rootfs(&rootfs);
-        // The runtime binds the run's scratch directory at `/scratch`. A pulled image is
-        // unpacked as the job's ids, who may make that mount point; this root is root's.
+        // The runtime binds the run's scratch directory at `/scratch`, and `crun`, run as the
+        // job user, cannot make that mount point in a root that root made.
         mkdir(&rootfs.join("scratch"), 0o755);
         mkdir(&config_dir(&store), 0o755);
         fs::write(config_dir(&store).join(format!("{hex}.json")), IMAGE_CONFIG).unwrap();
