@@ -18,9 +18,10 @@
 //!   and no init named is a run that is ending, or not yet created (`crun` deletes the
 //!   container when the job exits, and the supervisor drains the streams before it writes
 //!   its record): it is adopted, and its handle gives the end once the record is there.
-//! - and the runtime has no egress. An allow-list egress removes every interface and table
-//!   a previous process wired when it starts, and a run adopted here would have none: no
-//!   run is adopted by a runtime opened with an egress, and each is removed.
+//!   With no record, the runtime must also have no egress: an allow-list egress removes every
+//!   interface and table a previous process wired when it starts, so a run that may still
+//!   run would have no network, and it is removed. A run whose record is there has ended and
+//!   has no network left: its result is taken over whatever the egress.
 //!
 //! An adopted run stands as a run this process started, with the start time the sidecar
 //! recorded (wall clock), so the lifecycle reads how long it has run and holds it to the rest
@@ -68,28 +69,53 @@ pub(super) struct Fields<'a> {
     supervisor: Supervisor,
 }
 
-/// `field`, or the error that it is not recorded.
-fn need<T>(field: Option<T>, what: &str) -> Result<T, String> {
-    field.ok_or_else(|| format!("its {what} is not recorded"))
-}
-
 /// The version 2 fields of `entry`.
 ///
 /// # Errors
 /// The first that is missing.
 pub(super) fn fields_of(entry: &Entry) -> Result<Fields<'_>, String> {
-    Ok(Fields {
-        allocation: need(entry.allocation.as_deref(), "lease id")?,
-        booked: need(entry.booked.as_ref(), "booking")?,
-        started_wall_ms: need(entry.started_wall_ms, "start")?,
-        wall_ms: need(entry.wall_ms, "wall-time limit")?,
-        lease_dir: need(entry.lease_dir.as_deref(), "lease directory")?,
-        cgroup: need(entry.cgroup.as_deref(), "cgroup")?,
-        scratch: need(entry.scratch.as_deref(), "scratch directory")?,
-        exit_record: need(entry.exit_record.as_deref(), "exit record")?,
-        image_digest: need(entry.image_digest.as_deref(), "image")?,
-        supervisor: need(entry.supervisor, "supervisor")?,
-    })
+    let missing = first_wrong(&[
+        ("lease id", entry.allocation.is_some()),
+        ("booking", entry.booked.is_some()),
+        ("start", entry.started_wall_ms.is_some()),
+        ("wall-time limit", entry.wall_ms.is_some()),
+        ("lease directory", entry.lease_dir.is_some()),
+        ("cgroup", entry.cgroup.is_some()),
+        ("scratch directory", entry.scratch.is_some()),
+        ("exit record", entry.exit_record.is_some()),
+        ("image", entry.image_digest.is_some()),
+        ("supervisor", entry.supervisor.is_some()),
+    ]);
+    match (
+        (entry.allocation.as_deref(), entry.booked.as_ref()),
+        (entry.started_wall_ms, entry.wall_ms),
+        (entry.lease_dir.as_deref(), entry.cgroup.as_deref()),
+        (entry.scratch.as_deref(), entry.exit_record.as_deref()),
+        (entry.image_digest.as_deref(), entry.supervisor),
+    ) {
+        (
+            (Some(allocation), Some(booked)),
+            (Some(started_wall_ms), Some(wall_ms)),
+            (Some(lease_dir), Some(cgroup)),
+            (Some(scratch), Some(exit_record)),
+            (Some(image_digest), Some(supervisor)),
+        ) => Ok(Fields {
+            allocation,
+            booked,
+            started_wall_ms,
+            wall_ms,
+            lease_dir,
+            cgroup,
+            scratch,
+            exit_record,
+            image_digest,
+            supervisor,
+        }),
+        _ => Err(format!(
+            "its {} is not recorded",
+            missing.unwrap_or_default()
+        )),
+    }
 }
 
 /// The label `key` of `labels` as a number, when it is one.
@@ -259,11 +285,6 @@ impl CrunRuntime {
         if entry.state != Some(Phase::Running) {
             return Err(Reason::NeverRan);
         }
-        if self.egress.is_some() {
-            return Err(Reason::Inconsistent(
-                "its network wiring cannot be taken over".to_owned(),
-            ));
-        }
         let fields = fields_of(entry).map_err(Reason::Inconsistent)?;
         agree(entry, &fields).map_err(Reason::Inconsistent)?;
         self.places(entry, &fields).map_err(Reason::Inconsistent)?;
@@ -274,7 +295,16 @@ impl CrunRuntime {
         let record = read_exit_record(fields.lease_dir)
             .map_err(|why| Reason::Inconsistent(format!("the exit record: {why}")))?;
         run.state = match record {
+            // A container that ended has no network left to take over: its result is kept
+            // whatever the egress, so it is reported.
             Some(record) => self.ended_state(&run, &record),
+            // One that may still run is wired, and an egress removed the wiring of every
+            // earlier process when it started.
+            None if self.egress.is_some() => {
+                return Err(Reason::Inconsistent(
+                    "its network wiring cannot be taken over".to_owned(),
+                ));
+            }
             None => self
                 .standing(&run, &fields, alive)
                 .map_err(Reason::Inconsistent)?,
@@ -325,7 +355,8 @@ impl CrunRuntime {
             backstop: cgroup.parent_ooms().ok(),
             cgroup,
             state: State::Created,
-            // Only a runtime with no egress adopts, and it admits no job with a network.
+            // A run that may still run is adopted only by a runtime with no egress, which admits
+            // no job with a network; one that ended has no network to release.
             net: net::Net::asked(JobNetwork::None, Vec::new()),
             entry: entry.clone(),
         }
@@ -461,9 +492,13 @@ impl CrunRuntime {
         let lease = self.oci.lease_dirs(name);
         // The supervisor the lease's directory names, for a lease whose sidecar is gone: ended
         // first, or it would write the container's end into the directory being removed. The
-        // directory is the job user's, so only a process that runs as the job user is ended.
+        // directory is the job user's, so the file is trusted only as far as it can be checked:
+        // the process must run as the job user and be this lease's supervisor by its command
+        // line (another lease's names its own lease), or it is left alone.
         let job_uid = self.oci.job_ids().0;
-        if let Some(id) = recorded_supervisor(&lease.dir).filter(|id| id.runs_as(job_uid)) {
+        let named = recorded_supervisor(&lease.dir)
+            .filter(|id| id.runs_as(job_uid) && id.supervises(&lease.dir));
+        if let Some(id) = named {
             end_supervisor(id);
         }
         // A lease an agent from before the leases were beside the runs left in the store.
@@ -480,27 +515,36 @@ impl CrunRuntime {
             let _ = cgroup.kill();
         }
         if has_dir {
-            step("delete the container", self.oci.remove(name))?;
+            step("delete the container", self.oci.remove(name).err())?;
         }
         if has_cgroup {
-            step("remove the lease's cgroup", cgroup.remove())?;
+            let removed = cgroup.remove();
+            step(
+                "remove the lease's cgroup",
+                removed.as_ref().err().map(ToString::to_string),
+            )?;
         }
         if has_dir {
             for dir in [Some(&lease.dir), legacy.as_ref()].into_iter().flatten() {
                 if dir.exists() {
+                    let removed = js_contain::remove::remove_tree(dir);
                     step(
                         "remove the lease directory",
-                        js_contain::remove::remove_tree(dir),
+                        removed.as_ref().err().map(ToString::to_string),
                     )?;
                 }
             }
         }
         // Last: the image may go only once nothing of the lease can use it.
-        step("remove the image's pin", self.oci.unpin_image(name))
+        let unpinned = self.oci.unpin_image(name);
+        step(
+            "remove the image's pin",
+            unpinned.as_ref().err().map(ToString::to_string),
+        )
     }
 }
 
-/// `result`, with the step that failed named.
-fn step<T>(what: &str, result: Result<T, impl std::fmt::Display>) -> Result<T, String> {
-    result.map_err(|why| format!("{what}: {why}"))
+/// The failure `why` of the step `what`, if it failed, with the step named.
+fn step(what: &str, why: Option<String>) -> Result<(), String> {
+    why.map_or(Ok(()), |why| Err(format!("{what}: {why}")))
 }

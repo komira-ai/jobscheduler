@@ -82,9 +82,10 @@ process, on a stop and after a crash, so the supervisors and the containers outl
 - **A job's wall limit** counts the time the job ran with no agent, but only a running agent stops
   a job: one whose limit passed while no agent ran is stopped at the new agent's first step, and
   its result says it timed out.
-- **An agent with an allow-list `--egress`** takes nothing over: its start removes every network
-  wiring an earlier process made, so it removes the containers it finds instead, and their jobs
-  are lost.
+- **An agent with an allow-list `--egress`** takes over no container that may still run: its
+  start removes every network wiring an earlier process made, so it removes those containers
+  instead, and their jobs are lost. A container that ended while no agent ran has no network
+  left: it is taken over and its result reported, as above.
 
 The ledger is one file per lease, `<image store>/oci-labels/<lease>.json` (the image store is
 `oci` beside the scratch root), mode 0600, root's. Version 2 of the file holds:

@@ -119,8 +119,9 @@
 //! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
 //! `Oci::start_supervised` (its init holds it until the route), with a forward from the host
 //! for each port it declared, releasing it when the run ends or goes. A runtime with such an
-//! egress adopts no run: the egress removes the wiring of a previous process when it starts, so
-//! each lease an earlier agent left is removed.
+//! egress adopts no run that may still run: the egress removes the wiring of a previous process
+//! when it starts, so such a lease an earlier agent left is removed. A run that ended while no
+//! agent ran has no network left, and is taken over so that its result is reported.
 //!
 //! # Not here
 //!

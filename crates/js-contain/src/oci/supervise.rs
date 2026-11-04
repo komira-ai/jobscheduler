@@ -39,6 +39,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -116,6 +117,16 @@ impl SupervisorId {
     pub fn runs_as(&self, uid: u32) -> bool {
         std::fs::metadata(format!("/proc/{}", self.pid)).is_ok_and(|meta| meta.uid() == uid)
     }
+
+    /// Whether the process it names is the supervisor of the lease directory `lease`: its
+    /// command line, which [`Oci::start_supervised`] sets, names `lease` as the lease
+    /// (`<daemon> <mode> <crun> <lease> ...`). Another lease's supervisor names its own.
+    #[must_use]
+    pub fn supervises(&self, lease: &Path) -> bool {
+        std::fs::read(format!("/proc/{}/cmdline", self.pid)).is_ok_and(|cmdline| {
+            cmdline.split(|byte| *byte == 0).nth(3) == Some(lease.as_os_str().as_bytes())
+        })
+    }
 }
 
 /// The file in the lease directory `lease` that names the supervisor started for it.
@@ -128,7 +139,8 @@ pub fn supervisor_path(lease: &Path) -> PathBuf {
 /// [`Oci::start_supervised`] wrote there, for a teardown that has no other record of the
 /// lease. `None` when there is no such file or it names none. It is opened without following
 /// a link or waiting on a pipe. The directory is the job user's: a caller signals the process
-/// only when it runs as the job user ([`SupervisorId::runs_as`]).
+/// only when it runs as the job user ([`SupervisorId::runs_as`]) and supervises this lease
+/// ([`SupervisorId::supervises`]).
 #[must_use]
 pub fn recorded_supervisor(lease: &Path) -> Option<SupervisorId> {
     let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;

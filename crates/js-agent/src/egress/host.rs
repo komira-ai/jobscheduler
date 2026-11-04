@@ -42,8 +42,9 @@
 //! when its last process ends, so nothing of it outlives the run. A start under the ceiling
 //! `allow-list` or `open` begins by
 //! removing every interface named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and
-//! the two tables. An agent with such a ceiling does not adopt crun runs: it removes them at
-//! start, so nothing a previous process wired is in use; and only one agent at a time holds the
+//! the two tables. An agent with such a ceiling does not adopt a crun run that may still run:
+//! it removes it at start (it takes over only a run that has ended, which has no network left),
+//! so nothing a previous process wired is in use; and only one agent at a time holds the
 //! host's egress ([`HOST_LOCK`]), so the sweep never removes the live wiring of another agent.
 //! Mode none runs no program and touches nothing.
 //!

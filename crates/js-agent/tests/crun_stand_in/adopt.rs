@@ -22,9 +22,10 @@ use js_agent::lifecycle::{
     RunSpec, Runtime, ScratchRoot, StateRoot, Status, label,
 };
 use js_agent_wire::{
-    Command, HeartbeatReply, HeldJob, HeldState, LogTail, NetworkCeiling, Outcome,
+    Ack, Command, HeartbeatReply, HeldJob, HeldState, JobResultAck, LogTail, NetworkCeiling,
+    Outcome,
 };
-use js_contain::oci::SupervisorId;
+use js_contain::oci::{SupervisorId, supervisor_path};
 use js_types::{JobNetwork, PortMap};
 use serde_json::{Value, json};
 
@@ -841,4 +842,124 @@ fn a_lease_whose_image_pin_cannot_be_removed_is_kept_and_named() {
     std::fs::set_permissions(&pins_dir, mode(0o700)).expect("closed");
     assert_eq!(second.remove_orphan("r1-exit"), Ok(true));
     drop(dead);
+}
+
+/// Proves a runtime opened with an egress still takes over a job that ended while no agent
+/// ran: its exit record holds a finished result, and no network is left to take over. It is
+/// adopted, a lifecycle over the runtime lists it exited with its code and tail and keeps
+/// that result through later steps until the server acknowledges it, and then lists nothing.
+/// Catches the refusal of a runtime with an egress discarding a finished job's result.
+#[test]
+fn a_runtime_with_an_egress_still_reports_a_job_that_ended_while_no_agent_ran() {
+    let node = Node::new("adopt-egress-ended");
+    let mut first = node.open();
+    let id = first
+        .create_and_start(&node.job("r1-sayexit", 60_000))
+        .expect("started");
+    first.wait_ended(&id);
+    drop(first);
+
+    let mut settings = node.settings("/root");
+    settings.egress = Some(Arc::new(Unused));
+    let second = CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG))
+        .expect("opens");
+    assert_eq!(
+        second.swept().adopted,
+        ["r1-sayexit"],
+        "{:?}",
+        second.swept()
+    );
+    assert!(second.swept().removed.is_empty(), "{:?}", second.swept());
+
+    let clock = Moving::default();
+    let (mut life, _) = lifecycle(&node, second, &clock, LONG);
+    for _ in 0..2 {
+        life.step();
+        let jobs = life.held_jobs();
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].state, HeldState::ExitedUnacked);
+        let result = jobs[0].result.clone().expect("the result is held");
+        assert_eq!(
+            (result.outcome, result.exit_code),
+            (Outcome::Failed, Some(5))
+        );
+        let tail = result.log_tail.expect("a tail");
+        assert_eq!(
+            (tail.stdout.as_str(), tail.stderr.as_str()),
+            ("to-stdout\n", "to-stderr\n")
+        );
+    }
+    let reply = HeartbeatReply {
+        job_acks: vec![JobResultAck {
+            job_id: "r1-sayexit".to_owned(),
+            ack: Ack::Accepted,
+        }],
+        ..HeartbeatReply::default()
+    };
+    let _events = life.apply(&reply);
+    life.step();
+    assert!(life.held_jobs().is_empty(), "{:?}", life.held_jobs());
+}
+
+/// The identity of `init` (pid 1), from its `/proc` entry: a live process of another user.
+fn init() -> SupervisorId {
+    let stat = std::fs::read_to_string("/proc/1/stat").expect("init's stat");
+    let (_, rest) = stat.rsplit_once(')').expect("a stat line");
+    let start = rest.split_whitespace().nth(19).expect("field 22");
+    SupervisorId {
+        pid: 1,
+        start: start.parse().expect("a start time"),
+    }
+}
+
+/// Proves the file that names a lease's supervisor cannot send the teardown after a process
+/// that is not that lease's supervisor: two leases have lost their sidecars (their own
+/// supervisors ended), and their supervisor files, which the job user can write, name the
+/// live supervisor of a third lease (the same job user) and `init`. The next start removes
+/// both leases, ends neither process, and takes the third lease over. Catches a teardown that
+/// kills whatever process of the job user the file names.
+#[test]
+fn a_supervisor_file_that_names_another_process_ends_nothing() {
+    let node = Node::new("adopt-forged-supervisor");
+    let mut first = node.open();
+    let kept = held(&node, &mut first, "r1-hold");
+    let kept_supervisor = supervisor_id(&node, &kept.0);
+    let forged = [
+        (held(&node, &mut first, "r2-hold"), kept_supervisor),
+        (held(&node, &mut first, "r3-hold"), init()),
+    ];
+    drop(first);
+    for (id, named) in &forged {
+        end_supervisor(&node, &id.0);
+        std::fs::remove_file(node.sidecar(&id.0)).expect("lose the sidecar");
+        let file = supervisor_path(&node.lease_of(&id.0));
+        std::fs::write(file, format!("{} {}\n", named.pid, named.start)).expect("forge");
+    }
+
+    let mut second = node.open();
+    let report = second.swept();
+    assert_eq!(report.adopted, ["r1-hold"], "{report:?}");
+    let mut removed: Vec<(&str, &Reason)> = report
+        .removed
+        .iter()
+        .map(|removed| (removed.run_id.as_str(), &removed.reason))
+        .collect();
+    removed.sort_by_key(|(run, _)| *run);
+    assert_eq!(
+        removed,
+        [
+            ("r2-hold", &Reason::NoRecord),
+            ("r3-hold", &Reason::NoRecord)
+        ],
+        "{report:?}"
+    );
+    assert!(
+        kept_supervisor.alive(),
+        "the third lease's supervisor was ended"
+    );
+    assert!(init().alive());
+    for (id, _) in &forged {
+        assert_gone(&node, &id.0);
+    }
+    second.remove(&kept).expect("removed");
 }

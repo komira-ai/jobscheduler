@@ -722,3 +722,27 @@ fn a_lease_names_its_supervisor_in_a_file_of_its_own() {
     };
     assert!(!gone.runs_as(uid));
 }
+
+/// Catches a supervisor taken for another lease's: a process whose command line names the
+/// lease where the supervisor's names it is that lease's, and is not another lease's; this
+/// process (whose command line names no lease) and a process that is gone supervise none.
+#[test]
+fn a_supervisor_is_known_by_the_lease_its_command_line_names() {
+    let dir = dir("supervises");
+    let lease = lease_in(&dir);
+    // `sh -c <script> <$0>`: the command line is `sh -c <script> <lease>`, the lease fourth.
+    let mut child = Command::new("sh")
+        .args(["-c", "read line"])
+        .arg(&lease)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("sh");
+    let id = SupervisorId::of(child.id()).expect("the child");
+    assert!(id.supervises(&lease));
+    assert!(!id.supervises(&dir.join("another-lease")));
+    let me = SupervisorId::of(std::process::id()).expect("this process");
+    assert!(!me.supervises(&lease));
+    drop(child.stdin.take());
+    child.wait().expect("the child ends");
+    assert!(!id.supervises(&lease));
+}
