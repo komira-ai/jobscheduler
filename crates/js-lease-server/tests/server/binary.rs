@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -144,25 +145,46 @@ fn the_program_refuses_a_loose_token_file() {
     assert!(out.stdout.is_empty());
 }
 
-/// Asserts that the real program refuses the removed `--pool-config` flag even when
-/// every other flag is valid: status 2, standard error naming the flag and pointing to
-/// `js-agent` and `--agent-pool-config`, nothing on standard output, and neither the
-/// host list's path nor a host it names echoed. It catches a program that still reads
-/// a hosts file, that exits with another status, or that prints the file's contents.
-#[test]
-fn the_program_refuses_the_removed_pool_config_flag() {
-    let scratch = Scratch::new("binary_pool_config");
-    let mut args = registering_args(&scratch);
-    let hosts = scratch.write("old-hosts.toml", EXAMPLE_CONFIG, 0o644);
+/// The refusal of the removed hosts-file pool, as the server words it.
+const MIGRATION: &str = "the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"static\" (with its shape and max_machines)";
+
+/// Runs the real program on a valid start plus `--pool-config <value>` and asserts it
+/// exits 2 with nothing on standard output and exactly the migration refusal, one line,
+/// on standard error.
+fn assert_pool_config_refused(scratch: &Scratch, value: PathBuf) {
+    let mut args = registering_args(scratch);
     args.push("--pool-config".into());
-    args.push(hosts.clone().into_os_string());
+    args.push(value.into_os_string());
     let out = Command::new(PROGRAM).args(&args[1..]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8(out.stderr).unwrap();
-    assert!(err.contains("--pool-config"), "{err}");
-    assert!(err.contains("js-agent"), "{err}");
-    assert!(err.contains("--agent-pool-config"), "{err}");
-    assert!(!err.contains(&*hosts.to_string_lossy()), "{err}");
-    assert!(!err.contains("gpu-01"), "{err}");
+    assert_eq!(
+        err,
+        format!("js-lease-server: --pool-config: {MIGRATION}\n")
+    );
     assert!(out.stdout.is_empty());
+}
+
+/// Asserts that the real program refuses the removed `--pool-config` flag even when
+/// every other flag is valid: status 2, standard error exactly the one-line refusal that
+/// names the flag and points to `js-agent` and `--agent-pool-config`, and nothing on
+/// standard output, so neither the host list's path nor a host it names is echoed. It
+/// catches a program that still reads a hosts file, that exits with another status, or
+/// that prints the file's contents or any other text beside the refusal.
+#[test]
+fn the_program_refuses_the_removed_pool_config_flag() {
+    let scratch = Scratch::new("binary_pool_config");
+    let hosts = scratch.write("old-hosts.toml", EXAMPLE_CONFIG, 0o644);
+    assert_pool_config_refused(&scratch, hosts);
+}
+
+/// Asserts that the real program gives the same refusal, byte for byte, when
+/// `--pool-config` names a path that does not exist. It catches a program that opens the
+/// path first and reports the operating system's "No such file" instead of the
+/// migration.
+#[test]
+fn the_program_refuses_the_removed_pool_config_flag_for_a_missing_path() {
+    let scratch = Scratch::new("binary_pool_config_missing");
+    let missing = scratch.path("no-such-hosts.toml");
+    assert_pool_config_refused(&scratch, missing);
 }

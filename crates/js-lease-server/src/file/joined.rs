@@ -627,20 +627,58 @@ mod tests {
         );
     }
 
-    /// Asserts that `kind = "joined"` and `kind = "static"` read the same pool, that only
-    /// the old spelling gives a warning, and that the warning names the pool and `static`.
-    /// It catches a reader that refuses either spelling, one that reads them apart, and a
-    /// warning given for the new spelling or naming no pool.
+    /// Asserts that `kind = "joined"` and `kind = "static"` over one table with every
+    /// optional key set, `join_token_file` included, make the same built pool: equal
+    /// registry pool config (exec, capabilities, share class, timing, memory percent, GPU
+    /// shape), the same mint provider, no launch plan, and a token set that admits the same
+    /// token with the same credentials; and that only the old spelling carries the warning,
+    /// naming the pool and `static`. It catches a reader that refuses either spelling, one
+    /// that builds the two apart (a key dropped for one spelling, the token file read for
+    /// one only), and a warning given for the new spelling or naming no pool.
     #[test]
     fn the_old_spelling_reads_the_same_pool_with_one_warning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/joined_unit");
+        let dir = js_testkit::dir::TestDir::under(root, "old_spelling");
+        let secret = "j".repeat(40);
+        let token_file = dir.path().join("join-token");
+        std::fs::write(&token_file, &secret).unwrap();
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let spelled = |kind: &str| {
+            table(&format!(
+                "kind = \"{kind}\"\nname = \"nodes\"\nclass = \"gpu-host\"\nexec = \"container\"\n\
+                 max_machines = 6\nmemory_schedulable_percent = 90\nshare_class = \"share\"\n\
+                 heartbeat_interval = \"10s\"\ngrace = \"1m\"\nlost_retention = \"2h\"\n\
+                 join_token_file = \"{}\"\n\
+                 capabilities = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+                 shape = {{ cpu_millis = 8000, memory_bytes = 1024, gpus = 2, gpu_class = \"nvidia-a100\" }}\n",
+                token_file.display()
+            ))
+        };
         let client = crate::config::parse_token(&[b'c'; 40]).unwrap();
-        let old = read(with("kind = \"joined\""), &client).unwrap();
-        let new = read(with("kind = \"static\""), &client).unwrap();
-        assert_eq!(
-            JoinedPool::from_table(with("kind = \"joined\"")).unwrap(),
-            JoinedPool::from_table(with("kind = \"static\"")).unwrap()
-        );
+        let old = read(spelled("joined"), &client).unwrap();
+        let new = read(spelled("static"), &client).unwrap();
         assert_eq!((old.name.as_str(), new.name.as_str()), ("nodes", "nodes"));
+        let (Pool::Elastic(old_pool), Pool::Elastic(new_pool)) = (old.pool, new.pool) else {
+            panic!("a static pool is read as a registering pool");
+        };
+        assert_eq!(old_pool.pool, new_pool.pool);
+        assert_eq!(old_pool.pool.exec(), Some(ExecMode::Container));
+        assert_eq!(
+            old_pool.pool.memory_percent(),
+            MemoryPercent::new(90).unwrap()
+        );
+        assert!(old_pool.pool.share_class().is_some());
+        assert_eq!(old_pool.pool.shape().resources().gpus(), 2);
+        assert_eq!(old_pool.mint_provider.as_deref(), Some("nodes"));
+        assert_eq!(old_pool.mint_provider, new_pool.mint_provider);
+        assert!(old_pool.plan.is_none() && new_pool.plan.is_none());
+        assert_eq!(old_pool.tokens.credentials().len(), 1);
+        assert!(old_pool.tokens.credentials() == new_pool.tokens.credentials());
+        assert!(old_pool.tokens.identify(&secret).is_some());
+        assert!(new_pool.tokens.identify(&secret).is_some());
         assert_eq!(new.warning, None);
         assert_eq!(old.warning, Some(old_spelling("nodes")));
         let said = old_spelling("nodes");

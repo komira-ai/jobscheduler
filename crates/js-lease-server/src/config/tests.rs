@@ -7,6 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use js_lease::Booking;
 use js_testkit::dir::TestDir;
 
+use js_registry::WholeNodeConfig;
+
+use super::hosts::with_whole_node;
 use super::*;
 use crate::capacity::Seated;
 

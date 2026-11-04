@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, hello_body, session};
 use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server_with_agents};
-use crate::support::{Harness, Reply, Scratch, TOKEN, request};
+use crate::support::{Harness, LogCapture, Reply, Scratch, TOKEN, request};
 
 /// A joined pool `burst`, six nodes at most, that books 8 cores and 16 GiB and asks the hosts
 /// for no contract. The text is the `[[pool]]` table.
@@ -103,12 +103,16 @@ fn table_of(pool: &PoolText) -> toml::Table {
 }
 
 /// Asserts that the old spelling `kind = "joined"` is read as `kind = "static"`: both files
-/// load; the two tables read into equal pools; the file that spells the old kind carries
-/// exactly one warning for its pool, with the exact words; and the file that spells the new
-/// kind carries none about `joined`. It catches the old spelling refused, a warning on the
-/// new spelling, more than one warning for a pool, or the two spellings loading differently.
-#[test]
-fn a_joined_pool_is_accepted_as_static_with_a_warning() {
+/// load; the two tables read into equal pools; the loaded configuration of the old spelling
+/// carries exactly one warning for its pool, with the exact words, and that of the new
+/// spelling none about `joined`; and a server started over each logs that deprecation
+/// record exactly once for the old spelling, never for the new one, and still once after
+/// the tick loop has stepped several times. It catches the old spelling refused, a warning
+/// on the new spelling, more than one warning for a pool, the two spellings loading
+/// differently, a startup that drops the warning, and one that repeats it on ticks.
+#[tokio::test]
+async fn a_joined_pool_is_accepted_as_static_with_a_warning() {
+    let logs = LogCapture::start();
     let scratch = Scratch::new("joined_old_spelling");
     let server = server_with_agents(&scratch);
     let old = joined().set("kind", &quote("joined"));
@@ -135,6 +139,21 @@ fn a_joined_pool_is_accepted_as_static_with_a_warning() {
         "{:?}",
         new_config.warnings()
     );
+
+    let count = |logs: &LogCapture| logs.text().matches(expected).count();
+    let static_server = serving("joined_static_served", |_| new).await;
+    assert_eq!(count(&logs), 0, "{}", logs.text());
+    for _ in 0..3 {
+        static_server.ticks.step().await;
+    }
+    assert_eq!(count(&logs), 0, "{}", logs.text());
+
+    let joined_server = serving("joined_old_served", |_| old).await;
+    assert_eq!(count(&logs), 1, "{}", logs.text());
+    for _ in 0..3 {
+        joined_server.ticks.step().await;
+    }
+    assert_eq!(count(&logs), 1, "{}", logs.text());
 }
 
 /// Asserts that a server over a file with one `kind = "static"` pool and no host list

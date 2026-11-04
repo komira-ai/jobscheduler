@@ -213,7 +213,11 @@ class = "action"
 ## Migrating an agentless pool
 
 The agentless pool, in which the server booked hosts from a list in a file and nothing ran on them, was removed. The server refuses it at
-start with exit status 2, and the message names the migration. The old file was a `[[pool]]` that named a hosts file:
+start with exit status 2, and the message names the migration.
+
+### The old files
+
+The old file was a `[[pool]]` that named a hosts file:
 
 ```toml
 [[pool]]
@@ -235,8 +239,22 @@ memory_bytes = 549755813888
 gpus = 8
 ```
 
-The replacement is one `[[pool]]` of `kind = "static"`: the pool of hosts that run `js-agent` and register. It lists no hosts; a host is in
-the pool when its agent registers, up to `max_machines`, and every host books the pool's one `shape`:
+The replacement is one pool of `kind = "static"`: the pool of hosts that run `js-agent` and register. It lists no hosts; a host is in the
+pool when its agent registers, up to `max_machines`, and every host books the pool's one shape. Install and start `js-agent` on each host that
+the hosts file listed, naming the pool `gpu` and the server's agent address, then move the server to one of the two routes below, remove
+the old pool and the hosts file, and restart the server. The two routes are not mixed: the `--config` file's pool is written in the file's
+`[[pool]]` format, and the `--agent-pool-config` file has a format of its own.
+
+### Route 1: a pool in the `--config` file
+
+A registering pool needs `agent_listen` in `[server]`, which the agentless pool did not (`listen` stays as it was). The pool is a `[[pool]]`
+with `kind = "static"`; its shared token, if any, is `join_token_file` of the pool.
+
+```toml
+[server]
+# the keys the file already has, and the address the agents register on:
+agent_listen = "127.0.0.1:7443"
+```
 
 ```toml
 [[pool]]
@@ -249,9 +267,30 @@ capabilities = { os = "linux", arch = "x86_64" }          # optional
 join_token_file = "/run/credentials/js/join-token"        # optional shared pool token
 ```
 
-1. Install and start `js-agent` on each host that the hosts file listed, naming the pool `gpu` and the server's agent address.
-2. Add the pool above to the `--config` file (or write the same keys in an `--agent-pool-config` file).
-3. Remove the old pool and the hosts file, and restart the server.
+### Route 2: the flags `--agent-pool-config` and `--agent-token-file`
+
+The agent pool file is one pool at its root, with the shape and the capabilities as tables of their own; it has no `[[pool]]` and no
+`kind`. The shared token is not in this file: it is the file that `--agent-token-file` names, and its presence is what turns agent
+registration on.
+
+```toml
+name         = "gpu"
+class        = "gpu-host"
+max_machines = 2
+
+[shape]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+gpu_class = "nvidia-a100"
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+```
+
+The server is then started with `--agent-pool-config <that file> --agent-token-file <the token file>` beside its other flags; the agents register on
+the server's own `--listen` address.
 
 The flag `--pool-config` is refused the same way, with the same migration in its message, and beside `--config` it is refused as every flag is.
 The message never echoes the path. `kind = "joined"` keeps loading, read as `kind = "static"`, with one warning per pool; a later release

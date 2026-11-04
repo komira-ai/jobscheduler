@@ -528,8 +528,11 @@ fn an_old_static_pool_config_is_refused_with_a_migration_message() {
 
 /// Asserts that the flag `--pool-config` is refused, with a host list that is valid: the
 /// refusal names the flag and its reason is the migration sentence exactly, and the
-/// message holds neither the path of the file nor a host it lists. It catches the flag
-/// being read again, or a refusal that quotes the file.
+/// message holds neither the path of the file nor a host it lists. The same refusal,
+/// whole, comes when the value is a path that does not exist and when it is a directory,
+/// with no filesystem detail in it. It catches the flag being read again, a refusal that
+/// quotes the file, and one that opens the path first and reports "No such file" or
+/// "Is a directory".
 #[test]
 fn the_pool_config_flag_is_refused_with_a_migration_message() {
     let scratch = Scratch::new("pool_config_flag");
@@ -543,6 +546,53 @@ fn the_pool_config_flag_is_refused_with_a_migration_message() {
     let said = refused.to_string();
     assert!(!said.contains(&*listed.to_string_lossy()), "{said}");
     assert!(!said.contains("gpu-01"), "{said}");
+
+    for (label, value) in [
+        ("missing", scratch.path("no-such-hosts.toml")),
+        ("directory", scratch.path("")),
+    ] {
+        let mut args = base_args(&scratch);
+        args.push("--pool-config".into());
+        args.push(value.clone().into_os_string());
+        let refused = config(args).err().expect("the flag should be refused");
+        let said = refused.to_string();
+        assert_eq!(said, format!("--pool-config: {MIGRATION}"), "{label}");
+        assert!(!said.contains(&*value.to_string_lossy()), "{label}: {said}");
+        for detail in ["No such file", "directory"] {
+            assert!(!said.contains(detail), "{label}: {said}");
+        }
+    }
+}
+
+/// Asserts that an old `kind = "static"` provider whose `hosts_file` is a path that does
+/// not exist, or a directory, is refused with the migration sentence whole, as when the
+/// file is there. It catches a loader that reads the path before refusing the kind, and
+/// so says "No such file" or "Is a directory", or prints the path.
+#[test]
+fn an_old_static_pool_config_with_a_missing_or_directory_hosts_file_is_refused() {
+    let scratch = Scratch::new("pool_old_static_paths");
+    for (label, path) in [
+        ("missing", scratch.path("no-such-hosts.toml")),
+        ("directory", scratch.path("")),
+    ] {
+        let pool = PoolText::fake_hosts(&scratch, "old")
+            .set("name", &quote("old"))
+            .set(
+                "provider",
+                &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&path)),
+            );
+        let said = hosts(&scratch, &pool);
+        assert_eq!(
+            said,
+            format!("pool \"old\": provider.kind = \"static\", provider.hosts_file: {MIGRATION}"),
+            "{label}"
+        );
+        let shown = path.display().to_string();
+        assert!(!said.contains(&shown), "{label}: {said}");
+        for detail in ["No such file", "directory"] {
+            assert!(!said.contains(detail), "{label}: {said}");
+        }
+    }
 }
 
 /// Asserts that no refusal and no `Debug` holds a secret the test planted: the content of

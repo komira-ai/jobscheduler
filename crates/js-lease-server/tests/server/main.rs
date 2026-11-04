@@ -23,6 +23,7 @@ mod config_file;
 mod config_joined;
 mod config_launch;
 mod config_lifetime;
+mod config_migration;
 mod config_one_file;
 mod config_pool_refusals;
 mod config_refusals;

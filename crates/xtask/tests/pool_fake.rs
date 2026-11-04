@@ -81,36 +81,71 @@ fn package(manifest: &toml::Table) -> String {
         .to_owned()
 }
 
-/// The packages a dependency table names: its keys, or `package` where one is renamed.
-fn named(table: Option<&toml::Value>) -> Vec<String> {
+/// The `[workspace.dependencies]` of `root/Cargo.toml`; empty when the root has no
+/// manifest or no such table, which leaves an inherited key unresolved.
+fn workspace_dependencies(root: &Path) -> toml::Table {
+    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else {
+        return toml::Table::new();
+    };
+    let manifest: toml::Table = text.parse().expect("root manifest parses");
+    manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The packages a dependency table names: `package` where one is renamed, else the key.
+/// An entry with `workspace = true` takes the package of the same key in `inherited`
+/// (the root's `[workspace.dependencies]`), or its own key when the root has none.
+fn named(table: Option<&toml::Value>, inherited: &toml::Table) -> Vec<String> {
     let Some(table) = table.and_then(toml::Value::as_table) else {
         return Vec::new();
     };
     table
         .iter()
         .map(|(key, value)| {
-            let package = value.get("package").and_then(toml::Value::as_str);
+            let from_root = value.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+            let source = if from_root {
+                inherited.get(key).unwrap_or(value)
+            } else {
+                value
+            };
+            let package = source.get("package").and_then(toml::Value::as_str);
             package.unwrap_or(key).to_owned()
         })
         .collect()
 }
 
-/// Every crate under `root/crates` that names `js-pool-fake` as a normal dependency:
-/// under `[dependencies]` or `[build-dependencies]`, plain or target-specific, by its key
-/// or by `package = "js-pool-fake"`. A `[dev-dependencies]` entry is not one. In name
-/// order.
-fn normal_dependents_of_pool_fake(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    for (_, manifest) in manifests(root) {
-        let mut deps = Vec::new();
-        for kind in ["dependencies", "build-dependencies"] {
-            deps.extend(named(manifest.get(kind)));
-            if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
-                for target in targets.values() {
-                    deps.extend(named(target.get(kind)));
-                }
+/// The packages `manifest` names under each of the dependency table `kinds`, plain and
+/// under every `[target.*]`, with workspace inheritance resolved through `inherited`.
+fn dependencies(manifest: &toml::Table, kinds: &[&str], inherited: &toml::Table) -> Vec<String> {
+    let mut deps = Vec::new();
+    for kind in kinds {
+        deps.extend(named(manifest.get(*kind), inherited));
+        if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+            for target in targets.values() {
+                deps.extend(named(target.get(*kind), inherited));
             }
         }
+    }
+    deps
+}
+
+/// Every crate under `root/crates` that names `js-pool-fake` as a normal dependency:
+/// under `[dependencies]` or `[build-dependencies]`, plain or target-specific, by its key,
+/// by `package = "js-pool-fake"`, or inherited from the root's `[workspace.dependencies]`.
+/// A `[dev-dependencies]` entry is not one. In name order.
+fn normal_dependents_of_pool_fake(root: &Path) -> Vec<String> {
+    let inherited = workspace_dependencies(root);
+    let mut found = Vec::new();
+    for (_, manifest) in manifests(root) {
+        let deps = dependencies(
+            &manifest,
+            &["dependencies", "build-dependencies"],
+            &inherited,
+        );
         if deps.iter().any(|dep| dep == "js-pool-fake") {
             found.push(package(&manifest));
         }
@@ -120,13 +155,16 @@ fn normal_dependents_of_pool_fake(root: &Path) -> Vec<String> {
 }
 
 /// The crates under `root/crates` whose directory or package is named `name`, or that
-/// name a package `name` in any dependency table, dev-dependencies included. In name order.
+/// name a package `name` in any dependency table, dev-dependencies included, plain or
+/// target-specific. In name order.
 fn crates_naming(root: &Path, name: &str) -> Vec<String> {
+    let inherited = workspace_dependencies(root);
+    let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
     let mut found = Vec::new();
     for (dir, manifest) in manifests(root) {
-        let depends = ["dependencies", "dev-dependencies", "build-dependencies"]
+        let depends = dependencies(&manifest, &kinds, &inherited)
             .iter()
-            .any(|kind| named(manifest.get(*kind)).iter().any(|dep| dep == name));
+            .any(|dep| dep == name);
         if dir == name || package(&manifest) == name || depends {
             found.push(package(&manifest));
         }
@@ -305,4 +343,62 @@ fn a_mention_of_the_agentless_pool_is_reported() {
     );
     assert!(!names("fn hosts_file_budget()", "hosts_file"));
     assert!(names("\"hosts_file\"", "hosts_file"));
+}
+
+/// Asserts that the old-name scan reports a crate whose only mention of `js-pool-static`
+/// is a target-specific `[dev-dependencies]` entry. It catches a scan that reads only the
+/// plain dependency tables.
+#[test]
+fn a_target_specific_dev_dependency_on_the_old_pool_is_reported() {
+    let tree = Tree::new("old-name-target");
+    tree.krate(
+        "user",
+        "user",
+        "[target.'cfg(unix)'.dev-dependencies]\njs-pool-static = { path = \"../x\" }\n",
+    );
+    tree.krate("clean", "clean", "");
+    assert_eq!(crates_naming(tree.root(), OLD_POOL_NAME), ["user"]);
+}
+
+/// Asserts that a root `[workspace.dependencies]` entry that renames `js-pool-fake`,
+/// inherited with `workspace = true` (dotted or inline) under `[dependencies]`, is
+/// reported, and that the same inheritance under `[dev-dependencies]` is not. It catches a
+/// scan that counts the inherited key instead of its package, so a renamed fake slips in.
+#[test]
+fn an_inherited_renamed_js_pool_fake_is_resolved_through_the_workspace() {
+    let tree = Tree::new("inherited");
+    tree.put(
+        "Cargo.toml",
+        "[workspace.dependencies]\nhosts = { path = \"crates/js-pool-fake\", package = \"js-pool-fake\" }\n",
+    );
+    tree.krate(
+        "normal",
+        "normal",
+        "[dependencies]\nhosts.workspace = true\n",
+    );
+    tree.krate(
+        "inline",
+        "inline",
+        "[build-dependencies]\nhosts = { workspace = true, optional = true }\n",
+    );
+    tree.krate("dev", "dev", "[dev-dependencies]\nhosts.workspace = true\n");
+    assert_eq!(
+        normal_dependents_of_pool_fake(tree.root()),
+        ["inline", "normal"]
+    );
+}
+
+/// Asserts that an inherited entry with no root manifest keeps its own key, so a key that
+/// is not `js-pool-fake` is not reported, and that an inherited plain `js-pool-fake` is.
+/// It catches a resolver that panics or invents a package when the root has no entry.
+#[test]
+fn an_inherited_key_without_a_root_entry_stays_its_own_name() {
+    let tree = Tree::new("unresolved");
+    tree.krate("other", "other", "[dependencies]\nhosts.workspace = true\n");
+    tree.krate(
+        "fake",
+        "fake",
+        "[dependencies]\njs-pool-fake.workspace = true\n",
+    );
+    assert_eq!(normal_dependents_of_pool_fake(tree.root()), ["fake"]);
 }
