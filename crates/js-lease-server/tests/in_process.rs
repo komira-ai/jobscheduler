@@ -6,8 +6,12 @@
 //! Time is the test's clock ([`support::clock`]) and the lease table's timings a clock of
 //! the test's own ([`support::Stepping`]); nothing sleeps and nothing measures elapsed time.
 
+// This file is the root of its test binary, so its modules are found by path.
+#[path = "in_process/elastic.rs"]
 mod elastic;
+#[path = "in_process/feature.rs"]
 mod feature;
+#[path = "in_process/support.rs"]
 mod support;
 
 use std::time::Duration;
