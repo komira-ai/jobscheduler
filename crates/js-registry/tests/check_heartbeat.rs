@@ -291,11 +291,13 @@ fn check_heartbeat_returns_the_taint_the_beat_then_records() {
 /// Asserts the same for the whole-node part of a beat: a `host-unsafe` refusal of the
 /// committed lease names the `host-unsafe` taint; one naming another lease, or a refusal
 /// whose reason does not taint (`not-quiet`), names none; a report beside a `host-unsafe`
-/// refusal names the report; a ready report for the lease beside its refusal makes it
-/// ready first, so the refusal names no lease and no taint; a taint report beside both
-/// keeps the lease from becoming ready, so the refusal ends it and the report is named.
-/// It catches a check that misses the taint a refused prepare records, or names one the
-/// beat does not record.
+/// refusal names the report; a report beside a ready report for the lease names the
+/// report; a ready report alone names none; a `host-unsafe` refusal on a host with no
+/// lease committed names none; a host tainted before the refusal keeps its first taint
+/// and the check names none. (The wire refuses a heartbeat that carries both a ready
+/// report and a refusal, so that pair never reaches either call.) It catches a check
+/// that misses the taint a refused prepare records, or names one the beat does not
+/// record.
 #[test]
 fn check_heartbeat_returns_the_taint_a_refused_prepare_records() {
     let unsafe_refusal = exclusive_refusal("1-1", RefusalReason::HostUnsafe);
@@ -330,21 +332,17 @@ fn check_heartbeat_returns_the_taint_a_refused_prepare_records() {
             Some(report("residue")),
         ),
         (
-            "ready and host-unsafe for the same lease",
-            edited(|m| {
-                m.exclusive_ready = Some("1-1".into());
-                m.exclusive_refused = Some(unsafe_refusal.clone());
-            }),
-            None,
-        ),
-        (
-            "a report, ready and host-unsafe for the same lease",
+            "a report and ready for the committed lease",
             edited(|m| {
                 m.taint = Some(report("residue"));
                 m.exclusive_ready = Some("1-1".into());
-                m.exclusive_refused = Some(unsafe_refusal.clone());
             }),
             Some(report("residue")),
+        ),
+        (
+            "ready for the committed lease",
+            edited(|m| m.exclusive_ready = Some("1-1".into())),
+            None,
         ),
     ];
     for (name, message, expected) in cases {
@@ -355,6 +353,13 @@ fn check_heartbeat_returns_the_taint_a_refused_prepare_records() {
         };
         assert_eq!(check_then_beat(&fx, &message), expected, "{name}");
     }
+
+    // A refusal on a host with no lease committed names no lease, and no taint.
+    let fx = fixture_of(whole_config());
+    fx.join("a", "t");
+    let mut uncommitted = fx.heartbeat("a", 1);
+    uncommitted.exclusive_refused = Some(unsafe_refusal.clone());
+    assert_eq!(check_then_beat(&fx, &uncommitted), None);
 
     // A host tainted before its lease is refused keeps the first taint, and the check
     // names none.
