@@ -146,9 +146,10 @@ impl Registry {
     ///
     /// This does not mutate: the host's last-heard time, phase, epoch, session, held runs,
     /// load, taint and whole-node state, its booking and its binding stay as they were, and
-    /// no run is touched. Like every call it first forgets the hosts lost for longer than
-    /// the retention with no booking, which no call can see, so it refuses such a host as
-    /// [`Registry::heartbeat`] does.
+    /// no run is touched. Like every call it first applies the registry's time-driven
+    /// housekeeping (forgetting the hosts lost for longer than the retention with no
+    /// booking, expiring waits, sweeping idle requests), which any call would apply at the
+    /// same time, so it refuses a forgotten host as [`Registry::heartbeat`] does.
     ///
     /// It lets a caller make a taint durable before the registry records it: check, commit
     /// the taint, then call [`Registry::heartbeat`]. The answer holds for the registry as
