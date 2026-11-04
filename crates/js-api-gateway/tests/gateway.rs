@@ -5,7 +5,8 @@
 mod common;
 
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
@@ -14,12 +15,13 @@ use js_proto::refusal::refusal_status;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     CancelJobRequest, CordonHostRequest, GetJobRequest, GetJobResponse, GetResultRequest,
-    GetResultResponse, GetUsageRequest, JobState, ListJobsRequest, ListJobsResponse, RefusalCode,
-    SubmitJobRequest,
+    GetResultResponse, GetUsageRequest, JobSpec, JobState, ListJobsRequest, ListJobsResponse,
+    RefusalCode, SubmitJobRequest,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 use serde_json::json;
+use tokio::sync::oneshot;
 use tonic::codegen::tokio_stream;
 use tonic::{Code, Request, Status};
 
@@ -145,7 +147,9 @@ async fn every_annotated_rpc_is_routed() {
 /// methods outside `ROUTES` answer 404 or 405 and reach no method: the lease and agent
 /// routes, a path below a job that no template has, a method's name as a path (the gRPC
 /// form and REST forms), and every method of HTTP but the annotated one on each route's
-/// path. Catches a fallback route such as `POST /<service>/<method>`.
+/// path (HEAD, OPTIONS, TRACE and CONNECT among them, and GET on the cancel route's path,
+/// which is that route's and not a job id with a colon). Catches a fallback route such as
+/// `POST /<service>/<method>`.
 #[tokio::test]
 async fn an_unannotated_rpc_is_not_exposed() {
     let pool = common::fixture("gatewaytest/good.proto");
@@ -184,14 +188,14 @@ async fn an_unannotated_rpc_is_not_exposed() {
     }
     for route in ROUTES {
         let path = fill(route.template);
-        for method in ["GET", "POST", "PUT", "DELETE", "PATCH"] {
+        let methods = [
+            "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT",
+        ];
+        for method in methods {
             let served = ROUTES
                 .iter()
                 .any(|other| other.verb.as_str() == method && fill(other.template) == path);
-            // `GET /v1/jobs/x-1:cancel` is `GetJob` of the job id `x-1:cancel`, a 400 that
-            // bad_job_id_is_a_400_naming_the_field asserts.
-            let job_read = method == "GET" && path.starts_with("/v1/jobs/") && path.contains(':');
-            if served || job_read {
+            if served {
                 continue;
             }
             let reply = send(&router, method, &path, "").await;
@@ -226,16 +230,16 @@ fn from_json<M: Message + Default>(name: &str, body: &[u8]) -> M {
 #[tokio::test]
 async fn json_and_grpc_return_the_same_job() {
     let (stub, router) = serve();
-    let direct = Stub::default();
+    let direct = stub.clone();
 
     let grpc = direct
         .get_job(Request::new(GetJobRequest {
-            job_id: "job-1".to_owned(),
+            job_id: "job-7".to_owned(),
         }))
         .await
         .expect("the stub answers")
         .into_inner();
-    let reply = send(&router, "GET", "/v1/jobs/job-1", "").await;
+    let reply = send(&router, "GET", "/v1/jobs/job-7", "").await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(
         reply.headers.get("content-type").map(|v| v.as_bytes()),
@@ -297,7 +301,17 @@ async fn json_and_grpc_return_the_same_job() {
     assert_eq!(json["result"]["reason"], json!("RESULT_REASON_MEMORY"));
     assert_eq!(json["result"]["stdoutTail"], json!("AP9vdXQ="));
 
-    assert_eq!(stub.rpcs(), ["GetJob", "ListJobs", "GetResult"]);
+    assert_eq!(
+        stub.rpcs(),
+        [
+            "GetJob",
+            "GetJob",
+            "ListJobs",
+            "ListJobs",
+            "GetResult",
+            "GetResult"
+        ]
+    );
 }
 
 /// Asserts that a submit answers 201 with the job, and a repeated identical submit 201 with
@@ -361,8 +375,9 @@ async fn bad_job_id_is_a_400_naming_the_field() {
         ("GET", "/v1/jobs//result".to_owned(), "jobId"),
         ("GET", "/v1/jobs/bad*id/logs".to_owned(), "jobId"),
         ("GET", "/v1/jobs/bad%2Fid".to_owned(), "jobId"),
+        ("GET", "/v1/jobs/%2561".to_owned(), "jobId"),
+        ("GET", "/v1/jobs/".to_owned(), "jobId"),
         ("POST", "/v1/jobs/bad~id:cancel".to_owned(), "jobId"),
-        ("GET", "/v1/jobs/job-1:cancel".to_owned(), "jobId"),
         ("POST", "/v1/hosts/:uncordon".to_owned(), "hostId"),
         ("POST", "/v1/hosts/:cordon".to_owned(), "hostId"),
         ("GET", "/v1/usage?job_id=bad~id".to_owned(), "jobId"),
@@ -742,21 +757,21 @@ async fn a_query_sets_the_fields_of_a_read() {
 }
 
 /// Asserts the 400s of a query and the field each names: an unknown parameter, a map
-/// without a key, a key on a field that is not a map, a field and a map entry given twice,
-/// a value of the wrong kind, text that is not UTF-8, a query on a route whose body is the
-/// request, and a body on a route that takes none. Catches a malformed query that reaches
-/// the service.
+/// without a key, a key on a field that is not a map, a field and a map entry given twice
+/// (also when two spellings decode to the same name or key), a value of the wrong kind,
+/// malformed percent escapes (trailing, incomplete, not hexadecimal) in a name and in a
+/// value, text that is not UTF-8, a query on a route whose body is the request, and a body
+/// on a route that takes none. Catches a malformed query that reaches the service.
 #[tokio::test]
 async fn a_malformed_query_is_a_400() {
     let (stub, router) = serve();
     let twice = "the field is set twice";
     let malformed = "a map field is set as name[key]=value, any other field as name=value";
+    let unknown = "the request has no such field";
+    let wrong = "the field is unknown, or does not hold a value of its type";
+    let text = "the text has a malformed percent escape or does not decode as UTF-8";
     let cases = [
-        (
-            "GET",
-            "/v1/jobs?bogus=1",
-            invalid("bogus", "the request has no such field"),
-        ),
+        ("GET", "/v1/jobs?bogus=1", invalid("bogus", unknown)),
         ("GET", "/v1/jobs?labels=x", invalid("labels", malformed)),
         (
             "GET",
@@ -768,15 +783,16 @@ async fn a_malformed_query_is_a_400() {
             "/v1/jobs?states[a]=JOB_STATE_QUEUED",
             invalid("states[a]", malformed),
         ),
-        (
-            "GET",
-            "/v1/jobs?nope[a]=1",
-            invalid("nope[a]", "the request has no such field"),
-        ),
+        ("GET", "/v1/jobs?nope[a]=1", invalid("nope[a]", unknown)),
         (
             "GET",
             "/v1/jobs?pageSize=1&page_size=2",
             invalid("page_size", twice),
+        ),
+        (
+            "GET",
+            "/v1/jobs?pageSize=1&page%53ize=2",
+            invalid("pageSize", twice),
         ),
         (
             "GET",
@@ -785,27 +801,27 @@ async fn a_malformed_query_is_a_400() {
         ),
         (
             "GET",
-            "/v1/jobs?pageSize=ten",
-            invalid(
-                "pageSize",
-                "the field is unknown, or does not hold a value of its type",
-            ),
+            "/v1/jobs?labels[a]=1&labels%5Ba%5D=2",
+            invalid("labels[a]", twice),
         ),
+        ("GET", "/v1/jobs?pageSize=ten", invalid("pageSize", wrong)),
         (
             "GET",
             "/v1/jobs?states=JOB_STATE_NONE",
-            invalid(
-                "states",
-                "the field is unknown, or does not hold a value of its type",
-            ),
+            invalid("states", wrong),
         ),
         (
             "GET",
             "/v1/jobs?page_token=%FF",
-            json!({
-                "error": "invalid-argument",
-                "reason": "the query string does not decode as UTF-8 text",
-            }),
+            invalid("page_token", text),
+        ),
+        ("GET", "/v1/jobs?pageToken=%zz", invalid("pageToken", text)),
+        ("GET", "/v1/jobs?pageToken=%4", invalid("pageToken", text)),
+        ("GET", "/v1/jobs?pageToken=a%", invalid("pageToken", text)),
+        (
+            "GET",
+            "/v1/jobs?%zz=1",
+            json!({ "error": "invalid-argument", "reason": text }),
         ),
         (
             "POST",
@@ -832,60 +848,217 @@ async fn a_malformed_query_is_a_400() {
     assert_eq!(stub.rpcs(), Vec::<&str>::new());
 }
 
-/// Asserts the 400s of a body and the field each names: not JSON, JSON that is not an
-/// object, a value of the wrong kind (at the top, inside the job, in a list and in a map),
-/// a message field that is not an object, the two names of one optional field inside the
-/// job (the job is named) and at the top (no field is named), and a body that cannot be
-/// read. Catches a malformed body that reaches the service, and a 400 that names the wrong
-/// field.
+/// Asserts what a query's names and keys decode to: a percent-encoded field name, a
+/// parameter without `=` (an empty value), an empty map key and a map key that holds
+/// brackets. Catches a query boundary read as another field or key.
+#[tokio::test]
+async fn query_names_and_keys_decode_once() {
+    let (stub, router) = serve();
+    let uri = "/v1/jobs?page%53ize=5&pageToken&labels[]=empty&labels[a[b]]=nested";
+    let reply = send(&router, "GET", uri, "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        stub.only_request::<ListJobsRequest>(),
+        ListJobsRequest {
+            page_size: 5,
+            labels: map(&[("", "empty"), ("a[b]", "nested")]),
+            ..ListJobsRequest::default()
+        }
+    );
+}
+
+/// Asserts that a path variable is percent-decoded exactly once before its checks: `%61`
+/// is the job id `a` and `host%5Fa` the host id `host_a`; `%2561` decodes to `%61`, which
+/// is no job id; and a malformed escape or bytes that are not UTF-8 are a 400 naming the
+/// field. Catches a path read as written, or decoded twice.
+#[tokio::test]
+async fn a_path_variable_is_decoded_once() {
+    let (stub, router) = serve();
+    let reply = send(&router, "GET", "/v1/jobs/%61", "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["job"]["id"], json!("a"));
+    let reply = send(&router, "POST", "/v1/hosts/host%5Fa:cordon", "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let calls = stub.calls();
+    assert_eq!(
+        CordonHostRequest::decode(calls[1].request.as_slice()).expect("it decodes"),
+        CordonHostRequest {
+            host_id: "host_a".to_owned(),
+            cordon_secs: None,
+        }
+    );
+    let text = "the text has a malformed percent escape or does not decode as UTF-8";
+    for path in ["/v1/jobs/%FF", "/v1/jobs/a%zz", "/v1/jobs/a%"] {
+        let reply = send(&router, "GET", path, "").await;
+        assert_eq!(reply.json(), invalid("jobId", text), "{path}");
+    }
+    assert_eq!(stub.rpcs(), ["GetJob", "CordonHost"]);
+}
+
+/// Asserts that a body or query that names a field the path sets is a 400 naming it,
+/// whatever it holds: a different id, the empty default, `null`, under the JSON name or the
+/// proto name, and an empty query value; and that a body naming only other fields is
+/// taken. Catches a path field silently overwriting what the request gave.
+#[tokio::test]
+async fn a_field_the_path_sets_is_given_once() {
+    let (stub, router) = serve();
+    let by_path = invalid("jobId", "the field is set by the path");
+    for body in [
+        r#"{"jobId":"job-2"}"#,
+        r#"{"jobId":""}"#,
+        r#"{"job_id":null}"#,
+    ] {
+        let reply = send(&router, "POST", "/v1/jobs/job-1:cancel", body).await;
+        assert_eq!(reply.json(), by_path, "{body}");
+    }
+    let reply = send(&router, "GET", "/v1/jobs/job-1?jobId=", "").await;
+    assert_eq!(reply.json(), by_path);
+    assert_eq!(stub.rpcs(), Vec::<&str>::new());
+    let reply = send(
+        &router,
+        "POST",
+        "/v1/hosts/host-a:cordon",
+        r#"{"cordonSecs":60}"#,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+}
+
+/// Asserts that an integer field holding a JSON number is taken only as an exact integer:
+/// the largest `u64` and a negative `int32` reach the service unchanged, while a number
+/// past the `u64` range (which a JSON parser would round to a float), a fraction, an
+/// exponent form, an integral number written with a fraction, and a decimal string past the
+/// range are each a 400 naming the field, inside a list too. Catches a value silently
+/// rounded or saturated.
+#[tokio::test]
+async fn an_integer_is_taken_exactly_or_refused() {
+    let (stub, router) = serve();
+    let body = r#"{"spec":{"jobId":"job-1","needs":{"memoryBytes":18446744073709551615},"priority":-2147483648,"network":2}}"#;
+    let reply = send(&router, "POST", "/v1/jobs", body).await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    let spec = stub
+        .only_request::<SubmitJobRequest>()
+        .spec
+        .expect("the job is submitted");
+    assert_eq!(spec.needs.map(|needs| needs.memory_bytes), Some(u64::MAX));
+    assert_eq!(spec.priority, i32::MIN);
+    assert_eq!(spec.network, 2);
+
+    let (stub, router) = serve();
+    let wrong = "the field is unknown, or does not hold a value of its type";
+    let memory = "spec.needs.memoryBytes";
+    let cases = [
+        (
+            r#"{"spec":{"needs":{"memoryBytes":18446744073709551616}}}"#,
+            memory,
+        ),
+        (r#"{"spec":{"needs":{"memoryBytes":1.5}}}"#, memory),
+        (r#"{"spec":{"needs":{"memoryBytes":1e3}}}"#, memory),
+        (r#"{"spec":{"needs":{"memoryBytes":2.0}}}"#, memory),
+        (
+            r#"{"spec":{"needs":{"memoryBytes":"18446744073709551616"}}}"#,
+            memory,
+        ),
+        (
+            r#"{"spec":{"ports":[{"hostPort":80},{"hostPort":8.5}]}}"#,
+            "spec.ports[1].hostPort",
+        ),
+    ];
+    for (body, field) in cases {
+        let reply = send(&router, "POST", "/v1/jobs", body).await;
+        assert_eq!(reply.json(), invalid(field, wrong), "{body}");
+    }
+    assert_eq!(stub.rpcs(), Vec::<&str>::new());
+}
+
+/// Asserts the 400s of a body and the field each names, by its JSON-name path: not JSON,
+/// JSON that is not an object, an object that gives a member twice (at the top and inside a
+/// map), a value of the wrong kind (at the top, inside the job, in a list element, in a
+/// message of a list, in a map), an unknown field inside a list's message, a field written
+/// by its proto name (named by its JSON name), one field under both its names (inside the
+/// job, at the top, and with one of them `null`), a `null` list element, and a body that
+/// cannot be read. Catches a malformed body that reaches the service, and a 400 that names
+/// the wrong field or none.
 #[tokio::test]
 async fn a_malformed_body_is_a_400() {
     let (stub, router) = serve();
     let wrong = "the field is unknown, or does not hold a value of its type";
+    let twice = "the field is set twice";
+    let member = json!({
+        "error": "invalid-argument",
+        "reason": "an object of the body gives a member twice",
+    });
     let cases = [
         (
             "/v1/jobs",
-            "{".to_owned(),
+            "{",
             json!({ "error": "invalid-argument", "reason": "the body is not valid JSON" }),
         ),
         (
             "/v1/jobs",
-            "[]".to_owned(),
+            "[]",
             json!({ "error": "invalid-argument", "reason": "the body is not a JSON object" }),
         ),
+        ("/v1/jobs", r#"{"spec":{},"spec":{}}"#, member.clone()),
         (
             "/v1/jobs",
-            json!({ "spec": 5 }).to_string(),
-            invalid("spec", wrong),
+            r#"{"spec":{"labels":{"a":"1","a":"2"}}}"#,
+            member,
         ),
+        ("/v1/jobs", r#"{"spec":5}"#, invalid("spec", wrong)),
         (
             "/v1/jobs",
-            json!({ "spec": { "priority": "high" } }).to_string(),
+            r#"{"spec":{"priority":"high"}}"#,
             invalid("spec.priority", wrong),
         ),
         (
             "/v1/jobs",
-            json!({ "spec": { "args": [1] } }).to_string(),
-            invalid("spec.args", wrong),
+            r#"{"spec":{"args":["a",1]}}"#,
+            invalid("spec.args[1]", wrong),
         ),
         (
             "/v1/jobs",
-            json!({ "spec": { "labels": { "a": 1 } } }).to_string(),
+            r#"{"spec":{"args":[null]}}"#,
+            invalid("spec.args[0]", wrong),
+        ),
+        (
+            "/v1/jobs",
+            r#"{"spec":{"ports":[{"hostPort":1},{"hostPort":"x"}]}}"#,
+            invalid("spec.ports[1].hostPort", wrong),
+        ),
+        (
+            "/v1/jobs",
+            r#"{"spec":{"ports":[{"bogus":1}]}}"#,
+            invalid("spec.ports[0].bogus", wrong),
+        ),
+        (
+            "/v1/jobs",
+            r#"{"spec":{"labels":{"a":1}}}"#,
             invalid("spec.labels", wrong),
         ),
         (
             "/v1/jobs",
-            json!({ "spec": { "wallLimitSeconds": "1", "wall_limit_seconds": "2" } }).to_string(),
-            invalid("spec", wrong),
+            r#"{"spec":{"wall_limit_seconds":"x"}}"#,
+            invalid("spec.wallLimitSeconds", wrong),
+        ),
+        (
+            "/v1/jobs",
+            r#"{"spec":{"wallLimitSeconds":"1","wall_limit_seconds":"2"}}"#,
+            invalid("spec.wallLimitSeconds", twice),
+        ),
+        (
+            "/v1/jobs",
+            r#"{"spec":{"jobId":null,"job_id":"job-1"}}"#,
+            invalid("spec.jobId", twice),
         ),
         (
             "/v1/hosts/host-a:cordon",
-            json!({ "cordonSecs": 1, "cordon_secs": 2 }).to_string(),
-            json!({ "error": "invalid-argument", "reason": wrong }),
+            r#"{"cordonSecs":1,"cordon_secs":2}"#,
+            invalid("cordonSecs", twice),
         ),
     ];
     for (path, body, expected) in cases {
-        let reply = send(&router, "POST", path, body.clone()).await;
+        let reply = send(&router, "POST", path, body).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(reply.json(), expected, "{body}");
     }
@@ -899,6 +1072,340 @@ async fn a_malformed_body_is_a_400() {
         json!({ "error": "invalid-argument", "reason": "the body could not be read" })
     );
     assert_eq!(stub.rpcs(), Vec::<&str>::new());
+}
+
+/// Asserts what `null` and explicit defaults mean in a body, by the proto3 JSON mapping:
+/// `null` for a message field leaves it absent, an optional field set to zero is present
+/// and zero (not absent), and an absent optional field is absent; and that a body with
+/// booleans, negative and unsigned numbers, strings, lists, objects and `null` together is
+/// read whole. Catches presence lost between the HTTP body and the call.
+#[tokio::test]
+async fn null_and_explicit_defaults_keep_their_meaning() {
+    let (stub, router) = serve();
+    let bodies = [
+        r#"{"spec":null}"#,
+        r#"{"spec":{"jobId":"job-1","wallLimitSeconds":"0"}}"#,
+        r#"{"spec":{"jobId":"job-1"}}"#,
+        r#"{"spec":{"jobId":"job-1","args":["a"],"needs":{"wholeHost":true,"gpus":1,"diskBytes":null},"priority":-1,"constraints":null}}"#,
+    ];
+    for body in bodies {
+        let reply = send(&router, "POST", "/v1/jobs", body).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{body}");
+    }
+    let specs: Vec<Option<JobSpec>> = stub
+        .calls()
+        .iter()
+        .map(|call| {
+            SubmitJobRequest::decode(call.request.as_slice())
+                .expect("it decodes")
+                .spec
+        })
+        .collect();
+    assert_eq!(specs[0], None);
+    let wall = |index: usize| specs[index].as_ref().map(|spec| spec.wall_limit_seconds);
+    assert_eq!(wall(1), Some(Some(0)));
+    assert_eq!(wall(2), Some(None));
+    let last = specs[3].clone().expect("the job is submitted");
+    assert_eq!(last.args, ["a"]);
+    assert_eq!(last.priority, -1);
+    assert_eq!(last.constraints, None);
+    let needs = last.needs.expect("the needs are given");
+    assert_eq!(
+        (needs.whole_host, needs.gpus, needs.disk_bytes),
+        (true, 1, None)
+    );
+}
+
+/// A body stream of `frames` chunks of `size` bytes each, counting the chunks it hands out
+/// in `taken`.
+fn counted(frames: usize, size: usize, taken: Arc<AtomicUsize>) -> Body {
+    let chunks = (0..frames).map(move |_| {
+        taken.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, io::Error>(Bytes::from(vec![b' '; size]))
+    });
+    Body::from_stream(tokio_stream::iter(chunks))
+}
+
+/// Asserts that a body streamed across frames is cut at the limit: four frames of 30000
+/// bytes are a 413 after the third frame (no frame after the one that crosses the limit is
+/// pulled) and call nothing; an oversized body that is not JSON is a 413 too, not a 400; and
+/// a streamed body of exactly 65536 bytes is taken. Catches a limit applied after the body
+/// is read whole, and JSON decoded before the limit.
+#[tokio::test]
+async fn a_streamed_body_stops_at_the_limit() {
+    let (stub, router) = serve();
+    let taken = Arc::new(AtomicUsize::new(0));
+    let reply = send(
+        &router,
+        "POST",
+        "/v1/jobs",
+        counted(4, 30_000, taken.clone()),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(reply.json(), json!({ "error": "request-too-large" }));
+    assert_eq!(taken.load(Ordering::SeqCst), 3);
+    let reply = send(&router, "POST", "/v1/jobs", "x".repeat(BODY_LIMIT + 1)).await;
+    assert_eq!(reply.json(), json!({ "error": "request-too-large" }));
+    assert_eq!(stub.rpcs(), Vec::<&str>::new());
+
+    let half = BODY_LIMIT / 2;
+    let body = submit_body(BODY_LIMIT);
+    let (first, second) = body.split_at(half);
+    let frames = [
+        Ok::<_, io::Error>(Bytes::from(first.to_owned())),
+        Ok(Bytes::from(second.to_owned())),
+    ];
+    let reply = send(
+        &router,
+        "POST",
+        "/v1/jobs",
+        Body::from_stream(tokio_stream::iter(frames)),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    assert_eq!(stub.rpcs(), ["SubmitJob"]);
+}
+
+/// The wire form of `google.rpc.Status`, to write status details by hand.
+#[derive(Clone, PartialEq, Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+/// A detail under `type_url` holding `value`.
+fn detail(type_url: &str, value: Vec<u8>) -> prost_types::Any {
+    prost_types::Any {
+        type_url: type_url.to_owned(),
+        value,
+    }
+}
+
+/// The type URL of a refusal detail.
+const REFUSAL: &str = js_proto::refusal::REFUSAL_TYPE_URL;
+
+/// A status of `code` and `message` whose details are `details`, encoded.
+fn status_with(code: Code, message: &str, details: Vec<u8>) -> Status {
+    Status::with_details(code, message, details.into())
+}
+
+/// The details holding `details`.
+fn envelope(details: Vec<prost_types::Any>) -> Vec<u8> {
+    RpcStatus {
+        code: 9,
+        message: "m".to_owned(),
+        details,
+    }
+    .encode_to_vec()
+}
+
+/// Asserts how a status's details select its row through the router: a refusal decides over
+/// the status's own code and message (a refusal number this version does not know is a 500
+/// `internal`, a known refusal under a `NOT_FOUND` is still its own row); details that do
+/// not decode, a detail of another type, and a refusal detail whose payload does not decode
+/// leave the row to the code and the message. Every body is exact, so no detail text leaks.
+/// Catches a refusal ignored, a corrupt detail answered as a refusal, and leaked details.
+#[tokio::test]
+async fn status_details_select_the_row_or_are_ignored() {
+    let newer = js_proto::v1::Refusal {
+        code: 99,
+        detail: "a newer refusal".to_owned(),
+    };
+    let capable = js_proto::v1::Refusal {
+        code: RefusalCode::NoCapableHost.into(),
+        detail: "secret detail".to_owned(),
+    };
+    let rows = [
+        (
+            status_with(
+                Code::FailedPrecondition,
+                "not-finished",
+                envelope(vec![detail(REFUSAL, newer.encode_to_vec())]),
+            ),
+            500,
+            json!({ "error": "internal" }),
+        ),
+        (
+            status_with(
+                Code::NotFound,
+                "unknown-job",
+                envelope(vec![detail(REFUSAL, capable.encode_to_vec())]),
+            ),
+            422,
+            json!({ "error": "no-capable-host" }),
+        ),
+        (
+            status_with(Code::NotFound, "unknown-job", vec![0x00, 0x01]),
+            404,
+            json!({ "error": "unknown-job" }),
+        ),
+        (
+            status_with(
+                Code::NotFound,
+                "expired",
+                envelope(vec![detail(
+                    "type.example.org/other.Detail",
+                    vec![0x0a, 0x01, b'x'],
+                )]),
+            ),
+            410,
+            json!({ "error": "expired" }),
+        ),
+        (
+            status_with(
+                Code::Internal,
+                "state-write-failed",
+                envelope(vec![detail(REFUSAL, vec![0x12, 0x05, b'x'])]),
+            ),
+            500,
+            json!({ "error": "state-write-failed" }),
+        ),
+    ];
+    for (status, code, body) in rows {
+        let shown = format!("{:?} {}", status.code(), status.message());
+        let router = router(Arc::new(Stub::failing(status)));
+        let reply = send(&router, "GET", "/v1/jobs/job-1", "").await;
+        assert_eq!(reply.status.as_u16(), code, "{shown}");
+        assert_eq!(reply.json(), body, "{shown}");
+    }
+}
+
+/// A service whose `GetJob` for the job `first` waits for a signal the test sends, and
+/// answers every job with its own id.
+struct Gated {
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[tonic::async_trait]
+impl JobService for Gated {
+    async fn get_job(
+        &self,
+        request: Request<GetJobRequest>,
+    ) -> Result<tonic::Response<GetJobResponse>, Status> {
+        let id = request.into_inner().job_id;
+        let wait = match id.as_str() {
+            "first" => self.release.lock().expect("not poisoned").take(),
+            _ => None,
+        };
+        if let Some(wait) = wait {
+            wait.await.expect("the test releases the first call");
+        }
+        let job = js_proto::v1::Job {
+            id,
+            ..js_proto::v1::Job::default()
+        };
+        Ok(tonic::Response::new(GetJobResponse { job: Some(job) }))
+    }
+}
+
+/// Asserts that two calls in flight at once each get their own answer: the first call is
+/// held inside the service until the second has been answered (an explicit signal, no
+/// timing), and each answer names the job of its own request. Catches state shared between
+/// requests of one router.
+#[tokio::test]
+async fn interleaved_calls_get_their_own_answers() {
+    let (release, wait) = oneshot::channel();
+    let router = router(Arc::new(Gated {
+        release: Mutex::new(Some(wait)),
+    }));
+    let (first, second) = tokio::join!(send(&router, "GET", "/v1/jobs/first", ""), async {
+        let second = send(&router, "GET", "/v1/jobs/second", "").await;
+        release.send(()).expect("the first call waits");
+        second
+    });
+    assert_eq!(first.json()["job"]["id"], json!("first"));
+    assert_eq!(second.json()["job"]["id"], json!("second"));
+}
+
+/// Asserts that the fleet, usage and log calls answer over HTTP the message the trait
+/// answers, field for field, for populated messages: hosts with every field, a host at its
+/// defaults and one whose optional cordon time is present and zero, pools, providers with
+/// an optional price of zero, usage records and an empty usage page, logs with bytes, a
+/// cordon's answer, and a job in a state this version does not know (written as its
+/// number). Catches a populated field lost or mapped wrongly, and optional presence lost.
+#[tokio::test]
+async fn fleet_usage_and_log_answers_survive_the_mapping() {
+    let (stub, router) = serve();
+    macro_rules! same {
+        ($method:ident, $request:expr, $response:ty, $name:literal, $uri:literal) => {{
+            let direct = stub
+                .$method(Request::new($request))
+                .await
+                .expect("the stub answers")
+                .into_inner();
+            let reply = send(&router, "GET", $uri, "").await;
+            let name = concat!("jobscheduler.v1.", $name);
+            assert_eq!(
+                from_json::<$response>(name, &reply.body),
+                direct,
+                "{}",
+                $uri
+            );
+            reply
+        }};
+    }
+    let hosts = same!(
+        list_hosts,
+        js_proto::v1::ListHostsRequest::default(),
+        js_proto::v1::ListHostsResponse,
+        "ListHostsResponse",
+        "/v1/hosts"
+    );
+    assert_eq!(hosts.json()["hosts"][2]["cordonExpiresAtMs"], json!("0"));
+    same!(
+        list_pools,
+        js_proto::v1::ListPoolsRequest::default(),
+        js_proto::v1::ListPoolsResponse,
+        "ListPoolsResponse",
+        "/v1/pools"
+    );
+    same!(
+        list_providers,
+        js_proto::v1::ListProvidersRequest::default(),
+        js_proto::v1::ListProvidersResponse,
+        "ListProvidersResponse",
+        "/v1/providers"
+    );
+    same!(
+        get_usage,
+        GetUsageRequest::default(),
+        js_proto::v1::GetUsageResponse,
+        "GetUsageResponse",
+        "/v1/usage"
+    );
+    let empty = same!(
+        get_usage,
+        GetUsageRequest {
+            page_token: "empty".to_owned(),
+            ..GetUsageRequest::default()
+        },
+        js_proto::v1::GetUsageResponse,
+        "GetUsageResponse",
+        "/v1/usage?pageToken=empty"
+    );
+    assert_eq!(empty.body, b"{}");
+    same!(
+        get_logs,
+        js_proto::v1::GetLogsRequest {
+            job_id: "x-1".to_owned()
+        },
+        js_proto::v1::GetLogsResponse,
+        "GetLogsResponse",
+        "/v1/jobs/x-1/logs"
+    );
+    let listed = same!(
+        list_jobs,
+        ListJobsRequest::default(),
+        ListJobsResponse,
+        "ListJobsResponse",
+        "/v1/jobs"
+    );
+    assert_eq!(listed.json()["jobs"][2]["state"], json!(42));
 }
 
 /// Asserts that a cordon's body sets its fields beside the host the path names, and that a

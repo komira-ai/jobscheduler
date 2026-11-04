@@ -14,19 +14,18 @@ use axum::{Json, Router};
 use http_body_util::LengthLimitError;
 use js_proto::v1::job_service_server::JobService;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
-use serde::ser::{Error as _, Serialize, Serializer};
 
 use crate::annotation::{Segment, Template};
 use crate::answer::Answer;
 use crate::{BODY_LIMIT, ROUTES, Route, input};
 
 /// A route with what serving it needs: its parsed template and its messages' descriptors.
-struct Binding {
-    route: &'static Route,
-    template: Template,
-    status: StatusCode,
-    input: MessageDescriptor,
-    output: MessageDescriptor,
+pub(crate) struct Binding {
+    pub(crate) route: &'static Route,
+    pub(crate) template: Template,
+    pub(crate) status: StatusCode,
+    pub(crate) input: MessageDescriptor,
+    pub(crate) output: MessageDescriptor,
 }
 
 /// The state every request shares: the service and the bindings of [`ROUTES`], or `None`
@@ -52,6 +51,7 @@ pub(crate) fn router_over<T: JobService>(service: Arc<T>, descriptors: &[u8]) ->
     for resource in resources {
         router = router
             .route(resource, any(handle::<T>))
+            .route(&format!("{resource}/"), any(handle::<T>))
             .route(&format!("{resource}/{{*rest}}"), any(handle::<T>));
     }
     router.with_state(gateway)
@@ -118,38 +118,65 @@ impl<T: JobService> Gateway<T> {
             &binding.output,
         )
         .await?;
-        Ok(respond(binding.status, &output))
+        respond(binding.status, &output)
     }
 }
 
 /// A binding that serves a request, with the path variables it captured (field name and
 /// text).
-type Matched<'a> = (&'a Binding, Vec<(String, String)>);
+pub(crate) type Matched<'a> = (&'a Binding, Vec<(String, String)>);
 
-/// The binding that serves `method` on `path`, with the path variables it captures; the
-/// first in the order of [`ROUTES`] when two match. A 404 when no template matches the
-/// path, a 405 naming the methods that would when only other methods' do.
-fn find<'a>(bindings: &'a [Binding], method: &Method, path: &str) -> Result<Matched<'a>, Answer> {
+/// The binding that serves `method` on `path`, with the path variables it captures. The
+/// path is matched first: of the templates that match it, only the most specific count (a
+/// custom verb before none, then more literal segments before fewer), so that
+/// `/v1/jobs/x:cancel` is the cancel route's path for every method and never a job id of
+/// `GetJob`. Among those, the binding of `method` serves, the first in the order of
+/// [`ROUTES`] when two do. A 404 when no template matches the path, a 405 naming the
+/// methods of the most specific templates when none of them is `method`.
+pub(crate) fn find<'a>(
+    bindings: &'a [Binding],
+    method: &Method,
+    path: &str,
+) -> Result<Matched<'a>, Answer> {
+    let matching: Vec<Matched<'a>> = bindings
+        .iter()
+        .filter_map(|binding| Some((binding, capture(&binding.template, path)?)))
+        .collect();
+    let Some(best) = matching
+        .iter()
+        .map(|(binding, _)| specificity(binding))
+        .max()
+    else {
+        return Err(Answer::not_found());
+    };
     let mut allow = Vec::new();
-    for binding in bindings {
-        let Some(variables) = capture(&binding.template, path) else {
+    for (binding, variables) in matching {
+        if specificity(binding) != best {
             continue;
-        };
+        }
         if binding.route.verb.as_str() == method.as_str() {
             return Ok((binding, variables));
         }
         allow.push(binding.route.verb);
     }
-    if allow.is_empty() {
-        Err(Answer::not_found())
-    } else {
-        Err(Answer::method_not_allowed(allow))
-    }
+    Err(Answer::method_not_allowed(allow))
+}
+
+/// How specific a binding's template is: whether it has a custom verb, then how many literal
+/// segments it has. A greater value wins.
+fn specificity(binding: &Binding) -> (bool, usize) {
+    let template = &binding.template;
+    let literals = template
+        .segments
+        .iter()
+        .filter(|segment| matches!(segment, Segment::Literal(_)))
+        .count();
+    (template.verb.is_some(), literals)
 }
 
 /// The variables `template` captures from `path` (field name and text), or `None` when the
-/// path does not match. A variable captures one whole segment, the empty one too; path
-/// text is not percent-decoded.
+/// path does not match. A variable captures one whole segment, the empty one too, as it is
+/// written; [`input::build`] decodes it. A literal and a custom verb are matched as written.
 fn capture(template: &Template, path: &str) -> Option<Vec<(String, String)>> {
     let path = match &template.verb {
         Some(verb) => path.strip_suffix(verb.as_str())?.strip_suffix(':')?,
@@ -186,21 +213,16 @@ async fn read(body: Body) -> Result<Bytes, Answer> {
 }
 
 /// The success answer `status` of a call's response, written by the proto3 JSON mapping
-/// (`DynamicMessage`'s own serialization, the default options of prost-reflect), with the
-/// keys of every object in order ([`Ordered`]).
-fn respond(status: StatusCode, output: &DynamicMessage) -> Response {
-    (status, Json(Ordered(output))).into_response()
+/// (`DynamicMessage`'s own serialization, the default options of prost-reflect) into a
+/// `serde_json::Value`, whose objects keep their keys sorted: prost-reflect keeps a map field
+/// in a hash map, whose order changes from one process to the next, and the same message is
+/// always the same bytes. A message that does not serialize is a 500 `internal`.
+pub(crate) fn respond(status: StatusCode, output: &DynamicMessage) -> Result<Response, Answer> {
+    let value = serde_json::to_value(output).map_err(unwritable)?;
+    Ok((status, Json(value)).into_response())
 }
 
-/// A message written with the keys of every JSON object in order. prost-reflect keeps a map
-/// field in a hash map, whose order changes from one process to the next, so the message is
-/// first made a `serde_json::Value`, whose objects keep their keys sorted: the same message
-/// is always the same bytes.
-struct Ordered<'a>(&'a DynamicMessage);
-
-impl Serialize for Ordered<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let value = serde_json::to_value(self.0).map_err(S::Error::custom)?;
-        value.serialize(serializer)
-    }
+/// The answer to a response that does not serialize.
+fn unwritable(_: serde_json::Error) -> Answer {
+    Answer::internal()
 }

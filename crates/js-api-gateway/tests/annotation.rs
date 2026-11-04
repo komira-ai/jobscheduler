@@ -55,7 +55,11 @@ fn routes_are_the_annotated_methods() {
 /// path, a path outside `/v1/`, a route under `/v1/leases` or `/v1/agent` (or with a
 /// variable as its resource), a method other than GET and POST, no method, additional
 /// bindings, a response body, a body on a GET or a named body, a template outside the
-/// grammar, and an option that is not an `HttpRule`. Catches any of them accepted.
+/// grammar, a success status other than 200 and 201, a streaming method, a request or
+/// response that is not a top-level message of the service's package (another package's,
+/// a nested one), and an option that is not an `HttpRule`; and that a service with no
+/// method at all, or with methods none of which is annotated, fails with the service's
+/// name. Catches any of them accepted.
 #[test]
 fn build_rejects_a_bad_annotation() {
     let pool = fixture("gatewaytest/bad.proto");
@@ -63,7 +67,7 @@ fn build_rejects_a_bad_annotation() {
                     with an optional :verb of lower-case letters after a final variable";
     let reserved =
         "its path names no resource of its own after /v1/ (a literal other than leases and agent)";
-    let cases: [(&str, &str, String); 24] = [
+    let cases: [(&str, &str, String); 28] = [
         (
             "Put",
             "Call",
@@ -144,6 +148,30 @@ fn build_rejects_a_bad_annotation() {
             "its http_success_status is 204; the gateway answers a success 200 or 201".to_owned(),
         ),
         (
+            "ClientStream",
+            "Call",
+            "it streams; the gateway serves unary methods only".to_owned(),
+        ),
+        (
+            "ServerStream",
+            "Call",
+            "it streams; the gateway serves unary methods only".to_owned(),
+        ),
+        (
+            "Foreign",
+            "Call",
+            "its message google.protobuf.Empty is not a top-level message of the service's \
+             package"
+                .to_owned(),
+        ),
+        (
+            "Nested",
+            "Call",
+            "its message gatewaytest.Holder.Inside is not a top-level message of the \
+             service's package"
+                .to_owned(),
+        ),
+        (
             "Duplicate",
             "Second",
             "its method and path are those of First".to_owned(),
@@ -154,6 +182,15 @@ fn build_rejects_a_bad_annotation() {
             routes(&pool, &format!("gatewaytest.{service}")).expect_err("the option is refused");
         assert_eq!(err.to_string(), format!("{rpc}: {text}"), "{service}");
         assert!(matches!(err, AnnotationError::Rpc { .. }), "{service}");
+    }
+
+    for service in ["gatewaytest.Empty", "gatewaytest.Unannotated"] {
+        let err = routes(&pool, service).expect_err("a service without routes is refused");
+        assert_eq!(err, AnnotationError::NoRoutes(service.to_owned()));
+        assert_eq!(
+            err.to_string(),
+            format!("no method of {service} carries a google.api.http option")
+        );
     }
 
     let garbled = fixture("gatewaytest/garbled.proto");

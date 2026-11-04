@@ -30,6 +30,9 @@ dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "o
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2.17"
+# The HTTP/JSON gateway (js-api-gateway): the Rust names of generated methods and messages,
+# by the same conversion prost and tonic use. In the lock already through prost-build.
+heck = "0.5.0"
 hex = "0.4.3"
 # Bodies of the registry client (js-oci): the empty request body and the frame reader.
 http-body-util = { version = "0.1.5", default-features = false }

@@ -207,6 +207,13 @@ pub enum Fault {
     /// The method's `http_success_status` is neither 200 nor 201.
     #[error("its http_success_status is {0}; the gateway answers a success 200 or 201")]
     SuccessStatus(u32),
+    /// The method streams its request or its response; the gateway serves unary methods.
+    #[error("it streams; the gateway serves unary methods only")]
+    Streaming,
+    /// The method's request or response, named here, is not a top-level message of the
+    /// service's own package, which the generated code names.
+    #[error("its message {0} is not a top-level message of the service's package")]
+    Message(String),
     /// Another method, named here, has the same HTTP method and the same path shape.
     #[error("its method and path are those of {0}")]
     Duplicate(String),
@@ -218,6 +225,10 @@ pub enum AnnotationError {
     /// The descriptor set has no service of the full name given.
     #[error("the descriptor set has no service {0}")]
     NoService(String),
+    /// The service, named here, has no method with a `google.api.http` option: the gateway
+    /// would serve nothing.
+    #[error("no method of {0} carries a google.api.http option")]
+    NoRoutes(String),
     /// A method's option is not one the gateway serves.
     #[error("{rpc}: {fault}")]
     Rpc {
@@ -234,7 +245,8 @@ pub enum AnnotationError {
 ///
 /// # Errors
 ///
-/// [`AnnotationError::NoService`] when the pool has no such service, and
+/// [`AnnotationError::NoService`] when the pool has no such service,
+/// [`AnnotationError::NoRoutes`] when no method of it has a route, and
 /// [`AnnotationError::Rpc`] for the first method whose option the gateway does not serve.
 pub fn routes(pool: &DescriptorPool, service: &str) -> Result<Vec<RouteSpec>, AnnotationError> {
     let service_descriptor = pool
@@ -255,6 +267,9 @@ pub fn routes(pool: &DescriptorPool, service: &str) -> Result<Vec<RouteSpec>, An
             return Err(at(Fault::Duplicate(other)));
         }
         routes.push(route);
+    }
+    if routes.is_empty() {
+        return Err(AnnotationError::NoRoutes(service.to_owned()));
     }
     Ok(routes)
 }
@@ -296,7 +311,18 @@ fn read_route(method: &MethodDescriptor) -> Result<Option<(RouteSpec, String)>, 
         Some(other) => return Err(Fault::SuccessStatus(other)),
     };
     let parsed = Template::parse(&template)?;
+    if method.is_client_streaming() || method.is_server_streaming() {
+        return Err(Fault::Streaming);
+    }
     let input = method.input();
+    let output = method.output();
+    for message in [&input, &output] {
+        let own = message.package_name() == method.parent_service().package_name()
+            && message.parent_message().is_none();
+        if !own {
+            return Err(Fault::Message(message.full_name().to_owned()));
+        }
+    }
     let mut seen = BTreeSet::new();
     for name in parsed.variables() {
         let field = input
@@ -320,7 +346,7 @@ fn read_route(method: &MethodDescriptor) -> Result<Option<(RouteSpec, String)>, 
         body,
         status,
         input: input.full_name().to_owned(),
-        output: method.output().full_name().to_owned(),
+        output: output.full_name().to_owned(),
     };
     Ok(Some((route, parsed.shape())))
 }

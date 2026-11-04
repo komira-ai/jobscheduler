@@ -13,6 +13,10 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request as HttpRequest, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
+    Availability, Host, HostBooking, HostMark, HostSource, HostState, Machine, Memory, Pool,
+    Provider, ProviderCheck, Shape, UsageRecord, WholeHostOutcome,
+};
+use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, Constraints, CordonHostRequest, CordonHostResponse,
     ExecMode, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, GetUsageRequest, GetUsageResponse, Job, JobFile, JobResult, JobSpec,
@@ -105,7 +109,11 @@ impl JobService for Stub {
         &self,
         request: Request<GetJobRequest>,
     ) -> Result<Response<GetJobResponse>, Status> {
-        self.answer("GetJob", request, GetJobResponse { job: Some(job()) })
+        let job = Job {
+            id: request.get_ref().job_id.clone(),
+            ..job()
+        };
+        self.answer("GetJob", request, GetJobResponse { job: Some(job) })
     }
 
     async fn list_jobs(
@@ -113,7 +121,7 @@ impl JobService for Stub {
         request: Request<ListJobsRequest>,
     ) -> Result<Response<ListJobsResponse>, Status> {
         let response = ListJobsResponse {
-            jobs: vec![job(), cancelled_job()],
+            jobs: vec![job(), cancelled_job(), job_of_a_newer_state()],
             next_page_token: "page-2".to_owned(),
         };
         self.answer("ListJobs", request, response)
@@ -156,42 +164,119 @@ impl JobService for Stub {
         &self,
         request: Request<ListHostsRequest>,
     ) -> Result<Response<ListHostsResponse>, Status> {
-        self.answer("ListHosts", request, ListHostsResponse::default())
+        let response = ListHostsResponse {
+            hosts: vec![host("host-a"), Host::default(), cordoned_now()],
+        };
+        self.answer("ListHosts", request, response)
     }
 
     async fn cordon_host(
         &self,
         request: Request<CordonHostRequest>,
     ) -> Result<Response<CordonHostResponse>, Status> {
-        self.answer("CordonHost", request, CordonHostResponse::default())
+        let response = CordonHostResponse {
+            host: Some(host("host-a")),
+            already_cordoned: true,
+        };
+        self.answer("CordonHost", request, response)
     }
 
     async fn uncordon_host(
         &self,
         request: Request<UncordonHostRequest>,
     ) -> Result<Response<UncordonHostResponse>, Status> {
-        self.answer("UncordonHost", request, UncordonHostResponse::default())
+        let response = UncordonHostResponse {
+            host: Some(cordoned_now()),
+            lifted: false,
+        };
+        self.answer("UncordonHost", request, response)
     }
 
     async fn list_pools(
         &self,
         request: Request<ListPoolsRequest>,
     ) -> Result<Response<ListPoolsResponse>, Status> {
-        self.answer("ListPools", request, ListPoolsResponse::default())
+        let response = ListPoolsResponse {
+            pools: vec![
+                Pool {
+                    name: "gpu".to_owned(),
+                    kind: "lambdalabs".to_owned(),
+                    state: Availability::Unavailable.into(),
+                    reasons: vec!["no-offer".to_owned()],
+                    memory: Some(memory()),
+                    instances: 3,
+                    last_tick_ms: Some(BIG),
+                },
+                Pool {
+                    instances: 0,
+                    last_tick_ms: Some(0),
+                    ..Pool::default()
+                },
+            ],
+        };
+        self.answer("ListPools", request, response)
     }
 
     async fn list_providers(
         &self,
         request: Request<ListProvidersRequest>,
     ) -> Result<Response<ListProvidersResponse>, Status> {
-        self.answer("ListProviders", request, ListProvidersResponse::default())
+        let response = ListProvidersResponse {
+            providers: vec![Provider {
+                name: "gpu".to_owned(),
+                kind: "lambdalabs".to_owned(),
+                state: Availability::Available.into(),
+                checks: vec![ProviderCheck {
+                    name: "credentials".to_owned(),
+                    ok: true,
+                    reason: String::new(),
+                    note: "key read".to_owned(),
+                    checked_at_ms: BIG,
+                }],
+                machines: vec![Machine {
+                    host: "machine-host".to_owned(),
+                    state: "joined".to_owned(),
+                    offer: "gpu_1x_a100".to_owned(),
+                    zone: "zone-1".to_owned(),
+                    price_cents_per_hour: Some(0),
+                    provider_id: "instance-1".to_owned(),
+                }],
+            }],
+        };
+        self.answer("ListProviders", request, response)
     }
 
     async fn get_usage(
         &self,
         request: Request<GetUsageRequest>,
     ) -> Result<Response<GetUsageResponse>, Status> {
-        self.answer("GetUsage", request, GetUsageResponse::default())
+        let page = request.get_ref().page_token.clone();
+        let response = match page.as_str() {
+            "empty" => GetUsageResponse::default(),
+            _ => GetUsageResponse {
+                records: vec![UsageRecord {
+                    job_id: "usage-job".to_owned(),
+                    host_id: "usage-host".to_owned(),
+                    queue_wait_ms: 1500,
+                    run_ms: BIG,
+                    end_state: JobState::Succeeded.into(),
+                    ended_reason: ResultReason::Exit.into(),
+                    ended_at_ms: BIG,
+                    booked: Some(booking("usage-job")),
+                    used: Some(ResourceUsage {
+                        cpu_usec: 9_000_000,
+                        peak_memory_bytes: 1 << 30,
+                        disk_bytes: Some(0),
+                        gpus: 1,
+                    }),
+                    whole_host: WholeHostOutcome::Drained.into(),
+                    mark_give_ups: 1,
+                    estimated_run_ms: Some(0),
+                }],
+                next_page_token: "usage-page-2".to_owned(),
+            },
+        };
+        self.answer("GetUsage", request, response)
     }
 }
 
@@ -311,6 +396,69 @@ pub fn job() -> Job {
         times: Some(times()),
         host_silent_since_ms: Some(BIG + 4000),
         cancel_requested: true,
+    }
+}
+
+/// A job in a state this version does not know (a number a newer server could send).
+pub fn job_of_a_newer_state() -> Job {
+    Job {
+        id: "job-newer".to_owned(),
+        state: 42,
+        ..Job::default()
+    }
+}
+
+/// The resources booked for `job_id` on a host.
+pub fn booking(job_id: &str) -> HostBooking {
+    HostBooking {
+        job_id: job_id.to_owned(),
+        cpu_millis: 2000,
+        memory_bytes: BIG,
+        disk_bytes: 8 << 30,
+        gpus: 1,
+        host_ports: vec![8080, 9090],
+    }
+}
+
+/// The memory of a host or a pool.
+pub fn memory() -> Memory {
+    Memory {
+        configured_bytes: 64 << 30,
+        schedulable_percent: 90,
+        schedulable_bytes: 57_982_058_496,
+    }
+}
+
+/// A host with every field set.
+pub fn host(id: &str) -> Host {
+    Host {
+        id: id.to_owned(),
+        source: HostSource::Registered.into(),
+        state: HostState::Live.into(),
+        shape: Some(Shape {
+            cpu_millis: 16_000,
+            memory_bytes: 64 << 30,
+            gpus: 4,
+            gpu_class: "nvidia-a100-sxm4-80gb".to_owned(),
+            disk_bytes: Some(500 << 30),
+        }),
+        memory: Some(memory()),
+        capabilities: map(&[("os", "linux"), ("arch", "x86_64")]),
+        labels: map(&[("rack", "r1")]),
+        booked: vec![booking("booked-job")],
+        mark: HostMark::Draining.into(),
+        cordon_expires_at_ms: Some(BIG),
+        taint_reason: "post-job-check-failed".to_owned(),
+        agent_version: "0.1.0".to_owned(),
+    }
+}
+
+/// A host whose optional cordon time is present and zero, beside fields at their defaults.
+pub fn cordoned_now() -> Host {
+    Host {
+        id: "host-b".to_owned(),
+        cordon_expires_at_ms: Some(0),
+        ..Host::default()
     }
 }
 

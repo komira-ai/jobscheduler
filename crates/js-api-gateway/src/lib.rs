@@ -2,9 +2,11 @@
 //! `google.api.http` option of each method of `jobscheduler.v1.JobService` (crate
 //! `js-proto`), which call the service's generated trait
 //! [`JobService`](js_proto::v1::job_service_server::JobService). No route and no JSON field
-//! is written by hand: the build script reads the options from js-proto's descriptor set,
-//! checks them ([`annotation`]) and generates [`ROUTES`], [`Rpc`] and the call of each
-//! method, and the messages are mapped to and from JSON from their descriptors. A method of
+//! is written by hand: the options are read from js-proto's descriptor set and checked
+//! ([`annotation`]), [`ROUTES`], [`Rpc`] and the call of each method are generated from them
+//! into `src/gateway.rs` (checked in, so the coverage report measures it; the build script
+//! and a test fail when it differs from what the options give), and the messages are mapped
+//! to and from JSON from their descriptors. A method of
 //! the service appears over HTTP when it is annotated; an unannotated one has no route.
 //!
 //! The crate is a library and serves nothing by itself: [`router`] is mounted by a server,
@@ -27,21 +29,29 @@
 //! `POST /v1/jobs/{job_id}:cancel`, not a `DELETE`: a cancel keeps the job's record and its
 //! result, where a `DELETE` would read as removal. It is idempotent on the job, so a repeat
 //! answers 200 with the same final state. The router has one axum route per resource
-//! (`/v1/jobs`, `/v1/hosts`, ...) and below it, and matches a request against the routes'
-//! templates itself, so that a custom verb (`:cancel`) and an empty path segment are
-//! matched as the templates say. It matches the whole path, so it is merged at the root, not
+//! (`/v1/jobs`, `/v1/hosts`, ...), its path with a trailing `/`, and below it, and matches a
+//! request against the routes' templates itself, so that a custom verb (`:cancel`) and an
+//! empty path segment (`/v1/jobs/`, `/v1/jobs//result`) are matched as the templates say.
+//! The path decides first: of the templates that match it, the most specific count (a
+//! custom verb before none, then more literal segments), so `GET /v1/jobs/x:cancel` is a
+//! 405 of the cancel route, never a read of the job `x:cancel`; then the method picks among
+//! them, or the answer is a 405 that names theirs. It matches the whole path, so it is merged at the root, not
 //! nested; its resource routes (`/v1/hosts` and every path below it, and so on) overlap the
 //! lease server's routes under the same resources, which a server mounting both has to
 //! resolve (`docs/http-gateway.md`).
 //!
 //! # Requests
 //!
-//! A path variable sets the request field it names. A POST route takes the request message
+//! A path variable sets the request field it names, percent-decoded exactly once (a
+//! malformed escape or text that is not UTF-8 is a 400 naming the field); literal segments
+//! and custom verbs are matched as written. A body or query that names a field the path
+//! sets is a 400, whatever it holds (`null` and the default too). A POST route takes the request message
 //! as its JSON body (an empty body is `{}`) and no query string. A GET route takes no body;
 //! its query string sets the other fields: `name=value` for a singular field (once),
 //! repeated for a list (`states=JOB_STATE_QUEUED&states=JOB_STATE_RUNNING`), and
-//! `name[key]=value` for each entry of a map (`labels[team]=ml`). A field may be named by
-//! its JSON name or its proto name.
+//! `name[key]=value` for each entry of a map (`labels[team]=ml`), names and values
+//! percent-decoded once with `+` as a space (a malformed escape is a 400). A field may be
+//! named by its JSON name or its proto name, but not by both in one request.
 //!
 //! A `job_id` (1 to 63 bytes of letters, digits, dot, underscore and dash, design section
 //! 5.3 and `job.proto`) is checked before the call, in the path, the body and the query
@@ -59,9 +69,15 @@
 //! fields by their lowerCamelCase JSON names (a request may also use the proto names),
 //! enums by their value names (`"JOB_STATE_RUNNING"`), 64-bit integers as decimal strings
 //! (`"9007199254740993"`, so no JSON number rounds them), bytes as base64, and fields at
-//! their default values left out of a response. A request with a field the message does
-//! not have is refused (a 400 naming it), so an older server tells a newer client that it
-//! does not know the field rather than dropping it.
+//! their default values left out of a response, while an optional field that is present
+//! is written even at zero; a response's objects have their keys in order, so the same
+//! message is always the same bytes. An enum value this version does not know is written
+//! as its number. A request with a field the message does not have is refused (a 400
+//! naming it), so an older server tells a newer client that it does not know the field
+//! rather than dropping it. In a request, `null` leaves a field absent; an object that gives
+//! a member twice is refused; and an integer field takes a JSON number only as an exact
+//! integer (a fraction, an exponent or a number past the 64-bit range, which a JSON parser
+//! would round, is a 400; a decimal string is read exactly).
 //!
 //! # Limits
 //!
@@ -79,9 +95,11 @@
 //! # Errors
 //!
 //! An answer that is not the call's response is an [`Answer`]: the status and
-//! `{"error": "<code>"}`, plus `"field"` (the first offending field, by its JSON name,
-//! `spec.jobId` inside the submitted job) and `"reason"` (a fixed text) on a 400. Neither
-//! ever repeats a value of the request, and a 500 never says its cause.
+//! `{"error": "<code>"}`, plus `"field"` (the first offending field, by its JSON-name path:
+//! `spec.jobId` inside the submitted job, `spec.ports[1].hostPort` in a list; a field the
+//! request does not have as it was written; a map field without its key) and `"reason"` (a
+//! fixed text) on a 400. Neither ever repeats a value of the request, and a 500 never says
+//! its cause; a response that cannot be written is a 500 `internal` too.
 //!
 //! | answer | status | code |
 //! |---|---|---|
@@ -117,13 +135,15 @@ use tonic::Status;
 
 pub mod annotation;
 mod answer;
+#[cfg(test)]
+mod codegen;
 mod input;
 mod serve;
 
 pub use annotation::Verb;
 pub use answer::Answer;
 
-include!(concat!(env!("OUT_DIR"), "/gateway.rs"));
+include!("gateway.rs");
 
 /// The largest request body the gateway reads, in bytes: 64 KiB, the body limit of the
 /// lease server's routes.

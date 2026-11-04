@@ -1092,11 +1092,13 @@ name = "js-api-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "heck",
  "http-body-util",
  "js-proto",
  "percent-encoding",
  "prost",
  "prost-reflect",
+ "prost-types",
  "protox",
  "serde",
  "serde_json",

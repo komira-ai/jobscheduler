@@ -8,6 +8,7 @@ package gatewaytest;
 import "google/api/annotations.proto";
 import "gatewaytest/good.proto";
 import "jobscheduler/v1/service.proto";
+import "google/protobuf/empty.proto";
 
 // Put.
 service Put {
@@ -192,6 +193,53 @@ service BadStatus {
     option (google.api.http) = { get: "/v1/things" };
     option (jobscheduler.v1.http_success_status) = 204;
   }
+}
+
+// No method at all.
+service Empty {}
+
+// Methods, none with a route.
+service Unannotated {
+  // The one method.
+  rpc Call(Req) returns (Resp);
+}
+
+// A client stream.
+service ClientStream {
+  // The one method.
+  rpc Call(stream Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/things" body: "*" };
+  }
+}
+
+// A server stream.
+service ServerStream {
+  // The one method.
+  rpc Call(Req) returns (stream Resp) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A request of another package.
+service Foreign {
+  // The one method.
+  rpc Call(google.protobuf.Empty) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A response nested in another message.
+service Nested {
+  // The one method.
+  rpc Call(Req) returns (Holder.Inside) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A message that holds the nested response.
+message Holder {
+  // The nested response.
+  message Inside {}
 }
 
 // Two methods on one method and path shape.

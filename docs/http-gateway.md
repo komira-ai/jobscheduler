@@ -56,15 +56,24 @@ the call; there is no offset, limit or stream.
 
 ## Requests
 
-- A path variable (`{job_id}`, `{host_id}`) sets the request field it names. An empty path
-  segment is an empty value; path text is not percent-decoded.
+- A path variable (`{job_id}`, `{host_id}`) sets the request field it names, percent-decoded
+  exactly once (`/v1/jobs/%61` is the job `a`; a malformed escape or text that is not UTF-8
+  is a 400 naming the field). An empty path segment (`/v1/jobs/`, `/v1/jobs//result`) is an
+  empty value. Literal segments and custom verbs are matched as written.
+- The path decides before the method: of the routes whose path matches, the most specific
+  count (a custom verb before none, then more literal segments), so `GET /v1/jobs/x:cancel`
+  is a 405 of the cancel route allowing POST, not a read of the job `x:cancel`.
 - A POST takes the request message as its JSON body (an empty body reads as `{}`) and no query
-  string. A body field the path sets (`{"jobId": ...}` on a cancel) is refused.
+  string. A body or query field the path sets (`{"jobId": ...}` on a cancel, `?jobId=` on a
+  read) is refused, whatever it holds, `null` and the default included.
 - A GET takes no body. Its query string sets the other fields: `name=value` for a singular
   field (once), the same name repeated for a list, and `name[key]=value` for each entry of a
-  map, percent-encoded, with `+` read as a space. For example
+  map (`labels[]` is the empty key; brackets inside a key are kept), names and values
+  percent-decoded once, with `+` read as a space; a malformed escape (`%`, `%4`, `%zz`) is a
+  400. A parameter without `=` has an empty value. For example
   `GET /v1/jobs?states=JOB_STATE_QUEUED&states=JOB_STATE_RUNNING&labels[team]=ml&pageSize=50`.
-- A field may be named by its JSON name (`pageSize`) or its proto name (`page_size`).
+- A field may be named by its JSON name (`pageSize`) or its proto name (`page_size`), not by
+  both in one request.
 - A `job_id` (1 to 63 bytes of letters, digits, dot, underscore and dash) is checked before
   the call, in the path, the body and the query. An empty one in a body or a query is left to
   the service: an empty job id in a submit asks the service to mint one. Any other path
@@ -80,7 +89,15 @@ Bodies are the proto3 JSON mapping of the messages:
 - 64-bit integers as decimal strings (`"queuedAtMs": "1800000000000"`), so that no JSON number
   rounds a value above 2^53; 32-bit integers as numbers;
 - bytes (the log tails) as base64;
-- a field at its default value (0, `false`, empty) left out of a response.
+- a field at its default value (0, `false`, empty) left out of a response, but an optional
+  field that is present written even at zero;
+- an enum value this version does not know written as its number;
+- the keys of every object in order, so the same message is always the same bytes.
+
+In a request, `null` leaves a field absent, an object that gives a member twice is refused,
+and an integer field takes a JSON number only as an exact integer: a fraction, an exponent or
+a number past the 64-bit range (which a JSON parser would round) is a 400, while a decimal
+string is read exactly.
 
 A request with a field its message does not have is refused with a 400 that names it, so an
 older server tells a newer client that it does not know the field instead of dropping it.
@@ -94,7 +111,8 @@ request head; the listener in front of it bounds the head, query string included
 ## Errors
 
 An answer that is not the call's response is `{"error": "<code>"}`, plus `"field"` (the first
-offending field, by its JSON name: `spec.jobId` inside the submitted job) and `"reason"` (a
+offending field, by its JSON-name path: `spec.jobId` inside the submitted job,
+`spec.ports[1].hostPort` in a list, a map field without its key) and `"reason"` (a
 fixed text) on a 400. Neither ever repeats a value of the request, and a 500 never says its
 cause.
 
@@ -114,7 +132,7 @@ cause.
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
 | a store write that failed | 500 | `state-write-failed` |
-| any other failure | 500 | `internal` |
+| any other failure, a response that cannot be written | 500 | `internal` |
 | unauthenticated (the mounting server's bearer layer) | 401 | empty body |
 
 How the service's answer selects a row: a gRPC status that carries a `Refusal` in its details

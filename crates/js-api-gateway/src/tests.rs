@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{GetJobRequest, GetLogsResponse, JobState, ListHostsRequest, ListHostsResponse};
 use prost::Message as _;
@@ -16,6 +16,7 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MapKey, Value};
 use tonic::Status;
 use tower::ServiceExt;
 
+use crate::Verb;
 use crate::answer::Answer;
 
 /// The pool of the job service.
@@ -74,12 +75,18 @@ impl JobService for Hosts {
     }
 }
 
-/// The status and body the router over `descriptors` answers to `GET uri`.
-async fn get(descriptors: &[u8], uri: &str) -> (StatusCode, Vec<u8>) {
+/// The status and body the router over `descriptors` answers to `method uri` with `body`.
+async fn send(
+    descriptors: &[u8],
+    method: &str,
+    uri: &str,
+    body: &'static str,
+) -> (StatusCode, Vec<u8>) {
     let router = crate::serve::router_over(Arc::new(Hosts), descriptors);
     let request = Request::builder()
+        .method(method)
         .uri(uri)
-        .body(Body::empty())
+        .body(Body::from(body))
         .expect("the request is well formed");
     let response = router.oneshot(request).await.expect("the router answers");
     let status = response.status();
@@ -89,35 +96,248 @@ async fn get(descriptors: &[u8], uri: &str) -> (StatusCode, Vec<u8>) {
     (status, body.to_vec())
 }
 
+/// `template` with every `{variable}` replaced by `x-1`.
+fn fill(template: &str) -> String {
+    let mut path = String::new();
+    for (index, part) in template.split(['{', '}']).enumerate() {
+        path.push_str(if index % 2 == 1 { "x-1" } else { part });
+    }
+    path
+}
+
 /// Asserts that a router made from a descriptor set that does not decode, and from one that
 /// decodes but lacks the routes' messages, answers 500 `internal`; and that with the
-/// service's descriptors it answers a call that succeeds (200), one the service does not
-/// implement (501), one with a bad id (400) and a path no route has (404). Catches a router
-/// that panics or serves without its messages.
+/// service's descriptors every route reaches its method of this service (`ListHosts`
+/// answers 200 `{}`, every other one the generated 501 `unimplemented`), a bad id is a 400
+/// and a path no route has a 404. Catches a router that panics or serves without its
+/// messages, and a route of this instantiation of the generated `call` that reaches the
+/// wrong method.
 #[tokio::test]
 async fn a_router_answers_from_its_messages_only() {
     for descriptors in [&b"\xff"[..], &[][..]] {
-        let (status, body) = get(descriptors, "/v1/jobs/job-1").await;
+        let (status, body) = send(descriptors, "GET", "/v1/jobs/job-1", "").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, br#"{"error":"internal"}"#);
     }
     let set = js_proto::FILE_DESCRIPTOR_SET;
-    assert_eq!(
-        get(set, "/v1/hosts").await,
-        (StatusCode::OK, b"{}".to_vec())
-    );
-    let (status, body) = get(set, "/v1/jobs/job-1").await;
-    assert_eq!(
-        (status, body),
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            br#"{"error":"unimplemented"}"#.to_vec()
-        )
-    );
-    let (status, _) = get(set, "/v1/jobs/bad~id").await;
+    for route in crate::ROUTES {
+        let body = if route.body { "{}" } else { "" };
+        let answer = send(set, route.verb.as_str(), &fill(route.template), body).await;
+        let expected = match route.rpc {
+            crate::Rpc::ListHosts => (StatusCode::OK, b"{}".to_vec()),
+            _ => (
+                StatusCode::NOT_IMPLEMENTED,
+                br#"{"error":"unimplemented"}"#.to_vec(),
+            ),
+        };
+        assert_eq!(answer, expected, "{}", route.template);
+    }
+    let (status, _) = send(set, "GET", "/v1/jobs/bad~id", "").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, _) = get(set, "/v1/jobs/job-1/nothing").await;
+    let (status, _) = send(set, "GET", "/v1/jobs/job-1/nothing", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A route of `rpc` at `template`, for the matching tests.
+fn binding(route: &'static crate::Route) -> crate::serve::Binding {
+    let pool = service_pool();
+    let message = pool
+        .get_message_by_name("jobscheduler.v1.GetJobRequest")
+        .expect("defined");
+    crate::serve::Binding {
+        route,
+        template: crate::annotation::Template::parse(route.template).expect("parses"),
+        status: StatusCode::OK,
+        input: message.clone(),
+        output: message,
+    }
+}
+
+/// A test route.
+const fn route(verb: Verb, template: &'static str, rpc: crate::Rpc) -> crate::Route {
+    crate::Route {
+        verb,
+        template,
+        rpc,
+        body: false,
+        status: 200,
+        input: "jobscheduler.v1.GetJobRequest",
+        output: "jobscheduler.v1.GetJobRequest",
+    }
+}
+
+static BY_ID: crate::Route = route(Verb::Get, "/v1/things/{job_id}", crate::Rpc::GetJob);
+static LISTED: crate::Route = route(Verb::Get, "/v1/things/list", crate::Rpc::ListJobs);
+static CANCEL: crate::Route = route(
+    Verb::Post,
+    "/v1/things/{job_id}:cancel",
+    crate::Rpc::CancelJob,
+);
+
+/// The method `find` picks for `method path` over `routes` in that order, or the answer
+/// it refuses with.
+fn pick(routes: &[&'static crate::Route], method: &str, path: &str) -> Result<crate::Rpc, Answer> {
+    let bindings: Vec<crate::serve::Binding> = routes.iter().map(|route| binding(route)).collect();
+    let method = Method::from_bytes(method.as_bytes()).expect("a method");
+    crate::serve::find(&bindings, &method, path).map(|(binding, _)| binding.route.rpc)
+}
+
+/// Asserts that the most specific template that matches a path decides, in either order of
+/// the routes: a literal segment before a variable (`/v1/things/list` is not the job id
+/// `list`), and a custom verb before none (`GET /v1/things/x:cancel` is a 405 of the cancel
+/// route allowing POST, not a read of the job id `x:cancel`); that HEAD, OPTIONS, TRACE
+/// and CONNECT on a route's path are 405s allowing its method; and that a path no template
+/// matches is a 404. Catches a first-match router that lets an earlier variable route shadow
+/// a later, more specific one.
+#[test]
+fn the_most_specific_template_decides() {
+    for order in [[&BY_ID, &LISTED], [&LISTED, &BY_ID]] {
+        assert_eq!(
+            pick(&order, "GET", "/v1/things/list"),
+            Ok(crate::Rpc::ListJobs)
+        );
+        assert_eq!(pick(&order, "GET", "/v1/things/x"), Ok(crate::Rpc::GetJob));
+    }
+    for order in [[&BY_ID, &CANCEL], [&CANCEL, &BY_ID]] {
+        assert_eq!(
+            pick(&order, "POST", "/v1/things/x:cancel"),
+            Ok(crate::Rpc::CancelJob)
+        );
+        assert_eq!(
+            pick(&order, "GET", "/v1/things/x:cancel"),
+            Err(Answer::method_not_allowed(vec![Verb::Post]))
+        );
+        for method in ["HEAD", "OPTIONS", "TRACE", "CONNECT"] {
+            assert_eq!(
+                pick(&order, method, "/v1/things/x"),
+                Err(Answer::method_not_allowed(vec![Verb::Get])),
+                "{method}"
+            );
+        }
+    }
+    assert_eq!(
+        pick(&[&BY_ID], "GET", "/v1/elsewhere"),
+        Err(Answer::not_found())
+    );
+}
+
+/// Asserts that a response that does not serialize (an `Any` whose type is not in the pool)
+/// is a 500 whose whole body is `{"error":"internal"}`, not the success status with the
+/// serializer's text. Catches a serialization failure that bypasses the error table.
+#[tokio::test]
+async fn a_response_that_does_not_serialize_is_internal() {
+    let pool = good_pool();
+    let with_any = pool
+        .get_message_by_name("gatewaytest.WithAny")
+        .expect("defined");
+    let any = pool
+        .get_message_by_name("google.protobuf.Any")
+        .expect("defined");
+    let mut packed = DynamicMessage::new(any);
+    packed.set_field_by_name(
+        "type_url",
+        Value::String("type.example.org/missing.Message".to_owned()),
+    );
+    let mut message = DynamicMessage::new(with_any);
+    message.set_field_by_name("any", Value::Message(packed));
+    let answer = crate::serve::respond(StatusCode::CREATED, &message).expect_err("refused");
+    assert_eq!(answer, Answer::internal());
+    let response = axum::response::IntoResponse::into_response(answer);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read");
+    assert_eq!(&body[..], br#"{"error":"internal"}"#);
+}
+
+/// Asserts what the strict JSON reader expects, as serde words it in an error.
+#[test]
+fn the_strict_reader_expects_a_json_value() {
+    let expected: &dyn serde::de::Expected = &crate::input::StrictVisitor;
+    assert_eq!(expected.to_string(), "a JSON value");
+}
+
+/// Asserts that two fields of one oneof, each valid alone, are a 400 that names no field
+/// (no single field is to blame), and that two names of one field are a 400 naming it.
+#[test]
+fn a_oneof_conflict_names_no_field() {
+    let request = good_pool()
+        .get_message_by_name("gatewaytest.Req")
+        .expect("defined");
+    let refused = crate::input::build(&request, true, &[], None, br#"{"left":"a","right":"b"}"#);
+    assert_eq!(
+        refused.map(|_| ()),
+        Err(Answer::invalid(
+            None,
+            "the field is unknown, or does not hold a value of its type"
+        ))
+    );
+    let refused = crate::input::build(
+        &request,
+        true,
+        &[],
+        None,
+        br#"{"otherId":"a","other_id":"b"}"#,
+    );
+    assert_eq!(
+        refused.map(|_| ()),
+        Err(Answer::invalid(
+            Some("otherId".to_owned()),
+            "the field is set twice"
+        ))
+    );
+}
+
+/// Asserts that `src/gateway.rs` is exactly what `src/codegen.rs` writes for the job
+/// service's options, and that the check fails for a route list that lost a route. Catches
+/// a checked-in file edited by hand or left behind by a change of the options.
+#[test]
+fn generated_source_is_current() {
+    let service = "jobscheduler.v1.JobService";
+    let mut routes = crate::annotation::routes(&service_pool(), service).expect("the options pass");
+    let generated = crate::codegen::render(service, &routes);
+    assert_eq!(generated, include_str!("gateway.rs"));
+    routes.pop();
+    assert_ne!(
+        crate::codegen::render(service, &routes),
+        include_str!("gateway.rs")
+    );
+}
+
+/// Asserts the Rust names the generator gives methods and messages, as prost and tonic
+/// write them, acronyms included, and that a service of acronyms renders with them.
+/// Catches a name the generated trait or message type does not have.
+#[test]
+fn generated_names_follow_prost() {
+    assert_eq!(crate::codegen::method_name("GetJob"), "get_job");
+    assert_eq!(
+        crate::codegen::method_name("GetHTTPUsage"),
+        "get_http_usage"
+    );
+    assert_eq!(
+        crate::codegen::message_type("jobscheduler.v1.GetJobRequest"),
+        "::js_proto::v1::GetJobRequest"
+    );
+    assert_eq!(
+        crate::codegen::message_type("gatewaytest.HTTPRequest"),
+        "::js_proto::v1::HttpRequest"
+    );
+    let routes = crate::annotation::routes(&good_pool(), "gatewaytest.Acronyms").expect("passes");
+    let text = crate::codegen::render("gatewaytest.Acronyms", &routes);
+    assert!(text.contains("    GetHttpUsage,\n"), "{text}");
+    assert!(
+        text.contains("Self::GetHttpUsage => \"GetHTTPUsage\","),
+        "{text}"
+    );
+    assert!(
+        text.contains("decode_as::<::js_proto::v1::HttpRequest>(&input)?;"),
+        "{text}"
+    );
+    assert!(
+        text.contains("service.get_http_usage(::tonic::Request::new(request))"),
+        "{text}"
+    );
+    assert!(text.contains("verb: Verb::Get,"), "{text}");
 }
 
 /// The pool of the test descriptor `gatewaytest/good.proto`.
