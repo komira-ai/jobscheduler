@@ -45,15 +45,17 @@ impl Bar {
         }
     }
 
-    /// The strength of a bar: a hard bar over a back-off, then the later end.
-    const fn strength(self) -> (bool, u64) {
-        (self.is_hard(), self.end().as_millis())
+    /// The strength of a bar: a hard bar over a back-off, then the later end, then a bar
+    /// for life over a bar that ends at the end of time.
+    const fn strength(self) -> (bool, u64, bool) {
+        let life = matches!(self, Self::ForLife);
+        (self.is_hard(), self.end().as_millis(), life)
     }
 }
 
 /// Sets `bar` on `worker` in `bars` at `now`: the worker keeps the stronger of the bar it
-/// has and `bar` (hard over a back-off, then the later end), or takes `bar` if the one it
-/// has has ended.
+/// has and `bar` (hard over a back-off, then the later end, then a bar for life), takes
+/// `bar` if the one it has has ended, and keeps the one it has if `bar` has already ended.
 pub(in crate::scheduler) fn set_bar(
     bars: &mut BTreeMap<WorkerId, Bar>,
     worker: WorkerId,
@@ -61,7 +63,8 @@ pub(in crate::scheduler) fn set_bar(
     now: FarmTime,
 ) {
     let old = bars.get(&worker).copied().unwrap_or(bar);
-    let kept = if old.holds_at(now) && old.strength() >= bar.strength() {
+    let stronger = old.strength() >= bar.strength() || !bar.holds_at(now);
+    let kept = if old.holds_at(now) && stronger {
         old
     } else {
         bar
@@ -110,5 +113,33 @@ mod tests {
         assert_eq!(set(&mut bars, Bar::Backoff(t(90)), 30), Bar::Backoff(t(90)));
         assert_eq!(set(&mut bars, Bar::ForLife, 40), Bar::ForLife);
         assert_eq!(set(&mut bars, Bar::Until(t(u64::MAX)), 40), Bar::ForLife);
+    }
+
+    /// Catches: a bar that has already ended replacing one that holds (an ended hard bar
+    /// erasing a live back-off would let the worker be marked before the back-off ends).
+    #[test]
+    fn an_ended_bar_never_replaces_one_that_holds() {
+        let a = WorkerId::new("a");
+        let mut bars = BTreeMap::from([(a.clone(), Bar::Backoff(t(90)))]);
+        set_bar(&mut bars, a.clone(), Bar::Until(t(5)), t(10));
+        assert_eq!(bars[&a], Bar::Backoff(t(90)));
+        assert!(bars[&a].holds_at(t(89)));
+        set_bar(&mut bars, a.clone(), Bar::Until(t(5)), t(90));
+        assert_eq!(bars[&a], Bar::Until(t(5)));
+    }
+
+    /// Catches: a bar for life kept from replacing a bar that ends at the end of time, in
+    /// either order: the worker ends with the bar for life, which holds at the last instant.
+    #[test]
+    fn a_bar_for_life_outranks_one_to_the_end_of_time() {
+        let a = WorkerId::new("a");
+        let last = t(u64::MAX);
+        let mut bars = BTreeMap::from([(a.clone(), Bar::Until(last))]);
+        set_bar(&mut bars, a.clone(), Bar::ForLife, t(0));
+        assert_eq!(bars[&a], Bar::ForLife);
+        set_bar(&mut bars, a.clone(), Bar::Until(last), t(0));
+        assert_eq!(bars[&a], Bar::ForLife);
+        assert!(bars[&a].holds_at(last));
+        assert!(!Bar::Until(last).holds_at(last));
     }
 }

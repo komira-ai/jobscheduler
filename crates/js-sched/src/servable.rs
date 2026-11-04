@@ -149,6 +149,9 @@ pub(crate) struct Servable {
     memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
 }
 
+/// No bars: what a hold reads, whose bars are already in its `avoid` and `reserved`.
+static NO_BARS: BTreeSet<WorkerId> = BTreeSet::new();
+
 /// The new lease's charge `slot` minutes ahead on `worker` as the predicate counts it, as
 /// `(millicores, bytes)`, where `left` is what the worker is charged now. It is the one
 /// function behind `Scheduler::charge_at` and the figures the score reads, so the two
@@ -270,7 +273,7 @@ impl Servable {
     ) -> Fit {
         let request = attempt.request;
         let now = self.now;
-        let pool = self.pool_of(workers, request, attempt.avoid);
+        let pool = self.pool_of(workers, request, attempt.avoid, attempt.barred);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
         // A VM is placed by its booking, and under load admission also held to the
         // flat-memory guard.
@@ -347,18 +350,20 @@ impl Servable {
     /// The workers [`Servable::fit`] looks at for `request`, in name order: for a probe
     /// ([`Request::pin`]) the worker it names alone, which the caller has admitted
     /// ([`Servable::probe`]); else the live workers that serve its kind and satisfy its
-    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]).
+    /// platform, less those of `avoid` that placement skips ([`Servable::avoided`]) while a
+    /// worker neither avoided nor `barred` could run the request.
     fn pool_of<'s>(
         &'s mut self,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &'s Request,
         avoid: &BTreeSet<WorkerId>,
+        barred: &BTreeSet<WorkerId>,
     ) -> Vec<&'s WorkerId> {
         if let Some(pin) = &request.pin {
             return vec![pin];
         }
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
+        let skip = self.avoided(at, workers, request, (avoid, barred));
         self.memo[at]
             .1
             .iter()
@@ -599,7 +604,7 @@ impl Servable {
     ) -> Vec<HeadCandidate<'s>> {
         let request = attempt.request;
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let skip = self.avoided(at, workers, request, (attempt.avoid, attempt.barred));
         let now = self.now;
         self.memo[at]
             .1
@@ -764,7 +769,7 @@ impl Servable {
         avoid: &BTreeSet<WorkerId>,
     ) -> Vec<&WorkerId> {
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
+        let skip = self.avoided(at, workers, request, (avoid, &NO_BARS));
         self.memo[at]
             .1
             .iter()
@@ -797,20 +802,22 @@ impl Servable {
     }
 
     /// The workers of `avoid` that placement skips for `request`, whose matching live
-    /// workers are `memo[at]`: all of them while a matching worker outside `avoid`
-    /// could run the request once its bookings end, else none.
+    /// workers are `memo[at]`: all of them while a matching worker outside `avoid` and not
+    /// `barred` (a hard bar, which the request is never granted) could run the request
+    /// once its bookings end, else none.
     fn avoided<'a>(
         &self,
         at: usize,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &Request,
-        avoid: &'a BTreeSet<WorkerId>,
+        (avoid, barred): (&'a BTreeSet<WorkerId>, &BTreeSet<WorkerId>),
     ) -> &'a BTreeSet<WorkerId> {
         static NONE: BTreeSet<WorkerId> = BTreeSet::new();
-        let elsewhere =
-            self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
-                !avoid.contains(name) && workers[name].capacity.fits(&request.demand())
-            });
+        let elsewhere = self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
+            !avoid.contains(name)
+                && !barred.contains(name)
+                && workers[name].capacity.fits(&request.demand())
+        });
         if elsewhere { avoid } else { &NONE }
     }
 

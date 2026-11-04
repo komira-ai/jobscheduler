@@ -20,13 +20,18 @@ use crate::servable::{Servable, serves};
 pub struct Room {
     /// Whether a whole-machine lease could be placed on it by the facts placement reads:
     /// it is registered, heard from within the lease grace, serving and not cordoned, it
-    /// serves whole-machine leases, and it holds no lease. Caps, marks and bars are not
-    /// read here: [`Room::marked_for`] and [`Room::barred_for`] say who may take it.
+    /// serves whole-machine leases, and it holds no lease. Caps, marks, bars and holds are
+    /// not read here, so `quiet` alone is not leave to place: [`Room::marked_for`] and
+    /// [`Room::barred_for`] say who may take it, and a hold set with
+    /// [`Scheduler::reserve_outside`] keeps every request of this scheduler off it but as
+    /// backfill.
     pub quiet: bool,
     /// The operations it is barred to now ([`Scheduler::whole_barred`]).
     pub barred_for: BTreeSet<OperationId>,
-    /// The operation whose mark is on it, as of the last placement round
-    /// ([`Scheduler::whole_mark`]): only that one is placed on it, but as backfill.
+    /// The whole-machine operation whose mark is on it, as of the last placement round
+    /// ([`Scheduler::whole_mark`]): that operation waits for the worker to empty and is
+    /// granted it when it does; work after it in queue order may use the worker meanwhile
+    /// only as backfill.
     pub marked_for: Option<OperationId>,
 }
 

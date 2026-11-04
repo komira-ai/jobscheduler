@@ -14,103 +14,25 @@ mod digest;
 #[path = "whole_rig/mod.rs"]
 mod whole_rig;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+#[allow(dead_code, reason = "each test binary uses some of the rig")]
+#[path = "whole_api/mod.rs"]
+mod whole_api;
 
-use js_caps::NodeCaps;
+use std::collections::{BTreeMap, BTreeSet};
+
 use js_sched::{
-    Backfill, Bar, Cancelled, DaemonInstance, Event, Recovered, Request, RestoredMark,
-    RestoredWhole, Room, Scheduler, WholeError, WholeMark, WholeState,
+    Backfill, Bar, Cancelled, Event, Recovered, RestoredMark, RestoredWhole, Room, Scheduler,
+    WholeError, WholeMark, WholeState,
 };
-use js_types::sched::{
-    ControlRecord, FarmTime, LeaseGrant, LeaseKind, OperationId, Outcome, Qos, WaiterId, WorkerId,
-};
+use js_types::sched::{ControlRecord, LeaseKind, OperationId, Outcome, WaiterId};
 use js_whole::WholeNodeConfig;
 
 use crate::digest::{Digest, DigestFunction};
-use crate::whole_rig::{CAPACITY, Farm, request, secs, w};
-
-const MAX_WALL: u64 = 600;
-
-fn t(ms: u64) -> FarmTime {
-    FarmTime::from_millis(ms)
-}
-
-/// Whole-node settings: a drain deadline of a minute, a back-off of ten seconds, and
-/// `drain_after_ms` and `attempts` as given.
-fn cfg(drain_after_ms: u64, attempts: u32) -> WholeNodeConfig {
-    WholeNodeConfig {
-        drain_after_ms,
-        drain_deadline_ms: Some(60_000),
-        reserve_backoff_ms: 10_000,
-        max_reserve_attempts: attempts,
-        ..WholeNodeConfig::dedicated(4)
-    }
-}
-
-/// A scheduler placing by the booked rule with whole-node settings `config`.
-fn farm(config: WholeNodeConfig) -> Farm {
-    Farm::new(
-        Scheduler::new(1)
-            .with_load_config(booked::booked())
-            .with_whole_node(config),
-    )
-}
-
-/// One worker `a` with a lease that may run ten minutes, from farm time zero.
-fn busy(config: WholeNodeConfig) -> Farm {
-    let mut f = farm(config);
-    f.worker("a");
-    f.lease(secs(MAX_WALL));
-    f
-}
-
-/// Submits a whole-machine request with the ten-minute wall time at the current farm time
-/// and runs a round in which nothing is granted.
-fn ask(f: &mut Farm) -> OperationId {
-    let op = f.submit_whole(Some(secs(MAX_WALL)));
-    assert!(f.grants().is_empty());
-    op
-}
-
-/// Each grant's operation and worker.
-fn placed(grants: &[LeaseGrant]) -> Vec<(OperationId, WorkerId)> {
-    grants
-        .iter()
-        .map(|g| (g.operation, g.worker.clone()))
-        .collect()
-}
-
-/// Everything the scheduler holds, to compare before and after a call.
-fn snapshot(f: &Farm) -> String {
-    format!("{:?}", f.s)
-}
-
-/// The caller of the last request [`Farm`] submitted.
-fn waiter(f: &Farm) -> WaiterId {
-    WaiterId(u64::from(f.next_n))
-}
-
-/// A restored state for `operation` queued at zero, with nothing given up or barred.
-fn restored(operation: OperationId, mark: Option<RestoredMark>) -> RestoredWhole {
-    RestoredWhole {
-        operation,
-        queued_at: t(0),
-        give_ups: 0,
-        bars: BTreeMap::new(),
-        mark,
-    }
-}
-
-/// A restored mark on `worker`, made at zero, given up at ten minutes, tail unknown.
-fn mark_on(worker: &str) -> RestoredMark {
-    RestoredMark {
-        worker: w(worker),
-        made: t(0),
-        deadline: t(600_000),
-        tail_end: None,
-    }
-}
+use crate::whole_api::{
+    DAY, MAX_WALL, ask, busy, cfg, farm, job, mark_on, ordinary_worker, placed, restored, snapshot,
+    t, waiter,
+};
+use crate::whole_rig::{Farm, request, secs, w};
 
 /// Catches: a restart that loses the queue time, the give-up count or the mark (today's
 /// `recover` takes the time now and starts every count at zero): an operation taken up at
@@ -373,21 +295,6 @@ fn cancel_whole_ends_a_leased_and_a_running_operation() {
     assert_eq!(snapshot(&f), before);
 }
 
-/// Registers `name` with no whole-machine driver.
-fn ordinary_worker(f: &mut Farm, name: &str) {
-    let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])
-        .unwrap()
-        .with_drivers(["container"]);
-    f.feed(Event::WorkerUp {
-        worker: w(name),
-        instance: DaemonInstance::new(name),
-        predecessor_stopped: false,
-        capacity: CAPACITY,
-        caps,
-    });
-    f.workers.push(w(name));
-}
-
 /// Catches: a read that disagrees with the placement round (a mark it does not show, a
 /// quiet worker that is busy, cordoned, unregistered or serves no whole-machine lease,
 /// a bar on the wrong operation), or that changes what it reads. `a` is busy and marked,
@@ -445,24 +352,6 @@ fn whole_marked_worker_holder_and_room_read_the_last_round() {
     assert_eq!(f.s.whole_marked_worker(OperationId(999)), None);
     assert_eq!(f.s.whole_holder(&w("a")), None);
     assert_eq!(snapshot(&f), before);
-}
-
-/// A ceiling no wall time in these tests reaches.
-const DAY: Duration = Duration::from_secs(86_400);
-
-/// Submits an action that may run `wall` at the farm time now and runs a round: the
-/// worker it was placed on, if it was, its run started.
-fn job(f: &mut Farm, wall: Duration) -> Option<WorkerId> {
-    f.next_n += 1;
-    let operation = f.s.next_operation();
-    f.s.set_max_wall(operation, wall);
-    f.submit(Request {
-        qos: Qos::Ci,
-        ..request(f.next_n, LeaseKind::Action)
-    });
-    let grant = f.grants().into_iter().find(|g| g.operation == operation)?;
-    f.start(&grant);
-    Some(grant.worker)
 }
 
 /// Catches: a mark whose tail end moves after it is made, and a restored mark whose tail

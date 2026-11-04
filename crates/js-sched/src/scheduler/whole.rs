@@ -79,7 +79,8 @@ pub struct WholeMark {
     /// and kept while the mark stays on that worker; work after the request is placed
     /// there only as backfill that ends by it, or by the tail now if that ends sooner
     /// ([`Scheduler::with_backfill`]). It stays the bound when the tail now is not known,
-    /// as a hold made again on the same worker keeps its earlier start.
+    /// as a hold made again on the same worker keeps its earlier start; a mark made with
+    /// none admits no backfill until it moves.
     pub tail_end: Option<FarmTime>,
 }
 
@@ -542,7 +543,9 @@ impl Scheduler {
     ///
     /// The start time is when the request is expected to start there (`None`: not known):
     /// the mark's tail end, or the worker's tail now if that ends sooner
-    /// ([`backfill::kept`]); a known tail end is kept when the tail now is not known.
+    /// ([`backfill::kept`]); a known tail end is kept when the tail now is not known, and a
+    /// mark made with no known tail end has no start, whatever the tail now, so nothing
+    /// backfills under it.
     ///
     /// Head holds are not marks: `reserved` keeps a request off a worker a head holds, and
     /// no cap counts it.
@@ -585,7 +588,9 @@ impl Scheduler {
             let mark = self
                 .drain
                 .mark(id, (&name, tail), turn.kept, self.now, cfg, max_wall);
-            let start = backfill::kept(mark.tail_end.map(FarmTime::as_millis), tail);
+            let start = mark
+                .tail_end
+                .and_then(|end| backfill::kept(Some(end.as_millis()), tail));
             return Ok(Some((name, mark, start)));
         }
     }
