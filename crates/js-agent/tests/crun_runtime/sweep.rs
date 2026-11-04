@@ -64,7 +64,7 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
         .into_iter()
         .map(|found| found.id)
         .collect();
-    assert_eq!(listed, [up.clone()]);
+    assert_eq!(listed, std::slice::from_ref(&up));
 
     // The run that runs is ended through the subject's own runtime, which holds the same
     // container.

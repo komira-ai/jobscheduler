@@ -566,6 +566,12 @@ impl Rig {
         for signal in ["ready", "go", "calls"] {
             let _ = fs::remove_file(node.dir.path().join(signal));
         }
+        // Each test has a server of its own, which numbers its runs from the start again: the
+        // results and retired ids an earlier test's agent kept in the shared state root are
+        // another server's, and a retired id would keep this test's run of the same id from
+        // starting.
+        let _ = fs::remove_file(node.state.join("retired.json"));
+        let _ = fs::remove_dir_all(node.state.join("held"));
         let server = Server::start_pool(name, &[], pool);
         let address = Arc::new(Mutex::new(server.url()));
         let flags = crun_flags("h1", extra);
