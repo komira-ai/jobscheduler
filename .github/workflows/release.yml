@@ -249,8 +249,12 @@ jobs:
           mtime="$(git log -1 --format=%ct "$COMMIT")"
           # The oldest macOS the Apple silicon binaries must run on; a newer runner image
           # must not raise it (the check step below reads each binary's minos).
+          # ring's C code for arm64 musl: the cc crate looks for `aarch64-linux-musl-gcc` when the
+          # host (aarch64 glibc) and the target differ, and musl-tools installs only `musl-gcc`
+          # (for x86_64 the cc crate falls back to `musl-gcc` by itself).
           case "$TARGET" in
             *-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+            aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=musl-gcc ;;
           esac
           # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
           tar=tar

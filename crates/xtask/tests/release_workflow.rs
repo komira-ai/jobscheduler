@@ -628,9 +628,11 @@ fn the_condition_reader_reads_equality_suffix_and_or() {
 }
 
 /// Asserts that the "Install musl tools" step installs `musl-tools` and that its condition is
-/// true for both musl targets and false for the Mac target, evaluated for each. Catches an arm64
-/// leg that builds without `musl-tools` (ring needs a C compiler for musl) and a Mac leg that
-/// would run `apt-get`.
+/// true for both musl targets and false for the Mac target, evaluated for each, and that the
+/// build points the cc crate at that package's `musl-gcc` for the arm64 target (the name it
+/// looks for there, `aarch64-linux-musl-gcc`, is not installed). Catches an arm64 leg that builds
+/// without `musl-tools` or without a C compiler the cc crate finds (ring needs one for musl), and
+/// a Mac leg that would run `apt-get`.
 #[test]
 fn the_musl_tools_are_installed_for_both_musl_legs() {
     let text = workflow();
@@ -658,6 +660,13 @@ fn the_musl_tools_are_installed_for_both_musl_legs() {
             "{target}: {condition}"
         );
     }
+    let package = step(build, "Build and package").join("\n");
+    assert!(
+        package.contains(
+            "aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=musl-gcc ;;"
+        ),
+        "{package}"
+    );
     // Every leg is one of those three.
     for leg in legs(build) {
         assert!(
