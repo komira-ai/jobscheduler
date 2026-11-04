@@ -166,11 +166,19 @@ fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::proc
 }
 
 /// The host side of the egress mode: the pool of address blocks and the firewall. Cheap to
-/// clone; every clone is the same pool.
+/// clone; every clone is the same pool, and two are equal when they are the same pool.
 #[derive(Debug, Clone)]
 pub struct Egress {
     inner: Arc<Inner>,
 }
+
+impl PartialEq for Egress {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for Egress {}
 
 #[derive(Debug)]
 struct Inner {

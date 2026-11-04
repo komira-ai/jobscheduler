@@ -1,11 +1,14 @@
 //! What is made for a run is removed when the run ends, however it ends, and two runs never
-//! share anything.
+//! share anything; and the same through the agent's `CrunRuntime`, which makes the calls.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use js_agent::egress::{Config, Egress, EgressError};
+use js_agent::egress::{Config, Egress, EgressError, Flags};
+use js_agent::lifecycle::{Exit, RunHandle, Runtime, Status};
+use js_agent_wire::LogTail;
 
+use crate::container::{PROBE, RuntimeHost, section};
 use crate::sys::{
     Far, Holder, Reach, Server, allow_list, eventually, far, ip, ip_in, links, named_namespaces,
     packets, serial, tcp, text, wired,
@@ -200,4 +203,147 @@ fn two_runs_at_once_cannot_reach_each_other() {
     );
     assert_eq!(allowed.accepted(), 3);
     drop(second);
+}
+
+/// Waits for the run `id` to end, reads its end through the runtime (which releases its
+/// wiring), and returns the end and what the job printed.
+fn ended(host: &mut RuntimeHost, id: &RunHandle) -> (Status, LogTail) {
+    host.runtime.wait_ended(id);
+    let status = host.runtime.poll(id).expect("polled");
+    let tail = host
+        .runtime
+        .log_tail(id)
+        .expect("a tail")
+        .unwrap_or_default();
+    (status, tail)
+}
+
+/// The probe line of `target` in the section `reach` of `out`.
+fn probed(out: &str, target: &str) -> String {
+    section(out, "reach")
+        .lines()
+        .find(|line| line.starts_with(&format!("reach {target} ")))
+        .unwrap_or_else(|| panic!("no probe of {target} in\n{out}"))
+        .to_owned()
+}
+
+/// Asserts the allow-list end to end through the agent's runtime: a job started by
+/// `CrunRuntime::create_and_start` (which checks the firewall, starts the container, asks
+/// for its pid and wires it while the init holds the job) connects to the allowed endpoint
+/// on the far host, and the far host's other address and the metadata address are refused
+/// (neither listener sees a connection); the job ends well, and its removal leaves no veth
+/// and no set member. Catches a runtime that starts its jobs with loopback only, or wired
+/// beside the firewall.
+#[test]
+#[ignore = "needs root, crun, busybox, a job user: see the module docs"]
+fn a_crun_job_through_the_runtime_reaches_an_allowed_endpoint_and_not_a_denied_one() {
+    let _serial = serial();
+    let far_host = Far::new();
+    let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
+    let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
+    let metadata = Server::tcp(&far_host.ns, far::METADATA);
+    let egress = Egress::start(config()).expect("start");
+    let mut host = RuntimeHost::new("reach", &egress);
+    host.runtime
+        .check_egress()
+        .expect("the firewall is as loaded");
+    let script = format!(
+        "{PROBE}echo '--reach'; p 192.0.2.10 9300; p 192.0.2.40 9300; p 169.254.169.254 80; \
+         echo '--end'"
+    );
+    let spec = host.spec("reach", &script);
+    let id = host
+        .runtime
+        .create_and_start(&spec)
+        .unwrap_or_else(|why| panic!("started: {why}"));
+    let (status, tail) = ended(&mut host, &id);
+    assert!(
+        matches!(status, Status::Exited(Exit { code: 0, .. })),
+        "{status:?}: {tail:?}"
+    );
+    let out = &tail.stdout;
+    assert!(probed(out, "192.0.2.10:9300").contains("pong"), "{tail:?}");
+    for refused in ["192.0.2.40:9300", "169.254.169.254:80"] {
+        let line = probed(out, refused);
+        assert!(!line.contains("pong"), "{line}");
+    }
+    assert!(allowed.accepted() >= 1);
+    assert_eq!(other_host.accepted() + metadata.accepted(), 0);
+    assert!(packets("metadata") >= 1, "the metadata range, by name");
+    host.runtime.remove(&id).expect("removed");
+    assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
+    assert!(wired().is_empty(), "{:?}", wired());
+}
+
+/// Asserts that the runtime leaves nothing of a run's network on the host, however the run
+/// goes: a job that ends by itself (it writes a marker to its scratch directory first, the
+/// control of the test below) leaves no veth and no set member once the runtime has read
+/// its end, before it is removed; one that is removed while it runs is wired while it runs
+/// and leaves neither after its removal. Catches a runtime path that forgets to release.
+#[test]
+#[ignore = "needs root, crun, busybox, a job user: see the module docs"]
+fn a_crun_runtime_job_leaves_no_veth_and_no_set_member_after_removal() {
+    let _serial = serial();
+    let _far = Far::new();
+    let egress = Egress::start(config()).expect("start");
+    let mut host = RuntimeHost::new("clean", &egress);
+    let spec = host.spec("ends", "echo ran > /scratch/marker");
+    let id = host
+        .runtime
+        .create_and_start(&spec)
+        .unwrap_or_else(|why| panic!("started: {why}"));
+    let (status, tail) = ended(&mut host, &id);
+    assert!(
+        matches!(status, Status::Exited(Exit { code: 0, .. })),
+        "{status:?}: {tail:?}"
+    );
+    assert!(spec.scratch.join("marker").exists(), "the job ran");
+    assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
+    assert!(wired().is_empty(), "released at its end: {:?}", wired());
+    host.runtime.remove(&id).expect("removed");
+
+    let spec = host.spec("held", "sleep 600");
+    let id = host
+        .runtime
+        .create_and_start(&spec)
+        .unwrap_or_else(|why| panic!("started: {why}"));
+    assert_eq!(links("jsv"), ["jsv0"]);
+    assert_eq!(wired(), ["jsv0"]);
+    host.runtime.remove(&id).expect("removed while it runs");
+    assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
+    assert!(wired().is_empty(), "{:?}", wired());
+}
+
+/// Asserts that a container the runtime cannot wire never starts its job: with an `nsenter`
+/// that fails (the last step of the wiring, which adds the route) the start fails naming the
+/// step, the job's marker is never written (the init held the job, and the runtime ended
+/// the container), nothing of the wiring is left on the host, and the runtime holds no run.
+/// The test above is the control: the same job, wired, writes it. Catches a job that runs
+/// unwired, and a failed start that leaves its container or its veth.
+#[test]
+#[ignore = "needs root, crun, busybox, a job user: see the module docs"]
+fn a_failed_wiring_never_starts_the_job() {
+    let _serial = serial();
+    let _far = Far::new();
+    let allow = vec!["192.0.2.10:9300".to_owned()];
+    let config = Config::from_flags(&Flags {
+        mode: Some("allow-list"),
+        allow: &allow,
+        nsenter: Some("/bin/false"),
+        ..Flags::default()
+    })
+    .expect("a sound configuration");
+    let egress = Egress::start(config).expect("start");
+    let mut host = RuntimeHost::new("unwired", &egress);
+    let spec = host.spec("unwired", "echo ran > /scratch/marker");
+    let why = host
+        .runtime
+        .create_and_start(&spec)
+        .map(|_| ())
+        .expect_err("the wiring fails");
+    assert!(why.to_string().contains("configuring the job end"), "{why}");
+    assert!(!spec.scratch.join("marker").exists(), "the job ran unwired");
+    assert!(links("jsv").is_empty() && links("jsp").is_empty());
+    assert!(wired().is_empty(), "{:?}", wired());
+    assert!(host.runtime.list_labelled().expect("listed").is_empty());
 }

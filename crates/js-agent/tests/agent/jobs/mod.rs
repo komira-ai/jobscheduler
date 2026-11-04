@@ -9,6 +9,8 @@ mod contract;
 mod contract_e2e;
 #[cfg(target_os = "linux")]
 mod crun_e2e;
+#[cfg(target_os = "linux")]
+mod crun_egress;
 mod drain;
 mod e2e;
 mod ends;

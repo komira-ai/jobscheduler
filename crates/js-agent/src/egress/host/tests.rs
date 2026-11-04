@@ -650,3 +650,29 @@ fn the_real_machine_runs_programs_and_reads_files() {
         "{error}"
     );
 }
+
+/// Catches the crun runtime's port doing anything but the host side's own steps, and an
+/// equality that is not "the same pool": through `EgressPort` the check reads the tables
+/// back and tells a changed rule, an attach makes the calls of a direct one, and the release
+/// of what it gave removes them; a clone is equal to its original and another start is not.
+#[test]
+fn the_crun_runtimes_port_is_the_host_side() {
+    use crate::crun::EgressPort;
+    let fake = Fake::new();
+    let egress = started(&fake, allow_list());
+    let port: &dyn EgressPort = &egress;
+    port.check().expect("as loaded");
+    let before = fake.log().len();
+    let wired = port.attach("one", PID).expect("attach");
+    assert_eq!(fake.log()[before..], attach_calls()[..]);
+    let attached = fake.log().len();
+    crate::crun::Wired::release(wired).expect("release");
+    assert_eq!(fake.log()[attached..], release_calls(0)[..]);
+    let again = port.attach("two", PID);
+    assert!(again.is_ok(), "the block is free again");
+    drop(again);
+    fake.answer("list table inet", Ok(INET_CHANGED.to_owned()));
+    assert_eq!(port.check(), Err(EgressError::Rules));
+    assert_eq!(egress, egress.clone());
+    assert_ne!(egress, started(&Fake::new(), allow_list()));
+}
