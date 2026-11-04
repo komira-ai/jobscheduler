@@ -885,6 +885,70 @@ mod tests {
         assert_eq!(need(&[]), booked);
     }
 
+    /// Asserts that an `accelerator.model` key beside a booked class keeps the narrower of
+    /// the two: a booked full spelling stays pinned beside a key naming its family (so a
+    /// validated request for the 80 GiB A100 does not become one for any A100, and does not
+    /// fit a host of the 40 GiB one), a key naming a variant pins a booked family, and a key
+    /// naming another family or another variant is refused by `Request::validate` and
+    /// `try_from_request`. Catches a key that widens the booked model.
+    #[test]
+    fn a_model_key_never_widens_the_booked_model() {
+        use crate::{RequestError, Shape};
+        let (a80, a40) = ("nvidia-a100-sxm4-80gb", "nvidia-a100-sxm4-40gb");
+        let family = [("accelerator.model", "nvidia-a100")];
+        let pinned = booking(2, Some(a80), &family);
+        assert!(pinned.validate().is_ok());
+        let need = Requirements::try_from_request(&pinned)
+            .unwrap()
+            .accelerator
+            .unwrap();
+        assert_eq!(need.model.as_ref().map(Model::as_str), Some(a80));
+        let host = |class: &str| {
+            let resources = Resources::new(64_000, 1 << 40, 8, Some(class.into())).unwrap();
+            Shape::new(resources, Capabilities::new())
+        };
+        assert!(host(a80).satisfies(&pinned.resources, &pinned.capabilities));
+        assert!(
+            !host(a40).satisfies(&pinned.resources, &pinned.capabilities),
+            "the family key does not widen the booked 80 GiB variant"
+        );
+        let narrowed = booking(2, Some("nvidia-a100"), &[("accelerator.model", a80)]);
+        let need = Requirements::try_from_request(&narrowed)
+            .unwrap()
+            .accelerator
+            .unwrap();
+        assert_eq!(need.model.as_ref().map(Model::as_str), Some(a80));
+        assert!(!host(a40).satisfies(&narrowed.resources, &narrowed.capabilities));
+        for (booked, key) in [(a80, a40), ("nvidia-a100", "nvidia-h100")] {
+            let contradicted = booking(2, Some(booked), &[("accelerator.model", key)]);
+            let conflict = AccelError::ModelConflict {
+                stated: key.to_owned(),
+                booked: booked.to_owned(),
+            };
+            assert_eq!(
+                Requirements::try_from_request(&contradicted),
+                Err(RequirementsError::BadAccelerator(conflict.clone()))
+            );
+            assert_eq!(
+                contradicted.validate(),
+                Err(RequestError::Requirements(
+                    RequirementsError::BadAccelerator(conflict.clone())
+                ))
+            );
+            assert!(!host(booked).satisfies(&contradicted.resources, &contradicted.capabilities));
+            assert_eq!(
+                conflict.to_string(),
+                format!("accelerator.model {key:?} contradicts the booked gpu_class {booked:?}")
+            );
+        }
+        let same = booking(2, Some(a80), &[("accelerator.model", a80)]);
+        let need = Requirements::try_from_request(&same)
+            .unwrap()
+            .accelerator
+            .unwrap();
+        assert_eq!(need.model.as_ref().map(Model::as_str), Some(a80));
+    }
+
     /// Asserts that a count without a model (neither a key nor a booked class names one),
     /// a count above the GPUs the request books, and each key holding a value that is not
     /// valid, is refused naming what is wrong, and that the lenient read then falls back to

@@ -545,11 +545,11 @@ fn a_stored_offer_of_an_unknown_model_keeps_every_fact_it_stated() {
     assert_eq!(stored.accelerator_facts, original.accelerator);
     let rebuilt = stored.to_offer(60);
     assert_eq!(rebuilt, original);
-    let held = rebuilt.accelerator.unwrap();
+    let held = rebuilt.accelerator.as_ref().unwrap();
     assert_eq!(held.memory_per_device, Some(80 << 30));
     assert_eq!(held.vendor.as_str(), "nvidia");
     assert_eq!(held.form_factor, Some(js_types::FormFactor::Sxm));
-    assert_eq!(held.interconnect.unwrap().kind(), "nvlink");
+    assert_eq!(held.interconnect.as_ref().unwrap().kind(), "nvlink");
     assert_eq!(rebuilt.fit(&gb300_request("r1").demand), Ok(()));
 }
 

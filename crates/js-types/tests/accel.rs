@@ -362,10 +362,10 @@ fn a_full_spelling_need_pins_its_variant() {
 /// Asserts that a need round trips through its capability keys (memory in whole GiB,
 /// rounded up so it never asks for less), that no key reads as no need and a zero count
 /// is not written, that a bad value is refused naming its key, and that the memory key
-/// reads every GiB up to `MAX_MEMORY_GIB` and refuses the next, while any byte count a need
-/// holds (to `u64::MAX`) is written as a key that reads back. Catches a need whose keys
-/// lose a field, whose memory is rounded down into asking for less, or whose memory is
-/// written as a value its own reader refuses.
+/// reads every GiB up to `MAX_MEMORY_GIB` and refuses the next, that a need's memory up to
+/// that bound reads back as no less than it was, and that one above it is refused when read
+/// rather than read as a smaller need. Catches a need whose keys lose a field, or whose
+/// memory is rounded or clamped down into asking for less.
 #[test]
 fn a_need_round_trips_through_its_capability_keys() {
     let need = AcceleratorNeed {
@@ -416,21 +416,28 @@ fn a_need_round_trips_through_its_capability_keys() {
             value: first_refused.clone()
         })
     );
-    for bytes in [1_u64 << 62, MAX_MEMORY_GIB * GIB, u64::MAX] {
-        let huge = AcceleratorNeed {
+    let written = |bytes: u64| -> BTreeMap<String, String> {
+        let need = AcceleratorNeed {
             memory_per_device: Some(bytes),
             ..AcceleratorNeed::default()
         };
-        let written: BTreeMap<String, String> = huge
-            .to_capabilities()
+        need.to_capabilities()
             .into_iter()
             .map(|(key, value)| (key.to_owned(), value))
-            .collect();
-        let back = AcceleratorNeed::from_capabilities(&written)
+            .collect()
+    };
+    for bytes in [1_u64 << 62, MAX_MEMORY_GIB * GIB - 1, MAX_MEMORY_GIB * GIB] {
+        let back = AcceleratorNeed::from_capabilities(&written(bytes))
             .unwrap()
             .unwrap();
         let memory = back.memory_per_device.unwrap();
-        assert!(memory >= bytes.min(MAX_MEMORY_GIB * GIB), "{bytes}");
+        assert!(memory >= bytes, "{bytes} is never read back as less");
+    }
+    for bytes in [MAX_MEMORY_GIB * GIB + 1, u64::MAX] {
+        assert!(
+            AcceleratorNeed::from_capabilities(&written(bytes)).is_err(),
+            "{bytes} B is refused where it is read, never read as a smaller need"
+        );
     }
     assert_eq!(
         AcceleratorNeed::from_capabilities(&caps(&[("accelerator.memory-gib", "lots")])),

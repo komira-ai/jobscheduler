@@ -66,6 +66,15 @@ pub enum AccelError {
     /// A form factor is not `sxm` or `pcie`.
     #[error("form factor must be sxm or pcie, not {0:?}")]
     BadFormFactor(String),
+    /// A request's `accelerator.model` contradicts the GPU class it books: another family,
+    /// or another variant of the same family.
+    #[error("accelerator.model {stated:?} contradicts the booked gpu_class {booked:?}")]
+    ModelConflict {
+        /// The model the key names.
+        stated: String,
+        /// The class the resources book.
+        booked: String,
+    },
     /// A count or a memory size is not a whole number in range.
     #[error("{key} must be a whole number, not {value:?}")]
     BadNumber {
@@ -406,14 +415,18 @@ impl AcceleratorNeed {
     }
 
     /// The need a request states: its `accelerator.*` keys over the need its booked GPUs
-    /// state ([`Self::booked`]). A key narrows the booked need and never drops it: a model
+    /// state ([`Self::booked`]). A key narrows the booked need and never widens it: a model
     /// and a count the keys leave out are the booking's (so a booked full spelling keeps its
-    /// variant pin beside `accelerator.vendor` alone), and the count is the larger of the
-    /// two (an `accelerator.count` of zero asks for no fewer than the booking).
+    /// variant pin beside `accelerator.vendor` alone); when both name a model, the narrower
+    /// is kept (a booked full spelling over the family named by the key, and the reverse);
+    /// and the count is the larger of the two (an `accelerator.count` of zero asks for no
+    /// fewer than the booking).
     ///
     /// # Errors
     ///
-    /// The [`AccelError`] of the first key whose value is not valid.
+    /// The [`AccelError`] of the first key whose value is not valid, or
+    /// [`AccelError::ModelConflict`] when the key's model and the booked class are of
+    /// different families, or are two different variants of one.
     pub fn requested(
         capabilities: &Capabilities,
         resources: &Resources,
@@ -423,7 +436,7 @@ impl AcceleratorNeed {
             (None, booked) => booked,
             (Some(stated), None) => Some(stated),
             (Some(stated), Some(booked)) => Some(Self {
-                model: stated.model.or(booked.model),
+                model: narrower(stated.model.clone(), booked.model)?,
                 count: stated.count.max(booked.count),
                 ..stated
             }),
@@ -478,9 +491,10 @@ impl AcceleratorNeed {
 
     /// The `accelerator.*` capability entries that state this need, in [`ACCEL_KEYS`]
     /// order, leaving out every field that is `None` and a count of zero. Memory is written
-    /// in whole GiB, rounded up, so it never asks for less than the need; a memory above
-    /// [`MAX_MEMORY_GIB`] GiB (no device has it) is written as that bound, the largest the
-    /// key reads back.
+    /// in whole GiB, rounded up, so it never asks for less than the need. A memory above
+    /// [`MAX_MEMORY_GIB`] GiB, which no key can state, is written as the GiB it needs, which
+    /// [`Self::from_capabilities`] refuses: such a need is refused where it is read, never
+    /// read as a smaller one.
     #[must_use]
     pub fn to_capabilities(&self) -> Vec<(&'static str, String)> {
         let entries = [
@@ -496,7 +510,7 @@ impl AcceleratorNeed {
             (
                 ACCEL_MEMORY_GIB_KEY,
                 self.memory_per_device
-                    .map(|bytes| bytes.div_ceil(GIB).min(MAX_MEMORY_GIB).to_string()),
+                    .map(|bytes| bytes.div_ceil(GIB).to_string()),
             ),
             (
                 ACCEL_INTERCONNECT_KEY,
@@ -691,6 +705,31 @@ impl Resolved {
     /// `spelling` when it named a variant rather than its family; `None` otherwise.
     fn variant_spelling(&self, spelling: &Model) -> Option<Model> {
         (*spelling != self.model).then(|| spelling.clone())
+    }
+}
+
+/// The narrower of a model a request's key names and the model its booked class names:
+/// either alone is kept; of one family, the one that spells a variant (the stated one when
+/// neither does or both spell the same variant).
+///
+/// # Errors
+///
+/// [`AccelError::ModelConflict`] when they are of different families or name two different
+/// variants.
+fn narrower(stated: Option<Model>, booked: Option<Model>) -> Result<Option<Model>, AccelError> {
+    let (stated, booked) = match (stated, booked) {
+        (Some(stated), Some(booked)) => (stated, booked),
+        (stated, booked) => return Ok(stated.or(booked)),
+    };
+    let (want, have) = (stated.canonical(), booked.canonical());
+    let pins_differ = want.variant.zip(have.variant).is_some_and(|(a, b)| a != b);
+    match want.model != have.model || pins_differ {
+        true => Err(AccelError::ModelConflict {
+            stated: stated.to_string(),
+            booked: booked.to_string(),
+        }),
+        false if want.variant.is_none() => Ok(Some(booked)),
+        false => Ok(Some(stated)),
     }
 }
 

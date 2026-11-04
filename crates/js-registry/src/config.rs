@@ -322,7 +322,7 @@ impl PoolConfig {
         let stated = claim.into_iter().flat_map(|claim| claim.capabilities());
         capabilities.extend(
             stated
-                .filter(|(key, _)| is_accel(*key))
+                .filter(|(key, _)| is_accel(key))
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
         let shape = Shape::new(self.booked.resources().clone(), capabilities);
