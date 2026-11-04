@@ -87,6 +87,7 @@ impl Lifecycle {
             adopted_leases: Vec::new(),
             quota_health: QuotaHealth::default(),
             parked_reminded_ms: None,
+            answered: Vec::new(),
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);

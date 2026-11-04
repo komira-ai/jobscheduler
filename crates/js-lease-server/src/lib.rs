@@ -61,6 +61,7 @@
 //! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
+//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed` and
@@ -105,6 +106,7 @@
 //! # agents, and refused as true beside usage_off = true
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
 //! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
+//! # job_retention ("7d"): the flag's name, default and rules
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
 //! # scaler is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every

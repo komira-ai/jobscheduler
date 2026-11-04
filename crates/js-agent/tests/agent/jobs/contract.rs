@@ -68,10 +68,41 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "runtime": "container",
             "exec": "container",
             "run-files": "true",
+            "per-job": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";
     assert!(ran.err.contains(said), "{}", ran.err);
+}
+
+/// Asserts that the hello of an agent that runs jobs reports `per-job` as `true`, that a hello
+/// of the previous release (the wire's fixture) does not, and that an operator cannot give
+/// it with `--capability` (status 2 naming the key, nothing sent). It catches an agent that
+/// takes job starts without saying so (a server would never send it one) and one an
+/// operator could make claim the job messages.
+#[test]
+fn the_hello_reports_the_per_job_capability() {
+    let (_, hello) = container_hello("contract-per-job", &[], &linux_host());
+    assert_eq!(hello["capabilities"]["per-job"], "true");
+    let previous: Value = serde_json::from_str(include_str!(
+        "../../../../js-agent-wire/tests/fixtures/v0.1.135/hello.json"
+    ))
+    .unwrap();
+    assert!(
+        previous["capabilities"].get("per-job").is_none(),
+        "{previous}"
+    );
+    assert_eq!(previous["capabilities"], json!({ "os": "macos" }));
+    let (ran, sent, _) = run_scripted(
+        &["--capability", "per-job=true"],
+        &linux_host(),
+        vec![welcome(1)],
+        1,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let said = "--capability: per-job is detected and cannot be set";
+    assert!(ran.err.contains(said), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
 }
 
 /// Asserts that an agent without `--container-bin` runs no job and reports none of the

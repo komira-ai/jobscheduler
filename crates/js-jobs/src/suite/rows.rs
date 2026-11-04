@@ -23,7 +23,8 @@ const LATER_VALUE: &[u8] = b"a later build's field";
 /// A job row as a build before the network policy, the ports and the files wrote it: no
 /// tags 17, 18 or 19 (and no retention end). Its fields are listed in
 /// `tests/golden/README.md`.
-const BEFORE_NETWORK: &[u8] = include_bytes!("../../tests/golden/job-before-network.bin");
+pub(super) const BEFORE_NETWORK: &[u8] =
+    include_bytes!("../../tests/golden/job-before-network.bin");
 
 /// A row with a field this build does not know reads, and a transition that rewrites the row
 /// keeps the field's bytes; the same for an allocation row.
@@ -64,7 +65,7 @@ pub fn a_row_with_unknown_tags_is_read_and_rewritten_intact<B: Backend>(backend:
     let later = set_field(&allocation, LATER_TAG, LATER_VALUE).expect("the row parses");
     rig.put_raw("alloc/n", later);
     rig.jobs
-        .transition(&id, JobState::Placed, JobState::Cancelled)
+        .end_job(&id, super::cancelled())
         .expect("a_row_with_unknown_tags_is_read_and_rewritten_intact: the job ends");
     let rewritten = rig.raw("alloc/n").expect("written").value;
     assert_eq!(

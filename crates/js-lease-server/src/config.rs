@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
+use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
@@ -34,8 +35,10 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod cpu_slack;
 mod placement;
+mod retention;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use placement::Placement;
+pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -199,6 +202,12 @@ pub struct Cli {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub profile_store_bytes: u64,
+    /// How long an ended job's record and result are kept after the job ends: a whole
+    /// count of days (`7d`) or a duration such as `36h` or `90m`, at least one minute. Read
+    /// once at start; it is the window the job store applies when a job ends, so a changed
+    /// window affects only the jobs that end after the restart.
+    #[arg(long, default_value = DEFAULT_JOB_RETENTION, value_parser = parse_job_retention)]
+    pub job_retention: Retention,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -398,6 +407,8 @@ pub struct Config {
     pub(crate) alerts: Option<Arc<dyn AlertSink>>,
     /// How often an alert that keeps holding is sent to the sink again.
     pub(crate) alert_repeat: Duration,
+    /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
+    pub(crate) job_retention: Retention,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -488,6 +499,7 @@ impl Config {
             monotonic: Arc::new(SystemMonotonic::default()),
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
+            job_retention: cli.job_retention,
         })
     }
 
@@ -594,6 +606,7 @@ impl Config {
             monotonic: Arc::new(SystemMonotonic::default()),
             alerts,
             alert_repeat,
+            job_retention: server.job_retention,
         })
     }
 
@@ -728,6 +741,13 @@ impl Config {
             Hosts::Layered { agents, .. } => agents.cpu_slack,
             Hosts::Static(_) => CpuSlack::default(),
         }
+    }
+
+    /// How long an ended job's record and result are kept after the job ends
+    /// (`--job-retention`, or `server.job_retention`): seven days unless set. It is read
+    /// once here and applied when a job ends.
+    pub fn job_retention(&self) -> Retention {
+        self.job_retention
     }
 
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).

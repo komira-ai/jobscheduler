@@ -19,8 +19,8 @@ use js_types::{ExecMode, HostId, ImageDigestRef, Labels, ReservedKey, Resources}
 
 use crate::interfere::Interfere;
 use crate::{
-    Booked, Constraints, DeclaredPort, JobId, JobSpec, JobState, JobStore, Needs, NetworkPolicy,
-    NewJob, RandomIds,
+    Booked, Constraints, DeclaredPort, JobEnd, JobId, JobSpec, JobState, JobStore, Needs,
+    NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
 };
 
 mod clock;
@@ -31,6 +31,7 @@ mod lifecycle;
 mod paging;
 mod placement;
 mod races;
+mod retention;
 mod rows;
 
 pub use clock::*;
@@ -41,6 +42,7 @@ pub use lifecycle::*;
 pub use paging::*;
 pub use placement::*;
 pub use races::*;
+pub use retention::*;
 pub use rows::*;
 
 /// Runs every check of the suite against `backend`, one after another.
@@ -92,6 +94,19 @@ where
     list_jobs_walks_past_pages_with_nothing_to_show(backend);
     list_jobs_is_capped_at_max_page(backend);
     list_jobs_follows_rows_that_change_between_pages(backend);
+    a_result_is_readable_until_the_retention_end_and_not_after(backend);
+    restart_keeps_results(backend);
+    a_result_survives_the_end_of_its_allocation(backend);
+    retention_ends_are_raised_at_boot_after_a_long_outage(backend);
+    retention_uses_the_injected_clock(backend);
+    the_result_and_the_state_change_commit_together(backend);
+    an_overlong_tail_is_cut_on_a_character_boundary(backend);
+    ending_an_ended_job_keeps_the_first_result(backend);
+    a_job_without_a_result_decodes(backend);
+    sweep_never_lists_a_job_that_has_not_ended(backend);
+    the_tick_deletes_in_batches_and_leaves_what_it_cannot_read(backend);
+    a_failed_sweep_or_raise_changes_nothing(backend);
+    a_sweep_that_loses_to_a_raise_is_stale(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -154,6 +169,19 @@ macro_rules! job_store_tests {
             list_jobs_walks_past_pages_with_nothing_to_show,
             list_jobs_is_capped_at_max_page,
             list_jobs_follows_rows_that_change_between_pages,
+            a_result_is_readable_until_the_retention_end_and_not_after,
+            restart_keeps_results,
+            a_result_survives_the_end_of_its_allocation,
+            retention_ends_are_raised_at_boot_after_a_long_outage,
+            retention_uses_the_injected_clock,
+            the_result_and_the_state_change_commit_together,
+            an_overlong_tail_is_cut_on_a_character_boundary,
+            ending_an_ended_job_keeps_the_first_result,
+            a_job_without_a_result_decodes,
+            sweep_never_lists_a_job_that_has_not_ended,
+            the_tick_deletes_in_batches_and_leaves_what_it_cannot_read,
+            a_failed_sweep_or_raise_changes_nothing,
+            a_sweep_that_loses_to_a_raise_is_stale,
         );
     };
 }
@@ -327,6 +355,35 @@ pub(crate) fn whole_host_spec() -> JobSpec {
     JobSpec {
         needs: Needs::WholeHost,
         ..full_spec()
+    }
+}
+
+/// What a host reports of a job that stopped: short tails and the resources it used.
+pub(crate) fn output() -> Output {
+    Output {
+        stdout: "done\n".to_owned(),
+        stderr: "warning: slow disk\n".to_owned(),
+        truncated: false,
+        usage: Some(ResourceUsage {
+            cpu_time: Duration::from_millis(2500),
+            peak_memory_bytes: 64 << 20,
+        }),
+    }
+}
+
+/// An exit with `exit_code` and [`output`].
+pub(crate) fn exited(exit_code: i32) -> JobEnd {
+    JobEnd::Exited {
+        exit_code,
+        output: output(),
+    }
+}
+
+/// A cancel with no exit code and no output, as of a job that never ran.
+pub(crate) fn cancelled() -> JobEnd {
+    JobEnd::Cancelled {
+        exit_code: None,
+        output: Output::default(),
     }
 }
 

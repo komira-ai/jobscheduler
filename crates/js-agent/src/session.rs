@@ -66,14 +66,15 @@
 //! never calls the container runtime and never waits for the worker:
 //!
 //! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
-//!   results not yet acknowledged and the taint to report. So does every hello, as its
+//!   results not yet acknowledged, the jobs a job start began (with their results) and the
+//!   retired job ids, and the taint to report. Every hello carries the held runs as its
 //!   held list, so a server that restarted learns what the agent still runs. A new epoch
 //!   keeps the worker and everything it holds.
-//! - Every accepted reply that says anything (a command, an acknowledgement, a
-//!   `taint_ack`) is handed to the worker, which checks it as a whole and acts on each
-//!   command in order; a command it refuses is logged by its place in the reply. A reply
-//!   the worker has no room for is dropped and noted ([`Note::Busy`]): the server sends
-//!   everything again.
+//! - Every accepted reply that says anything (a command, an acknowledgement of a result or
+//!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
+//!   and acts on each command in order; a command it refuses is logged by its place in the
+//!   reply. A reply the worker has no room for is dropped and noted ([`Note::Busy`]): the
+//!   server sends everything again.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told.
@@ -728,6 +729,8 @@ impl<'a> Session<'a> {
             exclusive_refused: lease.refused,
             load,
             disk_gib: self.saying,
+            jobs: jobs.jobs,
+            retired_jobs: jobs.retired_jobs,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())

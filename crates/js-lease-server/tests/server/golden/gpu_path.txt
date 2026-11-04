@@ -14,6 +14,7 @@
 --estimate-feed default=none required=false values=true|false
 --handshake-timeout default=10s required=false
 --header-timeout default=10s required=false
+--job-retention default=7d required=false
 --listen default=127.0.0.1:7300 required=false
 --max-connections default=256 required=false
 --max-requests default=100 required=false

@@ -181,6 +181,8 @@ impl Rig {
             exclusive_refused: None,
             load,
             disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
         }
     }
 
