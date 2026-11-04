@@ -3,14 +3,8 @@ Lists the ended bookings, a page at a time. Changes nothing.
 Usage: js usage [OPTIONS]
 
 Options:
-      --from-ms <N>
-          Only records of bookings that ended at or after this time, in milliseconds since the Unix epoch.
-
       --server <URL>
           The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
-
-      --to-ms <N>
-          Only records of bookings that ended before this time, in milliseconds since the Unix epoch.
 
       --token-file <PATH>
           A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
@@ -18,20 +12,26 @@ Options:
       --ca-cert <PATH>
           A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
 
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --from-ms <N>
+          Only records of bookings that ended at or after this time, in milliseconds since the Unix epoch.
+
       --host-id <TEXT>
           Only records of this host. Empty: every host.
 
       --job-id <TEXT>
           Only records of this job. Empty: every job.
 
-      --json
-          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
-
       --page-size <N>
           The most records in one answer. 0: the server's own page size. A server may answer fewer.
 
       --page-token <TEXT>
           Where to continue: the next page token of the previous answer of the same listing. Empty: the first page.
+
+      --to-ms <N>
+          Only records of bookings that ended before this time, in milliseconds since the Unix epoch.
 
   -h, --help
           Print help (see a summary with '-h')
