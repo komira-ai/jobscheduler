@@ -277,6 +277,17 @@ impl Crun {
         self.job.as_ref()
     }
 
+    /// The `crun` program.
+    pub(crate) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// Prepares `command` as every command of this driver is: the environment scrub, then
+    /// the drop to the job user.
+    pub(crate) fn prepare(&self, command: &mut std::process::Command) {
+        self.launch().apply(command);
+    }
+
     /// How every command of this driver is prepared.
     fn launch(&self) -> Launch<'_> {
         Launch {
