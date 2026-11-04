@@ -8,6 +8,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use js_agent_wire::limits;
 use js_caps::{AcceleratorRequest, check_stated, request_need};
+
+use self::accel::AcceleratorBody;
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
 use js_types::{
@@ -17,6 +19,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
 use tracing::error;
+
+mod accel;
 
 /// The body of `POST /v1/leases`.
 #[derive(Debug, Deserialize)]
@@ -72,38 +76,6 @@ struct ResourcesBody {
     /// devices the lease books. Left out (or null), the lease is as before.
     #[serde(default)]
     accelerator: Option<AcceleratorBody>,
-}
-
-/// The `resources.accelerator` object of an [`AcquireBody`]; every field is optional and a
-/// field left out matches anything.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AcceleratorBody {
-    #[serde(default)]
-    vendor: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    count: Option<u32>,
-    #[serde(default)]
-    memory_per_device_gib: Option<u32>,
-    #[serde(default)]
-    interconnect: Option<String>,
-    #[serde(default)]
-    form_factor: Option<String>,
-}
-
-impl From<AcceleratorBody> for AcceleratorRequest {
-    fn from(body: AcceleratorBody) -> Self {
-        Self {
-            vendor: body.vendor,
-            model: body.model,
-            count: body.count,
-            memory_per_device_gib: body.memory_per_device_gib,
-            interconnect: body.interconnect,
-            form_factor: body.form_factor,
-        }
-    }
 }
 
 impl AcquireBody {
