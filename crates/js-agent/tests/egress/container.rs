@@ -381,7 +381,11 @@ impl RuntimeHost {
         mkdir(&store, 0o711);
         mkdir(&work.join("runs"), 0o711);
         let hex = "d".repeat(64);
-        busybox_rootfs(&store.join("oci-images").join(&hex).join("rootfs"));
+        let rootfs = store.join("oci-images").join(&hex).join("rootfs");
+        busybox_rootfs(&rootfs);
+        // The runtime binds the run's scratch directory at `/scratch`. A pulled image is
+        // unpacked as the job's ids, who may make that mount point; this root is root's.
+        mkdir(&rootfs.join("scratch"), 0o755);
         mkdir(&config_dir(&store), 0o755);
         fs::write(config_dir(&store).join(format!("{hex}.json")), IMAGE_CONFIG).unwrap();
 
