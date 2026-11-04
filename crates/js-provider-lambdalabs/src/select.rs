@@ -29,7 +29,7 @@ const DOCUMENTED: [Architecture; 2] = [Architecture::X86_64, Architecture::Arm64
 /// operating system, the architecture of every instance type Lambda documents as
 /// [`offers`] spells it, and the GPU class of every row of `table`, which is where an
 /// offer's class comes from. An instance type of an architecture Lambda does not document
-/// yields an offer outside it. A machine runs the agent, so it can be had whole and its
+/// reaches the catalog as its own text; the provider adds those its catalog has carried. A machine runs the agent, so it can be had whole and its
 /// jobs may declare host ports.
 pub(crate) fn capabilities(table: &OptionTable) -> ProviderCaps {
     ProviderCaps {

@@ -511,6 +511,8 @@ fn the_catalog_carries_every_architecture_and_leaves_the_choice_to_the_demand() 
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].arch, name);
         assert_eq!(offers[0].os, "linux");
+        // Whatever architecture the catalog carried, the capabilities cover its offer.
+        assert!(rig.provider.capabilities().covers(&offers[0]), "{name}");
     }
 }
 

@@ -15,5 +15,6 @@ mod model;
 mod options;
 mod own;
 mod read;
+mod records;
 mod release;
 mod rig;

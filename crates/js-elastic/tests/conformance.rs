@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use js_elastic::conformance::{
     Rig, acquire_is_idempotent_on_the_acquire_id, refused_codes_are_the_plain_constants,
+    release_terminates_then_reads_back,
 };
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootPayload, BootStep, Capacity, CapacityProvider, Held,
@@ -22,6 +23,8 @@ enum Flaw {
     LaunchesOnEveryAcquire,
     /// No acquire is ever answered.
     NeverAnswers,
+    /// A release answers what a terminate would say, without reading the machine back.
+    AnswersFromTerminate,
 }
 
 /// A provider with one flaw, which counts its launches.
@@ -86,7 +89,10 @@ impl CapacityProvider for Broken {
     }
 
     fn release(&self, _id: &HostRef) -> Released {
-        Released::Unknown
+        match self.flaw {
+            Flaw::AnswersFromTerminate => Released::Terminating(HostStatus::Terminating),
+            Flaw::LaunchesOnEveryAcquire | Flaw::NeverAnswers => Released::Unknown,
+        }
     }
 
     fn observe(&self, _id: &HostRef) -> Observed {
@@ -160,6 +166,10 @@ impl Rig for BrokenRig {
 
     fn lose_next_answer_that_did_not_land(&mut self) {}
 
+    fn lose_next_launch_that_did_not_land(&mut self) {}
+
+    fn fail_read_after_next_terminate(&mut self) {}
+
     fn foreign_machine_exists(&mut self) -> Vec<HostRef> {
         Vec::new()
     }
@@ -211,4 +221,15 @@ fn a_case_fails_on_a_provider_whose_acquire_never_answers() {
 )]
 fn the_refusal_case_fails_on_a_provider_that_launches_instead() {
     refused_codes_are_the_plain_constants(&mut BrokenRig::new(Flaw::LaunchesOnEveryAcquire));
+}
+
+/// Asserts that the release case fails on a provider that answers a release from the
+/// terminate call alone: when the read after the terminate gets no answer, such a provider
+/// still says the machine is terminating.
+#[test]
+#[should_panic(
+    expected = "release_terminates_then_reads_back: a release whose read after the terminate got no answer is Unknown"
+)]
+fn the_release_case_fails_on_a_provider_that_answers_from_the_terminate() {
+    release_terminates_then_reads_back(&mut BrokenRig::new(Flaw::AnswersFromTerminate));
 }

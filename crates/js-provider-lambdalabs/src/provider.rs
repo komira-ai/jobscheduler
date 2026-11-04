@@ -204,15 +204,18 @@ impl LambdaProvider {
         self.records().listed(claimed);
     }
 
-    /// Copies what the launch guard holds after an acquire: the instances it answered with
-    /// that it names on a retry, and the count of the rest it holds against
-    /// `max_machines` (the extras of a launch, the launches with no answer).
-    fn remember(&self, gate: &Launching) {
-        let (named, extras): (Vec<&Answered>, Vec<&Answered>) =
-            gate.answered.iter().partition(|launched| launched.primary);
-        let held = named.into_iter().map(|launched| launched.held.clone());
-        self.records()
-            .guarded(held, extras.len() + gate.unknown.len());
+    /// Copies what the launch guard holds after an acquire whose answer is `answer`: every
+    /// instance a launch answered with that no list has shown as ours (the extras of a
+    /// launch included), and the acquire ids of the launches with no answer. The extras the
+    /// answer released are noted as their release read them back.
+    fn remember(&self, gate: &Launching, answer: &Acquired) {
+        let extras = match answer {
+            Acquired::Accepted { extras, .. } => extras.as_slice(),
+            _ => &[],
+        };
+        let held = gate.answered.iter().map(|launched| launched.held.clone());
+        let unresolved = gate.unknown.keys().cloned();
+        self.records().guarded(held, unresolved, extras);
     }
 
     /// Where `demand` can launch, best first (see the module docs of the choice): empty
@@ -660,17 +663,21 @@ impl CapacityProvider for LambdaProvider {
     /// Linux, the architectures of the instance types Lambda documents, and the GPU classes
     /// of the option table: the table [`CapacityProvider::catalog`] takes each offer's class
     /// from.
+    ///
+    /// An architecture Lambda does not document reaches the catalog as its own text; once a
+    /// catalog has carried it, it is in the capabilities too, so every offer the catalog
+    /// has returned is inside them. No call is made.
     fn capabilities(&self) -> ProviderCaps {
-        select::capabilities(&self.options)
+        let mut caps = select::capabilities(&self.options);
+        caps.arch.extend(self.records().arches());
+        caps
     }
 
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         let types = self.api.instance_types().map_err(provider_error)?;
-        Ok(select::offers(
-            &self.options,
-            &types,
-            self.config.regions.as_deref(),
-        ))
+        let offers = select::offers(&self.options, &types, self.config.regions.as_deref());
+        self.records().offered(&offers);
+        Ok(offers)
     }
 
     /// From what the provider last listed, launched, released and read by id; `can_add`
@@ -744,7 +751,7 @@ impl CapacityProvider for LambdaProvider {
         }
         let mut gate = self.launching();
         let answer = self.launch_locked(&mut gate, request, &launch);
-        self.remember(&gate);
+        self.remember(&gate, &answer);
         answer
     }
 
@@ -791,7 +798,8 @@ impl CapacityProvider for LambdaProvider {
     }
 
     /// The instance launched, or listed, under the hello's name, which must be one this
-    /// scheduler derives, and with the hello's instance id when it carries one.
+    /// scheduler derives: with the hello's instance id when it carries one, else the one
+    /// such instance that is not ending (none when several are).
     fn verify_instance(&self, hello: &Hello) -> Option<HostRef> {
         let name = HostName::parse(&self.config.scheduler, &hello.name)?;
         self.records().verify(&name, hello.instance_id.as_deref())

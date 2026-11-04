@@ -93,6 +93,18 @@ impl Conformance for LambdaRig {
         self.0.fake.fail_next_call(timeout);
     }
 
+    fn lose_next_launch_that_did_not_land(&mut self) {
+        let timeout = ApiError::Transport("the launch timed out".to_owned());
+        self.0.fake.fail_next(Call::Launch, timeout);
+    }
+
+    fn fail_read_after_next_terminate(&mut self) {
+        // The read before the terminate works; the read after it does not.
+        self.0.fake.pass_next(Call::GetInstance);
+        let timeout = ApiError::Transport("the read timed out".to_owned());
+        self.0.fake.fail_next(Call::GetInstance, timeout);
+    }
+
     fn foreign_machine_exists(&mut self) -> Vec<HostRef> {
         let other = SchedulerId::new(OTHER_SCHEDULER).unwrap();
         let acquire = AcquireId::new(FOREIGN_ACQUIRE).unwrap();

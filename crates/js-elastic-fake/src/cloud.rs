@@ -243,6 +243,12 @@ impl Inner {
         let ours = live.clone().filter(|m| m.marked).count();
         (ours, live.count())
     }
+
+    /// The acquires whose answer was lost and that made no machine: they may still land.
+    fn unanswered(&self) -> usize {
+        let made = |id: &AcquireId| self.machines.iter().any(|m| m.acquire == id.as_str());
+        self.unresolved.keys().filter(|id| !made(*id)).count()
+    }
 }
 
 /// An elastic cloud in memory.
@@ -343,9 +349,11 @@ impl ElasticFake {
     }
 
     /// The cloud reclaims the machine `id`: it stops running and billing now and reads
-    /// `preempted` until it is released, and every event stream gets
-    /// [`ProviderEvent::Reclaimed`] for it. An id the cloud does not hold, or a machine
-    /// that has already ended, changes nothing and sends no notice.
+    /// `preempted` until it is released, and every event stream open now gets
+    /// [`ProviderEvent::Reclaimed`] for it, in the order of the preemptions. An id the
+    /// cloud does not hold, or a machine that has already ended, changes nothing and sends
+    /// no notice. A machine the caller did not launch ([`ElasticFake::add_foreign`]) is
+    /// reclaimed all the same, with no notice: the notices are about the caller's machines.
     pub fn preempt(&self, id: &HostRef) {
         let mut state = self.state();
         let now = state.clock.now_ms();
@@ -354,6 +362,9 @@ impl ElasticFake {
             return;
         };
         machine.ended = Some(now);
+        if !machine.marked {
+            return;
+        }
         let notice = ProviderEvent::Reclaimed(id.clone());
         state
             .watchers
@@ -501,11 +512,14 @@ impl CapacityProvider for ElasticFake {
     }
 
     /// The caller's machines that have not ended, and what the quota leaves of it once
-    /// every running machine of the account is counted (`None` with no quota).
+    /// every running machine of the account and every lost acquire that made no machine
+    /// (it may still land) are counted (`None` with no quota).
     fn capacity(&self) -> Capacity {
         let mut state = self.state();
         state.calls.push(Call::Capacity);
+        state.expire();
         let (ours, running) = state.running();
+        let running = running + state.unanswered();
         let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         Capacity {
             supplied: count(ours),
@@ -543,10 +557,10 @@ impl CapacityProvider for ElasticFake {
                 wait: Duration::from_millis(wait),
             };
         }
-        let earlier = state
-            .machines
-            .iter()
-            .find(|m| (m.acquire == request.acquire.as_str()) & m.released.is_none() & m.marked);
+        let earlier = state.machines.iter().find(|m| {
+            let same = m.acquire == request.acquire.as_str();
+            same & m.released.is_none() & m.marked & !m.dropped
+        });
         if let Some(machine) = earlier {
             let status = state.status_at(machine, now);
             let held = Inner::held(machine, status.unwrap_or(HostStatus::Booting));
@@ -644,17 +658,24 @@ impl CapacityProvider for ElasticFake {
         }
     }
 
-    /// The caller's machine that was launched with the hello's name and, when the hello
-    /// carries one, has its id.
+    /// The caller's machine that was launched with the hello's name: with the hello's
+    /// instance id when it carries one, else the one such machine that still runs (none
+    /// when several do, as after a release and a new launch of the same acquire).
     fn verify_instance(&self, hello: &Hello) -> Option<HostRef> {
         let mut state = self.state();
         state.calls.push(Call::VerifyInstance);
         let name = Some(hello.name.as_str());
-        let wanted = hello.instance_id.as_deref();
-        let found = state.machines.iter().find(|m| {
-            let id_fits = wanted.is_none_or(|id| id == m.id.as_str());
-            (m.name.as_deref() == name) & id_fits & m.marked
-        });
+        let mut named = state
+            .machines
+            .iter()
+            .filter(|m| (m.name.as_deref() == name) & m.marked & !m.dropped);
+        let found = match hello.instance_id.as_deref() {
+            Some(id) => named.find(|m| m.id.as_str() == id),
+            None => {
+                let live: Vec<&Machine> = named.filter(|m| m.ended.is_none()).collect();
+                live.first().filter(|_| live.len() == 1).copied()
+            }
+        };
         found.map(|m| m.id.clone())
     }
 

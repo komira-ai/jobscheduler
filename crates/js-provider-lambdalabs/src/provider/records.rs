@@ -1,63 +1,88 @@
 //! What the provider remembers of the instances it holds, for the calls that answer with
-//! no request to the API: how many it supplies and could add, and which of them a first
-//! hello comes from. It is kept from what the provider last listed, launched, released and
-//! read by id, so it can lag the account; it never decides a launch (the launch guard
-//! reads a fresh list for that).
+//! no request to the API: how many it supplies and could add, which of them a first hello
+//! comes from, and the architectures its catalog has carried. It is kept from what the
+//! provider last listed, launched, released and read by id, so it can lag the account; it
+//! never decides a launch (the launch guard reads a fresh list for that).
+//!
+//! Every instance is kept by its id, so one instance is counted once whichever source
+//! named it. A launch answer only adds an instance the records do not know: it never
+//! brings back an older status over a later release or read, and never brings back an
+//! instance a read or a release found gone. A list is the account's word: it replaces
+//! what it shows (and clears a gone mark for an instance it shows), and keeps the
+//! instances the launch guard holds that it does not show yet.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use js_elastic::{Capacity, Claim, Held, HostName, HostRef, HostStatus, Observed, Released};
+use js_elastic::{
+    Capacity, Claim, Extra, Held, HostName, HostRef, HostStatus, Observed, Offer, Released,
+};
 
-/// The instances the provider knows of, by what told it.
+/// The instances the provider knows of.
 #[derive(Default)]
 pub(super) struct Records {
-    /// Ours, as the last list showed them.
-    listed: BTreeMap<HostRef, Held>,
-    /// The instances a launch was answered with that no list had shown as ours when the
-    /// guard last settled: the launch guard's own memory, copied.
-    answered: BTreeMap<HostRef, Held>,
-    /// The rows of the last list with some of our marks, not all, that are not terminated.
-    /// They count toward `max_machines`.
-    suspects: usize,
-    /// What else counts toward `max_machines` with no instance of ours to show for it:
-    /// launches sent with no answer yet, and the extra instances a launch started.
-    pending: usize,
+    /// Ours, by id, as the latest list, launch answer, release or read by id left them.
+    held: BTreeMap<HostRef, Held>,
+    /// The ids a read by id or a release found gone.
+    gone: BTreeSet<HostRef>,
+    /// The instances the launch guard holds that no list had shown as ours when it last
+    /// settled: a list that does not show them yet keeps them.
+    answered: BTreeSet<HostRef>,
+    /// The instances with some of our marks, not all, by id, with their status. They count
+    /// toward `max_machines` until they are terminated or gone.
+    suspects: BTreeMap<HostRef, HostStatus>,
+    /// The acquire ids of launches sent with no answer yet.
+    unresolved: BTreeSet<String>,
+    /// The architectures the catalog has carried.
+    arches: BTreeSet<String>,
 }
 
 impl Records {
-    /// Every instance held, by id: the answered ones, then the listed ones over them (a
-    /// list is the later word on the status).
-    fn machines(&self) -> BTreeMap<&HostRef, &Held> {
-        let mut all: BTreeMap<&HostRef, &Held> = self.answered.iter().collect();
-        all.extend(&self.listed);
-        all
-    }
-
     /// A list worked and showed `rows`, each with the claim its marks make.
     pub(super) fn listed(&mut self, rows: impl IntoIterator<Item = (Claim, Held)>) {
-        self.listed.clear();
-        self.suspects = 0;
-        for (claim, held) in rows {
+        let mut held = BTreeMap::new();
+        let mut suspects = BTreeMap::new();
+        for (claim, row) in rows {
             match claim {
                 Claim::Ours => {
-                    self.listed.insert(held.id.clone(), held);
+                    self.gone.remove(&row.id);
+                    held.insert(row.id.clone(), row);
                 }
                 Claim::Suspect => {
-                    self.suspects += usize::from(held.status != HostStatus::Terminated);
+                    suspects.insert(row.id.clone(), row.status);
                 }
                 Claim::Foreign => {}
             }
         }
+        let unlisted = self.answered.iter().filter_map(|id| self.held.get(id));
+        for row in unlisted {
+            held.entry(row.id.clone()).or_insert_with(|| row.clone());
+        }
+        self.held = held;
+        self.suspects = suspects;
     }
 
-    /// The launch guard holds `answered` (the instances a launch answered with that it is
-    /// the one to name) and `pending` more that count with nothing to show for them.
-    pub(super) fn guarded(&mut self, answered: impl IntoIterator<Item = Held>, pending: usize) {
-        self.answered = answered
-            .into_iter()
-            .map(|held| (held.id.clone(), held))
-            .collect();
-        self.pending = pending;
+    /// After an acquire the launch guard holds `answered` (every instance a launch answered
+    /// with that no list has shown as ours) and `unresolved` (the acquire ids of launches
+    /// with no answer); `extras` are the instances the acquire's own answer released.
+    pub(super) fn guarded(
+        &mut self,
+        answered: impl IntoIterator<Item = Held>,
+        unresolved: impl IntoIterator<Item = String>,
+        extras: &[Extra],
+    ) {
+        self.answered.clear();
+        for row in answered {
+            self.answered.insert(row.id.clone());
+            let known = self.gone.contains(&row.id);
+            let new = (!known).then_some(row);
+            new.into_iter().for_each(|row| {
+                self.held.entry(row.id.clone()).or_insert(row);
+            });
+        }
+        self.unresolved = unresolved.into_iter().collect();
+        for extra in extras {
+            self.released(&extra.id, &extra.released);
+        }
     }
 
     /// A release of `id` read back `released`.
@@ -78,46 +103,76 @@ impl Records {
         }
     }
 
+    /// The catalog carried `offers`.
+    pub(super) fn offered(&mut self, offers: &[Offer]) {
+        self.arches
+            .extend(offers.iter().map(|offer| offer.arch.clone()));
+    }
+
+    /// The architectures the catalog has carried.
+    pub(super) fn arches(&self) -> BTreeSet<String> {
+        self.arches.clone()
+    }
+
     fn set_status(&mut self, id: &HostRef, status: &HostStatus) {
-        let known = self.listed.get_mut(id).into_iter();
-        for held in known.chain(self.answered.get_mut(id)) {
-            held.status = status.clone();
-        }
+        let held = self.held.get_mut(id).into_iter();
+        held.for_each(|row| row.status = status.clone());
+        let suspect = self.suspects.get_mut(id).into_iter();
+        suspect.for_each(|known| *known = status.clone());
     }
 
     fn forget(&mut self, id: &HostRef) {
-        self.listed.remove(id);
-        self.answered.remove(id);
+        self.held.remove(id);
+        self.suspects.remove(id);
+        self.gone.insert(id.clone());
     }
 
     /// The instances supplied (held and not ending) and how many more `max_machines`
-    /// allows once every instance it counts is counted: held and not terminated, the
-    /// suspects, and the pending launches.
+    /// allows once every instance it counts is counted once: ours and not terminated, the
+    /// suspects that are not terminated, and the launches with no answer that no held
+    /// instance carries the acquire id of.
     pub(super) fn capacity(&self, max_machines: usize) -> Capacity {
-        let machines = self.machines();
-        let supplied = machines.values().filter(|held| !ending(&held.status));
-        let live = machines
-            .values()
-            .filter(|held| held.status != HostStatus::Terminated);
-        let counted = live.count() + self.suspects + self.pending;
+        let rows = self.held.values();
+        let supplied = rows.clone().filter(|row| !ending(&row.status)).count();
+        let live = rows
+            .clone()
+            .filter(|row| row.status != HostStatus::Terminated)
+            .count();
+        let suspects = self.suspects.values();
+        let suspects = suspects.filter(|status| **status != HostStatus::Terminated);
+        let acquires: BTreeSet<&str> = rows.map(|row| row.acquire.as_str()).collect();
+        let pending = self.unresolved.iter();
+        let unanswered = pending.filter(|acquire| !acquires.contains(acquire.as_str()));
+        let counted = live + suspects.count() + unanswered.count();
         Capacity {
-            supplied: count(supplied.count()),
+            supplied: count(supplied),
             can_add: Some(count(max_machines.saturating_sub(counted))),
         }
     }
 
-    /// The held instance named `name` and, when `instance` is given, with that id.
+    /// The instance a hello named `name` comes from. With `instance`, the held instance of
+    /// that name and id. Without it, the one held instance of that name that is not ending;
+    /// `None` when there is none, or more than one (a hello by name alone cannot tell them
+    /// apart).
     pub(super) fn verify(&self, name: &HostName, instance: Option<&str>) -> Option<HostRef> {
         let named = Some(name.as_str());
-        let found = self.machines().into_iter().find(|(id, held)| {
-            let id_fits = instance.is_none_or(|instance| instance == id.as_str());
-            (held.name.as_deref() == named) & id_fits
-        });
-        found.map(|(id, _)| id.clone())
+        let mut rows = self
+            .held
+            .values()
+            .filter(|row| row.name.as_deref() == named);
+        let found = match instance {
+            Some(instance) => rows.find(|row| row.id.as_str() == instance),
+            None => {
+                let live: Vec<&Held> = rows.filter(|row| !ending(&row.status)).collect();
+                live.first().filter(|_| live.len() == 1).copied()
+            }
+        };
+        found.map(|row| row.id.clone())
     }
 }
 
-/// Whether a machine in `status` is on its way out, so no longer supplied.
+/// Whether a machine in `status` is on its way out, so no longer supplied and not one a
+/// first hello comes from.
 fn ending(status: &HostStatus) -> bool {
     matches!(
         status,

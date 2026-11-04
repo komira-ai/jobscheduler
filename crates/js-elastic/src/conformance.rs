@@ -57,6 +57,14 @@ pub trait Rig {
     /// timeout) and takes no effect.
     fn lose_next_answer_that_did_not_land(&mut self);
 
+    /// The next launch request itself gets no answer (a timeout) and takes no effect; the
+    /// calls the provider makes before it work.
+    fn lose_next_launch_that_did_not_land(&mut self);
+
+    /// The next terminate takes effect, and the read of the machine the provider makes
+    /// after it gets no answer (a timeout).
+    fn fail_read_after_next_terminate(&mut self);
+
     /// Two machines appear in the same account that this scheduler did not launch: one
     /// that [`OTHER_SCHEDULER`] launched for [`FOREIGN_ACQUIRE`] (named and marked as that
     /// scheduler marks its own), and one with no marks and no name. Returns their
@@ -320,20 +328,41 @@ pub fn an_acquire_that_did_not_land_launches_once_when_retried(rig: &mut dyn Rig
     const CASE: &str = "an_acquire_that_did_not_land_launches_once_when_retried";
     rig.make_room(1);
     let request = rig.request(&acquire_id("did-not-land"));
-    rig.lose_next_answer_that_did_not_land();
+    rig.lose_next_launch_that_did_not_land();
     let answer = rig.provider().acquire(&request);
-    assert!(
-        matches!(&answer, Acquired::Unknown | Acquired::Deferred { .. }),
-        "{CASE}: an acquire whose call timed out answers {answer:?}"
+    assert_eq!(
+        answer,
+        Acquired::Unknown,
+        "{CASE}: a launch that timed out is Unknown"
     );
     assert_eq!(
         rig.launches(),
         0,
-        "{CASE}: the timed-out acquire launched nothing"
+        "{CASE}: the timed-out launch made nothing"
+    );
+    let held_back = rig.provider().capacity();
+    assert_eq!(
+        (held_back.supplied, held_back.can_add.unwrap_or(0)),
+        (0, 0),
+        "{CASE}: the unanswered launch keeps its room, {held_back:?}"
+    );
+    let early = rig.provider().acquire(&request);
+    assert!(
+        matches!(&early, Acquired::Deferred { .. }),
+        "{CASE}: a retry within the hold is deferred, not {early:?}"
+    );
+    assert_eq!(
+        rig.launches(),
+        0,
+        "{CASE}: the early retry launched nothing"
     );
     rig.outwait_unresolved();
     let launched = accepted(CASE, &rig.provider().acquire(&request));
-    assert_eq!(rig.launches(), 1, "{CASE}: the retry launched once");
+    assert_eq!(
+        rig.launches(),
+        1,
+        "{CASE}: the retry after the hold launched once"
+    );
     let again = accepted(CASE, &rig.provider().acquire(&request));
     assert_eq!(
         again.id, launched.id,
@@ -342,12 +371,22 @@ pub fn an_acquire_that_did_not_land_launches_once_when_retried(rig: &mut dyn Rig
     assert_eq!(rig.launches(), 1, "{CASE}: and launches nothing");
 }
 
-/// A release terminates the machine and reports what a read after the terminate found,
-/// and a read by id afterwards agrees with it: the machine is terminating, terminated or
-/// absent, never still up. Fails on a provider that reports from the terminate call alone.
+/// A release terminates the machine and reports what a read after the terminate found:
+/// when that read gets no answer the release is `Unknown`, whatever the terminate said;
+/// when it works, a read by id afterwards agrees with what the release reported, and the
+/// machine is terminating, terminated or absent, never still up. Fails on a provider that
+/// reports from the terminate call alone.
 pub fn release_terminates_then_reads_back(rig: &mut dyn Rig) {
     const CASE: &str = "release_terminates_then_reads_back";
-    rig.make_room(1);
+    rig.make_room(2);
+    let unread = launch(CASE, rig, "unread");
+    rig.fail_read_after_next_terminate();
+    let answer = rig.provider().release(&unread.id);
+    assert_eq!(
+        answer,
+        Released::Unknown,
+        "{CASE}: a release whose read after the terminate got no answer is Unknown"
+    );
     let held = launch(CASE, rig, "released");
     let released = rig.provider().release(&held.id);
     let observed = rig.provider().observe(&held.id);
@@ -370,8 +409,8 @@ pub fn release_terminates_then_reads_back(rig: &mut dyn Rig) {
     );
     assert_eq!(
         rig.terminates(),
-        1,
-        "{CASE}: the release sent one terminate"
+        2,
+        "{CASE}: each release sent one terminate"
     );
 }
 

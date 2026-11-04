@@ -65,6 +65,17 @@ impl Rig for FakeRig {
         self.fake.script_next(Step::Lost { landed: false });
     }
 
+    fn lose_next_launch_that_did_not_land(&mut self) {
+        self.fake
+            .script(Call::Acquire, &[Step::Lost { landed: false }]);
+    }
+
+    fn fail_read_after_next_terminate(&mut self) {
+        // The fake's release is one call: one that lands and gets no answer is this.
+        self.fake
+            .script(Call::Release, &[Step::Lost { landed: true }]);
+    }
+
     fn foreign_machine_exists(&mut self) -> Vec<HostRef> {
         let other = SchedulerId::new(OTHER_SCHEDULER).unwrap();
         let acquire = AcquireId::new(FOREIGN_ACQUIRE).unwrap();
