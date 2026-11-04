@@ -291,7 +291,18 @@ impl CrunRuntime {
         let fields = fields_of(entry).map_err(Reason::Inconsistent)?;
         agree(entry, &fields).map_err(Reason::Inconsistent)?;
         self.places(entry, &fields).map_err(Reason::Inconsistent)?;
-        let mut run = self.run_of(entry, &fields);
+        let run = self.adopted(entry, &fields)?;
+        Ok((entry.name.clone(), run))
+    }
+
+    /// The run the sidecar `entry`, whose `fields` were checked, stands for, with its state:
+    /// ended, from the exit record its supervisor wrote, or still standing. The one place an
+    /// adopted run and its state are made.
+    ///
+    /// # Errors
+    /// The record cannot be read, or the run cannot stand (`standing`).
+    fn adopted(&self, entry: &Entry, fields: &Fields<'_>) -> Result<Run, Reason> {
+        let mut run = self.run_of(entry, fields);
         // The supervisor is looked at before the record: one that is gone has written its
         // record already, so a record not there then is one that never will be.
         let alive = fields.supervisor.id().alive();
@@ -309,10 +320,10 @@ impl CrunRuntime {
                 ));
             }
             None => self
-                .standing(&run, &fields, alive)
+                .standing(&run, fields, alive)
                 .map_err(Reason::Inconsistent)?,
         };
-        Ok((entry.name.clone(), run))
+        Ok(run)
     }
 
     /// Whether the paths `fields` records are the ones this runtime names for the lease of
