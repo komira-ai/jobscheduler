@@ -104,23 +104,35 @@
 //! those, and the listed driver mounts and variables (the module `gpu`). Without one,
 //! `supports_gpus` is false and a start naming a GPU is refused.
 //!
+//! # Network
+//!
+//! In mode none (`--egress none`, the default) a job has loopback only. With an allow-list the
+//! runtime checks the firewall through the agent's [`EgressPort`] before every create, wires
+//! the container's namespace (one interface to the host) after `Oci::start` while its init
+//! holds the job until the default route is there, and releases the wiring when the run ends
+//! or is removed; a container that cannot be wired runs no job and its lease is removed.
+//!
 //! # Not here
 //!
-//! No network (a job has loopback only; `check_egress` has nothing to check), no host jobs
-//! and no read-back of the container's mounts.
+//! No host jobs and no read-back of the container's mounts.
 
 mod claim;
 mod dirs;
+mod fault;
 mod gpu;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
+mod net;
 mod spec;
 #[cfg(test)]
 mod tests;
 mod wire;
 
 use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
+use fault::Fault;
+pub(crate) use net::port_of;
+pub use net::{EgressPort, Wired, start_egress};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 pub use gpu::{
@@ -144,13 +156,13 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, JobError, LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::{Chown, NAME_PREFIX, agent_tag, container_name};
-use crate::image::{ConfigError, ImageConfig, config_path};
+use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, label,
@@ -204,6 +216,9 @@ pub struct CrunSettings {
     pub pull_threads: usize,
     /// The root of the runs' files, when the agent has one.
     pub files: Option<FilesRoot>,
+    /// The host's egress, which wires each container's network: none in mode none, where a
+    /// job has loopback only ([`start_egress`]).
+    pub egress: Option<Arc<dyn EgressPort>>,
     /// The GPUs a run is given, when the agent passes them (`--gpu-device`).
     pub gpus: Option<GpuSettings>,
 }
@@ -308,44 +323,6 @@ pub enum CrunError {
     Ledger(#[from] LedgerError),
 }
 
-/// Why a run could not be made into a container.
-#[derive(Debug, thiserror::Error)]
-enum Fault {
-    #[error("this runtime runs contained jobs only")]
-    NotContained,
-    #[error(transparent)]
-    Gpu(gpu::StartError),
-    #[error("this runtime runs container jobs only")]
-    Native,
-    #[error("{0}")]
-    Image(String),
-    #[error("run id {0:?} cannot name a container")]
-    Name(String),
-    #[error("a container of run {0} exists")]
-    InUse(String),
-    #[error("this runtime has no run files directory")]
-    NoFiles,
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Book(#[from] js_types::TypeError),
-    #[error("remove an image that has no config: {0}")]
-    Evict(#[from] io::Error),
-    #[error("the image's pin: {0}")]
-    Pin(#[from] JobError),
-    #[error("{what}: {why}")]
-    Step { what: &'static str, why: String },
-}
-
-impl Fault {
-    fn step(what: &'static str, why: &dyn std::fmt::Display) -> Self {
-        Self::Step {
-            what,
-            why: why.to_string(),
-        }
-    }
-}
-
 /// How far a container is.
 enum State {
     /// Made and not started.
@@ -367,6 +344,8 @@ struct Run {
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
+    /// The container's network, from its start until it is released.
+    wired: Option<Box<dyn Wired>>,
 }
 
 /// A container runtime over `crun`.
@@ -384,6 +363,8 @@ pub struct CrunRuntime {
     leases_beside: bool,
     /// The image store, where an agent from before the leases were beside the runs kept them.
     store: PathBuf,
+    /// The host's egress; none in mode none.
+    egress: Option<Arc<dyn EgressPort>>,
     hooks: Hooks,
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
@@ -473,6 +454,7 @@ impl CrunRuntime {
             gpus: settings.gpus,
             leases_beside,
             store: settings.scratch.clone(),
+            egress: settings.egress,
             hooks,
             runs: BTreeMap::new(),
             ledger,
@@ -716,6 +698,7 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
+                wired: None,
             },
         );
         Ok(name)
@@ -808,11 +791,13 @@ impl CrunRuntime {
             .map_err(|why| Fault::step("write the bundle", &why))
     }
 
-    /// Starts the container `id` that [`CrunRuntime::stage`] made. A failure leaves it
-    /// staged: the caller removes it.
+    /// Starts the container `id` that [`CrunRuntime::stage`] made and wires its network. A
+    /// failure leaves it staged, or started with its job held by the init when the network
+    /// could not be wired: the caller removes it, which ends it.
     ///
     /// # Errors
-    /// The container is gone or started already, or `crun` could not be started.
+    /// The container is gone or started already, `crun` could not be started, or its
+    /// network could not be wired.
     pub fn start_staged(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         let _entered = self.rt.enter();
         let now = (self.hooks.now_ms)();
@@ -827,10 +812,17 @@ impl CrunRuntime {
             .start(&run.spec)
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
         run.backstop = run.cgroup.parent_ooms().ok();
+        let wired = net::attach(
+            self.egress.as_deref(),
+            &self.oci,
+            (&run.spec, &started),
+            self.hooks.now_ms,
+        );
         run.state = State::Running {
             run: started,
             since_ms: now,
         };
+        run.wired = wired?;
         Ok(())
     }
 
@@ -857,6 +849,7 @@ impl CrunRuntime {
         let tail = log_tail_of(&captured, not_run_words(&ended));
         let exit = end_of(ended, &run.cgroup, run.cap, run.backstop);
         run.state = State::Ended(exit, tail);
+        net::release(name, &mut run.wired);
         Status::Exited(exit)
     }
 }
@@ -891,8 +884,10 @@ impl Runtime for CrunRuntime {
         let id = self.stage(spec)?;
         if let Err(why) = self.start_staged(&id) {
             // The failed start leaves no container: the lease is taken apart as a removal
-            // does.
-            let _ = self.remove(&id);
+            // does. What cannot be is kept, listed, and removed by the next removal or sweep.
+            if let Err(left) = self.remove(&id) {
+                tracing::warn!(lease = %id.0, "remove the failed start: {left}");
+            }
             return Err(why);
         }
         Ok(id)
@@ -964,6 +959,7 @@ impl Runtime for CrunRuntime {
                 rt.block_on(running.force());
             }
         }
+        net::release(&id.0, &mut run.wired);
         oci.remove(&id.0)
             .map_err(|why| failed("delete the container", &why))?;
         run.cgroup
@@ -1002,6 +998,10 @@ impl Runtime for CrunRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus.is_some()
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        net::check(self.egress.as_deref())
     }
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {

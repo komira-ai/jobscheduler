@@ -163,6 +163,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         host_id: HOST.to_owned(),
         pull_threads: 1,
         files: None,
+        egress: None,
         gpus: None,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))

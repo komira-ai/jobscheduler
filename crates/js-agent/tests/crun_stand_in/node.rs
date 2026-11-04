@@ -19,6 +19,8 @@ use js_testkit::dir::TestDir;
 
 /// The first host uid of the subordinate range of the node's job user.
 pub const SUB_UID: u32 = 100_000;
+/// The pid the stand-in's `crun state` names for a container.
+pub const PID: u32 = 4321;
 /// The first host gid of the subordinate range.
 pub const SUB_GID: u32 = 200_000;
 
@@ -112,7 +114,14 @@ const CONFIG: &str =
 
 /// The stand-in. Its behaviour is chosen by the end of the container's name (a run id such
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
-/// and fails when the node has a file `delete-fails`.
+/// and fails when the node has a file `delete-fails`. `state` notes each ask in
+/// `asks-<name>` and names the pid [`PID`], except for a container `*-nopid` or `*-deaf`
+/// (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
+/// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
+/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once with a `crun`
+/// error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
+/// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
+/// the test removes it); its `state` names the pid only once that is there.
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -159,6 +168,9 @@ case "$cmd" in
         echo up > "$DIR/ready-$name"
         read x < "$root/gate"
         exit 137;;
+      *-wired|*-late|*-deaf|*-badpid|*-hugepid) trap '' TERM; exec sleep 600;;
+      *-nopid) echo '{"level":"error","msg":"no container made"}' >> "$log"; exit 1;;
+      *-stuckcg) mkdir -p "$cg/left"; : > "$cg/left/held"; trap '' TERM; exec sleep 600;;
       *) exit 0;;
     esac;;
   kill)
@@ -169,7 +181,19 @@ case "$cmd" in
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
     rmdir "$root/$name" 2>/dev/null
     exit 0;;
-  state) echo '{"pid":1}';;
+  state)
+    echo ask >> "$DIR/asks-$name"
+    case "$name" in
+      *-nopid|*-deaf) echo "no container $name" >&2; exit 1;;
+      *-badpid) echo '{"status":"running"}'; exit 0;;
+      *-hugepid) echo '{"pid":99999999999}'; exit 0;;
+      *-stuckcg) [ -e "$cg/left/held" ] || { echo "no container $name yet" >&2; exit 1; };;
+      *-late)
+        if [ "$(wc -l < "$DIR/asks-$name")" -le 2 ]; then
+          echo "no container $name yet" >&2; exit 1
+        fi;;
+    esac
+    echo '{"pid":4321}';;
 esac
 "#;
 
@@ -263,6 +287,7 @@ impl Node {
             host_id: "node-1".to_owned(),
             pull_threads: 1,
             files: None,
+            egress: None,
             gpus: None,
         }
     }

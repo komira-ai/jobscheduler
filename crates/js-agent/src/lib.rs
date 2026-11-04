@@ -79,7 +79,7 @@
 //! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); a network made without DNS resolves nothing, and a presigned URL names its host (its signature covers the Host header), so every endpoint a job may reach is given this way; needs `--container-bin` |
 //! | `--container-egress-allow <ip:port>` | an endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (prefix 24 to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16; required with a named `--container-network` (the agent does not start without it); before every job is created the agent reads back the network (a bridge, DNS off, no IPv6, one IPv4 subnet), `br_netfilter` and the nftables table `inet js_egress`, and refuses the job (`egress-unchecked`) unless the table holds exactly the rules for these endpoints; Podman only; see docs/egress.md; needs `--container-bin` |
 //! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
-//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside and keeps the firewall (docs/design/agent-egress.md); only the `crun` runtime reads it and this build cannot select that runtime yet, so `allow-list` is refused at start, as is `--container-network` beside it |
+//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside after its start, while the container's init holds the job until its default route is there, keeps the firewall and checks it before every create (`egress-unchecked` when it changed), and takes the wiring down when the run ends or is removed (docs/design/agent-egress.md); started once, after the claims of the scratch root and the host id, holding the host's egress (the abstract socket `@js-agent-egress`: one allow-list agent per host, a second is refused), and an allow-list that cannot be set up ends the agent with status 2; only `--runtime crun` reads it, so another runtime is refused `allow-list` at start, and `--container-network` is refused beside it |
 //! | `--egress-allow <ip:port>` | an endpoint an allow-list may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required; needs `--egress allow-list` |
 //! | `--egress-dns <ip>` | a resolver an allow-list may ask (UDP and TCP port 53) and the only nameserver of a job's `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` |
 //! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` |
@@ -680,6 +680,15 @@ fn execute(
         }
         None => None,
     };
+    // The egress of the crun runtime starts once, here: after the claims, because an
+    // allow-list's start removes every interface and table a previous agent left, which must
+    // not be another agent's that still runs. Mode none starts nothing.
+    #[cfg(target_os = "linux")]
+    if let Some(plan) = local.container.as_mut().and_then(Settings::crun_mut) {
+        let started = crun::start_egress(&local.egress, crate::egress::Egress::start);
+        let mode = local.egress.mode();
+        plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;
+    }
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;

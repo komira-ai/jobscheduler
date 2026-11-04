@@ -10,6 +10,8 @@ mod contract_e2e;
 #[cfg(target_os = "linux")]
 mod crun_e2e;
 #[cfg(target_os = "linux")]
+mod crun_egress;
+#[cfg(target_os = "linux")]
 mod crun_gpu_hello;
 mod drain;
 mod e2e;
