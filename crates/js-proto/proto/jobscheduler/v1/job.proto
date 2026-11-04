@@ -75,24 +75,6 @@ message Constraints {
   Accelerator accelerator = 5;
 }
 
-// What a job needs of an accelerator, in the vocabulary of design section 3.8 (the
-// accelerator.* capability keys). Each field left out matches any host. A count above zero
-// needs a model, because the GPUs it books need a class. A vendor alone books no GPU.
-message Accelerator {
-  // The vendor, such as nvidia.
-  optional string vendor = 1;
-  // The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.
-  optional string model = 2;
-  // The least number of devices.
-  optional uint32 count = 3;
-  // The least memory of each device, in whole GiB.
-  optional uint32 memory_per_device_gib = 4;
-  // The least interconnect, as kind>=size.
-  optional string interconnect = 5;
-  // The form factor: sxm or pcie.
-  optional string form_factor = 6;
-}
-
 // One host port forwarded to a port of the job (design section 5.8). New traffic toward a
 // job is refused except through its declared ports. A host port is a resource of the host:
 // two jobs cannot hold the same one on one host. Nothing enforces the forward yet.
@@ -306,4 +288,22 @@ message Refusal {
   RefusalCode code = 1;
   // Text for a person saying more. A program acts on the code only.
   string detail = 2;
+}
+
+// What a job needs of an accelerator, in the vocabulary of design section 3.8 (the
+// accelerator.* capability keys). Each field left out matches any host. A count above zero
+// needs a model, because the GPUs it books need a class. A vendor alone books no GPU.
+message Accelerator {
+  // The vendor, such as nvidia.
+  optional string vendor = 1;
+  // The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.
+  optional string model = 2;
+  // The least number of devices.
+  optional uint32 count = 3;
+  // The least memory of each device, in whole GiB.
+  optional uint32 memory_per_device_gib = 4;
+  // The least interconnect, as kind>=size.
+  optional string interconnect = 5;
+  // The form factor: sxm or pcie.
+  optional string form_factor = 6;
 }
