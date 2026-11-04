@@ -432,10 +432,15 @@ If the decision is (C), in this order: (B) steps 1 and 3 for the messages; a gRP
 limits for long-lived streams; `max_connections` set above hosts plus clients; a decision on session resume across a reconnect
 (open point 6); application heartbeats kept in the stream for presence; commands held and resent until the host's listing shows
 them, with the tests of the delivery cases above; the polling routes served beside the stream within major 1. Deleting the polling
-routes removes the only transport of every released agent, so it is a major 2 like (B)'s step 4: the server then speaks major 2
-only, and an older agent that returns later (a host restored from an old image, say) is refused `unsupported-protocol` at its
-hello, a fatal answer, and exits 2 until it is updated. Deleted then: the polling routes, their session code in the agent and the
-server, and the JSON fixtures and frozen copies.
+routes removes the only transport of every released agent, so it is a major 2 like (B)'s step 4, and the server then speaks major 2
+only. An older agent can only learn that through the route it calls, so `POST /v1/agent/hello` stays as a minimal legacy handler
+that reads no body and answers every request 400 `unsupported-protocol` with `"supported"` naming major 2, the answer
+`ProtocolRange::negotiate` gives today when the ranges do not meet. An older agent that returns later (a host restored from an old
+image, say) gets that answer at its hello, which its `verdict` treats as fatal and prints with the majors the server speaks
+(`Fatal`, `session.rs`), and it exits 2 until it is updated. Without the handler the hello would get a 404, also fatal to an older
+agent, but with no code to say why. Deleted then: `POST /v1/agent/heartbeat`, the hello's decoding and admission behind the legacy
+handler, the polling session code in the agent and the server, and the JSON fixtures and frozen copies. A test sends the previous
+release's hello fixture to that handler and expects the 400 and its body.
 
 ## 5. Open points
 
