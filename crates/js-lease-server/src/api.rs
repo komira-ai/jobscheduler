@@ -162,24 +162,19 @@ impl Shared {
         self.save_errors.load(Ordering::SeqCst)
     }
 
-    /// Hands the table the registry's reservation ledger when it changed, ticks the table
-    /// (which writes both), then advances the agent registry (when the server has one) so
-    /// its reservations and prepare deadlines act on this tick, logs what changed and
-    /// counts a failed write. The table's lock is held for those two steps alone.
+    /// Ticks the table, which writes the leases the tick changed and, when it changed, the
+    /// registry's reservation ledger as the tick's stops and presentations left it, in one
+    /// replace; then advances the agent registry (when the server has one) so its
+    /// reservations and prepare deadlines act on this tick, logs what changed and counts a
+    /// failed write. The table's lock is held for the tick alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = {
             let mut table = self.table.lock().await;
-            if let Some(agents) = &self.agents {
-                // The registry's reservations are written with the leases of this tick.
-                self.handed.hand_over(&agents.registry, &mut table);
-            }
-            let report = table.tick();
-            if let Some(agents) = &self.agents {
-                // The tick's presentations may have placed, refused or moved a waiting
-                // request: the file follows before the lock is let go.
-                self.handed.write_over(&agents.registry, &mut table);
-            }
-            report
+            // The registry's reservations, as the tick's stops and presentations leave
+            // them, are written in the same replace as the leases of this tick.
+            let handed = &self.handed;
+            let agents = self.agents.as_ref();
+            table.tick_then(|| agents.and_then(|agents| handed.changed(&agents.registry)))
         };
         let counts = match &self.agents {
             Some(agents) => {

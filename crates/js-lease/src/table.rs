@@ -213,6 +213,20 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// The file is written once at the end when anything changed or an earlier save failed,
     /// and a failure is reported in the result.
     pub fn tick(&mut self) -> TickReport {
+        self.tick_then(|| None)
+    }
+
+    /// Ticks as [`Self::tick`] does, and asks `ledger`, after every stop, observation and
+    /// presentation of the tick and before its one write, for the reservation ledger as they
+    /// left it. `Some` replaces the table's ledger, so what the provider did to its waiting
+    /// requests during the tick (one cancelled by the stop of a releasing lease, placed or
+    /// refused by a presentation) is written in the same replace as the leases the tick
+    /// changed, and no crash or failed write can keep one without the other; `None` keeps
+    /// the ledger. A failed write leaves the file as it was before the tick.
+    pub fn tick_then(
+        &mut self,
+        ledger: impl FnOnce() -> Option<Vec<ReservationRecord>>,
+    ) -> TickReport {
         let now = self.clock.now();
         let mut report = TickReport::default();
         for id in self.book.ids() {
@@ -238,6 +252,10 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         }
         report.pending = self.book.count(LeaseState::Pending);
         report.releasing = self.book.count(LeaseState::Releasing);
+        let after = ledger();
+        after
+            .into_iter()
+            .for_each(|records| self.book.set_reservations(records));
         if report.changed() | self.book.unsaved() {
             report.save_error = self.save("tick").err();
         }
@@ -254,16 +272,6 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// decides nothing about them.
     pub fn set_reservations(&mut self, records: Vec<ReservationRecord>) {
         self.book.set_reservations(records);
-    }
-
-    /// Replaces the reservation ledger with `records` as [`Self::set_reservations`] does,
-    /// and writes the file now, with the leases as they stand, instead of at the next tick.
-    /// A caller whose provider just changed the ledger in a way that must not be lost to a
-    /// crash (a cancelled request, whose lease is already gone from the file) writes it
-    /// this way. A failed write leaves the file behind, and the next tick writes it again.
-    pub fn write_reservations(&mut self, records: Vec<ReservationRecord>) -> Result<(), SaveError> {
-        self.book.set_reservations(records);
-        self.save("reservations")
     }
 
     /// Every lease the table keeps with a request id ([`Self::acquire_with_id`]), with that

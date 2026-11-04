@@ -485,7 +485,11 @@ fn unknown_fields_of_the_request_row_survive_a_rewrite() {
     assert_eq!(table.request_ids(), [(lease, id("r1"))]);
     let repeat = table.acquire_with_id(id("r1"), asked(), None);
     assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
-    table.write_reservations(Vec::new()).unwrap();
+    let other = table.acquire_with_id(id("r2"), asked(), None);
+    assert!(
+        matches!(other, Err(AcquireError::Unconfirmed(_))),
+        "{other:?}"
+    );
     let written = fs::read_to_string(scratch.file()).unwrap();
     assert!(written.contains("future = \"x\""), "{written}");
     assert!(written.contains("k = 1"), "{written}");

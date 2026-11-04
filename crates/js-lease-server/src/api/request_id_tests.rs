@@ -162,32 +162,70 @@ async fn a_cancel_is_written_before_it_is_answered() {
     assert_eq!(rig.registry.queue_position(&id("r1")), None);
 }
 
-/// Asserts recovery from a crash between a release's two writes. The first write holds the
-/// lease as releasing and the ledger as it was, with the request waiting; a server started
-/// over exactly that file binds the request to the releasing lease, and its first tick stops
-/// the lease again, which cancels the request: no waiter, no reservation, the lease gone and
-/// no row for the request in the file. The same file is what a failed second write leaves.
-/// It catches a crash or a failed write at that point that leaves a request waiting, and a
-/// host set aside, for a lease that is gone.
-#[tokio::test]
-async fn a_crash_between_the_release_writes_cancels_the_request_at_the_next_tick() {
-    let (rig, _busy, waiting) = reserved("request_id_release_crash").await;
+/// A server started over the file a release's first write leaves: `r1` waits in the ledger
+/// and its lease is releasing. The restored request is bound to that lease. The lease id.
+async fn releasing(name: &str) -> (Rig, String) {
+    let (rig, _busy, waiting) = reserved(name).await;
     let text = file(&rig);
     let releasing = text.replace("state = \"pending\"", "state = \"releasing\"");
     assert_ne!(releasing, text);
     std::fs::write(rig.file(), releasing).unwrap();
+    let rig = rig.restart(true).await;
+    assert_eq!(rig.registry.queue_position(&id("r1")), Some(0));
+    (rig, waiting)
+}
+
+/// Asserts that `r1` is cancelled and its lease gone, in the registry, the table and the
+/// file.
+async fn assert_cancelled(rig: &Rig, waiting: &str) {
+    assert_eq!(rig.registry.queue_position(&id("r1")), None);
+    assert!(rig.registry.reservations().is_empty());
+    assert_eq!(state(rig, waiting).await, "gone");
+    let text = file(rig);
+    assert!(!text.contains("request_id = \"r1\""), "{text}");
+}
+
+/// Asserts recovery from a crash between a release's two writes. A server started over the
+/// file the first write leaves (the lease releasing, the request waiting) stops the lease
+/// again at its first tick, which cancels the request, and that tick writes the lease's end
+/// and the ledger without the request in one replace: a crash right after it (a server
+/// started again with no further tick) finds neither the lease nor the request. It catches
+/// a recovery that leaves a request waiting for a lease that is gone, and one whose two
+/// halves reach the file in two writes, which a crash between them splits.
+#[tokio::test]
+async fn a_crash_between_the_release_writes_cancels_the_request_at_the_next_tick() {
+    let (rig, waiting) = releasing("request_id_release_crash").await;
+    let report = rig.shared.tick().await;
+    assert_eq!((report.freed.len(), report.save_error.is_none()), (1, true));
+    assert_cancelled(&rig, &waiting).await;
+    let rig = rig.restart(true).await;
+    assert_cancelled(&rig, &waiting).await;
+}
+
+/// Asserts that a failed write of the recovery tick leaves the file as it was, so the
+/// recovery starts over: the tick that cancels the request cannot write (a directory sits
+/// where the file's temporary copy goes), the file still holds the releasing lease and the
+/// waiting request, and a server started over it after a crash binds and cancels them at
+/// its first tick, and the file then holds neither, also across another start. It catches a
+/// failed write that keeps one half (the lease's end without the request's, or the other
+/// way round), which no later start could repair.
+#[tokio::test]
+async fn a_failed_recovery_write_leaves_a_file_that_recovers_again() {
+    let (rig, waiting) = releasing("request_id_recovery_fails").await;
+    let before = file(&rig);
+    let blocker = rig.file().with_file_name("leases.toml.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let report = rig.shared.tick().await;
+    assert!(report.save_error.is_some());
+    assert_eq!(file(&rig), before);
+    std::fs::remove_dir(&blocker).unwrap();
 
     let rig = rig.restart(true).await;
     assert_eq!(rig.registry.queue_position(&id("r1")), Some(0));
     rig.shared.tick().await;
-    assert_eq!(rig.registry.queue_position(&id("r1")), None);
-    assert!(rig.registry.reservations().is_empty());
-    assert_eq!(state(&rig, &waiting).await, "gone");
-    assert!(
-        !file(&rig).contains("request_id = \"r1\""),
-        "{}",
-        file(&rig)
-    );
+    assert_cancelled(&rig, &waiting).await;
+    let rig = rig.restart(true).await;
+    assert_cancelled(&rig, &waiting).await;
 }
 
 /// Asserts that the tick whose presentation placed a waiting request writes the ledger as
