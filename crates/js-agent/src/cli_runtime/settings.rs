@@ -389,6 +389,7 @@ impl Settings {
                 files: None,
                 #[cfg(target_os = "linux")]
                 egress: None,
+                #[cfg(target_os = "linux")]
                 gpus: None,
                 actions: Arc::new(OnceLock::new()),
             })),
