@@ -14,8 +14,8 @@ pub mod detail {
     /// only to an agent that reported the `run-files` capability, so this is a fault of the
     /// sender.
     pub const FILES_UNSUPPORTED: &str = "files-unsupported";
-    /// The job is a host job and carries run files, which only a container can be given
-    /// (they are mounted read-only at `/run/js-files`). Nothing is created.
+    /// The job is a host job and carries run files, which only a contained job (a container,
+    /// or a native run's own user) can be given. Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
     /// The network the job would get is not limited as the agent was told: the `crun`
     /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
@@ -45,6 +45,9 @@ pub mod code {
     pub const START_FAILED: &str = "start-failed";
     /// The runtime could not remove a container.
     pub const CONTAINER_REMOVE_FAILED: &str = "container-remove-failed";
+    /// A native run was removed (its processes and its user are gone) and one or more of
+    /// its declared outputs could not be copied. The host holds nothing of it: not a taint.
+    pub const OUTPUTS_FAILED: &str = "outputs-failed";
     /// The scratch directory could not be made or removed.
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// A labelled container could not be accounted for after a restart.

@@ -12,8 +12,12 @@
 //!   (`--version`) and found Docker or Podman; a runtime that does not start ends the agent
 //!   first, so no hello names a runtime that was not found. An agent that runs no jobs
 //!   (`--runtime none`) reports neither.
-//! - `run-files` is `true` for an agent with a run files root (`--run-files-root`, on a
-//!   tmpfs): it writes a start's `files` and mounts them at `/run/js-files`. The server sends a start with files to a host that reports it only.
+//! - `run-files` is `true` for an agent with a run files root (`--run-files-root`): a
+//!   container agent's is on a tmpfs, and it writes a start's `files` and mounts them at
+//!   `/run/js-files`; a native agent's is where the operator put it, and it gives a run's
+//!   files to the run's user and names their directory in `JS_FILES_DIR`. A native agent
+//!   without the flag has no root and does not report it. The server sends a start with
+//!   files to a host that reports it only.
 //! - `scratch-quota` is `project` and `scratch-default-gib` is the GiB a run without
 //!   `disk_bytes` books, for an agent started with `--scratch-quota` whose scratch root
 //!   passed the probe (an agent whose root did not pass does not start). The server books
@@ -88,14 +92,26 @@ impl ToolkitHook {
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs native
-/// jobs: `runtime` and `exec` are `sandbox-exec`. The hello is sent only after the job half
-/// has started, which asked the helper for its boot reset, so no hello names a mode the
-/// agent cannot serve. Returns the warnings the operator should read: none.
-pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
+/// jobs: `runtime` and `exec` are `sandbox-exec`, and `run-files` when `run_files` (the
+/// agent has a files root). The hello is sent only after the job half has started, which
+/// asked the helper for its boot reset, so no hello names a mode the agent cannot serve.
+/// Returns the warnings the operator should read: none.
+pub(crate) fn report_native(hello: &mut Hello, run_files: bool) -> Vec<String> {
     let mode = ExecMode::SandboxExec.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
+    report_run_files(hello, run_files);
     Vec::new()
+}
+
+/// Says that the agent writes a start's run files, when it has a files root (`run_files`);
+/// an older agent would ignore them, and one without a root refuses them.
+fn report_run_files(hello: &mut Hello, run_files: bool) {
+    if run_files {
+        hello
+            .capabilities
+            .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    }
 }
 
 /// Says that the agent takes the job-keyed start and stop, and that it fences them (it
@@ -128,13 +144,7 @@ pub(crate) fn report(
     hello.capabilities.insert(EXEC.to_owned(), mode);
     ceiling.insert_into(&mut hello.capabilities);
     report_per_job(hello);
-    // This agent writes a start's run files (when it has a files root); an older one
-    // would ignore them.
-    if run_files {
-        hello
-            .capabilities
-            .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
-    }
+    report_run_files(hello, run_files);
     if gpu_passthrough {
         hello
             .capabilities
