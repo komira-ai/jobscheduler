@@ -363,7 +363,7 @@ fn unescape(text: &str, plus_is_space: bool) -> Option<String> {
 
 /// Whether `kind` is an integer kind, which the proto3 JSON mapping reads from a JSON
 /// number only when it is an exact integer.
-fn is_integer(kind: &Kind) -> bool {
+pub(crate) fn is_integer(kind: &Kind) -> bool {
     matches!(
         kind,
         Kind::Int32

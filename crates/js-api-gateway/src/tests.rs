@@ -12,7 +12,7 @@ use axum::http::{Method, Request, StatusCode};
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{GetJobRequest, GetLogsResponse, JobState, ListHostsRequest, ListHostsResponse};
 use prost::Message as _;
-use prost_reflect::{DescriptorPool, DynamicMessage, MapKey, Value};
+use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MapKey, Value};
 use tonic::Status;
 use tower::ServiceExt;
 
@@ -297,6 +297,48 @@ fn the_strict_reader_reads_every_json_value() {
             read(body).map(|_| ()),
             Err(Answer::invalid(field.map(str::to_owned), reason))
         );
+    }
+}
+
+/// Asserts which kinds of field take a JSON number only as an exact integer: each of the ten
+/// integer kinds, and none of the others (floating point, bool, string, bytes, enum,
+/// message). Catches an integer kind left out of the check, which would let a JSON parser
+/// round its value.
+#[test]
+fn every_integer_kind_is_held_to_exact_integers() {
+    let integers = [
+        Kind::Int32,
+        Kind::Sint32,
+        Kind::Sfixed32,
+        Kind::Int64,
+        Kind::Sint64,
+        Kind::Sfixed64,
+        Kind::Uint32,
+        Kind::Fixed32,
+        Kind::Uint64,
+        Kind::Fixed64,
+    ];
+    for kind in &integers {
+        assert!(crate::input::is_integer(kind), "{kind:?}");
+    }
+    let pool = service_pool();
+    let others = [
+        Kind::Double,
+        Kind::Float,
+        Kind::Bool,
+        Kind::String,
+        Kind::Bytes,
+        Kind::Enum(
+            pool.get_enum_by_name("jobscheduler.v1.JobState")
+                .expect("defined"),
+        ),
+        Kind::Message(
+            pool.get_message_by_name("jobscheduler.v1.Job")
+                .expect("defined"),
+        ),
+    ];
+    for kind in &others {
+        assert!(!crate::input::is_integer(kind), "{kind:?}");
     }
 }
 
