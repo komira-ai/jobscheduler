@@ -24,6 +24,11 @@ use crate::lifecycle::{cleanup, config_in, names, reply, reply_json};
 use crate::support::Scratch;
 use js_agent::native::{NativeConfig, NativeRuntime};
 
+/// A named change to the agent's bundle settings, made against the registry served.
+type SettingsCase = (&'static str, fn(&mut Settings, &Served));
+/// A named change to a start.
+type SpecCase = (&'static str, fn(&mut JobSpec));
+
 /// A lifecycle over a native runtime over a fake helper.
 pub(super) struct Native {
     pub(super) life: Lifecycle,
@@ -517,7 +522,7 @@ fn a_bundle_blob_that_fails_its_digest_is_refused() {
 /// images.
 #[test]
 fn a_non_allowed_prefix_is_refused() {
-    let cases: [(&str, fn(&mut Settings, &Served)); 3] = [
+    let cases: [SettingsCase; 3] = [
         ("none", |_, _| {}),
         ("other", |rules, served| {
             let other = format!("{}/other", served.fx.at(js_testkit::oci_registry::REGISTRY));
@@ -568,7 +573,7 @@ fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
 /// a job that can never run, and one answered with the wrong code.
 #[test]
 fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched() {
-    let table: [(&str, fn(&mut JobSpec)); 5] = [
+    let table: [SpecCase; 5] = [
         ("image-unsupported-here", |spec| spec.run = None),
         ("native-unsupported", |spec| {
             spec.run.as_mut().unwrap().cwd = "sub".to_owned();

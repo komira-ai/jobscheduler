@@ -312,7 +312,7 @@ fn pull_missing_is_accepted_with_only_image_allow() {
     assert_eq!(settings.pull, Pull::Missing);
     assert!(settings.registries.is_empty());
     let entry = js_oci::Allow::parse("ghcr.io/komira-ai/").unwrap();
-    assert_eq!(settings.image_allow, [entry.clone()]);
+    assert_eq!(settings.image_allow, std::slice::from_ref(&entry));
     assert_eq!(settings.registry_allow().unwrap(), [entry]);
 }
 
