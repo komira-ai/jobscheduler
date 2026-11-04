@@ -203,15 +203,21 @@ async fn job_client_trusts_only_the_given_ca_cert() {
         .await
         .unwrap();
     trusted.list_hosts(ListHostsRequest {}).await.unwrap();
-    let refusal = "cannot reach https://jobs.example: TLS with jobs.example: invalid peer certificate: UnknownIssuer";
-    for ca in [Some(theirs.as_path()), None] {
+    // Another certificate of the same name does not verify the server's signature; the
+    // bundled roots do not know the server's issuer at all.
+    let refusal =
+        "cannot reach https://jobs.example: TLS with jobs.example: invalid peer certificate: ";
+    for (ca, why) in [
+        (Some(theirs.as_path()), "BadSignature"),
+        (None, "UnknownIssuer"),
+    ] {
         let mut jobs = client(&dir, origin, ca, fake.dialer(Some(server.clone())))
             .await
             .unwrap();
         let error = jobs.list_hosts(ListHostsRequest {}).await.err().unwrap();
         assert_eq!(
             (error.to_string(), error.may_have_acted()),
-            (refusal.to_owned(), false),
+            (format!("{refusal}{why}"), false),
             "{ca:?}"
         );
     }

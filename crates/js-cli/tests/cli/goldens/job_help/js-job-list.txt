@@ -1,0 +1,39 @@
+Lists jobs by state, label and the time they were queued, a page at a time. Changes nothing.
+
+Usage: js job list [OPTIONS]
+
+Options:
+      --server <URL>
+          The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
+
+      --states <NAME>
+          Only jobs in one of these states. Empty: every state. Repeat for more.
+          
+          [possible values: queued, placed, starting, running, succeeded, failed, cancelled, lost, failed-to-start]
+
+      --labels <KEY=VALUE>
+          Only jobs that carry every one of these labels with the same value. Empty: any labels. KEY=VALUE; repeat for more.
+
+      --token-file <PATH>
+          A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
+
+      --ca-cert <PATH>
+          A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
+
+      --queued-after-ms <N>
+          Only jobs queued at or after this time, in milliseconds since the Unix epoch.
+
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --queued-before-ms <N>
+          Only jobs queued before this time, in milliseconds since the Unix epoch.
+
+      --page-size <N>
+          The most jobs in one answer. 0: the server's own page size. A server may answer fewer.
+
+      --page-token <TEXT>
+          Where to continue: the next page token of the previous answer of the same listing. Empty: the first page.
+
+  -h, --help
+          Print help (see a summary with '-h')
