@@ -629,7 +629,7 @@ fn a_reply_names_each_job_and_each_gpu_once() {
 #[test]
 fn per_job_messages_ignore_what_they_do_not_know() {
     let mut command = serde_json::to_value(Command::JobStart(Box::new(start()))).unwrap();
-    command["network"] = json!({"mode": "from-the-future"});
+    command["sandbox"] = json!({"mode": "from-the-future"});
     command["booked"]["accelerators"] = json!(4);
     let decoded: Command = serde_json::from_value(command).unwrap();
     assert_eq!(decoded, Command::JobStart(Box::new(start())));
