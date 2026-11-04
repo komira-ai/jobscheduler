@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,10 +25,10 @@ use js_types::{
 };
 
 use crate::adapt::SharedClock;
-use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
+use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{Token, parse_duration};
+use crate::config::Token;
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
@@ -41,12 +40,14 @@ mod joined;
 mod lifetime;
 mod network;
 mod pins;
+mod section;
 mod server;
 
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
 use network::read_network;
 use pins::{LIVE_NEEDS, read_agents};
+use section::Section;
 pub(crate) use server::{AlertKeys, Server};
 use server::{read_client_token, read_server};
 
@@ -274,215 +275,6 @@ pub(crate) struct Load<'a> {
     pub(crate) kinds: &'a Kinds,
     pub(crate) files: &'a dyn SecretFiles,
     pub(crate) clock: SharedClock,
-}
-
-/// One table of the file, and where it is, for the messages.
-struct Section {
-    map: toml::Table,
-    head: String,
-}
-
-impl Section {
-    fn open(map: toml::Table, head: String) -> Self {
-        Self { map, head }
-    }
-
-    /// A refusal of `key` of this table.
-    fn fail(&self, key: &str, reason: &str) -> StartupError {
-        StartupError::at(format!("{}{key}", self.head), reason)
-    }
-
-    /// Refuses a class that books part of a host: this server serves whole hosts only.
-    fn class_served(&self, class: &ResourceClass) -> Result<(), StartupError> {
-        match class.admission() {
-            Admission::Book(_) => Err(self.fail("class", MIXED_UNSERVED)),
-            _ => Ok(()),
-        }
-    }
-
-    /// Refuses the first field that is not one of `known`.
-    fn only(&self, known: &[&str]) -> Result<(), StartupError> {
-        for key in self.map.keys() {
-            if !known.contains(&key.as_str()) {
-                let reason = format!("unknown field; known: {}", known.join(", "));
-                return Err(self.fail(key, &reason));
-            }
-        }
-        Ok(())
-    }
-
-    fn string(&mut self, key: &str) -> Result<Option<String>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::String(text)) => Ok(Some(text)),
-            Some(_) => Err(self.fail(key, "must be a string")),
-        }
-    }
-
-    fn required_string(&mut self, key: &str) -> Result<String, StartupError> {
-        match self.string(key)? {
-            Some(text) => Ok(text),
-            None => Err(self.fail(key, "required")),
-        }
-    }
-
-    fn path(&mut self, key: &str) -> Result<Option<PathBuf>, StartupError> {
-        Ok(self.string(key)?.map(PathBuf::from))
-    }
-
-    fn required_path(&mut self, key: &str) -> Result<PathBuf, StartupError> {
-        match self.path(key)? {
-            Some(path) => Ok(path),
-            None => Err(self.fail(key, "required")),
-        }
-    }
-
-    fn integer(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Integer(number)) => match u64::try_from(number) {
-                Ok(number) => Ok(Some(number)),
-                Err(_) => Err(self.fail(key, "must not be negative")),
-            },
-            Some(_) => Err(self.fail(key, "must be an integer")),
-        }
-    }
-
-    /// The integer `key` when the file gives it, which must be from `low` to `high`.
-    fn bounded_given(
-        &mut self,
-        key: &str,
-        low: u64,
-        high: u64,
-    ) -> Result<Option<u64>, StartupError> {
-        let Some(number) = self.integer(key)? else {
-            return Ok(None);
-        };
-        match (low..=high).contains(&number) {
-            true => Ok(Some(number)),
-            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
-        }
-    }
-
-    /// The integer `key`, or `default`, which must be from `low` to `high`.
-    fn bounded(
-        &mut self,
-        key: &str,
-        low: u64,
-        high: u64,
-        default: u64,
-    ) -> Result<u64, StartupError> {
-        Ok(self.bounded_given(key, low, high)?.unwrap_or(default))
-    }
-
-    fn boolean(&mut self, key: &str) -> Result<Option<bool>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Boolean(flag)) => Ok(Some(flag)),
-            Some(_) => Err(self.fail(key, "must be true or false")),
-        }
-    }
-
-    fn duration(&mut self, key: &str) -> Result<Option<Duration>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match parse_duration(&text) {
-            Ok(duration) => Ok(Some(duration)),
-            Err(_) => Err(self.fail(key, "must be a positive duration such as 600s, 10m or 1h")),
-        }
-    }
-
-    fn duration_or(&mut self, key: &str, default: Duration) -> Result<Duration, StartupError> {
-        Ok(self.duration(key)?.unwrap_or(default))
-    }
-
-    fn address(&mut self, key: &str) -> Result<Option<SocketAddr>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match text.parse::<SocketAddr>() {
-            Ok(address) => Ok(Some(address)),
-            Err(_) => Err(self.fail(key, "must be an address such as 127.0.0.1:7300")),
-        }
-    }
-
-    fn table(&mut self, key: &str) -> Result<Option<toml::Table>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Table(table)) => Ok(Some(table)),
-            Some(_) => Err(self.fail(key, "must be a table")),
-        }
-    }
-
-    fn tables(&mut self, key: &str) -> Result<Vec<toml::Table>, StartupError> {
-        let must = "must be an array of tables, written [[pool]]";
-        let Some(value) = self.map.remove(key) else {
-            return Ok(Vec::new());
-        };
-        let toml::Value::Array(items) = value else {
-            return Err(self.fail(key, must));
-        };
-        let mut tables = Vec::new();
-        for item in items {
-            let toml::Value::Table(table) = item else {
-                return Err(self.fail(key, must));
-            };
-            tables.push(table);
-        }
-        Ok(tables)
-    }
-
-    /// The pool's `memory_schedulable_percent` when the table gives it: a whole number
-    /// from 1 to 100.
-    fn memory_percent(&mut self) -> Result<Option<MemoryPercent>, StartupError> {
-        let Some(percent) = self.integer(MEMORY_PERCENT_KEY)? else {
-            return Ok(None);
-        };
-        let bounded = MemoryPercent::new(percent);
-        bounded
-            .map(Some)
-            .map_err(|_| self.fail(MEMORY_PERCENT_KEY, "must be from 1 to 100"))
-    }
-
-    /// A spend in cents: a string holding a decimal with at most two places, above zero.
-    fn spend(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match cents(&text) {
-            None => Err(self.fail(
-                key,
-                "must be a decimal with at most two places, such as \"12.00\"",
-            )),
-            Some(0) => Err(self.fail(key, "must be above zero")),
-            Some(amount) => Ok(Some(amount)),
-        }
-    }
-}
-
-fn is_digit(byte: u8) -> bool {
-    byte.is_ascii_digit()
-}
-
-fn digits(part: &str) -> bool {
-    part.bytes().all(is_digit)
-}
-
-/// `text` as cents: digits, then optionally a point and one or two digits.
-fn cents(text: &str) -> Option<u64> {
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    let valid = [
-        !whole.is_empty(),
-        fraction.len() <= 2,
-        !text.ends_with('.'),
-        digits(whole),
-        digits(fraction),
-    ];
-    match valid.contains(&false) {
-        true => None,
-        false => format!("{whole}{fraction:0<2}").parse().ok(),
-    }
 }
 
 /// The line of `text` at which the parser stopped; the first when it gives no position.
