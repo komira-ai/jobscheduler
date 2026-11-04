@@ -295,7 +295,7 @@ fn the_list_scanner_reads_only_a_well_formed_page() {
         (b"\xff".to_vec(), None, 10),
         (b"<Other></Other>".to_vec(), None, 10),
         (b"<ListBucketResult></ListBucketResult>".to_vec(), None, 10),
-        (b"<ListBucketResultX><IsTruncated>false</IsTruncated></ListBucketResultX>".to_vec(), None, 10),
+        (b"<ListBucketResultX><IsTruncated>false</IsTruncated></ListBucketResult>".to_vec(), None, 10),
         (b"<ListBucketResult a=\"b\"/><IsTruncated>false</IsTruncated></ListBucketResult>".to_vec(), None, 10),
         (b"<ListBucketResult".to_vec(), None, 10),
         (b"<ListBucketResult><IsTruncated>false</IsTruncated>".to_vec(), None, 10),
