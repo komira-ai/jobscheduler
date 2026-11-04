@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use js_contain::container::ContainerSpec;
 use js_contain::oci::Oci;
+use js_contain::oci::words::{crun_words, init_words};
 use js_contain::running::Running;
 
 use crate::egress::{Attachment, Config, Egress, EgressError, Mode, ROUTE_WAIT};
@@ -142,7 +143,8 @@ fn pid_of(
         };
         if running.try_end().is_some() {
             return Err(format!(
-                "crun run ended before the container had a pid: {why}"
+                "crun run ended before the container had a pid: {why}; {}",
+                said(oci, spec)
             ));
         }
         if now_ms() >= deadline {
@@ -152,6 +154,23 @@ fn pid_of(
         }
         std::thread::sleep(PID_PAUSE);
     }
+}
+
+/// What `crun` and the container's init said of the container of `spec`, their error lines
+/// joined by `; ` (empty when neither said anything).
+fn said(oci: &Oci, spec: &ContainerSpec) -> String {
+    let reports = oci.reports(spec);
+    let read = |path: &std::path::Path| std::fs::read_to_string(path).unwrap_or_default();
+    let words = [
+        crun_words(&read(&reports.log)),
+        init_words(&read(&reports.init)),
+    ];
+    let said: Vec<&str> = words
+        .iter()
+        .map(String::as_str)
+        .filter(|w| !w.is_empty())
+        .collect();
+    said.join("; ")
 }
 
 /// Whether `why`, an error of `Oci::container_pid`, is `crun`'s answer that the container is

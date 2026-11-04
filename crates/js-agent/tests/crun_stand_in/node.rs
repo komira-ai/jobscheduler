@@ -118,7 +118,8 @@ const CONFIG: &str =
 /// `asks-<name>` and names the pid [`PID`], except for a container `*-nopid` or `*-deaf`
 /// (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
 /// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
-/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once.
+/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once with a `crun`
+/// error in its log.
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -166,6 +167,7 @@ case "$cmd" in
         read x < "$root/gate"
         exit 137;;
       *-wired|*-late|*-deaf|*-badpid|*-hugepid) trap '' TERM; exec sleep 600;;
+      *-nopid) echo '{"level":"error","msg":"no container made"}' >> "$log"; exit 1;;
       *) exit 0;;
     esac;;
   kill)

@@ -410,6 +410,10 @@ fn a_run_that_ends_before_its_pid_is_named_is_never_wired() {
         ),
         "{text}"
     );
+    assert!(
+        text.ends_with("; crun: no container made"),
+        "crun's words: {text}"
+    );
     assert!(asks(&node, "r1-nopid") >= 1);
     assert_eq!(seen.taken(), Vec::<String>::new());
     assert!(nothing_left(&node, "r1-nopid"));
