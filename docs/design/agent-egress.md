@@ -1,8 +1,8 @@
 # Egress of jobs in `crun` containers (privilege option B)
 
-Status: implemented as a module and its tests; not yet reachable from a runtime (see
-"What is and is not wired"). The agent's privilege model is `agent-privilege.md`: the agent
-is root, every `crun` runs as a dedicated job user.
+Status: implemented, and wired into the `crun` runtime (see "What is and is not wired").
+The agent's privilege model is `agent-privilege.md`: the agent is root, every `crun` runs as
+a dedicated job user.
 
 ## The premise, re-proved
 
@@ -69,6 +69,10 @@ handles and the set's members are not compared), and checks that IPv4 forwarding
 One mode, flags only: `--egress none` (the default) or `allow-list` with `--egress-allow`,
 `--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none does nothing: it runs
 no program and writes no file; the container's namespace has loopback only. An allow-list start
+first binds the abstract socket `@js-agent-egress` (`egress::HOST_LOCK`) and holds it while the
+agent's egress or any run it wired lives; the kernel frees it when the process ends, however it ends. The names it
+makes and removes are the host's, not an agent's, so a second agent with an allow-list is refused
+at start (`EgressError::Held`) instead of sweeping the first one's live wiring. Then it
 removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both tables a previous
 process left (the keeper kills the containers with the agent), loads the firewall and switches
 IPv4 forwarding on. That switch is host-wide and is never switched back: other users of the host
@@ -82,11 +86,24 @@ no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those a
 ## What is and is not wired
 
 - `egress::{Config, Egress, Attachment}`, `OciConfig::{resolv_conf, route_wait}`,
-  `Oci::container_pid` and `js-init --wait-route` are the parts. The `crun` runtime (a later PR)
-  calls `check`, `Oci::start`, `container_pid`, `attach`, `release` in that order.
-- The new flags are parsed and checked at start. Only the `crun` runtime reads them and it cannot be
-  selected yet, so an allow-list is refused at start, and so is `--container-network` beside it.
-  The old Podman flags (`--container-network`, `--container-egress-allow`, `--container-nft`), their
+  `Oci::container_pid` and `js-init --wait-route` are the parts. The `crun` runtime
+  (`crates/js-agent/src/crun/net.rs`) calls them in this order: `Egress::check` before every
+  create (the lifecycle's `check_egress`; a failure is `egress-unchecked` and creates nothing),
+  the create, `Oci::start`, `Oci::container_pid` (asked again until `crun` names the pid, until
+  `crun run` ends, or for the init's route wait at most), `Egress::attach`, and
+  `Attachment::release` when the runtime reads the run's end or removes the run, whichever
+  comes first. A container whose pid or wiring fails is removed with its lease, and its job never
+  ran (the init still waits for the route). A release that fails is logged and the removal goes
+  on. With an allow-list the backend writes the configured resolvers in every container's
+  `resolv.conf` and starts the init with `--wait-route`; mode none changes neither.
+- The flags are parsed and checked at start. The agent starts the egress once, after it holds
+  the claims of its scratch root and host id (the start removes what an earlier agent left);
+  an allow-list that cannot be set up ends the agent with status 2. The start-up sweep of the
+  leases an earlier process left needs no call of its own: no `Attachment` of that process
+  exists, and the egress start has already removed its interfaces and tables. There is no job
+  field yet: the agent's `--egress` applies to every `crun` job it runs. Only `--runtime crun`
+  enforces an allow-list, so another runtime is refused one at start, and `--container-network`
+  is refused beside it. The old Podman flags (`--container-network`, `--container-egress-allow`, `--container-nft`), their
   check and `deploy/js-agent/egress-network.sh` stay as the Podman runtime's own until that runtime
   is removed; deleting them now would take egress away from the runtime nodes run today.
 - The hosts must not drop forwarded packets in another chain: Docker's forward policy does. The CI
@@ -95,8 +112,10 @@ no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those a
 
 ## The held canary (not run here)
 
-On one farm node, after the `crun` runtime is selectable: a job with an allow-list reaches its
-endpoint on another host and is refused elsewhere (the metadata address included), the veth,
-the set member and the `jsv*` links are gone after the run and after an agent restart, and the
+On one production host, with the `crun` runtime and an allow-list: a job reaches its endpoint
+on another host and is refused elsewhere (the metadata address included), the veth, the set
+member and the `jsv*` links are gone after the run and after an agent restart, and the
 distribution's `crun` AppArmor profile is loaded (the restriction applies to the job user's `crun`).
-The farm kernel is 6.8; CI's is the runner's. Nothing of this is run by the PR.
+The CI job `agent-egress` runs the same through `CrunRuntime` on the runner's kernel; the
+host's kernel (6.8) and its AppArmor policy are exercised only by the canary, which no pull
+request runs.

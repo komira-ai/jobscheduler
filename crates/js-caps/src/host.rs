@@ -8,6 +8,7 @@
 //! |---|---|---|
 //! | [`RUNTIME`] | an [`ExecMode`] name: `container` or `sandbox-exec` | the program the agent runs jobs with was found and ran |
 //! | [`GPU_TOOLKIT`] | [`FLAG_SET`] | the host offers GPUs and the toolkit check passed |
+//! | [`GPU_PASSTHROUGH`] | [`FLAG_SET`] | the crun runtime gives a job the device nodes of the GPUs it booked |
 //! | [`EXEC`] | an [`ExecMode`] name | the agent runs jobs, in that mode |
 //! | [`DISK_GIB`] | whole GiB | the agent has a work volume (`--scratch-root`) and could read its free space |
 //! | [`RUN_FILES`] | [`FLAG_SET`] | the agent runs containers and writes a start's run files |
@@ -69,13 +70,20 @@ pub const BUNDLE: &str = "bundle";
 /// output, so a fleet uses one path and a host with another is not eligible.
 pub const BUNDLE_ROOT: &str = "bundle-root";
 
+/// The capability key of an agent whose crun runtime gives a job the device nodes, driver
+/// mounts and variables of the GPUs it booked (`--gpu-device`). Its value is [`FLAG_SET`].
+/// It tells the operator so; a GPU job is placed by the GPUs a host reports, and no pool or
+/// request reads this key.
+pub const GPU_PASSTHROUGH: &str = "gpu-passthrough";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 9] = [
+pub const DETECTED_KEYS: [&str; 10] = [
     RUNTIME,
     GPU_TOOLKIT,
+    GPU_PASSTHROUGH,
     EXEC,
     DISK_GIB,
     RUN_FILES,

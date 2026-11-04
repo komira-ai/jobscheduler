@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Artifact, BootPlan, BootStep, Demand, Dimension, ElasticProvider, HostName, Offer,
+    AcquireId, Artifact, BootPlan, BootStep, CapacityProvider, Demand, Dimension, HostName, Offer,
     SchedulerId,
 };
 use js_types::{ExecMode, MemoryHeadroom, normalise_arch};
@@ -71,7 +71,7 @@ pub(crate) struct Pool {
     pub(crate) max_instances: usize,
     pub(crate) max_spend_per_hour_cents: u64,
     pub(crate) health: Arc<Mutex<Health>>,
-    provider: Arc<dyn ElasticProvider>,
+    provider: Arc<dyn CapacityProvider>,
     mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     floor: Floor,
     pub(crate) floor_demand: Demand,

@@ -761,10 +761,6 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         // A job's mount is bound from a directory the job's writer may swap for a link
         // between the agent's check and the bind; `CrunRuntime` does not read the binds
         // back yet, so no mount root is accepted.
-        (
-            "--egress",
-            cli.egress.as_deref().is_some_and(|mode| mode != "none"),
-        ),
         ("--mount-root", !cli.mount_roots.is_empty()),
         ("--mount-root-ro", !cli.mount_roots_ro.is_empty()),
     ];
@@ -772,7 +768,7 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
     engine_flags.extend(cli.native_flags());
     if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of the container engine or of native jobs; a mount root, which the crun runtime does not read back after it binds; or an --egress allow-list, which this build does not wire)"
+            "{flag}: not accepted with --runtime crun (a flag of the container engine or of native jobs, or a mount root, which the crun runtime does not read back after it binds)"
         ));
     }
     let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));

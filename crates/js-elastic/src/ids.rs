@@ -145,6 +145,17 @@ impl fmt::Display for HostRef {
     }
 }
 
+/// What a machine's agent says in its first hello that a provider can match to one of its
+/// launches: the host name it was given and, when it read one, its instance id as its cloud
+/// spells it. The join token and every other secret of the hello are not part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hello {
+    /// The host name the agent was launched with.
+    pub name: String,
+    /// The cloud's id of the machine, when the agent knows it.
+    pub instance_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

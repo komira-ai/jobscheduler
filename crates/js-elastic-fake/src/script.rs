@@ -8,12 +8,20 @@ use js_elastic::RefusalCode;
 /// How long the fake asks a caller to wait when it answers a 429.
 pub const THROTTLE_WAIT: Duration = Duration::from_secs(30);
 
-/// One of the calls the fake counts. Only [`Call::Acquire`], [`Call::List`] and
-/// [`Call::Release`] can be scripted; the others are only counted.
+/// One of the calls the fake counts. Only [`Call::Acquire`], [`Call::List`],
+/// [`Call::Release`] and [`Call::IsGone`] can be scripted; the others are only counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Call {
+    /// `id`.
+    Id,
+    /// `can_launch`.
+    CanLaunch,
+    /// `capabilities`.
+    Capabilities,
     /// `catalog`.
     Catalog,
+    /// `capacity`.
+    Capacity,
     /// `checks`.
     Checks,
     /// `host_prep`.
@@ -28,8 +36,12 @@ pub enum Call {
     Release,
     /// `unresolved`.
     Unresolved,
-    /// `is_gone`.
+    /// `observe`: a read of one machine by id, which `is_gone` makes too.
     IsGone,
+    /// `verify_instance`.
+    VerifyInstance,
+    /// `events`.
+    Events,
 }
 
 /// What one call does, as a script gives it.
@@ -39,16 +51,17 @@ pub enum Step {
     #[default]
     Pass,
     /// An acquire is refused with this code and makes nothing. A list fails. A release is
-    /// refused and ends nothing.
+    /// refused and ends nothing. A read by id has no answer.
     Refuse(RefusalCode),
     /// The caller gets no answer. `landed` says whether the call took effect all the same:
-    /// an acquire makes its machine, a release ends it. A list fails either way.
+    /// an acquire makes its machine, a release ends it. A list and a read by id fail either
+    /// way.
     Lost {
         /// Whether the effect happened.
         landed: bool,
     },
     /// The cloud answers 429. Nothing happens: an acquire is answered with a deferral of
-    /// [`THROTTLE_WAIT`], a list fails, a release is not answered.
+    /// [`THROTTLE_WAIT`], a list fails, a release and a read by id are not answered.
     Throttled,
 }
 

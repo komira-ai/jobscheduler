@@ -78,6 +78,12 @@ struct State {
     files: HashMap<String, String>,
     write_errors: HashMap<String, ErrorKind>,
     identities: HashMap<String, (Seen, usize)>,
+    /// Whether another agent holds the host's egress.
+    held: bool,
+    /// Whether the host's egress cannot be asked for at all.
+    lock_fails: bool,
+    /// The hold this machine gave, held while it is alive (as the kernel's socket is).
+    hold: Option<std::sync::Weak<()>>,
 }
 
 /// A machine that records every call and answers as scripted.
@@ -180,6 +186,20 @@ impl Sys for Fake {
             .get(path)
             .cloned()
             .ok_or_else(|| std::io::Error::from(ErrorKind::NotFound))
+    }
+
+    fn lock_host(&self, _name: &str) -> std::io::Result<Option<Held>> {
+        let mut state = self.state();
+        if state.lock_fails {
+            return Err(std::io::Error::other("injected"));
+        }
+        let alive = state.hold.as_ref().and_then(std::sync::Weak::upgrade);
+        if state.held || alive.is_some() {
+            return Ok(None);
+        }
+        let hold = Arc::new(());
+        state.hold = Some(Arc::downgrade(&hold));
+        Ok(Some(hold as Held))
     }
 
     fn open_netns(&self, pid: u32) -> std::io::Result<Netns> {
@@ -634,6 +654,21 @@ fn the_real_machine_runs_programs_and_reads_files() {
     assert_eq!(system.identity(&own_pid.path).expect("by path"), one);
     assert!(system.open_netns(u32::MAX).is_err());
 
+    // A name of this test's own: the host's (`HOST_LOCK`) may be held by an agent of this
+    // machine, and no test may depend on that.
+    let name = format!("{HOST_LOCK}-unit-{}", std::process::id());
+    let lock = system.lock_host(&name).expect("bound").expect("free");
+    assert!(
+        system.lock_host(&name).expect("asked").is_none(),
+        "held once"
+    );
+    drop(lock);
+    let again = system
+        .lock_host(&name)
+        .expect("bound")
+        .expect("free once dropped");
+    drop(again);
+
     let echo = ["/bin/echo".to_owned()];
     let allow = ["192.0.2.10:9300".to_owned()];
     let flags = Flags {
@@ -644,9 +679,123 @@ fn the_real_machine_runs_programs_and_reads_files() {
         nsenter: Some(&echo[0]),
         ..Flags::default()
     };
-    let error = Egress::start(Config::from_flags(&flags).expect("sound")).expect_err("not JSON");
+    let config = Config::from_flags(&flags).expect("sound");
+    let error = Egress::start_holding(config, Arc::new(System), &name).expect_err("not JSON");
     assert!(
         error.to_string().contains("listing the interfaces"),
         "{error}"
     );
+}
+
+/// Catches the crun runtime's port doing anything but the host side's own steps, and an
+/// equality that is not "the same pool": through `EgressPort` the check reads the tables
+/// back and tells a changed rule, an attach makes the calls of a direct one, and the release
+/// of what it gave removes them; a clone is equal to its original and another start is not.
+#[test]
+fn the_crun_runtimes_port_is_the_host_side() {
+    use crate::crun::EgressPort;
+    let fake = Fake::new();
+    let egress = started(&fake, allow_list());
+    let port: Arc<dyn EgressPort> = crate::crun::port_of(&egress);
+    port.check().expect("as loaded");
+    let before = fake.log().len();
+    let wired = port.attach("one", PID).expect("attach");
+    assert_eq!(fake.log()[before..], attach_calls()[..]);
+    let attached = fake.log().len();
+    crate::crun::Wired::release(wired).expect("release");
+    assert_eq!(fake.log()[attached..], release_calls(0)[..]);
+    let again = port.attach("two", PID);
+    assert!(again.is_ok(), "the block is free again");
+    drop(again);
+    fake.answer("list table inet", Ok(INET_CHANGED.to_owned()));
+    assert_eq!(port.check(), Err(EgressError::Rules));
+    assert_eq!(egress, egress.clone());
+    assert_ne!(egress, started(&Fake::new(), allow_list()));
+}
+
+/// Catches a start that sweeps the host while another agent holds its egress, or when the
+/// hold cannot be asked for: with the host held the start is refused as `Held`, and with the
+/// socket unusable it is an error naming the hold; either way nothing else is run (no
+/// interface listed or removed, no table touched). Mode none starts whoever holds it.
+#[test]
+fn a_held_host_refuses_an_allow_list_and_sweeps_nothing() {
+    let fake = Fake::new();
+    fake.state().held = true;
+    let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    assert_eq!(refused, Err(EgressError::Held));
+    assert_eq!(fake.log(), Vec::<String>::new(), "nothing swept");
+    assert!(
+        EgressError::Held.to_string().contains(HOST_LOCK),
+        "{}",
+        EgressError::Held
+    );
+    let broken = Fake::new();
+    broken.state().lock_fails = true;
+    let failed = Egress::start_on(allow_list(), broken.clone()).map(drop);
+    assert_eq!(
+        failed,
+        Err(EgressError::Command {
+            what: "holding the host's egress".to_owned(),
+            why: "injected".to_owned(),
+        })
+    );
+    assert_eq!(broken.log(), Vec::<String>::new(), "nothing swept");
+    let none = Fake::new();
+    none.state().held = true;
+    started(&none, config_with("none", None));
+    assert_eq!(none.log(), Vec::<String>::new());
+}
+
+/// Catches a runtime opened from the agent's plan that gets an egress of its own (a second
+/// start, which the host's lock refuses) or none: the started egress put in the crun plan is
+/// the one every clone of the settings holds (the worker's runtime and the rescue's are opened
+/// from clones), and the ports made of it take their blocks from one pool.
+#[test]
+fn every_runtime_opened_from_a_crun_plan_shares_its_egress() {
+    use crate::cli_runtime::Settings;
+    let fake = Fake::new();
+    let egress = started(&fake, allow_list());
+    let crun = PathBuf::from("/usr/bin/crun");
+    let mut settings = Settings::for_crun(crun, "job", (7, 8), Vec::new());
+    settings.crun_mut().expect("crun settings").egress = Some(egress.clone());
+    let rescue = settings.clone();
+    let plans = [&settings, &rescue].map(|settings| settings.crun().expect("a plan"));
+    assert_eq!(plans[0].egress.as_ref(), Some(&egress));
+    assert_eq!(plans[1].egress.as_ref(), Some(&egress));
+    let ports = plans.map(|plan| crate::crun::port_of(plan.egress.as_ref().expect("egress")));
+    let first = ports[0].attach("worker", PID).expect("attach");
+    let second = ports[1].attach("rescue", PID).expect("attach");
+    let made: Vec<String> = fake
+        .log()
+        .into_iter()
+        .filter(|line| line.starts_with("ip link add "))
+        .collect();
+    assert_eq!(
+        made,
+        [
+            "ip link add jsv0 type veth peer name jsp0",
+            "ip link add jsv1 type veth peer name jsp1"
+        ],
+        "one pool"
+    );
+    drop((first, second));
+}
+
+/// Catches a hold on the host that ends while a run of it is still wired: with the last
+/// `Egress` dropped and an attachment alive, another start is refused as `Held` and sweeps
+/// nothing (it would remove the run's live veth and could take its name, which the run's
+/// release would then delete); once the attachment is released the hold ends with it and a
+/// start succeeds.
+#[test]
+fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
+    let fake = Fake::new();
+    let egress = started(&fake, allow_list());
+    let attachment = egress.attach("run", PID).expect("attach");
+    drop(egress);
+    let logged = fake.log().len();
+    let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    assert_eq!(refused, Err(EgressError::Held));
+    assert_eq!(fake.log().len(), logged, "nothing swept");
+    attachment.release().expect("release");
+    started(&fake, allow_list());
 }

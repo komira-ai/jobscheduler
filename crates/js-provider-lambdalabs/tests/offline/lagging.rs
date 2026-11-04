@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use js_elastic::{Acquired, ElasticProvider, HostStatus, Reason, Released};
+use js_elastic::{Acquired, CapacityProvider, HostStatus, Reason, Released};
 use js_provider_lambdalabs::{
     ApiError, Call, FakeLambda, FirewallRuleset, Instance, InstanceId, InstanceTypeOffer,
     LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, SshKey,

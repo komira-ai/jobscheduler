@@ -204,6 +204,20 @@ pub enum Released {
     Unknown,
 }
 
+/// What a read of one machine by id found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Observed {
+    /// The provider holds the machine, in this status ([`HostStatus::Terminated`]
+    /// included: a terminated machine is still read).
+    Present(HostStatus),
+    /// The provider said, for a read by id, that the machine does not exist. This is the
+    /// only answer that frees what the machine was booked for.
+    Absent,
+    /// No answer: the read failed, was throttled or timed out, or the reference is not one
+    /// the provider can read. Never read as absent.
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +273,10 @@ mod tests {
         };
         assert_ne!(extra.released, Released::Refused(Claim::Suspect));
         assert_ne!(Released::Unknown, Released::Gone);
+        assert_ne!(Observed::Unknown, Observed::Absent);
+        assert_ne!(
+            Observed::Present(HostStatus::Terminated),
+            Observed::Present(HostStatus::Active)
+        );
     }
 }

@@ -89,6 +89,8 @@ struct State {
     offers: Vec<InstanceTypeOffer>,
     instances: Vec<Instance>,
     faults: HashMap<Call, VecDeque<Option<ApiError>>>,
+    /// The failure of the next call of any kind, before the ones scripted per call.
+    next: Option<ApiError>,
     lost: HashMap<Call, VecDeque<ApiError>>,
     launch_counts: VecDeque<usize>,
     terminate_effect: Option<TerminateEffect>,
@@ -191,6 +193,12 @@ impl FakeLambda {
             .push_back(Some(error));
     }
 
+    /// Makes the next call, of whatever kind, fail with `error` and take no effect, before
+    /// any failure scripted for its kind (which then falls on the call after).
+    pub fn fail_next_call(&self, error: ApiError) {
+        self.state().next = Some(error);
+    }
+
     /// Lets the next `call` that has no earlier scripted outcome succeed, so that a
     /// failure scripted after it falls on the call after.
     pub fn pass_next(&self, call: Call) {
@@ -255,6 +263,9 @@ impl FakeLambda {
     fn enter(&self, call: Call) -> Result<MutexGuard<'_, State>, ApiError> {
         let mut state = self.state();
         state.calls.push(call);
+        if let Some(error) = state.next.take() {
+            return Err(error);
+        }
         match state.faults.get_mut(&call).and_then(VecDeque::pop_front) {
             Some(Some(error)) => Err(error),
             Some(None) | None => Ok(state),

@@ -207,7 +207,8 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
     sysctl("net/ipv4/ip_forward", "1");
     drop(attachment);
 
-    // A restart puts all of it back.
+    // A restart puts all of it back: the agent that held the host's egress has ended.
+    drop(egress);
     let restarted = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("restart");
     restarted
         .check()

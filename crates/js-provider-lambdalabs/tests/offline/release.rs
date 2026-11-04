@@ -1,7 +1,7 @@
 //! Release, list, the sweep and the choice of where to launch.
 
 use js_elastic::{
-    AcquireId, Acquired, Claim, Demand, ElasticProvider, Held, HostRef, HostStatus, Offer,
+    AcquireId, Acquired, CapacityProvider, Claim, Demand, Held, HostRef, HostStatus, Offer,
     ProviderError, Released,
 };
 use js_provider_lambdalabs::{
@@ -513,6 +513,8 @@ fn the_catalog_carries_every_architecture_and_leaves_the_choice_to_the_demand() 
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].arch, name);
         assert_eq!(offers[0].os, "linux");
+        // Whatever architecture the catalog carried, the capabilities cover its offer.
+        assert!(rig.provider.capabilities().covers(&offers[0]), "{name}");
     }
 }
 
@@ -556,7 +558,7 @@ fn a_reference_that_is_no_instance_id_is_foreign_and_asks_the_api_nothing() {
 #[test]
 fn the_provider_is_usable_through_the_trait_object() {
     let rig = launched();
-    let dynamic: &dyn ElasticProvider = &rig.provider;
+    let dynamic: &dyn CapacityProvider = &rig.provider;
     let held = dynamic.list().unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(

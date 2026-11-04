@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootStep, CheckResult, ElasticProvider, GpuClass, Held,
+    AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CheckResult, GpuClass, Held,
     HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
 use js_lease::{ManualClock, Timestamp};
@@ -82,7 +82,7 @@ pub struct FakeCloud {
     catalog: Mutex<Result<Vec<Offer>, String>>,
     prep: Mutex<Vec<BootStep>>,
     panics: AtomicBool,
-    delegate: Mutex<Option<Arc<dyn ElasticProvider>>>,
+    delegate: Mutex<Option<Arc<dyn CapacityProvider>>>,
     catalogs: AtomicUsize,
     others: AtomicUsize,
 }
@@ -106,7 +106,7 @@ impl FakeCloud {
 
     /// Has the catalog call and the provider's own checks answered by `provider` from now
     /// on; the other calls stay counted and unanswered.
-    pub fn delegate(&self, provider: Arc<dyn ElasticProvider>) {
+    pub fn delegate(&self, provider: Arc<dyn CapacityProvider>) {
         *self.delegate.lock().unwrap() = Some(provider);
     }
 
@@ -145,7 +145,7 @@ impl FakeCloud {
 
 struct Handle(Arc<FakeCloud>);
 
-impl ElasticProvider for Handle {
+impl CapacityProvider for Handle {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         self.0.catalogs.fetch_add(1, Ordering::SeqCst);
         if self.0.panics.load(Ordering::SeqCst) {
@@ -183,6 +183,33 @@ impl ElasticProvider for Handle {
     fn release(&self, _id: &HostRef) -> Released {
         self.0.others.fetch_add(1, Ordering::SeqCst);
         Released::Unknown
+    }
+
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("handle")
+    }
+
+    fn can_launch(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        js_elastic::ProviderCaps::default()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        js_elastic::Capacity {
+            supplied: 0,
+            can_add: None,
+        }
+    }
+
+    fn observe(&self, _id: &HostRef) -> js_elastic::Observed {
+        js_elastic::Observed::Unknown
+    }
+
+    fn verify_instance(&self, _hello: &js_elastic::Hello) -> Option<HostRef> {
+        None
     }
 }
 

@@ -253,6 +253,9 @@ pub fn job(run_id: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

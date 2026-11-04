@@ -58,6 +58,8 @@ fn only_the_configured_resolver_is_reachable() {
     assert_eq!(other_tcp.accepted(), 0);
     assert_eq!(configured_tcp.accepted(), 1);
     drop(attachment);
+    // A restart: the agent that held the host's egress has ended.
+    drop(egress);
 
     let none = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("restart");
     assert_eq!(none.config().resolv_conf(), None);

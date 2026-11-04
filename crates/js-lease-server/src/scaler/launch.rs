@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootPlan, ElasticProvider, HostName, Reason, Refusal,
+    AcquireRequest, Acquired, Artifact, BootPlan, CapacityProvider, HostName, Reason, Refusal,
     RefusalCode, SchedulerId, Secret,
 };
 use js_scaler::AcquirePlan;
@@ -26,7 +26,7 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// What a launch needs besides the scaler's decision: the provider, the pool's network
 /// mode and what the machine is told to dial and run.
 pub struct Launcher {
-    provider: Arc<dyn ElasticProvider>,
+    provider: Arc<dyn CapacityProvider>,
     mode: Arc<dyn NetworkMode>,
     scheduler: SchedulerId,
     scheduler_url: String,
@@ -37,7 +37,7 @@ impl Launcher {
     /// A launcher for the machines of `scheduler`: each is told to download the entry of `agents` for its offer's architecture, to
     /// dial `scheduler_url`, and to join the network as `mode` says.
     pub fn new(
-        provider: Arc<dyn ElasticProvider>,
+        provider: Arc<dyn CapacityProvider>,
         mode: Arc<dyn NetworkMode>,
         scheduler: SchedulerId,
         scheduler_url: String,

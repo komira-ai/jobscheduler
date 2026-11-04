@@ -9,8 +9,9 @@ use std::sync::Arc;
 use js_agent::bundle::{Admission, Placer};
 use js_agent::lifecycle::{Event, Lifecycle};
 use js_agent::native::NativeChecks;
-use js_agent_wire::{Command, InputRef, JobSpec, Outcome, RunFile};
+use js_agent_wire::{Command, InputRef, JobSpec, Outcome, RunFile, RunSpec};
 use js_mac_pool::seatbelt::AbsPath;
+use js_types::{Arch, Os};
 use serde_json::json;
 
 use super::fake_helper::FakeHelper;
@@ -209,6 +210,31 @@ fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
     assert_eq!(h.fake.verbs()[3], "kill-uid 7.0");
+}
+
+/// Asserts that a start named by its image, an image alone and an image with a `run`,
+/// `os` and `arch`, is refused by the native runtime with `image-unsupported-here` before
+/// anything is made: the helper sees no user, no run directory is made and the booking is
+/// intact. It catches an image start answered `native-unsupported` (the code of a native
+/// body this runtime cannot stage), and one that reaches the helper and fails late.
+#[test]
+fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
+    let image_only = crate::lifecycle::job("r1");
+    let mut with_run = crate::lifecycle::job("r1");
+    with_run.args = Vec::new();
+    with_run.run = Some(RunSpec::from(native("/bin/sh", &[])));
+    with_run.os = Some(Os::Macos);
+    with_run.arch = Some(Arch::Arm64);
+    for (n, spec) in [image_only, with_run].into_iter().enumerate() {
+        let mut h = Native::new(&format!("image{n}"));
+        assert_eq!(h.start(spec), ["refused r1 image-unsupported-here"], "{n}");
+        assert_eq!(h.fake.verbs(), ["boot-reset"]);
+        assert!(!h.scratch_of("r1").exists());
+        assert_eq!(h.life.free().cpu_millis, 4000);
+        let result = &h.life.results()[0];
+        assert_eq!(result.outcome, Outcome::FailedToStart);
+        assert_eq!(result.detail.as_deref(), Some("image-unsupported-here"));
+    }
 }
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
