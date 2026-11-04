@@ -1,0 +1,21 @@
+// The message gRPC carries in the details of a status, for the crate's own use: the wire
+// form of google.rpc.Status (field numbers and types as googleapis defines them), so that
+// a client in any language reads the details as that message. It is not part of the job
+// service: it is compiled apart from package jobscheduler.v1 and is not in that package's
+// descriptor set.
+
+syntax = "proto3";
+
+package jobscheduler.rpc;
+
+import "google/protobuf/any.proto";
+
+// A status: a code, a message and typed details.
+message Status {
+  // The status code, a google.rpc.Code value.
+  int32 code = 1;
+  // The status message.
+  string message = 2;
+  // The details, each a message packed with its type URL.
+  repeated google.protobuf.Any details = 3;
+}

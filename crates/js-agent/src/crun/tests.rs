@@ -136,6 +136,7 @@ fn a_run_becomes_the_container_it_asked_for() {
         target: target.to_owned(),
         source: PathBuf::from(source),
         read_only,
+        recursive: true,
     };
     assert_eq!(
         spec.mounts,

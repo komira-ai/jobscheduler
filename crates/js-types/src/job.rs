@@ -3,19 +3,21 @@
 //! A job never names a cloud, an image of a machine or an instance type; those live in
 //! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
-//! [`Requirements::from_request`] reads `os` and `arch` from the capabilities the request
-//! requires and leaves disk and execution mode unset.
+//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib` and `exec`
+//! from the capabilities the request requires.
 
 use std::fmt;
 use std::str::FromStr;
 
 use crate::digest::{DigestRef, DigestRefError};
-use crate::{Request, Resources};
+use crate::{IsaLevel, Request, Resources, normalise_arch};
 
 /// The capability key a request names its operating system by.
 const OS_KEY: &str = "os";
 /// The capability key a request names its CPU architecture by.
-const ARCH_KEY: &str = "arch";
+pub(crate) const ARCH_KEY: &str = "arch";
+/// The capability key a request names its least ISA level by (`x86-64-v3`, `armv8.2-a`).
+pub(crate) const ISA_LEVEL_KEY: &str = "isa_level";
 /// The capability key a request names its least free disk by, in whole GiB. A host
 /// reports the free space of its work volume under it.
 pub const DISK_GIB_KEY: &str = "disk-gib";
@@ -133,13 +135,17 @@ pub struct Requirements {
     pub disk_bytes: Option<u64>,
     /// The operating system (`linux`, `macos`). `None`: any.
     pub os: Option<String>,
-    /// The CPU architecture (`x86_64`, `aarch64`). `None`: any.
+    /// The CPU architecture, canonical (`x86_64`, `arm64`; a request's `aarch64` is read
+    /// as `arm64`, and a name no release knows is kept as sent). `None`: any.
     pub arch: Option<String>,
+    /// The least ISA level, met by a level of the same family at least as high. `None`: not
+    /// asked for.
+    pub isa_level: Option<IsaLevel>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
 }
 
-/// Why a request's `disk-gib` or `exec` capability is not a requirement.
+/// Why a request's `disk-gib`, `exec` or `isa_level` capability is not a requirement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RequirementsError {
     /// `disk-gib` is not a whole number of GiB that fits in bytes.
@@ -148,31 +154,38 @@ pub enum RequirementsError {
     /// `exec` names no execution mode.
     #[error("exec must be container or sandbox-exec, not {0:?}")]
     BadExec(String),
+    /// `isa_level` names no ISA level.
+    #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
+    BadIsaLevel(String),
 }
 
 impl Requirements {
-    /// The requirements of a lease request: its resources, and `os`, `arch`, `disk-gib`
-    /// and `exec` from the capabilities it requires. A capability the request does not
-    /// name is `None`: any. A `disk-gib` or `exec` that is not valid also reads as `None`
-    /// here; [`Request::validate`] refuses such a request, so none that was admitted has
-    /// one ([`Self::try_from_request`] says why).
+    /// The requirements of a lease request: its resources, and `os`, `arch` (through
+    /// [`normalise_arch`]), `isa_level`, `disk-gib` and `exec` from the capabilities it
+    /// requires. A capability the request does not name is `None`: any. A `disk-gib`,
+    /// `exec` or `isa_level` that is not valid also reads as `None` here, and so do the
+    /// other two; [`Request::validate`] refuses such a request, so none that was admitted
+    /// has one ([`Self::try_from_request`] says why).
     pub fn from_request(request: &Request) -> Self {
         Self::try_from_request(request).unwrap_or_else(|_| Self {
             resources: request.resources.clone(),
             disk_bytes: None,
             os: request.capabilities.get(OS_KEY).cloned(),
-            arch: request.capabilities.get(ARCH_KEY).cloned(),
+            arch: arch_of(request),
+            isa_level: None,
             exec: None,
         })
     }
 
-    /// [`Self::from_request`], refusing a `disk-gib` or `exec` that is not valid.
+    /// [`Self::from_request`], refusing a `disk-gib`, `exec` or `isa_level` that is not
+    /// valid.
     ///
     /// # Errors
     ///
     /// [`RequirementsError::BadDisk`] when `disk-gib` is not a whole number of GiB whose
     /// size in bytes fits 64 bits; [`RequirementsError::BadExec`] when `exec` is not a
-    /// mode name. `disk-gib=0` is valid and asks for nothing.
+    /// mode name; [`RequirementsError::BadIsaLevel`] when `isa_level` is not a level
+    /// name. `disk-gib=0` is valid and asks for nothing.
     pub fn try_from_request(request: &Request) -> Result<Self, RequirementsError> {
         let caps = &request.capabilities;
         let disk_bytes = caps
@@ -190,14 +203,28 @@ impl Requirements {
                     .map_err(|_| RequirementsError::BadExec(text.clone()))
             })
             .transpose()?;
+        let isa_level = caps
+            .get(ISA_LEVEL_KEY)
+            .map(|text| {
+                text.parse::<IsaLevel>()
+                    .map_err(|_| RequirementsError::BadIsaLevel(text.clone()))
+            })
+            .transpose()?;
         Ok(Self {
             resources: request.resources.clone(),
             disk_bytes,
             os: caps.get(OS_KEY).cloned(),
-            arch: caps.get(ARCH_KEY).cloned(),
+            arch: arch_of(request),
+            isa_level,
             exec,
         })
     }
+}
+
+/// The `arch` a request requires, in the one spelling.
+fn arch_of(request: &Request) -> Option<String> {
+    let arch = request.capabilities.get(ARCH_KEY)?;
+    Some(normalise_arch(arch).to_owned())
 }
 
 #[cfg(test)]
@@ -266,7 +293,146 @@ mod tests {
         assert_eq!(os_only.arch, None);
         let arch_only = Requirements::from_request(&request(&[("arch", "aarch64")]));
         assert_eq!(arch_only.os, None);
-        assert_eq!(arch_only.arch.as_deref(), Some("aarch64"));
+        assert_eq!(arch_only.arch.as_deref(), Some("arm64"));
+        assert_eq!(arch_only.isa_level, None);
+    }
+
+    /// Asserts that a request's `arch` is held in the one spelling: `aarch64` becomes
+    /// `arm64` through both readers, `arm64` and `x86_64` stay, and a name no release
+    /// knows is kept as sent rather than refused or turned into another. Catches a
+    /// requirement that keeps `aarch64`, which `Offer::fit` compares by equality.
+    #[test]
+    fn the_requested_arch_is_normalised() {
+        for (sent, held) in [
+            ("aarch64", "arm64"),
+            ("arm64", "arm64"),
+            ("x86_64", "x86_64"),
+            ("sparc", "sparc"),
+        ] {
+            let caps = [("arch", sent)];
+            let lenient = Requirements::from_request(&request(&caps));
+            let strict = Requirements::try_from_request(&request(&caps)).unwrap();
+            assert_eq!(lenient.arch.as_deref(), Some(held), "{sent}");
+            assert_eq!(strict.arch.as_deref(), Some(held), "{sent}");
+        }
+        let refused = request(&[("arch", "aarch64"), (EXEC_KEY, "native")]);
+        let lenient = Requirements::from_request(&refused);
+        assert_eq!(lenient.arch.as_deref(), Some("arm64"));
+    }
+
+    /// Asserts that the capabilities a request of the previous release names (none, `os`
+    /// and `arch` as `x86_64` or `arm64`, `disk-gib`, `exec`) read as the requirements they
+    /// did, every field compared, with no ISA level. Catches a new field that a request
+    /// which does not name it fails, or reads as asking for something.
+    #[test]
+    fn previous_request_bodies_parse_unchanged() {
+        let resources = request(&[]).resources;
+        let read = |caps: &[(&str, &str)]| Requirements::try_from_request(&request(caps));
+        let none = Requirements {
+            resources,
+            disk_bytes: None,
+            os: None,
+            arch: None,
+            isa_level: None,
+            exec: None,
+        };
+        assert_eq!(read(&[]), Ok(none.clone()));
+        for arch in ["x86_64", "arm64"] {
+            let want = Requirements {
+                os: Some("linux".to_owned()),
+                arch: Some(arch.to_owned()),
+                ..none.clone()
+            };
+            assert_eq!(read(&[("os", "linux"), ("arch", arch)]), Ok(want));
+        }
+        let want = Requirements {
+            disk_bytes: Some(40 << 30),
+            exec: Some(ExecMode::Container),
+            ..none.clone()
+        };
+        assert_eq!(
+            read(&[(DISK_GIB_KEY, "40"), (EXEC_KEY, "container")]),
+            Ok(want)
+        );
+    }
+
+    /// Asserts that one bad field among `disk-gib`, `exec` and `isa_level` is refused by
+    /// name while the others are good, and that the lenient read then keeps the resources,
+    /// the operating system and the architecture (in the one spelling) and reads all three
+    /// of disk, mode and level as not asked, as its doc says. Catches a fallback that keeps
+    /// a valid level beside a bad disk, or loses the platform.
+    #[test]
+    fn one_bad_field_clears_disk_mode_and_level_together() {
+        let platform = [("os", "linux"), ("arch", "aarch64")];
+        let cases = [
+            (
+                [
+                    (DISK_GIB_KEY, "lots"),
+                    (EXEC_KEY, "container"),
+                    (ISA_LEVEL_KEY, "x86-64-v3"),
+                ],
+                RequirementsError::BadDisk("lots".to_owned()),
+            ),
+            (
+                [
+                    (DISK_GIB_KEY, "40"),
+                    (EXEC_KEY, "native"),
+                    (ISA_LEVEL_KEY, "x86-64-v3"),
+                ],
+                RequirementsError::BadExec("native".to_owned()),
+            ),
+            (
+                [
+                    (DISK_GIB_KEY, "40"),
+                    (EXEC_KEY, "container"),
+                    (ISA_LEVEL_KEY, "x86-64-v9"),
+                ],
+                RequirementsError::BadIsaLevel("x86-64-v9".to_owned()),
+            ),
+        ];
+        for (fields, refusal) in cases {
+            let caps: Vec<(&str, &str)> = platform.iter().chain(&fields).copied().collect();
+            let asked = request(&caps);
+            assert_eq!(Requirements::try_from_request(&asked), Err(refusal.clone()));
+            let lenient = Requirements::from_request(&asked);
+            let want = Requirements {
+                resources: asked.resources.clone(),
+                disk_bytes: None,
+                os: Some("linux".to_owned()),
+                arch: Some("arm64".to_owned()),
+                isa_level: None,
+                exec: None,
+            };
+            assert_eq!(lenient, want, "{refusal}");
+        }
+    }
+
+    /// Asserts that `isa_level` is read as a level of either family, that a request
+    /// without it asks for none, and that a name that is not a level is refused naming
+    /// the text, and read as not asked by `from_request`. Catches a requirement that drops
+    /// the level, or that admits a level no host can state.
+    #[test]
+    fn the_isa_level_comes_from_the_request() {
+        use crate::{ArmVersion, X86Level};
+        let x86 = Requirements::from_request(&request(&[(ISA_LEVEL_KEY, "x86-64-v3")]));
+        assert_eq!(x86.isa_level, Some(IsaLevel::X86_64(X86Level::V3)));
+        let arm = Requirements::try_from_request(&request(&[(ISA_LEVEL_KEY, "armv8.2-a")]));
+        assert_eq!(
+            arm.map(|r| r.isa_level),
+            Ok(Some(IsaLevel::Arm64(ArmVersion::V8_2)))
+        );
+        let none = Requirements::try_from_request(&request(&[("os", "linux")])).unwrap();
+        assert_eq!(none.isa_level, None);
+        for bad in ["x86-64-v9", "", "armv8.2", "X86-64-V3"] {
+            let err = Requirements::try_from_request(&request(&[(ISA_LEVEL_KEY, bad)]));
+            assert_eq!(err, Err(RequirementsError::BadIsaLevel(bad.to_owned())));
+            let lenient = Requirements::from_request(&request(&[(ISA_LEVEL_KEY, bad)]));
+            assert_eq!(lenient.isa_level, None, "{bad:?}");
+        }
+        assert_eq!(
+            RequirementsError::BadIsaLevel("x86-64-v9".into()).to_string(),
+            "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not \"x86-64-v9\""
+        );
     }
 
     /// Asserts that `disk-gib` becomes bytes and `exec` a mode, each on its own, that an

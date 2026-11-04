@@ -288,6 +288,7 @@ impl Node {
             pull_threads: 1,
             files: None,
             egress: None,
+            gpus: None,
         }
     }
 

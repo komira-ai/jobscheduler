@@ -1,0 +1,249 @@
+// The job service: every call a client may make (design section 3.6). The job is the one
+// public concept. No call acquires, renews, holds or releases capacity; the service books
+// a placed job's resources itself, and an operator sees them read-only through ListHosts
+// and GetUsage.
+//
+// Evolution rule, for every file of package jobscheduler.v1. A field number is never
+// reused or renumbered. A field, enum value or method that has shipped is never removed,
+// renamed or given another meaning. A new field is optional to its reader: a message
+// without it means what it meant before the field existed. A new enum value is appended,
+// and a reader reads a value it does not know as the enum's UNSPECIFIED value. A new method
+// is added beside the others. So a reader of this version decodes what a newer writer
+// sends, and a newer reader decodes what this version sends. The schema test of the
+// js-proto crate holds every shipped field and enum value to its name, number and type.
+//
+// Every enum has an UNSPECIFIED value 0. Where a request carries it, a server reads it as
+// the default its enum documents; in an answer it means what its enum documents. A refused
+// call answers a gRPC status, and a refused submit carries a Refusal (job.proto) in the
+// status details.
+
+syntax = "proto3";
+
+package jobscheduler.v1;
+
+import "jobscheduler/v1/fleet.proto";
+import "jobscheduler/v1/job.proto";
+import "jobscheduler/v1/usage.proto";
+
+// The job service.
+service JobService {
+  // Submits a job. Idempotent on the job id: the same id with the same job (every field
+  // but the priority) answers from the job already made, in whatever state it is now, so a
+  // retry after a lost answer never runs the work twice. The job is recorded as queued
+  // before the answer; the call never waits for placement. A refusal records nothing.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  // Reads a job: its state, its host once placed, its times and its host's silence.
+  // Changes nothing.
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  // Lists jobs by state, label and the time they were queued, a page at a time. Changes
+  // nothing.
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  // Cancels a job. Idempotent on the job: cancelling twice is the same as once. A queued
+  // job is cancelled at once; a placed, starting or running job is asked to stop and is
+  // cancelled when its host reports it stopped; an ended job is unchanged.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  // Reads the result of an ended job, for the retention window after it ended. A job that
+  // has not ended has no result, and the call is refused. Changes nothing.
+  rpc GetResult(GetResultRequest) returns (GetResultResponse);
+  // Reads the log tail held so far, also for a running job, and for the retention window
+  // after the job ended. Changes nothing.
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+  // Lists the hosts, each with the resources booked on it. Changes nothing.
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+  // Takes a host out of placement for a time, or extends a cordon already there. A cordon
+  // lapses unless it is extended. Jobs already on the host go on.
+  rpc CordonHost(CordonHostRequest) returns (CordonHostResponse);
+  // Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
+  rpc UncordonHost(UncordonHostRequest) returns (UncordonHostResponse);
+  // Lists the pools. Changes nothing.
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+  // Lists the machine providers. Changes nothing.
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+  // Lists the ended bookings, a page at a time. Changes nothing.
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+}
+
+// The request of SubmitJob.
+message SubmitJobRequest {
+  // The job to submit.
+  JobSpec spec = 1;
+}
+
+// The answer of SubmitJob.
+message SubmitJobResponse {
+  // The job as recorded: queued for a new job, or the job already made for a repeated
+  // submit.
+  Job job = 1;
+}
+
+// The request of GetJob.
+message GetJobRequest {
+  // The id of the job to read.
+  string job_id = 1;
+}
+
+// The answer of GetJob.
+message GetJobResponse {
+  // The job.
+  Job job = 1;
+}
+
+// The request of ListJobs. Each filter that is given narrows the listing; one that is not
+// given matches every job.
+message ListJobsRequest {
+  // Only jobs in one of these states. Empty: every state.
+  repeated JobState states = 1;
+  // Only jobs that carry every one of these labels with the same value. Empty: any labels.
+  map<string, string> labels = 2;
+  // Only jobs queued at or after this time, in milliseconds since the Unix epoch.
+  optional uint64 queued_after_ms = 3;
+  // Only jobs queued before this time, in milliseconds since the Unix epoch.
+  optional uint64 queued_before_ms = 4;
+  // The most jobs in one answer. 0: the server's own page size. A server may answer
+  // fewer.
+  uint32 page_size = 10;
+  // Where to continue: the next page token of the previous answer of the same listing.
+  // Empty: the first page.
+  string page_token = 11;
+}
+
+// The answer of ListJobs.
+message ListJobsResponse {
+  // The jobs of this page.
+  repeated Job jobs = 1;
+  // The token that reads the next page. Empty: this is the last page.
+  string next_page_token = 2;
+}
+
+// The request of CancelJob.
+message CancelJobRequest {
+  // The id of the job to cancel.
+  string job_id = 1;
+}
+
+// The answer of CancelJob.
+message CancelJobResponse {
+  // The job after the cancel was recorded: cancelled if it was queued, with its cancel
+  // requested if it was placed, starting or running, and unchanged if it had ended.
+  Job job = 1;
+}
+
+// The request of GetResult.
+message GetResultRequest {
+  // The id of the ended job whose result to read.
+  string job_id = 1;
+}
+
+// The answer of GetResult.
+message GetResultResponse {
+  // The job's result.
+  JobResult result = 1;
+}
+
+// The request of GetLogs. The call is unary: it answers the tail held at the time of the
+// call.
+message GetLogsRequest {
+  // The id of the job whose log tail to read.
+  string job_id = 1;
+}
+
+// The answer of GetLogs.
+message GetLogsResponse {
+  // The job's state when the tail was read.
+  JobState state = 1;
+  // The last bytes the job wrote to its standard output so far: at most 8 KiB (8192
+  // bytes).
+  bytes stdout_tail = 2;
+  // The last bytes the job wrote to its standard error so far: at most 8 KiB (8192 bytes).
+  bytes stderr_tail = 3;
+  // A stream was cut to that cap: the job wrote more to it than its tail holds.
+  bool truncated = 4;
+}
+
+// The request of ListHosts.
+message ListHostsRequest {}
+
+// The answer of ListHosts.
+message ListHostsResponse {
+  // The hosts, by id.
+  repeated Host hosts = 1;
+}
+
+// The request of CordonHost.
+message CordonHostRequest {
+  // The id of the host to cordon.
+  string host_id = 1;
+  // How long the cordon holds unless it is extended, in seconds from the call. Absent:
+  // 300. The server cuts a longer one to 3600.
+  optional uint32 cordon_secs = 2;
+}
+
+// The answer of CordonHost.
+message CordonHostResponse {
+  // The host after the cordon.
+  Host host = 1;
+  // The host was cordoned before the call, so the cordon was extended, not placed. A
+  // caller lifts only a cordon whose answer said false here.
+  bool already_cordoned = 2;
+}
+
+// The request of UncordonHost.
+message UncordonHostRequest {
+  // The id of the host whose cordon to lift.
+  string host_id = 1;
+}
+
+// The answer of UncordonHost.
+message UncordonHostResponse {
+  // The host after the call.
+  Host host = 1;
+  // The host was cordoned and the call lifted the cordon. False: it was not cordoned.
+  bool lifted = 2;
+}
+
+// The request of ListPools.
+message ListPoolsRequest {}
+
+// The answer of ListPools.
+message ListPoolsResponse {
+  // The pools, by name.
+  repeated Pool pools = 1;
+}
+
+// The request of ListProviders.
+message ListProvidersRequest {}
+
+// The answer of ListProviders.
+message ListProvidersResponse {
+  // The machine providers, by name.
+  repeated Provider providers = 1;
+}
+
+// The request of GetUsage. Each filter that is given narrows the listing; one that is not
+// given matches every record.
+message GetUsageRequest {
+  // Only records of bookings that ended at or after this time, in milliseconds since the
+  // Unix epoch.
+  optional uint64 from_ms = 1;
+  // Only records of bookings that ended before this time, in milliseconds since the Unix
+  // epoch.
+  optional uint64 to_ms = 2;
+  // Only records of this host. Empty: every host.
+  string host_id = 3;
+  // Only records of this job. Empty: every job.
+  string job_id = 4;
+  // The most records in one answer. 0: the server's own page size. A server may answer
+  // fewer.
+  uint32 page_size = 10;
+  // Where to continue: the next page token of the previous answer of the same listing.
+  // Empty: the first page.
+  string page_token = 11;
+}
+
+// The answer of GetUsage.
+message GetUsageResponse {
+  // The records of this page.
+  repeated UsageRecord records = 1;
+  // The token that reads the next page. Empty: this is the last page.
+  string next_page_token = 2;
+}

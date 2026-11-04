@@ -159,6 +159,7 @@ mod tests {
             gpu_class: None,
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
+            isa_level: None,
             exec: js_types::ExecMode::Container,
             price_cents_per_hour: None,
             price_unit: crate::offer::PriceUnit::UsCents,

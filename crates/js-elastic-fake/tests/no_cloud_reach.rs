@@ -7,7 +7,9 @@
 //! where the scan reads. It fails on
 //!
 //! - the name of a cloud's API host anywhere but the one place a provider keeps its default
-//!   address;
+//!   address. The standard prefix of a protobuf type URL holds such a name but is never
+//!   reached, so in the files listed in [`TYPE_URL_FILES`], and only there, that prefix is
+//!   taken out before the scan and the rest of the file is scanned as any other;
 //! - the name of a purchase API (the path or method that makes a machine) anywhere but in
 //!   the provider crate that guards it;
 //! - the names of the provider's raw API types outside that crate, because holding
@@ -46,6 +48,19 @@ const LAMBDA_CRATE: &str = "crates/js-provider-lambdalabs/";
 /// The one file that may name the production host: the default address of the
 /// `lambdalabs` kind, which a pool's `api_url` overrides.
 const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs";
+
+/// The files that write protobuf type URLs, by exact path: the refusal a gRPC status
+/// carries is packed in a `google.protobuf.Any`, whose type URL starts with
+/// [`type_url_prefix`]. The prefix names a type, not a host anything connects to.
+const TYPE_URL_FILES: [&str; 2] = [
+    "crates/js-proto/src/refusal.rs",
+    "crates/js-proto/tests/golden/refusal_status.hex",
+];
+
+/// The standard prefix of a protobuf type URL: `type.` and Google's API domain, then `/`.
+fn type_url_prefix() -> String {
+    joined(&["type.", "google", "apis.com/"])
+}
 
 /// Parts joined, so that this file does not hold what it looks for.
 fn joined(parts: &[&str]) -> String {
@@ -105,17 +120,28 @@ fn names(text: &str, needle: &str) -> bool {
         .contains(&needle.to_ascii_lowercase())
 }
 
+/// The text of `file` the rules are matched against: the whole text, but for a file of
+/// [`TYPE_URL_FILES`] (by exact path), the text without the type-URL prefix.
+fn scanned_text(file: &File) -> String {
+    if TYPE_URL_FILES.contains(&file.path.as_str()) {
+        file.text.replace(&type_url_prefix(), "")
+    } else {
+        file.text.clone()
+    }
+}
+
 /// Every violation in `files`, one line each.
 fn violations(files: &[File], rules: &[Rule]) -> Vec<String> {
     let mut found = Vec::new();
     for file in files {
+        let text = scanned_text(file);
         for rule in rules {
             let allowed = rule
                 .allowed
                 .iter()
                 .any(|prefix| file.path.starts_with(prefix));
             for needle in &rule.needles {
-                if !allowed && names(&file.text, needle) {
+                if !allowed && names(&text, needle) {
                     found.push(format!("{} names {} ({needle})", file.path, rule.what));
                 }
             }
@@ -191,6 +217,7 @@ fn file(path: &str, text: &str) -> File {
 fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
     let rules = rules();
     let host = joined(&["https://api.", "lambda", "labs.com/v1"]);
+    let type_url = format!("{}jobscheduler.v1.Refusal", type_url_prefix());
     let planted = [
         file("crates/js-lease-server/tests/x.rs", &host),
         file(
@@ -232,8 +259,33 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
             "crates/js-scaler/src/lib.rs",
             "a pure crate that names nothing",
         ),
+        file(TYPE_URL_FILES[0], &type_url),
+        file(TYPE_URL_FILES[1], &type_url),
     ];
     assert_eq!(violations(&guarded, &rules), Vec::<String>::new());
+
+    // The type-URL exception takes out the prefix and nothing else, in the listed files
+    // only: an API address, or another cloud's host, in such a file is still named, and so
+    // is the type URL in a file whose path only starts like a listed one.
+    let api_address = joined(&["https://storage.", "google", "apis.com/upload"]);
+    let other_cloud = joined(&["https://ec2.", "amazon", "aws.com"]);
+    let near_misses = [
+        file("crates/js-proto/src/lib.rs", &type_url),
+        file(TYPE_URL_FILES[0], &format!("{type_url}\n{api_address}")),
+        file(TYPE_URL_FILES[0], &format!("{type_url}\n{other_cloud}")),
+        file("crates/js-proto/src/refusal.rs.orig", &type_url),
+    ];
+    let found = violations(&near_misses, &rules);
+    assert_eq!(found.len(), 4, "{found:#?}");
+    for (at, path) in found.iter().zip([
+        "crates/js-proto/src/lib.rs ",
+        "crates/js-proto/src/refusal.rs ",
+        "crates/js-proto/src/refusal.rs ",
+        "crates/js-proto/src/refusal.rs.orig ",
+    ]) {
+        assert!(at.starts_with(path), "{at}");
+        assert!(at.contains("host"), "{at}");
+    }
 
     let other_file_of_the_provider = file("crates/js-provider-lambdalabs/tests/t.rs", &host);
     assert_eq!(violations(&[other_file_of_the_provider], &rules).len(), 1);

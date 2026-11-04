@@ -90,13 +90,19 @@ fn next_round(f: &mut Farm) {
     tick_at(f, at);
 }
 
-fn holding(worker: &str, made: u64, deadline: Option<u64>, give_ups: u32) -> WholeState {
+fn holding(
+    (worker, tail_end): (&str, u64),
+    made: u64,
+    deadline: Option<u64>,
+    give_ups: u32,
+) -> WholeState {
     WholeState::Holding {
         worker: w(worker),
         made: t(made),
         deadline: deadline.map(t),
         give_ups,
         draining: true,
+        tail_end: Some(t(tail_end)),
     }
 }
 
@@ -128,7 +134,10 @@ fn before_drain_after_a_request_holds_nothing_and_then_holds() {
     );
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Early, 1)]));
     tick_at(&mut f, 30_000);
-    assert_eq!(state(&f, op), holding("a", 30_000, Some(90_000), 0));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 30_000, Some(90_000), 0)
+    );
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Holding, 1)]));
 }
 
@@ -140,7 +149,10 @@ fn before_drain_after_a_request_holds_nothing_and_then_holds() {
 fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600)]);
     let op = ask(&mut f);
-    assert_eq!(state(&f, op), holding("a", 10_000, Some(70_000), 0));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 10_000, Some(70_000), 0)
+    );
     let mark = f.s.whole_mark(op).cloned().expect("marked");
     assert_eq!(
         (mark.made, Some(mark.deadline)),
@@ -153,13 +165,14 @@ fn a_hold_shows_its_worker_deadline_and_whether_it_is_draining_until_granted() {
         deadline,
         give_ups,
         draining,
+        tail_end,
     } = state(&f, op)
     else {
         panic!("holds");
     };
     assert_eq!(
-        (worker, made, deadline, give_ups),
-        (w("a"), t(10_000), Some(t(70_000)), 0)
+        (worker, made, deadline, give_ups, tail_end),
+        (w("a"), t(10_000), Some(t(70_000)), 0, Some(t(600_000)))
     );
     assert!(!draining);
     let s = summary(&f);
@@ -192,7 +205,10 @@ fn a_given_up_hold_is_barred_until_the_backoff_ends_then_holds_again() {
     tick_at(&mut f, 79_999);
     assert_eq!(state(&f, op), barred);
     tick_at(&mut f, 80_000);
-    assert_eq!(state(&f, op), holding("a", 80_000, Some(140_000), 1));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 80_000, Some(140_000), 1)
+    );
     f.finish(&grants[0]);
     assert_eq!(f.advance(90_000).len(), 1);
     assert_eq!(f.s.whole_state(op), None);
@@ -206,15 +222,24 @@ fn a_given_up_hold_is_barred_until_the_backoff_ends_then_holds_again() {
 fn a_given_up_hold_moves_back_to_the_cheaper_worker_with_one_give_up() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
     let op = ask(&mut f);
-    assert_eq!(state(&f, op), holding("a", 10_000, Some(70_000), 0));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 10_000, Some(70_000), 0)
+    );
     tick_at(&mut f, 70_000);
-    assert_eq!(state(&f, op), holding("b", 70_000, Some(130_000), 1));
+    assert_eq!(
+        state(&f, op),
+        holding(("b", 1_200_000), 70_000, Some(130_000), 1)
+    );
     tick_at(&mut f, 130_000);
     // Changed with the non-sticky pick (design rule 2, step 4): the hold is picked again
     // every round, so when `a`'s back-off ends at 80 s it moves back to `a`, the cheaper to
     // drain, keeping the time it was made (70 s) and taking its deadline from the move
     // (80 s plus the minute). The count is still one: a move is not a give-up.
-    assert_eq!(state(&f, op), holding("a", 70_000, Some(140_000), 1));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 70_000, Some(140_000), 1)
+    );
     f.finish(&grants[0]);
     let granted = f.advance(140_000);
     assert_eq!(granted.len(), 1);
@@ -233,15 +258,21 @@ fn at_the_cap_the_hold_has_no_deadline_and_is_not_given_up_again() {
     let (mut f, grants) = busy(cfg(0, 2), &[("a", 600), ("b", 1_200)]);
     let op = ask(&mut f);
     tick_at(&mut f, 70_000);
-    assert_eq!(state(&f, op), holding("b", 70_000, Some(130_000), 1));
+    assert_eq!(
+        state(&f, op),
+        holding(("b", 1_200_000), 70_000, Some(130_000), 1)
+    );
     tick_at(&mut f, 130_000);
-    assert_eq!(state(&f, op), holding("a", 70_000, Some(140_000), 1));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 600_000), 70_000, Some(140_000), 1)
+    );
     tick_at(&mut f, 140_000);
-    assert_eq!(state(&f, op), holding("b", 140_000, None, 2));
+    assert_eq!(state(&f, op), holding(("b", 1_200_000), 140_000, None, 2));
     tick_at(&mut f, 150_000);
-    assert_eq!(state(&f, op), holding("a", 140_000, None, 2));
+    assert_eq!(state(&f, op), holding(("a", 600_000), 140_000, None, 2));
     tick_at(&mut f, 900_000);
-    assert_eq!(state(&f, op), holding("a", 140_000, None, 2));
+    assert_eq!(state(&f, op), holding(("a", 600_000), 140_000, None, 2));
     f.finish(&grants[0]);
     let granted = f.advance(910_000);
     assert_eq!(granted.len(), 1);
@@ -594,7 +625,10 @@ fn a_request_both_barred_and_stopped_shows_the_stop() {
     });
     assert!(f.grants().is_empty(), "only b could run it, and it is busy");
     let op = ask(&mut f);
-    assert_eq!(state(&f, op), holding("a", 10_000, Some(70_000), 0));
+    assert_eq!(
+        state(&f, op),
+        holding(("a", 60_000), 10_000, Some(70_000), 0)
+    );
     tick_at(&mut f, 70_000);
     assert_eq!(f.s.whole_give_ups(op), 1);
     assert_eq!(f.s.whole_wait(op), Some(WholeWait::LastCapable));

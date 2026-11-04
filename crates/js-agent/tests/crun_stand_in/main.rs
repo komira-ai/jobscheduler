@@ -12,6 +12,7 @@
 
 mod blind;
 mod egress;
+mod gpus;
 mod images;
 mod node;
 mod open;

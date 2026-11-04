@@ -310,15 +310,15 @@ fn the_grep_for_secrets_finds_a_planted_one() {
 }
 
 /// Asserts the agent pins against the catalog. A pool that launches and has an agent
-/// pinned for x86_64 only is unavailable while the catalog holds an offer of aarch64, and
-/// says which offer, which architecture and which field; a pool in `plan` mode is not
+/// pinned for x86_64 only is unavailable while the catalog holds an offer of arm64, and
+/// says which offer, which architecture and which field, in the one spelling; a pool in `plan` mode is not
 /// held to it, and a live pool whose offers are all pinned is available. It catches a pool
 /// that would launch a machine for which it has no agent, or fall back to another
 /// architecture's.
 #[tokio::test]
 async fn a_live_pool_is_unavailable_for_an_offer_of_an_architecture_it_has_no_agent_for() {
     let mut arm = a10("gpu_1x_a10_arm", 1, 129);
-    arm.arch = "aarch64".to_owned();
+    arm.arch = "arm64".to_owned();
     let live = Options {
         live: true,
         exec: "container",
@@ -331,7 +331,7 @@ async fn a_live_pool_is_unavailable_for_an_offer_of_an_architecture_it_has_no_ag
     assert_eq!(
         reasons(&pool),
         [
-            "catalog: gpu_1x_a10_arm is for the architecture aarch64, which has no agent pin (agent.aarch64)"
+            "catalog: gpu_1x_a10_arm is for the architecture arm64, which has no agent pin (agent.arm64)"
         ]
     );
 

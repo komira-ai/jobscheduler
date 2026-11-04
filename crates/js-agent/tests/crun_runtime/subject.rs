@@ -9,7 +9,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, config_dir};
+use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, GpuSettings, config_dir};
 use js_agent::image::RegistryImages;
 use js_agent::lifecycle::{
     Capacity, Config, DirLayout, MountRoots, Prepared, RunHandle, RunSpec, ScratchRoot, StateRoot,
@@ -164,6 +164,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         pull_threads: 1,
         files: None,
         egress: None,
+        gpus: None,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));
@@ -185,6 +186,27 @@ impl CrunSubject {
         settings.host_id = host_id.to_owned();
         CrunRuntime::open(settings, registry(&self.settings.scratch))
             .unwrap_or_else(|e| panic!("open as {host_id}: {e}"))
+    }
+
+    /// Another runtime over the same store and cgroup, registered as `host_id`, that gives
+    /// the runs that book GPUs what `gpus` lists.
+    pub fn open_with_gpus(&self, host_id: &str, gpus: GpuSettings) -> CrunRuntime {
+        let mut settings = self.settings.clone();
+        settings.host_id = host_id.to_owned();
+        settings.gpus = Some(gpus);
+        CrunRuntime::open(settings, registry(&self.settings.scratch))
+            .unwrap_or_else(|e| panic!("open with GPUs as {host_id}: {e}"))
+    }
+
+    /// A directory `name` below the subject's that the job's ids can read: `0755`.
+    pub fn searchable_dir(&self, name: &str) -> PathBuf {
+        self.made(&[name], 0o755)
+    }
+
+    /// The unpacked root of the subject's image in its store.
+    pub fn image_root(&self) -> PathBuf {
+        let digest = self.image.rsplit_once('@').map_or("", |(_, digest)| digest);
+        js_contain::oci::image::published_root(&self.settings.scratch, digest)
     }
 
     /// The directory of the lease `name`.

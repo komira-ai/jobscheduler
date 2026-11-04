@@ -18,7 +18,7 @@ changes code that ships is released as the next version, after the jobs of `ci` 
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the binaries for
-   `x86_64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), checks that
+   `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each target on a GitHub-hosted runner of its own architecture, checks that
    the Linux ones are static and that `--version` prints the release version, and packages them:
    `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
    lists them) and `tar` makes it. `sums` writes one `SHA256SUMS` over the archives.
@@ -131,25 +131,30 @@ For version `X.Y.Z`:
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
 | `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
+| `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts and `LICENSE` |
+| `js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js` binary for arm64 Linux hosts and `LICENSE` |
+| `js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-agent` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-agent.toml`, as in the x86_64 archive |
+| `js-bundle-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-bundle` binary for arm64 Linux hosts and `LICENSE` |
+| `js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-mdm` binary for arm64 Linux hosts and `LICENSE` |
 | `js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE` |
 | `js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the ten archives |
+| `SHA256SUMS` | SHA-256 of the fifteen archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux `js-agent` archive also holds `updater.d/js-agent.toml`, the declaration the host
+The Linux `js-agent` archives, of both architectures, also hold `updater.d/js-agent.toml`, the declaration the host
 updater loads the js-agent hook's rights from (`packaging/js-agent/updater.d/js-agent.toml`; the
 updater's own install step puts it in `/etc/updater.d` from a verified release, after checking
 it asks for no more than the approved one). It sits beside the binary, at the name kbf's release
-unpacker takes a declaration by (`updater.d/<binary>.toml`), and the attestation of the archive
+unpacker takes a declaration by (`updater.d/<binary>.toml`), and the attestation of each archive
 covers it. It is the file the js-agent deb carries as
 `/usr/share/js-agent/updater.d/js-agent.toml`. `crates/xtask/tests/js_agent_declaration.rs` loads
 it with the updater's own validator (kbf's `update-rights`, at the revision the root manifest
 pins) and with the hook's, and fails if the deb or the archive leaves it out.
 
-The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
+The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`. The js-agent Debian package (`.github/workflows/js-agent-deb.yml`) is built for x86_64 only: there is no arm64 deb, and an arm64 host takes the agent from its release archive.
 
-Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run. The Linux archives are held to this by the comparison in `publish`; for the Mac ones it is watched on the first real release.
+Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when they are built again on a hosted arm64 runner. The Linux archives of both architectures are held to this by the comparison in `publish`, as every archive is; for the Mac ones and the Linux arm64 ones it is watched on the first real release. `crates/xtask/tests/release_archive_compat.rs` checks the archiving half for the arm64 agent archive: the workflow's `tar` options and `gzip -n` make the same bytes from the same files, whatever the working directory and the files' own times.
 
 ## Downloading and verifying
 
@@ -168,6 +173,12 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
 `-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`, and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
+
+On an arm64 Linux host, write `aarch64-unknown-linux-musl` where these say `x86_64-unknown-linux-musl`,
+in the pattern and in the file name: for the agent `-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'`
+and `gh attestation verify js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz ...`. On either Linux
+architecture `uname -m` prints the first part of the target (`x86_64` or `aarch64`), so
+`-p "js-agent-*-$(uname -m)-unknown-linux-musl.tar.gz"` picks the host's own.
 
 The checksum check proves the download is intact. The attestation check proves the file was built
 from this repository by the `release` workflow, from `main` (`--source-ref`), at exactly that commit

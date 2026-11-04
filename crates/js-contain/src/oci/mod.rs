@@ -49,6 +49,7 @@
 //! CPU limits stay on the lease cgroup.
 
 pub(crate) mod crun;
+mod devices;
 mod gc;
 pub(crate) mod hardening;
 pub mod helper;

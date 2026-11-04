@@ -1,5 +1,14 @@
 //! Taking up again the operations a state store holds: a scheduler rebuilt after its
 //! process ended, or taken over by another.
+//!
+//! A recovered operation is queued at the scheduler's time now, and its whole-node state
+//! (the marks, the give-up counts and the bars) starts empty: [`Recovered`] carries none
+//! of it. A caller that keeps that state outside the scheduler puts it back with
+//! [`Scheduler::restore_whole`], the operation's original queue time included, so that a
+//! restart does not restart `drain_after`. It calls it under the same lock as
+//! [`Scheduler::recover`] (or [`Scheduler::take_in`]) and before the next placement round,
+//! which would otherwise mark from the reset state. Like `recover`, it is a method of the
+//! scheduler, not an [`crate::Event`].
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;

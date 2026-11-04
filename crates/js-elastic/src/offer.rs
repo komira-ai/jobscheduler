@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use js_types::{ExecMode, Requirements};
+use js_types::{ExecMode, IsaLevel, Requirements};
 
 /// What a job needs of a host. The scaler and the matcher read one definition.
 pub type Demand = Requirements;
@@ -61,6 +61,9 @@ pub enum Dimension {
     Os,
     /// The CPU architecture differs.
     Arch,
+    /// The demand asks for an ISA level the offer does not state, or states one of
+    /// another family or a lower one.
+    IsaLevel,
     /// The execution mode differs.
     Exec,
     /// The offer has less CPU.
@@ -95,8 +98,13 @@ pub struct Offer {
     pub gpu_class: Option<GpuClass>,
     /// The operating system (`linux`, `macos`).
     pub os: String,
-    /// The CPU architecture (`x86_64`, `aarch64`).
+    /// The CPU architecture, canonical: `x86_64` or `arm64` (every constructor of an offer
+    /// reads a source's `aarch64` as `arm64`; an architecture no release knows is kept as
+    /// the source spells it).
     pub arch: String,
+    /// The highest ISA level a machine from this offer supports. `None`: not stated, and
+    /// then the offer fits no demand that asks for a level.
+    pub isa_level: Option<IsaLevel>,
     /// The mode a host from this offer runs jobs in.
     pub exec: ExecMode,
     /// The price per hour, in the smallest part of the unit. `None`: not priced.
@@ -109,14 +117,17 @@ pub struct Offer {
 
 impl Offer {
     /// Whether a host from this offer would serve `demand`: the same platform where the
-    /// demand names one, and at least the CPU, memory, disk and GPUs asked for (the disk
+    /// demand names one, an ISA level of the same family at least as high where the demand
+    /// asks for one (an offer that states no level serves no such demand), and at least
+    /// the CPU, memory, disk and GPUs asked for (the disk
     /// both as the `disk-gib` requirement and as the scratch disk the request books), with
     /// the GPU class when GPUs are asked for. Whether the offer is [available](Self::available)
     /// is not part of the fit.
     ///
     /// # Errors
     ///
-    /// The first [`Dimension`] it fails: platform first, then size.
+    /// The first [`Dimension`] it fails: platform first (the ISA level after the
+    /// architecture), then size.
     pub fn fit(&self, demand: &Demand) -> Result<(), Dimension> {
         let wanted = &demand.resources;
         let checks = [
@@ -127,6 +138,12 @@ impl Offer {
             (
                 Dimension::Arch,
                 demand.arch.as_ref().is_none_or(|arch| *arch == self.arch),
+            ),
+            (
+                Dimension::IsaLevel,
+                demand
+                    .isa_level
+                    .is_none_or(|want| self.isa_level.is_some_and(|have| have.satisfies(want))),
             ),
             (
                 Dimension::Exec,
@@ -180,6 +197,7 @@ mod tests {
             gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
+            isa_level: None,
             exec: ExecMode::Container,
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
@@ -193,6 +211,7 @@ mod tests {
             disk_bytes: Some(512 << 30),
             os: Some("linux".to_owned()),
             arch: Some("x86_64".to_owned()),
+            isa_level: None,
             exec: Some(ExecMode::Container),
         }
     }
@@ -207,6 +226,7 @@ mod tests {
             disk_bytes: None,
             os: None,
             arch: None,
+            isa_level: None,
             exec: None,
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
@@ -227,7 +247,7 @@ mod tests {
         mac.os = "macos".to_owned();
         assert_eq!(mac.fit(&demand()), Err(Dimension::Os));
         let mut arm = offer();
-        arm.arch = "aarch64".to_owned();
+        arm.arch = "arm64".to_owned();
         assert_eq!(arm.fit(&demand()), Err(Dimension::Arch));
         let mut any = demand();
         (any.os, any.arch) = (None, None);
@@ -240,6 +260,83 @@ mod tests {
         let mut arch_only = demand();
         arch_only.os = None;
         assert_eq!(mac.fit(&arch_only), Ok(()));
+    }
+
+    /// The level `name`, which is one.
+    fn level(name: &str) -> IsaLevel {
+        name.parse().unwrap()
+    }
+
+    /// The test offer stating `name` as its level (`None`: stating none).
+    fn at(name: Option<&str>) -> Offer {
+        Offer {
+            isa_level: name.map(level),
+            ..offer()
+        }
+    }
+
+    /// The test demand asking for the level `name` (`None`: asking for none).
+    fn asking(name: Option<&str>) -> Demand {
+        Demand {
+            isa_level: name.map(level),
+            ..demand()
+        }
+    }
+
+    /// Asserts that an ISA level is at least, within the family: an `x86-64-v3` demand
+    /// fits offers stating v3 and v4 and fails one stating v2, an `armv8.2-a` demand fits
+    /// `armv8.4-a` and fails `armv8.0-a`, both by the ISA level dimension; that a demand
+    /// with a level fails an offer that states none, and one without a level fits an
+    /// offer that states one. Catches a fit that compares levels for equality, ignores the
+    /// field, or counts an offer that has not said its level.
+    #[test]
+    fn an_isa_level_request_matches_at_least_within_the_family() {
+        let v3 = asking(Some("x86-64-v3"));
+        assert_eq!(at(Some("x86-64-v3")).fit(&v3), Ok(()));
+        assert_eq!(at(Some("x86-64-v4")).fit(&v3), Ok(()));
+        assert_eq!(at(Some("x86-64-v2")).fit(&v3), Err(Dimension::IsaLevel));
+        let mut arm = asking(Some("armv8.2-a"));
+        arm.arch = Some("arm64".to_owned());
+        let arm_at = |name| Offer {
+            arch: "arm64".to_owned(),
+            ..at(Some(name))
+        };
+        assert_eq!(arm_at("armv8.2-a").fit(&arm), Ok(()));
+        assert_eq!(arm_at("armv8.4-a").fit(&arm), Ok(()));
+        assert_eq!(arm_at("armv8.0-a").fit(&arm), Err(Dimension::IsaLevel));
+        assert_eq!(at(None).fit(&v3), Err(Dimension::IsaLevel));
+        assert_eq!(at(Some("x86-64-v1")).fit(&asking(None)), Ok(()));
+        assert_eq!(at(None).fit(&asking(None)), Ok(()));
+    }
+
+    /// Asserts that an ISA level of one family never serves a demand for the other: an
+    /// `x86-64-v3` demand against an offer stating `armv8.4-a`, and an `armv8.2-a` demand
+    /// against `x86-64-v4`, both fail by the ISA level dimension (the demands name no
+    /// architecture, so only the level decides). Catches levels ranked on one scale.
+    #[test]
+    fn an_isa_request_does_not_cross_families() {
+        let mut v3 = asking(Some("x86-64-v3"));
+        v3.arch = None;
+        let mut a82 = asking(Some("armv8.2-a"));
+        a82.arch = None;
+        assert_eq!(at(Some("armv8.4-a")).fit(&v3), Err(Dimension::IsaLevel));
+        assert_eq!(at(Some("x86-64-v4")).fit(&a82), Err(Dimension::IsaLevel));
+    }
+
+    /// Asserts that an offer whose architecture differs is named by the architecture
+    /// before the ISA level, and a level miss before any size. Catches a dimension order
+    /// that reports a level miss for a machine of the wrong architecture.
+    #[test]
+    fn the_arch_is_named_before_the_level_and_the_level_before_the_size() {
+        let mut arm = at(Some("armv8.4-a"));
+        arm.arch = "arm64".to_owned();
+        assert_eq!(arm.fit(&asking(Some("x86-64-v3"))), Err(Dimension::Arch));
+        let mut small = at(Some("x86-64-v2"));
+        small.cpu_millis = 1;
+        assert_eq!(
+            small.fit(&asking(Some("x86-64-v3"))),
+            Err(Dimension::IsaLevel)
+        );
     }
 
     /// Asserts that each size and mode dimension refuses on its own, by name, and that

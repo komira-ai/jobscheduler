@@ -97,22 +97,29 @@
 //! keeps it with the end, so it can be read again. A container never started has an empty
 //! tail; one still running has what it wrote so far.
 //!
+//! # GPUs
+//!
+//! A runtime opened with a device list ([`CrunSettings::gpus`], from `--gpu-device`) runs GPU
+//! jobs: a run that booked GPU indices is given their nodes, a device cgroup that allows only
+//! those, and the listed driver mounts and variables (the module `gpu`). Without one,
+//! `supports_gpus` is false and a start naming a GPU is refused.
+//!
 //! # Network
 //!
-//! In mode none (`--egress none`, the default) a job has loopback only and `check_egress`
-//! has nothing to check. With an allow-list the runtime holds the agent's [`EgressPort`]: it
-//! checks the firewall before every create, wires the container's network namespace (one
-//! interface to the host) after `Oci::start` while the container's init holds the job until
-//! the default route is there, and releases the wiring once the run has ended or is removed.
-//! A container that cannot be wired runs no job: its start fails and the lease is removed.
+//! In mode none (`--egress none`, the default) a job has loopback only. With an allow-list the
+//! runtime checks the firewall through the agent's [`EgressPort`] before every create, wires
+//! the container's namespace (one interface to the host) after `Oci::start` while its init
+//! holds the job until the default route is there, and releases the wiring when the run ends
+//! or is removed; a container that cannot be wired runs no job and its lease is removed.
 //!
 //! # Not here
 //!
-//! No GPUs (`supports_gpus` is false and a start naming one is refused), no host jobs and no
-//! read-back of the container's mounts.
+//! No host jobs and no read-back of the container's mounts.
 
 mod claim;
 mod dirs;
+mod fault;
+mod gpu;
 mod ledger;
 #[cfg(test)]
 mod ledger_tests;
@@ -123,10 +130,15 @@ mod tests;
 mod wire;
 
 use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
+use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
+pub use gpu::{
+    DESTINATION_OFF_LIMITS, DeviceProblem, EnvProblem, GpuFlagError, GpuPassthrough, GpuSettings,
+    INDEX, MountProblem, NO_GPUS, NodeError, ReadNode, read_node,
+};
 
 pub use wire::{
     CgroupError, CgroupSource, ID_TOOL_PATH, IdSources, PULL_THREADS, Seams, WireError, oci_config,
@@ -144,13 +156,13 @@ use js_agent_wire::LogTail;
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, JobError, LeaseDirs, Oci, OciConfig, OciError, Owner};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner};
 use js_contain::running::Running;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::{Chown, NAME_PREFIX, agent_tag, container_name};
-use crate::image::{ConfigError, ImageConfig, config_path};
+use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
     RuntimeError, Status, Ticket, label,
@@ -207,6 +219,8 @@ pub struct CrunSettings {
     /// The host's egress, which wires each container's network: none in mode none, where a
     /// job has loopback only ([`start_egress`]).
     pub egress: Option<Arc<dyn EgressPort>>,
+    /// The GPUs a run is given, when the agent passes them (`--gpu-device`).
+    pub gpus: Option<GpuSettings>,
 }
 
 /// What a runtime does that a test replaces: giving a file away and reading the clock.
@@ -309,44 +323,6 @@ pub enum CrunError {
     Ledger(#[from] LedgerError),
 }
 
-/// Why a run could not be made into a container.
-#[derive(Debug, thiserror::Error)]
-enum Fault {
-    #[error("this runtime runs contained jobs only")]
-    NotContained,
-    #[error("containers on this runtime cannot use a GPU")]
-    Gpu,
-    #[error("this runtime runs container jobs only")]
-    Native,
-    #[error("{0}")]
-    Image(String),
-    #[error("run id {0:?} cannot name a container")]
-    Name(String),
-    #[error("a container of run {0} exists")]
-    InUse(String),
-    #[error("this runtime has no run files directory")]
-    NoFiles,
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Book(#[from] js_types::TypeError),
-    #[error("remove an image that has no config: {0}")]
-    Evict(#[from] io::Error),
-    #[error("the image's pin: {0}")]
-    Pin(#[from] JobError),
-    #[error("{what}: {why}")]
-    Step { what: &'static str, why: String },
-}
-
-impl Fault {
-    fn step(what: &'static str, why: &dyn std::fmt::Display) -> Self {
-        Self::Step {
-            what,
-            why: why.to_string(),
-        }
-    }
-}
-
 /// How far a container is.
 enum State {
     /// Made and not started.
@@ -381,6 +357,7 @@ pub struct CrunRuntime {
     host_id: String,
     configs: PathBuf,
     files: Option<FilesRoot>,
+    gpus: Option<GpuSettings>,
     /// Whether the leases' directories are made beside the runs' own
     /// ([`OciConfig::leases_in`]), where [`Runtime::lease_dir`] names them.
     leases_beside: bool,
@@ -474,6 +451,7 @@ impl CrunRuntime {
             host_id: settings.host_id,
             configs,
             files: settings.files,
+            gpus: settings.gpus,
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,
@@ -675,9 +653,8 @@ impl CrunRuntime {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
         }
-        if !spec.gpu_indices.is_empty() {
-            return Err(Fault::Gpu);
-        }
+        // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
+        let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
         let Body::Container { image: given, args } = &spec.body else {
             return Err(Fault::Native);
         };
@@ -699,7 +676,7 @@ impl CrunRuntime {
             .record(&entry)
             .map_err(|why| Fault::step("record the lease's labels", &why))?;
         let (container, lease, cgroup) =
-            match self.make_recorded(spec, (given, &image), args, &name) {
+            match self.make_recorded(spec, (given, &image), args, &name, gpu) {
                 Ok(made) => made,
                 Err(fault) => {
                     // What the failed step left; none of it is a container. The sidecar goes with
@@ -727,14 +704,15 @@ impl CrunRuntime {
         Ok(name)
     }
 
-    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and the
-    /// resources of the lease `name`, whose sidecar is recorded.
+    /// The pinned image (`given`, parsed as `image`), the container spec with `args` and what
+    /// its GPUs give it, and the resources of the lease `name`, whose sidecar is recorded.
     fn make_recorded(
         &self,
         spec: &RunSpec,
         (given, image): (&str, &PinnedImage),
         args: &[String],
         name: &str,
+        gpu: gpu::Wiring,
     ) -> Result<(ContainerSpec, LeaseDirs, LeaseCgroup), Fault> {
         // Before the image is made sure of: from then on no agent on the store removes it
         // until the lease is torn down.
@@ -756,11 +734,14 @@ impl CrunRuntime {
                 .block_on(ensure_image(&self.oci, image, limit))
                 .map_err(Fault::Image)?;
         }
+        let rootfs = js_contain::oci::image::published_root(&self.store, &image.digest);
+        gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
         let config = ImageConfig::kept(&self.configs, &image.digest)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
         let mut container = container_spec(name, spec, image, &lease, cgroup.name());
         config.apply(args, &mut container)?;
+        gpu.apply(&mut container);
         self.make_resources(spec, &container, &lease, &cgroup)?;
         Ok((container, lease, cgroup))
     }
@@ -1016,7 +997,7 @@ impl Runtime for CrunRuntime {
     }
 
     fn supports_gpus(&self) -> bool {
-        false
+        self.gpus.is_some()
     }
 
     fn check_egress(&self) -> Result<(), RuntimeError> {

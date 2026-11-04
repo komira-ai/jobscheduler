@@ -344,9 +344,8 @@ async fn bad_request_reasons_do_not_echo_the_request() {
     );
 }
 
-/// Asserts that a `disk-gib` or `exec` capability that is not a requirement is a 400
-/// that names the capability and never repeats the value the client sent, and that good
-/// values are accepted.
+/// Asserts that a `disk-gib`, `exec` or `isa_level` capability that is not a requirement
+/// is a 400 that names the capability and never repeats the value the client sent.
 #[tokio::test]
 async fn a_bad_disk_or_exec_is_a_400_that_does_not_echo_it() {
     let h = Harness::new("bad_disk_exec").await;
@@ -357,6 +356,10 @@ async fn a_bad_disk_or_exec_is_a_400_that_does_not_echo_it() {
             "disk-gib must be a whole number of GiB below 2^34",
         ),
         ("exec", "exec must be container or sandbox-exec"),
+        (
+            "isa_level",
+            "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a",
+        ),
     ] {
         let mut caps = json!({});
         caps[key] = json!(marker);

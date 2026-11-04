@@ -310,6 +310,7 @@ fn request(gpus: u64) -> Demand {
         disk_bytes: None,
         os: None,
         arch: Some("x86_64".to_owned()),
+        isa_level: None,
         exec: None,
     }
 }
@@ -497,7 +498,8 @@ fn the_catalog_carries_every_architecture_and_leaves_the_choice_to_the_demand() 
     let rig = rig(live(5));
     for (architecture, name) in [
         (Architecture::X86_64, "x86_64"),
-        (Architecture::Arm64, "aarch64"),
+        (Architecture::Arm64, "arm64"),
+        (Architecture::Other("aarch64".to_owned()), "arm64"),
         (Architecture::Other("riscv".to_owned()), "riscv"),
     ] {
         rig.fake.set_offers(vec![offer(

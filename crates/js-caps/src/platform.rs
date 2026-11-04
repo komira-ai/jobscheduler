@@ -34,8 +34,8 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
-use crate::cpu::Arch;
-use crate::level::IsaLevel;
+use js_types::{Arch, IsaLevel};
+
 use crate::matching::{Request, RequestError, is_own_key};
 
 /// The operating systems a kbf daemon runs on, as its node report names them.

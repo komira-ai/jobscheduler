@@ -3,12 +3,27 @@
 
 use std::cmp::Reverse;
 
+use js_types::sched::usage::RunEnd;
 use js_types::sched::{
     Answer, ControlRecord, Effect, Failure, LeaseGrant, LeaseId, OperationId, Outcome, Refusal,
     RefusalRecord, ResultRecord, StartLease,
 };
 
-use super::{OpState, Scheduler, StartSent, run_end_of};
+use super::{OpState, Scheduler, StartSent};
+
+/// How a run that ends the operation ended: on its own, killed at its own memory limit or
+/// by the node, or cut short (its result says nothing about how the action runs).
+const fn run_end_of(outcome: Outcome) -> RunEnd {
+    match outcome {
+        Outcome::Completed { .. } => RunEnd::Clean,
+        Outcome::Failed(Failure::OutOfMemory) => RunEnd::KilledAtLimit,
+        Outcome::Failed(Failure::NodeMemoryPressure) => RunEnd::BackstopKilled,
+        Outcome::Failed(Failure::Infra | Failure::Lost(_)) => RunEnd::Requeued,
+        Outcome::Failed(Failure::Timeout | Failure::Invalid | Failure::MissingInput) => {
+            RunEnd::Cancelled
+        }
+    }
+}
 
 impl Scheduler {
     /// A committed refusal: the operation is finished, and its waiters are answered.

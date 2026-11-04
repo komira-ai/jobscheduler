@@ -1,5 +1,6 @@
 //! The host contract the hello reports (design: pools, providers and host networking,
-//! section 3.6): `runtime`, `exec` and `gpu-toolkit`, from what the agent actually found.
+//! section 3.6): `runtime`, `exec` and `gpu-toolkit`, from what the agent actually found, and
+//! `gpu-passthrough`.
 //!
 //! The capabilities are not flags. An operator cannot set them with `--capability`
 //! ([`js_caps::DETECTED_KEYS`]), so a pool that requires them is not satisfied by a
@@ -17,6 +18,10 @@
 //!   passed the probe (an agent whose root did not pass does not start). The server books
 //!   that default for such a run and places a job that sets `disk_bytes` only on a host
 //!   that reports `scratch-quota`.
+//! - `gpu-passthrough` is `true` for a `--runtime crun` agent given `--gpu-device`, whose
+//!   flags passed the start check: its runtime gives a job the device nodes, the driver mounts
+//!   and the variables of the GPUs it booked. It is for the operator; a GPU job is placed by
+//!   the GPUs a host reports, as before.
 //! - `gpu-toolkit` is `true` when the host offers GPUs and `--gpu-toolkit-hook` ran and
 //!   exited 0. The hook is the operator's check that a container can use a GPU (for
 //!   example, a container that runs `nvidia-smi`); the agent knows only its exit status.
@@ -27,8 +32,8 @@ use std::path::Path;
 
 use js_agent_wire::Hello;
 use js_caps::{
-    EXEC, FLAG_SET, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA,
-    SCRATCH_QUOTA_PROJECT,
+    EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
+    SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
 use js_types::ExecMode;
 
@@ -78,14 +83,16 @@ pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
-/// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on.
-/// Returns the warnings the operator should read.
+/// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on;
+/// `gpu_passthrough` says the runtime gives jobs the GPUs they book. Returns the warnings the
+/// operator should read.
 pub(crate) fn report(
     hello: &mut Hello,
     hook: Option<&ToolkitHook>,
     commands: &dyn CommandRunner,
     run_files: bool,
     scratch_default_gib: Option<u64>,
+    gpu_passthrough: bool,
 ) -> Vec<String> {
     let mode = ExecMode::Container.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
@@ -96,6 +103,11 @@ pub(crate) fn report(
         hello
             .capabilities
             .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    }
+    if gpu_passthrough {
+        hello
+            .capabilities
+            .insert(GPU_PASSTHROUGH.to_owned(), FLAG_SET.to_owned());
     }
     if let Some(gib) = scratch_default_gib {
         hello

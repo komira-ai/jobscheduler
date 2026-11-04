@@ -65,6 +65,11 @@ impl Gate {
     pub(super) fn end_round(&mut self, holds: Holds) {
         self.last = holds.by_operation;
     }
+
+    /// Forgets the hold `operation` had last round, so its next hold keeps no earlier start.
+    pub(super) fn forget(&mut self, operation: OperationId) {
+        self.last.remove(&operation);
+    }
 }
 
 /// The tail end `drain` gives `worker`: when a request that holds it is expected to start.

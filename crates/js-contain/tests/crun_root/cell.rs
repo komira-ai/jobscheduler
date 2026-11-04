@@ -308,6 +308,7 @@ impl Cell {
             target: "/sync".to_owned(),
             source: dir,
             read_only: false,
+            recursive: true,
         }
     }
 
@@ -347,6 +348,7 @@ impl Cell {
             limits: shape.limits,
             shared: Vec::new(),
             mounts: shape.mounts,
+            devices: Vec::new(),
         };
         Lease {
             spec,

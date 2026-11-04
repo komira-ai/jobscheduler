@@ -247,6 +247,74 @@ fn a_stored_offer_rebuilds_its_offer() {
     assert_eq!(shown.gpu_class, None);
 }
 
+/// Asserts that a record written when offers spelt Arm `aarch64` rebuilds an `arm64`
+/// offer, which fits an `arm64` demand, and that another architecture is kept as written.
+/// Catches a rebuilt offer that keeps `aarch64`, so a machine launched before the upgrade
+/// would no longer count for the request it was launched for.
+#[test]
+fn a_stored_aarch64_offer_rebuilds_as_arm64() {
+    let mut stored = StoredOffer::from_offer(&offer("arm", 60));
+    stored.arch = "aarch64".to_owned();
+    let rebuilt = stored.to_offer(60);
+    assert_eq!(rebuilt.arch, "arm64");
+    assert_eq!(rebuilt.isa_level, None);
+    let mut wanted = demand();
+    wanted.arch = Some("arm64".to_owned());
+    assert_eq!(rebuilt.fit(&wanted), Ok(()));
+    stored.arch = "riscv64".to_owned();
+    assert_eq!(stored.to_offer(60).arch, "riscv64");
+}
+
+/// Asserts how an offer's stated ISA level meets the records file, in both directions
+/// between this release and the one before it:
+///
+/// - the level is held by name and rebuilds the offer it was taken from;
+/// - a file written with a stated level is byte for byte the file written with none, so
+///   the previous release, whose reader refuses an unknown key, reads it (its own golden,
+///   `records_v2.json`, is that text);
+/// - this release reads a file that carries the key, as a later release will write it, and
+///   one without it (the previous release's) as stating none;
+/// - a held name that is not a level rebuilds an offer stating none.
+///
+/// Catches a release that writes the key before the release it rolls back to can read it,
+/// which would refuse the records file and stop the pool at its restart.
+#[test]
+fn a_stated_isa_level_crosses_the_records_file_both_ways() {
+    let level: js_types::IsaLevel = "x86-64-v3".parse().unwrap();
+    let original = Offer {
+        isa_level: Some(level),
+        ..offer("a10", 60)
+    };
+    let stored = StoredOffer::from_offer(&original);
+    assert_eq!(stored.isa_level.as_deref(), Some("x86-64-v3"));
+    assert_eq!(stored.to_offer(60), original);
+
+    let mut with_level = sample();
+    with_level.instances[0].offer = stored.clone();
+    let mut without = with_level.clone();
+    without.instances[0].offer.isa_level = None;
+    let written = with_level.encode().unwrap();
+    assert_eq!(written, without.encode().unwrap());
+    assert!(!written.contains("isa_level"), "{written}");
+    assert_eq!(sample().encode().unwrap(), GOLDEN.trim_end());
+
+    let previous = Records::decode(&written).unwrap();
+    assert_eq!(previous.instances[0].offer.isa_level, None);
+    let anchor = "\"arch\": \"x86_64\",";
+    assert!(written.contains(anchor), "{written}");
+    let later = written.replacen(
+        anchor,
+        &format!("{anchor} \"isa_level\": \"x86-64-v3\","),
+        1,
+    );
+    let read = Records::decode(&later).unwrap();
+    assert_eq!(read.instances[0].offer, stored);
+
+    let mut unknown = stored;
+    unknown.isa_level = Some("x86-64-v9".to_owned());
+    assert_eq!(unknown.to_offer(60).isa_level, None);
+}
+
 const ALL: [Phase; 11] = [
     Phase::Planned,
     Phase::Launching,

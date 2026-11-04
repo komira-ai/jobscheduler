@@ -206,6 +206,7 @@ impl ContainerHost {
             limits: ContainerLimits::DEFAULT,
             shared: Vec::new(),
             mounts: Vec::new(),
+            devices: Vec::new(),
         }
     }
 
@@ -477,6 +478,7 @@ impl RuntimeHost {
             pull_threads: 1,
             files: None,
             egress: Some(Arc::new(egress.clone())),
+            gpus: None,
         };
         let runtime = CrunRuntime::open(settings, Arc::new(NoImages))
             .unwrap_or_else(|why| panic!("a root agent opens the runtime: {why}"));
