@@ -1554,6 +1554,7 @@ dependencies = [
  "js-sizing",
  "js-types",
  "js-whole",
+ "thiserror",
 ]
 
 [[package]]
