@@ -104,8 +104,9 @@ fn spelt_families(text: &str) -> Vec<String> {
 /// Asserts that no production source of the workspace spells a canonical family as a
 /// string literal, except the table itself in `js-types/src/accel.rs`: a provider or the
 /// agent that needs a family names it through the table, and translates its own source
-/// spellings to one. Test code is not scanned (files named `*_tests.rs`, and a file's lines
-/// from its first `#[cfg(test)]`), nor `xtask`, whose site demo records the text a user
+/// spellings to one. Test code is not scanned (files named `*_tests.rs`, files in a `tests`
+/// directory of a crate's `src`, which hold its test modules, and a file's lines from its
+/// first `#[cfg(test)]`), nor `xtask`, whose site demo records the text a user
 /// types. Checks the scan itself on a line that spells a family, so an empty scan cannot
 /// pass by reading nothing. Catches a provider or the agent defining a family of its own.
 #[test]
@@ -134,7 +135,8 @@ fn no_canonical_name_is_defined_outside_js_caps() {
     let mut spelt = Vec::new();
     for file in files {
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
-        if file.ends_with(&table) || name.ends_with("_tests.rs") {
+        let in_tests = file.components().any(|part| part.as_os_str() == "tests");
+        if file.ends_with(&table) || name.ends_with("_tests.rs") || in_tests {
             continue;
         }
         for line in spelt_families(&fs::read_to_string(&file).unwrap()) {
