@@ -4,7 +4,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_elastic::{ElasticProvider, Offer, PriceUnit, SchedulerId};
+use js_elastic::{CapacityProvider, Offer, PriceUnit, SchedulerId};
 use js_lease_server::bootstrap::{Fill, render};
 use js_lease_server::network::{DefaultMode, NetworkMode};
 use js_provider_lambdalabs::{ElasticConfig, FakeLambda, LambdaProvider, ManualClock, OptionTable};

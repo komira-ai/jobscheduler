@@ -39,6 +39,9 @@ fn job(run: &str, valid: u64, wall: u64) -> JobSpec {
         valid_for_ms: valid,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

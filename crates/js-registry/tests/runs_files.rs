@@ -33,6 +33,9 @@ fn job_with_files(run: &str, files: Vec<RunFile>) -> JobSpec {
         labels: Default::default(),
         heartbeat_seq: 0,
         valid_for_ms: 0,
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

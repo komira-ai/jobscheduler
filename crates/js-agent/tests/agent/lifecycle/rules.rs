@@ -175,6 +175,40 @@ fn stale_start_dropped_silently() {
     assert_eq!(names(&h.start(late)), ["started late"]);
 }
 
+/// Asserts that a start with a `run` beside its image, on an agent whose runtime runs
+/// containers, creates nothing (no container, no scratch directory, no booking) and is
+/// answered with a held `failed_to_start` result carrying `run-unsupported`, while the same
+/// start without the `run` (`os` and `arch` kept) starts. It catches a `run` silently
+/// dropped, which would run the image's own command instead of the one the job asked for.
+#[test]
+fn a_run_beside_an_image_is_refused_on_a_container_agent() {
+    let mut h = Harness::new("run-refused");
+    let mut spec = job("r1");
+    spec.args = Vec::new();
+    spec.run = Some(js_agent_wire::RunSpec {
+        program: "/usr/bin/true".to_owned(),
+        args: Vec::new(),
+        env: Default::default(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    });
+    spec.os = Some(js_types::Os::Linux);
+    spec.arch = Some(js_types::Arch::X86_64);
+    let events = h.start(spec.clone());
+    assert_eq!(names(&events), ["refused r1 run-unsupported"]);
+    assert!(h.log.borrow().is_empty());
+    assert!(!h.scratch_of("r1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    let result = &h.life.results()[0];
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    assert_eq!(result.detail.as_deref(), Some("run-unsupported"));
+    spec.run = None;
+    spec.run_id = "r2".to_owned();
+    assert_eq!(names(&h.start(spec)), ["started r2"]);
+}
+
 /// Asserts that a native start, which this agent cannot run yet, creates nothing (no
 /// container, no scratch directory, no booking) and is answered with a held
 /// `failed_to_start` result carrying `native-unsupported`. It catches an agent that

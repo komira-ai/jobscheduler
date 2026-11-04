@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPlan, BootStep, ElasticProvider, Held, HostName,
+    AcquireId, AcquireRequest, Acquired, BootPlan, BootStep, CapacityProvider, Held, HostName,
     HostRef, Offer, PriceUnit, ProviderError, Released, SchedulerId, Secret,
 };
 use js_lease_server::bootstrap::{BootSecrets, payload};
@@ -34,7 +34,7 @@ struct Recorder {
     calls: Mutex<Vec<(Call, String)>>,
 }
 
-impl ElasticProvider for Recorder {
+impl CapacityProvider for Recorder {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         Ok(Vec::new())
     }
@@ -71,6 +71,33 @@ impl ElasticProvider for Recorder {
     fn release(&self, _id: &HostRef) -> Released {
         Released::Unknown
     }
+
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("recorder")
+    }
+
+    fn can_launch(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        js_elastic::ProviderCaps::default()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        js_elastic::Capacity {
+            supplied: 0,
+            can_add: None,
+        }
+    }
+
+    fn observe(&self, _id: &HostRef) -> js_elastic::Observed {
+        js_elastic::Observed::Unknown
+    }
+
+    fn verify_instance(&self, _hello: &js_elastic::Hello) -> Option<HostRef> {
+        None
+    }
 }
 
 fn offer() -> Offer {
@@ -97,7 +124,7 @@ fn offer() -> Offer {
 
 /// The launch path of the service, as the scaler will walk it: the mode contributes, the
 /// plan is built, rendered, and the provider is handed the payload.
-fn launch(mode: &dyn NetworkMode, provider: &dyn ElasticProvider, name: &HostName) {
+fn launch(mode: &dyn NetworkMode, provider: &dyn CapacityProvider, name: &HostName) {
     let launch = ctx(name, TEN_MINUTES);
     let contribution = mode.prepare(&launch).unwrap();
     let mut boot: BootPlan = plan(name);

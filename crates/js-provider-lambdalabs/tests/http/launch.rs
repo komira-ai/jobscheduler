@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, HostName, Offer, PriceUnit,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, HostName, Offer, PriceUnit,
     Reason, Refusal, RefusalCode, Released, SchedulerId,
 };
 use js_provider_lambdalabs::{

@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use js_elastic::{CheckResult, ElasticProvider, Offer};
+use js_elastic::{CapacityProvider, CheckResult, Offer};
 use js_lease::{Clock, Timestamp};
 use js_types::normalise_arch;
 use serde::Serialize;
@@ -173,7 +173,7 @@ struct Pass {
 /// returns is checked against the pool's floor, and the provider's own checks run when the
 /// catalog could be had (a refused key would fail each of them the same way).
 fn provider_checks(
-    provider: &dyn ElasticProvider,
+    provider: &dyn CapacityProvider,
     floor: &Floor,
     pins: Option<&AgentPins>,
 ) -> Provided {
@@ -265,7 +265,7 @@ fn network_check(mode: &Result<Arc<dyn NetworkMode>, NetworkError>) -> Result<()
 /// Runs both halves of a pass at once on the blocking pool. A panic in a half fails that
 /// half and nothing else.
 async fn pass(
-    provider: &Arc<dyn ElasticProvider>,
+    provider: &Arc<dyn CapacityProvider>,
     floor: &Floor,
     mode: &Result<Arc<dyn NetworkMode>, NetworkError>,
     pins: &Option<AgentPins>,
@@ -330,7 +330,7 @@ impl Schedule {
 /// What the check loop of one pool holds.
 pub(crate) struct Checker {
     pub(crate) pool: String,
-    pub(crate) provider: Arc<dyn ElasticProvider>,
+    pub(crate) provider: Arc<dyn CapacityProvider>,
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     pub(crate) floor: Floor,
     /// The agents pinned, when the pool launches.

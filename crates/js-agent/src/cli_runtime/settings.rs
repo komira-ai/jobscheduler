@@ -248,6 +248,10 @@ pub struct CrunPlan {
     pub scratch_root: PathBuf,
     /// The root of the runs' files, when the agent has one, set by [`Settings::placed_beside`].
     pub files: Option<FilesRoot>,
+    /// The host's egress, started once when the agent starts (after its claims): none in
+    /// mode none. Every runtime opened from the plan shares it.
+    #[cfg(target_os = "linux")]
+    pub egress: Option<crate::egress::Egress>,
     /// The GPUs a run is given (`--gpu-device`, `--gpu-mount`, `--gpu-env`), when the agent
     /// passes them, set by [`Settings::with_gpus`].
     #[cfg(target_os = "linux")]
@@ -384,6 +388,8 @@ impl Settings {
                 scratch_root: PathBuf::new(),
                 files: None,
                 #[cfg(target_os = "linux")]
+                egress: None,
+                #[cfg(target_os = "linux")]
                 gpus: None,
                 actions: Arc::new(OnceLock::new()),
             })),
@@ -421,6 +427,11 @@ impl Settings {
     /// What the crun runtime is opened from, when these are its settings.
     pub fn crun(&self) -> Option<&CrunPlan> {
         self.crun.as_deref()
+    }
+
+    /// [`Settings::crun`], to change.
+    pub fn crun_mut(&mut self) -> Option<&mut CrunPlan> {
+        self.crun.as_deref_mut()
     }
 
     /// The engine host the runtime is told to use, when one is given.

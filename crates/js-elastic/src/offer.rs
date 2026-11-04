@@ -175,7 +175,7 @@ impl Offer {
 
 #[cfg(test)]
 mod tests {
-    use js_types::{AcceleratorNeed, Model, Resources, accelerator_of};
+    use js_types::{AcceleratorNeed, Arch, Model, Os, Resources, accelerator_of};
 
     use super::*;
 
@@ -270,6 +270,27 @@ mod tests {
         let mut arch_only = demand();
         arch_only.os = None;
         assert_eq!(mac.fit(&arch_only), Ok(()));
+    }
+
+    /// Asserts that a job whose image is built for `macos`/`arm64` turns a demand that named
+    /// no platform into one that a Linux x86_64 offer fails on its operating system, a Linux
+    /// arm64 offer still fails on its operating system, a macOS x86_64 offer fails on its
+    /// architecture, and a macOS arm64 offer meets. Catches an image platform that never
+    /// reaches the fit, so a macOS job is offered a Linux host.
+    #[test]
+    fn the_image_platform_of_a_job_reaches_the_fit() {
+        let mut any = demand();
+        (any.os, any.arch) = (None, None);
+        let mac_job = any.with_image_platform(Os::Macos, Arch::Arm64).unwrap();
+        let host = |os: &str, arch: &str| Offer {
+            os: os.to_owned(),
+            arch: arch.to_owned(),
+            ..offer()
+        };
+        assert_eq!(host("linux", "x86_64").fit(&mac_job), Err(Dimension::Os));
+        assert_eq!(host("linux", "arm64").fit(&mac_job), Err(Dimension::Os));
+        assert_eq!(host("macos", "x86_64").fit(&mac_job), Err(Dimension::Arch));
+        assert_eq!(host("macos", "arm64").fit(&mac_job), Ok(()));
     }
 
     /// The level `name`, which is one.

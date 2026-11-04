@@ -1,8 +1,11 @@
 //! The contract of a provider that launches machines.
 
-use crate::answer::{Acquired, Held, Released};
+use crate::answer::{Acquired, Held, Observed, Released};
 use crate::boot::BootStep;
-use crate::ids::{AcquireId, HostName, HostRef};
+use crate::caps::{Capacity, ProviderCaps};
+use js_types::ProviderId;
+
+use crate::ids::{AcquireId, Hello, HostName, HostRef};
 use crate::offer::Offer;
 use crate::secret::BootPayload;
 
@@ -86,14 +89,44 @@ pub struct AcquireRequest {
     pub payload: BootPayload,
 }
 
-/// A scheduler's view of a provider that launches machines.
+/// A notice a provider sends of its own accord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderEvent {
+    /// The provider reclaimed the machine (a preemption): it no longer runs and the work on
+    /// it is lost. It still needs a [`CapacityProvider::release`].
+    Reclaimed(HostRef),
+}
+
+/// The notices of one provider, in the order it sent them. `next` waits for the next one
+/// and answers `None` once the provider will send no more.
+pub type EventStream = Box<dyn Iterator<Item = ProviderEvent> + Send>;
+
+/// A scheduler's view of a provider that supplies machines which run the agent.
 ///
 /// The calls block, and each is bound by the time limit of the client under it. The
 /// trait must not be called with a lock held that other work waits on (the lease
 /// table's is one): an acquire takes a request or two, and a slow provider makes every
-/// call slow. It is not the lease-level `Provider` of `js-provider`, which books hosts
-/// that already exist.
-pub trait ElasticProvider: Send + Sync {
+/// call slow. [`CapacityProvider::id`], [`CapacityProvider::can_launch`],
+/// [`CapacityProvider::capabilities`], [`CapacityProvider::capacity`] and
+/// [`CapacityProvider::verify_instance`] answer from the provider's own code and records
+/// and make no call. It is not the lease-level `Provider` of `js-provider`, which books
+/// hosts that already exist.
+///
+/// What each call means is pinned by the cases of the `conformance` module (behind the
+/// crate's `conformance` feature), which every provider crate runs against its provider.
+pub trait CapacityProvider: Send + Sync {
+    /// The provider's stable name, such as its kind. The scheduler tells providers apart
+    /// by it and never branches on it.
+    fn id(&self) -> ProviderId;
+
+    /// Whether [`CapacityProvider::acquire`] can launch a machine at all. A provider of
+    /// machines that register themselves has nothing to launch.
+    fn can_launch(&self) -> bool;
+
+    /// What the provider could ever offer, so that a job none of its machines could serve
+    /// is refused up front. Every offer of [`CapacityProvider::catalog`] is inside it.
+    fn capabilities(&self) -> ProviderCaps;
+
     /// What the provider could launch now, one offer per zone with capacity. A call that
     /// works is also a check that the credential does.
     ///
@@ -101,6 +134,11 @@ pub trait ElasticProvider: Send + Sync {
     ///
     /// [`ProviderError`] when the catalog cannot be had whole.
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;
+
+    /// How many machines the provider holds for this scheduler and how many more it could
+    /// add, from what it last listed, launched or released. It never calls the cloud and
+    /// never waits for a call in flight.
+    fn capacity(&self) -> Capacity;
 
     /// The provider's own live checks, beyond the catalog call: what only its account can
     /// say, such as a missing key or a ruleset that holds rules. Called on each check pass
@@ -138,7 +176,7 @@ pub trait ElasticProvider: Send + Sync {
     fn release(&self, id: &HostRef) -> Released;
 
     /// The acquire ids with a call that got no answer and may have landed: while an id is
-    /// here, [`ElasticProvider::acquire`] with it does not launch again but answers
+    /// here, [`CapacityProvider::acquire`] with it does not launch again but answers
     /// [`Acquired::Deferred`], and a retry settles the call once a list shows the machine
     /// or the provider's hold has run out. The scheduler keeps a launch it planned for such
     /// an id instead of forgetting it. A provider that holds no such call has none.
@@ -146,11 +184,29 @@ pub trait ElasticProvider: Send + Sync {
         Vec::new()
     }
 
-    /// Whether a read of the machine `id` by id says the provider no longer has it. Only a
-    /// definite answer counts: a failed read, a machine in any state (terminated
-    /// included) and a provider that cannot read by id are all `false`.
-    fn is_gone(&self, _id: &HostRef) -> bool {
-        false
+    /// Reads the machine `id` by id. [`Observed::Absent`] only when the provider said it
+    /// does not exist; a failed, throttled or timed-out read, and a reference the provider
+    /// cannot read, are [`Observed::Unknown`]; a machine in any state, terminated included,
+    /// is [`Observed::Present`].
+    fn observe(&self, id: &HostRef) -> Observed;
+
+    /// Whether a read of the machine `id` by id says the provider no longer has it:
+    /// [`CapacityProvider::observe`] answers [`Observed::Absent`]. A failed read and a
+    /// machine in any state (terminated included) are `false`.
+    fn is_gone(&self, id: &HostRef) -> bool {
+        self.observe(id) == Observed::Absent
+    }
+
+    /// The machine this provider launched that `hello`, an agent's first hello, comes
+    /// from, or `None` when it launched none by that name (and, when the hello carries
+    /// one, that instance id). A name that carries another scheduler's prefix is never
+    /// one of its machines. Answers from the provider's own records and makes no call.
+    fn verify_instance(&self, hello: &Hello) -> Option<HostRef>;
+
+    /// The provider's notices, such as a reclaimed machine, for a provider that sends any;
+    /// `None` (the default) for one that does not, whose reclaims a list shows instead.
+    fn events(&self) -> Option<EventStream> {
+        None
     }
 }
 
@@ -159,6 +215,7 @@ mod tests {
     use js_types::ExecMode;
 
     use super::*;
+    use crate::answer::HostStatus;
     use crate::ids::SchedulerId;
     use crate::offer::PriceUnit;
 
@@ -219,9 +276,28 @@ mod tests {
     /// A provider that implements only the required calls.
     struct Bare;
 
-    impl ElasticProvider for Bare {
+    impl CapacityProvider for Bare {
+        fn id(&self) -> ProviderId {
+            ProviderId::known("bare")
+        }
+
+        fn can_launch(&self) -> bool {
+            false
+        }
+
+        fn capabilities(&self) -> ProviderCaps {
+            ProviderCaps::default()
+        }
+
         fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
             Ok(Vec::new())
+        }
+
+        fn capacity(&self) -> Capacity {
+            Capacity {
+                supplied: 0,
+                can_add: None,
+            }
         }
 
         fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -243,23 +319,57 @@ mod tests {
         fn release(&self, _id: &HostRef) -> Released {
             Released::Unknown
         }
+
+        fn observe(&self, id: &HostRef) -> Observed {
+            match id.as_str() {
+                "i-gone" => Observed::Absent,
+                "i-off" => Observed::Present(HostStatus::Terminated),
+                _ => Observed::Unknown,
+            }
+        }
+
+        fn verify_instance(&self, _hello: &Hello) -> Option<HostRef> {
+            None
+        }
     }
 
-    /// Asserts the defaults of the two optional calls: a provider that does not say it
-    /// holds an unresolved call has none, and one that cannot read by id never says a
-    /// machine is gone. It catches a default that reads "no answer" as "gone", which would
-    /// have the scheduler settle a machine that may exist.
+    /// Asserts the defaults of the optional calls: a provider that does not say it holds
+    /// an unresolved call has none, one that sends no notices has no event stream, and a
+    /// machine is gone only when its read by id answers absent: a read with no answer and
+    /// a terminated machine are not gone. It catches a default that reads "no answer" or
+    /// "terminated" as "gone", which would have the scheduler settle a machine that may
+    /// exist.
     #[test]
     fn a_provider_that_says_nothing_has_no_unresolved_call_and_finds_nothing_gone() {
         let id = HostRef("i-1".to_owned());
         assert!(Bare.unresolved().is_empty());
+        assert!(Bare.events().is_none());
         assert!(!Bare.is_gone(&id));
+        assert!(!Bare.is_gone(&HostRef("i-off".to_owned())));
+        assert!(Bare.is_gone(&HostRef("i-gone".to_owned())));
         // The required calls of the stand-in, so that it is whole.
+        assert_eq!(Bare.id().as_str(), "bare");
+        assert!(!Bare.can_launch());
+        assert_eq!(Bare.capabilities(), ProviderCaps::default());
+        assert_eq!(Bare.capacity().can_add, None);
         assert_eq!(Bare.catalog(), Ok(Vec::new()));
         assert!(Bare.host_prep(&offer()).is_empty());
         assert_eq!(Bare.payload_limit(), 0);
         assert_eq!(Bare.list(), Ok(Vec::new()));
         assert_eq!(Bare.release(&id), Released::Unknown);
         assert_eq!(Bare.acquire(&request()), Acquired::Unknown);
+        let hello = Hello {
+            name: "js-0-0".to_owned(),
+            instance_id: None,
+        };
+        assert_eq!(Bare.verify_instance(&hello), None);
+    }
+
+    /// Asserts that a notice names the machine it is about and compares by it.
+    #[test]
+    fn a_reclaim_notice_names_its_machine() {
+        let notice = ProviderEvent::Reclaimed(HostRef("i-1".to_owned()));
+        assert_eq!(notice, ProviderEvent::Reclaimed(HostRef("i-1".to_owned())));
+        assert_ne!(notice, ProviderEvent::Reclaimed(HostRef("i-2".to_owned())));
     }
 }

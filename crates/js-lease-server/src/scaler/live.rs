@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, ElasticProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
+    AcquireId, Acquired, CapacityProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
     SchedulerId, Secret,
 };
 use js_registry::{Busy, HostView, Waiting};
@@ -23,7 +23,7 @@ pub(crate) struct Live {
     agents: Arc<Agents>,
     pool: ProviderId,
     scheduler: SchedulerId,
-    provider: Arc<dyn ElasticProvider>,
+    provider: Arc<dyn CapacityProvider>,
     launcher: Launcher,
     file: RecordsFile,
     unremoved: UnremovedFile,
@@ -37,7 +37,7 @@ impl Live {
     /// and its health and offers are what its `checks` found.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
-        provider: Arc<dyn ElasticProvider>,
+        provider: Arc<dyn CapacityProvider>,
         launcher: Launcher,
         (file, unremoved, checks): (RecordsFile, UnremovedFile, Arc<Mutex<Checks>>),
     ) -> Self {
@@ -189,9 +189,28 @@ mod tests {
     /// A provider that answers each call with a fixed word and launches nothing.
     struct Stub;
 
-    impl ElasticProvider for Stub {
+    impl CapacityProvider for Stub {
+        fn id(&self) -> js_types::ProviderId {
+            js_types::ProviderId::known("stub")
+        }
+
+        fn can_launch(&self) -> bool {
+            false
+        }
+
+        fn capabilities(&self) -> js_elastic::ProviderCaps {
+            js_elastic::ProviderCaps::default()
+        }
+
         fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
             Err(ProviderError::new("the catalog is not read here"))
+        }
+
+        fn capacity(&self) -> js_elastic::Capacity {
+            js_elastic::Capacity {
+                supplied: 0,
+                can_add: Some(0),
+            }
         }
 
         fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -218,8 +237,15 @@ mod tests {
             vec![AcquireId::new("u1").unwrap()]
         }
 
-        fn is_gone(&self, id: &HostRef) -> bool {
-            id.as_str() == "i-gone"
+        fn observe(&self, id: &HostRef) -> js_elastic::Observed {
+            match id.as_str() {
+                "i-gone" => js_elastic::Observed::Absent,
+                _ => js_elastic::Observed::Present(HostStatus::Active),
+            }
+        }
+
+        fn verify_instance(&self, _hello: &js_elastic::Hello) -> Option<HostRef> {
+            None
         }
     }
 
@@ -349,6 +375,19 @@ mod tests {
         assert_eq!(live.unresolved(), [AcquireId::new("u1").unwrap()]);
         assert!(live.is_gone(&HostRef("i-gone".to_owned())));
         assert!(!live.is_gone(&id));
+        // The stand-in's calls the shell does not make, so that it is whole.
+        assert_eq!(live.provider.id().as_str(), "stub");
+        assert!(!live.provider.can_launch());
+        assert_eq!(
+            live.provider.capabilities(),
+            js_elastic::ProviderCaps::default()
+        );
+        assert_eq!(live.provider.capacity().can_add, Some(0));
+        let hello = js_elastic::Hello {
+            name: name("a1"),
+            instance_id: None,
+        };
+        assert_eq!(live.provider.verify_instance(&hello), None);
     }
 
     /// Asserts that the records are written whole to their file and that a file that

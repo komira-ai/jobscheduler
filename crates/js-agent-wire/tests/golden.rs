@@ -3,12 +3,16 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::{heartbeat, hello, job, welcome};
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HelloReply, Isolation, Outcome,
-    ProtocolRange, RefusalReason, Refused, ResultAck, Taint,
+    Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HelloReply, InputRef, Isolation,
+    JobSpec, NetworkLevel, Outcome, OutputKind, OutputSpec, Placement, ProtocolRange,
+    RefusalReason, Refused, ResultAck, RunSpec, Taint,
 };
+use js_types::{Arch, Os};
 use serde_json::{Value, json};
 
 /// Asserts the exact JSON of a hello, with an instance identity and every optional
@@ -170,6 +174,44 @@ fn start_command_with_bundle_wire_form() {
     let decoded: Command = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, Command::Start(Box::new(spec)));
 }
+
+/// Asserts the exact text of a start in the one job definition: an image with a `run`
+/// (every field set), `os` and `arch`, in the order a receiver sees them, `run` right after
+/// `image`. It catches a renamed `run`, `os` or `arch` field or run field, an `arch` written
+/// as `aarch64` or as the variant's name, and a lost `snake_case` on the os.
+#[test]
+fn one_job_start_wire_form() {
+    let mut spec = job();
+    spec.args = Vec::new();
+    spec.run = Some(RunSpec {
+        program: "@bundle/tool".into(),
+        args: vec!["--version".into()],
+        env: BTreeMap::from([("LANG".to_owned(), "C".to_owned())]),
+        cwd: "work".into(),
+        inputs: vec![InputRef::Stage {
+            stage_id: format!("sha256:{HEX}"),
+            dest: "in".into(),
+            placement: Placement::ReadOnly,
+        }],
+        outputs: vec![OutputSpec {
+            path: "out".into(),
+            kind: OutputKind::Dir,
+        }],
+        network: NetworkLevel::Loopback,
+    });
+    spec.os = Some(Os::Macos);
+    spec.arch = Some(Arch::Arm64);
+    let text = serde_json::to_string(&spec).unwrap();
+    assert_eq!(text, ONE_JOB_START);
+    let decoded: JobSpec = serde_json::from_str(ONE_JOB_START).unwrap();
+    assert_eq!(decoded, spec);
+    assert_eq!(Command::Start(Box::new(spec)).validate(), Ok(()));
+}
+
+/// The text `one_job_start_wire_form` expects.
+const ONE_JOB_START: &str = r#"{"run_id":"run-1","lease_id":"1-1","image":"ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","run":{"program":"@bundle/tool","args":["--version"],"env":{"LANG":"C"},"cwd":"work","inputs":[{"type":"stage","stage_id":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","dest":"in","placement":"read_only"}],"outputs":[{"path":"out","kind":"dir"}],"network":"loopback"},"os":"macos","arch":"arm64","args":[],"limits":{"cpu_millis":2000,"memory_bytes":1073741824,"pids":512,"wall_ms":60000},"gpu_indices":[0],"mounts":[{"root_name":"cache","rel":"inputs/a","ro":true}],"isolation":"host","labels":{"team":"infra"},"heartbeat_seq":7,"valid_for_ms":10000}"#;
+
+const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Asserts the exact JSON of a heartbeat that carries a held run, a run result and a
 /// taint, and the spelling of every outcome. It catches a renamed heartbeat, result or

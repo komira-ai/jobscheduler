@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{ElasticProvider, SchedulerId};
+use js_elastic::{CapacityProvider, SchedulerId};
 use js_lease::Clock as LeaseClock;
 use js_provider_lambdalabs as lambda;
 use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
@@ -101,7 +101,7 @@ impl Floor {
 /// An elastic provider and what the server learns of it offline.
 pub struct ElasticBuilt {
     /// The provider.
-    pub provider: Box<dyn ElasticProvider>,
+    pub provider: Box<dyn CapacityProvider>,
     /// The pool floor its sizes give.
     pub floor: Floor,
     /// The execution modes its hosts can run jobs in. A pool whose `exec` is not among

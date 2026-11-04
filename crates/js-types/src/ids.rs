@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 
 /// Longest id, in bytes.
@@ -29,16 +30,28 @@ pub(crate) fn is_id_char(c: char) -> bool {
     matches!(c, 'a'..='z' | '0'..='9' | '.' | '_' | '-')
 }
 
+/// Whether `text` is an id: 1 to 63 bytes of `[a-z0-9._-]`. A `const fn`, so that an id
+/// written in code is checked when the program is built.
+const fn is_id(text: &[u8]) -> bool {
+    let mut fits = (!text.is_empty()) & (text.len() <= MAX_ID_LEN);
+    let mut at = 0;
+    while at < text.len() {
+        fits &= matches!(text[at], b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-');
+        at += 1;
+    }
+    fits
+}
+
 macro_rules! name_id {
     ($(#[$doc:meta])* $name:ident, $kind:literal) => {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(String);
+        pub struct $name(Cow<'static, str>);
 
         impl $name {
             /// Builds the id, refusing an empty, long or out-of-alphabet value.
             pub fn new(value: &str) -> Result<Self, IdError> {
-                check($kind, value).map(Self)
+                check($kind, value).map(|value| Self(Cow::Owned(value)))
             }
 
             /// The id as text.
@@ -74,7 +87,24 @@ name_id!(
 impl ClassId {
     /// An id from a constant already known to be valid.
     pub(crate) fn from_trusted(value: &str) -> Self {
-        Self(value.to_string())
+        Self(Cow::Owned(value.to_string()))
+    }
+}
+
+impl ProviderId {
+    /// The id `text`, a name written in a provider's code, such as its kind. In a `const`
+    /// item, text that is not an id fails the build, so a provider names itself with no
+    /// error to handle.
+    ///
+    /// # Panics
+    ///
+    /// When `text` is not an id and this is called outside a `const` item.
+    pub const fn known(text: &'static str) -> Self {
+        assert!(
+            is_id(text.as_bytes()),
+            "a provider id is 1 to 63 characters of [a-z0-9._-]"
+        );
+        Self(Cow::Borrowed(text))
     }
 }
 
@@ -163,6 +193,34 @@ mod tests {
         assert!(ClassId::new(&"a".repeat(63)).is_ok());
         let err = ProviderId::new("Pool").unwrap_err();
         assert!(err.to_string().starts_with("provider id \"Pool\""));
+    }
+
+    /// Asserts that a provider id written in code is the same id as the same text read at
+    /// run time, and is checked as `new` checks: every character of the alphabet and the
+    /// longest length pass. It catches a named id that compares unequal to a parsed one.
+    #[test]
+    fn a_named_provider_id_is_the_parsed_one() {
+        const LAMBDA: ProviderId = ProviderId::known("lambdalabs");
+        assert_eq!(LAMBDA, ProviderId::new("lambdalabs").unwrap());
+        assert_eq!(ProviderId::known("fake").as_str(), "fake");
+        let long = "a".repeat(63);
+        let every = ["a-z.0_9", long.as_str()];
+        for text in every {
+            let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
+            assert_eq!(ProviderId::known(leaked), ProviderId::new(text).unwrap());
+        }
+    }
+
+    /// Asserts that a provider id written in code that is not an id is refused: too long,
+    /// empty, or out of the alphabet. In a `const` item the same text fails the build.
+    #[test]
+    fn a_named_provider_id_that_is_not_an_id_is_refused() {
+        let long: &'static str = Box::leak("a".repeat(64).into_boxed_str());
+        for bad in ["", "Pool", "a b", long] {
+            let refused = std::panic::catch_unwind(|| ProviderId::known(bad));
+            assert!(refused.is_err(), "{bad:?}");
+            assert!(ProviderId::new(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// Asserts that a request id takes the id alphabet and length, and that the error

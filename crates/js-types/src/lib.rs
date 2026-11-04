@@ -6,9 +6,9 @@
 //! resource class as data, [`Shape`] is what a host offers, [`LeaseId`] identifies a
 //! lease, [`Labels`] carry the reserved `jobscheduler.dev/` schema, and [`Request`] is
 //! what a caller asks for. [`ContainerSpec`] and [`Requirements`] say what a job runs and
-//! what it needs of a host, in the CPU vocabulary of [`Arch`] and [`IsaLevel`] and the
-//! accelerator vocabulary of [`Accelerator`] and [`AcceleratorNeed`], resolved through the
-//! alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports.
+//! what it needs of a host, on the platform of [`Os`], in the CPU vocabulary of [`Arch`] and
+//! [`IsaLevel`] and the accelerator vocabulary of [`Accelerator`] and [`AcceleratorNeed`],
+//! resolved through the alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports.
 //!
 //! The [`sched`] module holds the scheduler's own vocabulary (operations, leases,
 //! control-log records, QoS, farm time, the state-machine trait). It shares names with
@@ -42,8 +42,8 @@ pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use isa::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level, normalise_arch};
 pub use job::{
-    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, Requirements,
-    RequirementsError, UnknownExecMode,
+    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, Os,
+    PlatformConflict, Requirements, RequirementsError, UnknownExecMode, UnknownOs,
 };
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use memory::{MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, MemoryPercentError};

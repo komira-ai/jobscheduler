@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_elastic::{ElasticProvider, Held, HostRef, Released, SchedulerId};
+use js_elastic::{CapacityProvider, Held, HostRef, Released, SchedulerId};
 
 use crate::api::LambdaApi;
 use crate::clock::{Clock, SystemClock};

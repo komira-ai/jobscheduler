@@ -85,6 +85,6 @@ pub fn accepted(answer: Acquired) -> Held {
 
 /// Launches `acquire` and returns the machine's id.
 pub fn launch(cloud: &ElasticFake, acquire: &str) -> HostRef {
-    use js_elastic::ElasticProvider;
+    use js_elastic::CapacityProvider;
     accepted(cloud.acquire(&request(acquire))).id
 }

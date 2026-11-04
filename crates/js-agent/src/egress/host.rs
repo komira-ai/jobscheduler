@@ -29,7 +29,8 @@
 //! nothing of it outlives the run. An allow-list start begins by removing every interface
 //! named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and the two tables, because
 //! the keeper kills the containers with the agent: nothing a previous process wired is in
-//! use. Mode none runs no program and touches nothing.
+//! use; and only one agent at a time holds the host's egress ([`HOST_LOCK`]), so the sweep
+//! never removes the live wiring of another agent. Mode none runs no program and touches nothing.
 //!
 //! Everything the agent does to the machine goes through [`Sys`], so the unit tests script
 //! the whole sequence, including a failure at each step, and the tests that need the real
@@ -53,6 +54,15 @@ const PEER_PREFIX: &str = "jsp";
 
 /// The name every job's interface has inside its container.
 const INSIDE_NAME: &str = "eth0";
+
+/// The abstract socket an allow-list holds bound while its egress lives: one per network
+/// namespace (the host's, for the agent), freed by the kernel when the process ends however it
+/// ends. The interfaces and tables an allow-list makes and removes are named for the host, not
+/// for an agent, so one agent at a time may hold them.
+pub const HOST_LOCK: &str = "js-agent-egress";
+
+/// What holds the host's egress for an agent: the bound [`HOST_LOCK`].
+pub(crate) type Held = Arc<dyn std::fmt::Debug + Send + Sync>;
 
 /// Why egress could not be set up, checked or taken down. The text stays on the host: it
 /// names what failed and may hold the output of `ip` or `nft`.
@@ -83,6 +93,10 @@ pub enum EgressError {
     /// The tables in the kernel are not what the agent loaded.
     #[error("egress: the firewall tables are not what the agent loaded")]
     Rules,
+    /// Another process of this host holds its egress ([`HOST_LOCK`]): starting would remove
+    /// that agent's live interfaces and tables.
+    #[error("egress: another agent on this host holds its egress (the socket @{HOST_LOCK})")]
+    Held,
 }
 
 /// What the host side does to the machine; the real one is [`System`].
@@ -101,6 +115,9 @@ pub(crate) trait Sys: std::fmt::Debug + Send + Sync {
     /// Opens the network namespace of process `pid` and keeps it open as long as the
     /// result lives.
     fn open_netns(&self, pid: u32) -> std::io::Result<Netns>;
+    /// Binds the abstract socket `name` ([`HOST_LOCK`] for an agent) and holds it as long as
+    /// the result lives; `None` when another process holds it.
+    fn lock_host(&self, name: &str) -> std::io::Result<Option<Held>>;
 }
 
 /// An open network namespace: its identity, and a path any process of the host can open to
@@ -149,6 +166,20 @@ impl Sys for System {
             _held: Some(file),
         })
     }
+
+    fn lock_host(&self, name: &str) -> std::io::Result<Option<Held>> {
+        use std::os::linux::net::SocketAddrExt as _;
+        use std::os::unix::net::{SocketAddr, UnixListener};
+        let name = SocketAddr::from_abstract_name(name)?;
+        let in_use = |why: std::io::Error| {
+            (why.kind() == std::io::ErrorKind::AddrInUse)
+                .then_some(None)
+                .ok_or(why)
+        };
+        UnixListener::bind_addr(&name)
+            .map(|bound| Some(Arc::new(bound) as Held))
+            .or_else(in_use)
+    }
 }
 
 /// Runs `program args` with `stdin` as its input to its end.
@@ -166,14 +197,26 @@ fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::proc
 }
 
 /// The host side of the egress mode: the pool of address blocks and the firewall. Cheap to
-/// clone; every clone is the same pool.
+/// clone; every clone is the same pool, and two are equal when they are the same pool. An
+/// allow-list holds the host's egress ([`HOST_LOCK`]) until its last clone and its last
+/// [`Attachment`] are dropped: a run still wired keeps another start from sweeping it.
 #[derive(Debug, Clone)]
 pub struct Egress {
     inner: Arc<Inner>,
 }
 
+impl PartialEq for Egress {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for Egress {}
+
 #[derive(Debug)]
 struct Inner {
+    /// The hold on the host's egress; none in mode none.
+    _host: Option<Held>,
     config: Config,
     sys: Arc<dyn Sys>,
     /// The indexes of the pool's blocks in use.
@@ -227,22 +270,33 @@ fn sysctl(sys: &dyn Sys, path: &str, value: &str) -> Result<(), EgressError> {
 }
 
 impl Egress {
-    /// Starts the host side for `config`. Mode none runs nothing. An allow-list removes what
-    /// an earlier agent left (the interfaces `jsv<digits>` and `jsp<digits>`, both tables),
+    /// Starts the host side for `config`. Mode none runs nothing. An allow-list first holds
+    /// the host's egress ([`HOST_LOCK`]: another agent's live wiring is never swept), then
+    /// removes what an earlier agent left (the interfaces `jsv<digits>` and `jsp<digits>`, both tables),
     /// switches IPv4 forwarding on (a host-wide switch, which stays on when the agent ends:
     /// other users of the host may rely on it, and the agent cannot know) and loads the
     /// firewall.
     ///
     /// # Errors
     ///
-    /// A program could not run or refused what it was given.
+    /// [`EgressError::Held`], or a program could not run or refused what it was given.
     pub fn start(config: Config) -> Result<Self, EgressError> {
         Self::start_on(config, Arc::new(System))
     }
 
     fn start_on(config: Config, sys: Arc<dyn Sys>) -> Result<Self, EgressError> {
-        let mut baseline = None;
+        Self::start_holding(config, sys, HOST_LOCK)
+    }
+
+    /// [`Egress::start_on`] holding the abstract socket `lock` in place of [`HOST_LOCK`]: a
+    /// test on the real machine holds a name of its own, never the host's.
+    fn start_holding(config: Config, sys: Arc<dyn Sys>, lock: &str) -> Result<Self, EgressError> {
+        let (mut baseline, mut host) = (None, None);
         if config.mode() == Mode::AllowList {
+            let held = sys
+                .lock_host(lock)
+                .map_err(|why| command("holding the host's egress", why))?;
+            host = Some(held.ok_or(EgressError::Held)?);
             sweep(&*sys, &config)?;
             sysctl(&*sys, "net/ipv4/ip_forward", "1\n")?;
             call(
@@ -256,6 +310,7 @@ impl Egress {
         }
         Ok(Self {
             inner: Arc::new(Inner {
+                _host: host,
                 config,
                 sys,
                 used: Mutex::new(BTreeSet::new()),

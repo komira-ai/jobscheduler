@@ -4,7 +4,7 @@
 
 use std::num::NonZeroUsize;
 
-use js_elastic::{CheckResult, ElasticProvider, SchedulerId};
+use js_elastic::{CapacityProvider, CheckResult, SchedulerId};
 use js_provider_lambdalabs::{ApiError, Call, ElasticConfig, ErrorCode, FakeLambda};
 
 use crate::rig::{Rig, SCHEDULER, TABLE, config, rig, rig_with};

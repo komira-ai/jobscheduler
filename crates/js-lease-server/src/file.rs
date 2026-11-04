@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
+use js_elastic::{Artifact, CapacityProvider, Demand, SchedulerId};
 use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_scaler::{Budgets, Millis};
@@ -196,7 +196,7 @@ pub struct ElasticPlan {
     pub scheduler: SchedulerId,
     /// The pool's name as the registry knows it.
     pub(crate) id: ProviderId,
-    pub(crate) provider: Arc<dyn ElasticProvider>,
+    pub(crate) provider: Arc<dyn CapacityProvider>,
 }
 
 impl ElasticPlan {
@@ -207,7 +207,7 @@ impl ElasticPlan {
     }
 
     /// The provider the pool launches with.
-    pub fn provider(&self) -> &dyn ElasticProvider {
+    pub fn provider(&self) -> &dyn CapacityProvider {
         self.provider.as_ref()
     }
 }
