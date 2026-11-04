@@ -23,11 +23,18 @@
 //!    else, and the helper builds the process's environment around the one the agent
 //!    passes. The connection stays open until the process exits: a thread of the runtime
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
+//!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
+//!    `--run-files-root`) has their directory given to the user before this, `0500` with
+//!    its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it
+//!    (`native/files.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
 //!    none of its per-user agents; `user-delete` removes the user and sweeps its home and
 //!    its entry under `/var/folders`. A step that fails leaves the user in the helper's
-//!    ledger, its uid held, and the lease in the journal for the next start to end.
+//!    ledger, its uid held, and the lease in the journal for the next start to end. Between
+//!    the two, a removal copies the run's declared outputs out of `exec/` into the run's
+//!    scratch directory (`native/outputs.rs`); one that cannot be copied does not stop the
+//!    removal, which then fails as [`RuntimeError`] of its outputs only.
 //!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's
@@ -76,18 +83,20 @@
 //! What this runtime does not do yet: carry a job start's environment (`RunSpec::env`: a
 //! start with one is refused `env-unsupported` at admission, before its image or body is
 //! looked at, and a run handed here with one fails before a user is made; the native body's
-//! own `env`, and a `run`'s, is applied), stage inputs or collect outputs (a start that names
-//! either is refused `native-unsupported`), adopt a run after the agent restarts (the
-//! journal ends it), stop a run softly (the helper only kills), or grant the user's
-//! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
-//! which is inside the home).
+//! own `env`, and a `run`'s, is applied), stage inputs or run in a subdirectory (a start
+//! that names inputs or a `cwd` is refused `native-unsupported`), adopt a run after the
+//! agent restarts (the journal ends it, and collects none of its outputs), stop a run softly
+//! (the helper only kills), or grant the user's `/var/folders` entry (toolchains that need
+//! it get their temporary files from `TMPDIR`, which is inside the home).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
 
 mod bundle;
+mod files;
 mod journal;
 mod logs;
+mod outputs;
 mod pf;
 mod settings;
 
@@ -104,7 +113,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, LogTail, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{
+    BUNDLE_PROGRAM_PREFIX, LogTail, NativeSpec, NetworkLevel, OutputSpec, refusal,
+};
 use js_mac_pool::seatbelt::{
     AbsPath, Caps, Narrowing, Net, Policy, Profile, ReadModel, SlotLayout,
 };
@@ -122,6 +133,7 @@ use crate::lifecycle::{
     Runtime, RuntimeError, Status,
 };
 
+pub use files::HandOver;
 pub use journal::Journal;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use settings::{
@@ -161,12 +173,43 @@ pub struct NativeConfig {
 /// waiting on the helper found.
 struct Run {
     scratch: PathBuf,
+    /// The home of the run's user, whose `exec/` holds the run's outputs.
+    home: PathBuf,
+    /// The outputs the start declared.
+    outputs: Vec<OutputSpec>,
+    /// What the removal copied of them, once it has: each file's path and bytes, and the
+    /// paths that could not be copied (taken when the removal reports them).
+    collected: Option<outputs::Collected>,
     /// Set once the run has ended, so it is answered the same way again.
     ended: Option<Status>,
     /// The exit, or `None` when the helper's connection ended without one.
     waiter: Receiver<Option<Exit>>,
     /// The trees of the run's bundle, pinned until the run is removed.
     _pinned: Option<Pinned>,
+}
+
+impl Run {
+    /// Copies the run's outputs into its scratch directory, unless that was done, and logs
+    /// what was copied and what was not, by path and byte count.
+    fn collect(&mut self, lease: &str, max_file_bytes: u64) {
+        if self.collected.is_some() {
+            return;
+        }
+        let into = outputs::dir_in(&self.scratch);
+        let caps = outputs::Caps {
+            file_bytes: max_file_bytes,
+            run_bytes: outputs::MAX_COLLECTED_BYTES,
+            entries: outputs::MAX_ENTRIES,
+        };
+        let done = outputs::collect(&self.home, &self.outputs, &into, caps);
+        for (path, bytes) in &done.copied {
+            tracing::info!("native {lease}: output {path:?} copied, {bytes} bytes");
+        }
+        for why in &done.failed {
+            tracing::warn!("native {lease}: output {why:?}");
+        }
+        self.collected = Some(done);
+    }
 }
 
 /// Runs native jobs as users of the root helper.
@@ -183,6 +226,8 @@ pub struct NativeRuntime {
     journal: Journal,
     /// The helper said it needs its boot reset again (it restarted under this agent).
     reset_needed: bool,
+    /// Gives a run's files to its user.
+    hand_over: HandOver,
 }
 
 impl NativeRuntime {
@@ -234,7 +279,16 @@ impl NativeRuntime {
             bundles: None,
             journal,
             reset_needed: false,
+            hand_over: files::lchown(),
         })
+    }
+
+    /// The same runtime, giving a run's files to its user through `hand_over` in place of
+    /// `lchown`, which needs root. For tests; an agent never calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hand_over(self, hand_over: HandOver) -> Self {
+        Self { hand_over, ..self }
     }
 
     /// The same runtime, with `placer` as its bundle store: a start that names a bundle
@@ -293,7 +347,11 @@ impl NativeRuntime {
             .into_iter()
             .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
             .collect::<Result<Vec<File>, RuntimeError>>()?;
-        let (native, env) = match &pinned {
+        // The files go to the user before any process of it exists.
+        if let Some(dir) = &spec.files {
+            files::hand_over(dir, uid, &self.hand_over).map_err(|why| fail(&"the files", &why))?;
+        }
+        let (native, mut env) = match &pinned {
             Some(pinned) => {
                 let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp))
                     .map_err(|why| fail(&"the bundle", &why))?;
@@ -307,7 +365,11 @@ impl NativeRuntime {
             }
             None => (native.clone(), plain_env(native, &tmp)),
         };
-        let argv = profile_argv(&self.config, &native, &home)?;
+        let files = spec.files.as_deref();
+        if let Some(dir) = files {
+            env.push((files::FILES_DIR_ENV.to_owned(), dir.display().to_string()));
+        }
+        let argv = argv_of(&self.config, &native, &home, files)?;
         let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
             .into_iter()
             .map(|name| {
@@ -338,6 +400,9 @@ impl NativeRuntime {
         });
         Ok(Run {
             scratch: spec.scratch.clone(),
+            home,
+            outputs: native.outputs,
+            collected: None,
             ended: None,
             waiter,
             _pinned: pinned,
@@ -558,15 +623,28 @@ impl Runtime for NativeRuntime {
         self.ended(killed, "kill-uid")
     }
 
+    /// Kills, copies the run's outputs (once: a removal that is tried again does not copy
+    /// them again), deletes the user, and only then reports outputs that could not be copied.
     fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
         self.ready()?;
         let killed = self.helper.kill_uid(&id.0);
         self.ended(killed, "kill-uid")?;
+        let max_file_bytes = self.config.max_file_bytes;
+        if let Some(run) = self.runs.get_mut(&id.0) {
+            run.collect(&id.0, max_file_bytes);
+        }
         let deleted = self.helper.user_delete(&id.0).map(|_| ());
         self.ended(deleted, "user-delete")?;
-        self.runs.remove(&id.0);
+        let run = self.runs.remove(&id.0);
         let _ = self.journal.done(&id.0);
-        Ok(())
+        let failed = run.and_then(|run| run.collected).map(|done| done.failed);
+        match failed.unwrap_or_default() {
+            failed if failed.is_empty() => Ok(()),
+            failed => Err(RuntimeError::outputs(format!(
+                "outputs not copied: {}",
+                outputs::told(&failed)
+            ))),
+        }
     }
 
     fn reclaim(&mut self) -> Vec<String> {
@@ -663,18 +741,13 @@ impl Runtime for NativeRuntime {
         self.bundles.is_some()
     }
 
+    /// Outputs are collected when the run is removed; inputs and a working directory below
+    /// `exec/` are not served yet.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
-        let staged = [
-            !native.inputs.is_empty(),
-            !native.outputs.is_empty(),
-            !native.cwd.is_empty(),
-        ];
-        if staged.into_iter().any(|named| named) {
+        if !native.inputs.is_empty() || !native.cwd.is_empty() {
             return Err(NativeRefusal {
                 code: refusal::NATIVE_UNSUPPORTED,
-                why: "this agent stages no inputs, collects no outputs and runs in no \
-                      subdirectory yet"
-                    .to_owned(),
+                why: "this agent stages no inputs and runs in no subdirectory yet".to_owned(),
             });
         }
         if native.program.starts_with(BUNDLE_PROGRAM_PREFIX) {
@@ -728,11 +801,28 @@ pub fn profile_argv(
     native: &NativeSpec,
     home: &Path,
 ) -> Result<Vec<String>, RuntimeError> {
+    argv_of(config, native, home, None)
+}
+
+/// [`profile_argv`] for a run whose files are in `files`: the profile denies writes there
+/// as it does to an input. Reads are open under the only read model that has a profile
+/// ([`ReadModel::Open`]), and the agent refuses at start a files root that a read deny
+/// covers, so the run reads its files.
+fn argv_of(
+    config: &NativeConfig,
+    native: &NativeSpec,
+    home: &Path,
+    files: Option<&Path>,
+) -> Result<Vec<String>, RuntimeError> {
     let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
+    let inputs = files.map(AbsPath::new).transpose();
     let layout = SlotLayout {
         run,
         uid_entry: None,
-        inputs: Vec::new(),
+        inputs: inputs
+            .map_err(|why| fail(&"the files", &why))?
+            .into_iter()
+            .collect(),
         read_denies: config.read_denies.clone(),
     };
     let caps = Caps {

@@ -7,11 +7,11 @@ use std::fs;
 use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
-use js_agent::lifecycle::{Event, Lifecycle};
-use js_agent::native::{Enforcer, NativeChecks};
+use js_agent::lifecycle::{Config, Event, Lifecycle};
+use js_agent::native::{Enforcer, HandOver, NativeChecks};
 use js_agent_wire::{
-    BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunFile,
-    RunSpec, refusal,
+    BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
+    refusal,
 };
 use js_mac_pool::seatbelt::{AbsPath, Net};
 use js_oci::{Allow, Digest};
@@ -79,8 +79,31 @@ impl Native {
         adjust: impl FnOnce(&mut NativeConfig),
         gated: bool,
     ) -> Self {
+        Self::made(name, bundles, adjust, gated, |_| {}, None)
+    }
+
+    /// A lifecycle whose configuration `life` has changed (its files root is `files` in the
+    /// test's directory, the agent's), over a runtime that gives a run's files to its user
+    /// through `hand_over` when one is given and with `lchown` otherwise.
+    pub(super) fn with_files(
+        name: &str,
+        life: impl FnOnce(&mut Config),
+        hand_over: Option<HandOver>,
+    ) -> Self {
+        Self::made(name, None, |_: &mut NativeConfig| {}, true, life, hand_over)
+    }
+
+    fn made(
+        name: &str,
+        bundles: Option<(Arc<Placer>, Admission)>,
+        adjust: impl FnOnce(&mut NativeConfig),
+        gated: bool,
+        life: impl FnOnce(&mut Config),
+        hand_over: Option<HandOver>,
+    ) -> Self {
         let dir = Scratch::new(&format!("native-life-{name}"));
         let mut config = config_in(&dir, false);
+        life(&mut config);
         let fake = FakeHelper::start(&dir);
         let mut runtime_config = super::config(&fake);
         runtime_config.read_denies = vec![canonical(&dir, "state"), canonical(&dir, "scratch")];
@@ -90,6 +113,9 @@ impl Native {
             false => NativeRuntime::open_ungated(fake.client(), runtime_config, TERM),
         };
         let mut runtime = opened.unwrap();
+        if let Some(hand_over) = hand_over {
+            runtime = runtime.with_hand_over(hand_over);
+        }
         if let Some((store, admission)) = bundles {
             config.bundle = Some(admission);
             runtime = runtime.with_bundles(store);
@@ -131,7 +157,7 @@ impl Native {
         panic!("the lifecycle never got there: the fake helper never reported the end");
     }
 
-    fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
+    pub(super) fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
         fs::canonicalize(self.dir.path("scratch"))
             .unwrap()
             .join(run_id)
@@ -325,22 +351,17 @@ fn the_native_runtime_still_answers_env_unsupported() {
 }
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
-/// the server reads: a program outside the tool roots (`invalid-program`), inputs, a
-/// working directory and outputs it cannot stage (`native-unsupported`), and run files,
-/// which only a container is given (`files-need-container`). Nothing is made: the helper
+/// the server reads: a program outside the tool roots (`invalid-program`), and inputs and
+/// a working directory it cannot stage (`native-unsupported`). Nothing is made: the helper
 /// sees no user, the scratch directory is not made and the booking is intact. It catches a
-/// refused start that still costs a user, and a job whose inputs or files are dropped
-/// without a word.
+/// refused start that still costs a user, and a job whose inputs are dropped without a
+/// word. (Outputs and run files are served: `native/outputs.rs` and `native/files.rs`.)
 #[test]
 fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
     let input = InputRef::Mount {
         root_name: "data".to_owned(),
         rel: "x".to_owned(),
         dest: "in".to_owned(),
-    };
-    let outputs = js_agent_wire::OutputSpec {
-        path: "out".to_owned(),
-        kind: js_agent_wire::OutputKind::File,
     };
     let table: Vec<(&str, JobSpec)> = vec![
         ("invalid-program", job("r1", "/opt/tool/run")),
@@ -351,20 +372,7 @@ fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
         }),
         ("native-unsupported", {
             let mut spec = job("r1", "/bin/sh");
-            spec.native.as_mut().unwrap().outputs.push(outputs);
-            spec
-        }),
-        ("native-unsupported", {
-            let mut spec = job("r1", "/bin/sh");
             spec.native.as_mut().unwrap().cwd = "sub".to_owned();
-            spec
-        }),
-        ("files-need-container", {
-            let mut spec = job("r1", "/bin/sh");
-            spec.files = vec![RunFile {
-                name: "token".to_owned(),
-                contents: "secret".to_owned(),
-            }];
             spec
         }),
     ];
@@ -644,13 +652,12 @@ fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
 /// A start named by its image that this runtime cannot run is refused with the code that says
 /// why before its bundle is fetched, though the registry would serve it and the image is
 /// allowed: an image with no `run` (`image-unsupported-here`, a bundle has no command of its
-/// own), a `run` that stages inputs, collects outputs or names a working directory
-/// (`native-unsupported`), and a `run` with run files (`files-need-container`). The registry
-/// sees no request and no user is made. It catches an image start that begins a download for
+/// own), and a `run` that stages inputs or names a working directory (`native-unsupported`).
+/// The registry sees no request and no user is made. It catches an image start that begins a download for
 /// a job that can never run, and one answered with the wrong code.
 #[test]
 fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched() {
-    let table: [SpecCase; 5] = [
+    let table: [SpecCase; 3] = [
         ("image-unsupported-here", |spec| spec.run = None),
         ("native-unsupported", |spec| {
             spec.run.as_mut().unwrap().cwd = "sub".to_owned();
@@ -661,22 +668,6 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
                 rel: "x".to_owned(),
                 dest: "in".to_owned(),
             });
-        }),
-        ("native-unsupported", |spec| {
-            spec.run
-                .as_mut()
-                .unwrap()
-                .outputs
-                .push(js_agent_wire::OutputSpec {
-                    path: "out".to_owned(),
-                    kind: js_agent_wire::OutputKind::File,
-                });
-        }),
-        ("files-need-container", |spec| {
-            spec.files = vec![RunFile {
-                name: "token".to_owned(),
-                contents: "secret".to_owned(),
-            }];
         }),
     ];
     for (n, (code, shape)) in table.into_iter().enumerate() {

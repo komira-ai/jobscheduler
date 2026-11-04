@@ -193,12 +193,24 @@ pub struct Found {
 /// A runtime call that failed. The text is the runtime's own and stays on the host.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct RuntimeError(pub String, bool);
+pub struct RuntimeError(pub String, Kind);
+
+/// What kind of failure a [`RuntimeError`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// The call failed.
+    Call,
+    /// The agent cannot see the host ([`RuntimeError::blind`]).
+    Blind,
+    /// A removal that ended everything of the run and could not copy a declared output
+    /// ([`RuntimeError::outputs`]).
+    Outputs,
+}
 
 impl RuntimeError {
     /// A failure of the call.
     pub fn new(text: impl Into<String>) -> Self {
-        Self(text.into(), false)
+        Self(text.into(), Kind::Call)
     }
 
     /// A start that failed because the agent cannot see the host: the container started,
@@ -206,12 +218,24 @@ impl RuntimeError {
     /// post-job checks would read a host that is not the one the job runs on. The backend
     /// has removed the container; the lifecycle taints the host as unchecked.
     pub fn blind(text: impl Into<String>) -> Self {
-        Self(text.into(), true)
+        Self(text.into(), Kind::Blind)
     }
 
     /// Whether the failure is that the agent cannot see the host ([`RuntimeError::blind`]).
     pub fn is_blind(&self) -> bool {
-        self.1
+        self.1 == Kind::Blind
+    }
+
+    /// A removal that did everything a removal does (the run's processes and its user are
+    /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
+    /// run is left on the host, so the lifecycle reports it and does not taint the host.
+    pub(crate) fn outputs(text: impl Into<String>) -> Self {
+        Self(text.into(), Kind::Outputs)
+    }
+
+    /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
+    pub(crate) fn is_outputs(&self) -> bool {
+        self.1 == Kind::Outputs
     }
 }
 

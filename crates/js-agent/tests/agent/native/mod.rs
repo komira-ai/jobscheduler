@@ -11,6 +11,7 @@ mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod fake_helper;
+mod files;
 mod journal;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -19,6 +20,7 @@ mod mac;
 mod mac_agent;
 #[cfg(target_os = "macos")]
 mod mac_pf;
+mod outputs;
 mod pf_gate;
 mod runtime;
 mod settings;
@@ -89,6 +91,14 @@ impl Rig {
         let mut config = config(&fake);
         adjust(&mut config, &dir);
         let rt = NativeRuntime::open(fake.client(), config, TERM).unwrap();
+        Self { fake, rt, dir }
+    }
+
+    /// The same rig, its runtime giving a run's files to the run's user through
+    /// `hand_over`.
+    pub fn handing_over(self, hand_over: js_agent::native::HandOver) -> Self {
+        let Self { fake, rt, dir } = self;
+        let rt = rt.with_hand_over(hand_over);
         Self { fake, rt, dir }
     }
 

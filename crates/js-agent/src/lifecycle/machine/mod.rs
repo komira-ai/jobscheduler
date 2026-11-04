@@ -421,16 +421,12 @@ impl Lifecycle {
                 ));
             }
         }
+        // A native start with files is admitted like a container's: below, it needs this
+        // agent's files root, and the runtime gives the run's directory to the run's user.
         if let Some(native) = &body {
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;
-            if !spec.files.is_empty() {
-                return Err(no(
-                    detail::FILES_NEED_CONTAINER,
-                    "run files are delivered to containers only",
-                ));
-            }
         }
         // An image start is a bundle start: the image is the bundle's name. It is admitted
         // after the checks above so that a start the runtime refuses begins no fetch. (A
