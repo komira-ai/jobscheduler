@@ -1,7 +1,7 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_types::{
     Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass, Shape,
 };

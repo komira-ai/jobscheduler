@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_pool_static::{Candidate, HostBook, SeatError};
+use js_provider::{Candidate, HostBook, SeatError};
 use js_provider::{RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
