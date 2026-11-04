@@ -73,8 +73,8 @@
 //! the native body. A start named by its image without a `run`, or on a runtime with no
 //! store, is refused `image-unsupported-here`.
 //!
-//! What this runtime does not do yet: stage inputs or collect outputs (a start that names either is refused
-//! `native-unsupported`), adopt a run after the agent restarts (the
+//! What this runtime does not do yet: stage inputs or collect outputs (a start that names
+//! either is refused `native-unsupported`), adopt a run after the agent restarts (the
 //! journal ends it), stop a run softly (the helper only kills), or grant the user's
 //! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
 //! which is inside the home).

@@ -388,8 +388,9 @@ impl Lifecycle {
             }
         }
         // An image start is a bundle start: the image is the bundle's name. It is admitted
-        // after the checks above so that a start the runtime refuses begins no fetch.
-        if image_run && spec.bundle.is_none() {
+        // after the checks above so that a start the runtime refuses begins no fetch. (A
+        // start with a `bundle` and no `native` body never gets here: the wire refuses it.)
+        if image_run {
             self.admit_bundle(spec)?;
         }
         if let Some(why) = self.quota_health.why() {

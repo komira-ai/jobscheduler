@@ -640,17 +640,16 @@ fn an_image_run_that_asks_for_the_network_is_checked_against_the_anchor() {
     assert_eq!(s.h.start(networked), ["started r2"]);
 }
 
-/// A start that carries both a `bundle` pin and a `run` is admitted once, by its pin: the
-/// legacy field decides the bundle (the image is not read as one) and the run starts from it.
-/// It catches a start admitted twice, or by its image when it pins a bundle.
+/// A start that carries both a `bundle` pin and a `run` is skipped as invalid by the wire
+/// (`invalid-bundle`: a bundle needs a native body and no image) and fetches nothing. It
+/// catches an image start that is also a bundle start being admitted twice or run.
 #[test]
-fn a_start_with_a_run_and_a_bundle_pin_is_admitted_by_its_pin() {
+fn a_start_with_a_run_and_a_bundle_pin_is_invalid() {
     let mut s = imaged("both");
-    s.fetched();
     let image = s.image();
     let mut spec = image_job("r1", &image, "@bundle/tool");
-    spec.image = "registry.example/other:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
-    spec.bundle = Some(image.clone());
-    assert_eq!(s.h.start(spec), ["started r1"]);
-    assert!(s.store.pin(&image, "7.0").is_err(), "pinned while it runs");
+    spec.bundle = Some(image);
+    assert_eq!(s.h.start(spec), ["invalid #0 invalid-bundle"]);
+    assert!(s.served.fx.requests().is_empty());
+    s.made_no_user();
 }

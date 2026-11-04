@@ -70,8 +70,7 @@ pub const IMAGE_UNSUPPORTED_HERE: &str = "image-unsupported-here";
 pub const RUN_UNSUPPORTED: &str = "run-unsupported";
 /// As the detail of a `failed_to_start` result: a start on a Mac agent whose image is on no
 /// `--image-allow` entry, so the agent will not fetch it. Nothing is created and no
-/// registry is asked. A Linux agent has no such code: its pull fails later, as
-/// `runtime-failed`.
+/// registry is asked. A Linux agent has no such code.
 pub const IMAGE_NOT_ALLOWED: &str = "image-not-allowed";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";

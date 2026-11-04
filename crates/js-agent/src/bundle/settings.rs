@@ -357,7 +357,7 @@ impl Settings {
         let bundles = self.registries.iter().map(|registry| {
             let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
             let entry = self.credentials.attach(entry);
-            Ok(if registry.private {
+            Ok::<_, js_oci::Error>(if registry.private {
                 entry.private()
             } else {
                 entry
