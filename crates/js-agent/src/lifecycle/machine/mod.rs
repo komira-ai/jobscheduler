@@ -1,8 +1,9 @@
 //! The state machine: one [`Job`] per run the agent holds, moved by the commands of a
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 //!
-//! The jobs and what they book are in `job`, a restart in `adopt`, and the end of a job
-//! (watching its container and the cleanup in order) in `cleanup`.
+//! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
+//! (watching its container and the cleanup in order) in `cleanup`, and the stop after a
+//! silence of the server in `silence`.
 
 mod adopt;
 mod cleanup;
@@ -11,6 +12,7 @@ mod held;
 mod job;
 mod per_job;
 mod prepare;
+mod silence;
 mod slots;
 mod tails;
 
@@ -33,9 +35,10 @@ use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
 
-/// How many finished or stopped run ids the agent remembers, so a late or repeated start
-/// for one of them runs nothing. The oldest is forgotten first; a start for a run older
-/// than the last [`RETIRED_CAP`] is the server's to stop sending.
+/// How many fences of finished or stopped work the agent remembers (a run id, or a job id
+/// with its allocation id), so a late or repeated start for one of them runs nothing. The
+/// oldest is forgotten first; a start for work older than the last [`RETIRED_CAP`] is the
+/// server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
 
 /// The most jobs the agent holds, each listed in the held runs of a heartbeat. A job
@@ -112,6 +115,8 @@ pub struct Lifecycle {
     /// When the slots that stay parked were last reported, on the clock; none while no slot
     /// is parked.
     parked_reminded_ms: Option<u64>,
+    /// The stop after a silence of the server, once it is set (see `silence`).
+    silence: Option<silence::Watch>,
 }
 
 impl Lifecycle {
@@ -187,15 +192,17 @@ impl Lifecycle {
         self.taint.is_tainted()
     }
 
-    /// Lets the jobs make progress: watches each running container and its wall-time
-    /// limit, then takes each finished job as far through its cleanup as it will go, and
-    /// tries again to remove the containers no job stands for that could not be removed.
-    /// Call it on every tick.
+    /// Lets the jobs make progress: stops every job when the server has been silent for the
+    /// bound ([`Lifecycle::stop_on_silence`]), watches each running container and its
+    /// wall-time limit, then takes each finished job as far through its cleanup as it will
+    /// go, and tries again to remove the containers no job stands for that could not be
+    /// removed. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it
         // happened, and the agent refuses starts and frees no slot until it is written.
         let _ = self.taint.persist();
+        self.watch_silence(&mut events);
         for index in 0..self.jobs.len() {
             self.advance(index, &mut events);
             self.supervise(index, &mut events);
@@ -366,13 +373,19 @@ impl Lifecycle {
             .for_each(|job| job.result = None);
     }
 
+    /// Stops (or, `silent`, cancels) the run `run_id`. Its id is retired at once, with the
+    /// lease of a run the agent holds, so the list in the state root names it before the
+    /// stop is reported and a restart does not run it again.
     fn stop(&mut self, run_id: &str, silent: bool) {
         let held = self
             .jobs
             .iter_mut()
             .find(|job| job.keyed == Keyed::Run && job.run_id == run_id);
         match held {
-            Some(job) => job.request_stop(silent),
+            Some(job) => {
+                job.request_stop(silent);
+                self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+            }
             None => self.retired.insert(run_id),
         }
     }
@@ -666,8 +679,10 @@ impl Lifecycle {
 
     /// Whether a start is new work this agent may take on: not late, not held (a start of
     /// held work changes nothing; one that names held work of the other keying is a clash),
-    /// not retired, and not beyond the jobs a heartbeat can list. A start that may not is
-    /// skipped, with an event when that is worth a line.
+    /// not retired (a run start by its run id, `Skip::Retired`; a job start by its fence,
+    /// the job id with the allocation id, `Skip::FenceRetired`), and not beyond the jobs a
+    /// heartbeat can list. A start that may not is skipped, with an event when that is
+    /// worth a line. Nothing is booked or made before this has passed.
     fn may_start(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
@@ -695,10 +710,17 @@ impl Lifecycle {
             }
             return false;
         }
-        if self.retired.contains(run_id) {
+        let retired = match keyed {
+            Keyed::Run => self.retired.contains(run_id).then_some(Skip::Retired),
+            Keyed::Job => {
+                let fenced = self.retired.fenced(run_id, &spec.lease_id);
+                fenced.then_some(Skip::FenceRetired)
+            }
+        };
+        if let Some(why) = retired {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
-                why: Skip::Retired,
+                why,
             });
             return false;
         }

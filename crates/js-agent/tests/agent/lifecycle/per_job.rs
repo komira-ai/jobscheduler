@@ -87,7 +87,7 @@ fn a_repeated_start_does_not_run_the_job_twice() {
     ack_job(&mut h, "j1", "ACCEPTED");
     assert!(listed(&h).is_empty());
     let events = h.apply(vec![job_start(start("j1"))]);
-    assert_eq!(names(&events), ["skipped j1 Retired"]);
+    assert_eq!(names(&events), ["skipped j1 FenceRetired"]);
     assert_eq!(h.fake.created().len(), 1);
     assert!(listed(&h).is_empty());
 }
@@ -108,7 +108,7 @@ fn a_stop_for_an_unlisted_job_retires_the_id() {
     h.life.apply(&reply_json(&json!({ "taint_ack": false })));
     assert_eq!(h.life.retired_jobs(), ["j9"]);
     let events = h.apply(vec![job_start(start("j9"))]);
-    assert_eq!(names(&events), ["skipped j9 Retired"]);
+    assert_eq!(names(&events), ["skipped j9 FenceRetired"]);
     assert!(h.fake.created().is_empty());
     assert!(listed(&h).is_empty());
     h.life
@@ -385,7 +385,7 @@ fn the_retired_job_list_keeps_the_newest_ids() {
     assert_eq!(retired[0], "j1");
     assert_eq!(retired[RETIRED_LISTED - 1], format!("j{RETIRED_LISTED}"));
     let events = h.apply(vec![job_start(start("j0"))]);
-    assert_eq!(names(&events), ["skipped j0 Retired"]);
+    assert_eq!(names(&events), ["skipped j0 FenceRetired"]);
     h.apply(vec![job_stop("j0")]);
     let retired = h.life.retired_jobs();
     assert_eq!(retired.len(), RETIRED_LISTED);

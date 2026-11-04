@@ -71,6 +71,19 @@ fn forgetting_an_unacked_result_fails_unacked_result_is_resent() {
 }
 
 #[test]
+fn running_a_retired_fence_fails_retired_fence_is_refused() {
+    only_fails(Defect::RunsRetiredFence, Scenario::RetiredFenceIsRefused);
+}
+
+#[test]
+fn a_fence_kept_by_the_job_alone_fails_retired_fence_is_refused() {
+    only_fails(
+        Defect::FenceKeyedByJobAlone,
+        Scenario::RetiredFenceIsRefused,
+    );
+}
+
+#[test]
 fn the_failure_text_names_what_was_wrong() {
     let report = agent::run(|| FakeAgent::broken(Defect::NeverFences));
     let text = report.results.iter().find_map(|(_, v)| match v {
@@ -88,6 +101,7 @@ fn messages_on_a_dropped_connection_are_lost_and_change_nothing() {
     agent.disconnect();
     assert_eq!(agent.start("a", 10, 0), Delivery::Lost);
     assert_eq!(agent.ack("a"), Delivery::Lost);
+    assert_eq!(agent.start_fenced("a", "first"), Delivery::Lost);
     assert_eq!(agent.cancel("a"), Delivery::Lost);
     assert_eq!(agent.observed(), Default::default());
 }

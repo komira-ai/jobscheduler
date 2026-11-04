@@ -550,6 +550,15 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+    /// How many seconds the agent goes on running its jobs when it hears nothing from the
+    /// server (no welcome and no accepted heartbeat reply): then it stops every job it
+    /// holds, as a stop from the server would (the stop grace, then the kill), and reports
+    /// each `killed` with the detail `silence-stop`. By default 300; from 1 to 7200; it must
+    /// be above the stop grace plus the server's default grace of 15 seconds, and a welcome
+    /// whose grace plus the stop grace is not below it ends the agent. There is no value
+    /// that turns the stop off. Needs `--container-bin` or `--native-helper-socket`.
+    #[arg(long, value_name = "SECONDS")]
+    pub silence_stop: Option<u64>,
 
     /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
     /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
