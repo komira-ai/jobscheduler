@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
-use js_provider::{Provider, StartAck};
+use js_provider::{Pool, StartAck};
 use js_provider_lambdalabs::{FakeLambda, TerminateEffect};
 use js_scaler::{Phase, State};
 use serde_json::json;

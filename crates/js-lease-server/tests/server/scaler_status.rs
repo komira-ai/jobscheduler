@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
-use js_provider::Provider;
+use js_provider::Pool;
 use js_scaler::{Millis, Phase, Record, Records, StoredOffer};
 use serde_json::{Value, json};
 

@@ -2,6 +2,11 @@
 //! a [`Rig`] that the provider's crate writes: the rig puts the provider's cloud (a fake
 //! of it) in a named state and hands over the provider under test.
 //!
+//! A provider that cannot launch (one whose machines register themselves) runs the
+//! registered set instead, [`run_all_registered`] over a [`RegisteredRig`], which returns
+//! how many of [`REGISTERED_CASES`] it ran. The cases of [`run_all`] do not apply to it:
+//! they assume a [`Rig`] that scripts a cloud which launches, and a catalog with offers.
+//!
 //! A provider crate runs the suite from one test file: it enables this crate's
 //! `conformance` feature in its `[dev-dependencies]`, implements [`Rig`] over its fake
 //! cloud, and calls [`run_all`]. A new provider crate does the same; the cases do not
@@ -13,6 +18,18 @@
 //! the case's name, which is what a `should_panic(expected = ...)` test matches. No case
 //! reads a clock or waits: a rig whose provider spaces its launches in time sets the space
 //! to nothing.
+
+mod registered;
+
+pub use registered::{
+    REGISTERED_CASES, RegisteredCase, RegisteredRig, registered_acquire_is_refused_with_capacity,
+    registered_capacity_counts_machines_and_adds_none,
+    registered_catalog_is_empty_and_capabilities_follow_the_machines,
+    registered_list_holds_every_machine_and_a_failure_is_an_error,
+    registered_observe_is_absent_only_after_removal,
+    registered_release_refuses_and_changes_nothing,
+    registered_verify_instance_matches_only_a_bound_instance, run_all_registered,
+};
 
 use crate::answer::{Acquired, Claim, Held, HostStatus, Observed, RefusalCode, Released};
 use crate::ids::{AcquireId, Hello, HostName, HostRef, SchedulerId};

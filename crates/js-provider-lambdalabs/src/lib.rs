@@ -68,7 +68,7 @@
 //!
 //! The provider is not wired to a scheduler. The calls block, each under a time limit, so
 //! they must not run under a lock that other work waits on. It does not implement the
-//! delivered whole-host `Provider` trait, which is called under the lease table's lock.
+//! lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock.
 
 mod aborter;
 mod api;

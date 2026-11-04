@@ -7,7 +7,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use js_elastic::Demand;
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Busy, Launchable, Waiting, WholeNodeConfig};
 use support::world::*;
 use support::*;
