@@ -12,15 +12,21 @@
 //!   it, its scratch directory is the run's own (beside the runs when the leases are), and
 //!   the directories are directories, not links;
 //! - and either the supervisor left an exit record that can be read (the run ended while no
-//!   agent ran, and is reported from the record), or `crun state` names the container's
-//!   init, that process is in the lease's cgroup (or one below it), and the supervisor named
-//!   by the sidecar is the live process it was.
+//!   agent ran, and is reported from the record), or the supervisor named by the sidecar is
+//!   the live process it was and, when `crun state` names the container's init, that
+//!   process is in the lease's cgroup (or one below it). A live supervisor with no record
+//!   and no init named is a run that is ending, or not yet created (`crun` deletes the
+//!   container when the job exits, and the supervisor drains the streams before it writes
+//!   its record): it is adopted, and its handle gives the end once the record is there.
+//! - and the runtime has no egress. An allow-list egress removes every interface and table
+//!   a previous process wired when it starts, and a run adopted here would have none: no
+//!   run is adopted by a runtime opened with an egress, and each is removed.
 //!
 //! An adopted run stands as a run this process started, with the start time the sidecar
 //! recorded (wall clock), so the lifecycle reads how long it has run and holds it to the rest
-//! of its wall-time limit. That limit is kept only while an agent runs: the time no agent
-//! ran is counted against it, and a run past its limit when the agent comes back is stopped
-//! at the first step.
+//! of its wall-time limit. The wall limit is enforced only while an agent runs: the time a
+//! job ran with no agent counts against it, and a job whose limit passed meanwhile is
+//! stopped at the first step after the adoption.
 //!
 //! Every other lease of this agent is torn down and reported with its [`Reason`]: a sidecar
 //! of version 1, one whose container never started, one that failed a check, and a lease of
@@ -35,12 +41,12 @@ use std::path::Path;
 use js_contain::cgroup::LeaseCgroup;
 use js_contain::oci::{ExitRecord, end_supervisor, exit_record_path, read_exit_record};
 
-use super::dirs::{cgroup_dir, legacy_lease};
+use super::dirs::cgroup_dir;
 use super::ledger::{
     Booked, Entry, Failed, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
 };
 use super::spec::{adopted_spec, concluded};
-use super::{CrunError, CrunRuntime, Fault, Run, State};
+use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease};
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::{RunSpec, RuntimeError, label};
 
@@ -111,7 +117,10 @@ pub(super) fn agree(entry: &Entry, fields: &Fields<'_>) -> Result<(), String> {
         (label::WALL_MS, Some(fields.wall_ms.to_string())),
         (label::CPU_MILLIS, Some(booked.cpu_millis.to_string())),
         (label::MEMORY_BYTES, Some(booked.memory_bytes.to_string())),
-        (label::DISK_BYTES, booked.disk_bytes.map(|bytes| bytes.to_string())),
+        (
+            label::DISK_BYTES,
+            booked.disk_bytes.map(|bytes| bytes.to_string()),
+        ),
         (label::GPUS, Some(gpus.join(","))),
         (label::SLOT, Some(booked.slot.to_string())),
     ];
@@ -247,23 +256,25 @@ impl CrunRuntime {
         if entry.state != Some(Phase::Running) {
             return Err(Reason::NeverRan);
         }
+        if self.egress.is_some() {
+            return Err(Reason::Inconsistent(
+                "its network wiring cannot be taken over".to_owned(),
+            ));
+        }
         let fields = fields_of(entry).map_err(Reason::Inconsistent)?;
         agree(entry, &fields).map_err(Reason::Inconsistent)?;
         self.places(entry, &fields).map_err(Reason::Inconsistent)?;
         let mut run = self.run_of(entry, &fields);
+        // The supervisor is looked at before the record: one that is gone has written its
+        // record already, so a record not there then is one that never will be.
+        let alive = fields.supervisor.id().alive();
         let record = read_exit_record(fields.lease_dir)
             .map_err(|why| Reason::Inconsistent(format!("the exit record: {why}")))?;
         run.state = match record {
             Some(record) => self.ended_state(&run, &record),
-            None => {
-                self.standing(&run, &fields).map_err(Reason::Inconsistent)?;
-                State::Running {
-                    run: self
-                        .oci
-                        .adopt_supervised(fields.lease_dir, fields.supervisor.id()),
-                    since_ms: fields.started_wall_ms,
-                }
-            }
+            None => self
+                .standing(&run, &fields, alive)
+                .map_err(Reason::Inconsistent)?,
         };
         Ok((entry.name.clone(), run))
     }
@@ -278,7 +289,10 @@ impl CrunRuntime {
         let wrong = first_wrong(&[
             ("lease directory", fields.lease_dir == lease.dir),
             ("cgroup", fields.cgroup == cgroup.dir()),
-            ("exit record", fields.exit_record == exit_record_path(&lease.dir)),
+            (
+                "exit record",
+                fields.exit_record == exit_record_path(&lease.dir),
+            ),
             ("scratch directory", scratch),
         ]);
         if let Some(what) = wrong {
@@ -323,22 +337,28 @@ impl CrunRuntime {
         State::Ended(exit, tail)
     }
 
-    /// Whether the run `run`, which left no exit record, still stands: its supervisor is the
-    /// process the sidecar names and lives, `crun state` names its init, and the init is in
-    /// the lease's cgroup.
-    fn standing(&self, run: &Run, fields: &Fields<'_>) -> Result<(), String> {
-        if !fields.supervisor.id().alive() {
+    /// The state of the run `run`, which left no exit record, if it still stands: its
+    /// supervisor (`alive`, as looked at before the record was read) is the process the
+    /// sidecar names, and, if `crun state` names an init, that init is in the lease's cgroup.
+    /// No init named is not a reason to refuse: `crun` deletes the container when the job
+    /// exits and the supervisor drains the streams before it writes its record, and the
+    /// container does not exist yet between the supervisor's ready word and `crun`'s create.
+    /// The handle gives the end once the record is written.
+    fn standing(&self, run: &Run, fields: &Fields<'_>, alive: bool) -> Result<State, String> {
+        if !alive {
             return Err("the supervisor has ended and left no exit record".to_owned());
         }
-        let pid = self
-            .oci
-            .container_pid(&run.spec)
-            .map_err(|why| format!("crun names no init: {why}"))?;
-        if in_cgroup(fields.cgroup, pid) {
-            Ok(())
-        } else {
-            Err("the container's init is not in the lease's cgroup".to_owned())
+        if let Ok(pid) = self.oci.container_pid(&run.spec)
+            && !in_cgroup(fields.cgroup, pid)
+        {
+            return Err("the container's init is not in the lease's cgroup".to_owned());
         }
+        Ok(State::Running {
+            run: self
+                .oci
+                .adopt_supervised(fields.lease_dir, fields.supervisor.id()),
+            since_ms: fields.started_wall_ms,
+        })
     }
 
     /// Removes the leases of this agent's name that no sidecar records (a directory beside

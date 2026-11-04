@@ -33,8 +33,8 @@
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
 //!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
-//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it (the
-//!   Docker and Podman path; `crun` adopts nothing yet) lists it as a job again.
+//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
+//!   lists it as a job again.
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`

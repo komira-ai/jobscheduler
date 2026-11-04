@@ -76,7 +76,12 @@ fn lifecycle(
 ) -> Lifecycle {
     let mut config = s.config();
     config.stop_grace = grace;
-    let adopted = Lifecycle::adopt(config, Box::new(runtime), Box::new(NoChecks), Box::new(clock));
+    let adopted = Lifecycle::adopt(
+        config,
+        Box::new(runtime),
+        Box::new(NoChecks),
+        Box::new(clock),
+    );
     adopted.expect("a lifecycle over the runtime").0
 }
 

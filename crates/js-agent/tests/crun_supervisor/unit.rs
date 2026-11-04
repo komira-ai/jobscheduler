@@ -3,7 +3,7 @@
 //! under `<unit>/actions`) alive, and `Restart=` brings the agent back to find it.
 //!
 //! The agent here is a probe: this test binary again, run in a transient unit as
-//! `--exact probe_of_the_unit` with the packaged unit's `KillMode=` and `Restart=` and its
+//! `--exact unit::probe_of_the_unit` with the packaged unit's `KillMode=` and `Restart=` and its
 //! delegation. On its first start the probe makes a lease cgroup, starts a stand-in container
 //! (a process it moves into that cgroup) and a stand-in supervisor (a process of its own group
 //! left in the leaf), and says so through a named pipe. The test kills the probe's main process
@@ -28,7 +28,7 @@ const MOUNT: &str = "/sys/fs/cgroup";
 fn packaged(key: &str) -> String {
     let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packaging/js-agent/js-agent-crun.service");
-    let text = fs::read_to_string(&unit).expect("read the packaged unit");
+    let text = fs::read_to_string(unit).expect("read the packaged unit");
     text.lines()
         .filter(|line| !line.starts_with('#'))
         .find_map(|line| line.strip_prefix(&format!("{key}=")))
@@ -108,15 +108,18 @@ fn own_unit() -> PathBuf {
 /// A process that runs until it is killed, in a process group of its own, as a supervisor and
 /// a container's init are.
 fn idle() -> u32 {
-    Command::new("sleep")
+    let mut command = Command::new("sleep");
+    command
         .arg("infinity")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .expect("start sleep")
-        .id()
+        .process_group(0);
+    // Left running on purpose: the process stands for a job that outlives its agent, and the
+    // probe kills it by its pid when the case is over.
+    #[allow(clippy::zombie_processes)]
+    let child = command.spawn().expect("start sleep");
+    child.id()
 }
 
 /// The probe: the agent of the unit `the_unit_leaves_leases_alive_when_the_agent_is_killed`
@@ -148,9 +151,10 @@ fn probe_of_the_unit() {
             .split_whitespace()
             .map(|pid| pid.parse().expect("a pid"))
             .collect();
-        let word = match pids.iter().all(|pid| alive(*pid)) {
-            true => "alive",
-            false => "gone",
+        let word = if pids.iter().all(|pid| alive(*pid)) {
+            "alive"
+        } else {
+            "gone"
         };
         // Nothing of the probe is left for the next case.
         let _ = fs::write(lease.join("cgroup.kill"), "1");
@@ -198,7 +202,7 @@ fn after_a_crash(kill_mode: &str) -> String {
             "--",
             exe.to_str().expect("a path in UTF-8"),
             "--exact",
-            "probe_of_the_unit",
+            "unit::probe_of_the_unit",
             "--include-ignored",
             "--test-threads=1",
         ],

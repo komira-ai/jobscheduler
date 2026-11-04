@@ -11,7 +11,7 @@
 //!   `docs/design/agent-egress.md`.
 //!
 //! The runtime that starts the containers calls, in this order: [`Egress::check`] before
-//! every create (a failure is `egress-unchecked` and creates nothing), `Oci::start`,
+//! every create (a failure is `egress-unchecked` and creates nothing), `Oci::start_supervised`,
 //! `Oci::container_pid`, [`Egress::attach`], and [`Attachment::release`] when the run ends.
 
 mod config;

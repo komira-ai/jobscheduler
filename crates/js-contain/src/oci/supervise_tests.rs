@@ -33,7 +33,7 @@ fn a_record() -> ExitRecord {
 
 /// The JSON of `a_record`, to break in a way the test names.
 fn valid() -> Value {
-    serde_json::from_str(&encode(&a_record())).expect("json")
+    serde_json::from_str(&encode(&a_record(), MAX_TAIL_RECORDED)).expect("json")
 }
 
 fn text(value: &Value) -> Vec<u8> {
@@ -228,7 +228,7 @@ fn a_record_file_that_is_not_a_plain_small_file_is_refused() {
     let cap = usize::try_from(MAX_RECORD).expect("cap");
     std::fs::write(&path, vec![b' '; cap + 1]).expect("long");
     let why = read_exit_record(&lease).expect_err("too long");
-    assert!(why.contains("longer than 1 MiB"), "{why}");
+    assert!(why.contains("longer than an exit record can be"), "{why}");
     std::fs::write(&path, vec![b' '; cap]).expect("at the cap");
     let why = read_exit_record(&lease).expect_err("blank");
     assert!(why.contains("not JSON"), "{why}");
@@ -322,7 +322,7 @@ fn ending_a_supervisor_kills_its_group_and_only_when_it_is_the_same_process() {
 fn start(lease: &Path, hold: &Path, script: &str) -> Result<Supervised, String> {
     let mut command = Command::new("sh");
     command.args(["-c", script, "sh"]).arg(hold);
-    Supervised::spawn(command, lease.to_owned(), READY)
+    Supervised::spawn(command, lease.to_owned(), READY, READY_WAIT)
 }
 
 /// A fifo in `dir`, for a stand-in to wait on.
@@ -425,7 +425,10 @@ async fn a_record_that_cannot_be_read_ends_the_run_in_failure() {
 fn a_supervisor_that_does_not_say_it_is_ready_fails_the_start() {
     let lease = dir("silent");
     for (script, says) in [
-        ("printf 'wrong-word!!'", "something other than its ready word"),
+        (
+            "printf 'wrong-word!!'",
+            "something other than its ready word",
+        ),
         ("printf 'sup'", "did not say it is ready"),
         ("true", "did not say it is ready"),
     ] {
@@ -433,8 +436,38 @@ fn a_supervisor_that_does_not_say_it_is_ready_fails_the_start() {
         assert!(why.contains(says), "{script}: {why}");
     }
     let missing = Command::new(lease.join("no-such-program"));
-    let why = Supervised::spawn(missing, lease.to_path_buf(), READY).expect_err("not run");
+    let why =
+        Supervised::spawn(missing, lease.to_path_buf(), READY, READY_WAIT).expect_err("not run");
     assert!(why.contains("No such file"), "{why}");
+}
+
+/// Catches a supervisor stuck before its ready word blocking the start for good: with no
+/// time allowed, a child that never answers fails the start naming the limit, and the child
+/// is killed and reaped (the `exec`ed `sleep` would otherwise run for ten minutes).
+#[test]
+fn a_supervisor_silent_past_the_limit_is_killed_and_the_start_fails() {
+    let lease = dir("stuck");
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 600"]);
+    let why =
+        Supervised::spawn(command, lease.to_path_buf(), READY, Duration::ZERO).expect_err("silent");
+    assert!(why.contains("not say it is ready within 0ns"), "{why}");
+}
+
+/// Catches a tail longer than the bound being recorded whole, which would make a record
+/// longer than the reader takes: the record keeps the last bytes of each stream, and a tail
+/// within the bound is recorded as it is.
+#[test]
+fn a_tail_longer_than_the_bound_is_recorded_as_its_last_bytes() {
+    let mut record = a_record();
+    record.tail.stdout = stream("abcdef", 6, false);
+    record.tail.stderr = stream("xyz", 3, true);
+    let value: Value = serde_json::from_str(&encode(&record, 4)).expect("json");
+    assert_eq!(value["stdout"]["tail"], hex(b"cdef"));
+    assert_eq!(value["stderr"]["tail"], hex(b"xyz"));
+    assert_eq!(value["stdout"]["total"], 6);
+    let whole: Value = serde_json::from_str(&encode(&record, 6)).expect("json");
+    assert_eq!(whole["stdout"]["tail"], hex(b"abcdef"));
 }
 
 /// A stand-in `crun` that runs `body` as a shell script.
@@ -481,7 +514,9 @@ fn the_supervise_mode_runs_crun_and_records_how_it_ended() {
     let crun = crun(&dir, "echo hello; echo oops >&2; exit 3");
     let (code, ready) = supervise(&args(&crun, &lease, "1048576", "65536"), one_thread_runtime);
     assert_eq!((code, ready.as_slice()), (0, READY));
-    let record = read_exit_record(&lease).expect("readable").expect("written");
+    let record = read_exit_record(&lease)
+        .expect("readable")
+        .expect("written");
     assert_eq!(record.end, RunEnd::Exited(3));
     assert_eq!(record.tail.stdout, stream("hello\n", 6, false));
     assert_eq!(record.tail.stderr, stream("oops\n", 5, false));
@@ -502,7 +537,9 @@ fn the_limits_in_the_arguments_bound_the_output_kept() {
     let crun = crun(&dir, "echo hello");
     let (code, _) = supervise(&args(&crun, &lease, "4", "3"), one_thread_runtime);
     assert_eq!(code, 0);
-    let record = read_exit_record(&lease).expect("readable").expect("written");
+    let record = read_exit_record(&lease)
+        .expect("readable")
+        .expect("written");
     assert_eq!(record.tail.stdout, stream("lo\n", 6, true));
     let file = std::fs::read(logs::stdout_path(&lease)).expect("file");
     assert_eq!(file, b"hell");
@@ -520,7 +557,9 @@ fn a_run_that_could_not_be_made_is_recorded_as_failed() {
     let missing = dir.join("no-such-crun");
     let (code, _) = supervise(&args(&missing, &lease, "100", "100"), one_thread_runtime);
     assert_eq!(code, 0);
-    let record = read_exit_record(&lease).expect("readable").expect("written");
+    let record = read_exit_record(&lease)
+        .expect("readable")
+        .expect("written");
     let RunEnd::Failed(why) = record.end else {
         panic!("the run did not fail");
     };
@@ -530,7 +569,9 @@ fn a_run_that_could_not_be_made_is_recorded_as_failed() {
     std::fs::create_dir_all(lease.join("bundle")).expect("lease");
     let (code, _) = supervise(&args(&missing, &lease, "100", "100"), no_runtime);
     assert_eq!(code, 0);
-    let record = read_exit_record(&lease).expect("readable").expect("written");
+    let record = read_exit_record(&lease)
+        .expect("readable")
+        .expect("written");
     assert_eq!(
         record.end,
         RunEnd::Failed("the runtime of the supervisor: no epoll".to_owned())

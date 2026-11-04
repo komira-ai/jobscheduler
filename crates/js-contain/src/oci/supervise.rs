@@ -12,8 +12,8 @@
 //!
 //! **The handshake:** the supervisor makes the init's report file and the capture files,
 //! then writes a ready word to its standard output. [`Oci::start_supervised`] returns once
-//! it has read the word; a supervisor that exits without it, or says something else, is
-//! killed and reaped, and the start fails.
+//! it has read the word; a supervisor that exits without it, says something else, or is
+//! silent for [`READY_WAIT`], is killed and reaped, and the start fails.
 //!
 //! **The exit record:** when `crun run` has returned and the drain of the output is over,
 //! the supervisor writes `exit.json` in the lease directory whole (a temporary file,
@@ -28,7 +28,8 @@
 //!
 //! A reader ignores fields it does not know and refuses another version, so later forms
 //! add fields. The record is read through [`read_exit_record`], which opens it without
-//! following a link and reads at most 1 MiB of a regular file.
+//! following a link and reads at most 16.1 MiB of a regular file. A stream's tail
+//! of more than 4 MiB is recorded as its last 4 MiB.
 //!
 //! **The handle:** [`Supervised`] reads the record. A run is over when the record is there;
 //! a supervisor that is gone ([`SupervisorId::alive`]) and wrote none ended without one,
@@ -64,8 +65,17 @@ const GONE: &str = "the supervisor ended without an exit record";
 /// Why a start fails whose supervisor said something else than the ready word.
 const WRONG_WORD: &str = "the supervisor said something other than its ready word";
 
-/// The most bytes of an exit record that are read.
-const MAX_RECORD: u64 = 1024 * 1024;
+/// The most bytes of each stream's tail an exit record holds: the writer keeps the last
+/// bytes of a longer tail, so that a record is always one [`read_exit_record`] accepts.
+pub(crate) const MAX_TAIL_RECORDED: usize = 4 * 1024 * 1024;
+
+/// The most bytes of an exit record that are read: two streams of [`MAX_TAIL_RECORDED`]
+/// bytes in two hexadecimal digits each, and 64 KiB for the rest.
+const MAX_RECORD: u64 = (2 * 2 * MAX_TAIL_RECORDED + 64 * 1024) as u64;
+
+/// How long [`Oci::start_supervised`] waits for the ready word before it gives up on the
+/// supervisor, kills its process group and fails the start.
+pub const READY_WAIT: Duration = Duration::from_secs(30);
 
 /// The exit record of the lease directory `lease`: `<lease>/exit.json`.
 pub fn exit_record_path(lease: &Path) -> PathBuf {
@@ -151,7 +161,8 @@ pub struct ExitRecord {
 }
 
 /// The record as the JSON of its form version 1.
-fn encode(record: &ExitRecord) -> String {
+/// Each stream's tail is cut to its last `max_tail` bytes.
+fn encode(record: &ExitRecord, max_tail: usize) -> String {
     let end = match &record.end {
         RunEnd::Exited(code) => json!({ "exited": code }),
         RunEnd::Failed(why) => json!({ "failed": why }),
@@ -160,15 +171,16 @@ fn encode(record: &ExitRecord) -> String {
         "version": 1,
         "end": end,
         "finished_ms": record.finished_ms,
-        "stdout": encode_stream(&record.tail.stdout),
-        "stderr": encode_stream(&record.tail.stderr),
+        "stdout": encode_stream(&record.tail.stdout, max_tail),
+        "stderr": encode_stream(&record.tail.stderr, max_tail),
     })
     .to_string()
 }
 
-fn encode_stream(stream: &StreamTail) -> Value {
+fn encode_stream(stream: &StreamTail, max_tail: usize) -> Value {
+    let kept = stream.bytes.len().saturating_sub(max_tail);
     json!({
-        "tail": hex(&stream.bytes),
+        "tail": hex(&stream.bytes[kept..]),
         "total": stream.total,
         "file_cut": stream.file_cut,
     })
@@ -196,7 +208,7 @@ fn unhex(text: &str) -> Result<Vec<u8>, String> {
         .map(nibble)
         .collect::<Option<_>>()
         .ok_or("the tail is not lowercase hexadecimal".to_owned())?;
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return Err("the tail has an odd number of digits".to_owned());
     }
     Ok(digits
@@ -285,14 +297,14 @@ fn load(lease: &Path) -> std::io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_RECORD {
-        return Err(std::io::Error::other("longer than 1 MiB"));
+        return Err(std::io::Error::other("longer than an exit record can be"));
     }
     Ok(Some(bytes))
 }
 
 /// Reads the exit record of `lease`: `Ok(None)` when there is none yet; `Err(text)` when the
-/// file is a link, not a regular file, longer than 1 MiB, or not a record. Opened without
-/// following a link.
+/// file is a link, not a regular file, longer than an exit record can be, or not a record.
+/// Opened without following a link.
 ///
 /// # Errors
 /// The text says which, and names the file.
@@ -317,7 +329,7 @@ pub(crate) fn write_record(lease: &Path, record: &ExitRecord) -> std::io::Result
         .truncate(true)
         .mode(0o600)
         .open(&staged)?;
-    file.write_all(encode(record).as_bytes())?;
+    file.write_all(encode(record, MAX_TAIL_RECORDED).as_bytes())?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&staged, exit_record_path(lease))?;
@@ -335,19 +347,25 @@ pub struct Supervised {
 impl Supervised {
     /// Starts `command` as a supervisor (stdin and stderr null, stdout a pipe, a process
     /// group of its own) and returns once it has written `ready` to its stdout. A child
-    /// that does not say it is killed and reaped. A thread waits for the child, so it
-    /// never stays a zombie.
+    /// that does not say it within `limit` is killed (its process group) and reaped. A
+    /// thread waits for the child, so it never stays a zombie.
     ///
     /// # Errors
-    /// The command could not be run, or its answer is not `ready`.
-    pub(crate) fn spawn(command: Command, lease: PathBuf, ready: &[u8]) -> Result<Self, String> {
-        Self::start(command, ready)
+    /// The command could not be run, its answer is not `ready`, or it gave none within
+    /// `limit`.
+    pub(crate) fn spawn(
+        command: Command,
+        lease: PathBuf,
+        ready: &[u8],
+        limit: Duration,
+    ) -> Result<Self, String> {
+        Self::start(command, ready, limit)
             .map(|id| Self { id, lease })
             .map_err(|e| e.to_string())
     }
 
-    fn start(mut command: Command, ready: &[u8]) -> std::io::Result<SupervisorId> {
-        let (mut from_child, to_child) = std::io::pipe()?;
+    fn start(mut command: Command, ready: &[u8], limit: Duration) -> std::io::Result<SupervisorId> {
+        let (from_child, to_child) = std::io::pipe()?;
         command
             .stdin(Stdio::null())
             .stdout(to_child)
@@ -358,7 +376,7 @@ impl Supervised {
         // read.
         drop(command);
         let mut child = spawned?;
-        match answer(child.id(), &mut from_child, ready) {
+        match answer(child.id(), from_child, ready, limit) {
             Ok(id) => {
                 std::thread::spawn(move || {
                     let _ = child.wait();
@@ -444,17 +462,31 @@ impl Supervised {
     }
 }
 
-/// Reads the ready word from the child `pid`'s `from_child` and says who the child is.
+/// Reads the ready word from the child `pid`'s `from_child` and says who the child is. The
+/// read is on a thread of its own, so that a child silent for `limit` ends the wait (the
+/// thread then ends with the child, when the caller kills it and the pipe closes).
 fn answer(
     pid: u32,
-    from_child: &mut impl std::io::Read,
+    mut from_child: impl std::io::Read + Send + 'static,
     ready: &[u8],
+    limit: Duration,
 ) -> std::io::Result<SupervisorId> {
     let unreadable = std::io::Error::other("the start time of the supervisor cannot be read");
     let id = SupervisorId::of(pid).ok_or(unreadable)?;
     let mut word = vec![0_u8; ready.len()];
-    from_child
-        .read_exact(&mut word)
+    let (said, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let read = from_child.read_exact(&mut word).map(|()| word);
+        // The waiter may have given up: nobody then wants the word.
+        let _ = said.send(read);
+    });
+    let word = heard
+        .recv_timeout(limit)
+        .map_err(|_| {
+            std::io::Error::other(format!(
+                "the supervisor did not say it is ready within {limit:?}"
+            ))
+        })?
         .map_err(|e| {
             std::io::Error::other(format!("the supervisor did not say it is ready: {e}"))
         })?;
@@ -465,8 +497,11 @@ fn answer(
     }
 }
 
-/// Kills the child and waits for it.
+/// Kills the child's process group (the child is its leader) and the child, and waits for
+/// it.
 fn give_up(mut child: Child) {
+    let group = rustix::process::Pid::from_child(&child);
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     // It may have ended already: both calls then say so, and there is nothing to do.
     let _ = child.kill();
     let _ = child.wait();
@@ -488,7 +523,10 @@ impl Oci {
     pub fn start_supervised(&self, spec: &ContainerSpec) -> Result<Supervised, String> {
         let record = exit_record_path(&spec.dir);
         if record.symlink_metadata().is_ok() {
-            return Err(format!("{}: an exit record is already there", record.display()));
+            return Err(format!(
+                "{}: an exit record is already there",
+                record.display()
+            ));
         }
         let mut command = Command::new(&self.daemon);
         command
@@ -500,7 +538,7 @@ impl Oci {
             .arg(self.logs.tail.to_string())
             .arg(self.logs.drain_grace.as_millis().to_string());
         self.crun.prepare(&mut command);
-        Supervised::spawn(command, spec.dir.clone(), READY)
+        Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)
     }
 
     /// The handle of a container an earlier process started under the supervisor `id`, whose
@@ -629,7 +667,10 @@ fn crun_run(
     let (lease, name) = (request.lease.clone(), request.name.clone());
     let bundle = lease.join("bundle");
     let launch: Launch = Box::new(move |stdout, stderr| {
-        Box::pin(async move { crun.run(&lease, &name, &bundle, report, stdout, stderr).await })
+        Box::pin(async move {
+            crun.run(&lease, &name, &bundle, report, stdout, stderr)
+                .await
+        })
     });
     match runtime() {
         Ok(runtime) => runtime.block_on(logs::supervise(capture.clone(), launch)),

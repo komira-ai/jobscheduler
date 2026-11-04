@@ -5,12 +5,10 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use js_agent_wire::limits::MAX_HELD;
-use js_agent_wire::{
-    BookedResources, Command, HeldRun, HeldState, JobStartSpec, LogTail, Outcome, RunResult,
-};
+use js_agent_wire::{BookedResources, Command, HeldRun, HeldState, JobStartSpec, LogTail, Outcome};
 use serde_json::{Value, json};
 
 use super::{Harness, job, names, reply_json};
@@ -68,7 +66,7 @@ fn retired_file(h: &Harness) -> PathBuf {
 }
 
 /// The JSON in `path`.
-fn json_of(path: &PathBuf) -> Value {
+fn json_of(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
@@ -142,7 +140,7 @@ fn results_not_yet_acknowledged_are_resent_after_restart() {
         h.life.held(),
         [HeldRun {
             run_id: "r1".to_owned(),
-            state: HeldState::ExitedUnacked
+            state: HeldState::ExitedUnacked,
         }]
     );
     assert_eq!(h.life.results()[0].outcome, Outcome::Failed);
@@ -469,6 +467,82 @@ fn a_restored_result_is_listed_under_its_own_keying() {
     let jobs = h.life.held_jobs();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].job_id, "j1");
-    let result: &RunResult = &h.life.results()[0];
-    assert_eq!(result.run_id, "r1");
+    let results = h.life.results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].run_id, "r1");
+}
+
+/// Asserts that a result file whose id is retired in the same call is removed only after
+/// the retired list is written: with the list unwritable, both files stay, the failure is
+/// one finding with no run, and the call that can write the list then removes them. It
+/// catches a crash window in which the id is neither held nor retired, so that a replayed
+/// start would run it again.
+#[test]
+fn a_result_file_stays_until_the_retired_list_is_written() {
+    let mut h = ended("held-retire-first");
+    let temp = h.dir.path("state").join("retired.json.tmp");
+    fs::create_dir(&temp).unwrap();
+    let events = ack_both(&mut h, "ACCEPTED");
+    assert!(
+        events.contains(&"finding - held-record-failed".to_owned()),
+        "{events:?}"
+    );
+    assert_eq!(findings(&events, "held-record-failed"), 1, "{events:?}");
+    assert!(h.life.results().is_empty());
+    assert!(held_file(&h, "r1").exists() && held_file(&h, "j1").exists());
+    assert!(!retired_file(&h).exists());
+    assert!(h.life.step().is_empty(), "told once");
+    assert!(held_file(&h, "r1").exists());
+
+    fs::remove_dir(&temp).unwrap();
+    assert!(h.life.step().is_empty());
+    assert!(!held_file(&h, "r1").exists() && !held_file(&h, "j1").exists());
+    assert_eq!(
+        json_of(&retired_file(&h))["retired"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// Asserts that the unfinished write of a dead process (`<id>.json.tmp`) is removed at
+/// start without a finding, beside a good result that is held. It catches a leftover that
+/// is reported as an unreadable result at every start.
+#[test]
+fn an_unfinished_write_is_removed_without_a_finding() {
+    let mut h = ended("held-tmp");
+    let leftover = held_dir(&h).join("r1.json.tmp");
+    fs::write(&leftover, "{\"keyed\": ").unwrap();
+    let events = names(&h.restart().unwrap());
+    assert_eq!(findings(&events, "held-record-unreadable"), 0, "{events:?}");
+    assert!(!leftover.exists());
+    assert_eq!(h.life.results().len(), 1);
+    assert_eq!(h.life.held_jobs().len(), 1);
+}
+
+/// Asserts that a file for a job the agent has taken over does not count against the room
+/// for held results: with the taken-over job's file and one more file than the rest of the
+/// room, exactly the one too many is removed and the taken-over job keeps its result. It
+/// catches a cap that counts a job twice and so drops a result it had room for.
+#[test]
+fn a_taken_over_jobs_file_does_not_use_up_room() {
+    let mut h = Harness::new("held-cap-adopted");
+    h.start(job("r1"));
+    h.fake.exit("r1", 7);
+    h.fake.fail("remove", u32::MAX);
+    h.life.step();
+    let dir = held_dir(&h);
+    for n in 0..MAX_HELD {
+        let id = format!("x{n:04}");
+        let body = json!({ "keyed": "run", "result": {
+            "run_id": id, "lease_id": "l", "outcome": "killed" } });
+        fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
+    }
+    let events = names(&h.restart().unwrap());
+    assert_eq!(findings(&events, "held-record-unreadable"), 1, "{events:?}");
+    assert_eq!(h.held().len(), MAX_HELD);
+    assert!(h.held().contains(&"r1".to_owned()));
+    assert!(dir.join("r1.json").exists());
+    assert!(!dir.join(format!("x{:04}.json", MAX_HELD - 1)).exists());
 }

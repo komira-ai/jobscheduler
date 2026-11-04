@@ -27,9 +27,9 @@
 //! Releasing a run removes the set member and the host end (which takes the job end with
 //! it); the container's namespace is the kernel's to free when its last process ends, so
 //! nothing of it outlives the run. An allow-list start begins by removing every interface
-//! named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and the two tables, because
-//! the keeper kills the containers with the agent: nothing a previous process wired is in
-//! use; and only one agent at a time holds the host's egress ([`HOST_LOCK`]), so the sweep
+//! named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and the two tables. An agent
+//! with an allow-list egress does not adopt crun runs: it removes them at start, so nothing a
+//! previous process wired is in use; and only one agent at a time holds the host's egress ([`HOST_LOCK`]), so the sweep
 //! never removes the live wiring of another agent. Mode none runs no program and touches nothing.
 //!
 //! Everything the agent does to the machine goes through [`Sys`], so the unit tests script

@@ -44,8 +44,11 @@
 #                         outlive the agent. The next agent the unit starts (Restart=always)
 #                         adopts every container its ledger records and lists the jobs again,
 #                         so a crash does not cost a running job. A container's wall limit
-#                         runs only while an agent runs: one whose limit passed while none
-#                         did is stopped at the first step after the adoption
+#                         is enforced only while an agent runs: the time it ran with no agent
+#                         counts, and one whose limit passed meanwhile is stopped at the
+#                         first step after the adoption. An agent with an allow-list --egress
+#                         adopts nothing (its start removes the network wiring): it removes
+#                         the containers it finds, and their jobs are lost
 #   --drain-wait 3600 --stop-grace 120   a stop (an update) still drains: the agent lets the
 #                         running jobs finish for up to an hour (the most --drain-wait
 #                         allows) and then stops them within 120 s before it exits

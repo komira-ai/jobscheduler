@@ -43,7 +43,10 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
     assert_eq!(swept.adopted, ["r-up"], "{swept:?}");
     assert_eq!(swept.removed.len(), 1, "{swept:?}");
     let removed = &swept.removed[0];
-    assert_eq!((removed.run_id.as_str(), &removed.name), ("r-made", &made.0));
+    assert_eq!(
+        (removed.run_id.as_str(), &removed.name),
+        ("r-made", &made.0)
+    );
     assert_eq!(removed.labels[label::RUN], "r-made");
     assert_eq!(removed.labels[label::AGENT], HOST);
     assert_eq!(removed.reason, Reason::NeverRan);

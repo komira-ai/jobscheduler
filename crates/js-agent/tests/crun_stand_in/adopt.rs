@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use js_agent::crun::{CrunRuntime, Hooks, Reason};
+use js_agent::crun::{CrunRuntime, EgressPort, Hooks, Reason, Wired};
+use js_agent::egress::EgressError;
 use js_agent::lifecycle::{
     Capacity, Clock, Config, DirLayout, Event, Exit, Lifecycle, MountRoots, NoChecks, RunHandle,
     RunSpec, Runtime, ScratchRoot, StateRoot, Status, label,
@@ -273,7 +274,12 @@ fn restarted(name: &str, (start, restart): (u64, u64)) -> (Node, Lifecycle, Movi
     drop(first);
     WALL.store(restart, Ordering::SeqCst);
     let second = node.open_with(hooks, Arc::new(NoImages));
-    assert_eq!(second.swept().adopted, ["r1-stubborn"], "{:?}", second.swept());
+    assert_eq!(
+        second.swept().adopted,
+        ["r1-stubborn"],
+        "{:?}",
+        second.swept()
+    );
     let clock = Moving::default();
     let (life, _) = lifecycle(&node, second, &clock, Duration::ZERO);
     (node, life, clock)
@@ -337,7 +343,12 @@ fn a_job_that_exited_while_no_agent_ran_is_reported_with_its_code_and_tail() {
     drop(first);
 
     let mut second = node.open();
-    assert_eq!(second.swept().adopted, ["r1-sayexit"], "{:?}", second.swept());
+    assert_eq!(
+        second.swept().adopted,
+        ["r1-sayexit"],
+        "{:?}",
+        second.swept()
+    );
     assert!(second.swept().removed.is_empty());
     let found = second.list_labelled().expect("lists");
     assert_eq!((found.len(), found[0].running_ms), (1, 0));
@@ -442,19 +453,19 @@ fn a_job_with_no_record_is_removed_and_the_server_is_told_it_is_gone() {
 }
 
 /// Proves each check of an adoption can fail by itself, and fails the lease with its own
-/// words: of fifteen jobs that run, the one left as it is stands, and each of the others has
+/// words: of fourteen jobs that run, the one left as it is stands, and each of the others has
 /// one thing wrong (a sidecar of version 1, one still starting, a field missing, a label that
 /// disagrees, a path that is not the one the agent makes for the lease: directory, cgroup,
 /// exit record, scratch directory; a cgroup and a scratch directory that are gone, an exit
-/// record that cannot be read, a supervisor that is gone, a `crun` that names no init, an
-/// init that is not in the cgroup), is removed saying which; a lease made and never started
+/// record that cannot be read, a supervisor that is gone, an init that is not in the
+/// cgroup), is removed saying which; a lease made and never started
 /// is removed as one that never ran. Catches a check that is not made, or that is made and
 /// answers for another.
 #[test]
 fn every_check_of_an_adoption_can_fail_and_the_lease_is_removed_with_its_reason() {
     type Tamper = fn(&Node, &str, &str);
     let node = Node::new("adopt-checks");
-    let cases: [(&str, Tamper, &str); 15] = [
+    let cases: [(&str, Tamper, &str); 14] = [
         ("a-ok-hold", |_, _, _| {}, "adopted"),
         (
             "b-old-hold",
@@ -519,15 +530,12 @@ fn every_check_of_an_adoption_can_fail_and_the_lease_is_removed_with_its_reason(
             |node, name, _| end_supervisor(node, name),
             "supervisor has ended",
         ),
-        ("n-deaf", |_, _, _| {}, "crun names no init"),
         ("p-unplaced-hold", |_, _, _| {}, "not in the lease's cgroup"),
     ];
     let mut first = node.open();
     let mut handles = Vec::new();
     for (run, tamper, _) in &cases {
-        let id = if run.ends_with("-deaf") {
-            first.create_and_start(&node.job(run, 60_000)).expect("started")
-        } else if run.starts_with("p-") {
+        let id = if run.starts_with("p-") {
             started(&node, &mut first, &node.job(run, 60_000))
         } else {
             held(&node, &mut first, run)
@@ -535,13 +543,18 @@ fn every_check_of_an_adoption_can_fail_and_the_lease_is_removed_with_its_reason(
         tamper(&node, &id.0, run);
         handles.push(id);
     }
-    let never = first.stage(&node.job("z-staged-hold", 60_000)).expect("staged");
+    let never = first
+        .stage(&node.job("z-staged-hold", 60_000))
+        .expect("staged");
     drop(first);
 
     let mut second = node.open();
     let report = second.swept().clone();
     assert_eq!(report.adopted, ["a-ok-hold"], "{report:?}");
-    assert!(report.failed.is_empty() && report.left.is_empty(), "{report:?}");
+    assert!(
+        report.failed.is_empty() && report.left.is_empty(),
+        "{report:?}"
+    );
     for (run, _, want) in cases.iter().skip(1) {
         let lease = report.removed.iter().find(|lease| lease.run_id == *run);
         let lease = lease.unwrap_or_else(|| panic!("{run} was not removed: {report:?}"));
@@ -562,18 +575,43 @@ fn every_check_of_an_adoption_can_fail_and_the_lease_is_removed_with_its_reason(
 /// Ends the supervisor of the lease `name` by force, as a crash of the host's process would,
 /// and returns once it is gone.
 fn end_supervisor(node: &Node, name: &str) {
+    let id = supervisor_id(node, name);
+    let group = rustix::process::Pid::from_raw(i32::try_from(id.pid).expect("a pid"));
+    rustix::process::kill_process_group(group.expect("a process"), rustix::process::Signal::KILL)
+        .expect("kill");
+    wait_gone(id);
+}
+
+/// The supervisor the sidecar of the lease `name` names.
+fn supervisor_id(node: &Node, name: &str) -> SupervisorId {
     let record = sidecar_json(node, name);
     let pid = record["supervisor"]["pid"].as_u64().expect("a pid");
     let start = record["supervisor"]["start"].as_u64().expect("a start");
-    let id = SupervisorId {
+    SupervisorId {
         pid: u32::try_from(pid).expect("a pid"),
         start,
-    };
-    let group = rustix::process::Pid::from_raw(i32::try_from(pid).expect("a pid"));
-    rustix::process::kill_process_group(group.expect("a process"), rustix::process::Signal::KILL)
-        .expect("kill");
+    }
+}
+
+/// Returns once the process `id` is gone (it was sent SIGKILL, which takes a moment to act).
+fn wait_gone(id: SupervisorId) {
     while id.alive() {
         std::thread::yield_now();
+    }
+}
+
+/// An egress that is given and never asked: a runtime opened with one stands for an agent
+/// with an allow-list.
+#[derive(Debug)]
+struct Unused;
+
+impl EgressPort for Unused {
+    fn check(&self) -> Result<(), EgressError> {
+        Ok(())
+    }
+
+    fn attach(&self, _run: &str, _pid: u32) -> Result<Box<dyn Wired>, EgressError> {
+        Err(EgressError::Exhausted)
     }
 }
 
@@ -616,10 +654,142 @@ fn a_start_whose_running_record_cannot_be_written_fails_and_is_removed() {
     let mut runtime = node.open();
     let id = runtime.stage(&node.job("r1-exit", 60_000)).expect("staged");
     let tmp = node.sidecar(&id.0).with_file_name(format!(".{}.tmp", id.0));
-    std::fs::create_dir(&tmp).expect("a directory");
+    std::fs::create_dir(tmp).expect("a directory");
     let why = runtime.start_staged(&id).expect_err("not recorded");
-    assert!(why.to_string().contains("record the running lease"), "{why}");
+    assert!(
+        why.to_string().contains("record the running lease"),
+        "{why}"
+    );
     assert_eq!(sidecar_json(&node, &id.0)["state"], "starting");
     runtime.remove(&id).expect("removed");
+    assert_gone(&node, &id.0);
+}
+
+/// Proves a run that is ending when the agent restarts is adopted, not torn down: `crun` has
+/// deleted the container (its `state` fails) while the supervisor still drains, or has not
+/// made it yet, and the supervisor lives, so the run is adopted as running; the same `crun`
+/// failure with the supervisor gone and no exit record is a lease removed saying the
+/// supervisor ended. Catches an adoption that needs `crun state` to name an init and so
+/// removes a job that is only ending, and one that adopts a run nothing runs.
+#[test]
+fn a_live_supervisor_with_no_container_named_is_adopted_and_a_dead_one_is_removed() {
+    let node = Node::new("adopt-ending");
+    let mut first = node.open();
+    let mut ids = Vec::new();
+    for run in ["r1-ending-deaf", "r2-gone-deaf"] {
+        let id = first
+            .create_and_start(&node.job(run, 60_000))
+            .expect("started");
+        ids.push(id);
+    }
+    end_supervisor(&node, &ids[1].0);
+    drop(first);
+
+    let mut second = node.open_impatient();
+    let report = second.swept().clone();
+    assert_eq!(report.adopted, ["r1-ending-deaf"], "{report:?}");
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert_eq!(report.removed[0].run_id, "r2-gone-deaf");
+    assert!(
+        says(&report.removed[0].reason, "supervisor has ended"),
+        "{report:?}"
+    );
+    assert_gone(&node, &ids[1].0);
+    assert_eq!(second.poll(&ids[0]), Ok(Status::Running));
+    second.remove(&ids[0]).expect("removed");
+    assert_gone(&node, &ids[0].0);
+}
+
+/// Proves a sidecar still in the state starting that names a live supervisor (the agent
+/// died between starting the supervisor and recording the run) is removed as a run that
+/// never ran, and its supervisor is ended with it. Catches a teardown that leaves the
+/// supervisor, and with it the job, running with no lease.
+#[test]
+fn a_starting_lease_that_names_a_live_supervisor_is_removed_and_the_supervisor_ended() {
+    let node = Node::new("adopt-starting-live");
+    let mut first = node.open();
+    let id = held(&node, &mut first, "r1-hold");
+    let supervisor = supervisor_id(&node, &id.0);
+    assert!(supervisor.alive());
+    edit(&node, &id.0, |json| json["state"] = json!("starting"));
+    drop(first);
+
+    let second = node.open();
+    let report = second.swept();
+    assert!(report.adopted.is_empty(), "{report:?}");
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert_eq!(report.removed[0].reason, Reason::NeverRan);
+    wait_gone(supervisor);
+    assert_gone(&node, &id.0);
+}
+
+/// Proves a runtime opened with an egress adopts nothing: a job that runs is removed, saying
+/// its network wiring cannot be taken over, and its supervisor is ended, because the egress
+/// removes the wiring of an earlier process. Catches an adopted run left with no network.
+#[test]
+fn a_runtime_with_an_egress_removes_the_runs_it_would_adopt() {
+    let node = Node::new("adopt-egress");
+    let mut first = node.open();
+    let id = held(&node, &mut first, "r1-hold");
+    let supervisor = supervisor_id(&node, &id.0);
+    drop(first);
+
+    let mut settings = node.settings("/root");
+    settings.egress = Some(Arc::new(Unused));
+    let second = CrunRuntime::open_with(settings, Arc::new(NoImages), Node::hooks(LONG, LONG))
+        .expect("opens");
+    let report = second.swept();
+    assert!(report.adopted.is_empty(), "{report:?}");
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(
+        says(
+            &report.removed[0].reason,
+            "network wiring cannot be taken over"
+        ),
+        "{report:?}"
+    );
+    wait_gone(supervisor);
+    assert_gone(&node, &id.0);
+}
+
+/// Proves a removal that cannot end the supervisor fails, naming it, and leaves the lease
+/// for another try: the sidecar names a process that a group kill does not reach (a child of
+/// the test, in the test's own group), so the forced end never completes within the wait;
+/// the removal is an error naming the process and the lease stays; once the process is gone
+/// the removal works. Catches a removal that waits for the supervisor without end.
+#[test]
+fn a_removal_that_cannot_end_the_supervisor_fails_and_can_be_tried_again() {
+    let node = Node::new("adopt-remove-stuck");
+    let mut first = node.open();
+    let id = held(&node, &mut first, "r1-hold");
+    end_supervisor(&node, &id.0);
+    let mut child = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("a child");
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).expect("its stat");
+    let start: u64 = stat
+        .rsplit_once(')')
+        .and_then(|(_, after)| after.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .expect("a start time");
+    edit(&node, &id.0, |json| {
+        json["supervisor"] = json!({ "pid": child.id(), "start": start });
+    });
+    drop(first);
+
+    let mut second = node.open_with(Node::hooks(Duration::ZERO, LONG), Arc::new(NoImages));
+    assert_eq!(second.swept().adopted, ["r1-hold"], "{:?}", second.swept());
+    let why = second.remove(&id).expect_err("not ended");
+    let text = why.to_string();
+    assert!(
+        text.contains("end the supervisor") && text.contains(&child.id().to_string()),
+        "{text}"
+    );
+    assert!(node.lease_of(&id.0).is_dir());
+
+    child.kill().expect("kill the child");
+    child.wait().expect("reaped");
+    second.remove(&id).expect("removed");
     assert_gone(&node, &id.0);
 }

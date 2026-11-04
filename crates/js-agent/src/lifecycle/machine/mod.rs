@@ -852,7 +852,7 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
-        let job = match started {
+        let mut job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
@@ -880,7 +880,6 @@ impl Lifecycle {
                 job
             }
         };
-        let mut job = job;
         job.keyed = keyed;
         match replace {
             Some(index) => self.jobs[index] = job,

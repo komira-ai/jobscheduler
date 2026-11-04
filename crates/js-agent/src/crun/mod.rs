@@ -43,9 +43,9 @@
 //! unit's `KillMode=process` ends only the agent). The runtime keeps a handle on each
 //! ([`Supervised`]) and reads the end from the record; a container exists from its creation
 //! to its [`Runtime::remove`], and [`Runtime::list_labelled`] lists those the runtime holds,
-//! the ones it adopted when it opened among them. A run's wall-time limit runs only while an
-//! agent runs: the time between two agents counts against it, and a restarted agent stops a
-//! run that is past its limit at its first step.
+//! the ones it adopted when it opened among them. The wall limit is enforced only while an
+//! agent runs: the time a job ran with no agent counts against it, and a job whose limit
+//! passed meanwhile is stopped at the first step after the adoption.
 //!
 //! # Labels, adoption and the lost run
 //!
@@ -117,9 +117,11 @@
 //!
 //! In mode none (`--egress none`, the default) a job has loopback only. With an allow-list the
 //! runtime checks the firewall through the agent's [`EgressPort`] before every create, wires
-//! the container's namespace (one interface to the host) after `Oci::start` while its init
-//! holds the job until the default route is there, and releases the wiring when the run ends
-//! or is removed; a container that cannot be wired runs no job and its lease is removed.
+//! the container's namespace (one interface to the host) after `Oci::start_supervised` while
+//! its init holds the job until the default route is there, and releases the wiring when the
+//! run ends or is removed; a container that cannot be wired runs no job and its lease is
+//! removed. A runtime with an allow-list adopts no run: the egress removes the wiring of a
+//! previous process when it starts, so each lease an earlier agent left is removed.
 //!
 //! # Not here
 //!
@@ -141,7 +143,7 @@ mod spec;
 mod tests;
 mod wire;
 
-use dirs::{cgroup_dir, make_dir, make_helper_cgroup, owned, project_of, take_dir};
+use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
 use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
@@ -192,6 +194,10 @@ pub const CALL_LIMIT: Duration = Duration::from_secs(120);
 /// How long a run is waited for after its cgroup was killed. A process in an
 /// uninterruptible sleep outlasts it; the stop then fails and is tried again.
 pub const KILL_WAIT: Duration = Duration::from_secs(60);
+
+/// The least a removal waits for a supervisor it ended by force: a process that was sent
+/// SIGKILL is a zombie a moment later, so a wait of none would fail a removal that works.
+const FORCE_FLOOR: Duration = Duration::from_millis(500);
 
 /// The directory of the image configs that the image source keeps and the runtime reads,
 /// for a runtime whose store is `scratch`.
@@ -730,6 +736,12 @@ impl CrunRuntime {
             .start_supervised(&run.spec)
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
         run.backstop = run.cgroup.parent_ooms().ok();
+        // The supervisor is on the sidecar before anything else is done, in the state still
+        // starting, so a teardown at any point ends it. A failure to write is reported with
+        // the running record's.
+        let named = self
+            .ledger
+            .rewrite(&run.entry.supervised(Supervisor::of(started.id())));
         let wired = net::attach(
             self.egress.as_deref(),
             &self.oci,
@@ -739,7 +751,7 @@ impl CrunRuntime {
         // The sidecar says the run runs from here on: a later start adopts it. A failure to
         // write it leaves the run started, for the caller to remove.
         run.entry = run.entry.running(now, Supervisor::of(started.id()));
-        let recorded = self.ledger.rewrite(&run.entry);
+        let recorded = named.and(self.ledger.rewrite(&run.entry));
         run.state = State::Running {
             run: started,
             since_ms: now,
@@ -869,7 +881,15 @@ impl Runtime for CrunRuntime {
             let ended =
                 rt.block_on(async { tokio::time::timeout(kill_wait, running.wait()).await });
             if ended.is_err() {
-                rt.block_on(running.force());
+                let forced = rt.block_on(async {
+                    tokio::time::timeout(kill_wait.max(FORCE_FLOOR), running.force()).await
+                });
+                forced.map_err(|_| {
+                    failed(
+                        "end the supervisor",
+                        &format!("process {} is still there", running.id().pid),
+                    )
+                })?;
             }
         }
         net::release(&id.0, &mut run.wired);

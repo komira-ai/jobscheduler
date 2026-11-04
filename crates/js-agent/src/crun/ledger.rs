@@ -203,6 +203,15 @@ impl Entry {
         }
     }
 
+    /// This sidecar, still in the state starting, with the supervisor of the container
+    /// being started, so a teardown that finds it ends the supervisor.
+    pub(super) fn supervised(&self, supervisor: Supervisor) -> Self {
+        Self {
+            supervisor: Some(supervisor),
+            ..self.clone()
+        }
+    }
+
     /// This sidecar once the container started at `started_wall_ms` under `supervisor`.
     pub(super) fn running(&self, started_wall_ms: u64, supervisor: Supervisor) -> Self {
         Self {

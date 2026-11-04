@@ -17,11 +17,13 @@
 //! [`Lifecycle::adopt`] reads both. A result whose id is a taken-over job's is set on that
 //! job, which then makes no second result when its container is seen to have exited; any
 //! other becomes a job that holds nothing and is listed until the result is acknowledged.
-//! A file that cannot be read or understood is removed and reported as a
-//! `held-record-unreadable` finding, and the agent starts all the same; a retired list that
-//! cannot be read starts empty. A file that cannot be written is a `held-record-failed`
-//! finding (once, until a call writes everything again): the result is still held in
-//! memory and the write is tried again at every call.
+//! An unfinished write (`<id>.json.tmp`) is removed without a finding. A file that cannot
+//! be read or understood is removed and reported as a `held-record-unreadable` finding, and
+//! the agent starts all the same; a retired list that cannot be read starts empty. A file
+//! that cannot be written is a `held-record-failed` finding (once, until a call writes
+//! everything again): the result is still held in memory and the write is tried again at
+//! every call. A result's file is removed only after the retired list that names its id is
+//! on disk.
 //!
 //! [`Lifecycle::apply`]: super::Lifecycle::apply
 //! [`Lifecycle::step`]: super::Lifecycle::step
@@ -47,6 +49,9 @@ const HELD_DIR: &str = "held";
 
 /// The end of the name of a held result's file.
 const RESULT_SUFFIX: &str = ".json";
+
+/// The end of the name of a file that is being written, before it is renamed.
+const TEMP_SUFFIX: &str = ".tmp";
 
 /// The file of the retired list, in the state root.
 const RETIRED_FILE: &str = "retired.json";
@@ -127,7 +132,7 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 /// Writes `body` as the file `name` of `dir`: to a temporary file, synced, renamed over the
 /// file, and the directory synced. The file is the old one or the new one, never a part.
 fn write_whole(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
-    let temp = dir.join(format!("{name}.tmp"));
+    let temp = dir.join(format!("{name}{TEMP_SUFFIX}"));
     OpenOptions::new()
         .write(true)
         .create(true)
@@ -148,6 +153,15 @@ fn read_result(path: &Path, name: &str) -> Result<(Keyed, RunResult), String> {
         true => Ok((stored.keyed, stored.result)),
         false => Err("the file is named for another run".to_owned()),
     }
+}
+
+/// Whether the next file is read, `adds` saying that it would add a job beside those
+/// counted in `used`: only such a file counts against `room`, and a file for a job the
+/// agent already holds is always read.
+fn admit(adds: bool, used: &mut usize, room: usize) -> bool {
+    let read = !adds || *used < room;
+    *used += usize::from(adds && read);
+    read
 }
 
 /// A finding about a file of the state root that could not be used.
@@ -196,27 +210,37 @@ impl Records {
         }
     }
 
-    /// Reads the held results, at most `room` of them, and the retired list. A file that
-    /// cannot be used, and every file past `room`, is removed and reported.
+    /// Reads the held results, at most `room` of them that add a job, and the retired list.
+    /// A result whose id is in `taken` is a job already held: it is always read and does not
+    /// count against `room`. A file that cannot be used, and every file past `room`, is
+    /// removed and reported; an unfinished write (`*.tmp`) of a dead process is removed
+    /// without a word.
     pub(super) fn load(
         &mut self,
         room: usize,
+        taken: &BTreeSet<&str>,
         events: &mut Vec<Event>,
     ) -> (Vec<(Keyed, RunResult)>, Retired) {
         let mut found = Vec::new();
         match self.names() {
             Err(why) => unreadable(events, "the held results", &why.to_string()),
             Ok(names) => {
-                for (index, name) in names.into_iter().enumerate() {
+                let mut used = 0;
+                for name in names {
                     let path = self.dir().join(&name);
-                    let read = match index < room {
+                    if name.ends_with(TEMP_SUFFIX) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    let id = name.strip_suffix(RESULT_SUFFIX).unwrap_or(&name);
+                    let adds = !taken.contains(id);
+                    let read = match admit(adds, &mut used, room) {
                         true => read_result(&path, &name),
                         false => Err("the agent can hold no more runs".to_owned()),
                     };
                     match read {
                         Ok((keyed, result)) => {
-                            self.written
-                                .insert(result.run_id.clone(), mark_of(&result));
+                            self.written.insert(result.run_id.clone(), mark_of(&result));
                             found.push((keyed, result));
                         }
                         Err(why) => {
@@ -320,6 +344,22 @@ impl Records {
             .filter(|id| !held.contains(id.as_str()))
             .cloned()
             .collect();
+        let listed = match self.retired_added != retired.added() {
+            true => match self.write_retired(retired) {
+                Ok(()) => {
+                    self.retired_added = retired.added();
+                    true
+                }
+                Err(why) => {
+                    failed.push((None, format!("the retired list cannot be written: {why}")));
+                    false
+                }
+            },
+            false => true,
+        };
+        // A result file goes only once its id is on the retired list on disk: a crash
+        // between the two must leave the id held or retired, never neither.
+        let gone = gone.into_iter().filter(|_| listed);
         for id in gone {
             match self.remove_result(&id) {
                 Ok(()) => {
@@ -327,14 +367,6 @@ impl Records {
                 }
                 Err(why) => {
                     failed.push((Some(id), format!("the result cannot be removed: {why}")));
-                }
-            }
-        }
-        if self.retired_added != retired.added() {
-            match self.write_retired(retired) {
-                Ok(()) => self.retired_added = retired.added(),
-                Err(why) => {
-                    failed.push((None, format!("the retired list cannot be written: {why}")));
                 }
             }
         }
@@ -371,7 +403,8 @@ impl Lifecycle {
     /// set on that job, any other makes a job that holds nothing and owes the result.
     pub(super) fn restore_held(&mut self, events: &mut Vec<Event>) {
         let room = MAX_JOBS.saturating_sub(self.jobs.len());
-        let (results, retired) = self.records.load(room, events);
+        let taken: BTreeSet<&str> = self.jobs.iter().map(|job| job.run_id.as_str()).collect();
+        let (results, retired) = self.records.load(room, &taken, events);
         self.retired = retired;
         for (keyed, result) in results {
             let taken = self.jobs.iter().position(|job| job.run_id == result.run_id);

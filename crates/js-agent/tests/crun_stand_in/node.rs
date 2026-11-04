@@ -116,10 +116,10 @@ const CONFIG: &str =
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
 /// and fails when the node has a file `delete-fails`. `state` notes each ask in
 /// `asks-<name>` and says the container runs with the pid [`PID`], except for a container
-/// `*-nopid` or `*-deaf` (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
-/// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
-/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once with a `crun`
-/// error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
+/// `*-nopid` or `*-deaf` (it fails: no container), `*-late` (it fails twice, then names it),
+/// `*-badpid` (a state with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid`
+/// run until they are killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once
+/// with a `crun` error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
 /// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
 /// the test removes it); its `state` names the pid only once that is there. `*-sayexit` writes
 /// a word to each stream and exits 5; `delete` also clears the files of a `ctr` cgroup below

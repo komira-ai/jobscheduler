@@ -453,7 +453,13 @@ fn full(agent: &str, run: &str) -> Entry {
     made.scratch = Some(PathBuf::from("/runs/r1"));
     made.exit_record = Some(PathBuf::from("/leases/one/exit.json"));
     made.image_digest = Some("sha256:abc".to_owned());
-    made.running(1_700_000, Supervisor { pid: 42, start: 777 })
+    made.running(
+        1_700_000,
+        Supervisor {
+            pid: 42,
+            start: 777,
+        },
+    )
 }
 
 /// Catches a sidecar of version 2 that loses a field on the way to the disk and back (a
@@ -467,7 +473,10 @@ fn a_version_2_sidecar_is_read_back_with_every_field() {
     let ledger = ledger(&dir, "agent-a");
     let started = full("agent-a", "r1");
     ledger.record(&started).expect("record");
-    assert_eq!(ledger.read(&started.name), Some(Read::Mine(started.clone())));
+    assert_eq!(
+        ledger.read(&started.name),
+        Some(Read::Mine(started.clone()))
+    );
     let text = fs::read_to_string(file_of(&ledger, &started)).expect("read");
     assert!(text.contains("\"version\":2"), "{text}");
     assert!(text.contains("\"state\":\"running\""), "{text}");
