@@ -587,6 +587,7 @@ fn the_runtime_opened_from_the_settings_passes_the_gpus_and_reads_the_host() {
             tool_path: node.dir.join("tools").into_os_string(),
             check_search: false,
         },
+        daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     };
     let settings = |gpus: Option<GpuPassthrough>| {
         let crun = node.dir.join("crun");

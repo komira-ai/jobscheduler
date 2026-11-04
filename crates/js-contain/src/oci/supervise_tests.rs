@@ -563,7 +563,7 @@ fn a_run_that_could_not_be_made_is_recorded_as_failed() {
     let RunEnd::Failed(why) = record.end else {
         panic!("the run did not fail");
     };
-    assert!(why.starts_with("crun run: "), "{why}");
+    assert!(why.contains("no-such-crun"), "{why}");
 
     let lease = dir.join("second");
     std::fs::create_dir_all(lease.join("bundle")).expect("lease");
@@ -672,4 +672,53 @@ fn the_supervise_mode_blocks_hangup_interrupt_and_terminate() {
     .join()
     .expect("thread");
     assert_eq!((code, blocked, other), (2, [true; 3], false));
+}
+
+/// Catches a lease whose supervisor cannot be named without the ledger, and a supervisor file
+/// read through a link, a pipe or a directory: what `note_supervisor` wrote is read back (over
+/// what was there), and a file that does not hold a pid and a start time, a link, a pipe and a
+/// directory name none. Also catches a process taken to run as a user it does not.
+#[test]
+fn a_lease_names_its_supervisor_in_a_file_of_its_own() {
+    let dir = dir("names");
+    let lease = lease_in(&dir);
+    let path = supervisor_path(&lease);
+    assert_eq!(recorded_supervisor(&lease), None);
+    let me = SupervisorId::of(std::process::id()).expect("this process");
+    note_supervisor(&lease, me);
+    assert_eq!(recorded_supervisor(&lease), Some(me));
+    let other = SupervisorId { pid: 1, start: 2 };
+    note_supervisor(&lease, other);
+    assert_eq!(recorded_supervisor(&lease), Some(other));
+    for junk in ["", "12", "x 1", "1 y"] {
+        std::fs::write(&path, junk).expect("junk");
+        assert_eq!(recorded_supervisor(&lease), None, "{junk:?}");
+    }
+    std::fs::remove_file(&path).expect("remove");
+    let target = dir.join("target");
+    std::fs::write(&target, "3 4").expect("target");
+    std::os::unix::fs::symlink(&target, &path).expect("link");
+    assert_eq!(recorded_supervisor(&lease), None);
+    std::fs::remove_file(&path).expect("remove");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .expect("fifo");
+    assert_eq!(recorded_supervisor(&lease), None);
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::create_dir(&path).expect("directory");
+    assert_eq!(recorded_supervisor(&lease), None);
+
+    let uid = rustix::process::getuid().as_raw();
+    assert!(me.runs_as(uid));
+    assert!(!me.runs_as(uid.wrapping_add(1)));
+    let gone = SupervisorId {
+        pid: u32::MAX,
+        start: 0,
+    };
+    assert!(!gone.runs_as(uid));
 }

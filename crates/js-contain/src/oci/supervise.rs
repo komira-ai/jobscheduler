@@ -39,7 +39,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -110,6 +110,54 @@ impl SupervisorId {
     pub fn alive(&self) -> bool {
         names(stat_of(self.pid), self.start)
     }
+
+    /// Whether the process it names runs as the user `uid` (the owner of its `/proc` entry).
+    #[must_use]
+    pub fn runs_as(&self, uid: u32) -> bool {
+        std::fs::metadata(format!("/proc/{}", self.pid)).is_ok_and(|meta| meta.uid() == uid)
+    }
+}
+
+/// The file in the lease directory `lease` that names the supervisor started for it.
+#[must_use]
+pub fn supervisor_path(lease: &Path) -> PathBuf {
+    lease.join("supervisor")
+}
+
+/// The supervisor the lease directory `lease` names: the pid and start time
+/// [`Oci::start_supervised`] wrote there, for a teardown that has no other record of the
+/// lease. `None` when there is no such file or it names none. It is opened without following
+/// a link or waiting on a pipe. The directory is the job user's: a caller signals the process
+/// only when it runs as the job user ([`SupervisorId::runs_as`]).
+#[must_use]
+pub fn recorded_supervisor(lease: &Path) -> Option<SupervisorId> {
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(supervisor_path(lease))
+        .ok()?;
+    let mut text = String::new();
+    file.take(64).read_to_string(&mut text).ok()?;
+    let mut words = text.split_whitespace();
+    let pid = words.next()?.parse().ok()?;
+    let start = words.next()?.parse().ok()?;
+    Some(SupervisorId { pid, start })
+}
+
+/// Writes `id` to the supervisor file of `lease`, as root into a directory the job user
+/// writes: what is in its place is removed (a link is removed, not followed) and the file is
+/// made new, so a link put there cannot send the write elsewhere. Best effort: the ledger's
+/// record is the agent's own, and this file only serves a teardown that has lost that.
+fn note_supervisor(lease: &Path, id: SupervisorId) {
+    let path = supervisor_path(lease);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&path)
+        .and_then(|mut file| file.write_all(format!("{} {}\n", id.pid, id.start).as_bytes()));
 }
 
 /// Whether a process whose `/proc` entry says `found` (its state letter and start time) is
@@ -514,8 +562,9 @@ impl Oci {
     /// for the ready word, stderr null, in a process group of its own. Returns once the
     /// supervisor wrote its ready word (it has made the init report and the capture files); a
     /// supervisor that does not answer is killed and reaped, and the call fails. A thread
-    /// waits for the child so it never stays a zombie. The bundle ([`Oci::create`]) must be
-    /// written.
+    /// waits for the child so it never stays a zombie. The supervisor's pid and start time are
+    /// then written to the lease directory ([`recorded_supervisor`]). The bundle
+    /// ([`Oci::create`]) must be written.
     ///
     /// # Errors
     /// An exit record is already in the lease directory, or the supervisor could not be
@@ -538,7 +587,9 @@ impl Oci {
             .arg(self.logs.tail.to_string())
             .arg(self.logs.drain_grace.as_millis().to_string());
         self.crun.prepare(&mut command);
-        Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)
+        let supervised = Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)?;
+        note_supervisor(&spec.dir, supervised.id());
+        Ok(supervised)
     }
 
     /// The handle of a container an earlier process started under the supervisor `id`, whose

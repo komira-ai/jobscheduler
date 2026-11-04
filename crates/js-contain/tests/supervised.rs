@@ -11,7 +11,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
-use js_contain::oci::{Oci, OciConfig, RunEnd, exit_record_path, read_exit_record, stdout_path};
+use js_contain::oci::{
+    Oci, OciConfig, RunEnd, exit_record_path, read_exit_record, recorded_supervisor, stdout_path,
+    supervisor_path,
+};
 use js_contain::subids::IdFiles;
 use js_testkit::spawn::install_copy;
 
@@ -135,6 +138,8 @@ async fn a_supervised_container_ends_with_its_code_and_output_in_its_record() {
     oci.create(&spec).await.expect("bundle");
     let mut run = oci.start_supervised(&spec).expect("started");
     assert_eq!(run.lease(), spec.dir);
+    // The lease's directory names its supervisor, for a teardown that lost the ledger.
+    assert_eq!(recorded_supervisor(&spec.dir), Some(run.id()));
     run.wait().await;
     assert_eq!(run.run_end(), RunEnd::Exited(3));
     let tail = run.tail();
@@ -165,10 +170,14 @@ async fn a_lease_is_started_once() {
     let mut run = oci.start_supervised(&spec).expect("started");
     run.wait().await;
 
-    let why = oci.start_supervised(&spec).expect_err("the record is there");
+    let why = oci
+        .start_supervised(&spec)
+        .expect_err("the record is there");
     assert!(why.contains("an exit record is already there"), "{why}");
     std::fs::remove_file(exit_record_path(&spec.dir)).expect("remove the record");
-    let why = oci.start_supervised(&spec).expect_err("the files are there");
+    let why = oci
+        .start_supervised(&spec)
+        .expect_err("the files are there");
     assert!(why.contains("did not say it is ready"), "{why}");
     assert_eq!(read_exit_record(&spec.dir), Ok(None));
 }
@@ -218,4 +227,22 @@ async fn the_words_of_crun_are_read_for_a_supervised_run() {
     let failed = RunEnd::Failed("it broke".to_owned());
     let ended = oci.ended_as(&spec, failed).await;
     assert_eq!(ended, Err("it broke".to_owned()));
+}
+
+/// Proves the file that names a lease's supervisor is written as a new file, so a link put in
+/// its place (the lease's directory is the job user's) is removed, never written through: the
+/// file the link pointed at keeps what it held, and the lease names the started supervisor.
+/// Catches a root agent that writes through a link the job user made.
+#[tokio::test]
+async fn the_supervisor_file_is_made_new_and_never_written_through_a_link() {
+    let node = Node::new("no-link", "run-exit 0");
+    let (oci, spec) = (node.oci(), node.spec());
+    oci.create(&spec).await.expect("bundle");
+    let target = node.dir.join("elsewhere");
+    std::fs::write(&target, "kept").expect("target");
+    std::os::unix::fs::symlink(&target, supervisor_path(&spec.dir)).expect("link");
+    let mut run = oci.start_supervised(&spec).expect("started");
+    assert_eq!(std::fs::read_to_string(&target).expect("target"), "kept");
+    assert_eq!(recorded_supervisor(&spec.dir), Some(run.id()));
+    run.wait().await;
 }

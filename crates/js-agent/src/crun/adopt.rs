@@ -39,7 +39,9 @@ use std::fs;
 use std::path::Path;
 
 use js_contain::cgroup::LeaseCgroup;
-use js_contain::oci::{ExitRecord, end_supervisor, exit_record_path, read_exit_record};
+use js_contain::oci::{
+    ExitRecord, end_supervisor, exit_record_path, read_exit_record, recorded_supervisor,
+};
 
 use super::dirs::cgroup_dir;
 use super::ledger::{
@@ -450,11 +452,18 @@ impl CrunRuntime {
         self.tear_down_named(&entry.name)
     }
 
-    /// Removes everything the lease `name` made: what still runs in its cgroup, the
-    /// container's state, the cgroup and the directories. What is not there is skipped.
+    /// Removes everything the lease `name` made: its supervisor, what still runs in its cgroup,
+    /// the container's state, the cgroup and the directories. What is not there is skipped.
     fn tear_down_named(&self, name: &str) -> Result<(), String> {
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
+        // The supervisor the lease's directory names, for a lease whose sidecar is gone: ended
+        // first, or it would write the container's end into the directory being removed. The
+        // directory is the job user's, so only a process that runs as the job user is ended.
+        let job_uid = self.oci.job_ids().0;
+        if let Some(id) = recorded_supervisor(&lease.dir).filter(|id| id.runs_as(job_uid)) {
+            end_supervisor(id);
+        }
         // A lease an agent from before the leases were beside the runs left in the store.
         let legacy = self
             .leases_beside

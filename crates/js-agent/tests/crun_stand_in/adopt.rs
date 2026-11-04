@@ -616,8 +616,9 @@ impl EgressPort for Unused {
 }
 
 /// Proves a lease nothing records that cannot be removed is reported and kept for the next
-/// start: with `crun delete` failing, the lease of a run whose sidecar is gone is reported as
-/// failed with the step and stays; once it works the next start removes it, as one nothing
+/// start: with `crun delete` failing (a container that never ran has no state to delete, so
+/// what fails is the removal of the lease's cgroup, whose files the delete leaves), the lease of
+/// a run whose sidecar is gone is reported as failed with the step and stays; once it works the next start removes it, as one nothing
 /// records. Catches a start that forgets a lease it could not remove and says nothing.
 #[test]
 fn a_lease_with_no_record_that_cannot_be_removed_is_reported_and_tried_again() {
@@ -632,7 +633,10 @@ fn a_lease_with_no_record_that_cannot_be_removed_is_reported_and_tried_again() {
     assert!(report.removed.is_empty(), "{report:?}");
     assert_eq!(report.failed.len(), 1, "{report:?}");
     assert_eq!(report.failed[0].run_id, "r1-exit");
-    assert!(report.failed[0].why.contains("delete the container"));
+    assert!(
+        report.failed[0].why.contains("remove the lease's cgroup"),
+        "{report:?}"
+    );
     assert!(node.lease_of(&id.0).is_dir());
 
     std::fs::remove_file(node.dir.join("delete-fails")).expect("switch off");

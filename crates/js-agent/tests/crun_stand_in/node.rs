@@ -122,8 +122,8 @@ const CONFIG: &str =
 /// with a `crun` error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
 /// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
 /// the test removes it); its `state` names the pid only once that is there. `*-sayexit` writes
-/// a word to each stream and exits 5; `delete` also clears the files of a `ctr` cgroup below
-/// the lease's ([`Node::place`]).
+/// a word to each stream and exits 5; `delete` also clears the `cgroup.procs` that
+/// [`Node::place`] writes in the `ctr` cgroup below the lease's (and nothing else there).
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -182,7 +182,7 @@ case "$cmd" in
   delete)
     if [ -e "$DIR/delete-fails" ]; then echo boom >&2; exit 1; fi
     find "$cg" -maxdepth 1 ! -type d -delete 2>/dev/null
-    find "$cg/ctr" -maxdepth 1 ! -type d -delete 2>/dev/null
+    rm -f "$cg/ctr/cgroup.procs"
     rmdir "$root/$name" 2>/dev/null
     exit 0;;
   state)

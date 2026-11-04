@@ -91,6 +91,7 @@ pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 pub use supervise::{
     ExitRecord, Supervised, SupervisorId, end_supervisor, exit_record_path, read_exit_record,
+    recorded_supervisor, supervisor_path,
 };
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.

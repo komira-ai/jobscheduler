@@ -151,6 +151,9 @@ pub struct Seams {
     pub host: fn() -> CrunHost,
     /// The files the backend reads its ids from.
     pub ids: IdSources,
+    /// The binary each container's supervisor runs (`__supervise-run`): this program, unless a
+    /// test runs the agent inside a binary that does not answer the helper modes.
+    pub daemon: PathBuf,
 }
 
 impl Default for Seams {
@@ -160,6 +163,7 @@ impl Default for Seams {
             hooks: Hooks::default(),
             host: CrunHost::system,
             ids: IdSources::system(),
+            daemon: OciConfig::default().daemon,
         }
     }
 }
@@ -202,6 +206,7 @@ pub fn open(
     oci.id_files = seams.ids.files.clone();
     oci.id_tool_path = Some(seams.ids.tool_path.clone());
     oci.check_search = seams.ids.check_search;
+    oci.daemon = seams.daemon.clone();
     // A lease's `/work` and home are made beside the run's directory in the scratch root, so
     // the run's disk quota bounds them with `/scratch`.
     oci.leases_in = Some(plan.scratch_root.clone());
