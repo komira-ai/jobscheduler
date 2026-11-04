@@ -661,9 +661,8 @@ mod tests {
         let old = read(spelled("joined"), &client).unwrap();
         let new = read(spelled("static"), &client).unwrap();
         assert_eq!((old.name.as_str(), new.name.as_str()), ("nodes", "nodes"));
-        let (Pool::Elastic(old_pool), Pool::Elastic(new_pool)) = (old.pool, new.pool) else {
-            panic!("a static pool is read as a registering pool");
-        };
+        let old_pool = registering(old.pool).expect("a static pool registers agents");
+        let new_pool = registering(new.pool).expect("a static pool registers agents");
         assert_eq!(old_pool.pool, new_pool.pool);
         assert_eq!(old_pool.pool.exec(), Some(ExecMode::Container));
         assert_eq!(
@@ -674,7 +673,8 @@ mod tests {
         assert_eq!(old_pool.pool.shape().resources().gpus(), 2);
         assert_eq!(old_pool.mint_provider.as_deref(), Some("nodes"));
         assert_eq!(old_pool.mint_provider, new_pool.mint_provider);
-        assert!(old_pool.plan.is_none() && new_pool.plan.is_none());
+        assert!(old_pool.plan.is_none());
+        assert!(new_pool.plan.is_none());
         assert_eq!(old_pool.tokens.credentials().len(), 1);
         assert!(old_pool.tokens.credentials() == new_pool.tokens.credentials());
         assert!(old_pool.tokens.identify(&secret).is_some());
@@ -684,5 +684,38 @@ mod tests {
         let said = old_spelling("nodes");
         assert!(said.starts_with("pool \"nodes\": warning: "), "{said}");
         assert!(said.contains("kind = \"static\""), "{said}");
+    }
+
+    /// A source with no hosts, standing for a pool of a simulated kind.
+    struct NoHosts;
+
+    impl crate::capacity::CapacitySource for NoHosts {
+        fn provider(
+            &self,
+            _bookings: &[js_lease::Booking],
+        ) -> Result<crate::capacity::Seated, StartupError> {
+            Err(StartupError::new("--fake-hosts", "no hosts"))
+        }
+    }
+
+    /// The registering side of a read pool, or `None` for a pool of a simulated kind.
+    fn registering(pool: Pool) -> Option<Box<Registering>> {
+        match pool {
+            Pool::Elastic(registering) => Some(registering),
+            Pool::Simulated(_) => None,
+        }
+    }
+
+    /// Asserts that the helper of the spelling test tells a pool of a simulated kind from a
+    /// registering one, so that test's `expect` is the only way it can fail on the kind of
+    /// pool read. It catches a helper that takes any pool for a registering one.
+    #[test]
+    fn a_simulated_pool_is_not_a_registering_one() {
+        let refused = crate::capacity::CapacitySource::provider(&NoHosts, &[]).err();
+        assert_eq!(
+            refused.map(|err| err.to_string()),
+            Some("--fake-hosts: no hosts".to_owned())
+        );
+        assert!(registering(Pool::Simulated(Box::new(NoHosts))).is_none());
     }
 }
