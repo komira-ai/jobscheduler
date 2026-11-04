@@ -324,6 +324,8 @@ impl OldJobSpec {
             bundle: None,
             native: None,
             files: Vec::new(),
+            network: Default::default(),
+            ports: Vec::new(),
             run: None,
             os: None,
             arch: None,

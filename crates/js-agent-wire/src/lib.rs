@@ -63,7 +63,9 @@
 //! - an unknown [`Phase`] reads as [`Phase::Quarantined`], which takes no work;
 //! - an unknown [`Isolation`] value is a decode error (inside a reply, that one start reads
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
-//!   absent one means [`Isolation::Contained`].
+//!   absent one means [`Isolation::Contained`];
+//! - an unknown `JobSpec::network` level is a decode error in the same way, so an agent
+//!   never runs a job at a level it did not name, while an absent one means `none`;
 //! - an unknown `os` or `arch` of a start ([`JobSpec::os`], [`JobSpec::arch`]) is a decode
 //!   error in the same way, so an agent never runs an image built for a platform it cannot
 //!   name, while an absent one is a legacy start.
@@ -76,6 +78,10 @@
 //! a server sends it, with `os` and `arch`, only to a host that reported `one-job`
 //! ([`ONE_JOB_CAPABILITY`]), and writes the start in the legacy forms for any other
 //! ([`JobSpec::downgrade_for`]).
+//! `JobSpec::network` and `JobSpec::ports` are two more: an agent reports its network ceiling
+//! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
+//! sends a start that asks for more than `none`, or declares a port, only to a host whose
+//! ceiling covers it.
 //!
 //! # Two keyings in one major
 //!
@@ -130,6 +136,7 @@ mod image;
 pub mod limits;
 mod load;
 mod native;
+mod network;
 pub mod per_job;
 mod platform;
 pub mod protocol;
@@ -153,6 +160,7 @@ pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
     OutputSpec, Placement,
 };
+pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{
     BookedResources, HeldJob, JobResult, JobResultAck, JobStartSpec, PER_JOB_CAPABILITY,
 };

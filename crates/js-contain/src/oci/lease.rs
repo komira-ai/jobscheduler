@@ -158,15 +158,22 @@ impl Oci {
     }
 
     /// Writes the bundle of `spec`: `config.json` and the `hosts`, `hostname` and `resolv.conf`
-    /// files it binds.
-    async fn write_bundle(&self, spec: &ContainerSpec) -> Result<(), JobError> {
+    /// files it binds. A `wired` container gets the configured `resolv.conf` and route wait
+    /// ([`OciConfig::resolv_conf`](super::OciConfig::resolv_conf),
+    /// [`OciConfig::route_wait`](super::OciConfig::route_wait)); one that is not gets
+    /// [`RESOLV_CONF`] and no wait.
+    async fn write_bundle(&self, spec: &ContainerSpec, wired: bool) -> Result<(), JobError> {
         open_dir(&spec.dir).await?;
         let etc = spec.dir.join("etc");
         open_dir(&etc).await?;
         write_open(&etc.join("hosts"), HOSTS.as_bytes()).await?;
         let hostname = format!("{}\n", spec::HOSTNAME);
         write_open(&etc.join("hostname"), hostname.as_bytes()).await?;
-        write_open(&etc.join("resolv.conf"), self.resolv_conf.as_bytes()).await?;
+        let (resolv_conf, route_wait_secs) = match wired {
+            true => (self.resolv_conf.as_str(), self.route_wait_secs),
+            false => (RESOLV_CONF, 0),
+        };
+        write_open(&etc.join("resolv.conf"), resolv_conf.as_bytes()).await?;
         let rootfs = self.images.rootfs_of(&spec.image_digest);
         let placement = spec::Placement {
             rootfs: &rootfs,
@@ -175,7 +182,7 @@ impl Oci {
             arch: self.arch,
             init: &self.init,
             init_dest: &self.init_dest,
-            route_wait_secs: self.route_wait_secs,
+            route_wait_secs,
         };
         // A rootless daemon cannot give a job a process limit above its own hard one.
         let mut job = spec.clone();
@@ -248,12 +255,24 @@ impl Oci {
         Ok(self.hand_over(owner, dirs).await?)
     }
 
-    /// Writes the bundle of `spec`.
+    /// Writes the bundle of `spec`, with the configured `resolv.conf` and route wait: a
+    /// container whose network the host wires.
     ///
     /// # Errors
     /// A file of the bundle could not be written.
     pub async fn create(&self, spec: &ContainerSpec) -> Result<(), String> {
-        Ok(self.write_bundle(spec).await?)
+        Ok(self.write_bundle(spec, true).await?)
+    }
+
+    /// Writes the bundle of `spec` for a container with loopback only, whatever the
+    /// configuration says: [`RESOLV_CONF`] and no route wait, so the init
+    /// starts the job at once. For a container the host does not wire (a job that asked for no
+    /// network on a host whose others are wired).
+    ///
+    /// # Errors
+    /// A file of the bundle could not be written.
+    pub async fn create_loopback(&self, spec: &ContainerSpec) -> Result<(), String> {
+        Ok(self.write_bundle(spec, false).await?)
     }
 
     /// `crun run` on a thread of its own; it ends when the container does. The

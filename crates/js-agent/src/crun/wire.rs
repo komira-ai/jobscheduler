@@ -31,10 +31,10 @@ pub const PULL_THREADS: usize = 2;
 
 /// The backend's configuration for the `crun` at `crun`, the job user `job_ids` and the
 /// egress `egress`: every `crun` command runs as that user, finding the id tools in
-/// [`ID_TOOL_PATH`]. An allow-list gives every container the configured resolvers as its
-/// only nameservers (the backend's loopback one when it names none) and has its init hold
-/// the job until the default route is there ([`Config::route_wait`]); mode none changes
-/// neither.
+/// [`ID_TOOL_PATH`]. Under `allow-list` or `open`, a container whose job asked for one of them
+/// gets the configured resolvers as its only nameservers (the backend's loopback one when it
+/// names none) and an init that holds the job until the default route is there
+/// ([`Config::route_wait`]); a `none` job, and mode none, get neither (`Oci::create_loopback`).
 #[must_use]
 pub fn oci_config(crun: &Path, job_ids: (u32, u32), egress: &Config) -> OciConfig {
     OciConfig {

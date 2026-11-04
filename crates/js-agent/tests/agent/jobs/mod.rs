@@ -69,7 +69,7 @@ pub fn private(dir: &Scratch, name: &str) -> std::path::PathBuf {
 pub fn settings(dir: &Scratch) -> Settings {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, uid, gid) = user();
-    let settings = Settings::new(&exec, None, Some(&user)).unwrap();
+    let settings = Settings::new(&exec, Some(&user)).unwrap();
     settings.with_agent(uid, gid).unwrap()
 }
 

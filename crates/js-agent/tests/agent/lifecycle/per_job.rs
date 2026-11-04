@@ -30,6 +30,8 @@ fn start(job_id: &str) -> JobStartSpec {
             gpu_indices: Vec::new(),
         },
         wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 
@@ -447,4 +449,60 @@ fn a_job_start_with_a_run_body_is_refused_and_runs_nothing() {
     assert!(h.fake.created().is_empty());
     let result = listing(&h, "j1").result.expect("a result");
     assert_eq!(result.detail.as_deref(), Some(refusal::RUN_UNSUPPORTED));
+}
+
+/// Proves a job start is held to the runtime's network ceiling as a run start is: under the
+/// ceiling `none` a job start that asks for `allow-list` is answered `failed_to_start` with
+/// `network-above-ceiling` and a text naming both levels, one that declares a port is refused
+/// `ports-not-supported` (the ceiling `none` forwards no port), neither creates anything, and
+/// both results are listed in `jobs`; a job start at the ceiling `allow-list` that asks for it
+/// is created at that level. Catches a
+/// job start whose network the agent drops on the way to the shared admission (it would run
+/// with loopback only) or never compares with the ceiling.
+#[test]
+fn a_job_start_is_held_to_the_network_ceiling() {
+    use js_agent::lifecycle::Event;
+    use js_agent_wire::NetworkCeiling;
+    use js_types::{JobNetwork, PortMap};
+
+    let mut h = Harness::new("job-network");
+    let mut wide = start("j1");
+    wide.network = JobNetwork::AllowList;
+    let events = h.apply(vec![job_start(wide)]);
+    assert_eq!(
+        events,
+        [Event::Refused {
+            run_id: "j1".to_owned(),
+            code: refusal::NETWORK_ABOVE_CEILING,
+            why: "network allow-list asked, agent ceiling is none".to_owned(),
+        }]
+    );
+    let mut ported = start("j2");
+    ported.ports = vec![PortMap {
+        host: 8080,
+        container: 80,
+    }];
+    assert_eq!(
+        names(&h.apply(vec![job_start(ported)])),
+        [format!("refused j2 {}", refusal::PORTS_NOT_SUPPORTED)]
+    );
+    assert!(
+        h.fake.created().is_empty(),
+        "a refused job start was created"
+    );
+    for job_id in ["j1", "j2"] {
+        let result = listing(&h, job_id).result.expect("a result");
+        assert_eq!(result.outcome, Outcome::FailedToStart);
+    }
+
+    let mut h = Harness::new("job-network-within");
+    h.fake.set_ceiling(NetworkCeiling {
+        level: JobNetwork::AllowList,
+        ports: Vec::new(),
+    });
+    let mut listed = start("j3");
+    listed.network = JobNetwork::AllowList;
+    assert_eq!(names(&h.apply(vec![job_start(listed)])), ["started j3"]);
+    let created: Vec<JobNetwork> = h.fake.created().iter().map(|run| run.network).collect();
+    assert_eq!(created, [JobNetwork::AllowList]);
 }

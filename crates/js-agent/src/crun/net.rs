@@ -5,17 +5,22 @@
 //!
 //! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create
 //! (`Runtime::check_egress`, which the lifecycle calls and answers `egress-unchecked`), the
-//! create, `Oci::start`, `Oci::container_pid`, [`EgressPort::attach`], and
-//! [`Wired::release`] once the run has ended or is removed. An agent in mode none has no
-//! port, and none of this runs: its containers have loopback only, as before.
+//! create, `Oci::start`, `Oci::container_pid`, [`EgressPort::attach`] with the job's level and
+//! declared ports, and [`Wired::release`] once the run has ended or is removed. An agent in
+//! mode none has no port, and none of this runs: its containers have loopback only, as
+//! before. Under a ceiling
+//! a `none` job is not attached either: its bundle has the loopback resolver and no route
+//! wait ([`create`]), and its container keeps loopback only.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_agent_wire::NetworkCeiling;
 use js_contain::container::ContainerSpec;
 use js_contain::oci::Oci;
 use js_contain::oci::words::{crun_words, init_words};
 use js_contain::running::Running;
+use js_types::{JobNetwork, PortMap};
 
 use crate::egress::{Attachment, Config, Egress, EgressError, Mode, ROUTE_WAIT};
 use crate::lifecycle::RuntimeError;
@@ -32,13 +37,23 @@ pub trait EgressPort: std::fmt::Debug + Send + Sync {
     /// What is wrong, as [`Egress::check`] says it.
     fn check(&self) -> Result<(), EgressError>;
 
+    /// The most network a job may ask for: the agent's ceiling ([`Config::ceiling`]).
+    fn ceiling(&self) -> NetworkCeiling;
+
     /// Wires the network namespace of the container `run` (the run's container name, used
-    /// in errors) whose first process is `pid`.
+    /// in errors) whose first process is `pid`, for a job that asked for `level` and declared
+    /// `ports`, each forwarded from the host's port to the job.
     ///
     /// # Errors
     ///
     /// As [`Egress::attach`]; nothing it made is left.
-    fn attach(&self, run: &str, pid: u32) -> Result<Box<dyn Wired>, EgressError>;
+    fn attach(
+        &self,
+        run: &str,
+        pid: u32,
+        level: JobNetwork,
+        ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError>;
 }
 
 /// One run's wiring, which [`Wired::release`] takes down.
@@ -56,8 +71,18 @@ impl EgressPort for Egress {
         Egress::check(self)
     }
 
-    fn attach(&self, run: &str, pid: u32) -> Result<Box<dyn Wired>, EgressError> {
-        let attachment = Egress::attach(self, run, pid)?;
+    fn ceiling(&self) -> NetworkCeiling {
+        self.config().ceiling()
+    }
+
+    fn attach(
+        &self,
+        run: &str,
+        pid: u32,
+        level: JobNetwork,
+        ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        let attachment = Egress::attach(self, run, pid, level, ports)?;
         Ok(Box::new(attachment))
     }
 }
@@ -74,8 +99,9 @@ pub(crate) fn port_of(egress: &Egress) -> Arc<dyn EgressPort> {
 }
 
 /// The egress of an agent whose `--egress*` flags are `config`, started by `start`
-/// ([`Egress::start`] on a node). Mode none starts nothing and gives none: the runtime then
-/// calls no port, and a job's container has loopback only.
+/// ([`Egress::start`] on a node) for the ceiling `allow-list` or `open`. Mode none starts
+/// nothing and gives none: the runtime then calls no port, and a job's container has loopback
+/// only.
 ///
 /// # Errors
 ///
@@ -86,7 +112,91 @@ pub fn start_egress<P>(
 ) -> Result<Option<P>, EgressError> {
     match config.mode() {
         Mode::None => Ok(None),
-        Mode::AllowList => start(config.clone()).map(Some),
+        Mode::AllowList | Mode::Open => start(config.clone()).map(Some),
+    }
+}
+
+/// The ceiling of the runtime whose egress is `egress`: the port's, or `none` without one.
+pub(super) fn ceiling(egress: Option<&dyn EgressPort>) -> NetworkCeiling {
+    egress.map_or_else(NetworkCeiling::default, |port| port.ceiling())
+}
+
+/// Writes the bundle of `container`, whose job was admitted at `level`: a wired job
+/// (`allow-list` or `open`) gets the backend's configured resolvers and route wait, a `none`
+/// job the loopback resolver and no wait, since nothing will wire it.
+///
+/// # Errors
+///
+/// As `Oci::create`.
+pub(super) async fn create(
+    oci: &Oci,
+    container: &ContainerSpec,
+    level: JobNetwork,
+) -> Result<(), String> {
+    match level {
+        JobNetwork::None => oci.create_loopback(container).await,
+        JobNetwork::AllowList | JobNetwork::Open => oci.create(container).await,
+    }
+}
+
+/// A run's network: the level its job was admitted at, the ports it declared, and its wiring
+/// from its start until it is released.
+pub(super) struct Net {
+    level: JobNetwork,
+    ports: Vec<PortMap>,
+    wired: Option<Box<dyn Wired>>,
+}
+
+impl Net {
+    /// The network of a run admitted at `level` with the declared `ports`, not wired yet.
+    pub(super) fn asked(level: JobNetwork, ports: Vec<PortMap>) -> Self {
+        Self {
+            level,
+            ports,
+            wired: None,
+        }
+    }
+
+    /// Wires the started container of `spec`, which `running` runs, by `egress` ([`attach`]),
+    /// and keeps the wiring.
+    ///
+    /// # Errors
+    ///
+    /// As [`attach`].
+    pub(super) fn attach(
+        &mut self,
+        egress: Option<&dyn EgressPort>,
+        oci: &Oci,
+        started: (&ContainerSpec, &Running),
+        now_ms: fn() -> u64,
+    ) -> Result<(), RuntimeError> {
+        self.wired = attach(egress, oci, started, (self.level, &self.ports), now_ms)?;
+        Ok(())
+    }
+
+    /// Takes the wiring of the container `name` down ([`release`]).
+    pub(super) fn release(&mut self, name: &str) {
+        release(name, &mut self.wired);
+    }
+}
+
+/// The port a run admitted at `level` is wired through: none for a `none` run, `egress` for a
+/// wired one. The runtime asks before it makes anything of the run.
+///
+/// # Errors
+///
+/// A wired level and no egress (the runtime's ceiling is `none`): the run is refused, never
+/// run with less than it asked for.
+pub(super) fn port_for(
+    egress: Option<&dyn EgressPort>,
+    level: JobNetwork,
+) -> Result<Option<&dyn EgressPort>, String> {
+    match (level, egress) {
+        (JobNetwork::None, _) => Ok(None),
+        (_, Some(egress)) => Ok(Some(egress)),
+        (_, None) => Err(format!(
+            "the job asked for {level} and this agent's ceiling is none"
+        )),
     }
 }
 
@@ -101,30 +211,35 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
     }
 }
 
-/// The wiring of the started container of `spec`, which `running` runs, by `egress`; none
-/// without one. The container's pid is asked for until `crun` names one (right after
-/// `Oci::start` the container may not be made yet), and the asks end without one when
+/// The wiring of the started container of `spec`, which `running` runs, by `egress`, for a
+/// job admitted at `level` that declared `ports`; none for a `none` job, which is not wired
+/// (and whose pid is not asked for). A wired level with no egress never gets here: the
+/// runtime refused it before it made the container ([`port_for`]). The container's pid is
+/// asked for until `crun` names one (right after `Oci::start` the container may not be made
+/// yet), and the asks end without one when
 /// `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
-/// or when [`ROUTE_WAIT`]
-/// (an allow-list's `Config::route_wait`, the only egress with a port) has passed on
-/// `now_ms`: the container's init gives up its wait for the route then.
+/// or when [`ROUTE_WAIT`] (a wired ceiling's `Config::route_wait`) has passed on `now_ms`: the
+/// container's init gives up its wait for the route then.
 ///
 /// # Errors
 ///
-/// No pid, or the wiring failed; nothing of the wiring is left. The container's init holds
-/// the job until the route, which never came: the caller removes the container.
+/// No pid, or the wiring failed; nothing of the wiring is left.
+/// The container's init holds the job until the route, which never came: the caller removes
+/// the container.
 pub(super) fn attach(
     egress: Option<&dyn EgressPort>,
     oci: &Oci,
     (spec, running): (&ContainerSpec, &Running),
+    (level, ports): (JobNetwork, &[PortMap]),
     now_ms: fn() -> u64,
 ) -> Result<Option<Box<dyn Wired>>, RuntimeError> {
-    let Some(egress) = egress else {
+    let failed = |why: String| RuntimeError::new(format!("wire the container's network: {why}"));
+    // `stage` refused a wired run with no egress before anything was made (`port_for`).
+    let Some(egress) = egress.filter(|_| !level.is_none()) else {
         return Ok(None);
     };
-    let failed = |why: String| RuntimeError::new(format!("wire the container's network: {why}"));
     let pid = pid_of(oci, spec, running, now_ms).map_err(failed)?;
-    let wired = egress.attach(&spec.name, pid);
+    let wired = egress.attach(&spec.name, pid, level, ports);
     wired.map(Some).map_err(|why| failed(why.to_string()))
 }
 

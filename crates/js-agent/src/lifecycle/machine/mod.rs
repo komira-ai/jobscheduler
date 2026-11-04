@@ -481,6 +481,9 @@ impl Lifecycle {
             .map(|mount| self.config.mounts.resolve(mount))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
+        // A job above the runtime's ceiling is refused, never run with less; it costs no call.
+        crate::egress::admit(&self.runtime.network_ceiling(), spec)
+            .map_err(|refused| (refused.code, refused.detail))?;
         // Last, so that a job refused for another reason costs no call. Before every
         // contained create: the firewall can change between two jobs. A native job has its
         // own check (a Mac pool is limited by a packet filter, not a container network).

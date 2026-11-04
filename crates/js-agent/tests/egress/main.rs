@@ -13,7 +13,8 @@
 //!
 //! A missing variable or tool is a failure, never a skip. The tests change host-wide state
 //! (the `js_crun_egress` tables, `net.ipv4.ip_forward`, a far network namespace `js-far` standing
-//! for another host, a veth pair `vfar0`), so they take one lock and run one at a time.
+//! for another host, a veth pair `vfar0`), so they take one lock and run one at a time. The far
+//! host also stands for the clients of a job's declared ports (`forward`).
 //!
 //! Two kinds of job stand in each other's place. A *holder* is a process in a network
 //! namespace of its own (`unshare --net sleep`): what the agent wires is a namespace, and a
@@ -26,9 +27,11 @@
 mod allow;
 mod container;
 mod dns;
+mod forward;
 mod ipv6;
 mod lifecycle;
 mod modes;
+mod open;
 mod premise;
 #[path = "../runtime_host/mod.rs"]
 mod runtime_host;
