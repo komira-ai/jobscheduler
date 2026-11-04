@@ -59,6 +59,8 @@ pub(crate) struct Attempt<'a> {
     pub(crate) starts: &'a BTreeMap<WorkerId, Option<u64>>,
     /// How long the request counts for backfill ([`crate::Backfill`]); `None` never fits.
     pub(crate) backfill: Option<u64>,
+    /// Workers barred to it ([`crate::Bar`] other than a back-off): never granted to it.
+    pub(crate) barred: &'a BTreeSet<WorkerId>,
     /// Workers its earlier runs ended on as the farm's fault.
     pub(crate) avoid: &'a BTreeSet<WorkerId>,
     /// A key floor raised its memory: a worker it would own whole is out.
@@ -75,9 +77,15 @@ pub(crate) struct Attempt<'a> {
 }
 
 impl Attempt<'_> {
-    /// Whether the request may go on `worker` at `now`: a worker no one holds, or a held
-    /// one where it fits as backfill ([`backfill::fits`]).
+    /// Whether the request may go on `worker` at `now`: one not barred to it, and either
+    /// no one holds it or it fits there as backfill ([`backfill::fits`]).
     fn may_use(&self, worker: &WorkerId, now: FarmTime) -> bool {
+        !self.barred.contains(worker) && self.may_share(worker, now)
+    }
+
+    /// Whether the request may go on `worker` at `now` as far as holds go: a worker no
+    /// one holds, or a held one where it fits as backfill ([`backfill::fits`]).
+    fn may_share(&self, worker: &WorkerId, now: FarmTime) -> bool {
         !self.reserved.contains(worker)
             || self
                 .starts
@@ -191,6 +199,11 @@ impl Servable {
             cordoned,
             memo: Vec::new(),
         }
+    }
+
+    /// Whether placement may use `worker` this round: live, not cordoned and serving.
+    pub(crate) fn is_live(&self, worker: &WorkerId) -> bool {
+        self.live.contains(worker)
     }
 
     /// Where in `memo` the live workers that serve `request`'s kind and satisfy its

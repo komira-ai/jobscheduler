@@ -1,5 +1,6 @@
 //! The scheduler state machine.
 
+mod cancel;
 mod commit;
 mod fault;
 mod gate;
@@ -20,13 +21,14 @@ mod whole;
 mod whole_view;
 mod worker;
 
+pub use cancel::Cancelled;
 pub use recover::{Fate, Recovered, RecoveredLease};
 pub use snapshot::{
     Avoided, LeasePhase, LeaseView, MAX_AVOIDED, QueueGroup, QueueView, Snapshot, WaitingGroup,
     platform_label,
 };
 pub use state::OpState;
-pub use whole::{WholeMark, WholeWait};
+pub use whole::{Bar, RestoredMark, RestoredWhole, Room, WholeError, WholeMark, WholeWait};
 pub use whole_view::{WholeReason, WholeState, WholeSummary};
 pub(crate) use worker::Worker;
 
@@ -37,8 +39,8 @@ use std::time::Duration;
 
 use js_types::sched::usage::{CurveSource, LeaseCost, RunEnd};
 use js_types::sched::{
-    ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId,
-    Outcome, Qos, RefusalRecord, Resources, WaiterId, Waiting, WorkKey, WorkerId,
+    ControlRecord, Effect, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos,
+    RefusalRecord, Resources, WaiterId, Waiting, WorkKey, WorkerId,
 };
 
 use js_whole::WholeNodeConfig;
@@ -79,20 +81,6 @@ pub const UNSERVABLE_WAIT: Duration = Duration::from_secs(300);
 /// memory: at the pilot's rate of about 4 operations a second, a minute is about 240.
 pub const FINISHED_RETENTION: Duration = Duration::from_secs(60);
 
-/// How a run that ends the operation ended: on its own, killed at its own memory limit or
-/// by the node, or cut short (its result says nothing about how the action runs).
-const fn run_end_of(outcome: Outcome) -> RunEnd {
-    match outcome {
-        Outcome::Completed { .. } => RunEnd::Clean,
-        Outcome::Failed(Failure::OutOfMemory) => RunEnd::KilledAtLimit,
-        Outcome::Failed(Failure::NodeMemoryPressure) => RunEnd::BackstopKilled,
-        Outcome::Failed(Failure::Infra | Failure::Lost(_)) => RunEnd::Requeued,
-        Outcome::Failed(Failure::Timeout | Failure::Invalid | Failure::MissingInput) => {
-            RunEnd::Cancelled
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Operation {
     request: Request,
@@ -121,8 +109,9 @@ struct Operation {
     /// Its leases lost ([`RequeueReason::is_loss`]), counted toward the cap
     /// ([`Scheduler::with_loss_requeues`]).
     losses: u32,
-    /// When it last entered the queue: its submission, or the give-up of its lease
-    /// ([`Scheduler::queue_snapshot`] ages the queue from it).
+    /// When it last entered the queue: its submission, or the give-up of its lease, unless
+    /// put back keeping it ([`Scheduler::unplace_keeping_queued_at`]) or restored
+    /// ([`Scheduler::restore_whole`]); [`Scheduler::queue_snapshot`] ages the queue from it.
     queued_at: FarmTime,
     /// While its memory is one a key floor raised: what it booked before and the raise
     /// ([`Scheduler::reclamp_key_floor`] undoes the raise when no live worker is large
@@ -281,7 +270,7 @@ pub struct Scheduler {
     /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
     /// the log or the `Eq` memory state.
     max_walls: BTreeMap<OperationId, Duration>,
-    /// The marks, give-up counts and back-offs of whole-machine requests
+    /// The marks, give-up counts and bars of whole-machine requests
     /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
     drain: whole::Drain,
     /// Backfill on held workers ([`Scheduler::with_backfill`]).
@@ -394,8 +383,8 @@ impl Scheduler {
     /// [`Scheduler::set_max_wall`]; with none, no deadline but `drain_deadline`). At the
     /// deadline, if the worker is still busy, the hold is given up: counted, dropped, the
     /// worker barred to the request for `reserve_backoff`, and another held if there is
-    /// one. Nothing running is stopped. The marks, counts and back-offs are in memory
-    /// only; a recovered scheduler has none, so every count restarts at zero.
+    /// one. Nothing running is stopped. The marks, counts and bars are in memory only; a
+    /// recovered scheduler has none until [`Scheduler::restore_whole`] puts them back.
     ///
     /// A new mark is made only while the caps allow it: whole workers (marks and held
     /// whole-machine leases, never a head's hold) below `max_whole_node` and below the
@@ -676,15 +665,17 @@ impl Scheduler {
             );
             let (cost, profile) = self.charging(id, request);
             let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
-            // A whole-machine request avoids the workers it gave up for the back-off.
-            let barred = self.drain.barred(id, now);
-            let avoid = whole::Drain::avoiding(&op.avoid, &barred);
+            // A whole-machine request avoids the workers it gave up for the back-off, and
+            // is never granted one barred to it.
+            let (barred, backoff) = self.drain.kept_off(id, now);
+            let avoid = whole::Drain::avoiding(&op.avoid, &backoff);
             let backfill = self.backfill_duration(id);
             let attempt = Attempt {
                 request,
                 reserved: &reserved,
                 starts: &holds.starts,
                 backfill,
+                barred: &barred,
                 avoid: &avoid,
                 not_whole: key_raised,
                 cost,
@@ -830,6 +821,7 @@ impl Scheduler {
                     reserved: &reserved,
                     starts: &holds.starts,
                     backfill,
+                    barred: &barred,
                     avoid: &op.avoid,
                     not_whole: key_raised,
                     cost,
