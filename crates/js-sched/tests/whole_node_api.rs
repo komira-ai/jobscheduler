@@ -1,5 +1,5 @@
 //! The whole-node state a caller gives the scheduler from outside, and reads back
-//! ([`Scheduler::restore_whole`], [`Scheduler::bar_whole`], [`Scheduler::cancel`],
+//! ([`Scheduler::restore_whole`], [`Scheduler::bar_whole`], [`Scheduler::cancel_whole`],
 //! [`Scheduler::unplace_keeping_queued_at`], [`Scheduler::whole_room`] and the other
 //! reads): restored marks, counts and bars, hard bars, the queue time kept across a
 //! requeue, cancel in every state, and the tail a mark keeps. Every time is farm time fed
@@ -304,7 +304,7 @@ fn cancel_whole_ends_a_leased_and_a_running_operation() {
     let marked = ask(&mut f);
     let marked_by = waiter(&f);
     assert_eq!(
-        f.s.cancel(marked),
+        f.s.cancel_whole(marked),
         Cancelled::Queued {
             waiters: vec![marked_by],
             mark: Some(w("a")),
@@ -327,7 +327,7 @@ fn cancel_whole_ends_a_leased_and_a_running_operation() {
     f.feed(Event::Committed(ControlRecord::Lease(grants[0].clone())));
     assert_eq!(f.s.whole_holder(&w("b")), Some(leased));
     assert_eq!(
-        f.s.cancel(leased),
+        f.s.cancel_whole(leased),
         Cancelled::Held {
             lease: grants[0].lease,
             worker: w("b"),
@@ -344,7 +344,7 @@ fn cancel_whole_ends_a_leased_and_a_running_operation() {
     f.start(&grants[0]);
     assert_eq!(f.s.whole_marked_worker(running), Some(&w("b")));
     assert_eq!(
-        f.s.cancel(running),
+        f.s.cancel_whole(running),
         Cancelled::Held {
             lease: grants[0].lease,
             worker: w("b"),
@@ -365,11 +365,11 @@ fn cancel_whole_ends_a_leased_and_a_running_operation() {
     let done = action[0].operation;
     let finished = f.s.state(done).cloned();
     assert!(finished.as_ref().is_some_and(js_sched::OpState::is_done));
-    assert_eq!(f.s.cancel(done), Cancelled::Nothing);
+    assert_eq!(f.s.cancel_whole(done), Cancelled::Nothing);
     assert_eq!(f.s.state(done).cloned(), finished);
 
     let before = snapshot(&f);
-    assert_eq!(f.s.cancel(leased), Cancelled::Nothing);
+    assert_eq!(f.s.cancel_whole(leased), Cancelled::Nothing);
     assert_eq!(snapshot(&f), before);
 }
 

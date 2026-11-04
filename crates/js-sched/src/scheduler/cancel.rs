@@ -1,4 +1,4 @@
-//! Cancelling an operation in any state ([`Scheduler::cancel`]).
+//! Cancelling an operation in any state ([`Scheduler::cancel_whole`]).
 //!
 //! A method of the scheduler, not an [`crate::Event`], as [`Scheduler::unplace`] is: the
 //! caller learns of the cancel from outside the event stream (a client, its ledger) and
@@ -9,7 +9,7 @@ use js_types::sched::{LeaseId, OperationId, WaiterId, WorkerId};
 
 use super::Scheduler;
 
-/// What [`Scheduler::cancel`] did.
+/// What [`Scheduler::cancel_whole`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cancelled {
     /// The operation was queued: it left the queue, with the mark it had.
@@ -48,7 +48,7 @@ impl Scheduler {
     /// The scheduler cannot stop a run: [`Cancelled::Held`] names the lease for the caller
     /// to stop on its worker, and the caller calls this when the worker may be booked again
     /// (for a whole-machine lease in prepare, once the worker leaves it).
-    pub fn cancel(&mut self, operation: OperationId) -> Cancelled {
+    pub fn cancel_whole(&mut self, operation: OperationId) -> Cancelled {
         let Some(op) = self.ops.get(&operation) else {
             return Cancelled::Nothing;
         };

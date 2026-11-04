@@ -45,6 +45,9 @@ pub enum WholeState {
         /// Whether the worker still has leases, so it is draining; when it has none the
         /// next round grants it.
         draining: bool,
+        /// The end of the worker's tail when the mark was made on it
+        /// ([`super::WholeMark::tail_end`]): when the request is expected to start there.
+        tail_end: Option<FarmTime>,
     },
     /// It holds no worker and some are barred to it ([`Scheduler::whole_barred`]): the
     /// workers it gave up a hold on, until their back-off ends, and those barred with
@@ -209,6 +212,7 @@ impl Scheduler {
                 deadline: self.drain.gives_up(operation, cfg).then_some(mark.deadline),
                 give_ups,
                 draining: self.workers.get(&mark.worker).is_some_and(|w| w.leases > 0),
+                tail_end: mark.tail_end,
             };
         }
         if let Some(wait) = self.whole_wait(operation) {

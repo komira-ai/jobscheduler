@@ -22,7 +22,7 @@
 //! with [`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`] and
 //! [`Scheduler::whole_barred`].
 //!
-//! [`Scheduler::restore_whole`], [`Scheduler::bar_whole`] and [`Scheduler::cancel`] are
+//! [`Scheduler::restore_whole`], [`Scheduler::bar_whole`] and [`Scheduler::cancel_whole`] are
 //! methods of the scheduler, not [`crate::Event`]s, as [`Scheduler::unplace`] is: the
 //! caller learns what they say from outside the event stream (its ledger, a store, a
 //! prepare that failed on the host) and calls them under the lock that serialises its
