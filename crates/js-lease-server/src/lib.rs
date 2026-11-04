@@ -681,7 +681,8 @@ pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use config::{
-    BootMode, Cli, Config, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles, Token, is_private_address,
+    BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles,
+    Token, is_private_address,
     parse_duration,
 };
 pub use error::StartupError;

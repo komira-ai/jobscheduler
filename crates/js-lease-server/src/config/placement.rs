@@ -8,6 +8,7 @@ use clap::ValueEnum;
 use js_registry::PoolConfig;
 use js_sched::Backfill;
 
+use super::CpuSlack;
 use crate::error::StartupError;
 use crate::sched::map;
 use crate::sched::place::SchedPlacer;
@@ -42,6 +43,22 @@ impl Placement {
                 );
                 StartupError::at(place, reason)
             }),
+        }
+    }
+
+    /// The CPU slack the placement engine is built with: `given`, or the engine's
+    /// default. A slack given for any placement but `js-sched` is refused at `place`,
+    /// naming `needs`: no other placement reads it, so it would do nothing.
+    pub(crate) fn slack(
+        self,
+        given: Option<CpuSlack>,
+        place: &str,
+        needs: &str,
+    ) -> Result<CpuSlack, StartupError> {
+        match (self, given) {
+            (Self::JsSched, given) => Ok(given.unwrap_or_default()),
+            (Self::Registry, None) => Ok(CpuSlack::default()),
+            (Self::Registry, Some(_)) => Err(StartupError::at(place, format!("requires {needs}"))),
         }
     }
 

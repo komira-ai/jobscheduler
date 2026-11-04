@@ -32,7 +32,9 @@ use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
+mod cpu_slack;
 mod placement;
+pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use placement::Placement;
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
@@ -120,6 +122,12 @@ pub struct Cli {
     /// `arch`.
     #[arg(long, value_enum, default_value = "registry")]
     pub placement: Placement,
+    /// How far above a host's cores the placement engine may charge it, as a multiplier
+    /// of the cores from 1.0 to 2.0 with at most three decimals, such as `1.1`. Without
+    /// the flag the engine's own default is used, which is 1.1. Needs `--placement
+    /// js-sched`.
+    #[arg(long, value_parser = CpuSlack::parse)]
+    pub cpu_slack: Option<CpuSlack>,
     /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
     /// lease's start plus the largest P90 wall time, among the profiles the usage file has
     /// learned, of the runs queued on it with a profile name. A lease with no such run is
@@ -420,6 +428,8 @@ pub(crate) struct AgentSetup {
     pub(crate) placement: Placement,
     /// `--estimate-feed`.
     pub(crate) estimate_feed: bool,
+    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
+    pub(crate) cpu_slack: CpuSlack,
     /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
     /// and the one up to which `--placement js-sched` trusts it for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
@@ -519,6 +529,9 @@ impl Config {
                     mint_provider,
                 } = *registering;
                 server.agents.placement().check(&pool, "server.placement")?;
+                let given = server.agents.cpu_slack();
+                let needs = "server.placement = \"js-sched\"";
+                let cpu_slack = server.agents.placement().slack(given, "server.cpu_slack", needs)?;
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
@@ -527,6 +540,7 @@ impl Config {
                     require_host_credential: server.agents.require_host_credential(),
                     placement: server.agents.placement(),
                     estimate_feed: server.agents.estimate_feed(),
+                    cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                 });
                 (
@@ -702,6 +716,16 @@ impl Config {
         }
     }
 
+    /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
+    /// value given, or the engine's default, 1.1x, which is also the answer for a server
+    /// with no agent registration. Only `--placement js-sched` reads it.
+    pub fn cpu_slack(&self) -> CpuSlack {
+        match &self.hosts {
+            Hosts::Layered { agents, .. } => agents.cpu_slack,
+            Hosts::Static(_) => CpuSlack::default(),
+        }
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -790,6 +814,8 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
             };
             let pool = agent_pool::read(pool)?;
             cli.placement.check(&pool, "--placement")?;
+            let needs = "--placement js-sched";
+            let cpu_slack = cli.placement.slack(cli.cpu_slack, "--cpu-slack", needs)?;
             Ok(Hosts::Layered {
                 static_pool,
                 agents: Box::new(AgentSetup {
@@ -803,6 +829,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     require_host_credential: cli.require_host_credential,
                     placement: cli.placement,
                     estimate_feed: cli.estimate_feed,
+                    cpu_slack,
                     max_lease_wall: None,
                 }),
             })
