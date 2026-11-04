@@ -116,10 +116,15 @@ pub struct StoredOffer {
     pub os: String,
     /// The CPU architecture.
     pub arch: String,
-    /// The highest ISA level the offer stated, by its name (`x86-64-v3`). Left out of the
-    /// file when the offer stated none, so a record of such an offer is written as before
-    /// and a record written before the field reads as stating none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The highest ISA level the offer stated, by its name (`x86-64-v3`), kept while the
+    /// scaler runs so that a machine on its way covers the request it was launched for.
+    ///
+    /// It is read from the file when present and never written: the reader of the release
+    /// before this one refuses an unknown key, so a file this release writes stays one that
+    /// release reads (a rollback restarts from it). A record read back after a restart
+    /// states no level until a later release writes the key. A file without the key reads
+    /// as stating none.
+    #[serde(default, skip_serializing)]
     pub isa_level: Option<String>,
     /// The execution mode.
     pub exec: StoredExec,
@@ -167,8 +172,8 @@ impl StoredOffer {
 
     /// The offer this shape was taken from, priced at `price`, available. The architecture
     /// is read in the one spelling, so a record written when offers spelt Arm `aarch64`
-    /// rebuilds an `arm64` offer. The ISA level is the one stored; a stored name that is not
-    /// a level (a file edited by hand) states none, as an offer that has not said.
+    /// rebuilds an `arm64` offer. The ISA level is the one held; a held name that is not a
+    /// level (a file edited by hand) states none, as an offer that has not said.
     #[must_use]
     pub fn to_offer(&self, price: u64) -> Offer {
         Offer {
