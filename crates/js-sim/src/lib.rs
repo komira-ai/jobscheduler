@@ -7,7 +7,8 @@
 //! operating-system entropy and keeps every collection ordered, so the same seed gives
 //! the same [`TraceHash`] in any process on any platform. A failing seed is a complete
 //! bug report. The kernel depends only on `js-types`; pure crates use it as a
-//! dev-dependency only, and the whole-cell assembly lives in `kbf-sim-cell`.
+//! dev-dependency only. This repository's whole-cell simulation is `js-sim-cell` (its
+//! observations and invariants so far); kbf's is its own.
 //!
 //! Trace lines are hand-written text ([`text`]), never `Debug` output, under a format
 //! line ([`FORMAT_VERSION`]); [`golden`] keeps the hash of each pinned run in a
