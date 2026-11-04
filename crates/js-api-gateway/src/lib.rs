@@ -53,8 +53,9 @@
 //! `name[key]=value` for each entry of a map (`labels[team]=ml`), names and values
 //! percent-decoded once with `+` as a space (a malformed escape is a 400). A field may be
 //! named by its JSON name or its proto name, but not by both in one request. A 400 about a
-//! query parameter names the field without a map key (`labels`, not `labels[a]`), since the
-//! key is a value of the request.
+//! query parameter names the field by its JSON name whichever spelling the request used
+//! (`pageSize` for `page_size`), and without a map key (`labels`, not `labels[a]`, also
+//! when the value does not decode), since the key is a value of the request.
 //!
 //! A `job_id` (1 to 63 bytes of letters, digits, dot, underscore and dash, design section
 //! 5.3 and `job.proto`) is checked before the call, in the path, the body and the query

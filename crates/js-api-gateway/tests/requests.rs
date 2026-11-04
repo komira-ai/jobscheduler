@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
-use js_api_gateway::{BODY_LIMIT, router};
+use js_api_gateway::BODY_LIMIT;
 use js_proto::v1::{
     CordonHostRequest, GetJobRequest, GetUsageRequest, JobSpec, JobState, ListJobsRequest,
     SubmitJobRequest,
@@ -170,7 +170,12 @@ async fn a_query_sets_the_fields_of_a_read() {
 /// (also when two spellings decode to the same name or key), a value of the wrong kind,
 /// malformed percent escapes (trailing, incomplete, not hexadecimal) in a name and in a
 /// value, text that is not UTF-8, a query on a route whose body is the request, and a body
-/// on a route that takes none. Catches a malformed query that reaches the service.
+/// on a route that takes none. Every 400 names the field by its JSON name (a proto-name
+/// spelling such as `page_size` is named `pageSize`), and a parameter of a map entry by the
+/// map field alone (`labels[sensitive]` is `labels`), also when its value does not decode,
+/// since a map key is a value of the request; a name that is no field is named as written
+/// without its key. Catches a malformed query that reaches the service, a field named by
+/// the spelling the client chose, and a map key echoed in an answer.
 #[tokio::test]
 async fn a_malformed_query_is_a_400() {
     let (stub, router) = serve();
@@ -196,7 +201,7 @@ async fn a_malformed_query_is_a_400() {
         (
             "GET",
             "/v1/jobs?pageSize=1&page_size=2",
-            invalid("page_size", twice),
+            invalid("pageSize", twice),
         ),
         (
             "GET",
@@ -219,14 +224,36 @@ async fn a_malformed_query_is_a_400() {
             "/v1/jobs?states=JOB_STATE_NONE",
             invalid("states[0]", wrong),
         ),
-        (
-            "GET",
-            "/v1/jobs?page_token=%FF",
-            invalid("page_token", text),
-        ),
+        ("GET", "/v1/jobs?page_token=%FF", invalid("pageToken", text)),
         ("GET", "/v1/jobs?pageToken=%zz", invalid("pageToken", text)),
         ("GET", "/v1/jobs?pageToken=%4", invalid("pageToken", text)),
         ("GET", "/v1/jobs?pageToken=a%", invalid("pageToken", text)),
+        (
+            "GET",
+            "/v1/jobs?labels[sensitive]=%zz",
+            invalid("labels", text),
+        ),
+        (
+            "GET",
+            "/v1/jobs?labels[sensitive]=%FF",
+            invalid("labels", text),
+        ),
+        (
+            "POST",
+            "/v1/jobs?labels[sensitive]=1",
+            invalid(
+                "labels",
+                "this route takes its fields in the body, not in the query",
+            ),
+        ),
+        (
+            "POST",
+            "/v1/hosts/host-a:cordon?cordon_secs=1",
+            invalid(
+                "cordonSecs",
+                "this route takes its fields in the body, not in the query",
+            ),
+        ),
         (
             "GET",
             "/v1/jobs?%zz=1",

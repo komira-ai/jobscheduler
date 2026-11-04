@@ -73,7 +73,9 @@ the call; there is no offset, limit or stream.
   400. A parameter without `=` has an empty value. For example
   `GET /v1/jobs?states=JOB_STATE_QUEUED&states=JOB_STATE_RUNNING&labels[team]=ml&pageSize=50`.
 - A field may be named by its JSON name (`pageSize`) or its proto name (`page_size`), not by
-  both in one request.
+  both in one request. A 400 names it by its JSON name either way, and a map entry's
+  parameter by the map field alone (`labels`, not `labels[team]`), since the key is a value
+  of the request.
 - A `job_id` (1 to 63 bytes of letters, digits, dot, underscore and dash) is checked before
   the call, in the path, the body and the query. An empty one in a body or a query is left to
   the service: an empty job id in a submit asks the service to mint one. Any other path

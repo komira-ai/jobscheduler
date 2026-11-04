@@ -102,7 +102,7 @@ pub(crate) fn build(
     }
     let query = query.unwrap_or_default();
     let object = if takes_body {
-        body_object(query, body)?
+        body_object(input, query, body)?
     } else {
         query_object(input, query, body)?
     };
@@ -137,10 +137,22 @@ fn lookup(message: &MessageDescriptor, key: &str) -> Option<FieldDescriptor> {
         .or_else(|| message.get_field_by_name(key))
 }
 
+/// The name a 400 about the query parameter `key` gives its field: the JSON name of the
+/// field of `input` it names, or, for a name that is no field, the name as written; never a
+/// map key, which is a value of the request.
+fn query_field(input: &MessageDescriptor, key: &str) -> String {
+    let (name, _) = split_key(key);
+    lookup(input, name).map_or_else(|| name.to_owned(), |field| field.json_name().to_owned())
+}
+
 /// The JSON object of a route whose body is the request. Its query string must be empty.
-fn body_object(query: &str, body: &[u8]) -> Result<Map<String, Json>, Answer> {
+fn body_object(
+    input: &MessageDescriptor,
+    query: &str,
+    body: &[u8],
+) -> Result<Map<String, Json>, Answer> {
     if let Some((key, _)) = pairs(query)?.into_iter().next() {
-        return Err(Answer::invalid(Some(key), NO_QUERY));
+        return Err(Answer::invalid(Some(query_field(input, &key)), NO_QUERY));
     }
     if body.is_empty() {
         return Ok(Map::new());
@@ -238,6 +250,10 @@ fn query_object(
             return Err(Answer::invalid(Some(name.to_owned()), UNKNOWN_FIELD));
         };
         let json_name = field.json_name().to_owned();
+        let at = Some(json_name.clone());
+        let Some(text) = text else {
+            return Err(Answer::invalid(at, NOT_TEXT));
+        };
         let entry = entry.map(str::to_owned);
         match (field.is_map(), field.is_list(), entry) {
             (true, _, Some(entry)) => {
@@ -246,7 +262,7 @@ fn query_object(
                     .insert(entry, scalar(&map_value_kind(&field), text))
                     .is_some()
                 {
-                    return Err(Answer::invalid(Some(name.to_owned()), TWICE));
+                    return Err(Answer::invalid(at, TWICE));
                 }
             }
             (false, true, None) => lists
@@ -258,10 +274,10 @@ fn query_object(
                     .insert(json_name, scalar(&field.kind(), text))
                     .is_some()
                 {
-                    return Err(Answer::invalid(Some(name.to_owned()), TWICE));
+                    return Err(Answer::invalid(at, TWICE));
                 }
             }
-            _ => return Err(Answer::invalid(Some(name.to_owned()), MALFORMED_KEY)),
+            _ => return Err(Answer::invalid(at, MALFORMED_KEY)),
         }
     }
     let mut object = singles;
@@ -306,9 +322,9 @@ fn scalar(kind: &Kind, text: String) -> Json {
 
 /// The `name=value` pairs of a query string, each side percent-decoded once with `+` read
 /// as a space. Empty pairs (`a=1&&b=2`) are skipped; a pair without `=` has an empty value.
-/// A name that does not decode is a 400 naming no field; a value that does not, a 400
-/// naming its decoded name.
-fn pairs(query: &str) -> Result<Vec<(String, String)>, Answer> {
+/// A name that does not decode is a 400 naming no field; a value that does not is `None`,
+/// for the caller to refuse naming its field ([`query_object`]).
+fn pairs(query: &str) -> Result<Vec<(String, Option<String>)>, Answer> {
     query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -317,10 +333,7 @@ fn pairs(query: &str) -> Result<Vec<(String, String)>, Answer> {
             let Some(key) = unescape(key, true) else {
                 return Err(Answer::invalid(None, NOT_TEXT));
             };
-            let Some(value) = unescape(value, true) else {
-                return Err(Answer::invalid(Some(key), NOT_TEXT));
-            };
-            Ok((key, value))
+            Ok((key, unescape(value, true)))
         })
         .collect()
 }

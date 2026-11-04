@@ -21,7 +21,7 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use tonic::{Code, Request, Status};
 
-use common::{BIG, HEAD, Stub, fill, from_json, invalid, map, pool, send, serve};
+use common::{BIG, Stub, fill, from_json, invalid, pool, send, serve};
 
 /// The (method, verb, path) of every method of the job service that carries a
 /// `google.api.http` option, read with the reflection API alone, not with the crate's
