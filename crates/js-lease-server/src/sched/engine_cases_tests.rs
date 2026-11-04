@@ -246,12 +246,14 @@ fn a_lease_the_engine_gives_up_while_the_registry_keeps_it_is_rebuilt_once() {
             .iter()
             .any(|h| h.id == h1 && h.state == HostState::Live)
     );
-    assert_eq!(r.start(share_of(3, 1_000, GIB)).as_deref(), Some("h1"));
+    // Offered both hosts, the rebuilt engine places it; on h1 it would go past its cores
+    // (inside the slack), which the score avoids while h2 has room.
+    assert_eq!(r.start(share_of(3, 1_000, GIB)).as_deref(), Some("h2"));
     assert_eq!(r.counted(), (NONE, 1, 2));
     let listed = r.provider.capacity();
     let on = |host: &str| listed.iter().find(|c| c.host.as_str() == host).unwrap();
-    assert_eq!(on("h1").leases, [LeaseId::new(1, 1), LeaseId::new(1, 3)]);
-    assert_eq!(on("h2").leases, [LeaseId::new(1, 2)]);
+    assert_eq!(on("h1").leases, [LeaseId::new(1, 1)]);
+    assert_eq!(on("h2").leases, [LeaseId::new(1, 2), LeaseId::new(1, 3)]);
     assert!(r.start(share_of(4, 500, GIB)).is_some());
     assert_eq!(r.counted(), (NONE, 1, 2));
 }
@@ -570,6 +572,8 @@ async fn the_routes_place_shared_leases_by_load() {
     };
     let on_busy: Vec<Value> = entry(&busy)["leases"].as_array().unwrap().clone();
     assert_eq!(on_busy, [first["id"].clone(), second["id"].clone()]);
-    assert_eq!(entry(&idle)["leases"], json!([third["id"].clone()]));
+    // A host with one lease names it as `lease` alone.
+    assert_eq!(entry(&idle)["lease"], third["id"]);
+    assert!(entry(&idle).get("leases").is_none());
     assert_eq!(entry(&idle)["shape"]["memory_bytes"], json!(16 * GIB));
 }

@@ -139,7 +139,18 @@ impl Rig {
     /// as `resume`), on the same clock: a new registry and a new engine, nothing carried
     /// over but the files. No host has said hello to it yet.
     pub(super) fn restarted(self, config: crate::config::Config) -> Self {
-        let Self { clock, _dir, .. } = self;
+        let Self {
+            agents,
+            placer,
+            source,
+            provider,
+            clock,
+            _dir,
+            ..
+        } = self;
+        // The old server lets go of its files (the usage file's lock) before the new one
+        // opens them.
+        drop((agents, placer, source, provider));
         rig_of(config, _dir, clock)
     }
 
