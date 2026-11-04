@@ -46,11 +46,11 @@
 //! **Ended allocations.** The hub is the [`AllocationLog`] a server runs. Beside the tracks
 //! it keeps, per lease the server holds, what its beats carried ([`Used`]): the highest
 //! minute of CPU and of working set, and the CPU averaged over the minute indices. A minute
-//! index that comes again (the agent folds every minute from [`crate::TAIL_MINUTE`] on into
-//! that one index, and sends it again as it grows) is one minute of the average, at the
-//! highest CPU it was sent with. When the registry hands the hub the row of an allocation
-//! that ended, the hub fills the row's `used` from them (when the row has none) and queues
-//! it, under its mutex only.
+//! index that comes again, in any order (the agent folds every minute from
+//! [`crate::TAIL_MINUTE`] on into that one index, and sends it again as it grows), is one
+//! minute of the average, at the highest CPU it was sent with. When the registry hands the
+//! hub the row of an allocation that ended, the hub fills the row's `used` from them (when
+//! the row has none) and queues it, under its mutex only.
 //!
 //! Every tick writes the queue through the sink, oldest first ([`UsageHub::write_history`]).
 //! One write runs at a time (a second waits for the first), and a row leaves the queue only
@@ -245,50 +245,44 @@ type Drops = BTreeMap<(u64, HostId), BTreeMap<DropReason, u32>>;
 /// What a lease the server holds was measured to use so far.
 struct Measured {
     used: Used,
-    /// The CPU of each minute before the latest, summed, and how many there were.
-    cpu_before: u64,
-    minutes_before: u64,
-    /// The latest minute index taken and the highest CPU it came with.
-    latest: (u16, u64),
+    /// The highest CPU each minute index of the lease came with. An index is one minute of
+    /// the mean however often, and in whatever order, it comes; a lease has at most
+    /// [`crate::TAIL_MINUTE`] + 1 indices, since the agent folds every later minute into the
+    /// last one.
+    cpu_by_minute: BTreeMap<u16, u64>,
     touched: u64,
 }
 
 impl Measured {
     /// What the first minute taken, `m`, measured.
     fn first(m: &MinuteIn, now: u64) -> Self {
-        let cpu = u64::from(m.mean_cores_milli);
-        Self {
+        let mut measured = Self {
             used: Used {
-                cpu_milli: cpu,
-                memory_bytes: m.working_set_max_bytes,
-                cpu_mean_milli: cpu,
+                cpu_milli: 0,
+                memory_bytes: 0,
+                cpu_mean_milli: 0,
             },
-            cpu_before: 0,
-            minutes_before: 0,
-            latest: (m.minute, cpu),
+            cpu_by_minute: BTreeMap::new(),
             touched: now,
-        }
+        };
+        measured.add(m, now);
+        measured
     }
 
-    /// Takes the minute `m` into the highest of each figure and into the mean CPU: a minute
-    /// index seen just before is the same minute again and keeps the higher CPU; another
-    /// index closes the latest one into the sum.
+    /// Takes the minute `m` into the highest of each figure and into its index's CPU, and
+    /// sets the mean CPU to the average over the indices taken.
     fn add(&mut self, m: &MinuteIn, now: u64) {
         let cpu = u64::from(m.mean_cores_milli);
         self.used.cpu_milli = self.used.cpu_milli.max(cpu);
         self.used.memory_bytes = self.used.memory_bytes.max(m.working_set_max_bytes);
-        let (index, latest) = self.latest;
-        let again = index == m.minute;
-        match again {
-            true => self.latest = (index, latest.max(cpu)),
-            false => {
-                self.cpu_before = self.cpu_before.saturating_add(latest);
-                self.minutes_before += 1;
-                self.latest = (m.minute, cpu);
-            }
-        }
-        let sum = self.cpu_before.saturating_add(self.latest.1);
-        self.used.cpu_mean_milli = sum / (self.minutes_before + 1);
+        let slot = self.cpu_by_minute.entry(m.minute).or_insert(cpu);
+        *slot = (*slot).max(cpu);
+        let sum = self
+            .cpu_by_minute
+            .values()
+            .fold(0u64, |sum, cpu| sum.saturating_add(*cpu));
+        let minutes = self.cpu_by_minute.len() as u64;
+        self.used.cpu_mean_milli = sum / minutes;
         self.touched = now;
     }
 }

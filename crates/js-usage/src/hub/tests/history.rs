@@ -312,7 +312,8 @@ fn reading(seq: u64, n: u64, minutes: &[(u16, u32, u64)]) -> BeatLoad {
 /// Catches: the mean counting the folded tail minute once more each time the agent sends
 /// it again as it grows (through the real recorder, which hands the raised tail on as
 /// fresh): minute 0 at one core and the tail at two give a mean of 1.5 cores however often
-/// the tail comes again; with the tail risen to three, 2 cores.
+/// the tail comes again, and whichever came first (another index between two sends of the
+/// tail does not make it two minutes); with the tail risen to three, 2 cores.
 #[test]
 fn the_folded_tail_minute_is_one_minute_of_the_mean() {
     let sink = Arc::new(Recording::default());
@@ -322,8 +323,13 @@ fn the_folded_tail_minute_is_one_minute_of_the_mean() {
     send(&hub, "a", reading(2, 1, &[(TAIL_MINUTE, 2000, 50)]), &[]);
     send(&hub, "a", reading(3, 2, &first), &[]);
     send(&hub, "a", reading(4, 2, &[(TAIL_MINUTE, 3000, 20)]), &[]);
+    // The tail first and minute 0 after it; then the tail again, raised in working set.
+    let tail_first = [(TAIL_MINUTE, 2000, 20), (0, 1000, 10)];
+    send(&hub, "a", reading(5, 3, &tail_first), &[]);
+    send(&hub, "a", reading(6, 3, &[(TAIL_MINUTE, 2000, 50)]), &[]);
     hub.ended(ended_row(1, 1));
     hub.ended(ended_row(2, 2));
+    hub.ended(ended_row(3, 3));
     hub.write_history();
     let rows = sink.written.lock().unwrap().clone();
     let expected = Used {
@@ -333,6 +339,7 @@ fn the_folded_tail_minute_is_one_minute_of_the_mean() {
     };
     assert_eq!(rows[0].used, Some(expected));
     assert_eq!(rows[1].used.map(|used| used.cpu_mean_milli), Some(2000));
+    assert_eq!(rows[2].used, Some(expected));
 }
 
 /// Catches: a second write that runs beside one held in the sink and writes a newer row
