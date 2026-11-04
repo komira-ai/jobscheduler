@@ -7,15 +7,15 @@
 //!
 //! # What a contained job gets
 //!
-//! `create` with, in this order: the name, the labels, the limits ([`limits_to_args`]),
-//! the hardening ([`hardening_args`]), then `--`, the image and the command line. Nothing
-//! after `--` is read as an option. Then the mounts are read back (see below), then
-//! `start`; when either fails the container is removed again, so a failed start leaves
-//! nothing behind.
+//! `create` with, in this order: the name, the labels, the job's environment, set over the
+//! image's ([`env_args`]), the limits ([`limits_to_args`]), the hardening ([`hardening_args`]),
+//! then `--`, the image and the command line. Nothing after `--` is read as an option. Then
+//! the mounts are read back (see below), then `start`; when either fails the container is
+//! removed again, so a failed start leaves nothing behind.
 //!
 //! ```text
 //! <bin> create --name js-<agent tag>-<run id> --label jobscheduler.dev/run-id=r1 ...
-//!   --label jobscheduler.dev/agent=<host>
+//!   --label jobscheduler.dev/agent=<host> [--env <name>=<value> ...]
 //!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 4096
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
 //!   --mount type=bind,src=<scratch>,dst=/scratch,nosuid,nodev            (Podman)
@@ -286,7 +286,7 @@ mod egress;
 use args::user_args;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, FILES_TARGET, SCRATCH_TARGET, binds_of, check_submounts,
-    hardening_args, label_args, limits_to_args, scratch_volume_options,
+    env_args, hardening_args, label_args, limits_to_args, scratch_volume_options,
 };
 pub use egress::{
     ALLOW_MAX as EGRESS_ALLOW_MAX, Allow, DEFAULT_NFT, Egress, EgressError, TABLE as EGRESS_TABLE,
@@ -811,7 +811,7 @@ impl CliRuntime {
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), created_ms.to_string());
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
-        args.extend(label_args(&labels)?);
+        args.extend([label_args(&labels)?, env_args(&spec.env)?].concat());
         if !self.recursive_ro && self.host_mounts {
             let mountinfo = (self.proc_read)("/proc/self/mountinfo");
             check_submounts(spec, mountinfo.as_deref())?;

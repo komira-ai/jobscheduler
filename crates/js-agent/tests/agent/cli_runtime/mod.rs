@@ -155,6 +155,7 @@ pub fn spec(run_id: &str) -> RunSpec {
             image: "registry.example/job:1".to_owned(),
             args: vec!["--go".to_owned(), "x y".to_owned()],
         },
+        env: Vec::new(),
         cpu_millis: 1500,
         memory_bytes: 1 << 30,
         pids: Some(100),

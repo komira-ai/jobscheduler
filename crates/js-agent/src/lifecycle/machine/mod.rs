@@ -635,7 +635,7 @@ impl Lifecycle {
     /// Starts the run `spec` names, or the job a job start names (`keyed`; see `per_job`).
     fn start(&mut self, (spec, keyed): (&JobSpec, Keyed), received: u64, events: &mut Vec<Event>) {
         if self.may_start((spec, keyed), received, events) {
-            self.admit_and_start((spec, keyed), received, events);
+            self.admit_and_start((spec, keyed), &[], received, events);
         }
     }
 
@@ -688,9 +688,12 @@ impl Lifecycle {
     }
 
     /// Admits a start [`Lifecycle::may_start`] let through and starts it, or refuses it.
+    /// `env` is the environment of a job start (empty for a run start), which the run's
+    /// container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)).
     fn admit_and_start(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
+        env: &[(String, String)],
         received: u64,
         events: &mut Vec<Event>,
     ) {
@@ -749,6 +752,7 @@ impl Lifecycle {
                 };
                 let waiting = Waiting {
                     spec: spec.clone(),
+                    env: env.to_vec(),
                     mounts,
                     slot,
                     booked,
@@ -761,7 +765,7 @@ impl Lifecycle {
                 self.jobs.push(job);
             }
             Prepared::Ready => {
-                let started = self.begin((spec, keyed), mounts, slot, booked, events);
+                let started = self.begin((spec, keyed), env, mounts, slot, booked, events);
                 let at = (None, u64::MAX);
                 self.settle((spec, keyed), started, (slot, booked), at, events);
             }
@@ -778,6 +782,7 @@ impl Lifecycle {
     fn begin(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
+        env: &[(String, String)],
         mounts: Vec<ResolvedMount>,
         slot: u32,
         booked: u64,
@@ -824,7 +829,8 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         started.and_then(|(scratch, files)| {
-            let run = run_spec((spec, keyed), mounts, scratch, files, slot, booked);
+            let made = (mounts, scratch, files);
+            let run = run_spec((spec, keyed), env, made, slot, booked);
             self.runtime
                 .create_and_start(&run)
                 .map_err(|why| runtime_failure(&why))

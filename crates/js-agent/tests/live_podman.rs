@@ -105,6 +105,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
             image: image.to_owned(),
             args: ["sh", "-c", SCRIPT].map(str::to_owned).to_vec(),
         },
+        env: Vec::new(),
         cpu_millis: 1000,
         memory_bytes: 256 << 20,
         pids: Some(64),

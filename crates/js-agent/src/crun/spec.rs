@@ -54,8 +54,9 @@ pub(super) fn pinned(image: &str) -> Result<PinnedImage, String> {
 }
 
 /// The container of `run` named `name` over `image`, with its directories and the cgroup
-/// `cgroup_parent`. The program and environment are the image's to give
-/// ([`ImageConfig::apply`](crate::image::ImageConfig::apply)); they are empty here.
+/// `cgroup_parent`. The program and environment are empty here: the image's config gives
+/// them ([`ImageConfig::apply`](crate::image::ImageConfig::apply)), and the job's
+/// environment goes over the image's after that ([`job_env`]).
 ///
 /// The run's scratch directory, its mounts and its files are bound after the exec root, in
 /// that order, as js-contain wants host mounts.
@@ -105,6 +106,18 @@ pub(super) fn container_spec(
         // A run's GPUs are given after the image's config ([`super::gpu::Wiring::apply`]).
         devices: Vec::new(),
     }
+}
+
+/// Sets the job's environment (`env`, [`RunSpec::env`]) in `container`, whose image config
+/// is applied: the image's variables stay, and a job variable replaces every image
+/// variable of its name. The job's follow the image's, in the order given. Called after
+/// [`ImageConfig::apply`](crate::image::ImageConfig::apply), which replaces the whole
+/// environment, and before a GPU run's variables, which go over the job's.
+pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
+    container
+        .env
+        .retain(|(name, _)| !env.iter().any(|(job, _)| job == name));
+    container.env.extend(env.iter().cloned());
 }
 
 /// What a container's end is to the lifecycle: the exit status of the job, or [`NOT_RUN`]

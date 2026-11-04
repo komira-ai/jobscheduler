@@ -101,6 +101,12 @@ pub struct RunSpec {
     pub run_id: String,
     /// What the run executes.
     pub body: Body,
+    /// The environment a job start names, by name in order, which the runtime sets in the
+    /// container over the image's own variables (a name in both takes this value). Empty
+    /// for a run start and for a native body, whose environment is its own
+    /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
+    /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one.
+    pub env: Vec<(String, String)>,
     /// Thousandths of a CPU core.
     pub cpu_millis: u64,
     /// Bytes of memory.
@@ -197,6 +203,22 @@ impl RuntimeError {
     pub fn is_blind(&self) -> bool {
         self.1
     }
+}
+
+/// Checks the environment of a run before a runtime creates anything for it, with the
+/// wire's one check ([`js_agent_wire::check_env`]): a run reaches a runtime by paths that
+/// skip the wire's validation, and a name the agent reserves (the loader's, the agent's
+/// own) must never reach a job's process. A name given twice is refused as well.
+///
+/// # Errors
+///
+/// The rule the environment breaks, naming `env` and never a name or a value.
+pub fn check_run_env(env: &[(String, String)]) -> Result<(), RuntimeError> {
+    let names: BTreeMap<String, String> = env.iter().cloned().collect();
+    if names.len() != env.len() {
+        return Err(RuntimeError::new("env names a variable twice"));
+    }
+    js_agent_wire::check_env("env", &names).map_err(|why| RuntimeError::new(why.to_string()))
 }
 
 /// Why a runtime will not run a native body: the wire code the start is answered with and

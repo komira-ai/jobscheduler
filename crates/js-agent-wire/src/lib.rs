@@ -122,6 +122,7 @@ mod caps;
 mod check;
 mod command;
 mod credential;
+mod env;
 mod error;
 mod files;
 mod heartbeat;
@@ -139,6 +140,7 @@ mod run;
 pub use caps::{Caps, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
+pub use env::check_env;
 pub use error::{Rule, ValidationError};
 pub use files::{RunFile, validate_files};
 pub use heartbeat::{

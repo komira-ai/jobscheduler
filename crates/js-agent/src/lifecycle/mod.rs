@@ -27,9 +27,11 @@
 //!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
 //!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
 //!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
-//!   whose id names held work of the other keying is not taken (`Skip::Clash`), and one
-//!   that names an environment is refused `env-unsupported` and runs nothing (no runtime
-//!   sets a container's environment yet; `js-agent-job-env-runtimes` adds it). A
+//!   whose id names held work of the other keying is not taken (`Skip::Clash`). The job's
+//!   environment is delivered: it goes to the runtime in [`RunSpec::env`], and a container
+//!   runtime sets it over the image's own variables (a name in both takes the job's value);
+//!   a runtime that cannot carry it (the macOS native one) answers the start
+//!   `env-unsupported` and runs nothing. A
 //!   `JobStop` for a held job ends it as a `Stop` does (`killed`, once however often it
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
@@ -240,7 +242,7 @@ pub use quota_flags::{
 pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     Body, Exit, Found, NativeRefusal, Prepared, ResolvedMount, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, label,
+    RuntimeError, Status, Ticket, check_run_env, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
 pub use taint::{MARKER_FILE, StateRoot};

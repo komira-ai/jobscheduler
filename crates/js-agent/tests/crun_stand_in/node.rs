@@ -333,6 +333,7 @@ impl Node {
                 image: self.image(),
                 args: vec!["--go".to_owned()],
             },
+            env: Vec::new(),
             cpu_millis: 1500,
             memory_bytes: 1 << 30,
             pids: None,

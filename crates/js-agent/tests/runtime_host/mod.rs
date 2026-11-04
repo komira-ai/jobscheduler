@@ -288,6 +288,7 @@ impl RuntimeHost {
                 image: self.image.clone(),
                 args: vec![script.to_owned()],
             },
+            env: Vec::new(),
             cpu_millis: 1000,
             memory_bytes: 256 << 20,
             pids: None,
