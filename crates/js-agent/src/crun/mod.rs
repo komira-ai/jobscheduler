@@ -106,11 +106,9 @@
 //!
 //! # Network
 //!
-//! In mode none (`--egress none`, the default) a job has loopback only. Under a ceiling
-//! (`allow-list` or `open`) the runtime checks the firewall through the agent's [`EgressPort`]
-//! before every create; a job that asked for that level or `allow-list` is wired (one
-//! interface to the host) after `Oci::start` while its init holds it until the default route,
-//! and the wiring is released when the run ends or is removed; a `none` job is not wired.
+//! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
+//! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
+//! `Oci::start` (its init holds it until the route), releasing it when the run ends or goes.
 //!
 //! # Not here
 //!

@@ -18,17 +18,13 @@ fn ceiling(level: JobNetwork, ports: &[&str]) -> NetworkCeiling {
     }
 }
 
-/// The text the agent keeps for the refusal of `run_id`.
-fn why(events: &[Event], run_id: &str) -> String {
-    events
-        .iter()
-        .find_map(|event| match event {
-            Event::Refused {
-                run_id: run, why, ..
-            } if run == run_id => Some(why.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no refusal of {run_id}: {events:?}"))
+/// The one event of a start refused with `code` and `why`.
+fn refused(run_id: &str, code: &'static str, why: &str) -> Vec<Event> {
+    vec![Event::Refused {
+        run_id: run_id.to_owned(),
+        code,
+        why: why.to_owned(),
+    }]
 }
 
 /// Proves a job above the ceiling is refused, not lowered: under the ceilings `none` and
@@ -57,11 +53,8 @@ fn a_job_above_the_ceiling_is_refused_with_a_code_naming_it() {
             names(&events),
             [format!("refused r1 {}", refusal::NETWORK_ABOVE_CEILING)]
         );
-        let said = why(&events, "r1");
-        assert_eq!(
-            said,
-            format!("network {asked} asked, agent ceiling is {top}")
-        );
+        let said = format!("network {asked} asked, agent ceiling is {top}");
+        assert_eq!(events, refused("r1", refusal::NETWORK_ABOVE_CEILING, &said));
         assert!(
             h.fake.created().is_empty(),
             "{asked} under {top} was created"
@@ -149,8 +142,12 @@ fn a_job_with_ports_is_refused_until_forwarding_exists() {
         [format!("refused r1 {}", refusal::PORT_ABOVE_CEILING)]
     );
     assert_eq!(
-        why(&events, "r1"),
-        "host port 9000 asked, agent ceiling forwards 80,8000-8010"
+        events,
+        refused(
+            "r1",
+            refusal::PORT_ABOVE_CEILING,
+            "host port 9000 asked, agent ceiling forwards 80,8000-8010"
+        )
     );
     let events = h.start(with("r2", JobNetwork::AllowList, &[80, 8005]));
     assert_eq!(

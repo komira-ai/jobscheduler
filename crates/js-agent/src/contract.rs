@@ -149,12 +149,12 @@ mod tests {
     use super::*;
     use crate::egress::Config;
 
-    /// A runner the report must not call: no hook is given.
-    struct Unused;
+    /// A runner whose every program fails: the toolkit hook does not pass.
+    struct Failing;
 
-    impl CommandRunner for Unused {
+    impl CommandRunner for Failing {
         fn run(&self, program: &str, _args: &[&str]) -> Result<String, String> {
-            Err(format!("{program}: not to be run"))
+            Err(format!("{program}: exit status 1"))
         }
 
         fn run_in(
@@ -177,9 +177,9 @@ mod tests {
             shape: WireShape {
                 cpu_millis: 1000,
                 memory_bytes: 1 << 30,
-                gpus: 0,
+                gpus: 1,
                 disk_bytes: 0,
-                gpu_class: None,
+                gpu_class: Some("nvidia-a10".into()),
                 max_leases: None,
             },
             capabilities: BTreeMap::from([("os".to_owned(), "linux".to_owned())]),
@@ -191,18 +191,26 @@ mod tests {
         }
     }
 
-    /// The hello of a container agent whose egress flags are `config`.
+    /// The hello of a container agent whose egress flags are `config`, on a host with one GPU
+    /// whose toolkit hook fails: the ceiling is reported whatever the hook says.
     fn reported(config: &Config) -> Hello {
         let mut hello = hello();
+        let hook = ToolkitHook("/usr/bin/false".to_owned());
         let warnings = report(
             &mut hello,
-            None,
-            &Unused,
+            Some(&hook),
+            &Failing,
             false,
             None,
             (false, &config.advertised()),
         );
-        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            warnings,
+            [
+                "--gpu-toolkit-hook: /usr/bin/false: exit status 1; the host is not reported as having the GPU toolkit"
+            ]
+        );
+        assert!(!hello.capabilities.contains_key(GPU_TOOLKIT));
         hello
     }
 

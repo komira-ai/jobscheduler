@@ -453,14 +453,12 @@ fn a_docker_run_gets_none_only() {
     spec.network = JobNetwork::AllowList;
     let events = w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
     assert_eq!(names(&events), ["refused r1 network-above-ceiling"]);
-    let said = events.iter().find_map(|event| match event {
-        Event::Refused { why, .. } => Some(why.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        said.as_deref(),
-        Some("network allow-list asked, agent ceiling is none")
-    );
+    let refused = Event::Refused {
+        run_id: "r1".to_owned(),
+        code: "network-above-ceiling",
+        why: "network allow-list asked, agent ceiling is none".to_owned(),
+    };
+    assert_eq!(events, [refused]);
     assert!(w.docker.ids().is_empty(), "a container was made");
     assert_eq!(names(&w.start("r2")), ["started r2"]);
 }

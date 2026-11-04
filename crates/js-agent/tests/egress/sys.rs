@@ -345,19 +345,22 @@ impl Far {
         // the IPv6 networks the jobs invent, except what the test adds.
         // Only what comes in from a job's link goes there: the runner's own agents talk to the
         // real metadata address, and a route for them would count as a connection of a job.
-        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
-        ip_args(&[
-            "rule",
-            "add",
-            "pref",
-            "4242",
-            "iif",
-            "jsv0",
-            "to",
-            "169.254.169.254/32",
-            "lookup",
-            "4242",
-        ]);
+        // The first two blocks' links: a test with a neighbour wires its job as `jsv1`.
+        for (pref, link) in [("4242", "jsv0"), ("4243", "jsv1")] {
+            let _ = run(&ip, &["rule", "del", "pref", pref]);
+            ip_args(&[
+                "rule",
+                "add",
+                "pref",
+                pref,
+                "iif",
+                link,
+                "to",
+                "169.254.169.254/32",
+                "lookup",
+                "4242",
+            ]);
+        }
         ip_args(&[
             "route",
             "add",
@@ -389,7 +392,9 @@ impl Drop for Far {
         let ip = tool("ip");
         let _ = run(&ip, &["netns", "del", FAR_NS]);
         let _ = run(&ip, &["link", "del", "vfar0"]);
-        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
+        for pref in ["4242", "4243"] {
+            let _ = run(&ip, &["rule", "del", "pref", pref]);
+        }
         let _ = run(&ip, &["route", "flush", "table", "4242"]);
     }
 }
