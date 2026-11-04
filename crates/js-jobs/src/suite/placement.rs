@@ -85,9 +85,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
     let placed = rig.placed("f-placed");
     let running = rig.running("f-running");
     let ended = rig.placed("f-ended");
-    rig.jobs
-        .transition(&ended, JobState::Placed, JobState::Cancelled)
-        .expect("ends");
+    rig.jobs.end_job(&ended, super::cancelled()).expect("ends");
     let cancelling = rig.running("f-cancelling");
     rig.jobs.request_cancel(&cancelling).expect("an intent");
     let whole = rig.queue_spec("f-whole", whole_host_spec());
@@ -134,10 +132,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
         ),
         (
             "an end",
-            Box::new(|| {
-                jobs.transition(&running, JobState::Running, JobState::Failed)
-                    .map(drop)
-            }),
+            Box::new(|| jobs.end_job(&running, super::exited(1)).map(drop)),
         ),
         (
             "a cancel of a queued job",
@@ -493,13 +488,11 @@ pub fn booked_on_sums_the_live_allocations_of_a_host<B: Backend>(backend: &B) {
         .place(&elsewhere, host("host-b"), share())
         .expect("placed");
     let freed = rig.placed("h-freed");
-    rig.jobs
-        .transition(&freed, JobState::Placed, JobState::Cancelled)
-        .expect("ends");
+    rig.jobs.end_job(&freed, super::cancelled()).expect("ends");
     rig.jobs.free(&freed, EndReason::Cancelled).expect("frees");
     let releasing = rig.placed("h-releasing");
     rig.jobs
-        .transition(&releasing, JobState::Placed, JobState::Lost)
+        .end_job(&releasing, crate::JobEnd::Lost)
         .expect("ends");
 
     assert_eq!(

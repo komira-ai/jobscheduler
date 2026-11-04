@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use js_agent::egress::{Config, Egress};
 use js_contain::container::Ended;
+use js_types::JobNetwork;
 
 use crate::container::{ContainerHost, Network, PROBE, block_on, interfaces, section};
 use crate::sys::{Far, Server, clear_tables, far, links, serial, table_loaded};
@@ -36,7 +37,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
         let host = ContainerHost::new("none", Network::default()).await;
         let live = host.start(&script).await;
         let attachment = egress
-            .attach("none", live.pid)
+            .attach("none", live.pid, JobNetwork::None)
             .expect("attach does nothing");
         assert_eq!(attachment.interface(), None);
         live.finish().await

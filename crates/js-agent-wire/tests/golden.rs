@@ -279,6 +279,8 @@ fn heartbeat_reply_wire_form() {
         }],
         taint_ack: true,
         exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
     };
     assert_eq!(
         serde_json::to_value(&reply).unwrap(),

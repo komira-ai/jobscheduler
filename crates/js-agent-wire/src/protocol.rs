@@ -12,6 +12,15 @@
 //! - Within a major, fields are only added. A receiver ignores fields it does not know,
 //!   and a field a sender may leave out has a default on decode. A change that cannot be
 //!   made that way is a new major.
+//! - A set of messages is added within a major, not by a new one: its commands are new
+//!   [`crate::Command`] variants (an agent from before them reads each as
+//!   [`crate::Command::Unknown`] and the rest of the reply still arrives), its lists are new
+//!   fields that are absent when empty, and the agent announces that it speaks the set by
+//!   a hello capability; a server sends the set's commands only to an agent that reported
+//!   it. A new major would instead make [`ProtocolRange::negotiate`] drop every agent of
+//!   the older major from a server that left it, while a capability lets one server speak
+//!   to both kinds of agent. The first such set is the per-job one ([`crate::per_job`],
+//!   capability [`crate::PER_JOB_CAPABILITY`]).
 //! - A hello with no `protocol` field (sent before the field existed) speaks major 1.
 
 use serde::{Deserialize, Serialize};

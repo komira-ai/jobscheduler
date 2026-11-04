@@ -14,7 +14,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{DigestRef, DigestRefError};
-use crate::{AccelError, AcceleratorNeed, Arch, IsaLevel, Request, Resources, normalise_arch};
+use crate::{
+    AccelError, AcceleratorNeed, Arch, IsaLevel, JobNetwork, PortMap, Request, Resources,
+    normalise_arch,
+};
 
 /// The capability key a request names its operating system by.
 const OS_KEY: &str = "os";
@@ -177,6 +180,26 @@ pub struct ContainerSpec {
     /// The platform of the image manifest the digest pins, when the job names it. `None`:
     /// not named (a job from before the field).
     pub platform: Option<(Os, Arch)>,
+    /// How much network the container has: [`JobNetwork::None`] (loopback only) unless the
+    /// job asks for more. The agent's ceiling is the most it may ask for.
+    pub network: JobNetwork,
+    /// The ports the job declares, none by default. A host port is the agent's to allow.
+    pub ports: Vec<PortMap>,
+}
+
+impl ContainerSpec {
+    /// The container that runs `command` in `image`, with no platform named, no network
+    /// ([`JobNetwork::None`]) and no ports.
+    #[must_use]
+    pub fn new(image: ImageDigestRef, command: Vec<String>) -> Self {
+        Self {
+            image,
+            command,
+            platform: None,
+            network: JobNetwork::None,
+            ports: Vec::new(),
+        }
+    }
 }
 
 /// What a job needs of the host it runs on.
@@ -651,9 +674,8 @@ mod tests {
         assert_eq!(image.name(), "registry.example/team/app:1.2");
         assert_eq!(image.digest(), format!("sha256:{HEX}"));
         let spec = ContainerSpec {
-            image: image.clone(),
-            command: vec!["run".into(), "--fast".into()],
             platform: Some((Os::Macos, Arch::Arm64)),
+            ..ContainerSpec::new(image.clone(), vec!["run".into(), "--fast".into()])
         };
         assert_eq!(spec.image, image);
         assert_eq!(spec.command.len(), 2);
@@ -756,6 +778,28 @@ mod tests {
             PlatformConflict { os_or_arch: "os" }.to_string(),
             "the request asks for another os than the job's image is built for"
         );
+    }
+
+    /// Asserts that a container made without a network says so: its level is `none`, the
+    /// default level, and it declares no port, so a job that names nothing gets loopback
+    /// only. Catches a default of `allow-list` or `open`, which would give every job that
+    /// asked for nothing a route out.
+    #[test]
+    fn none_is_the_default_and_has_loopback_only() {
+        let image = ImageDigestRef::parse(&format!("app@sha256:{HEX}")).unwrap();
+        let spec = ContainerSpec::new(image, vec!["run".into()]);
+        assert_eq!(spec.network, JobNetwork::None);
+        assert_eq!(JobNetwork::default(), JobNetwork::None);
+        assert!(spec.ports.is_empty());
+        let open = ContainerSpec {
+            network: JobNetwork::Open,
+            ports: vec![PortMap {
+                host: 8080,
+                container: 80,
+            }],
+            ..spec.clone()
+        };
+        assert_ne!(open, spec);
     }
 
     /// Asserts that each way a reference can fail to pin its content is refused with its

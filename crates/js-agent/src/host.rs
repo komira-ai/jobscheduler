@@ -4,8 +4,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_agent_wire::limits::MAX_DISK_BYTES;
-use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
+use js_agent_wire::{
+    EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Hello, InstanceIdentity, Phase, ProtocolRange,
+    WireShape,
+};
 
+use js_agent_wire::PER_JOB_CAPABILITY;
 use js_caps::{DETECTED_KEYS, DISK_GIB};
 use js_types::normalise_arch;
 
@@ -51,15 +55,18 @@ fn class(
 
 /// The capabilities to report: the operator's, and `os` and `arch` as detected, the
 /// architecture in the one spelling (`arm64`, never `aarch64`). The keys of the host
-/// contract are detected too and cannot be given.
+/// contract and the network ceiling (`egress`, `egress-ports`) are detected too and cannot be
+/// given.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
 ) -> Result<BTreeMap<String, String>, String> {
-    let clash = given
-        .iter()
-        .map(|(key, _)| key.as_str())
-        .find(|key| matches!(*key, "os" | "arch") || DETECTED_KEYS.contains(key));
+    let clash = given.iter().map(|(key, _)| key.as_str()).find(|key| {
+        matches!(
+            *key,
+            "os" | "arch" | PER_JOB_CAPABILITY | EGRESS_CAPABILITY | EGRESS_PORTS_CAPABILITY
+        ) || DETECTED_KEYS.contains(key)
+    });
     match clash {
         Some(key) => Err(format!("--capability: {key} is detected and cannot be set")),
         None => Ok(given

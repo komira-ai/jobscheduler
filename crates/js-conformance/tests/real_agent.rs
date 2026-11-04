@@ -89,6 +89,8 @@ fn job(run: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
         run: None,
         os: None,
         arch: None,
@@ -261,6 +263,8 @@ impl Agent {
             exclusive_refused: None,
             load: None,
             disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.prepared = reply.exclusive.clone();
@@ -275,6 +279,8 @@ fn words(reply: &HeartbeatReply) -> Vec<String> {
         Command::Start(spec) => format!("start {}", spec.run_id),
         Command::Stop { run_id } => format!("stop {run_id}"),
         Command::Cancel { run_id } => format!("cancel {run_id}"),
+        Command::JobStart(spec) => format!("job_start {}", spec.job_id),
+        Command::JobStop { job_id } => format!("job_stop {job_id}"),
         Command::Unknown => "unknown".into(),
     };
     reply.commands.iter().map(word).collect()

@@ -4,7 +4,22 @@
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
 //! **allocation** is the scheduler's private record that resources on one host are booked
 //! for one placement of one job ([`AllocationRecord`]). Both are kept after they end: an
-//! ended job until its retention end (set by a later step), a freed allocation as history.
+//! ended job, with its [`JobResult`], until its retention end; a freed allocation as
+//! history, as long as the placement estimates need it (design question 14), which no job
+//! retention deletes.
+//!
+//! # Results and retention
+//!
+//! A job ends only through [`JobStore::end_job`], which writes the end state, the result and
+//! the retention end (the store's clock plus the store's [`Retention`], seven days unless
+//! [`JobStore::with_retention`] sets another) in the transaction that ends it; so a restart
+//! loses no result, and no job is ever ended without them. The window is read when the store
+//! is made and applied when a job ends: changing it affects only the jobs that end
+//! afterwards. [`sweep`] lists the jobs past their retention end at a given time and reads no
+//! clock; [`JobStore::tick`] runs it over the table and deletes those jobs' rows,
+//! [`SWEEP_BATCH`] rows to a transaction; [`JobStore::raise_deadlines_at_boot`] raises every
+//! stored retention end to at least the boot plus [`BOOT_GRACE`] before the first tick, so an
+//! outage longer than the window deletes no result before a client could read it.
 //!
 //! # Keys
 //!
@@ -38,11 +53,15 @@
 //! |---|---|
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
 //! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked) |
-//! | [`JobStore::transition`] | put `job/<id>` at its version; on an end, also put a booked `alloc/<id>` at its version (to releasing) |
+//! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
+//! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
-//! | [`JobStore::request_cancel`] | put `job/<id>` at its version, or nothing for an ended job or a second cancel |
+//! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it), or nothing for an ended job or a second cancel |
 //! | [`JobStore::mark_releasing`] | put `alloc/<id>` at its version, or nothing when it is not booked |
 //! | [`JobStore::free`] | put `alloc/<id>` at its version, or nothing when it is freed |
+//! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
+//! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version |
+//! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
 //!
 //! Times are the store's own clock ([`Store::now`](js_state::Store::now)); nothing here reads
 //! a system clock.
@@ -59,6 +78,7 @@ mod ids;
 pub mod interfere;
 pub mod keys;
 mod record;
+mod result;
 mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod suite;
@@ -72,5 +92,9 @@ pub use ids::{AllocationId, IdSource, JobId, JobIdError, MAX_JOB_ID_LEN, MintErr
 pub use record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, HostBooking,
     JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
+};
+pub use result::{
+    BOOT_GRACE, JobEnd, JobResult, JobTiming, Output, ResourceUsage, ResultReason, Retention,
+    RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, SCHEMA_VERSION};

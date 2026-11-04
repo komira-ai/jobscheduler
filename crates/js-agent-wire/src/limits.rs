@@ -9,7 +9,7 @@
 //!
 //! | field | cap |
 //! |---|---|
-//! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
+//! | ids (`run_id`, `lease_id`, `job_id`, `allocation_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |
@@ -21,12 +21,13 @@
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
-//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` |
+//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
+//! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
-//! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
+//! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, jobs, retired job ids or retired acks, [`MAX_RESULTS`] results, run acks or job acks, [`MAX_COMMANDS`] commands |
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_DISK_GIB`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
@@ -102,12 +103,22 @@ pub const MAX_CAPS_XCODES: usize = 16;
 /// Longest Xcode build id in a [`crate::Caps`] frame, in bytes.
 pub const MAX_XCODE_BUILD_LEN: usize = 32;
 
-/// The longest value, in bytes, the capability `key` may have: a held-bundle list is longer
-/// than the other capabilities, which are short facts.
+/// Most ports one job may declare (`JobSpec::ports`), and most items of the capability
+/// [`crate::EGRESS_PORTS_CAPABILITY`] (the host ports an agent allows).
+pub const MAX_PORTS: usize = 16;
+/// Longest value of the capability [`crate::EGRESS_PORTS_CAPABILITY`], in bytes: that many
+/// items of at most 11 bytes (`65535-65535`) and the commas between them.
+pub const MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN: usize = MAX_PORTS * 12 - 1;
+
+/// The longest value, in bytes, the capability `key` may have: a held-bundle list and a list
+/// of host ports are longer than the other capabilities, which are short facts.
 #[must_use]
 pub fn capability_value_max(key: &str) -> usize {
-    [MAX_CAPABILITY_VALUE_LEN, MAX_BUNDLE_CAPABILITY_VALUE_LEN]
-        [usize::from(key == BUNDLE_CAPABILITY)]
+    match key {
+        BUNDLE_CAPABILITY => MAX_BUNDLE_CAPABILITY_VALUE_LEN,
+        crate::network::EGRESS_PORTS_CAPABILITY => MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN,
+        _ => MAX_CAPABILITY_VALUE_LEN,
+    }
 }
 /// Longest session secret, in bytes (see [`crate::Welcome::session`]). A secret the
 /// registry issues is far shorter; the cap only bounds what a peer can send.

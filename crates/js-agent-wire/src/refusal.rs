@@ -45,9 +45,13 @@ pub const BUNDLE_DIGEST_REQUIRED: &str = "bundle-digest-required";
 /// A native job whose `program` is empty, relative, climbs with `..`, or holds a
 /// character a path may not.
 pub const INVALID_PROGRAM: &str = "invalid-program";
-/// A native job whose environment has a bad name or value, too many entries, or a
-/// name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
+/// A native job, or a job start, whose environment has a bad name or value, too many
+/// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
+/// A job start with a non-empty `env`, answered `failed_to_start` by an agent whose
+/// runtimes cannot yet set a container's environment; nothing runs. Temporary: the change
+/// that passes the environment into the runtimes (`js-agent-job-env-runtimes`) removes it.
+pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
 pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
@@ -160,6 +164,24 @@ pub const NOT_READY: &str = "not-ready";
 /// another host. Whether a retry is charged to the run is the consumer's choice; nothing in
 /// the scheduler counts retries.
 pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
+
+/// As the detail of a `failed_to_start` result: a start whose `network` is above the agent's
+/// ceiling (`--egress`, reported in the hello as the capability `egress`). Nothing was
+/// created, and the job is never run with less than it asked for. The text that stays on the
+/// host names the level asked for and the ceiling (`network allow-list asked, agent ceiling
+/// is none`). The host's ceiling is at fault, not the run: the run may be sent to a host
+/// whose ceiling covers it. A container-engine run (Docker or Podman) has the ceiling
+/// `none`.
+pub const NETWORK_ABOVE_CEILING: &str = "network-above-ceiling";
+/// As the detail of a `failed_to_start` result: a start that declares a host port the agent
+/// does not list (`--egress-forward-port`, reported in the hello as the capability
+/// `egress-ports`). Nothing was created. The text that stays on the host names the port and
+/// the ports the agent lists. The host's ceiling is at fault, not the run.
+pub const PORT_ABOVE_CEILING: &str = "port-above-ceiling";
+/// As the detail of a `failed_to_start` result: a start within the agent's ceiling that
+/// declares ports, on an agent that does not forward declared ports yet. Nothing was
+/// created. It is checked after [`NETWORK_ABOVE_CEILING`] and [`PORT_ABOVE_CEILING`].
+pub const PORTS_NOT_SUPPORTED: &str = "ports-not-supported";
 
 /// A capabilities frame whose digests, root or Xcode builds are malformed.
 pub const INVALID_CAPS: &str = "invalid-caps";

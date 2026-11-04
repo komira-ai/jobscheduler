@@ -377,6 +377,8 @@ mod tests {
             exclusive_refused: None,
             load: None,
             disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
         };
         let hello: Hello = serde_json::from_value(json!({
             "protocol": { "min": 2, "max": 3 },

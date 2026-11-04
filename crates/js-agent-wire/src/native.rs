@@ -27,7 +27,8 @@ pub const BUNDLE_PROGRAM_PREFIX: &str = "@bundle/";
 pub const BUNDLE_ENTRYPOINT_MAX: usize = 64;
 
 /// How much network a native job may use. The agent clamps it to what its own flag
-/// allows. An absent value is [`NetworkLevel::Off`].
+/// allows. An absent value is [`NetworkLevel::Off`]. It is not the level of a container job
+/// ([`js_types::JobNetwork`], `JobSpec::network`), which a native job leaves `none`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkLevel {
@@ -165,6 +166,8 @@ pub(crate) fn check_job(job: &JobSpec, native: &NativeSpec) -> Result<(), Valida
         ("args", !job.args.is_empty()),
         ("gpu_indices", !job.gpu_indices.is_empty()),
         ("mounts", !job.mounts.is_empty()),
+        ("network", !job.network.is_none()),
+        ("ports", !job.ports.is_empty()),
     ];
     match clashes.iter().find(|(_, clash)| *clash) {
         Some((field, _)) => Err(ValidationError::new(

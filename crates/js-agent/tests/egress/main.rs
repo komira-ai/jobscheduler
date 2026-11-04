@@ -29,7 +29,10 @@ mod dns;
 mod ipv6;
 mod lifecycle;
 mod modes;
+mod open;
 mod premise;
+#[path = "../runtime_host/mod.rs"]
+mod runtime_host;
 mod spoof;
 mod sys;
 mod tamper;
