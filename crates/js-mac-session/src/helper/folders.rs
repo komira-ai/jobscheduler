@@ -14,7 +14,9 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use crate::disclaim::Program;
 
 /// A `DARWIN_USER_DIR` answer that names no entry of the per-user folders.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -42,9 +44,7 @@ pub(crate) const GETCONF: (&str, &str) = ("/usr/bin/getconf", "DARWIN_USER_DIR")
 // Only `MacHost` runs the resolver; off macOS the tests do.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn ask(program: &str, args: &[&str], uid: u32, gid: u32) -> io::Result<PathBuf> {
-    use std::os::unix::process::CommandExt as _;
-    let output = Command::new(program)
-        .args(args)
+    let output = Program::new(program, args)
         .env_clear()
         .current_dir("/")
         .uid(uid)

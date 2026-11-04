@@ -4,7 +4,6 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use objc2::rc::{Retained, autoreleasepool};
@@ -14,6 +13,7 @@ use objc2_open_directory::{ODNode, ODRecord, ODSession, kODNodeTypeLocalNodes};
 use security_framework::random::SecRandom;
 
 use crate::autologin::{self, CommandOutput};
+use crate::disclaim::Program;
 use crate::helper::{self, Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
 
 const USERS: &str = "dsRecTypeStandard:Users";
@@ -190,8 +190,7 @@ impl Host for MacHost {
     }
 
     fn launchctl_print(&self, domain: &str) -> io::Result<PrintAnswer> {
-        let output = Command::new("/bin/launchctl")
-            .args(["print", domain])
+        let output = Program::new("/bin/launchctl", ["print", domain])
             .env_clear()
             .stdin(std::process::Stdio::null())
             .output()?;
@@ -202,8 +201,7 @@ impl Host for MacHost {
     }
 
     fn bootout(&self, domain: &str) -> io::Result<()> {
-        let output = Command::new("/bin/launchctl")
-            .args(["bootout", domain])
+        let output = Program::new("/bin/launchctl", ["bootout", domain])
             .env_clear()
             .output()?;
         if output.status.success() {
@@ -571,7 +569,10 @@ mod tests {
     fn the_kernel_agrees() {
         let me = libc::pid_t::try_from(std::process::id()).unwrap();
         assert_eq!(live(me).map(|p| p.pid), Some(me));
-        let mut sleeper = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let pid = libc::pid_t::try_from(sleeper.id()).unwrap();
         // Polled: the name is the parent's until the child has executed sleep.
         let mut named = live(pid);
@@ -591,7 +592,7 @@ mod tests {
                 command: "sleep".to_owned()
             })
         );
-        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let mut zombie = false;
         for _ in 0..100 {

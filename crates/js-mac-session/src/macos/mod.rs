@@ -70,11 +70,11 @@ pub fn main(args: &Args) -> ExitCode {
 
 /// This Mac's serial number, from the I/O Registry.
 fn read_serial() -> Result<String, String> {
-    let output = std::process::Command::new("/usr/sbin/ioreg")
-        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-        .env_clear()
-        .output()
-        .map_err(|why| format!("ioreg: {why}"))?;
+    let output =
+        crate::disclaim::Program::new("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"])
+            .env_clear()
+            .output()
+            .map_err(|why| format!("ioreg: {why}"))?;
     start::parse_serial(&String::from_utf8_lossy(&output.stdout))
         .ok_or_else(|| "ioreg named no IOPlatformSerialNumber".to_owned())
 }

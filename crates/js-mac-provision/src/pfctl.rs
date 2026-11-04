@@ -3,7 +3,8 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
+
+use js_mac_session::disclaim::Program;
 
 /// Where macOS keeps `pfctl`.
 pub const SYSTEM_PFCTL: &str = "/sbin/pfctl";
@@ -61,7 +62,7 @@ impl SystemPfctl {
 
 impl Pfctl for SystemPfctl {
     fn run(&self, args: &[&str]) -> io::Result<Output> {
-        let out = Command::new(&self.program).args(args).output()?;
+        let out = Program::new(&self.program, args).output()?;
         Ok(Output {
             code: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),

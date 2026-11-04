@@ -39,9 +39,10 @@ use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
+use js_mac_session::disclaim::Program;
 use serde_json::Value;
 
 use super::config::{Config, Mode};
@@ -152,8 +153,7 @@ impl Sys for System {
 
 /// Runs `program args` with `stdin` as its input to its end.
 fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::process::Output> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut child = Program::new(program, args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

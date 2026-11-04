@@ -46,14 +46,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read};
 use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireShape};
+use js_mac_session::disclaim::Program;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -233,9 +233,8 @@ impl SystemCommands {
         io::pipe()
             .map_err(failed)
             .and_then(|(reader, writer)| {
-                let mut command = Command::new(program);
+                let mut command = Program::new(program, args);
                 command
-                    .args(args)
                     .stdin(Stdio::null())
                     .stdout(writer)
                     .stderr(Stdio::null());
@@ -321,9 +320,8 @@ impl SystemCommands {
         let failed = |err: io::Error| format!("{program}: {err}");
         let (out_reader, out_writer) = io::pipe().map_err(failed)?;
         let (err_reader, err_writer) = io::pipe().map_err(failed)?;
-        let mut command = Command::new(program);
+        let mut command = Program::new(program, args);
         command
-            .args(args)
             .stdin(Stdio::null())
             .stdout(out_writer)
             .stderr(err_writer)

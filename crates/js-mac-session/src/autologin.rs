@@ -96,8 +96,7 @@ pub struct CommandOutput {
 /// # Errors
 /// The program could not be started or waited for.
 pub fn run_command(program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-    let output = std::process::Command::new(program)
-        .args(args)
+    let output = crate::disclaim::Program::new(program, args)
         .env_clear()
         .stdin(std::process::Stdio::null())
         .output()?;
