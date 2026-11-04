@@ -42,6 +42,7 @@ fn env_values(args: &[String]) -> Vec<&str> {
 /// right after the last label and before `--` and the image; that a value holding `=`, a
 /// leading `-`, a newline and a space arrives as one unchanged argument; and that nothing
 /// is joined, quoted or put after the image (where it would be the job's command line).
+/// The runtime's admission answer for the environment is that it carries it.
 #[test]
 fn a_job_start_env_reaches_a_podman_job() {
     let tricky = "-x=y\nz w";
@@ -61,11 +62,9 @@ fn a_job_start_env_reaches_a_podman_job() {
         assert!(first + 6 <= dashes, "{args:?}");
         assert_eq!(args[dashes + 1], "registry.example/job:1");
         assert_eq!(&args[dashes + 2..], ["--go", "x y"]);
-        let joined = args
-            .iter()
-            .filter(|arg| arg.starts_with("--env") && arg.as_str() != "--env");
-        assert_eq!(joined.count(), 0, "{args:?}");
     }
+    // A container runtime carries the environment: the runtime's own answer at admission.
+    assert_eq!(rt.check_env(&job.env), Ok(()));
 }
 
 /// Asserts that a job with no environment gets no `--env` on its `create`, and that the
@@ -112,5 +111,13 @@ fn a_runtime_refuses_a_reserved_env_name_it_is_handed_directly() {
     assert_eq!(
         env_args(&[("LD_PRELOAD".to_owned(), "/x.so".to_owned())]),
         Err(ArgsError::Env(wire.to_string()))
+    );
+    let twice = [
+        ("A".to_owned(), "1".to_owned()),
+        ("A".to_owned(), "2".to_owned()),
+    ];
+    assert_eq!(
+        env_args(&twice),
+        Err(ArgsError::Env("env names a variable twice".to_owned()))
     );
 }
