@@ -123,7 +123,10 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   `Attachment::release` when the runtime reads the run's end or removes the run, whichever
   comes first. A container whose pid or wiring fails is removed with its lease, and its job never
   ran (the init still waits for the route). A release that fails is logged and the removal goes
-  on. For a wired job (`allow-list` or `open`) the backend writes the configured resolvers in
+  on, and its /30 block is not given out again until the next start sweeps the host: the sets
+  hold interface names, so a member left in `openifs` would otherwise let the next run that
+  took the name (an `allow-list` one, say) reach any address. A wired run on a runtime with no
+  egress is refused at `stage`, before its container exists. For a wired job (`allow-list` or `open`) the backend writes the configured resolvers in
   the container's `resolv.conf` and starts the init with `--wait-route`; a `none` job, and every
   job in mode none, gets neither and is not attached.
 - The flags are parsed and checked at start. The agent starts the egress once, after it holds

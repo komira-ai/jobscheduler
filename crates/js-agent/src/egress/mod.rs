@@ -26,7 +26,7 @@ mod config;
 #[cfg(target_os = "linux")]
 mod host;
 pub mod ruleset;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod stand_in;
 
 pub use admit::{NetworkRefusal, admit};
