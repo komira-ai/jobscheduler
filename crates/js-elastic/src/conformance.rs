@@ -4,8 +4,8 @@
 //!
 //! A provider that cannot launch (one whose machines register themselves) runs the
 //! registered set instead, [`run_all_registered`] over a [`RegisteredRig`], which returns
-//! how many of [`REGISTERED_CASES`] it ran: the cases of [`run_all`] each launch a machine
-//! and do not apply to it.
+//! how many of [`REGISTERED_CASES`] it ran. The cases of [`run_all`] do not apply to it:
+//! they assume a [`Rig`] that scripts a cloud which launches, and a catalog with offers.
 //!
 //! A provider crate runs the suite from one test file: it enables this crate's
 //! `conformance` feature in its `[dev-dependencies]`, implements [`Rig`] over its fake

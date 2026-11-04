@@ -1,9 +1,10 @@
 //! The cases a provider that cannot launch passes: one whose machines register
 //! themselves (the `static` provider), so that [`CapacityProvider::can_launch`] is false
-//! and [`CapacityProvider::acquire`] is refused. The cases of [`super::run_all`] each
-//! launch a machine and do not apply to such a provider; these pin what it answers
-//! instead, in the order of the contract: acquire, release, list, observe, verify, then
-//! capacity and capabilities.
+//! and [`CapacityProvider::acquire`] is refused. The cases of [`super::run_all`] do not
+//! apply to such a provider: they assume a [`super::Rig`] that scripts a cloud which
+//! launches, and a catalog with offers to launch. These pin what it answers instead, in
+//! the order of the contract: acquire, release, list, observe, verify, then capacity and
+//! capabilities.
 //!
 //! A provider crate runs them from one test file: it implements [`RegisteredRig`] over the
 //! host table its provider reads and calls [`run_all_registered`], which returns how many
@@ -31,10 +32,16 @@ pub trait RegisteredRig {
     /// Starts over: no machine is registered. Every case begins here.
     fn start_over(&mut self);
 
-    /// A machine named `name` registers itself and is live, reporting an operating system
-    /// and an architecture; when `instance` is set, its first hello names that instance id
-    /// and the machine is bound to it. Returns the provider's reference for it.
+    /// A machine named `name` registers itself and is live, reporting the operating system
+    /// and architecture of [`RegisteredRig::platform`]; when `instance` is set, its first
+    /// hello names that instance id and the machine is bound to it. Returns the provider's
+    /// reference for it.
     fn register(&mut self, name: &str, instance: Option<&str>) -> HostRef;
+
+    /// The operating system and the architecture every machine of
+    /// [`RegisteredRig::register`] reports, spelled as [`Offer::os`] and [`Offer::arch`]
+    /// spell them.
+    fn platform(&self) -> (String, String);
 
     /// The machine `id` goes silent: it has not been heard for longer than the provider's
     /// grace period, and not for so long that the provider forgets it. The other machines
@@ -300,10 +307,11 @@ pub fn registered_capacity_counts_machines_and_adds_none(rig: &mut dyn Registere
 }
 
 /// The catalog is an empty answer, not an error, with machines or without; the
-/// capabilities are empty with no machine and name an operating system once one has
-/// registered. Fails on a provider whose catalog errors (an error means "not known", and
-/// a static provider knows it has nothing to launch), or whose capabilities do not follow
-/// the machines that registered.
+/// capabilities are empty with no machine, and once one has registered they are exactly
+/// the operating system and architecture it reported. Fails on a provider whose catalog
+/// errors (an error means "not known", and a static provider knows it has nothing to
+/// launch), or whose capabilities do not follow what the machines reported: another
+/// operating system, or no architecture.
 pub fn registered_catalog_is_empty_and_capabilities_follow_the_machines(
     rig: &mut dyn RegisteredRig,
 ) {
@@ -320,9 +328,17 @@ pub fn registered_catalog_is_empty_and_capabilities_follow_the_machines(
         "{CASE}: the catalog is an empty answer, not an error"
     );
     rig.register("reg-a", None);
-    assert!(
-        !rig.provider().capabilities().os.is_empty(),
-        "{CASE}: a registered machine's operating system is a capability"
+    let (os, arch) = rig.platform();
+    let caps = rig.provider().capabilities();
+    assert_eq!(
+        caps.os.into_iter().collect::<Vec<_>>(),
+        [os],
+        "{CASE}: the operating systems are the one the machine reported"
+    );
+    assert_eq!(
+        caps.arch.into_iter().collect::<Vec<_>>(),
+        [arch],
+        "{CASE}: the architectures are the one the machine reported"
     );
     assert_eq!(
         rig.provider().catalog(),

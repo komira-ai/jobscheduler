@@ -42,6 +42,10 @@ enum Flaw {
     OffersALaunch,
     /// The catalog is an error.
     CatalogFails,
+    /// The capabilities name an operating system no machine reported.
+    WrongOs,
+    /// The capabilities leave out the architecture the machines reported.
+    NoArch,
 }
 
 /// One registered machine of the stand-in.
@@ -91,12 +95,21 @@ impl CapacityProvider for Registered {
     }
 
     fn capabilities(&self) -> ProviderCaps {
-        match self.table.lock().unwrap().machines.is_empty() {
-            true => ProviderCaps::default(),
-            false => ProviderCaps {
-                os: BTreeSet::from(["linux".to_owned()]),
-                ..ProviderCaps::default()
-            },
+        if self.table.lock().unwrap().machines.is_empty() {
+            return ProviderCaps::default();
+        }
+        let os = match self.has(Flaw::WrongOs) {
+            true => "macos",
+            false => "linux",
+        };
+        let arch = match self.has(Flaw::NoArch) {
+            true => BTreeSet::new(),
+            false => BTreeSet::from(["x86_64".to_owned()]),
+        };
+        ProviderCaps {
+            os: BTreeSet::from([os.to_owned()]),
+            arch,
+            ..ProviderCaps::default()
         }
     }
 
@@ -224,6 +237,10 @@ impl RegisteredRig for StandInRig {
         HostRef(name.to_owned())
     }
 
+    fn platform(&self) -> (String, String) {
+        ("linux".to_owned(), "x86_64".to_owned())
+    }
+
     fn silence(&mut self, id: &HostRef) {
         let mut table = self.table();
         let silenced = table.machines.iter_mut().filter(|m| m.name == id.as_str());
@@ -347,5 +364,29 @@ fn the_capacity_case_fails_on_a_provider_that_offers_a_launch() {
 fn the_catalog_case_fails_on_a_provider_whose_catalog_errors() {
     registered_catalog_is_empty_and_capabilities_follow_the_machines(&mut StandInRig::new(
         Flaw::CatalogFails,
+    ));
+}
+
+/// Asserts that the capability case fails on a provider whose capabilities name an
+/// operating system the machine did not report.
+#[test]
+#[should_panic(
+    expected = "registered_catalog_is_empty_and_capabilities_follow_the_machines: the operating systems are the one the machine reported"
+)]
+fn the_capability_case_fails_on_a_provider_that_reports_another_os() {
+    registered_catalog_is_empty_and_capabilities_follow_the_machines(&mut StandInRig::new(
+        Flaw::WrongOs,
+    ));
+}
+
+/// Asserts that the capability case fails on a provider whose capabilities leave out the
+/// architecture the machine reported.
+#[test]
+#[should_panic(
+    expected = "registered_catalog_is_empty_and_capabilities_follow_the_machines: the architectures are the one the machine reported"
+)]
+fn the_capability_case_fails_on_a_provider_that_drops_the_arch() {
+    registered_catalog_is_empty_and_capabilities_follow_the_machines(&mut StandInRig::new(
+        Flaw::NoArch,
     ));
 }
