@@ -35,7 +35,7 @@
 //! another way) is skipped, read as zero and counted ([`TailSinkCounters::rows_skipped`]),
 //! and never overwritten.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use js_state::{Cond, Store, StoreError, Txn, Versioned};
 
@@ -380,7 +380,7 @@ pub struct StoreTailSink {
     /// Held for the whole of a flush, so flushes run one after another: a flush that
     /// starts while another writes waits for it, and so sees the counts a failed write
     /// put back. [`StoreTailSink::add`] never takes it.
-    flushing: Mutex<()>,
+    flushing: Gate,
 }
 
 /// What a flush did that did not fail.
@@ -407,7 +407,7 @@ impl StoreTailSink {
             store,
             edges,
             state: Mutex::new(State::default()),
-            flushing: Mutex::new(()),
+            flushing: Gate::default(),
         }
     }
 
@@ -432,7 +432,7 @@ impl StoreTailSink {
     /// # Errors
     /// [`TailSinkError`] when the write did not land.
     pub fn flush(&self) -> Result<TailFlush, TailSinkError> {
-        let _flushing = self.flushing.lock().unwrap_or_else(PoisonError::into_inner);
+        let _flushing = self.flushing.enter();
         let delta = std::mem::take(&mut self.state().pending);
         if delta.is_empty() {
             return Ok(TailFlush::Idle);
@@ -536,6 +536,54 @@ impl StoreTailSink {
     }
 }
 
+/// One flush at a time: [`Gate::enter`] waits while another flush holds the gate.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    left: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    /// Whether a flush holds the gate.
+    held: bool,
+    /// How many flushes wait for it.
+    waiting: usize,
+}
+
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Holds the gate until the pass is dropped, after waiting for any flush that holds it.
+    fn enter(&self) -> Pass<'_> {
+        let mut state = self.state();
+        while state.held {
+            state.waiting += 1;
+            // Whoever waits for the count of waiters to change (a test) is told.
+            self.left.notify_all();
+            state = self
+                .left
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+            state.waiting -= 1;
+        }
+        state.held = true;
+        Pass(self)
+    }
+}
+
+/// The hold of a [`Gate`], let go when dropped.
+struct Pass<'a>(&'a Gate);
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.state().held = false;
+        self.0.left.notify_one();
+    }
+}
+
 impl TailSink for StoreTailSink {
     fn load(&self) -> Result<TailTotals, TailSinkError> {
         let stored = self.scan()?;
@@ -559,5 +607,61 @@ impl TailSink for StoreTailSink {
 
     fn counters(&self) -> TailSinkCounters {
         self.state().counters
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::thread;
+
+    use super::*;
+    use crate::testkit::TestStore;
+
+    /// Asserts that a flush that starts while another holds the flush gate waits on the
+    /// gate, and then writes what the other put back. The test holds the gate itself, as a
+    /// flush whose write is under way does, and holds the gate's lock from before the second
+    /// flush starts, so the second flush can neither count itself waiting nor finish unseen:
+    /// the test then waits on the gate's condition for one of two events, the second flush
+    /// counted among the waiters, or the second flush returned (its thread takes the lock
+    /// before it says so). With the gate the first always comes; without it the second
+    /// always does, and the test fails, whatever the schedule. Catches: flushes that
+    /// overlap, so a final flush returns with nothing written while an earlier one still
+    /// holds counts it then puts back.
+    #[test]
+    fn a_second_flush_waits_on_the_gate_and_writes_what_the_first_put_back() {
+        let store = TestStore::new();
+        let sink = Arc::new(StoreTailSink::new(store, [0; TAIL_BUCKETS - 1]));
+        let held = sink.flushing.enter();
+        let mut gate = sink.flushing.state();
+        let (done, finished) = mpsc::channel();
+        let second = Arc::clone(&sink);
+        let second = thread::spawn(move || {
+            let flushed = second.flush();
+            let _told = second.flushing.state();
+            let _ = done.send(());
+            second.flushing.left.notify_all();
+            flushed
+        });
+        while gate.waiting == 0 {
+            let ran_past = finished.try_recv() != Err(TryRecvError::Empty);
+            assert!(!ran_past, "the second flush ran past the gate");
+            gate = sink
+                .flushing
+                .left
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(gate);
+        let back = TailDelta {
+            backfilled: 1,
+            ..TailDelta::default()
+        };
+        sink.state().pending.merge(&back);
+        drop(held);
+        assert_eq!(second.join().expect("no panic"), Ok(TailFlush::Written));
+        assert_eq!(sink.pending(), TailDelta::default());
+        assert_eq!(sink.load().map(|t| t.backfilled), Ok(1));
+        assert_eq!(sink.flushing.state().waiting, 0);
     }
 }
