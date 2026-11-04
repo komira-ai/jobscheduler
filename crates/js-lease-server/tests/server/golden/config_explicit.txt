@@ -1,0 +1,4 @@
+machine_provider rack: kind static; keys -
+machine_provider lambda: kind lambdalabs; keys api_key_file
+platform ours: kind default; hosts yes; machine_providers rack, lambda
+pool gpu: platforms ours; max_machines 4; max_queue_wait 1h; start_timeout 15m; path_grace 15s

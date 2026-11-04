@@ -14,6 +14,7 @@ js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
 js-lease = { path = "../js-lease" }
+js-platform = { path = "../js-platform" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }

@@ -155,21 +155,50 @@ impl Section {
     }
 
     pub(super) fn tables(&mut self, key: &str) -> Result<Vec<toml::Table>, StartupError> {
-        let must = "must be an array of tables, written [[pool]]";
+        let must = format!("must be an array of tables, written [[{key}]]");
         let Some(value) = self.map.remove(key) else {
             return Ok(Vec::new());
         };
         let toml::Value::Array(items) = value else {
-            return Err(self.fail(key, must));
+            return Err(self.fail(key, &must));
         };
         let mut tables = Vec::new();
         for item in items {
             let toml::Value::Table(table) = item else {
-                return Err(self.fail(key, must));
+                return Err(self.fail(key, &must));
             };
             tables.push(table);
         }
         Ok(tables)
+    }
+
+    /// The list of names `key` when the table gives it: an array of strings, in the file's
+    /// order, with at least one, none empty and none twice. A refusal names the repeated
+    /// name: names are not secrets.
+    pub(super) fn names(&mut self, key: &str) -> Result<Option<Vec<String>>, StartupError> {
+        let Some(value) = self.map.remove(key) else {
+            return Ok(None);
+        };
+        let toml::Value::Array(items) = value else {
+            return Err(self.fail(key, "must be an array of strings"));
+        };
+        let mut names: Vec<String> = Vec::new();
+        for item in items {
+            let toml::Value::String(name) = item else {
+                return Err(self.fail(key, "must be an array of strings"));
+            };
+            if name.is_empty() {
+                return Err(self.fail(key, "holds an empty name"));
+            }
+            if names.contains(&name) {
+                return Err(self.fail(key, &format!("names {name:?} twice")));
+            }
+            names.push(name);
+        }
+        match names.is_empty() {
+            true => Err(self.fail(key, "must name at least one")),
+            false => Ok(Some(names)),
+        }
     }
 
     /// The pool's `memory_schedulable_percent` when the table gives it: a whole number

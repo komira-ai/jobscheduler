@@ -25,7 +25,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, Resolved};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
@@ -517,7 +517,12 @@ impl Config {
             client_token,
             hosts,
             mut warnings,
+            unrunnable,
+            ..
         } = file::load(path, &load)?;
+        if let Some(refusal) = unrunnable {
+            return Err(refusal);
+        }
         let (hosts, elastic) = match hosts {
             LoadedHosts::Static(source) => (Hosts::Static(source), None),
             LoadedHosts::Registering {
@@ -590,6 +595,28 @@ impl Config {
             alert_repeat,
             job_retention: server.job_retention,
         })
+    }
+
+    /// Checks the configuration file at `path` as [`Config::from_config_file`] does and
+    /// answers its machine providers, platforms and pools, however each pool was written.
+    /// A file that is valid but that this version cannot start on (more than one pool that
+    /// registers agents) is resolved too.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] naming the table and the field at fault.
+    pub fn resolve_file(
+        path: &Path,
+        kinds: &Kinds,
+        files: &dyn SecretFiles,
+        clock: SharedClock,
+    ) -> Result<Resolved, StartupError> {
+        let load = Load {
+            kinds,
+            files,
+            clock,
+        };
+        Ok(file::load(path, &load)?.resolved)
     }
 
     /// The same configuration with every alert of the scaler also sent to `sink`, in
