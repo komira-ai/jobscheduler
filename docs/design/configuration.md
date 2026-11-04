@@ -121,11 +121,15 @@ name in the file may hold. This version keeps one fixed order of hosts, register
 platform that lists a launching machine provider before `static` is refused (`machine_providers: static must come first in this version
 (the ordered walk of design 5.6 is not built yet)`), and a pool's platforms must reach exactly one machine provider that launches.
 
-**Parsed and checked, not yet enforced.** `max_queue_wait`, `start_timeout`, `path_grace` (each a positive duration) and the
-`provider_limits` tables are read and checked at start, and nothing acts on them yet: the job lifecycle ticks (design 6.1) will end a job
-that waits past `max_queue_wait` or does not start within `start_timeout`; whole-host jobs and admission (design 5.6) will read
-`path_grace`; the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit names a launching
-machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is refused.
+**Parsed and checked; what acts on them.** `max_queue_wait`, `start_timeout`, `path_grace` (each a positive duration) and the
+`provider_limits` tables are read and checked at start. Admission of a lease request (design 5.6, step 2) reads the limits: an offer
+whose instance type is not allowed, whose price is above the maximum, or that has no price under a maximum does not admit a request, and
+a provider whose `max_machines` (else the pool's) is zero admits none. `path_grace` is how long a waiting whole-node request of the pool
+keeps its place once no host could serve it, after which it is refused `no-capable-host` (it is the registry's `regain_grace` for the
+pool). Nothing acts on the rest yet: the job lifecycle ticks (design 6.1) will end a job that waits past `max_queue_wait` or does not
+start within `start_timeout`, and the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit
+names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
+refused.
 
 ## Live logs: `[logs]` (Planned)
 

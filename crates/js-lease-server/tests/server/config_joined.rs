@@ -279,7 +279,7 @@ async fn a_lease_that_requires_a_capability_is_placed_on_a_joined_host() {
         .call("POST", "/v1/leases", Some(&needing("windows")))
         .await;
     assert_eq!(other.status, 409, "{}", other.body);
-    assert_eq!(other.json(), json!({ "error": "no-fit" }));
+    assert_eq!(other.json(), json!({ "error": "no-capable-host" }));
     let asked = h.call("POST", "/v1/leases", Some(&needing("linux"))).await;
     assert_eq!(asked.status, 202, "{}", asked.body);
     let id = asked.json()["id"].as_str().unwrap().to_owned();
@@ -293,7 +293,7 @@ async fn a_lease_that_requires_a_capability_is_placed_on_a_joined_host() {
 }
 
 /// Asserts what the table is for: on a joined pool with no `capabilities`, the same request
-/// for `os=linux` fits nothing, because requests are matched against the pool's shape and
+/// for `os=linux` fits nothing (`no-capable-host`), because requests are matched against the pool's shape and
 /// not against what a host reports; and with the table, a host that does not report the
 /// pool's capabilities is refused 403 `shape-not-accepted`. It catches a joined pool whose
 /// booked shape drifts from the capabilities it admits hosts by.
@@ -307,7 +307,7 @@ async fn capabilities_decide_both_the_fit_and_the_admission() {
         .call("POST", "/v1/leases", Some(&needing("linux")))
         .await;
     assert_eq!(asked.status, 409, "{}", asked.body);
-    assert_eq!(asked.json(), json!({ "error": "no-fit" }));
+    assert_eq!(asked.json(), json!({ "error": "no-capable-host" }));
 
     let h = serving("joined_caps_admit", |_| linux()).await;
     let token = mint(&h, "node-1").await;
@@ -369,7 +369,7 @@ fn wanting(memory_bytes: u64) -> Value {
 }
 
 /// Asserts that a joined pool with `memory_schedulable_percent = 90` books
-/// floor(16 GiB x 90 / 100) for a host: one byte more fits nothing (409 `no-fit`) and exactly
+/// floor(16 GiB x 90 / 100) for a host: one byte more fits nothing (409 `no-capable-host`) and exactly
 /// that is accepted (202), and `GET /v1/hosts` shows the listed memory, the percent and the
 /// bookable memory. A pool without the key books all 16 GiB: one byte more fits nothing and
 /// 16 GiB is accepted. A host's hello still has to claim the whole listed memory. It catches
@@ -400,7 +400,7 @@ async fn a_joined_pool_books_the_memory_percent_it_is_given() {
     let ask = wanting(NINETY + 1);
     let over = cut.call("POST", "/v1/leases", Some(&ask)).await;
     assert_eq!(over.status, 409, "{}", over.body);
-    assert_eq!(over.json(), json!({ "error": "no-fit" }));
+    assert_eq!(over.json(), json!({ "error": "no-capable-host" }));
     let ask = wanting(NINETY);
     let exact = cut.call("POST", "/v1/leases", Some(&ask)).await;
     assert_eq!(exact.status, 202, "{}", exact.body);

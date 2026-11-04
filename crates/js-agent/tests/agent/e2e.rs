@@ -23,7 +23,7 @@ fn mac_without_gpu() -> Host {
 }
 
 /// Asserts the whole path of a host with no GPU: before the agent runs a lease request for
-/// `os=macos` finds no capacity; once the agent has said hello (admitted because its
+/// `os=macos` is refused `no-capable-host` (no host could serve it yet); once the agent has said hello (admitted because its
 /// detected `os` is the pool's `macos`) the host is live, serving and listed with its
 /// label; `POST /v1/leases` by capability leases it; a second request finds none; and the
 /// host is leasable again after the lease is released. It proves a machine with no GPU
@@ -35,7 +35,7 @@ fn agent_registers_and_host_is_leasable() {
     let before = server.lease();
     assert_eq!(
         (before.status, before.body),
-        (409, json!({ "error": "no-capacity" }))
+        (409, json!({ "error": "no-capable-host" }))
     );
 
     let flags = ["--host-id", "mac-1", "--label", "rack=r1"];

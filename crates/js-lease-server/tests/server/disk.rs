@@ -63,18 +63,19 @@ async fn ask(h: &Harness, disk: u64) -> (u16, String) {
 }
 
 /// Asserts that a request for exactly the disk the host has is granted end to end, and
-/// one byte more is refused `no-fit` and books nothing. It catches a body field that is
+/// one byte more is refused `no-capable-host` (no host could ever hold it) and books nothing. It catches a body field that is
 /// read and dropped (the request would book no disk and be granted), and a booking that
 /// is off by one at the edge.
 #[tokio::test]
 async fn a_request_for_the_hosts_disk_is_granted_and_one_byte_more_is_refused() {
     let h = serve("disk_edge", DISK).await;
-    assert_eq!(ask(&h, DISK + 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(ask(&h, DISK + 1).await, (409, "no-capable-host".to_owned()));
     assert_eq!(ask(&h, DISK).await, (201, "granted".to_owned()));
 }
 
 /// Asserts that a body without `disk_bytes` (a client that predates the field) is granted
-/// on a host with no disk to book, and that a request for any disk is refused there. It
+/// on a host with no disk to book, and that a request for any disk is refused there
+/// (`no-capable-host`). It
 /// catches a field that is required, and a host with no disk that is read as one with
 /// plenty.
 #[tokio::test]
@@ -82,7 +83,7 @@ async fn a_request_without_disk_needs_none_and_a_host_without_disk_has_none() {
     let h = serve("disk_none", 0).await;
     let plain = h.call("POST", "/v1/leases", Some(&lease(None))).await;
     assert_eq!(plain.status, 201, "{}", plain.body);
-    assert_eq!(ask(&h, 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(ask(&h, 1).await, (409, "no-capable-host".to_owned()));
 }
 
 /// Asserts that a `disk_bytes` of zero, above 2^46 - 1 or not a number is a 400 that

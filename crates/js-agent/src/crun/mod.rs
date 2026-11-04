@@ -31,8 +31,8 @@
 //! - the run's scratch directory, given to the job's host id and bound at `/scratch`; the
 //!   run's mounts, and its files at `/run/js-files` read-only, are bound after it;
 //! - a bundle of the image's unpacked root (read-only), an overlay of an empty input root
-//!   at `/work`, where the job starts, and the program and environment of the image's
-//!   config with the run's arguments after the entrypoint.
+//!   at `/work`, where the job starts, the image config's program with the run's arguments
+//!   after the entrypoint, and its environment with the job's ([`RunSpec::env`]) over it.
 //!
 //! `crun run` is run by a *supervisor*, a process of its own (the agent's binary in its
 //! `__supervise-run` helper mode, started as the job user in its own process group with
@@ -178,11 +178,11 @@ use crate::cli_runtime::{Chown, container_name};
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, label,
+    RuntimeError, Status, Ticket, check_run_env, label,
 };
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
-use spec::{concluded, container_spec, ctr_of, log_tail_of, pinned};
+use spec::{concluded, container_spec, ctr_of, job_env, log_tail_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -283,11 +283,9 @@ pub fn hand_over_no_follow(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 }
 
 fn system_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    let ms = since.map_or(0, |since| since.as_millis());
+    u64::try_from(ms).unwrap_or(u64::MAX)
 }
 
 /// Why a [`CrunRuntime`] could not be opened.
@@ -557,8 +555,9 @@ impl CrunRuntime {
     /// [`never_started`](Found::never_started).
     ///
     /// # Errors
-    /// As [`Runtime::create_and_start`].
+    /// As [`Runtime::create_and_start`], and an environment [`check_run_env`] refuses.
     pub fn stage(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
+        check_run_env(&spec.env)?;
         self.make(spec)
             .map(RunHandle)
             .map_err(|fault| RuntimeError::new(fault.to_string()))
@@ -666,6 +665,7 @@ impl CrunRuntime {
         let lease = self.oci.lease_dirs(name);
         let mut container = container_spec(name, spec, image, &lease, cgroup.name());
         config.apply(args, &mut container)?;
+        job_env(&mut container, &spec.env);
         gpu.apply(&mut container);
         self.make_resources(spec, &container, &lease, &cgroup)?;
         Ok((container, lease, cgroup))

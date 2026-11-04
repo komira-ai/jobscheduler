@@ -102,6 +102,13 @@ pub struct RunSpec {
     pub run_id: String,
     /// What the run executes.
     pub body: Body,
+    /// The environment a job start names, by name in order, which the runtime sets in the
+    /// container over the image's own variables (a name in both takes this value). Empty
+    /// for a run start and for a native body, whose environment is its own
+    /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
+    /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one
+    /// ([`Runtime::check_env`]).
+    pub env: Vec<(String, String)>,
     /// Thousandths of a CPU core.
     pub cpu_millis: u64,
     /// Bytes of memory.
@@ -230,6 +237,22 @@ impl RuntimeError {
     pub(crate) fn is_outputs(&self) -> bool {
         self.1 == Kind::Outputs
     }
+}
+
+/// Checks the environment of a run before a runtime creates anything for it, with the
+/// wire's one check ([`js_agent_wire::check_env`]): a run reaches a runtime by paths that
+/// skip the wire's validation, and a name the agent reserves (the loader's, the agent's
+/// own) must never reach a job's process. A name given twice is refused as well.
+///
+/// # Errors
+///
+/// The rule the environment breaks, naming `env` and never a name or a value.
+pub fn check_run_env(env: &[(String, String)]) -> Result<(), RuntimeError> {
+    let names: BTreeMap<String, String> = env.iter().cloned().collect();
+    if names.len() != env.len() {
+        return Err(RuntimeError::new("env names a variable twice"));
+    }
+    js_agent_wire::check_env("env", &names).map_err(|why| RuntimeError::new(why.to_string()))
 }
 
 /// Why a runtime will not run a native body: the wire code the start is answered with and
@@ -369,6 +392,20 @@ pub trait Runtime {
             code: refusal::NATIVE_UNSUPPORTED,
             why: "this agent runs no native jobs".to_owned(),
         })
+    }
+
+    /// Whether this runtime carries a job start's environment (`env`, by name in order),
+    /// asked at admission for every start, before anything is created and before
+    /// [`Runtime::check_image`], so a start the runtime cannot give its environment is
+    /// answered for that and not for another reason. The default carries it, which is every
+    /// container runtime; the runtime a Mac agent has refuses a non-empty one
+    /// (`env-unsupported`): a job must never run without the environment it names.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_env(&self, _env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        Ok(())
     }
 
     /// Whether this runtime runs a start named by its image (an `image`, with or without a

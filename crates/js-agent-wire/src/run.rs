@@ -104,7 +104,7 @@ impl RunSpec {
     pub(crate) fn check(&self, names: &Names) -> Result<(), ValidationError> {
         self.check_program(At::new(names.program, refusal::INVALID_PROGRAM))?;
         check::args(At::new(names.args, refusal::INVALID_JOB), &self.args)?;
-        self.check_env(At::new(names.env, refusal::INVALID_ENV))?;
+        crate::env::check_env(names.env, &self.env)?;
         rel_path(At::new(names.cwd, refusal::INVALID_JOB), &self.cwd, true)?;
         self.check_inputs(At::new(names.inputs, refusal::INVALID_JOB))?;
         self.check_outputs(At::new(names.outputs, refusal::INVALID_JOB))
@@ -134,10 +134,6 @@ impl RunSpec {
             return Err(at.fail(Rule::Empty));
         }
         Ok(())
-    }
-
-    fn check_env(&self, at: At) -> Result<(), ValidationError> {
-        check_env(at, &self.env)
     }
 
     fn check_inputs(&self, at: At) -> Result<(), ValidationError> {
@@ -223,48 +219,6 @@ fn check_input(at: At, input: &InputRef) -> Result<(), ValidationError> {
 fn entrypoint_byte(byte: u8) -> bool {
     check::ident_byte(byte) || byte == b'+'
 }
-/// An environment: at most [`limits::MAX_ENV`] entries, each name `[A-Za-z_][A-Za-z0-9_]*`
-/// and not reserved, each value at most [`limits::MAX_ENV_VALUE_LEN`] bytes without NUL, and
-/// [`limits::MAX_ENV_TOTAL_BYTES`] in all. The one check of a run's, a native body's and a
-/// job start's environment.
-pub(crate) fn check_env(at: At, env: &BTreeMap<String, String>) -> Result<(), ValidationError> {
-    check::count(at, env.len(), limits::MAX_ENV)?;
-    let mut total = 0usize;
-    for (key, value) in env {
-        env_name(at, key)?;
-        if value.len() > limits::MAX_ENV_VALUE_LEN {
-            return Err(at.fail(Rule::TooLong));
-        }
-        if value.contains('\0') {
-            return Err(at.fail(Rule::BadChars));
-        }
-        total += key.len() + value.len();
-    }
-    if total > limits::MAX_ENV_TOTAL_BYTES {
-        return Err(at.fail(Rule::TooLong));
-    }
-    Ok(())
-}
-
-fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
-    if key.is_empty() {
-        return Err(at.fail(Rule::Empty));
-    }
-    if key.len() > limits::MAX_ENV_KEY_LEN {
-        return Err(at.fail(Rule::TooLong));
-    }
-    let lead = key.as_bytes()[0];
-    let leads = lead.is_ascii_alphabetic() || lead == b'_';
-    let inside = key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    if ![leads, inside].into_iter().all(|ok| ok) {
-        return Err(at.fail(Rule::BadChars));
-    }
-    if js_types::env::env_name_reserved(key) {
-        return Err(at.fail(Rule::Reserved));
-    }
-    Ok(())
-}
-
 /// A relative path as a mount's `rel` is, or the empty path when `allow_empty`, and ASCII
 /// only. The agent runs on case-insensitive APFS, where `A` and `a`, or `\u{e9}` composed
 /// and decomposed, are one name; ASCII keeps the overlap checks exact with a lower-case

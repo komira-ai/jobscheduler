@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, NativeRefusal, Prepared, RunHandle,
+    RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
 use js_agent_wire::{LogTail, NetworkCeiling};
 
@@ -83,6 +83,8 @@ struct State {
     generation: u64,
     /// Whether the runtime cannot use a GPU (`supports_gpus` says so).
     gpus_off: bool,
+    /// Whether the runtime carries no job start's environment (`check_env` refuses one).
+    env_off: bool,
     /// The exit code of a container that handles SIGTERM, by run id: a stop ends it with
     /// that code instead of the kill's 137.
     term_exits: BTreeMap<String, i32>,
@@ -134,6 +136,12 @@ impl FakeRuntime {
     pub fn without_gpus(self) -> Self {
         self.state.borrow_mut().gpus_off = true;
         self
+    }
+
+    /// From now on the runtime carries no job start's environment, as the Mac runtime: its
+    /// `check_env` answers a non-empty one `env-unsupported`.
+    pub fn refuse_env(&self) {
+        self.state.borrow_mut().env_off = true;
     }
 
     /// The container of `run_id` handles SIGTERM: a stop ends it with `code` (the kill of a
@@ -558,6 +566,16 @@ impl Runtime for FakeRuntime {
 
     fn places_in_cgroup(&self) -> bool {
         self.state.borrow().places
+    }
+
+    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        match env.is_empty() || !self.state.borrow().env_off {
+            true => Ok(()),
+            false => Err(NativeRefusal {
+                code: js_agent_wire::refusal::ENV_UNSUPPORTED,
+                why: "this runtime carries no environment".to_owned(),
+            }),
+        }
     }
 
     fn supports_gpus(&self) -> bool {

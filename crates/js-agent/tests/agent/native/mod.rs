@@ -111,6 +111,7 @@ impl Rig {
         RunSpec {
             run_id: run_id.to_owned(),
             body: Body::Native(native),
+            env: Vec::new(),
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
             pids: None,

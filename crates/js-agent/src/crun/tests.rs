@@ -11,10 +11,12 @@ use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{LeaseDirs, LogTail as Captured, StreamTail};
 
 use super::spec::{
-    EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, log_tail_of, not_run_words, pinned,
+    EXEC_ROOT, NOT_RUN, container_spec, ctr_of, end_of, exit_of, job_env, log_tail_of,
+    not_run_words, pinned,
 };
 use super::{config_dir, system_now_ms};
 use crate::cli_runtime::DEFAULT_PIDS;
+use crate::image::ImageConfig;
 use crate::lifecycle::{Body, Exit, ResolvedMount, RunSpec};
 
 fn digest() -> String {
@@ -71,6 +73,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
             image: "registry.example/job:1".to_owned(),
             args: vec!["--go".to_owned()],
         },
+        env: Vec::new(),
         cpu_millis: 1500,
         memory_bytes: 1 << 30,
         pids,
@@ -96,6 +99,38 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         network: Default::default(),
         ports: Vec::new(),
     }
+}
+
+/// Catches a job environment that does not go over the image's once the image's config is
+/// applied: an empty one leaves the image's as it is; otherwise the image's variables stay
+/// in their order, a job variable of a name the image sets (`PATH`, set twice by this
+/// image) replaces every one of them, and the job's follow the image's in the order given.
+#[test]
+fn a_job_env_goes_over_the_image_env_once_applied() {
+    let config = ImageConfig::parse(
+        br#"{"config":{"Entrypoint":["/bin/tool"],"Env":["PATH=/bin","LANG=C","PATH=/sbin"]},"rootfs":{"diff_ids":[]}}"#,
+    )
+    .expect("a config");
+    let image = PinnedImage {
+        reference: format!("registry.example/job@{}", digest()),
+        digest: digest(),
+    };
+    let mut spec = container_spec("js-x-r1", &run(None, None), &image, &lease(), "/js");
+    config.apply(&[], &mut spec).expect("applied");
+    let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+    let image_env = vec![
+        pair("PATH", "/bin"),
+        pair("LANG", "C"),
+        pair("PATH", "/sbin"),
+    ];
+    assert_eq!(spec.env, image_env);
+    job_env(&mut spec, &[]);
+    assert_eq!(spec.env, image_env);
+    job_env(&mut spec, &[pair("A", "1"), pair("PATH", "/opt/bin")]);
+    assert_eq!(
+        spec.env,
+        [pair("LANG", "C"), pair("A", "1"), pair("PATH", "/opt/bin")]
+    );
 }
 
 /// Catches a run that becomes a different container than it asked for: the lease's name,

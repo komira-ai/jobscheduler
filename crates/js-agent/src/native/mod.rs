@@ -92,8 +92,11 @@
 //! above). A deadline the helper enforces by itself is a change to the helper, not made
 //! here.
 //!
-//! What this runtime does not do yet: stage inputs or run in a subdirectory (a start that
-//! names inputs or a `cwd` is refused `native-unsupported`), forward a declared port (a
+//! What this runtime does not do yet: carry a job start's environment (`RunSpec::env`: a
+//! start with one is refused `env-unsupported` at admission, before its image or body is
+//! looked at, and a run handed here with one fails before a user is made; the native body's
+//! own `env`, and a `run`'s, is applied), stage inputs or run in a subdirectory (a start
+//! that names inputs or a `cwd` is refused `native-unsupported`), forward a declared port (a
 //! start that declares any is refused `ports-not-supported`, see `native/network.rs`), adopt
 //! a run after the agent restarts (the journal ends it, and collects none of its outputs),
 //! stop a run softly (the helper only kills), bound a run while no agent runs (above), or
@@ -572,6 +575,11 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
+        if !spec.env.is_empty() {
+            return Err(RuntimeError::new(
+                "this runtime does not carry a job start's environment",
+            ));
+        }
         check_env(native)?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
@@ -737,6 +745,19 @@ impl Runtime for NativeRuntime {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
             why: "this agent runs an image only as a bundle, with a run".to_owned(),
         })
+    }
+
+    /// A job start's environment would be set in the native process, which this runtime
+    /// does not do yet: a start with one is refused before anything is made, never run
+    /// without it.
+    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        match env.is_empty() {
+            true => Ok(()),
+            false => Err(NativeRefusal {
+                code: refusal::ENV_UNSUPPORTED,
+                why: "this agent does not carry a job start's environment".to_owned(),
+            }),
+        }
     }
 
     /// With a bundle store, the image of a start with a `run` is the bundle it runs from.

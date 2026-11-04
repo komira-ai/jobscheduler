@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     HeldJob, Isolation, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, RunResult, limits,
-    refusal,
 };
 
 use super::Lifecycle;
@@ -83,10 +82,9 @@ impl Lifecycle {
     /// Acts on a job start: the same start as a run's, keyed by job id. It is idempotent on
     /// the job id: a start for a job the agent holds changes nothing, and one whose fence
     /// (the job id with the allocation id) is retired is skipped (`Skip::FenceRetired`); the
-    /// same job under a new allocation is new work. A start with an environment is
-    /// answered `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing: no
-    /// runtime sets a container's environment yet (`js-agent-job-env-runtimes` adds that and
-    /// removes the refusal), and a job must never run without the environment it names.
+    /// same job under a new allocation is new work. The job's environment goes to the
+    /// runtime by name in order ([`RunSpec::env`](crate::lifecycle::RunSpec::env)); whether
+    /// the runtime can carry it is the runtime's to say, never the lifecycle's.
     pub(super) fn start_job(
         &mut self,
         spec: &JobStartSpec,
@@ -94,15 +92,10 @@ impl Lifecycle {
         events: &mut Vec<Event>,
     ) {
         let run = run_of(spec);
-        if !self.may_start((&run, Keyed::Job), received, events) {
-            return;
+        if self.may_start((&run, Keyed::Job), received, events) {
+            let env: Vec<(String, String)> = spec.env.clone().into_iter().collect();
+            self.admit_and_start((&run, Keyed::Job), &env, received, events);
         }
-        if spec.env.is_empty() {
-            self.admit_and_start((&run, Keyed::Job), received, events);
-            return;
-        }
-        let why = "this agent's runtimes cannot set a container's environment yet".to_owned();
-        self.refuse((&run, Keyed::Job), refusal::ENV_UNSUPPORTED, why, events);
     }
 
     /// Acts on a job stop. A held job is asked to stop as a `Stop` asks a run (the stop

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use js_elastic::{CapacityProvider, ProviderCaps};
 use js_platform::{ContainerPlatform, PlatformCaps, PlatformId};
 use js_registry::Registry;
-use js_types::{Capabilities, DISK_GIB_KEY, EXEC_KEY, Requirements};
+use js_sched::admission_ever::{Admission, PoolLimits, can_ever_serve};
+use js_types::Requirements;
 
-/// One GiB, the unit of the `disk-gib` capability.
-const GIB: u64 = 1 << 30;
+use crate::admit;
 
 /// The `default` platform: its machine providers, first to last, and the host table of its
 /// `static` provider, whose hosts register themselves.
@@ -54,26 +54,22 @@ impl ContainerPlatform for DefaultPlatform {
             .fold(PlatformCaps::default(), |all, one| all.union(&one))
     }
 
-    /// Whether a machine provider that launches says it could offer a machine for `r`
-    /// ([`PlatformCaps::admits`]), or a registered host could ever hold it: the registry's
-    /// own check before it refuses a whole-node start for want of a capable host
-    /// ([`Registry::could_ever_hold`]). A provider that launches nothing is judged by its
-    /// hosts one by one, not by its capabilities, which pool every host's facts and say
-    /// nothing of size. No catalog is read: that call is slow and is cached later.
-    ///
-    /// This check is interim: admission's own `can_ever_serve` (design 5.6, step 2)
-    /// replaces its body.
+    /// Whether anything of the platform could ever serve `r`: admission's own decision
+    /// ([`js_sched::admission_ever::can_ever_serve`], design 5.6, step 2) over the hosts of
+    /// its host table, as the lease route reads them, and its machine providers, each
+    /// catalog read once (one that cannot be read may offer). The platform is built without
+    /// a pool, so it applies no pool limit and bounds no provider's share.
     fn can_ever_serve(&self, r: &Requirements) -> bool {
-        let offered = self
+        let hosts = self.hosts.as_ref().map(Registry::hosts).unwrap_or_default();
+        let hosts: Vec<_> = hosts.iter().map(admit::registered).collect();
+        let providers: Vec<_> = self
             .providers
             .iter()
-            .filter(|provider| provider.can_launch())
-            .any(|provider| caps_of(&provider.capabilities()).admits(r));
-        let held = self
-            .hosts
-            .as_ref()
-            .is_some_and(|hosts| hosts.could_ever_hold(&r.resources, &required(r)));
-        offered | held
+            .map(|provider| {
+                admit::provider_view(provider.as_ref(), u32::MAX, PoolLimits::default())
+            })
+            .collect();
+        can_ever_serve(r, &hosts, &providers) != Admission::Refuse
     }
 }
 
@@ -89,24 +85,4 @@ fn caps_of(caps: &ProviderCaps) -> PlatformCaps {
         caps.accelerators.iter().map(ToString::to_string).collect(),
         caps.whole_host,
     )
-}
-
-/// The capabilities a host must report for `r`, as a lease request names them: `os`,
-/// `arch`, `disk-gib` (rounded up to a whole GiB), `isa_level` and `exec`, each only when
-/// `r` names it.
-fn required(r: &Requirements) -> Capabilities {
-    let named = [
-        ("os", r.os.clone()),
-        ("arch", r.arch.clone()),
-        (
-            DISK_GIB_KEY,
-            r.disk_bytes.map(|bytes| bytes.div_ceil(GIB).to_string()),
-        ),
-        ("isa_level", r.isa_level.map(|level| level.to_string())),
-        (EXEC_KEY, r.exec.map(|mode| mode.name().to_owned())),
-    ];
-    named
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
-        .collect()
 }
