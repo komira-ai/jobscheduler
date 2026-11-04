@@ -34,6 +34,7 @@ pub(crate) fn row(end: u64) -> EndedRow {
         used: Some(Used {
             cpu_milli: 1500,
             memory_bytes: 1 << 30,
+            cpu_mean_milli: 1100,
         }),
     }
 }

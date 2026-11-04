@@ -28,7 +28,7 @@ Every row starts with a version byte.
 | `estimated_end` | the end the estimate feed (`--estimate-feed`) gave the lease, if it had one |
 | `actual_end` | when it ended: the key's time |
 | `error_ms` | `actual_end` less `estimated_end`, positive for a lease that outlived its estimate; absent without an estimate. It is the error the tail counters bucket |
-| `used` | the highest minute of mean CPU (thousandths of a core) and of working set (bytes) the host's heartbeats reported for the lease; absent when none was measured |
+| `used` | over the minutes the host's heartbeats reported for the lease: the highest minute of mean CPU (thousandths of a core), the highest minute of working set (bytes), and the CPU averaged over those minutes (thousandths of a core, rounded down); absent when none was measured |
 
 **Queue wait.** For a whole-node request it is the time from the request's first presentation to the start of its lease (the commit on its host), across every presentation and every host it gave up. An ordinary lease is placed when it is asked for or refused, never queued, so its wait is zero. A request whose lease is stopped while it still waits gets a record with no host, a run time of zero and the wait it had. A lease put back from the lease file after a restart has a known wait only if it is an ordinary one.
 

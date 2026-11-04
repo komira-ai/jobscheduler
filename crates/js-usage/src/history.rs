@@ -199,14 +199,16 @@ pub struct Booked {
     pub memory_bytes: u64,
 }
 
-/// What an allocation was measured to use: the highest minute of each over the minutes
-/// measured.
+/// What an allocation was measured to use, over the minutes measured: the highest minute of
+/// CPU and of working set, and the CPU averaged over the minutes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Used {
     /// The highest mean CPU of a minute, in thousandths of a core.
     pub cpu_milli: u64,
     /// The highest working set of a minute, in bytes.
     pub memory_bytes: u64,
+    /// The mean CPU of the minutes measured, in thousandths of a core (rounded down).
+    pub cpu_mean_milli: u64,
 }
 
 /// The record of one ended allocation: the fields of the design's usage history (section

@@ -187,18 +187,15 @@ impl Usage {
     /// Logs a write of the history queue: the first failure of a run of them, and the first
     /// write that succeeds after one.
     fn report_history(&self, written: Option<HistoryWritten>) {
+        let failing = &self.history_failing;
         match written {
-            None => {}
-            Some(Ok(rows)) => {
-                if self.history_failing.swap(false, Ordering::SeqCst) {
-                    info!(rows, "the allocation history is written again");
-                }
+            Some(Ok(rows)) if failing.swap(false, Ordering::SeqCst) => {
+                info!(rows, "the allocation history is written again");
             }
-            Some(Err(fault)) => {
-                if !self.history_failing.swap(true, Ordering::SeqCst) {
-                    error!(error = %fault, "cannot write the allocation history; its records stay queued");
-                }
+            Some(Err(fault)) if !failing.swap(true, Ordering::SeqCst) => {
+                error!(error = %fault, "cannot write the allocation history; its records stay queued");
             }
+            _ => {}
         }
     }
 

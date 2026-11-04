@@ -5,8 +5,8 @@
 //! whole host or 0, then the CPU and the memory as varints); the queue wait, the run time
 //! (each an optional varint); the ended reason and the drain outcome (each its name as text);
 //! the give-ups, the estimated end (each an optional varint); the actual end (a varint); the
-//! estimate error (an optional zigzag varint); what was used (optional: the CPU and the memory
-//! as varints).
+//! estimate error (an optional zigzag varint); what was used (optional: the highest CPU, the
+//! highest memory and the mean CPU as varints).
 //!
 //! A text is a varint length and that many bytes of UTF-8. An optional field is a byte 0
 //! (absent) or 1 followed by the field. A varint is little-endian base 128, 7 bits a byte, high
@@ -93,6 +93,7 @@ pub(crate) fn encode(row: &EndedRow) -> Vec<u8> {
     put_opt(&mut out, row.used, |out, used| {
         put_varint(out, used.cpu_milli);
         put_varint(out, used.memory_bytes);
+        put_varint(out, used.cpu_mean_milli);
     });
     out
 }
@@ -195,6 +196,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EndedRow, EndedRowError> {
         Ok(Used {
             cpu_milli: r.varint()?,
             memory_bytes: r.varint()?,
+            cpu_mean_milli: r.varint()?,
         })
     })?;
     // Bytes after the last field this build knows are fields a later build added.

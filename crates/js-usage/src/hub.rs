@@ -45,7 +45,7 @@
 //!
 //! **Ended allocations.** The hub is the [`AllocationLog`] a server runs. Beside the tracks
 //! it keeps, per lease the server holds, the highest minute of CPU and of working set its
-//! beats carried ([`Used`]); when the registry hands it the row of an allocation that ended,
+//! beats carried and the mean CPU over those minutes ([`Used`]); when the registry hands it the row of an allocation that ended,
 //! the hub fills the row's `used` from them (when the row has none) and queues it, under its
 //! mutex only. Every tick writes the queue through the sink, oldest first
 //! ([`UsageHub::write_history`]); a row the sink cannot write stays queued, with the ones
@@ -237,15 +237,21 @@ type Drops = BTreeMap<(u64, HostId), BTreeMap<DropReason, u32>>;
 /// What a lease the server holds was measured to use so far.
 struct Measured {
     used: Used,
+    /// The CPU of every minute taken, summed, and how many minutes were taken.
+    cpu_sum: u64,
+    minutes: u64,
     touched: u64,
 }
 
 impl Measured {
-    /// Takes the minute `m` into the highest of each figure.
+    /// Takes the minute `m` into the highest of each figure and into the mean CPU.
     fn add(&mut self, m: &MinuteIn, now: u64) {
         let cpu = u64::from(m.mean_cores_milli);
         self.used.cpu_milli = self.used.cpu_milli.max(cpu);
         self.used.memory_bytes = self.used.memory_bytes.max(m.working_set_max_bytes);
+        self.cpu_sum = self.cpu_sum.saturating_add(cpu);
+        self.minutes += 1;
+        self.used.cpu_mean_milli = self.cpu_sum / self.minutes;
         self.touched = now;
     }
 }
@@ -329,7 +335,10 @@ impl Books {
                         used: Used {
                             cpu_milli: 0,
                             memory_bytes: 0,
+                            cpu_mean_milli: 0,
                         },
+                        cpu_sum: 0,
+                        minutes: 0,
                         touched: now,
                     };
                     measured.add(m, now);

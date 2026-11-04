@@ -30,8 +30,8 @@ fn ids(rows: &[EndedRow]) -> Vec<String> {
     rows.iter().map(|row| row.id.to_string()).collect()
 }
 
-/// Catches: the row of a lease left without what the hub measured of it, a figure that is
-/// the last minute's or a sum rather than the highest, the minutes of another lease mixed
+/// Catches: the row of a lease left without what the hub measured of it, a highest figure
+/// that is the last minute's or a sum, a mean that is not the minutes' average, the minutes of another lease mixed
 /// in, and a measurement kept after its row took it (a second row of the id would carry
 /// it again).
 #[test]
@@ -52,6 +52,7 @@ fn an_ended_lease_takes_the_highest_minute_measured_of_it() {
     let used = Used {
         cpu_milli: 1000,
         memory_bytes: 900,
+        cpu_mean_milli: 850,
     };
     assert_eq!(rows[0].used, Some(used));
     assert_eq!(rows[1].used, None);
@@ -66,6 +67,7 @@ fn a_row_that_brings_its_own_use_keeps_it() {
     let own = Used {
         cpu_milli: 1,
         memory_bytes: 2,
+        cpu_mean_milli: 1,
     };
     hub.ended(EndedRow {
         used: Some(own),

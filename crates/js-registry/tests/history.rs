@@ -294,6 +294,7 @@ fn an_estimated_lease_and_one_without_an_estimate() {
         used: Some(Used {
             cpu_milli: 1500,
             memory_bytes: 2 << 30,
+            cpu_mean_milli: 1200,
         }),
         ..ordinary(&l, 1, "a", end, 150_000)
     };
