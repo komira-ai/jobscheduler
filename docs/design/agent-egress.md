@@ -70,7 +70,7 @@ One mode, flags only: `--egress none` (the default) or `allow-list` with `--egre
 `--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none does nothing: it runs
 no program and writes no file; the container's namespace has loopback only. An allow-list start
 first binds the abstract socket `@js-agent-egress` (`egress::HOST_LOCK`) and holds it while the
-agent's egress lives; the kernel frees it when the process ends, however it ends. The names it
+agent's egress or any run it wired lives; the kernel frees it when the process ends, however it ends. The names it
 makes and removes are the host's, not an agent's, so a second agent with an allow-list is refused
 at start (`EgressError::Held`) instead of sweeping the first one's live wiring. Then it
 removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both tables a previous

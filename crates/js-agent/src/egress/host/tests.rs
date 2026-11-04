@@ -82,6 +82,8 @@ struct State {
     held: bool,
     /// Whether the host's egress cannot be asked for at all.
     lock_fails: bool,
+    /// The hold this machine gave, held while it is alive (as the kernel's socket is).
+    hold: Option<std::sync::Weak<()>>,
 }
 
 /// A machine that records every call and answers as scripted.
@@ -187,11 +189,17 @@ impl Sys for Fake {
     }
 
     fn lock_host(&self, _name: &str) -> std::io::Result<Option<Held>> {
-        let state = self.state();
+        let mut state = self.state();
         if state.lock_fails {
             return Err(std::io::Error::other("injected"));
         }
-        Ok((!state.held).then(|| Arc::new(()) as Held))
+        let alive = state.hold.as_ref().and_then(std::sync::Weak::upgrade);
+        if state.held || alive.is_some() {
+            return Ok(None);
+        }
+        let hold = Arc::new(());
+        state.hold = Some(Arc::downgrade(&hold));
+        Ok(Some(hold as Held))
     }
 
     fn open_netns(&self, pid: u32) -> std::io::Result<Netns> {
@@ -771,4 +779,23 @@ fn every_runtime_opened_from_a_crun_plan_shares_its_egress() {
         "one pool"
     );
     drop((first, second));
+}
+
+/// Catches a hold on the host that ends while a run of it is still wired: with the last
+/// `Egress` dropped and an attachment alive, another start is refused as `Held` and sweeps
+/// nothing (it would remove the run's live veth and could take its name, which the run's
+/// release would then delete); once the attachment is released the hold ends with it and a
+/// start succeeds.
+#[test]
+fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
+    let fake = Fake::new();
+    let egress = started(&fake, allow_list());
+    let attachment = egress.attach("run", PID).expect("attach");
+    drop(egress);
+    let logged = fake.log().len();
+    let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
+    assert_eq!(refused, Err(EgressError::Held));
+    assert_eq!(fake.log().len(), logged, "nothing swept");
+    attachment.release().expect("release");
+    started(&fake, allow_list());
 }

@@ -11,7 +11,7 @@ use js_agent_wire::LogTail;
 use crate::container::{PROBE, RuntimeHost, section};
 use crate::sys::{
     Far, Holder, Reach, Server, allow_list, eventually, far, ip, ip_in, links, named_namespaces,
-    packets, serial, tcp, text, wired,
+    nft, packets, serial, tcp, text, wired,
 };
 
 fn config() -> Config {
@@ -87,8 +87,22 @@ fn a_restart_removes_what_a_crash_left() {
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let old = Egress::start(config()).expect("start");
     let holder = Holder::new();
-    let leaked = old.attach("crashed", holder.pid()).expect("attach");
-    std::mem::forget(leaked);
+    // What a run wired when its agent died: the host end, the job end in the run's
+    // namespace and the set member. A crash leaves nothing of the process, its hold on the
+    // host included; dropping the old egress, which holds no run, stands for that.
+    ip(&[
+        "link", "add", "jsv0", "type", "veth", "peer", "name", "jsp0",
+    ]);
+    ip(&["link", "set", "jsp0", "netns", &holder.pid().to_string()]);
+    nft(&[
+        "add",
+        "element",
+        "inet",
+        "js_crun_egress",
+        "jobifs",
+        "{ \"jsv0\" }",
+    ]);
+    assert_eq!(wired(), ["jsv0"]);
     drop(old);
     ip(&[
         "link", "add", "jsv7", "type", "veth", "peer", "name", "jsp7",
@@ -208,8 +222,10 @@ fn two_runs_at_once_cannot_reach_each_other() {
 /// Asserts that one agent at a time holds the host's egress: while an agent's egress lives
 /// (with a run wired), a second start, as of another agent with its own host id and scratch
 /// root, is refused as `Held` and removes nothing (the first run's veth and set member stay,
-/// and it still reaches the allowed endpoint); once the first agent's egress is gone a start
-/// succeeds. Catches a second agent that sweeps the first one's live wiring.
+/// and it still reaches the allowed endpoint). The hold lasts while the run is wired even
+/// after the egress itself is dropped (the second start is still `Held`), and ends with the
+/// run's release, after which a start succeeds. Catches a second agent that sweeps the first
+/// one's live wiring, and a hold that ends before the last run's release.
 #[test]
 #[ignore = "needs root, ip, nft, unshare: see the module docs"]
 fn a_second_agent_cannot_start_while_one_holds_the_hosts_egress() {
@@ -225,9 +241,16 @@ fn a_second_agent_cannot_start_while_one_holds_the_hosts_egress() {
     assert_eq!(wired(), ["jsv0"]);
     assert!(tcp(&holder.ns, far::ALLOWED).connected());
     assert_eq!(allowed.accepted(), 1);
-    drop(attachment);
     drop(first);
-    let next = Egress::start(config()).expect("free once the first agent ended");
+    let still = Egress::start(config()).map(drop);
+    assert_eq!(
+        still,
+        Err(EgressError::Held),
+        "the wired run holds the host"
+    );
+    assert_eq!(links("jsv"), ["jsv0"]);
+    attachment.release().expect("release");
+    let next = Egress::start(config()).expect("free once the last run is released");
     next.check().expect("loaded");
 }
 

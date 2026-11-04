@@ -198,12 +198,11 @@ fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::proc
 
 /// The host side of the egress mode: the pool of address blocks and the firewall. Cheap to
 /// clone; every clone is the same pool, and two are equal when they are the same pool. An
-/// allow-list holds the host's egress ([`HOST_LOCK`]) until its last clone is dropped (an
-/// [`Attachment`] does not hold it).
+/// allow-list holds the host's egress ([`HOST_LOCK`]) until its last clone and its last
+/// [`Attachment`] are dropped: a run still wired keeps another start from sweeping it.
 #[derive(Debug, Clone)]
 pub struct Egress {
     inner: Arc<Inner>,
-    _host: Option<Held>,
 }
 
 impl PartialEq for Egress {
@@ -216,6 +215,8 @@ impl Eq for Egress {}
 
 #[derive(Debug)]
 struct Inner {
+    /// The hold on the host's egress; none in mode none.
+    _host: Option<Held>,
     config: Config,
     sys: Arc<dyn Sys>,
     /// The indexes of the pool's blocks in use.
@@ -309,12 +310,12 @@ impl Egress {
         }
         Ok(Self {
             inner: Arc::new(Inner {
+                _host: host,
                 config,
                 sys,
                 used: Mutex::new(BTreeSet::new()),
                 baseline,
             }),
-            _host: host,
         })
     }
 
