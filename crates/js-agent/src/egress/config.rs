@@ -30,7 +30,7 @@ use js_agent_wire::limits::MAX_PORTS;
 use js_agent_wire::{NetworkCeiling, PortRange};
 use js_types::JobNetwork;
 
-use crate::cli_runtime::{Allow, EGRESS_ALLOW_MAX};
+use super::allow::{ALLOW_MAX, Allow};
 
 /// The addresses the per-run /30 blocks are taken from, unless `--egress-pool` names others:
 /// the benchmarking range, which no real network routes.
@@ -284,7 +284,7 @@ impl Config {
         if mode == Mode::AllowList && flags.allow.is_empty() {
             return Err(ConfigError::Empty);
         }
-        if flags.allow.len() > EGRESS_ALLOW_MAX {
+        if flags.allow.len() > ALLOW_MAX {
             return Err(ConfigError::AllowMany);
         }
         let mut allow = flags
