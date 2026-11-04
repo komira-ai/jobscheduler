@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal};
+use js_types::JobNetwork;
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -122,6 +123,10 @@ pub struct RunSpec {
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
+    /// The network level the job was admitted at: never above the runtime's
+    /// [`Runtime::network_ceiling`]. A backend that wires networks gives the container that
+    /// level; `none` is loopback only.
+    pub network: JobNetwork,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
     /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
@@ -374,6 +379,16 @@ pub trait Runtime {
     /// What is wrong with the network or the firewall; the text stays on the host.
     fn check_egress(&self) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// The most network a contained job of this runtime may ask for (design 5.8): a start
+    /// above it is refused (`network-above-ceiling`, `port-above-ceiling`) before anything is
+    /// made, and never run with less. The default is `none` with no port: the
+    /// container-engine runtimes (Docker, Podman) and the native one give a job no network of
+    /// its own choosing, so a job that asks for more through them is refused naming the
+    /// ceiling `none`. The `crun` runtime answers its egress's ceiling.
+    fn network_ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling::default()
     }
 
     /// Whether the network a native job would get is limited as the agent was told. Called

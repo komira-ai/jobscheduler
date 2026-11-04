@@ -611,6 +611,7 @@ pub(super) fn run_spec(
         files,
         slot,
         isolation: spec.isolation,
+        network: spec.network,
         labels,
         bundle: spec.bundle.clone(),
     }

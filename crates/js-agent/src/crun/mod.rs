@@ -115,12 +115,10 @@
 //!
 //! # Network
 //!
-//! In mode none (`--egress none`, the default) a job has loopback only. With an allow-list the
-//! runtime checks the firewall through the agent's [`EgressPort`] before every create, wires
-//! the container's namespace (one interface to the host) after `Oci::start_supervised` while
-//! its init holds the job until the default route is there, and releases the wiring when the
-//! run ends or is removed; a container that cannot be wired runs no job and its lease is
-//! removed. A runtime with an allow-list adopts no run: the egress removes the wiring of a
+//! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
+//! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
+//! `Oci::start_supervised` (its init holds it until the route), releasing it when the run ends
+//! or goes. A runtime with such an egress adopts no run: the egress removes the wiring of a
 //! previous process when it starts, so each lease an earlier agent left is removed.
 //!
 //! # Not here
@@ -166,7 +164,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::LogTail;
+use js_agent_wire::{LogTail, NetworkCeiling};
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
@@ -362,8 +360,8 @@ struct Run {
     /// The OOM count of the cgroup above, when the lease started.
     backstop: Option<u64>,
     state: State,
-    /// The container's network, from its start until it is released.
-    wired: Option<Box<dyn Wired>>,
+    /// The container's network: its level, and its wiring from its start until released.
+    net: net::Net,
     /// The lease's sidecar as last written.
     entry: Entry,
 }
@@ -578,6 +576,7 @@ impl CrunRuntime {
         if spec.isolation != js_agent_wire::Isolation::Contained {
             return Err(Fault::NotContained);
         }
+        net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
         // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
         let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
         let Body::Container { image: given, args } = &spec.body else {
@@ -621,7 +620,7 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
-                wired: None,
+                net: net::Net::asked(spec.network),
                 entry,
             },
         );
@@ -711,7 +710,7 @@ impl CrunRuntime {
                 .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
         }
         self.rt
-            .block_on(self.oci.create(container))
+            .block_on(net::create(&self.oci, container, spec.network))
             .map_err(|why| Fault::step("write the bundle", &why))
     }
 
@@ -742,12 +741,10 @@ impl CrunRuntime {
         let named = self
             .ledger
             .rewrite(&run.entry.supervised(Supervisor::of(started.id())));
-        let wired = net::attach(
-            self.egress.as_deref(),
-            &self.oci,
-            (&run.spec, &started),
-            self.hooks.now_ms,
-        );
+        let (egress, now_ms) = (self.egress.as_deref(), self.hooks.now_ms);
+        let wired = run
+            .net
+            .attach(egress, &self.oci, (&run.spec, &started), now_ms);
         // The sidecar says the run runs from here on: a later start adopts it. A failure to
         // write it leaves the run started, for the caller to remove.
         run.entry = run.entry.running(now, Supervisor::of(started.id()));
@@ -756,7 +753,7 @@ impl CrunRuntime {
             run: started,
             since_ms: now,
         };
-        run.wired = wired?;
+        wired?;
         recorded.map_err(|why| RuntimeError::new(format!("record the running lease: {why}")))
     }
 
@@ -779,7 +776,7 @@ impl CrunRuntime {
         };
         let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.cap, run.backstop));
         run.state = State::Ended(exit, tail);
-        net::release(name, &mut run.wired);
+        run.net.release(name);
         Status::Exited(exit)
     }
 }
@@ -892,7 +889,7 @@ impl Runtime for CrunRuntime {
                 })?;
             }
         }
-        net::release(&id.0, &mut run.wired);
+        run.net.release(&id.0);
         oci.remove(&id.0)
             .map_err(|why| failed("delete the container", &why))?;
         run.cgroup
@@ -935,6 +932,10 @@ impl Runtime for CrunRuntime {
 
     fn check_egress(&self) -> Result<(), RuntimeError> {
         net::check(self.egress.as_deref())
+    }
+
+    fn network_ceiling(&self) -> NetworkCeiling {
+        net::ceiling(self.egress.as_deref())
     }
 
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {

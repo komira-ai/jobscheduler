@@ -26,6 +26,7 @@ use js_agent::crun::{
 use js_agent::egress::{Config, Egress};
 use js_agent::lifecycle::{Body, RunSpec, Runtime as _};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
+use js_types::JobNetwork;
 
 /// The image source of a store that already holds its one image: a fetch fails.
 #[derive(Debug)]
@@ -165,6 +166,9 @@ pub struct RuntimeHost {
     pub runtime: CrunRuntime,
     image: String,
     runs: PathBuf,
+    /// The network every run asks for: the ceiling of the egress the runtime was opened with
+    /// (`none` without one), so a wired runtime's runs are wired.
+    network: JobNetwork,
     // Dropped after the runtime: the process goes home and the tree goes.
     cgroup: OwnedCgroup,
 }
@@ -248,6 +252,7 @@ impl RuntimeHost {
             runtime,
             image: format!("local/busybox@sha256:{hex}"),
             runs,
+            network: egress.map_or(JobNetwork::None, |egress| egress.config().mode().level()),
             cgroup,
         })
     }
@@ -299,6 +304,7 @@ impl RuntimeHost {
             isolation: js_agent_wire::Isolation::Contained,
             bundle: None,
             labels: BTreeMap::new(),
+            network: self.network,
         })
     }
 }

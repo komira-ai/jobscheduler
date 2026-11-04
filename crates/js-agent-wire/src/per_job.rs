@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use js_types::{Arch, Os};
+use js_types::{Arch, JobNetwork, Os, PortMap};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
@@ -25,6 +25,7 @@ use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
 use crate::image;
 use crate::limits;
+use crate::network;
 use crate::refusal;
 use crate::run::{self, RunSpec};
 
@@ -138,11 +139,24 @@ pub struct JobStartSpec {
     /// [`limits::MAX_WALL_MS`]. The agent counts it on its monotonic clock from the moment
     /// the container is made.
     pub wall_ms: u64,
+    /// How much network the job's container has, as [`crate::JobSpec::network`]: `none`
+    /// (the default, left out), `allow-list` or `open`; an unknown level fails to decode. An
+    /// agent refuses a start above its ceiling (`network-above-ceiling`) and never runs it
+    /// with less. An agent that predates the field ignores it, so a server sends a level other
+    /// than `none` only to a host whose hello reports a ceiling that covers it
+    /// ([`crate::NetworkCeiling`]).
+    #[serde(default, skip_serializing_if = "JobNetwork::is_none")]
+    pub network: JobNetwork,
+    /// The ports the job declares, as [`crate::JobSpec::ports`], with the same bounds; left
+    /// out when there are none. Until the agent forwards declared ports it refuses a start
+    /// that declares any (`ports-not-supported`, after `port-above-ceiling`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortMap>,
 }
 
 impl JobStartSpec {
     /// Checks the start: the ids, that an image is named and well formed, the command, the
-    /// environment, the files, the booked resources and the wall limit. The server calls it
+    /// environment, the files, the booked resources, the wall limit and the declared ports. The server calls it
     /// before it sends a start and the agent before it acts on one, together with
     /// [`JobStartSpec::require_pinned`].
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -170,7 +184,8 @@ impl JobStartSpec {
                 refusal::WALL_TIME_NOT_POSITIVE,
             ));
         }
-        check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)
+        check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)?;
+        network::check_ports(&self.ports)
     }
 
     /// Checks that the image is pinned by a `sha256:` digest, after

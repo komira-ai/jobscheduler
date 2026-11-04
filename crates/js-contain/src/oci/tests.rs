@@ -71,7 +71,7 @@ impl ImageSource for NoImages {
     }
 }
 
-fn start(config: &OciConfig, scratch: &Path) -> Result<Arc<Oci>, OciError> {
+pub(super) fn start(config: &OciConfig, scratch: &Path) -> Result<Arc<Oci>, OciError> {
     Oci::on(config, Arc::new(NoImages), scratch, "/actions", "x86_64")
 }
 

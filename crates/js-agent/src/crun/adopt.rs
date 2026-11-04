@@ -42,13 +42,14 @@ use js_contain::cgroup::LeaseCgroup;
 use js_contain::oci::{
     ExitRecord, end_supervisor, exit_record_path, read_exit_record, recorded_supervisor,
 };
+use js_types::JobNetwork;
 
 use super::dirs::cgroup_dir;
 use super::ledger::{
     Booked, Entry, Failed, Phase, Read, Reason, Removed, Supervisor, SweepReport, VERSION,
 };
 use super::spec::{adopted_spec, concluded};
-use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease};
+use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::{RunSpec, RuntimeError, label};
 
@@ -324,7 +325,8 @@ impl CrunRuntime {
             backstop: cgroup.parent_ooms().ok(),
             cgroup,
             state: State::Created,
-            wired: None,
+            // Only a runtime with no egress adopts, and it admits no job with a network.
+            net: net::Net::asked(JobNetwork::None),
             entry: entry.clone(),
         }
     }
