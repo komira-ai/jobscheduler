@@ -799,3 +799,19 @@ async fn ended_allocations_are_written_at_the_tick_and_a_failing_run_is_logged_o
     assert_eq!(log.lines_with("the allocation history is written again"), 1);
     assert_eq!(usage.counters().history_written, 2);
 }
+
+/// Asserts that the log the registry is given does not keep the usage side alive: once the
+/// usage side is dropped, the hub is gone and a record handed to the log is let go. It
+/// catches a log that holds the hub strongly, which with the hub holding the registry (its
+/// key source) would keep the usage store open, and its lock taken, after the server stops.
+#[test]
+fn the_registrys_log_does_not_keep_the_usage_side_alive() {
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[]);
+    let log = usage.log();
+    let hub = Arc::downgrade(&usage.hub);
+    drop(usage);
+    assert!(hub.upgrade().is_none());
+    log.ended(ended_row(1));
+    assert!(fake.history.lock().unwrap().is_empty());
+}
