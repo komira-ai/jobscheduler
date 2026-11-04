@@ -1,12 +1,12 @@
 # jobscheduler: the design
 
-jobscheduler is a generic, open-source scheduler that runs OCI images on Mac or Linux hosts. On Linux it launches each job with `crun` directly, with no container daemon in the path, so a job starts fast. On Linux this is built; on macOS the single image job definition is step 17 of section 12.1, and no launch time has been measured yet (step 18). It places jobs over an ordered list of machine providers per pool, and your own bare-metal machines are one of those providers, next to static hosts and cloud VM providers. A machine provider supplies machines that run `js-agent`; jobscheduler places every job itself. Container platforms such as Kubernetes, Cloud Run and ECS are a different, later concept (section 3.6).
+jobscheduler is a generic, open-source scheduler that runs OCI images on Mac or Linux hosts. On Linux it launches each job with `crun` directly, with no container daemon in the path, so a job starts fast. On Linux this is built; on macOS the single image job definition is step 17 of section 12.1, and no launch time has been measured yet (step 18). A pool names **container platforms** in priority order. The first kind is `Default`, which is ours: `js-agent` with `crun` on Linux and native runs on macOS, with our own placement. It takes an ordered list of **machine providers**: static hosts we install `js-agent` on, which reach out and register (your own bare-metal Linux and Macs), then cloud VM providers that start a machine that boots `js-agent` (Lambda Labs built; AWS EC2 and GCP Compute Engine planned). Kubernetes, Cloud Run and ECS are planned platform kinds with their own parameters (section 3.6). One capability vocabulary, owned by the scheduler, is how a request such as a GB300 accelerator finds the machine that has it (sections 3.7, 5.6). v1 builds the Default platform only.
 
 This is the design document. It describes the target design, and for every piece it says **Built**, **Partly built** or **Planned** and names the crate that holds it. A new engineer should be able to read it top to bottom and know what the system is, what the one picture shows, how each operation works, and what is left to do. Where today's code differs from the design, the difference is a numbered step in section 12.1, not part of the narrative.
 
 Every statement about behaviour cites a file or crate. Paths are relative to the repository root; crate paths are under `crates/`. A statement marked Built describes what the code does. Anything else is a design and is marked Partly built or Planned. Where an older design document and the code disagree, this document follows the code and says so.
 
-Ten SVG diagrams in `docs/design/diagrams/` carry the pictures. Contents: 0 status and the other documents; 1 problem; 2 goals and non-goals; 3 the design in one picture (pieces, one placement engine, machine providers and their interface, client surface, container platforms (later)); 4 configurations; 5 how each operation works (including the job definition and job networking); 6 background work; 7 edge cases handled; 8 races the current code loses; 9 assumptions; 10 state; 11 limits; 12 future work and the gap list; 13 open questions; related work; 14 glossary.
+Eleven SVG diagrams in `docs/design/diagrams/` carry the pictures. Contents: 0 status and the other documents; 1 problem; 2 goals and non-goals; 3 the design in one picture (pieces, one placement engine, container platforms and machine providers and their interfaces, client surface, other platforms (later), one capability vocabulary); 4 configurations; 5 how each operation works (including placement with an accelerator request worked end to end, the job definition and job networking); 6 background work; 7 edge cases handled; 8 races the current code loses; 9 assumptions; 10 state; 11 limits; 12 future work and the gap list; 13 open questions; related work; 14 glossary.
 
 ## What changed in this revision
 
@@ -15,8 +15,9 @@ The maintainers decided the following. The text below follows these decisions; t
 - **Clients use a generated surface.** A client calls the service through a CLI or a client library that are both generated from one protobuf service definition. kbf is one client of that service among others and is not part of the picture.
 - **kbf is a client only.** kbf no longer embeds the server crates (`js-server-core`, `js-sched`, `js-state` and the others). This reverses an earlier shape in which kbf linked them.
 - **Postgres is the store** for leases, runs, hosts and usage history. SQLite stays only for tests and single-node development.
-- **Machine providers.** Each pool has an ordered list of providers. Placement walks them in priority order and looks for one that satisfies the request's constraints: first existing free capacity in order, then the first provider that can acquire new capacity. The fleet of self-registered `js-agent` hosts (Linux and macOS) is one provider, the default provider, exactly like static hosts, Lambda Labs (built) and the planned AWS EC2 and GCP Compute Engine providers. Every provider's machines run `js-agent`. The scheduler never branches on provider kind. The agent fleet is not a separate system from the providers.
-- **Machine providers now, container platforms later.** The maintainers decided to keep two concepts apart. A *machine provider* supplies machines that run `js-agent`: the default provider (self-started agents on bare-metal Linux and macOS), static hosts, and dynamic providers that call a cloud's VM API to start a machine that boots `js-agent` (Lambda Labs built; AWS EC2 and GCP Compute Engine planned). jobscheduler places every job on those machines itself and launches it with `crun` (natively on macOS). A *container platform* (Kubernetes, Cloud Run, ECS) would be handed the same OCI image and would run it; it is a separate interface, later, and v1 builds machine providers only (section 3.6). Multi-cloud means a cloud's VM API only, never the cloud's job or container services, and running `js-agent` on Kubernetes nodes as a machine source is not the plan.
+- **Container platforms, with Default first.** The maintainers decided to model where a job runs as a *container platform*, one of `Default`, `Kubernetes`, `Cloud Run` and `ECS` (others may follow), each with its own typed parameters, and a pool names platforms in priority order. This supersedes the earlier split in which machine providers and container platforms were siblings. `Default` is ours and is the only kind v1 builds (sections 3.4, 3.6).
+- **Machine providers belong to the Default platform.** Default takes an ordered list of machine providers: `static` (hosts we install `js-agent` on, which reach out and register, Linux and macOS; today's self-registered hosts become this kind; today's agentless operator-listed static pool is removed as a production kind and kept only as a test fake, question 27), and dynamic VM providers that call a cloud's VM API to start a machine that boots `js-agent` (Lambda Labs built; AWS EC2 and GCP Compute Engine planned). Placement walks them in priority order: first existing free capacity, then the first provider that can acquire new capacity. Every machine runs `js-agent`, and the scheduler never branches on provider kind. Multi-cloud means a cloud's VM API only, never its job or container services, and running `js-agent` on Kubernetes nodes as a machine source is not the plan.
+- **One capability vocabulary.** The scheduler owns the terms (os, arch, ISA level, cpu, memory, disk, and a structured accelerator with vendor, model, count, memory per device and, where it matters, interconnect). Each provider's catalog returns offers already translated into those terms, so a request for `nvidia-gb300` is matched against EC2 instance types by code in the EC2 provider crate, not by the scheduler (section 3.7). A VM's agent-detected capabilities are checked against the offer when it says hello.
 - **One placement engine**, `js-sched`: load placement, tail placement for whole-node requests, a CPU slack setting, a memory percent setting, and estimates that come from usage history.
 - **The job is an OCI image on both platforms.** Linux runs it with `crun` directly. macOS runs it natively from the OCI bundle (a `js-bundle` is an OCI image manifest) under the sandbox. Docker and Podman are at most a fallback (section 5.7).
 - **Per-job network policy.** A job asks for `network = none | allow-list | open` and declares a list of host ports; each declared port becomes one DNAT host-port forward, and there is no other ingress. The agent's flags are the ceiling a job cannot exceed. The Podman firewall path is retired, so there is one concept (section 5.8).
@@ -43,7 +44,7 @@ This document supersedes nothing by deleting it. Nothing is removed. The table s
 | Document | Status relative to this one |
 |---|---|
 | `docs/design.md` | **Superseded as the entry point.** Still the record of the decision list (D-numbers) and the long-form rationale. Parts are stale: its crate map lists `js-config` and `js-provider-aws` as new crates (neither exists in `crates/`) and says the SQLite and Postgres state backends stay in kbf (they exist here, under `js-state`; this document makes Postgres the store); its protocol section describes a protobuf stream where the code is JSON polling; its Kubernetes target has no manifests; its claim that the agent holds no registry credential is false since private-registry pulls were added. Read it for why, not for what. |
-| `docs/design/providers.md` | **Authority for the provider hierarchy and admission rules** (D35, D59 to D61), which section 3.4 and 5.6 summarise. Planned, not built. |
+| `docs/design/providers.md` | **Authority for the machine-provider hierarchy and admission rules** (D35, D59 to D61), which section 3.4 and 5.6 summarise; it predates the platform layer and the capability vocabulary. Planned, not built. |
 | `docs/design/kbf-on-js-agent.md` | **Partly superseded.** It describes kbf's side of the integration. Where it has kbf embedding server crates, this document replaces that with kbf as a client of the service (section 3.5). Nothing in it about upload grants, a task tool or an `--executor` flag is in this repository. |
 | `docs/design/pools-providers-network.md` | **Reference; partly built.** The config file, scaler, elastic contract and the host-to-scheduler network layer it proposes now exist. Its first section ("there is no scaler") is stale. It is about how a host reaches the scheduler, not about job networking (section 4.4 against section 5.8). |
 | `docs/design/whole-node.md` | **Reference; current in its contracts.** Authority for whole-node rules. This document summarises it (sections 5.4, 6.4). |
@@ -85,7 +86,8 @@ jobscheduler is the service that answers these. It is a lease server (who holds 
 - **G8. Updatable without ceremony.** Every push to shipped code is released, attested and byte-identical on rebuild; agents update themselves through a hook that drains first (section 6.6).
 - **G9. One job, two platforms.** The job is an OCI image on Linux and on macOS; the host's operating system decides how it runs (section 5.7).
 - **G10. One way to ask.** Every client uses a CLI or library generated from one service definition (section 3.5).
-- **G11. Machines we control, in any cloud, through VM APIs.** Multi-cloud means a cloud's VM API starts a machine that boots `js-agent`; jobscheduler places and launches every job itself (sections 3.4, 3.6).
+- **G11. Machines we control, in any cloud, found by capability.** Multi-cloud means a cloud's VM API starts a machine that boots `js-agent`; jobscheduler places and launches every job itself, and a request names what it needs in one vocabulary (sections 3.4, 3.7, 5.6).
+- **G12. Other container platforms later, on the same vocabulary.** Kubernetes, Cloud Run and ECS map the same request onto their own knobs and refuse impossible requests up front (section 3.6).
 
 ### 2.2 Non-goals
 
@@ -93,14 +95,14 @@ jobscheduler is the service that answers these. It is a lease server (who holds 
 - High availability of the service in the first target. It is one active writer over Postgres; whether to add a standby is open (section 13, question 1).
 - Hosting a public listener. The service is meant to sit on a private network.
 - Being a workflow engine. It places and contains work; retry policy and result interpretation belong to the client.
-- Delegating execution to a cloud's batch or container service in v1. A machine provider supplies machines; it never runs a job. Container platforms (Kubernetes, Cloud Run, ECS) are a later, separate interface (section 3.6) and are not built in v1.
+- Delegating execution to a cloud's batch or container service in v1. The Default platform's machine providers supply machines and never run a job. The other platform kinds (Kubernetes, Cloud Run, ECS) are planned (section 3.6) and not built in v1.
 - A VM backend. The helper crates exist; the runtime does not (section 12).
 
 ## 3. The design in one picture
 
-![Components: generated CLI and client library on the left call a protobuf service API; the scheduler core holds one placement engine, queue, lease and run lifecycle, scaler and usage history over Postgres; on the right each pool has ordered machine providers: js-agent hosts with their host book (the default provider), static hosts, and dynamic VM providers (Lambda Labs, with AWS EC2 and GCP Compute Engine planned); every machine runs js-agent and runs OCI images; a dashed box below, container platforms (later: Kubernetes, Cloud Run, ECS), would receive OCI images directly and has no js-agent; the object store is reached only by the job through a client-minted URL.](diagrams/components.svg)
+![Components: generated CLI and client library on the left call a protobuf service API; the scheduler core holds one placement engine, queue, lease and run lifecycle, scaler and usage history over Postgres; on the right a pool names container platforms in priority order: Default, whose ordered machine providers are static hosts running js-agent on Linux and macOS, Lambda Labs, AWS EC2 and GCP Compute Engine, then dashed Kubernetes, Cloud Run and ECS (later); every Default machine runs js-agent and runs OCI images; the object store is reached only by the job through a client-minted URL.](diagrams/components.svg)
 
-Read the picture from the left. Clients call the service through a CLI or a library, both generated from the service definition. The service is one scheduler core: one placement engine (`js-sched`) decides where each request goes, a queue and the lease and run lifecycle record what was promised, the scaler drives acquires of elastic providers within its caps, and usage history turns past runs into estimates. All of it keeps its state in Postgres. On the right are the machine providers of a pool, in priority order. The first is the fleet of hosts that registered themselves with `js-agent`, Linux with `crun` and macOS native; this is the default provider, and the host book (`js-registry`: sessions, taint, cordon, credentials, bookings) is its state, not a separate part of the core. The second is static hosts. The third is dynamic VM providers (elastic providers in the code) that call a cloud's VM API to start a machine on request: Lambda Labs, with AWS EC2 and GCP Compute Engine planned. Every machine, whatever machine provider supplied it, runs `js-agent`, jobscheduler places every job on it, and every job is an OCI image launched with `crun` (natively on macOS). The dashed box at the bottom right is a different concept and is not built: container platforms (Kubernetes, Cloud Run, ECS), to which jobscheduler would hand the OCI image directly. There is no `js-agent` on them (section 3.6). The object store is outside: only a job reaches it, through a URL the client minted.
+Read the picture from the left. Clients call the service through a CLI or a library, both generated from the service definition. The service is one scheduler core: one placement engine (`js-sched`) decides where each request goes, a queue and the lease and run lifecycle record what was promised, the scaler drives acquires of elastic providers within its caps, and usage history turns past runs into estimates. All of it keeps its state in Postgres. On the right is a pool's list of container platforms, in priority order. The first is `Default`, the only one v1 builds. Default places every job itself, on machines that run `js-agent` (Linux with `crun`, macOS native), and takes an ordered list of machine providers. The first is `static`: hosts we install `js-agent` on, which reach out and register; the host book (`js-registry`: sessions, taint, cordon, credentials, bookings) is its state, not a separate part of the core. The rest are dynamic VM providers (elastic providers in the code) that call a cloud's VM API to start a machine on request: Lambda Labs, with AWS EC2 and GCP Compute Engine planned. Whatever machine provider supplied a machine, it runs `js-agent`, and every job on it is an OCI image launched with `crun` (natively on macOS). The dashed boxes below Default are further platform kinds and are not built: Kubernetes, Cloud Run and ECS, to which jobscheduler would hand the OCI image directly; there is no `js-agent` on them (section 3.6). Every platform and every machine provider describes what it can supply in the vocabulary of section 3.7. The object store is outside: only a job reaches it, through a URL the client minted.
 
 ### 3.1 The pieces
 
@@ -117,13 +119,14 @@ Status says how much of the piece exists. The crate column says where it lives.
 | Placement engine | One engine for load, tail, slack, memory percent, estimates | Partly built: the algorithms exist and run in kbf's embedded engine; the server's default path is the registry picker (steps 8, 11) | `js-sched`, `js-whole`; `js-registry` picker; `js-lease-server/src/sched` |
 | Queue and reservations | Waiting requests and whole-node marks | Partly built: live in the registry, not in `js-sched` | `js-registry/src/whole/` |
 | Usage history and estimates | Per-minute usage, cost curves, P90 wall times | Partly built: SQLite file, estimate feed behind a flag, no ended-lease record | `js-usage`, `js-registry/src/lives.rs` |
+| Container-platform layer | A pool's `platforms` in priority order, the `ContainerPlatform` trait, and the `Default` implementation that drives the machine providers (section 3.4) | Planned; a fixed static-then-registry order is Built | `js-lease-server/src/layered.rs` |
 | Machine-provider interface | One `CapacityProvider` contract, the machine-provider trait (section 3.4) | Planned; `ElasticProvider` is its Built core | `js-elastic`, `js-provider` |
-| Default provider | The fleet of self-registered `js-agent` hosts, with the host book it keeps (hosts, sessions, taint, cordon, credentials, bookings) | Partly built: the registry is a lease-level provider | `js-registry` (`RegisteredProvider`) |
-| Static provider | Operator-listed hosts that run `js-agent` | Partly built: `StaticPool` exists as a lease-level provider; the `CapacityProvider` form is step 6 | `js-pool-static` |
+| Static machine provider | Hosts we install `js-agent` on, which reach out and register (bare-metal Linux and macOS); one kind for the registry's self-registered hosts, with the host book they keep; the agentless operator-listed pool is not part of it (removed as a production kind, section 3.4, question 27) (hosts, sessions, taint, cordon, credentials, bookings) | Partly built: the registry (`RegisteredProvider`) and `StaticPool` are two separate lease-level providers; the merged `CapacityProvider` form is step 6 | `js-registry`, `js-pool-static` |
 | Lambda Labs provider | A dynamic VM provider (elastic) that launches machines through the cloud's VM API | Partly built: built as `ElasticProvider`; ported to `CapacityProvider` in step 5 | `js-provider-lambdalabs`, fake `js-elastic-fake` |
 | AWS EC2, GCP Compute Engine providers | Dynamic VM providers (elastic) | Planned | none yet |
-| Container-platform interface | A separate, later interface to Kubernetes, Cloud Run, ECS; not a machine provider (section 3.6) | Planned, after v1 | none yet |
-| Ordered providers per pool | A pool's `providers` list and the two-pass walk | Planned; a fixed static-then-registry order is Built | `js-lease-server/src/layered.rs` |
+| Capability vocabulary | One set of terms for what a request needs and what a host or offer has (section 3.7) | Partly built: `Requirements` has os, arch, exec, disk, cpu, memory, a GPU count and a GPU class string; no structured accelerator, no alias table | `js-types`, `js-caps`, `js-elastic/src/offer.rs` |
+| Catalog translation, verify-on-hello | A provider returns offers in our vocabulary; a new VM's detected capabilities are checked against its offer | Planned: Lambda Labs maps its types with operator-written rows; hello checks only the pool's shape floor | `js-elastic`, provider crates, `js-registry` |
+| Other container platforms | Kubernetes, Cloud Run, ECS, each with typed parameters (section 3.6) | Planned, after v1 | none yet |
 | Scaler | The core's acquire driver for any elastic provider: caps, brake, records before any acquire. It is not a fleet manager. | Built | `js-scaler`, `js-lease-server/src/scaler/` |
 | Agent | Registers, heartbeats, runs jobs, contains them, reports | Built | `js-agent` |
 | Linux runtime | `crun` run directly by the agent as a non-root job user | Built | `js-agent/src/crun/`, `js-contain`, `js-oci` |
@@ -148,32 +151,51 @@ What it decides, with status:
 - **Memory percent** (Partly built): `memory_schedulable_percent` is the share of a host's memory the scheduler may book, 1 to 100. An agent's claim never raises it. Built as a pool key in `js-lease-server` (`agent_pool.rs`), applied to the host shape the registry books. `js-sched` has no such key; moving it into the engine is part of step 8.
 - **Tail placement** (Partly built: the algorithms are in `js-whole` and `js-sched` and run in kbf's embedded engine; the server's whole-node path is the registry's, steps 8 and 11): a whole-node request reserves the host with the least estimated remaining time; backfill only inside the tail (sections 5.4, 5.5).
 - **Estimates from history** (Partly built): the tail needs an estimated end for each lease. It comes from the P90 wall time of past runs with the same profile key, kept in usage history (`js-usage`). The estimate feed is behind a flag and off by default (section 13, question 3).
-- **Walking the providers** (Planned): the engine considers a pool's providers in priority order, for ordinary and whole-node requests (section 5.6).
+- **Walking the platforms and providers** (Planned): the engine considers a pool's platforms in priority order and, inside Default, its machine providers in priority order, for ordinary and whole-node requests (section 5.6).
 
 The registry does not place. It keeps host facts and, until step 8 of section 12.1, the whole-node reservation ledger. The server's three placement paths of today are described in 12.1 as the work that makes this section true.
 
-### 3.4 Machine providers and the provider interface
+### 3.4 Container platforms, machine providers and their interfaces
 
-A machine provider supplies the machines of a pool. It never runs a job and never sees a request. `CapacityProvider` is the machine-provider trait; the word provider alone in this document means a machine provider. (Container platforms are a different concept with their own interface, section 3.6.) **Every machine it supplies runs `js-agent`**, so the scheduler talks to every host the same way, and **the scheduler never branches on provider kind**: a provider answers the same calls whatever it is.
+Two layers, two traits. A **container platform** is what runs a job's OCI image; a pool names platforms in priority order, and `ContainerPlatform` is the trait above. A **machine provider** exists only inside the `Default` platform: it supplies machines that run `js-agent`, and `CapacityProvider` is its trait. The word provider alone in this document means a machine provider. A machine provider never runs a job and never sees a request. **Every machine it supplies runs `js-agent`**, so the scheduler talks to every host the same way, and **the scheduler never branches on provider kind**: a provider answers the same calls whatever it is.
 
-A pool has an ordered list of providers. Placement walks the list in priority order (section 5.6). These kinds exist or are planned:
+**Platform kinds.** `Default` (v1), `Kubernetes`, `Cloud Run`, `ECS`; their parameters are section 3.6.
+
+**Machine providers of Default.** An ordered list. Placement walks it in priority order (section 5.6). These kinds exist or are planned:
 
 | Provider | Machines come from | `acquire` | Status | Crate |
 |---|---|---|---|---|
-| `default` | Hosts that run `js-agent` and register themselves, Linux (`crun`) and macOS (native). The default provider, and a deployment always has one. | Refused: it has nothing to launch | Partly built | `js-registry` |
-| `static` | Hosts the operator lists in the configuration, each running `js-agent`. For tests, and as a stepping stone for single hosts. | Refused | Partly built: `StaticPool` is a lease-level provider | `js-pool-static` |
+| `static` | Hosts we install `js-agent` on, which reach out and register themselves: bare-metal Linux (`crun`) and macOS (native). A deployment always has one. | Refused: it has nothing to launch | Partly built: two lease-level providers today (the registry and `StaticPool`), one kind in step 6 | `js-registry`, `js-pool-static` |
 | `lambdalabs` | A cloud's VM API, starting a machine on request | Boots a VM that runs `js-agent` | Partly built: built as `ElasticProvider` | `js-provider-lambdalabs` |
-| `aws` (EC2), `gcp` (Compute Engine) | A cloud's VM API | Boots a VM that runs `js-agent` | Planned | none yet |
+| `ec2` (AWS), `gce` (GCP Compute Engine) | A cloud's VM API | Boots a VM that runs `js-agent` | Planned | none yet |
 
 Multi-cloud means exactly this: a cloud's VM API starts a machine that boots `js-agent`, and jobscheduler places and launches the job. It never means the cloud's job or container services. Running `js-agent` on Kubernetes nodes as a machine source is not the plan.
 
-**The interface (Planned; a sketch, not a final signature).** One trait, `CapacityProvider`. Its Built core is `js_elastic::ElasticProvider` (`js-elastic/src/provider.rs`: `catalog`, `checks`, `host_prep`, `payload_limit`, `acquire`, `list`, `release`, `unresolved`, `is_gone`). The built `acquire` answers `Accepted`, `Refused`, `Unknown` or `Deferred { wait }` (`js-elastic/src/answer.rs`); `Deferred` means the call is not settled and a later `list` or retry settles it. `host_prep` and `payload_limit` shape the boot payload and stay in the target; `unresolved` and `is_gone` serve re-adoption and are subsumed by `list` and `observe`.
+**The platform interface (Planned; a sketch, not a final signature).** `Default` is one implementation. It owns the machine providers: it keeps the host table, serves a lease on a host, delivers runs to the host's agent, and calls `acquire` when the engine decides to. The other kinds submit an image to the platform (section 3.6).
+
+```rust
+trait ContainerPlatform {
+    fn id(&self) -> PlatformId;
+    fn capabilities(&self) -> PlatformCaps;                   // flags in the vocabulary of 3.7: os, arch, accelerator models, whole host, host ports, network levels   (Planned)
+    fn can_ever_serve(&self, r: &Requirements) -> bool;       // admission: from catalogs and registered hosts (Default), from capabilities (others)   (Planned)
+    async fn submit(&self, s: SubmitSpec) -> SubmitAck;       // image by digest, resources, network policy, wall limit, submit id
+    async fn observe(&self, r: &RunHandle) -> RunState;       // Pending | Running | Succeeded | Failed | Absent | Unknown   (Absent only after an explicit not-found)
+    async fn cancel(&self, r: &RunHandle) -> CancelAck;
+    async fn logs(&self, r: &RunHandle) -> LogStream;
+    async fn result(&self, r: &RunHandle) -> Option<RunResult>;
+}
+```
+
+For `Default`, `submit` is not a separate step: a client holds a lease on a host and submits runs on it (section 5.7), and `can_ever_serve` asks the machine providers' catalogs and the host table. Whether hostless platforms share this trait or the client surface gets a hostless lease is question 28.
+
+**The machine-provider interface (Planned; a sketch, not a final signature).** One trait, `CapacityProvider`. Its Built core is `js_elastic::ElasticProvider` (`js-elastic/src/provider.rs`: `catalog`, `checks`, `host_prep`, `payload_limit`, `acquire`, `list`, `release`, `unresolved`, `is_gone`). The built `acquire` answers `Accepted`, `Refused`, `Unknown` or `Deferred { wait }` (`js-elastic/src/answer.rs`); `Deferred` means the call is not settled and a later `list` or retry settles it. `host_prep` and `payload_limit` shape the boot payload and stay in the target; `unresolved` and `is_gone` serve re-adoption and are subsumed by `list` and `observe`.
 
 ```rust
 trait CapacityProvider {
     fn id(&self) -> ProviderId;                               // stable; the scheduler never branches on kind
-    fn can_launch(&self) -> bool;                             // false for default and static
-    fn catalog(&self) -> Vec<Offer>;                          // what a launch would give: shape, os, arch, price      (Built in ElasticProvider)
+    fn can_launch(&self) -> bool;                             // false for static
+    fn capabilities(&self) -> ProviderCaps;                   // flags: what it can ever offer, so impossible requests are refused up front   (Planned)
+    async fn catalog(&self) -> Result<Vec<Offer>, ProviderError>; // what a launch would give, translated into our vocabulary: accelerator, os, arch, image, zone, price, purchase option, quota. A failure is an error, never an empty list   (Built synchronously in ElasticProvider; the translation, the async refresh and the cache are Planned)
     fn capacity(&self) -> Capacity;                           // hosts supplied now; how many more could be acquired   (Planned)
     async fn acquire(&self, a: AcquireSpec) -> AcquireAck;    // Accepted{instance} | Refused(code) | Unknown | Deferred{wait}   (Built)
     async fn release(&self, i: &InstanceId) -> ReleaseAck;    // terminate, then read back                              (Built)
@@ -188,22 +210,25 @@ The semantics, each of which needs a conformance case:
 
 - **Idempotent on the acquire id.** A second `acquire` with the same id answers `Accepted` with the same instance and launches nothing. The instance carries the acquire id as a tag. (Built: the launched host name is derived from the scheduler and the acquire id.)
 - **`Accepted` means launched, not ready.** The machine's own `js-agent` registers it. The provider's job ends at the first matching hello, or at failure.
-- **`Refused(code)`** is a plain constant (`quota`, `capacity`, `shape`, `denied`). It is an answer: a cloud's quota error is reported here and is the platform's limit speaking.
+- **`Refused(code)`** is a plain constant (`quota`, `capacity`, `shape`, `denied`; `js-elastic/src/answer.rs`). It is an answer: a cloud's quota error is reported here and is the platform's limit speaking. `capacity` is documented there as the signal for the caller to fall through to its next option or provider (section 5.6).
 - **`Unknown`** is no answer (timeout, reset, throttle). It never launches a second instance and never frees one. (Built: `Released::Unknown` means "not known", callers retry and never read it as gone.)
 - **`release`** terminates, then reads back, and reports what it read. **`observe`** says `Present`, `Absent` after an explicit not-found, or `Unknown`; only `Absent` frees a booking. **`list`** returns only instances carrying this scheduler's tags, and an error is not an empty list.
 - **Commit before acquire.** The scheduler records the acquire intent (id, pool, shape) durably before it calls `acquire`, as a lease is recorded pending before the provider starts it. (Built in the scaler: records are written before any provider call.)
+- **The provider owns the translation.** `catalog` returns offers in the vocabulary of section 3.7. The scheduler core does not know any cloud's instance-type names.
 
-**Flavours.** There are two behaviours, and they are data (`can_launch`), not kinds the scheduler branches on: a *registered* provider (`default`, `static`) never launches and answers `acquire` with `Refused(capacity)`; an *elastic* provider launches. A third flavour, *delegated* (a provider that runs the job itself, as a cloud batch service would), was dropped by an earlier amendment, and a machine provider never runs a job; handing an image to a platform that runs it is the separate container-platform concept of section 3.6; the `Flavour` enum of `js-provider`, which has only `Delegated`, is deleted.
+**Flavours.** There are two behaviours, and they are data (`can_launch`), not kinds the scheduler branches on: a *registered* provider (`static`) never launches and answers `acquire` with `Refused(capacity)`; an *elastic* provider launches. A third flavour, *delegated* (a provider that runs the job itself, as a cloud batch service would), was dropped by an earlier amendment: a machine provider never runs a job, and handing an image to a service that runs it is a container-platform kind (section 3.6). The `Flavour` enum of `js-provider`, which has only `Delegated`, is deleted.
 
 **What today's traits become.**
 
 | Today | Becomes |
 |---|---|
-| `js_elastic::ElasticProvider` (`js-elastic`), implemented by `LambdaProvider` and `js-elastic-fake` | `CapacityProvider`, hosted in `js-elastic` (renamed there and widened with `capacity`, `observe`, `verify_instance`). Lambda Labs and the fake implement it. This deliberately differs from `merged-code.md` step 23, which puts a new `CapacityProvider` in `js-provider` beside the renamed `Pool`; one crate for the contract and the existing implementations avoids moving them twice. |
+| `js_elastic::ElasticProvider` (`js-elastic`), implemented by `LambdaProvider` and `js-elastic-fake` | `CapacityProvider`, hosted in `js-elastic` (renamed there and widened with `capabilities`, `capacity`, `observe`, `verify_instance`). Lambda Labs and the fake implement it. This deliberately differs from `merged-code.md` step 23, which puts a new `CapacityProvider` in `js-provider` beside the renamed `Pool`; one crate for the contract and the existing implementations avoids moving them twice. |
 | `js_provider::Provider` (`js-provider`), the synchronous lease-level trait with `start`, `stop`, `observe`, `capacity`, implemented by `RegisteredProvider`, `StaticPool`, `LayeredProvider`, `BoxedProvider`, `FakeProvider` | Stops being a provider. It becomes the lease table's internal booking port (`merged-code.md` step 23 names it `Pool`): "book this lease on that host, stop it, observe it". Its `Flavour` is deleted and `LayeredProvider` is removed; the ordered walk of section 5.6 replaces it. |
-| `js_registry::RegisteredProvider` | The host table behind the `default` `CapacityProvider`, with `acquire` refused. The registry keeps host facts and no placement. |
-| `js_pool_static::StaticPool` | The `static` `CapacityProvider`: it seeds the host table with the listed hosts. |
-| The `joined` pool kind (hand-started agents) | The `default` provider. There is no separate kind. |
+| `js_registry::RegisteredProvider` | The host table behind the `static` `CapacityProvider`, with `acquire` refused. The registry keeps host facts and no placement. |
+| The `joined` pool kind (hand-started agents) | The `static` provider. There is no separate kind. |
+| The kind name `static` (`js-lease-server/src/kinds.rs`, config) | **The name is reused with a different meaning.** Today `static` is the agentless, operator-listed `StaticPool`. The target `static` machine provider is `js-agent` hosts that register themselves. A configuration that uses the old kind must be migrated (question 27); it is not unchanged. |
+| `js_pool_static::StaticPool`, pool kind `static` in `js-lease-server/src/kinds.rs` | **Folded into `static`, then removed as a production kind (recommended).** It is a different thing from a registered host: hosts listed in a file with no agent, bookings in memory, whole-host leases only (its crate rustdoc: "a static pool has no agent"). An agentless host cannot be verified, tainted, drained, updated or measured, and the design has one way to run a job. Keep its booking logic only as a test fake for the lease-table, `js-conformance` and `js-cli` tests, which use it today. Whether any deployment relies on the agentless kind is question 27. |
+| The `layered.rs` fixed order (static pool, then registered hosts) | The ordered walk of section 5.6; `LayeredProvider` is deleted in step 8, when the walk replaces it. |
 
 The scaler is the core's acquire driver for any elastic provider: it applies the caps and the brake and writes the records, then calls `acquire` and `release`. It does not manage the fleet of registered hosts and does not know a provider's kind. A provider's configuration is declared in the configuration file; a new kind is a new crate behind the trait. The service renders the boot payload (join token, pinned agent build, network step) and a provider delivers it as it is; a provider never sees a network mode or a boot plan.
 
@@ -221,36 +246,79 @@ The scaler is the core's acquire driver for any elastic provider: it applies the
 
 **Authentication** is one bearer token today (Built). Per-client tokens and quotas are Planned (section 11).
 
-### 3.6 Container platforms (later)
+### 3.6 The other container platforms (later)
 
-A **container platform** is a service that runs an OCI image for you: Kubernetes, Cloud Run, ECS. It is not a machine provider. A machine provider gives jobscheduler a machine that runs `js-agent`, and jobscheduler places and launches the job. A container platform gives jobscheduler nothing to place on: jobscheduler hands it the same OCI image and the platform places and runs it. The maintainers decided to keep the two apart in the design now. **v1 builds machine providers only; nothing in this subsection exists in code.**
+`Default` is the only platform v1 builds; nothing else in this subsection exists in code. The others are planned kinds of the same layer, each with its own typed parameters. For these, jobscheduler hands the platform the same OCI image and the platform places and runs it: there is no machine for jobscheduler to place on and no `js-agent`.
 
-**Interface sketch (Planned; not a signature).** One trait, separate from `CapacityProvider`:
+| Kind | Typed parameters (sketch) | Status |
+|---|---|---|
+| `Default` | `machine_providers`: an ordered list (section 3.4) | v1; partly built |
+| `Kubernetes` | cluster (a kubeconfig reference or in-cluster), namespace, runtime class, node selectors, service account | Planned, later |
+| `Cloud Run` | project, region, service account, VPC egress setting | Planned, later |
+| `ECS` | cluster, launch type (Fargate or an EC2 capacity provider), subnets, security groups, task role | Planned, later |
 
-```rust
-trait ContainerPlatform {
-    fn id(&self) -> PlatformId;
-    async fn submit(&self, s: SubmitSpec) -> SubmitAck;   // image by digest, resources (cpu, memory, gpu), network policy, wall limit, env/inputs, submit id
-    async fn observe(&self, r: &RunHandle) -> RunState;   // Pending | Running | Succeeded | Failed | Absent | Unknown   (Absent only after an explicit not-found)
-    async fn cancel(&self, r: &RunHandle) -> CancelAck;   // stop, then read back
-    async fn logs(&self, r: &RunHandle) -> LogStream;     // output while running
-    async fn result(&self, r: &RunHandle) -> Option<RunResult>; // exit status and declared outputs once ended
-}
-```
+Candidates, not commitments: Azure Container Apps, Nomad, Fly Machines. A kind is added when someone needs it.
 
-The rules of section 3.4 carry over where they make sense: `submit` is idempotent on the submit id, the scheduler records the intent before it calls, `Unknown` is no answer and never frees or doubles a run, and only an explicit `Absent` frees a booking. The image is pinned by digest as for any job. The network policy is passed as a request; the platform enforces it with its own mechanism.
-
-**What is lost on a container platform**, stated plainly:
+**What is lost on these platforms**, stated plainly:
 
 - **`crun` launch speed.** The platform's own start path applies (scheduling, image pull, sandbox start), not a direct `crun` start on a warm host.
-- **Host-level placement.** There is no host to place on, so our load placement, CPU slack setting, memory percent and history estimates do not choose where the job runs. The platform chooses.
-- **Tail and whole-host placement.** A whole-node request has no meaning: there is no host the scheduler can reserve, drain or commit.
+- **Our host placement.** There is no host for us to place on, so our load placement, CPU slack setting, memory percent and history estimates do not choose where the job runs. The platform chooses.
+- **Whole-host and tail placement.** A whole-node request has no meaning: there is no host the scheduler can reserve, drain or commit.
 - **Per-job egress enforcement by our agent.** There is no `js-agent` on the job's machine, so the agent ceiling and the `network` and `ports` rules of section 5.8 do not apply. The platform's network policy applies instead, and the interface can only pass the request through.
 - **Taint, post-job checks and the macOS path.** These belong to a host we control and have no counterpart.
 
-What stays: leases (a lease is a run on the platform, with no host identity) and the queue, caps and spend limits where the platform reports cost, usage history from reported runs, and the generated client surface.
+What stays: leases (a lease is a run on the platform, with no host identity) and the queue, caps and spend limits where the platform reports cost, usage history from reported runs, and the generated client surface. The rules of section 3.4 carry over where they make sense: `submit` is idempotent on the submit id, the scheduler records the intent before it calls, `Unknown` is no answer and never frees or doubles a run, and only an explicit `Absent` frees a booking. The image is pinned by digest as for any job.
 
-**Where it fits in a pool.** In v1 a pool's `providers` list names machine providers only. Once container platforms exist, the ordered list may name either kind, and a request is served by the first entry in order that can satisfy it. A request that needs what only hosts we control give (a whole node, a declared host port, `network = open` under our ceiling, macOS) skips a container platform as incapable. The rule that the scheduler never branches on provider kind covers machine providers. The container-platform interface would publish capability flags (open question 25), and the walk skips an entry that lacks a capability the request needs; capability, not kind, decides.
+**Where they fit in a pool.** A pool's `platforms` list names kinds in priority order. A request is served by the first platform that can serve it; one that needs what only hosts we control give (a whole node, a declared host port, `network = open` under our ceiling, macOS) is passed over by a platform that lacks the capability. Capability, not kind, decides: each platform publishes capability flags (`PlatformCaps`), and admission refuses at once a request no platform in the pool can ever serve (section 5.6).
+
+**How they map the vocabulary.** Each platform translates the vocabulary of section 3.7 into its own knobs:
+
+| Request | Kubernetes | Cloud Run | ECS |
+|---|---|---|---|
+| accelerator model and count | the extended resource (`nvidia.com/gpu`) with the count, plus a node selector on the GPU product label | its GPU type field, which supports few models; others are refused | GPU count in the task definition, plus an instance-type placement constraint |
+| cpu, memory | resource requests and limits | service CPU and memory settings | task CPU and memory |
+| arch | node selector on the architecture label | refused unless the platform supports it | the task's runtime platform (CPU architecture) |
+| network | their network policy (the request is passed through) | VPC egress setting | security groups and subnets |
+
+These rows are the design's intent, not a checked mapping of each platform's current API; each is confirmed when its platform is built.
+
+### 3.7 One capability vocabulary
+
+The scheduler owns one set of terms for what a request needs and what a host, an offer or a platform has. Requests, the agent's report, provider offers and platform flags all use it, so matching is one function and no cloud's names reach the core.
+
+| Term | Type and unit | Matching |
+|---|---|---|
+| `os` | `linux` or `macos` | exact |
+| `arch` | `x86_64` or `arm64`. `aarch64` is accepted as an alias and normalised to `arm64` when a request, an offer or a hello is parsed (in `js-caps`), so everything inside holds one spelling | exact |
+| ISA level | `x86-64-v1` to `v4`, or an Armv8 version | at least, within the family |
+| `cpu` | cores (thousandths of a core in `Requirements`) | at least |
+| `memory`, `disk` | bytes (GiB in request syntax) | at least |
+| `exec` | `container` or `sandbox-exec` | exact |
+| `accelerator` | `vendor` (open set of lower-case strings, `nvidia` first); `model` (canonical lower-case family name, such as `nvidia-gb300`); `count` (integer); `memory per device` (GiB); `interconnect` (optional, a kind and a size, for example `nvlink-domain>=72`) | `model` exact after alias resolution; `count` and `memory per device` at least; `interconnect` at least when given. A field the request omits matches anything |
+
+**What is built.**
+
+- `js_types::Requirements` (`js-types/src/job.rs`) holds `resources` (CPU in thousandths of a core, memory, a GPU count and a GPU class string), `disk_bytes`, `os`, `arch` and `exec`. It has no ISA level and no accelerator structure.
+- `js-caps` (`matching.rs`) matches a capability request against a node: `arch` and `os` exact (`js-caps` spells ARM `arm64`, and the request syntax is `arch=arm64`; `js_elastic::Offer` and the pinned agent builds spell it `aarch64`, so today an `arm64` request and an `aarch64` offer never meet), `isa_level` at least within the family, `cpu.feature` as a subset, `cpus`, `mem_gib`, `disk-gib` and `gpu` as counts, and `gpu.kind` exact. Its GPU detection (`gpu.rs`) counts GPU functions from Linux PCI data and the macOS chip; it does not name a model.
+- The agent names the GPU itself: `js-agent/src/facts.rs` reads `nvidia-smi` (index, uuid, model name, memory) and spells the class as the lower-case model name with words joined by `-`, so `NVIDIA A100-SXM4-80GB` is `nvidia-a100-sxm4-80gb`. It reports one class per host and refuses a host whose GPUs are of more than one model. An operator flag `--gpu-class` can override the class, so the class is reported, not strictly detected.
+- `js_elastic::Offer` (`js-elastic/src/offer.rs`) carries `gpus` and `gpu_class: Option<GpuClass>` in that same full-model spelling, and `Offer::fit` checks a demand dimension by dimension (`Os`, `Arch`, `Exec`, `CpuMillis`, `MemoryBytes`, `DiskBytes`, `Gpus`, `GpuClass`), returning the first `Dimension` that fails. The class check is string equality. Availability is not part of the fit.
+- The Lambda Labs provider does not translate GPU names. It joins Lambda's instance-type catalog (vCPUs, memory, storage, price, architecture, regions with capacity) with operator-written `[[option]]` rows (`instance_type`, `gpu_class`, `gpus`; `js-provider-lambdalabs/src/options.rs`), and `select.rs` turns each row and region into an `Offer`. The catalog's free-text GPU description is deliberately not parsed.
+
+**What changes (Planned, steps 25 and 26).**
+
+- **A structured accelerator** replaces the pair `gpus` and `gpu_class` in `Requirements` and `Offer`: vendor, model, count, memory per device, optional interconnect. The agent reports the same structure.
+- **Model family against full name.** Today a request must spell the full agent name, and `nvidia-a100` matches nothing because no host reports exactly that. The canonical `model` is the family-level name (`nvidia-a100`, `nvidia-gb300`); the variant facts (memory per device, form factor) are separate fields. A request that names the model matches every variant, and `memory per device >= 80 GiB` narrows it. A request that names a full spelling resolves through the table to the family and that variant's facts and matches only that variant; `Offer::fit` compares the canonical model, then the count, then memory per device, then a form factor if the request fixed one.
+- **Aliases.** An alias table maps every spelling to the canonical model and its variant facts: the name `nvidia-smi` prints (today's agent spelling, for example `nvidia-a100-sxm4-80gb`), the text a provider's catalog uses for a GPU, and a cloud's GPU field. A request that names a full spelling resolves through the table and means exactly that variant, so today's requests keep working. A name the table does not know passes through as its own spelling and matches only an identical one, so a new accelerator works for exact-name requests before the table learns it. **One table, one owner.** The table lives in `js-caps` (pure, shared by the agent and by provider crates) and is the only place a canonical model name is defined. A provider crate contributes only rows from its own source spelling to a canonical name, as data that `js-caps` loads, and a conformance test checks that every canonical name a provider emits exists in the table. So the agent and every provider resolve to the same canonical model. Operator override rows are question 29.
+
+Illustrative rows (the cloud spellings are examples to be confirmed against each cloud's data; the GB300 agent spelling is not known today and is read from a real machine when the row is written):
+
+| Canonical model | Variant facts | Agent spelling (`nvidia-smi`) | Cloud spelling |
+|---|---|---|---|
+| `nvidia-a100` | 80 GiB, SXM4 | `nvidia-a100-sxm4-80gb` (the agent's spelling today) | EC2 GPU name `A100` with its memory size |
+| `nvidia-a100` | 40 GiB, SXM4 | `nvidia-a100-sxm4-40gb` | EC2 GPU name `A100` with its memory size |
+| `nvidia-gb300` | to be filled from the first machine | to be captured on a real GB300 | the cloud's GPU name for it |
+- **One arch spelling.** `arm64` is canonical and `aarch64` is accepted and normalised at parse, so the request `arch=arm64` fits an `aarch64` offer. A test covers it (step 25).
+- **ISA level** moves from `js-caps` matching into `Requirements`, so a request can ask for it and an offer can state it.
 
 ## 4. Configurations
 
@@ -274,36 +342,96 @@ Settings that matter for design:
 | `require_host_credential` | off | Refuse a first hello that does not ask for a host credential (`CredentialRequired`). It does not decide whether a credential is issued: an agent that asks, presenting a fresh one-time token, is issued one regardless (section 5.1). | Built |
 | usage | on | `--usage-off` opts out. | Built |
 
-### 4.2 Pools and providers
+### 4.2 Platforms, machine providers and pools
 
-A pool is a named set of hosts with a shape, a class and caps. Its hosts come from its providers.
+A pool is a named set of hosts with a shape, a class and caps. It names container platforms in priority order; the Default platform names its machine providers in priority order, and its hosts come from them. `shape`, `max_machines`, `join_token_file`, `memory_schedulable_percent` and the queue settings below describe hosts, so they apply to the Default platform's machines only; they are rejected for a pool that names only hostless platforms.
 
-**Target (Planned).** Machine providers are declared once and a pool names them in priority order (once container platforms exist, the list may name either kind, section 3.6). The single `provider` key stays as shorthand: a pool that names one elastic provider gets the hierarchy `default` followed by it, so registered hosts are preferred and the elastic provider tops up.
+**Target (Planned).** Machine providers and platforms are declared once and a pool names platforms. The single `provider` key stays as shorthand: a pool that names one elastic provider gets a Default platform whose machine providers are `static` followed by it, so registered hosts are preferred and the elastic provider tops up. Operator limits per pool are `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines`, per machine provider; they bound what pass 2 may acquire (section 5.6).
 
 ```toml
-[[provider]]
-name = "registered"
-kind = "default"                      # self-registered js-agent hosts
+[[machine_provider]]
+name = "rack"
+kind = "static"                       # hosts we install js-agent on; they register themselves
 
-[[provider]]
-name = "cloud"
-kind = "lambdalabs"                   # an elastic provider
+[[machine_provider]]
+name = "lambda"
+kind = "lambdalabs"                   # an elastic provider (built)
+api_key_file = "<path-to-key-file>"
+
+[[machine_provider]]
+name = "aws"
+kind = "ec2"                          # planned
+region = "<region>"
+purchase = ["on-demand", "spot"]      # ordered; a reservation or capacity-block option is added if the newest GPU types are sold only that way (confirm before step 19)
+images = { arm64 = "<image-id>", x86_64 = "<image-id>" }   # one machine image per architecture, with the GPU driver stack
+
+[[platform]]
+name = "ours"
+kind = "default"
+machine_providers = ["rack", "lambda", "aws"]   # first to last
+
+# Planned, later: each kind has its own typed keys.
+# [[platform]]
+# name = "cluster-a"
+# kind = "kubernetes"
+# kubeconfig_file = "<path>"
+# namespace = "<namespace>"
+# runtime_class = "<class>"
+# node_selector = { "<label>" = "<value>" }
+# service_account = "<name>"
+#
+# [[platform]]
+# name = "run"
+# kind = "cloud_run"
+# project = "<project>"
+# region = "<region>"
+# service_account = "<name>"
+# vpc_egress = "all-traffic"
+#
+# [[platform]]
+# name = "tasks"
+# kind = "ecs"
+# cluster = "<cluster>"
+# launch_type = "fargate"             # or "ec2", with capacity_provider
+# subnets = ["<subnet>"]
+# security_groups = ["<group>"]
+# task_role = "<role>"
 
 [[pool]]
 name = "linux-build"
 shape = "linux-x86-16"
-providers = ["registered", "cloud"]   # where capacity comes from, first to last
+platforms = ["ours"]                  # first to last
 max_machines = 24                     # the pool's total, every provider counted
-provider_max_machines = { cloud = 8 } # a share of the total
 join_token_file = "<path-to-token-file>"
 memory_schedulable_percent = 90
+
+[[pool]]
+name = "gpu"
+shape = "<gpu-shape>"
+platforms = ["ours"]
+max_machines = 8
+max_queue_wait = "30m"               # a waiting request ends as no-capacity after this
+join_token_file = "<path-to-token-file>"
+
+[pool.provider_limits.aws]
+allowed_instance_types = ["<instance-type>"]
+max_price_cents_per_hour = 5000
+max_machines = 4                      # a share of the pool's total
+max_spot_machines = 2
+quota_backoff = "1h"                 # after a quota refusal, pass over that instance type
+acquire_retry = "60s"                 # how often pass 2 retries when every offer was refused
+catalog_refresh = "1h"                # catalog cache refresh interval
+offer_cooldown = "1h"                 # an offer that failed verify-on-hello is not picked for this long
+size_tolerance_percent = 10           # verify-on-hello: measured sizes may be this far below nominal
 ```
 
-`max_machines` counts every machine in every state, every provider, in-flight acquires and tainted hosts included. A registered host that says hello when the pool is at `max_machines` is refused with `pool-full`. Only the scheduler's own launches are refused for a cap; there is no minimum anywhere and no machine is kept warm. A pool admits registering hosts only when it has a `join_token_file`.
+The values shown for the settings after `max_machines` are proposed defaults, not built behaviour.
 
-**As built.** At most one elastic pool and one static pool per server, plus `joined` pools. Provider kinds compiled in: `static`, `lambdalabs` (`js-lease-server/src/kinds.rs`). A fixed order, static pool first and then registered hosts, is the only ordering (`layered.rs`). Each pool has `memory_schedulable_percent` (1 to 100, default 100).
+`max_machines` counts every machine in every state, every provider, in-flight acquires and tainted hosts included. A registered host that says hello when the pool is at `max_machines` is refused with `pool-full`. Only the scheduler's own launches are refused for a cap; there is no minimum anywhere and no machine is kept warm. A pool admits registering hosts only when it has a `join_token_file`. A host belongs to the pool whose join token it presents, and the `static` provider's host table is partitioned by pool: two pools that name the same platform (here `linux-build` and `gpu` both name `ours`) share its machine providers' catalogs but not their registered hosts. `max_machines` and `pool-full` count the machines of that pool.
 
-Elastic pool keys (Built): `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime`, `boot_timeout`, `launch = plan | live` (default plan), `live_until`, boot-failure brake keys, the pinned agent build (URL and checksum per architecture), and `network = default | tailscale`.
+**As built.** There are no platforms or machine-provider tables. At most one elastic pool and one static pool per server, plus `joined` pools. Provider kinds compiled in: `static` (the agentless pool) and `lambdalabs` (`js-lease-server/src/kinds.rs`). The target `static` kind reuses this name for `js-agent` hosts that register themselves; it is not the same thing (section 3.4, question 27). A fixed order, static pool first and then registered hosts, is the only ordering (`layered.rs`). Each pool has `memory_schedulable_percent` (1 to 100, default 100).
+
+Elastic pool keys (Built): `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime`, `boot_timeout`, `launch = plan | live` (default plan), `live_until`, boot-failure brake keys, the pinned agent build (URL and checksum per architecture), and `network = default | tailscale`. The Lambda Labs `[[option]]` rows (`instance_type`, `gpu_class`, `gpus`) are the allow list and the GPU facts today; they are to be aligned with the target limits (`js-provider-lambdalabs/src/options.rs`).
 
 ### 4.3 Agent
 
@@ -321,7 +449,7 @@ This layer is not job networking. It is one service-level layer with `default` a
 
 ![Agent lifecycle: unregistered, hello with a one-time token, welcome with a host credential, registered heartbeats, drain, lost, and forgotten.](diagrams/agent-lifecycle.svg)
 
-This is how a host of the default provider joins a pool; an elastic provider's machines join the same way (section 5.2). Enrolment today is manual: install the package, run the packaged host setup script, mint a one-time join token (`POST /v1/agent/join-tokens`), and place the token file. A command that does this in one step is planned, in the host-management project rather than here.
+This is how a host of the `static` machine provider joins a pool; an elastic provider's machines join the same way (section 5.2). Enrolment today is manual: install the package, run the packaged host setup script, mint a one-time join token (`POST /v1/agent/join-tokens`), and place the token file. A command that does this in one step is planned, in the host-management project rather than here.
 
 1. Agent: `POST /v1/agent/hello` with host id, pool, labels, shape, capabilities, and an optional instance id (`provider:instance`). The default host id is derived from a salted hash of the machine id.
 2. Server (`Registry::hello`, `js-registry/src/registry.rs`): in order, valid host id; protocol negotiated; pool exists; host not on the reserved list; credential binding (host id bound to another credential or instance is refused); no live session already (409 `host-live`); the host's execution contract (`HostContract::check`); shape at least the pool floor; room in the pool; then epoch plus one, a fresh session secret, and a record.
@@ -406,24 +534,43 @@ The idea: a whole-node request should wait for the shortest time, and the time t
 
 **Estimate feed** (`--estimate-feed`, `js-registry/src/lives.rs`): off by default. A lease has no profile key of its own, a run does; the estimated end is the lease's start plus the largest P90 among the keys of the runs queued on it. With the feed off, tail ordering falls back to the max-wall bounds. Tail counters (started on a marked host, backfilled, estimate error buckets) are kept in memory only.
 
-### 5.6 Placement over ordered providers
+### 5.6 Placement over ordered platforms and machine providers
 
-One engine (`js-sched`, section 3.3) places every request. Status of the walk: Planned. What is Built today for it is the engine itself, the `no-capable-host` refusal over registered hosts, and a fixed static-then-registered order; how today's server reaches a placement is in 12.1 step 8.
+One engine (`js-sched`, section 3.3) places every request. Status of the walk: Planned. What is Built today for it is the engine itself, the `no-capable-host` refusal over registered hosts, `Offer::fit` (an offer against a demand, naming the first failing dimension), a fixed static-then-registered order, the scaler's choice of the cheapest priced offer that fits (then fewest GPUs, then id; unpriced offers are dropped), and the `capacity` refusal code that tells a caller to fall through. How today's server reaches a placement is in 12.1 step 8.
 
-A request carries a class, resources, typed constraints (operating system, architecture, GPUs, disk, execution mode, and the network level and host ports its jobs will ask for), a maximum wall time and labels. The steps:
+A request carries a class, resources, typed constraints in the vocabulary of section 3.7 (operating system, architecture, ISA level, accelerator, disk, execution mode, and the network level and host ports its jobs will ask for), a maximum wall time and labels. The steps:
 
 1. **Select the pool** by class and labels. A request that matches no pool is refused at selection.
 2. **Admission.** A host is *capable* of a request when it could serve it once it is free: it is not tainted and not draining; its total shape holds the booking; its facts satisfy every constraint. Busy and lost hosts are capable (silence is unknown, not absent); tainted hosts are not, because a taint ends only when a person reimages the host. Then, in order:
    - If a capable host exists in the pool, the request is accepted and queued.
-   - Otherwise, if some elastic provider of the pool *could launch* a machine that meets the request (the entry is enabled, has a share above zero, and a launch is possible once every slot that can free is counted as freed), the request is accepted and its demand is served by an acquire.
-   - Otherwise the request is refused at once with the plain constant `no-capable-host`. It is never queued: no host, now or after any bounded wait, could run it, and the caller can act (register a host, change the request, choose another pool). A suitable host that is only busy is not a refusal.
-3. **Pass 1, use what exists.** Among the capable hosts that are free now and serving, take the first in provider order; within one provider the engine's score decides (load placement with the CPU slack setting, and the memory percent). A free machine of a later provider is used before anything is launched: launching while a machine sits idle is waste. A whole-node request does not use this pass; it reserves by tail (section 5.5), as below.
-4. **Pass 2, acquire only if nothing can serve now.** If no free capable host exists in any provider and no machine already booting can serve the request, walk the providers in order. The first one that can satisfy by acquiring takes the demand: it can launch, it is enabled, not cooling down, not braked, and an acquire fits under its share of `max_machines` and the pool's. It gets one acquire for the demand. A provider that cannot is passed over, and a later one is asked only then.
-5. **Book.** The lease is recorded pending before the provider is asked to start it (section 5.3).
+   - Otherwise, if some platform of the pool *could ever* serve it, the request is accepted. A catalog that cannot be read (never fetched and the fetch failed) counts as *may offer*: the request is accepted and queued, and an unreadable catalog is never read as an empty one. For Default that means some enabled machine provider with a share above zero has an offer in its catalog that satisfies the request and the pool's limits (allowed instance types, maximum price); an offer that is unavailable now still counts, because `Offer::fit` ignores availability and "ever" is the question. For another platform it means its capability flags admit the request.
+   - Otherwise the request is refused at once with the plain constant `no-capable-host`. It is never queued: no host, catalog or platform, now or after any bounded wait, could serve it, and the caller can act (register a host, change the request, choose another pool). A suitable host that is only busy is not a refusal. A pool whose only machine provider is `static` has no catalog, so it is refused unless a capable registered host exists.
+3. **Walk the platforms in order.** The first platform that can serve the request takes it. A platform is passed over when its capability flags lack something the request needs or when every offer it could use has been refused; a later platform is asked only then.
+4. **Pass 1 (Default), use what exists.** Among the capable hosts that are free now and serving, take the first in machine-provider order; within one provider the engine's score decides (load placement with the CPU slack setting, and the memory percent). A free machine of a later provider is used before anything is launched: launching while a machine sits idle is waste. Hosts match on what their agents report (the agent measures the hardware itself), never on what a catalog says. A whole-node request does not use this pass; it reserves by tail (section 5.5), as below.
+5. **Pass 2 (Default), acquire only if nothing can serve now.** If no free capable host exists in any provider and no machine already booting can serve the request, walk the machine providers in order. For each, take the offers from its `catalog()` that satisfy the request, are inside the pool's limits and are available. The first provider that has any, is enabled, not cooling down, not braked, and fits under its share of `max_machines` and the pool's, gets one acquire for the demand, for the offer picked by policy: provider order first (already applied), then price per hour, then the fewest accelerators, then the least spare CPU and memory, then the purchase order of the provider (`purchase`), then the offer id. This is the order the scaler already applies (cheapest, then fewest GPUs, then id; `js-scaler/src/caps.rs`) with the later ties added, and it replaces the scaler's choice. An offer with no price is dropped, as the scaler drops it today. An offer with more accelerators than the request books the whole machine for the lease: sharing one machine's accelerators between leases is not part of this design. A provider with no usable offer is passed over and a later one is asked only then.
+   - A `capacity` refusal fails over to the next zone of the same offer, then to the next offer, then to the next provider.
+   - A `quota` refusal invalidates the cache and passes over that instance type in that region for `quota_backoff`; the walk continues with the next offer and provider.
+   - When every offer of every provider has been refused or passed over, the request stays queued. Pass 2 runs again every `acquire_retry` and after each catalog refresh. A request that is still unserved after the pool's `max_queue_wait` ends with the existing refusal `no-capacity` (it could be served in principle, so it is not `no-capable-host`); nothing waits for ever.
+6. **Book.** The lease is recorded pending before the provider is asked to start it (section 5.3).
 
-**Whole-node requests.** The same engine places a whole-node request over the hosts of all the pool's providers, in order. Tail cost (section 5.5) picks among the capable hosts of every provider. If no capable host exists, or the cheapest tail would end after the request's drain deadline (by default its maximum wall time), pass 2 applies: the first provider that can acquire a whole machine gets the acquire, and the request waits for that machine to say hello. There is no second path beside the engine for whole requests.
+**Whole-node requests.** The same engine places a whole-node request over the hosts of all the Default platform's machine providers, in order. Tail cost (section 5.5) picks among the capable hosts of every provider. If no capable host exists, or the cheapest tail would end after the request's drain deadline (by default its maximum wall time), pass 2 applies: the first provider that can acquire a whole machine gets the acquire, and the request waits for that machine to say hello. There is no second path beside the engine for whole requests. Other platforms have no whole-node concept (section 3.6).
 
-A pool whose only provider is `default` waits for a registered host. A queued request whose last capable path goes away (a host deregisters, is tainted or ages out) is not refused at once: it stays queued for `regain_grace` so a routine restart does not turn into failures, and ends as `no-capable-host` if the grace passes. When a host frees while a machine is booting, the request goes to the host that freed and the booting machine is kept: it was paid for, and the idle rule releases it after `idle` if nothing needs it.
+A pool whose only machine provider is `static` accepts a request only when a capable registered host exists (a busy one counts); otherwise it is refused with `no-capable-host`, as step 2 says. Once accepted, the request waits for that host to free. A queued request whose last capable path goes away (a host deregisters, is tainted or ages out) is not refused at once: it stays queued for `regain_grace` so a routine restart does not turn into failures, and ends as `no-capable-host` if the grace passes. When a host frees while a machine is booting, the request goes to the host that freed and the booting machine is kept: it was paid for, and the idle rule releases it after `idle` if nothing needs it.
+
+#### 5.6.1 Worked example: `accelerator = nvidia-gb300, count >= 4`
+
+![Sequence of an accelerator request: the client asks for four or more nvidia-gb300; the engine admits it from catalogs and hosts, finds no free host, asks the EC2 provider's cached catalog, filters and orders the offers, acquires one, the cloud launches an arm64 VM that boots js-agent, the agent's hello carries its detected accelerator, the engine verifies it against the offer, and the lease binds; a capacity refusal fails over to the next zone and then the next provider, and a mismatch releases the machine and marks the offer bad for a cool-down.](diagrams/accelerator-request.svg)
+
+1. **Admission.** The engine asks whether anything in the pool could ever offer four `nvidia-gb300`: registered hosts, the machine providers' catalogs (unavailable offers count), the other platforms' capability flags. If not, the answer is `no-capable-host` and nothing else happens.
+2. **Pass 1.** Free hosts whose agents report an `nvidia-gb300` accelerator with count at least four, and the other constraints. The agent detects the hardware itself (`nvidia-smi`), and the alias table turns the name it prints into the canonical model. If one exists, the lease binds to it and no machine is launched.
+3. **Pass 2.** The engine walks the Default platform's machine providers in order. The EC2 provider's `catalog()` returns offers already in our vocabulary. The provider crate owns the translation: it reads the instance types and their GPU information from the cloud's instance-type description (for EC2, `DescribeInstanceTypes`), maps the GPU names through the shared alias table of section 3.7 plus its own source-spelling rows, and adds the zones where each type is offered, the price, the purchase option (spot, on-demand, or a reservation if that is how the type is sold) and the quota. The design names no instance type: the offers are those instance types whose GPU information names GB300, and which they are is data in the provider crate. Each offer states its architecture; GB300 is Grace-Blackwell, so these offers are `arm64`.
+4. **Filter and pick.** The engine keeps the offers that satisfy the request (accelerator model, count at least four, memory per device if asked), are inside the pool's limits (allowed instance types, maximum price, maximum machines) and are available. Among them the pick is the policy of 5.6 step 5: provider order, price, fewest accelerators, least spare CPU and memory, purchase order, offer id.
+5. **Acquire.** The scheduler records the acquire, mints a join token, and calls `acquire` with the offer and a boot payload whose pinned agent build is chosen from the offer's architecture (an `arm64` build here). The offer names the machine image: the provider's configuration maps architecture (and region) to an image that carries the GPU driver stack, so a GB300 offer boots an `arm64` image with the driver installed, and the boot payload installs the pinned `js-agent` build for that architecture. The cloud launches the VM. A `capacity` refusal moves to the next zone, then the next offer, then the next machine provider; a `quota` refusal passes over that instance type for `quota_backoff` (5.6 step 5).
+6. **Verify on hello.** The VM boots `js-agent`, which says hello with the capabilities it detected. The engine compares them with the offer recorded for this acquire. Match means: accelerator model equal by canonical name after the alias table; accelerator count at least the offer's count (more is a match, fewer is not); architecture equal; CPU, memory and disk each at least the offer's value less `size_tolerance_percent`, because the agent measures less than the nominal size. Anything else is a mismatch: the machine is released, the offer is marked bad for `offer_cooldown` keyed by (provider, instance type, zone), and the mismatch counts as a boot failure toward the pool's brake, so a wrong alias row cannot loop acquire, release, acquire on paid machines. A match registers the host, and the lease binds. If the offer record is missing (section 10.1 keeps it, so this means a lost record), the hello is checked against the pool's shape floor only, and binding a lease still matches the request against the host's reported capabilities (pass 1). Binding gives a GPU job a GPU only after step 23: the `crun` path passes none today (section 5.7), so until then GPU jobs run on the container-engine fallback with `network = none`.
+
+**Catalog freshness.** A provider's catalog is cached with a refresh interval (`catalog_refresh`) and invalidated when an acquire is refused for `capacity` or `quota`. Admission reads the cache and so is cheap; pass 2 reads the same cache, and a stale offer costs one refused acquire, not a wrong placement. A refresh that fails keeps the last good catalog and is reported; a catalog never fetched counts as *may offer* in admission (5.6 step 2). Nothing in `ElasticProvider::catalog` caches today: it is a synchronous call that returns `Result<Vec<Offer>, ProviderError>`; the target signature is the async form of section 3.4.
+
+**What is Built and what is not.** Built: `Offer::fit`, offers from the Lambda Labs catalog (through operator rows), the `capacity` refusal code, idempotent acquire, the agent detecting and reporting its GPU class, and an agent build chosen per architecture in the boot payload. Planned: the structured accelerator, the arch spelling and the alias table (step 25), catalog translation, caching, the offer cool-down and verify-on-hello (step 26), the provider walk (step 9), the EC2 provider with its image mapping and purchase options (step 19), and GPU passthrough into `crun` jobs (step 23; until then GPU jobs use the fallback runtime). Linux arm64 has no release archive today (section 6.6, question 19), so serving an `arm64` offer also needs that archive.
 
 ### 5.7 The job, and how it runs
 
@@ -433,7 +580,7 @@ A pool whose only provider is `default` waits for a registered host. A queued re
 
 - **Linux: `crun` directly (Built, `js-agent/src/crun/`, `js-contain`, `js-oci`).** The agent pulls the image with its own registry client, verifies every blob against its digest, unpacks it into a store beside the scratch root, writes an OCI runtime configuration, and runs `crun` itself as a dedicated non-root job user. There is no Docker or containerd daemon, no Podman service and no per-job socket round trip in the path: the work between a start command and a running process is a store lookup, a configuration file and one `crun` invocation. The reason for the design is fast launch. The repository records no measurement of launch time yet; step 18 takes one on a reference node, and this document states no number until then.
 - **macOS: the OCI bundle, natively (Partly built, `js-agent/src/native/`, `js-bundle`, `js-mac-session`).** There is no container runtime on a Mac and `crun` is Linux-only. A `js-bundle` is an OCI image manifest of one platform (`darwin/arm64`) whose layers are sibling directory trees; its config says which tree is which, the entrypoints, the environment and what the tools need from the host. The agent pins the bundle's trees for the lease, clones the writable ones into the run's own directory, and runs the entrypoint as a throwaway user under a generated sandbox profile (section 5.9). Built: the bundle format, its extractor and the agent's bundle store. Not built: the single job definition. Today a native job is a different body of the start (`native`: program, arguments, environment, inputs, outputs, network), never combined with an `image`; step 17 makes the image reference the one definition on both platforms, pulls the bundle by digest, and adds staging of inputs and collecting of outputs, which a native start with `files` is refused for today (`native-unsupported`).
-- **Docker and Podman: at most a fallback (Built, `js-agent/src/cli_runtime/`).** `--runtime docker` runs a job through a container engine. What remains of it in this design: it is the path for a host that cannot meet `crun`'s host requirements (a kernel that restricts unprivileged user namespaces without an AppArmor profile for `crun`, no delegated cgroup version 2 controllers), and for anything `crun` does not carry yet (it gives jobs no GPUs, for example). It adopts a run after an agent restart by label, which the `crun` path does not yet. Its firewall path (`js_egress`, `--container-network`, `--container-egress-allow`) is retired by section 5.8. **Decision:** the fallback is kept, only for hosts that fail the `crun` host check, and only with `network = none`. `crun` is the default runtime and `--runtime docker` is refused unless the operator opts in (step 22). When the fallback is dropped is section 13, question 7.
+- **Docker and Podman: at most a fallback (Built, `js-agent/src/cli_runtime/`).** `--runtime docker` runs a job through a container engine. What remains of it in this design: it is the path for a host that cannot meet `crun`'s host requirements (a kernel that restricts unprivileged user namespaces without an AppArmor profile for `crun`, no delegated cgroup version 2 controllers), and for anything `crun` does not carry yet (it gives jobs no GPUs, for example). It adopts a run after an agent restart by label, which the `crun` path does not yet. Its firewall path (`js_egress`, `--container-network`, `--container-egress-allow`) is retired by section 5.8. **Decision:** the fallback is kept, only for hosts that fail the `crun` host check and, until step 23 lands, for jobs that need GPUs, and only with `network = none`. `crun` is the default runtime and `--runtime docker` is refused unless the operator opts in (step 22). When the fallback is dropped is section 13, question 7.
 
 **Run delivery** (interim run API, `js-lease-server/src/run_api.rs`, `js-registry/src/runs.rs`; the API of section 3.5 carries the same calls):
 
@@ -706,7 +853,7 @@ Rows 2, 7, 8, 28 and 31 are properties of the file store; step 2 of section 12.1
 | Reservations | Whole-node marks, give-ups, exclusions, wait-list entries with their bodies | Same file (bodies lost on restart) | Postgres rows |
 | Runs | Run records, state, result, bounded log tail, ack state | Server memory only | Postgres rows, with a retention window |
 | Hosts | Bindings (host id to credential and instance), host credential digests, taints, cordons, join-token digests | `.agents` and `.joins` files | Postgres rows |
-| Acquires | Acquire intents, scaler records, unremoved machines, brake state | `.scaler` and `.scaler.unremoved` files | Postgres rows |
+| Acquires | Acquire intents, the offer chosen for each acquire, offer cool-downs, scaler records, unremoved machines, brake state | `.scaler` and `.scaler.unremoved` files (no offer record or cool-down) | Postgres rows |
 | Tail counters | Started on a marked host, backfilled, estimate error buckets | Memory only | Postgres rows (step 3) |
 | Usage history | Per-minute node and lease usage, cost curves, P90 wall times by profile key, and a record of every ended lease (holder, host, duration, why it ended, drain and give-up outcome, estimate against actual) | SQLite file (usage and curves only; ended leases are deleted) | Postgres rows |
 
@@ -742,14 +889,15 @@ Today's file rules, for the as-built reader: the lease file format is additive; 
 
 ### 12.1 From today's code to the design
 
-"Done" means: every host class under the scheduler as providers of ordered pools; one placement engine with whole-host requests reserved by tail and fair; history that feeds the estimates; Macs under isolation we can prove; and jobs that start fast on both operating systems with the network they declared.
+"Done" means: every host class under the scheduler as a machine provider of the Default platform in ordered pools; a request by capability finds the provider that has it; one placement engine with whole-host requests reserved by tail and fair; history that feeds the estimates; Macs under isolation we can prove; and jobs that start fast on both operating systems with the network they declared.
 
 **How today differs.** Each row is a difference between the code and the design above, and the steps that close it.
 
 | Today (as built) | Design | Steps |
 |---|---|---|
 | Placement happens in three places: the registry's first-free-host picker (default), `SchedPlacer` (`js-lease-server/src/sched/place.rs`, a `js-sched` scheduler rebuilt for every start under both locks, only with `--placement js-sched`, no load readings, no CPU slack), and `js-server-core` (a long-lived load-placement engine that kbf embeds and the server does not use). Whole-node reservation lives in the registry. | One engine, `js-sched`, with queue and reservation. | 8, 9, 11 |
-| Two models of compute: the registry (`RegisteredProvider`, implements `js_provider::Provider`) and the scaler with `js_elastic::ElasticProvider`, joined only because launched machines register themselves. The ordered hierarchy is a fixed static-then-registry order (`LayeredProvider`). One elastic and one static pool per server. | One `CapacityProvider` interface; `default`, `static` and elastic kinds; ordered `providers` per pool. | 5, 6, 7 |
+| Two models of compute: the registry (`RegisteredProvider`, implements `js_provider::Provider`) and the scaler with `js_elastic::ElasticProvider`, joined only because launched machines register themselves. A third, the agentless `StaticPool`, is a separate lease-level provider. The ordered hierarchy is a fixed static-then-registry order (`LayeredProvider`). One elastic and one static pool per server. No platform concept. | A `ContainerPlatform` layer with `Default`, whose ordered machine providers are one `CapacityProvider` interface and the kinds `static`, `lambdalabs`, `ec2`, `gce`; the other platforms later. | 5, 6, 7, 24 |
+| Offers carry a GPU count and a class in the agent's full-model spelling, matched by string equality (`js-elastic/src/offer.rs`); Lambda Labs offers come from operator-written `[[option]]` rows; no alias table; hello is checked against the pool's shape floor, not against an offer; no cache or cool-down on catalogs; no Linux arm64 archive. | One vocabulary with a structured accelerator and an alias table; catalogs translated by the provider crates; verify-on-hello; cached catalogs with failover. | 9, 19, 25, 26 |
 | One process with a lease file replaced whole on every change, files beside it for bindings and scaler records, SQLite for usage, runs only in memory, ended leases deleted. | Postgres for all of it. | 2, 3, 4 |
 | Hand-written `js-client` and `js-cli` over HTTP/JSON; no service definition. | A protobuf service; generated CLI and library. | 1 |
 | kbf links `js-sched`, `js-whole`, `js-server-core`, `js-store`, `js-usage`, `js-caps`, `js-sizing`, `js-sim`, `js-agent-usage` and `js-state` (checked in its manifests at the pinned revision). | kbf calls the generated library. | 11 |
@@ -762,11 +910,11 @@ Today's file rules, for the as-built reader: the lease file format is additive; 
 2. **Postgres store for leases.** Run the lease table, reservations (wait-list bodies included), host bindings, join-token digests and scaler records over `js-state` with the `postgres` feature. Commit-before-start becomes a transaction; `term` and `sequence` come from the database; an advisory lock replaces `flock`; a one-time import reads the lease file. SQLite remains for tests and single-node development. This removes the file-save races of section 8 (rows 2, 7, 28, 31, and the id reissue of row 8). *Needs: nothing.*
 3. **Usage and history in Postgres.** Move `js-usage` to the same store; record every ended lease with the fields of section 10.1; persist the tail counters (the new row of section 10.1). *Needs: 2.*
 4. **Durable runs.** Store run records and results in Postgres with a retention window, so a server restart does not lose them and a result can be read after release for that window (section 8, rows 3 and 33). *Needs: 2.*
-5. **`CapacityProvider`.** Rename and widen `ElasticProvider` with `capacity`, `observe` and `verify_instance`; port `LambdaProvider` and `js-elastic-fake`; add a conformance suite every provider runs. *Needs: nothing.*
-6. **Default and static as providers.** Put the registry's host table behind a `default` `CapacityProvider` and `StaticPool` behind a `static` one, both answering `acquire` with `Refused(capacity)`. Delete `Flavour`, rename the lease-level `Provider` to the internal booking port, delete `LayeredProvider` and the `joined` pool kind. *Needs: 5.*
-7. **Ordered providers per pool, configuration and admission.** The `providers` and `provider_max_machines` keys, several elastic providers and pools per server, admission with `no-capable-host`, `regain_grace` for a queue that loses its last capable path (section 5.6). It wires configuration and admission over the current picker; the ordered walk itself is engine behaviour in step 8. *Needs: 5, 6.*
-8. **One placement engine.** Move the registry's start path and wait list onto `js-sched`: queue order becomes binding, load readings and the CPU slack setting reach the server, the whole-node reservation ledger moves out of the registry, the give-up is removed, `SchedPlacer` and the registry picker and `--placement` go. The engine takes hosts per provider, in pool order, and implements pass 1 of section 5.6, including whole-node requests over the hosts of all providers; the memory percent moves into the engine. The sub-steps already built (tail rule in `js-whole`, one pick, backfill gate, estimate feed, evaluation counters) stay. Fix rows 11, 17, 22 and 26 of section 8 here. *Needs: 6 (hosts arrive through the provider interface), 2 (the queue is persisted).*
-9. **Placement decides acquires (pass 2 of section 5.6).** Fold the scaler's demand logic into pass 2 of the walk; the scaler keeps caps, the brake and the records. *Needs: 7, 8.*
+5. **`CapacityProvider`.** Rename and widen `ElasticProvider` with `capabilities` (flags, so an impossible request is refused up front), `capacity`, `observe` and `verify_instance`; port `LambdaProvider` and `js-elastic-fake`; add a conformance suite every provider runs. *Needs: nothing.*
+6. **Static machine provider (the merge).** Put the registry's host table behind one `static` `CapacityProvider` (hosts we install `js-agent` on, which register; `acquire` answers `Refused(capacity)`). Delete `Flavour`, rename the lease-level `Provider` to the internal booking port, and delete the `joined` pool kind (`LayeredProvider` stays until step 8's ordered walk replaces it). Remove the agentless `StaticPool` as a production kind and keep its booking logic as a test fake for the lease-table, `js-conformance` and `js-cli` tests (section 3.4; question 27 first checks that no deployment uses it). *Needs: 5.*
+7. **Platform layer with Default, ordered machine providers, configuration and admission.** The `ContainerPlatform` trait with `capabilities` and `can_ever_serve`, and the `Default` implementation that owns the machine providers; the `[[platform]]` and `[[machine_provider]]` tables, `platforms`, and `provider_limits` (allowed instance types, maximum price, maximum machines); several elastic providers and pools per server; admission with `no-capable-host` over registered hosts and catalogs (an unreadable catalog counts as *may offer*; until step 26's cache lands, admission calls `catalog()` directly), pool settings such as `max_queue_wait`, and `regain_grace` for a queue that loses its last capable path (section 5.6). It wires configuration and admission over the current picker; the ordered walk itself is engine behaviour in step 8. *Needs: 5, 6.*
+8. **One placement engine.** Move the registry's start path and wait list onto `js-sched`: queue order becomes binding, load readings and the CPU slack setting reach the server, the whole-node reservation ledger moves out of the registry, the give-up is removed, `SchedPlacer` and the registry picker and `--placement` go. `LayeredProvider` and `layered.rs` are deleted here, replaced by the ordered walk. The engine takes hosts per machine provider of the Default platform, in order (the ordered providers come from step 7), and implements pass 1 of section 5.6, including whole-node requests over the hosts of all machine providers; the memory percent moves into the engine. The sub-steps already built (tail rule in `js-whole`, one pick, backfill gate, estimate feed, evaluation counters) stay. Fix rows 11, 17, 22 and 26 of section 8 here. *Needs: 6 (hosts arrive through the provider interface), 7 (the platform layer and the ordered machine providers), 2 (the queue is persisted).*
+9. **Placement decides acquires (pass 2 of section 5.6).** Fold the scaler's demand logic into pass 2 of the walk: filter catalog offers by the request in the vocabulary of section 3.7, apply the pool's limits, pick by the policy of 5.6 step 5 (provider order, price, fewest accelerators, spare resources, purchase order, offer id, replacing the scaler's choice), fail over on a `capacity` refusal to the next zone, offer and provider, handle `quota` and the retry and maximum queue wait of 5.6; the scaler keeps caps, the brake and the records. *Needs: 7, 8, 26.*
 10. **Estimate feed decision.** Persist the counters, collect evidence, decide the default (section 13, question 3). *Needs: 3, 8.*
 11. **kbf as a client only.** In kbf's repository, replace the embedded server crates with the generated library; remove the dependencies; retire `js-server-core` in this repository if nothing else uses it. The service must give kbf what the embedded engine gave it: load placement, tail placement, whole-host leases, run submission. *Needs: 1, 8.*
 12. **Wire `crun` networking.** Call `Egress::check`, `attach` and `release` around the container start; delete the refusal in `js-agent/src/lifecycle/mod.rs`, the "loopback only" text in the `js-agent` rustdoc and `crun/mod.rs`, and the stale sentences in `agent-egress.md`. *Needs: nothing.*
@@ -776,15 +924,17 @@ Today's file rules, for the as-built reader: the lease file format is additive; 
 16. **Retire the Podman firewall.** Remove `cli_runtime/egress.rs`, `deploy/js-agent/egress-network.sh`, `--container-network` and `--container-egress-allow`. *Needs: 12, 13.*
 17. **One job definition.** An `image` reference on both platforms; the macOS agent pulls the bundle by digest through `js-oci`; the `native` body is folded in; staging of inputs and collecting of outputs for native runs. *Needs: 1.*
 18. **Measure launch.** Time from a start command received to the job process running on a reference node, for `crun` with and without network wiring, from the agent-egress CI path; publish the number. A `pasta` comparison only if the veth cost is a problem. *Needs: 12.*
-19. **A cloud machine provider after Lambda Labs.** AWS EC2 or GCP Compute Engine behind `CapacityProvider`, starting a VM that boots `js-agent` (section 13, question 4). *Needs: 5, 7.*
+19. **EC2 machine provider (GCP Compute Engine after it).** AWS EC2 (the recommendation of question 4) behind `CapacityProvider`, starting a VM that boots `js-agent`: its `catalog()` reads the instance types, their GPU information and the zones where each is offered, maps GPU names through the shared alias table plus its own rows, adds price, purchase option and quota, and `acquire` launches the machine image the configuration maps to the offer's architecture with the agent build for that architecture. Check how the newest GPU types are actually purchasable (on-demand, spot, or a reservation or capacity block) and add that purchase option to `Offer` if needed. Add the Linux arm64 archive to the release (section 13, question 19), because the first accelerator offers are `arm64`. GPU jobs on these machines run on the fallback runtime until step 23. *Needs: 5, 7, 25, 26.*
 20. **Agent wire.** Decide whether `hello` and heartbeat move from JSON polling to the protobuf toolchain of step 1. *Needs: 1.*
 21. **Safety work that stands apart.** An agent self-fence on silence and a fencing token on a start (section 8, rows 5 and 6); adoption of `crun` runs after an agent restart (row 4); per-client tokens; a lease-server update hook; `--allow-host-jobs` with taint recording. *Needs: 4 for the update hook; the rest nothing.*
 22. **`crun` is the default Linux runtime.** Make `crun` the default `--runtime`; the start check refuses a host that cannot run `crun` instead of using Docker; `--runtime docker` is accepted only with an explicit opt-in flag and then runs with `network = none` (section 5.7). *Needs: 12, 16.*
 23. **GPUs for `crun`.** Pass GPU devices into a `crun` job, or state in section 2.2 that GPU jobs stay on the fallback. This gates dropping the fallback (section 13, question 7). *Needs: nothing.*
 
-24. **Later: the container-platform interface.** The `ContainerPlatform` trait of section 3.6 (submit, observe, cancel, logs and result), a conformance suite, one platform behind it, and admission that lets a pool's list name either kind. Not scheduled and not part of v1. *Needs: no numbered step blocks the design; it builds on 7 and 8 once scheduled.*
+24. **Later: the other container platforms.** The non-Default kinds of section 3.6 (Kubernetes, Cloud Run, ECS) behind `ContainerPlatform`: `submit`, `observe`, `cancel`, `logs` and `result`, a conformance suite, the mapping of the vocabulary onto each platform's knobs, and capability flags that refuse impossible requests. One platform first (question 26). Not scheduled and not part of v1. *Needs: 7 and 8; question 28 first.*
+25. **Capability vocabulary and alias table.** The structured accelerator (vendor, model, count, memory per device, optional interconnect) in `js_types::Requirements` and `js_elastic::Offer`, replacing `gpus` plus `GpuClass`; ISA level in `Requirements`; the agent reports the same structure; the alias table in `js-caps`, the one place canonical names are defined (agent spelling, provider spelling rows loaded as data, canonical model with variant facts, unknown names passing through), with a conformance test that every canonical name a provider emits is in the table; one arch spelling (`arm64`, `aarch64` accepted and normalised at parse) with a test that an `arch=arm64` request fits an `aarch64` offer; the comparators of section 3.7; `Offer::fit` matches on the canonical model. Today's full-spelling requests keep working. *Needs: nothing.*
+26. **Catalog translation, cache and verify-on-hello.** Providers return offers in the vocabulary (Lambda Labs first: its `[[option]]` rows become the allow list and the alias table the source of GPU facts); a per-provider catalog cache with a refresh interval and invalidation on `capacity` and `quota` refusals; an offer cool-down; the offer chosen for each acquire is stored (section 10.1); on hello the engine compares the agent's detected capabilities with the offer by the rule of 5.6.1 step 6 and, on a mismatch, releases the machine, marks the offer bad for `offer_cooldown` keyed by (provider, instance type, zone) and counts a boot failure toward the brake; a hello for a machine with no recorded offer is checked against the pool's shape floor only. *Needs: 5, 25.*
 
-Order that follows from the dependencies: 1, 2, 5 and 12 can start now. 3 and 4 follow 2. 6 and 7 follow 5. 8 follows 2 and 6, and is the largest. 9, 10 and 11 follow 8. 13 follows 12, and 14, 15, 16 follow 13. 17 and 20 follow 1. 18 follows 12. 22 follows 12 and 16; 23 stands alone; 24 is later and unscheduled.
+Order that follows from the dependencies: 1, 2, 5, 12 and 25 can start now. 3 and 4 follow 2. 6 and 26 follow 5 (26 also 25). 7 follows 5 and 6. 8 follows 2, 6 and 7, and is the largest. 9 follows 7, 8 and 26; 10 and 11 follow 8. 13 follows 12, and 14, 15, 16 follow 13. 17 and 20 follow 1. 18 follows 12. 19 follows 5, 7, 25 and 26 (its GPU jobs use the fallback runtime until 23). 22 follows 12 and 16; 23 stands alone, though GPU jobs on any machine wait for it; 24 is later, unscheduled, and follows 7 and 8.
 
 ### 12.2 Other gaps, unchanged by this revision
 
@@ -792,11 +942,11 @@ Order that follows from the dependencies: 1, 2, 5 and 12 can start now. 3 and 4 
 
 **Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process. Remaining: staging inputs and collecting outputs (step 17); the pool of reused users; adoption after restart; soft stop; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
 
-**Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot hosts and price data; a Linux arm64 archive; a VM runtime; a generic boot grace; a safe restore verb.
+**Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a generic boot grace; a safe restore verb.
 
 ## 13. Open questions
 
-Settled by the maintainers and therefore not listed: Postgres as the store, kbf as a client only, the provider model (ordered machine providers, `js-agent` hosts as the default provider, one interface; container platforms are a separate, later concept, section 3.6), per-job networking with an agent ceiling, and `crun` as the default Linux runtime with a Docker fallback (section 5.7). Each question below needs an owner's decision before this document can state it as fact. Where there is a real choice, the options and a recommendation are given.
+Settled by the maintainers and therefore not listed: Postgres as the store, kbf as a client only, the platform model (a pool names container platforms in priority order: `Default`, then Kubernetes, Cloud Run and ECS later; Default takes an ordered list of machine providers, of which `static` is hosts we install `js-agent` on; self-registered `js-agent` hosts are the `static` kind, and the agentless pool is removed as a production kind (recommended, question 27); sections 3.4, 3.6), one capability vocabulary owned by the scheduler with provider-owned catalog translation and verify-on-hello (section 3.7, 5.6), per-job networking with an agent ceiling, and `crun` as the default Linux runtime with a Docker fallback (section 5.7). Each question below needs an owner's decision before this document can state it as fact. Where there is a real choice, the options and a recommendation are given.
 
 1. **One active writer, or high availability, on Postgres.**
    - *A. One active service holds an advisory lock; a person or a supervisor restarts it.* Simple; an outage lasts as long as the restart. Leases whose clients could not renew can expire during it (question 15).
@@ -809,7 +959,7 @@ Settled by the maintainers and therefore not listed: Postgres as the store, kbf 
    - *C. Keep the hand-written routes.* Two sources of truth.
    - **Recommendation: B.** It costs a generator step, and the previous release's client must keep working against it (a test).
 3. **Is the estimate feed on by default, and what evidence in the tail counters would justify it?** Off by default today. Recommendation: persist the counters (step 3), then turn it on for a pool once its estimate error is bounded by the margin that backfill uses.
-4. **Which cloud machine provider comes after Lambda Labs: EC2 or GCE first?** Both start a VM through the cloud's VM API that boots `js-agent`.
+4. **Which cloud machine provider comes after Lambda Labs: EC2 or GCE first?** Both start a VM through the cloud's VM API that boots `js-agent` (step 19).
    - *A. AWS EC2:* the largest user base and a signed instance identity that removes the join token; the design (`providers.md`) already specifies its launch and identity rules.
    - *B. GCP Compute Engine.*
    - **Recommendation: AWS EC2**, because it exercises the most of the interface (signed identity, tags, spot reclaim events) and its rules are already written; GCE second.
@@ -827,14 +977,26 @@ Settled by the maintainers and therefore not listed: Postgres as the store, kbf 
 16. **Should the agent offer a command that records a reimage?** A taint is permanent until reimage (G5, section 5.7). The open point is whether the server learns of the reimage from a new host credential only, or from an explicit command.
 17. **Where is MDM owned?** The Mac device-management server is still in this repository; the host-management project is meant to own it. This document treats it as out of scope.
 18. **Coverage rule.** Should this repository keep its zero-uncovered-lines ratchet (`coverage-baseline`), or use a percentage gate?
-19. **Linux arm64.** Planned or dropped? The release has no archive for it.
+19. **Linux arm64.** Planned or dropped? The release has no archive for it, and the first accelerator offers we want to serve (GB300 is Grace-Blackwell) are `arm64`, so the Default platform cannot serve them without it (section 5.6). Recommendation: planned, as part of step 19.
 20. **Does a pending whole-node lease with a `request_id` survive a rollback to an older build?** The in-review change says it is served as a lease without an id, with no re-presentation.
 21. **When the registry ends a held lease** (failed prepare, voided ready), must the lease table drop it, keep it, or observe held leases every tick, and what does the client see? (row 26)
 22. **What does a client learn when its host is lost, tainted or has lost its booking?** A field on renew, a state on a lease read, or lease end? (row 29)
 23. **Should a flapping agent be able to postpone a whole-node prepare deadline,** or should the commit time survive a hello for a `Ready` host? (row 27)
 24. **How rich is the allow-list?** Today it is the operator's list of IPv4 `IP:PORT` and `CIDR:PORT` entries, TCP only, at most 16. Options: add hostnames (needs a resolve-and-refresh loop), add UDP, let a job narrow the list. Recommendation: no change until a use case needs one; the object-store case is served by a listed endpoint.
-25. **What do we take from SkyPilot's provider layer?** Capability flags per provider so an unsupported request is refused up front, a cheap quota check before a slow launch, and failover over zones within a provider. Recommendation: add capability flags to `CapacityProvider` in step 5 and decide the rest with the second cloud machine provider (step 19).
-26. **Which container platform first, when the container-platform interface is built (step 24)?** Kubernetes is the most common and runs on customers' own clusters; Cloud Run and ECS are simpler to submit to and bill per run. The choice decides which network-policy mapping and which log and result path the first implementation has to carry. Not needed for v1; no recommendation until a user needs one.
+25. **Quota check before a slow launch.** The platform-and-vocabulary design already takes from SkyPilot's provider layer: capability flags so an unsupported request is refused up front (step 5), failover over zones and providers on a `capacity` refusal (step 9), and a cached catalog (step 26). Section 5.6 states what a quota refusal does (the instance type is passed over for `quota_backoff`). Left open: a cheap quota check before a slow launch. Recommendation: decide with the EC2 provider (step 19).
+26. **Which other container platform first, when they are built (step 24)?** Kubernetes is the most common and runs on customers' own clusters; Cloud Run and ECS are simpler to submit to and bill per run. The choice decides which network-policy mapping and which log and result path the first implementation has to carry. Not needed for v1; no recommendation until a user needs one.
+27. **Does any deployment rely on the agentless static pool?** Step 6 removes `StaticPool` as a production kind (its kind name `static` is reused by the `js-agent` host provider, so an old configuration must be migrated), because a host without `js-agent` cannot be verified, tainted, drained or updated.
+   - *A. Remove it; migrate any such host to run `js-agent` (it becomes a `static` machine provider host).*
+   - *B. Keep it as a separate, unmanaged kind.* Two ways to own a host, and the agentless one has none of the safety rules.
+   - **Recommendation: A**, after checking which projects list hosts in a pool file today; `js-lease-server`, `js-conformance` and `js-cli` use it in this repository.
+28. **Does the Default platform's lease-on-a-host model share a trait and client surface with hostless platforms?** On Kubernetes, Cloud Run and ECS a lease can only be one run; on Default it is a host with runs inside it.
+   - *A. One trait; a lease is a lease, and a hostless lease has no host field.*
+   - *B. Keep the host lease for Default and add a hostless lease kind to the service definition when the first other platform is built.*
+   - **Recommendation: B.** v1 is unaffected, and the service definition (step 1) can reserve the room.
+29. **Who maintains the alias table between releases?** Accelerator names come from `nvidia-smi`, from each cloud's instance-type data and from the agent; a new accelerator ships before the table knows it. Unknown names pass through and match exactly (section 3.7), and verify-on-hello catches a wrong alias after the machine is paid for.
+   - *A. In-repository table only, updated with a release.*
+   - *B. The same plus operator `[[accelerator_alias]]` rows in the configuration.*
+   - **Recommendation: B**, so an operator can serve a new accelerator the day it appears; the table in the repository stays the default.
 
 ## Related work
 
@@ -847,37 +1009,43 @@ Several systems schedule work across heterogeneous compute. We found none that c
 - **Kueue MultiKueue** (https://kueue.sigs.k8s.io/docs/concepts/multikueue) dispatches jobs from a manager cluster to worker clusters; every worker is a Kubernetes cluster.
 - **crun** (https://github.com/containers/crun) is the OCI runtime this design drives directly on Linux.
 
-Where the systems overlap with this design, the overlap is the provider model and failover, which we adopt in the same spirit. SkyPilot spans both of our concepts: its cloud backends provision VMs, like our machine providers, and its Kubernetes backend submits to a cluster, like our later container platforms (section 3.6); Kueue MultiKueue is container-platform orchestration only. Our machine-provider model uses a cloud solely to start a VM that boots `js-agent`, and places and launches every job itself. The differences are the learned cost model, the macOS execution path, and whole-host requests placed by remaining drain time. All of these are designs until the steps of section 12.1 land; section 3.1 says which parts are built.
+Where the systems overlap with this design, the overlap is the provider model and failover, which we adopt in the same spirit. SkyPilot spans both of our layers: its cloud backends provision VMs, like the machine providers of our Default platform, and its Kubernetes backend submits to a cluster, like our later Kubernetes platform kind (section 3.6); Kueue MultiKueue is container-platform orchestration only. Our Default platform uses a cloud solely to start a VM that boots `js-agent`, and places and launches every job itself. The differences are the learned cost model, the macOS execution path, and whole-host requests placed by remaining drain time. All of these are designs until the steps of section 12.1 land; section 3.1 says which parts are built.
 
 ## 14. Glossary
 
 - **Acquire (lease).** `POST /v1/leases`. Asks for a host.
 - **Acquire (provider).** A provider's call that launches a machine for a pool.
 - **Agent.** `js-agent`, the process on every host, whatever provider supplied it.
+- **Accelerator.** In the vocabulary: `{ vendor, model, count, memory per device, interconnect }`, with `model` the canonical lower-case name such as `nvidia-gb300` (section 3.7).
+- **Alias table.** The map from every spelling of an accelerator (agent, provider, cloud) to its canonical model and variant facts, kept in `js-caps` (section 3.7).
 - **Allow-list.** A job network level: the endpoints and resolvers the agent is configured with and nothing else.
 - **Awaiting.** A host seated from the store after restart, not yet heard.
 - **Backfill.** Short work placed on a reserved host because it will end inside the tail.
 - **Booking.** The record that a lease owns part or all of a host.
 - **Bundle.** The macOS form of a job image: an OCI image manifest of one platform whose layers are directory trees (`js-bundle`).
 - **Capable.** A host that could serve a request once it is free.
-- **CapacityProvider.** The one provider interface (section 3.4).
+- **CapacityProvider.** The machine-provider interface (section 3.4).
 - **Ceiling.** The most network a job may ask for; set by the agent's flags.
+- **Capability vocabulary.** The one set of terms for what a request needs and what a host, offer or platform has (section 3.7).
+- **Catalog.** A machine provider's list of offers, already in the capability vocabulary (`catalog()`).
 - **Class.** What a lease asks for: a share class (part of a host) or a whole-node class.
 - **Commit before start.** The pending record is committed before the provider is called.
 - **Cordon.** A host takes no new lease; its current work continues.
-- **Container platform.** A service that runs an OCI image for you (Kubernetes, Cloud Run, ECS). Not a machine provider; a separate, later interface in which jobscheduler hands over the image and the platform runs it (section 3.6).
-- **Default provider.** The fleet of hosts that register themselves with `js-agent`; every deployment has one.
+- **Container platform.** What runs a job's OCI image; a pool names them in priority order. Kinds: `Default` (ours, v1), then Kubernetes, Cloud Run and ECS (section 3.6). Each has its own typed parameters and publishes capability flags.
+- **Default (platform).** Our container platform: `js-agent` with `crun` on Linux and native runs on macOS, with our own placement. It takes an ordered list of machine providers. The one platform v1 builds.
 - **Drain.** Waiting for a marked host to become quiet. Drain never kills work.
 - **Elastic provider.** A machine provider that launches and terminates machines through a cloud's VM API (a dynamic VM provider).
 - **Epoch.** Counter of an agent's sessions; stale epochs are refused.
 - **Exclusive.** The whole-node state of a host (committed, ready, restoring).
 - **Grace.** Silence allowed before a host is lost (agent); delay before a presentation is dropped (`regain_grace`).
 - **Held.** A lease whose provider confirmed it.
-- **Hierarchy.** A pool's providers, in priority order.
+- **Hierarchy.** The order of a pool's platforms, and of a Default platform's machine providers.
 - **Join token.** One-time credential for a first hello.
 - **Lease.** The right to a host until an expiry, renewed by the holder, capped by a wall time.
-- **Machine provider.** What supplies a pool's machines, every one of which runs `js-agent`: the default provider, static hosts, or a dynamic VM provider (Lambda Labs; AWS EC2 and GCP Compute Engine planned). It never runs a job. The `CapacityProvider` trait is its interface (section 3.4).
+- **Machine provider.** What supplies a Default platform's machines, every one of which runs `js-agent`: `static` (hosts we install `js-agent` on, which register), or a dynamic VM provider (Lambda Labs; AWS EC2 and GCP Compute Engine planned). It never runs a job. The `CapacityProvider` trait is its interface (section 3.4).
 - **Mark.** A reservation of a host for a waiting request.
+- **Cool-down.** The time an offer that failed verify-on-hello, or an instance type refused for quota, is not picked again.
+- **Offer.** What one launch of a machine provider would give: shape, accelerator, os, arch, zone, price and availability (`js-elastic/src/offer.rs`).
 - **Open.** A job network level: any address except what the agent always denies.
 - **Pending.** A lease recorded but not confirmed.
 - **Placement engine.** `js-sched`, the one place a placement is decided.
@@ -886,6 +1054,7 @@ Where the systems overlap with this design, the overlap is the provider model an
 - **Quiet.** A host with no leases and no runs.
 - **Registry.** `js-registry`; the host book.
 - **Run.** A job inside a lease, delivered through heartbeats.
+- **Static (machine provider).** Hosts we install `js-agent` on, which reach out and register; bare-metal Linux and macOS. It never acquires.
 - **Tail.** The latest estimated end among a host's leases.
 - **Taint.** A permanent mark that a host failed a post-job check.
 - **Tick.** The loop step where time acts.

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 850" width="1400" height="850" role="img" aria-label="Components of jobscheduler: generated clients on the left call a protobuf service API; the scheduler core with one placement engine, queue, lease and run lifecycle and usage history keeps its state in Postgres; on the right each pool has ordered machine providers, namely js-agent hosts (the default provider), static hosts and dynamic VM providers (Lambda Labs, with AWS EC2 and GCP Compute Engine planned), and every machine runs js-agent and runs jobs as OCI images; below, a dashed box for container platforms (later: Kubernetes, Cloud Run, ECS) receives OCI images directly from the scheduler core and has no js-agent.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 850" width="1400" height="850" role="img" aria-label="Components of jobscheduler: generated clients on the left call a protobuf service API; the scheduler core with one placement engine, queue, lease and run lifecycle and usage history keeps its state in Postgres; on the right a pool names container platforms in priority order: Default, whose ordered machine providers are static hosts running js-agent on Linux and macOS, Lambda Labs, AWS EC2 and GCP Compute Engine, then Kubernetes, Cloud Run and ECS as dashed later platforms with no js-agent; every Default machine runs js-agent and runs jobs as OCI images.">
 <title>jobscheduler components</title>
 <defs><marker id="components-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="components-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="components-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
 <style>
@@ -29,11 +29,11 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
 <rect x="0" y="0" width="1400" height="850" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">jobscheduler: clients, one scheduler core, ordered machine providers</text>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">jobscheduler: clients, one scheduler core, container platforms in priority order</text>
 <text x="20" y="58" class="b" text-anchor="start">Clients</text>
 <text x="235" y="58" class="b" text-anchor="start">Service API</text>
 <text x="470" y="58" class="b" text-anchor="start">Scheduler core (one service)</text>
-<text x="960" y="58" class="b" text-anchor="start">Machine providers of a pool, in priority order (v1)</text>
+<text x="960" y="58" class="b" text-anchor="start">Container platforms of a pool, in priority order</text>
 <rect x="20" y="96" width="170" height="64" rx="5" class="box-bd"/>
 <text x="105.0" y="124" class="b" text-anchor="middle">Generated CLI</text>
 <text x="105.0" y="140" class="t-m" text-anchor="middle">planned</text>
@@ -65,8 +65,9 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="685.0" y="136" class="b" text-anchor="middle">Placement engine: js-sched (partly built)</text>
 <text x="685.0" y="153" class="t-m" text-anchor="middle">load placement, CPU slack setting, memory percent</text>
 <text x="685.0" y="170" class="t-m" text-anchor="middle">tail placement for whole-node requests</text>
-<text x="685.0" y="187" class="t-m" text-anchor="middle">walks the pool's providers in priority order (planned)</text>
+<text x="685.0" y="187" class="t-m" text-anchor="middle">walks platforms, then machine providers (planned)</text>
 <text x="685.0" y="204" class="t-m" text-anchor="middle">estimates from usage history</text>
+<text x="685.0" y="221" class="t-m" text-anchor="middle">capability vocabulary: os, arch, cpu, memory, accelerator</text>
 <rect x="490" y="248" width="390" height="52" rx="5" class="box-o"/>
 <text x="685.0" y="270" class="b" text-anchor="middle">Queue and reservations (partly built)</text>
 <text x="685.0" y="286" class="t-m" text-anchor="middle">in js-registry today; moves into js-sched</text>
@@ -89,56 +90,62 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M720,492 L720,520" class="ln" marker-end="url(#components-ak)"/>
 <text x="780" y="510" class="t-m lbl" text-anchor="middle">commit</text>
 <rect x="950" y="72" width="440" height="560" rx="5" class="box-p"/>
-<rect x="960" y="88" width="420" height="262" rx="5" class="box-o"/>
-<text x="1170" y="110" class="b" text-anchor="middle">1  js-agent hosts: the default provider (partly built)</text>
-<text x="1170" y="128" class="t-m" text-anchor="middle">host book (js-registry) is its state; hosts register themselves; no acquire</text>
-<rect x="972" y="142" width="198" height="196" rx="5" class="box-b"/>
-<text x="1071" y="164" class="b" text-anchor="middle">Linux host</text>
-<text x="1071" y="182" class="t-m" text-anchor="middle">js-agent + crun</text>
-<text x="1071" y="199" class="t-m" text-anchor="middle">crun starts the OCI image</text>
-<text x="1071" y="216" class="t-m" text-anchor="middle">no container daemon</text>
-<rect x="1021" y="240" width="100" height="44" rx="5" class="box"/>
-<text x="1071" y="267" class="b" text-anchor="middle">job</text>
-<text x="1071" y="306" class="t-m" text-anchor="middle">job = OCI image</text>
-<rect x="986" y="311" width="170" height="12" rx="3" class="box-bd" fill-opacity="0"/>
-<text x="1071" y="321" class="t-m" text-anchor="middle" font-size="10">agent ceiling on network (planned)</text>
-<rect x="1178" y="142" width="198" height="196" rx="5" class="box-b"/>
-<text x="1277" y="164" class="b" text-anchor="middle">macOS host</text>
-<text x="1277" y="182" class="t-m" text-anchor="middle">js-agent + native run</text>
-<text x="1277" y="199" class="t-m" text-anchor="middle">OCI bundle under sandbox,</text>
-<text x="1277" y="216" class="t-m" text-anchor="middle">throwaway user, pf</text>
-<rect x="1227" y="240" width="100" height="44" rx="5" class="box-bd"/>
-<text x="1277" y="267" class="b" text-anchor="middle">job</text>
-<text x="1277" y="300" class="t-m" text-anchor="middle">today: native body</text>
-<text x="1277" y="316" class="t-m" text-anchor="middle">planned: job = OCI image</text>
-<rect x="1192" y="322" width="170" height="12" rx="3" class="box-bd" fill-opacity="0"/>
-<text x="1277" y="332" class="t-m" text-anchor="middle" font-size="10">agent ceiling on network (planned)</text>
-<rect x="960" y="364" width="420" height="64" rx="5" class="box-o"/>
-<text x="1170.0" y="392" class="b" text-anchor="middle">2  static hosts (partly built)</text>
-<text x="1170.0" y="408" class="t-m" text-anchor="middle">operator-listed hosts that also run js-agent</text>
-<rect x="960" y="442" width="420" height="136" rx="5" class="box-o"/>
-<text x="1170" y="464" class="b" text-anchor="middle">3  dynamic VM providers: a cloud's VM API</text>
-<rect x="972" y="478" width="128" height="50" rx="5" class="box"/>
-<text x="1036" y="500" class="b" text-anchor="middle">Lambda Labs</text>
-<text x="1036" y="517" class="t-m" text-anchor="middle">partly built</text>
-<rect x="1110" y="478" width="128" height="50" rx="5" class="box-bd"/>
-<text x="1174" y="500" class="b" text-anchor="middle">AWS EC2</text>
-<text x="1174" y="517" class="t-m" text-anchor="middle">planned</text>
-<rect x="1248" y="478" width="128" height="50" rx="5" class="box-bd"/>
-<text x="1312" y="500" class="b" text-anchor="middle">GCP Compute Engine</text>
-<text x="1312" y="517" class="t-m" text-anchor="middle">planned</text>
-<text x="1170" y="548" class="t-m" text-anchor="middle">each starts a VM that boots js-agent,</text>
-<text x="1170" y="564" class="t-m" text-anchor="middle">says hello and joins the pool as a host</text>
-<text x="1170" y="600" class="t-m" text-anchor="middle">the ordered list per pool is planned; today: static pool,</text>
-<text x="1170" y="616" class="t-m" text-anchor="middle">then registered hosts, one elastic pool</text>
+<rect x="960" y="84" width="420" height="382" rx="5" class="box-o"/>
+<text x="1170" y="104" class="b" text-anchor="middle">1  Default: ours (partly built; the only platform in v1)</text>
+<text x="1170" y="121" class="t-m" text-anchor="middle">our placement; js-agent + crun on Linux, native on macOS</text>
+<text x="1170" y="138" class="t-m" text-anchor="middle">machine providers, in priority order:</text>
+<rect x="972" y="148" width="396" height="150" rx="5" class="box-b"/>
+<text x="1170" y="167" class="b" text-anchor="middle">a  Static (partly built)</text>
+<text x="1170" y="183" class="t-m" text-anchor="middle">hosts we install js-agent on; they register; no acquire</text>
+<rect x="982" y="192" width="182" height="96" rx="5" class="box"/>
+<text x="1073" y="211" class="b" text-anchor="middle">Linux host</text>
+<text x="1073" y="227" class="t-m" text-anchor="middle">js-agent + crun, no daemon</text>
+<rect x="1033" y="238" width="80" height="34" rx="5" class="box-b"/>
+<text x="1073" y="260" class="b" text-anchor="middle">job</text>
+<text x="1073" y="283" class="t-m" text-anchor="middle" font-size="10">job = OCI image</text>
+<rect x="1176" y="192" width="182" height="96" rx="5" class="box"/>
+<text x="1267" y="211" class="b" text-anchor="middle">macOS host</text>
+<text x="1267" y="227" class="t-m" text-anchor="middle">js-agent, native run</text>
+<rect x="1227" y="238" width="80" height="34" rx="5" class="box-bd"/>
+<text x="1267" y="260" class="b" text-anchor="middle">job</text>
+<text x="1267" y="283" class="t-m" text-anchor="middle" font-size="10">planned: OCI image</text>
+<rect x="972" y="310" width="126" height="56" rx="5" class="box"/>
+<text x="1035" y="332" class="b" text-anchor="middle">b  Lambda Labs</text>
+<text x="1035" y="350" class="t-m" text-anchor="middle">partly built</text>
+<rect x="1107" y="310" width="126" height="56" rx="5" class="box-bd"/>
+<text x="1170" y="332" class="b" text-anchor="middle">c  AWS EC2</text>
+<text x="1170" y="350" class="t-m" text-anchor="middle">planned</text>
+<rect x="1242" y="310" width="126" height="56" rx="5" class="box-bd"/>
+<text x="1305" y="332" class="b" text-anchor="middle">d  GCP Compute Engine</text>
+<text x="1305" y="350" class="t-m" text-anchor="middle">planned</text>
+<text x="1170" y="386" class="t-m" text-anchor="middle">b to d: catalog() returns offers in our vocabulary;</text>
+<text x="1170" y="402" class="t-m" text-anchor="middle">acquire boots a VM that runs js-agent and says hello;</text>
+<text x="1170" y="418" class="t-m" text-anchor="middle">its detected capabilities are checked against the offer</text>
+<text x="1170" y="440" class="t-m" text-anchor="middle">today: static pool, then registered hosts, one elastic pool</text>
+<rect x="960" y="482" width="132" height="76" rx="5" class="box-gd"/>
+<text x="1026" y="504" class="b" text-anchor="middle">2  Kubernetes</text>
+<text x="1026" y="522" class="t-m" text-anchor="middle">later, not v1</text>
+<text x="1026" y="538" class="t-m" text-anchor="middle">no js-agent</text>
+<rect x="1104" y="482" width="132" height="76" rx="5" class="box-gd"/>
+<text x="1170" y="504" class="b" text-anchor="middle">3  Cloud Run</text>
+<text x="1170" y="522" class="t-m" text-anchor="middle">later, not v1</text>
+<text x="1170" y="538" class="t-m" text-anchor="middle">no js-agent</text>
+<rect x="1248" y="482" width="132" height="76" rx="5" class="box-gd"/>
+<text x="1314" y="504" class="b" text-anchor="middle">4  ECS</text>
+<text x="1314" y="522" class="t-m" text-anchor="middle">later, not v1</text>
+<text x="1314" y="538" class="t-m" text-anchor="middle">no js-agent</text>
+<text x="1170" y="580" class="t-m" text-anchor="middle">each kind has its own typed parameters and capability flags;</text>
+<text x="1170" y="596" class="t-m" text-anchor="middle">they run the image with their own placement and network policy</text>
+<text x="1170" y="616" class="t-m" text-anchor="middle">other candidates: Azure Container Apps, Nomad, Fly Machines</text>
 <path d="M880,170 L960,170" class="ln" marker-end="url(#components-ak)" marker-start="url(#components-ak)"/>
 <text x="920" y="120" class="t-m lbl" text-anchor="middle">hello,</text>
 <text x="920" y="134" class="t-m lbl" text-anchor="middle">heartbeat,</text>
 <text x="920" y="148" class="t-m lbl" text-anchor="middle">commands</text>
-<path d="M880,466 L960,466" class="ln" marker-end="url(#components-ak)"/>
-<text x="920" y="458" class="t-m lbl" text-anchor="middle">acquire,</text>
-<text x="920" y="490" class="t-m lbl" text-anchor="middle">release</text>
-<path d="M880,400 L960,400" class="ln" marker-end="url(#components-ak)" marker-start="url(#components-ak)"/>
+<path d="M880,338 L960,338" class="ln" marker-end="url(#components-ak)"/>
+<text x="920" y="316" class="t-m lbl" text-anchor="middle">acquire,</text>
+<text x="920" y="330" class="t-m lbl" text-anchor="middle">release</text>
+<path d="M900,520 L960,520" class="ln-d" marker-end="url(#components-ak)"/>
+<text x="920" y="508" class="t-m lbl" text-anchor="middle">OCI image</text>
 <rect x="1000" y="672" width="170" height="44" rx="5" class="box-g"/>
 <text x="1085" y="699" class="b" text-anchor="middle">Image registry</text>
 <rect x="1210" y="672" width="170" height="44" rx="5" class="box-g"/>
@@ -147,13 +154,6 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="1075" y="658" class="t-m lbl" text-anchor="end">digest-verified pull</text>
 <path d="M1295,632 L1295,672" class="ln-d" marker-end="url(#components-ak)"/>
 <text x="1285" y="658" class="t-m lbl" text-anchor="end">one presigned PUT</text>
-<rect x="950" y="750" width="440" height="80" rx="5" class="box-gd"/>
-<text x="1170" y="774" class="b" text-anchor="middle">Container platforms (later, not v1)</text>
-<text x="1170" y="792" class="t-m" text-anchor="middle">Kubernetes, Cloud Run, ECS</text>
-<text x="1170" y="809" class="t-m" text-anchor="middle">run the OCI image themselves: no js-agent, no crun,</text>
-<text x="1170" y="824" class="t-m" text-anchor="middle">their own placement and network policy</text>
-<path d="M900,712 L925,712 L925,790 L950,790" class="ln-d" marker-end="url(#components-ak)"/>
-<text x="920" y="750" class="t-m lbl" text-anchor="end">OCI image</text>
 
 <path d="M30,745 L80,745" class="ln" marker-end="url(#components-ak)"/>
 <text x="90" y="749" class="t-m" text-anchor="start">message path</text>
