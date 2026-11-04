@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp, read_bookings};
-use js_provider::{Provider, StartSpec};
+use js_provider::{Pool, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Registry, SequentialSessions, WholeCounts, WholeNodeConfig,
 };
@@ -25,7 +25,7 @@ use js_types::{
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::*;
-use crate::adapt::BoxedProvider;
+use crate::adapt::BoxedPool;
 use crate::agents::Agents;
 use crate::config::parse_token;
 
@@ -183,7 +183,7 @@ impl Rig {
         let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
         let settings = crate::reservations::with_restart_grace(settings, Some(&whole));
         let table = LeaseTable::open(
-            BoxedProvider(Box::new(provider)),
+            BoxedPool(Box::new(provider)),
             shared_clock.clone(),
             settings,
             file,

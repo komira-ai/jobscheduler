@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_provider::{Provider, StartSpec};
+use js_provider::{Pool, StartSpec};
 use js_types::{LeaseId, Request, RequestId};
 
 use crate::book::{self, Book, Presented, Seen, Step};
@@ -25,7 +25,7 @@ pub struct LeaseTable<P, C> {
     book: Book,
 }
 
-impl<P: Provider, C: Clock> LeaseTable<P, C> {
+impl<P: Pool, C: Clock> LeaseTable<P, C> {
     /// Opens the table over the file at `path`, holding an exclusive lock beside it for
     /// as long as the table lives (a second table over the same file is an
     /// [`OpenError::Lock`]). A missing file is an [`OpenError::Missing`] unless `boot` is
@@ -91,7 +91,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// dropped or refused) the id names nothing and an acquire under it is a new lease.
     ///
     /// The provider sees the id on the start ([`StartSpec::with_request_id`]). When it
-    /// holds the request on its wait list ([`Provider::waits`]), the lease stays pending
+    /// holds the request on its wait list ([`Pool::waits`]), the lease stays pending
     /// and [`Self::tick`] presents it again, under the same lease and request id, until
     /// the provider places or refuses it; its prepare deadline counts from the last
     /// presentation that found it waiting, so a wait for a host is not a prepare.

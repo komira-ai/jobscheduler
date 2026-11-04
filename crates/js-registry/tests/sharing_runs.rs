@@ -103,7 +103,7 @@ fn host_with_two_leases(came: Came) -> (Fixture, u64) {
     let epoch = fx.hello(&host_hello(), &cred("t")).unwrap().epoch;
     if let Came::Started = came {
         for n in 1..=2 {
-            let ack = js_provider::Provider::start(&mut provider, spec_of(n));
+            let ack = js_provider::Pool::start(&mut provider, spec_of(n));
             assert_eq!(ack, StartAck::Started { host: host("a") });
         }
     }

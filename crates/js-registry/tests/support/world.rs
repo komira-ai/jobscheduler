@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::*;
 use js_agent_wire::{Command, Isolation, JobSpec, Limits, Taint};
 use js_lease::{Clock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, Reservation, WholeNodeConfig};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, RequestId, ResourceClass,

@@ -10,7 +10,7 @@ mod support;
 use std::time::Duration;
 
 use js_agent_wire::{ExclusiveRefusal, RefusalReason};
-use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{ProviderId, Request, ResourceClass};
 use support::*;

@@ -9,7 +9,7 @@
 
 use js_elastic::{Offer, PriceUnit, RefusalCode};
 use js_elastic_fake::{Bill, Billing, Call, ElasticFake, FakeClock, Step};
-use js_provider::{Provider, StartAck, StopAck};
+use js_provider::{Pool, StartAck, StopAck};
 use js_provider_lambdalabs::Call as LambdaCall;
 use js_scaler::{Blocked, Phase};
 use js_types::{ExecMode, LeaseId, Model, accelerator_of};

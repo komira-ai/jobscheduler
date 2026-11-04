@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::{Shared, router};
-use crate::adapt::{BoxedProvider, SharedClock};
+use crate::adapt::{BoxedPool, SharedClock};
 use crate::agents::Agents;
 use crate::config::parse_token;
 use crate::sched::place::SchedPlacer;
@@ -100,7 +100,7 @@ impl Rig {
         let provider = registry.provider().with_classes(vec![share()]);
         let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
         let table = LeaseTable::open(
-            BoxedProvider(Box::new(provider)),
+            BoxedPool(Box::new(provider)),
             shared_clock.clone(),
             settings,
             dir.path().join("leases.toml"),

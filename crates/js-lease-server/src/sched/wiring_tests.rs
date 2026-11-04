@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use js_agent_wire::Hello;
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
 use js_types::{HostId, LeaseId, Request, ResourceClass, Resources};

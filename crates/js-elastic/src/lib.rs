@@ -26,10 +26,12 @@
 //! - `conformance` (module, behind the `conformance` feature, off by default) is the suite
 //!   of cases every provider runs: `conformance::run_all` over a `conformance::Rig` the
 //!   provider's crate writes. A new provider crate enables the feature in its
-//!   `[dev-dependencies]` and adds one test file that calls it.
+//!   `[dev-dependencies]` and adds one test file that calls it. A provider that cannot
+//!   launch runs `conformance::run_all_registered` over a `conformance::RegisteredRig`
+//!   instead.
 //!
-//! Nothing here does I/O or reads a clock; the lease-level `Provider` of `js-provider`
-//! is a different trait and does not change.
+//! Nothing here does I/O or reads a clock; the lease-level `Pool` of `js-provider` (the
+//! scheduler's allocation port) is a different trait.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 

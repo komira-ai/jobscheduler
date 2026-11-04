@@ -109,8 +109,8 @@ pub type EventStream = Box<dyn Iterator<Item = ProviderEvent> + Send>;
 /// call slow. [`CapacityProvider::id`], [`CapacityProvider::can_launch`],
 /// [`CapacityProvider::capabilities`], [`CapacityProvider::capacity`] and
 /// [`CapacityProvider::verify_instance`] answer from the provider's own code and records
-/// and make no call. It is not the lease-level `Provider` of `js-provider`, which books
-/// hosts that already exist.
+/// and make no call. It is not the lease-level `Pool` of `js-provider`, the allocation
+/// port that books hosts that already exist.
 ///
 /// What each call means is pinned by the cases of the `conformance` module (behind the
 /// crate's `conformance` feature), which every provider crate runs against its provider.
