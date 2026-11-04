@@ -1,7 +1,7 @@
 //! The steps that prepare Lambda's stock image: against files, at the size bounds and at
 //! the edge of the disk.
 
-use js_elastic::{BootStep, ElasticProvider};
+use js_elastic::{BootStep, CapacityProvider};
 use js_provider_lambdalabs::{
     ConfigError, DEFAULT_SCRATCH_GIB, DISK_RESERVE_GIB, MAX_SCRATCH_GIB, MIN_SCRATCH_GIB,
 };

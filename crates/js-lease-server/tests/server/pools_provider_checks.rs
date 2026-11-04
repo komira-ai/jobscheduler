@@ -5,7 +5,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_elastic::{ElasticProvider, SchedulerId};
+use js_elastic::{CapacityProvider, SchedulerId};
 use js_provider_lambdalabs::{
     Architecture, Call, ElasticConfig, FakeLambda, InstanceTypeOffer, LambdaProvider, ManualClock,
     OptionTable, Region,
@@ -56,7 +56,7 @@ async fn start(name: &str, table: &str) -> Account {
         config(),
     );
     let cloud = FakeCloud::new(Vec::new());
-    let provider: Arc<dyn ElasticProvider> = Arc::new(provider);
+    let provider: Arc<dyn CapacityProvider> = Arc::new(provider);
     cloud.delegate(provider);
     let rig = Rig::start_over(name, cloud, Options::default()).await;
     Account { fake, rig }
