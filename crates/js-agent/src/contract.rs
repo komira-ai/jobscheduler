@@ -268,7 +268,7 @@ mod tests {
         );
         assert_eq!(contained.validate(), Ok(()));
         let mut native = hello();
-        assert!(report_native(&mut native).is_empty());
+        assert!(report_native(&mut native, true).is_empty());
         assert_eq!(flag(&native, START_FENCE_CAPABILITY), None);
         assert_eq!(flag(&native, PER_JOB_CAPABILITY), None);
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
