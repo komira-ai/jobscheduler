@@ -195,14 +195,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The lease server and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the
-        # Mac host tools (js-mac-session, js-mac-provision) also build for Apple silicon.
+        # The five Linux binaries build for two architectures, x86_64 and arm64, each natively
+        # on a hosted runner of its own architecture (no cross linker, no emulation), so the
+        # check step below runs every binary on the kind of host it is for. The lease server
+        # and js-mdm are Linux-only; the client, the agent, the js-bundle CLI and the Mac host
+        # tools (js-mac-session, js-mac-provision) also build for Apple silicon.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
-          # Linux host, whatever its libc. rustls links ring, which compiles C, hence
-          # musl-tools.
+          # Linux host of their architecture, whatever its libc. rustls links ring, which
+          # compiles C, hence musl-tools on both Linux legs.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
             builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mdm:js-mdm
           - target: aarch64-apple-darwin
             runner: macos-15
@@ -216,10 +222,17 @@ jobs:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
       - name: Install musl tools
-        if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
+      # ring's C code for arm64 musl. On the arm64 runner the host (aarch64 glibc) and the target
+      # differ, so the cc crate looks for the compiler `aarch64-linux-musl-gcc`; musl-tools installs
+      # it as `musl-gcc` only (for x86_64 the cc crate falls back to `musl-gcc` by itself). The
+      # link gives musl-tools' compiler the name the crate looks for.
+      - name: Name musl-gcc as the arm64 musl compiler
+        if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+        run: sudo ln -s /usr/bin/musl-gcc /usr/local/bin/aarch64-linux-musl-gcc
       # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
       # (`gtar`), and this installs it if an image does not.
       - name: Install GNU tar
@@ -257,7 +270,7 @@ jobs:
             cargo build --locked --release --target "$TARGET" -p "$package" --bin "$bin"
             name="$bin-$VERSION-$TARGET"
             # The files of the archive (crates/xtask/src/release/stage.rs): the binary, LICENSE
-            # and, in the Linux js-agent archive, updater.d/js-agent.toml.
+            # and, in the Linux js-agent archive of either architecture, updater.d/js-agent.toml.
             cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$VERSION" --out "stage-$bin"
             "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
@@ -339,7 +352,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-aarch64-unknown-linux-musl.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-aarch64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-bundle-$VERSION-aarch64-apple-darwin.tar.gz js-bundle-$VERSION-aarch64-unknown-linux-musl.tar.gz js-bundle-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-aarch64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz js-mac-provision-$VERSION-aarch64-apple-darwin.tar.gz js-mac-session-$VERSION-aarch64-apple-darwin.tar.gz js-mdm-$VERSION-aarch64-unknown-linux-musl.tar.gz js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"

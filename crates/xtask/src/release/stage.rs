@@ -3,8 +3,9 @@
 //! exactly the files [`members`] lists, copied from the checkout. The workflow then archives it
 //! (`.github/workflows/release.yml`, docs/release.md).
 //!
-//! Every archive holds its binary and the repository's `LICENSE`. The Linux archive of `js-agent`
-//! also holds the host updater's declaration as `updater.d/js-agent.toml` ([`DECLARATION_MEMBER`]),
+//! Every archive holds its binary and the repository's `LICENSE`. The Linux archive of `js-agent`,
+//! of either architecture (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), also
+//! holds the host updater's declaration as `updater.d/js-agent.toml` ([`DECLARATION_MEMBER`]),
 //! the name kbf's release unpacker takes it by, so the updater reads the rights of a release
 //! from the release itself. The Mac archive does not: a Mac runs no generic updater, and its
 //! package carries its own declaration.
@@ -25,7 +26,8 @@ pub struct StageArgs {
     /// The binary the archive is of (`js-agent`).
     #[arg(long)]
     pub bin: String,
-    /// The target it was built for (`x86_64-unknown-linux-musl`).
+    /// The target it was built for (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+    /// `aarch64-apple-darwin`).
     #[arg(long)]
     pub target: String,
     /// The release version, `MAJOR.MINOR.PATCH`.
