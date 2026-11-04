@@ -2,7 +2,8 @@
 //! default is the registry, which is the server as it was; `js-sched` has the scheduler
 //! choose among the hosts with room and lets leases of a class that books part of a host
 //! share one. These tests read the flag and the key; where the leases land is tested in
-//! process, without a listener, in `src/sched/wiring_tests.rs`.
+//! process, without a listener, in `src/sched/wiring_tests.rs`, `src/sched/engine_tests.rs`
+//! and `src/sched/engine_cases_tests.rs` (which also covers the routes).
 
 use std::ffi::OsString;
 
