@@ -660,7 +660,7 @@ fn the_crun_runtimes_port_is_the_host_side() {
     use crate::crun::EgressPort;
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
-    let port: &dyn EgressPort = &egress;
+    let port: Arc<dyn EgressPort> = crate::crun::port_of(&egress);
     port.check().expect("as loaded");
     let before = fake.log().len();
     let wired = port.attach("one", PID).expect("attach");

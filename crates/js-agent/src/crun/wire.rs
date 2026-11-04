@@ -14,7 +14,7 @@ use js_contain::oci::RESOLV_CONF;
 use js_contain::subids::IdFiles;
 use js_oci::{Client, Policy};
 
-use super::{CgroupSettings, CrunError, CrunRuntime, CrunSettings, EgressPort, Hooks, config_dir};
+use super::{CgroupSettings, CrunError, CrunRuntime, CrunSettings, Hooks, config_dir, port_of};
 use crate::cli_runtime::{CGROUP_ROOT, CrunPlan, Mapping};
 use crate::crun_host::CrunHost;
 use crate::egress::{Config, Egress};
@@ -207,10 +207,7 @@ pub fn open(
         host_id: host_id.to_owned(),
         pull_threads: PULL_THREADS,
         files: plan.files.clone(),
-        egress: plan
-            .egress
-            .clone()
-            .map(|egress| Arc::new(egress) as Arc<dyn EgressPort>),
+        egress: plan.egress.as_ref().map(port_of),
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
     let (uid, gid) = runtime.subordinate_ids();

@@ -123,6 +123,7 @@ mod tests;
 mod wire;
 
 use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
+pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};

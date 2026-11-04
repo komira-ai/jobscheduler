@@ -9,6 +9,7 @@
 //! [`Wired::release`] once the run has ended or is removed. An agent in mode none has no
 //! port, and none of this runs: its containers have loopback only, as before.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_contain::container::ContainerSpec;
@@ -64,6 +65,11 @@ impl Wired for Attachment {
     fn release(self: Box<Self>) -> Result<(), EgressError> {
         Attachment::release(*self)
     }
+}
+
+/// The port of the host's `egress`, for the runtime opened from a plan that carries it.
+pub(crate) fn port_of(egress: &Egress) -> Arc<dyn EgressPort> {
+    Arc::new(egress.clone())
 }
 
 /// The egress of an agent whose `--egress*` flags are `config`, started by `start`
