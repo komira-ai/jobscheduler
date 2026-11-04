@@ -264,9 +264,9 @@ Default `registry`: first free host by id, one lease per host. A class that book
 Limits: 256 live runs and 256 finished runs kept per host; the log tail is the last 8 KiB of stdout and stderr. Runs are in server memory only.
 
 6. After the lease ends (release or expiry) its runs are swept and `ack` answers `stale`: a client that reads a result after releasing gets nothing. Read results before releasing (section 8, row 33).
-7. A run the server listed as `Queued` goes `NeverStarted` after a hello gap, and a `NeverStarted` run did not run. A run the agent lost (for example after a crun agent restart) is `Ended` with no result; `result` absent is the only thing that separates it from an exit.
+7. A run the server listed as `Queued` goes `NeverStarted` after a hello gap (`Runs::sync`, `next_life`). That is the server's observation: no heartbeat ever listed the run. It does not prove the job never executed. A delivered `Start` can run before any heartbeat lists it; if the crun agent then restarts, its new runtime lists nothing, and the still-`Queued`, unlisted run is classified `NeverStarted` after the gap. Whether it ran stays uncertain across that window (section 8, row 4). A run the agent lost (for example after a crun agent restart) is `Ended` with no result; `result` absent is the only thing that separates it from an exit.
 
-**Agent side** (`js-agent/src/lifecycle/mod.rs`): the heartbeat loop never calls the runtime. A worker thread owns the lifecycle; replies are handed over without waiting and dropped when its queue is full (the server resends). A start is idempotent on run id; the agent remembers recently retired ids in memory (the size bound is not documented, and the list is empty after an agent restart; section 8, row 34); a start later than its `valid_for_ms` is dropped. Refusals create nothing and return `failed_to_start` with a code (for example `host-tainted`, `limits-exceed-shape`, `gpu-unsupported`, `egress-unchecked`, `invalid-mount`, `host-jobs-not-allowed`).
+**Agent side** (`js-agent/src/lifecycle/mod.rs`): the heartbeat loop never calls the runtime. A worker thread owns the lifecycle; replies are handed over without waiting and dropped when its queue is full (the server resends). A start is idempotent on run id; the agent remembers retired ids in memory, at most `RETIRED_CAP` (4096, equal to `MAX_HELD`); when full, the oldest id is forgotten and a start for it would run again, and the list is empty after an agent restart (section 8, row 34); a start later than its `valid_for_ms` is dropped. Refusals create nothing and return `failed_to_start` with a code (for example `host-tainted`, `limits-exceed-shape`, `gpu-unsupported`, `egress-unchecked`, `invalid-mount`, `host-jobs-not-allowed`).
 
 **Containment with the crun runtime** (`js-agent/src/crun/`, `js-contain`):
 
@@ -275,7 +275,7 @@ Limits: 256 live runs and 256 finished runs kept per host; the log tail is the l
 - Capability sets all empty, no new privileges, a pinned seccomp profile, masked and read-only paths, a private cgroup namespace, core dumps off.
 - A per-lease cgroup with the booking as limit; out-of-memory is reported only if the lease cgroup says so.
 - A per-run scratch directory owned by the job identity, with an optional filesystem project quota.
-- Loopback only: no network, no GPUs. The allow-list egress module exists but is refused at start. (The Podman path has its own shipped nftables allow-list, re-verified before every container create.)
+- Loopback only: no network, no GPUs. The allow-list egress module exists but is refused at start (`--egress` other than `none` is refused with `--runtime crun`), so a crun job cannot reach an object store today; the upload below is the planned shape for a runtime with configured egress (section 13, question 9). (The Podman path has its own shipped nftables allow-list, re-verified before every container create.)
 - The wall limit runs on the agent's monotonic clock from container start. It is computed from the time left in the lease when the reply is sent (`valid_for_ms`) and counted from when the reply reaches the agent, so a run can outlast the lease end by transit time, queueing delay and the stop grace. Stop is SIGTERM, a grace period, then a cgroup kill.
 
 **Write fencing.** jobscheduler does not mint or check object-store credentials. The fence is a capability the client builds and the agent carries:
@@ -285,7 +285,7 @@ Limits: 256 live runs and 256 finished runs kept per host; the log tail is the l
 3. The agent writes the files to a memory-backed directory (it refuses to start if the root is not tmpfs) and mounts it read-only into the job. File contents are secret: debug output prints names and lengths only.
 4. The agent returns the container's exit code. The client verifies what was stored under the key before adopting it.
 
-What this guarantees: a job can write one object, once, and cannot delete or overwrite. What it does not: the agent has no `fence` field on a start; a job whose lease ended keeps running until its wall limit (section 8).
+What this guarantees, provided the client's grant is built as described and the object store enforces it (jobscheduler checks neither): a job can write one object, once, and cannot delete or overwrite. A crun job cannot make the upload at all until egress is wired (see Containment above); the Podman path with its allow-list can. What it does not: the agent has no `fence` field on a start; a job whose lease ended keeps running until its wall limit (section 8).
 
 **Taint.** After a job, the agent runs checks: container and scratch removed, watch directories unchanged, no leftover process. Any failure writes a taint marker under the state root before it is reported. The marker is permanent; nothing in the code clears it. A tainted host takes no start, no run, no lease. Reimage is the only clear.
 
@@ -391,7 +391,7 @@ Marks on hosts that never say hello are dropped after `claim_by`.
 | Crash between pending write and provider start | Pending record is on disk; next boot or tick resolves it by observation; no booking nobody knows about. | `js-lease` |
 | Provider says unknown | Start stays pending; stop stays releasing; only absent frees. | `table.rs`, `book.rs` |
 | Lease file write fails on acquire | Provider not called; the record stays in memory and is dropped at a later tick because the registry reads `Absent` for a booking it never made. | `table.rs` |
-| Lease file replace fails | Atomic: write temp, sync, rename, sync directory; old file stays. Restart refuses a short file. | `store.rs` |
+| Lease file replace fails | Write temp, sync, rename, sync directory. A failure before the rename leaves the old file. A failure after it (opening or syncing the directory) returns an error with the new file already in place and its crash durability uncertain. Restart refuses a short file. | `store.rs` |
 | Renewal not saved | In-memory expiry only; the tick retries the save while unsaved. | `table.rs` |
 | Whole-node ready report races the prepare deadline | Registry is asked first; expire only if still no answer a tick later; host restored. | `book.rs` |
 | Flapping agent during whole-node commit | A hello keeps the commit time of a `Committed` host. For a `Ready` host the time is reset to the hello time, so the deadline can be postponed (section 8, row 27). | `exclusive.rs` |
@@ -400,9 +400,9 @@ Marks on hosts that never say hello are dropped after `claim_by`.
 | Taint | Written before reported; acknowledged only after the server wrote it; permanent. | `lifecycle/mod.rs`, `agent_state.rs` |
 | Connection abuse | 256 connections max, permit before accept, handshake, header, read and write timeouts, max requests per connection, 64 KiB head and body caps, 10 s drain. | `lease-server` |
 | Result lost | The agent holds results until acknowledged and resends. | `lifecycle/mod.rs` |
-| Duplicate start | Idempotent on run id; recently retired ids never run. | `lifecycle/mod.rs` |
+| Duplicate start | Idempotent on run id; retired ids do not run again while remembered (the newest `RETIRED_CAP`, 4096; in memory, lost on agent restart; section 8, row 34). | `lifecycle/mod.rs` |
 | Welcome lost after token retired | Host holds nothing valid; hello 401; agent exits; scaler releases at boot timeout. | `agent_api.rs` |
-| Stop of an unknown run | Its id is retired, so a later start never runs. | `lifecycle/mod.rs` |
+| Stop of an unknown run | Its id is retired, so a later start does not run while the id is remembered (same bound as above). | `lifecycle/mod.rs` |
 | Mac teardown fails | Uid quarantined; lease stays in journal; reclaim at next start. | `native/mod.rs` |
 | Image garbage collection under a lease | A pin keeps a leased image from removal until the lease is removed. | `js-contain` |
 
@@ -445,7 +445,7 @@ This is the test list. "Open" means the code loses it today and a test should be
 | 31 | Synchronous lease-file writes on the async runtime | Open | Each save is write, fsync, rename, directory sync inside the table mutex on a runtime worker. A slow disk stalls heartbeat handlers, and healthy hosts can pass the 15 s grace and read lost. No bound is decided between save time and grace. | Inject a slow save; assert heartbeats are still answered inside the grace. |
 | 32 | Wall-clock step beyond leases | Open | See row 9. Host liveness, reservation, wait-list, join token and run end use the system clock. Only the agent's `valid_for_ms` counting is monotonic, and it starts at the reply's arrival, not at send. | Step the clock forward past the grace; assert no host is lost, or document it. |
 | 33 | Results unreadable after the lease ends | Open | `ack` returns `stale` and `sweep` drops finished runs once the lease no longer holds the host. Undecided: may a result be read after release, and for how long. | Release, then read a finished run's result. |
-| 34 | Start resend and the retired-id list | Open | A `Queued` run whose accepted result arrives before the server has seen it listed is resent; only the agent's in-memory retired list stops a rerun. The list's size bound is undocumented and it is empty after an agent restart. | Restart the agent, replay a stale Start; assert the job does not run again. |
+| 34 | Start resend and the retired-id list | Open | A `Queued` run whose accepted result arrives before the server has seen it listed is resent; only the agent's in-memory retired list stops a rerun. The list holds the newest 4096 ids (`RETIRED_CAP`); an older id is forgotten and can run again (`the_memory_of_stopped_runs_is_bounded`), and the list is empty after an agent restart. | Restart the agent, replay a stale Start; assert the job does not run again. |
 | 35 | Heartbeat order around the second heartbeat after a stop | Documented | `Exclusive::after_beat` counts any admitted heartbeat, duplicates and retries included, and assumes one heartbeat in flight per agent. | Send a duplicate heartbeat after a stop; assert the restore count. |
 | 36 | Bindings save result ignored on hello | Suspected | `save_bindings` is awaited and its result dropped; the Welcome, which may carry a new host credential, is sent either way. If the credential is persisted only in the bindings file, a crash after a failed save leaves the host at 401 until the scaler releases it. Where the credential is persisted is not confirmed. | Fail the bindings save on hello, restart the server; assert the next hello. |
 | 37 | Token on a retried scaler launch | Suspected | A retry is the same instance, but the caller gives `Launcher::acquire` a fresh token. Whether the first token (in the payload the instance booted with) stays valid is not confirmed; the join-token store was not read. | Crash after launch, retry; assert which token the instance can use. |

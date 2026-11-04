@@ -89,7 +89,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="470" y="450" width="130" height="50" rx="5" class="box-o"/>
 <text x="535.0" y="479.0" class="b" text-anchor="middle">job</text>
 <path d="M600,475 L1160,475" class="ln-d" marker-end="url(#job-execution-ak)"/>
-<text x="890" y="467" class="t-m lbl" text-anchor="middle">one PUT; second write refused (412)</text>
+<text x="890" y="449" class="t-m lbl" text-anchor="middle">planned: crun is loopback only today,</text><text x="890" y="465" class="t-m lbl" text-anchor="middle">so no upload; one PUT, second refused (412)</text>
 <rect x="1160" y="445" width="110" height="60" rx="5" class="box-g"/>
 <text x="1215.0" y="479.0" class="b" text-anchor="middle">Object store</text>
 <path d="M620,575 L660,575" class="ln" marker-end="url(#job-execution-ak)"/>
@@ -103,8 +103,10 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="970.0" y="587.5" class="t-m" text-anchor="middle">carries result</text>
 <path d="M1060,575 L1130,575 L1130,188 L1060,188" class="ln" marker-end="url(#job-execution-ak)"/>
 <text x="1144" y="330" class="t-m lbl" text-anchor="middle" transform="rotate(-90 1144 330)">result</text>
-<path d="M1060,205 L1090,205 L1090,678 L1060,678" class="ln" marker-end="url(#job-execution-ak)"/>
-<text x="1108" y="640" class="t-m lbl" text-anchor="middle" transform="rotate(-90 1108 640)">ack, then clean up</text>
+<path d="M1060,205 L1090,205 L1090,590 L1060,590" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="1108" y="400" class="t-m lbl" text-anchor="middle" transform="rotate(-90 1108 400)">ack: agent drops held result</text>
+<path d="M800,605 L960,650" class="ln" marker-end="url(#job-execution-ak)"/>
+<text x="880" y="635" class="t-m lbl" text-anchor="middle">cleanup after exit</text>
 <text x="370" y="640" class="t-m" text-anchor="start">agent cleanup chain</text>
 <rect x="910" y="650" width="150" height="56" rx="5" class="box-b"/>
 <text x="985.0" y="682.0" class="b" text-anchor="middle">container</text>
