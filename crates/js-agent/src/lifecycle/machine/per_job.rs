@@ -159,3 +159,7 @@ impl Lifecycle {
         self.answered.clone()
     }
 }
+
+#[cfg(test)]
+#[path = "per_job_tests.rs"]
+mod tests;
