@@ -68,6 +68,16 @@ fn journal_of(h: &Native) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
+/// Gives the agent's write permission back on every run directory of `h`'s files root,
+/// which a test that ends without removing its runs leaves `0500`, so the test's directory
+/// can be removed.
+fn reopen(h: &Native) {
+    for entry in fs::read_dir(root_of(h)).unwrap() {
+        let path = entry.unwrap().path();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
 /// The uid the fake helper answers `user-create` with.
 fn helper_uid() -> u32 {
     rustix::process::getuid().as_raw()
@@ -121,6 +131,7 @@ fn files_are_readable_by_the_job_user_only() {
     assert_eq!((mode(&other), mode(&other.join("grant"))), (0o500, 0o400));
     let want = [(other.join("grant"), uid, gid), (other.clone(), uid, gid)];
     assert_eq!(*handed.lock().unwrap(), want);
+    reopen(&h);
 }
 
 /// Asserts what the run is told of its files and what its profile lets it do there: the
@@ -157,6 +168,7 @@ fn the_profile_grants_read_of_the_files_directory_and_no_write_there() {
     }
     assert!(parsed.profile.contains("(allow default)"));
     assert_eq!(mode(Path::new(&dir)), 0o500, "lchown to the same uid");
+    reopen(&h);
 
     let mut rig = Rig::new("files-env");
     let mut body = native("/bin/cat", &[]);

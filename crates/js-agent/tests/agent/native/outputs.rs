@@ -289,3 +289,25 @@ fn a_collection_failure_is_a_finding_and_leaves_the_host_untainted() {
     assert!(!h.fake.home_of("7.0").exists());
     assert_eq!(h.start(job("r2", "/bin/sh")), ["started r2"]);
 }
+
+/// Asserts that a file output with a second name (a hard link to a file outside the home,
+/// which a job may make to a file it cannot read) is not copied and is a failure, while the
+/// file it names is untouched. It catches the root agent copying a file the job could not
+/// read itself.
+#[test]
+fn a_file_with_a_second_name_is_not_copied() {
+    let declared = vec![output("hard", OutputKind::File)];
+    let (mut rig, exec) = started("outputs-hard", 1 << 20, declared);
+    let outside = rig.dir.path("outside");
+    fs::write(&outside, b"not the job's").unwrap();
+    fs::hard_link(&outside, exec.join("hard")).unwrap();
+    rig.fake.exit("7.0", 0);
+    rig.settle(&handle());
+    let why = rig.rt.remove(&handle()).unwrap_err();
+    assert_eq!(
+        why.0,
+        "outputs not copied: hard: a file with 2 names: not copied"
+    );
+    assert!(!collected(&rig).join("hard").exists());
+    assert_eq!(fs::read(&outside).unwrap(), b"not the job's");
+}

@@ -193,8 +193,12 @@ impl Run {
             return;
         }
         let into = outputs::dir_in(&self.scratch);
-        let limits = (max_file_bytes, outputs::MAX_COLLECTED_BYTES);
-        let done = outputs::collect(&self.home, &self.outputs, &into, limits);
+        let caps = outputs::Caps {
+            file_bytes: max_file_bytes,
+            run_bytes: outputs::MAX_COLLECTED_BYTES,
+            entries: outputs::MAX_ENTRIES,
+        };
+        let done = outputs::collect(&self.home, &self.outputs, &into, caps);
         for (path, bytes) in &done.copied {
             tracing::info!("native {lease}: output {path:?} copied, {bytes} bytes");
         }
@@ -630,7 +634,7 @@ impl Runtime for NativeRuntime {
             failed if failed.is_empty() => Ok(()),
             failed => Err(RuntimeError::outputs(format!(
                 "outputs not copied: {}",
-                failed.join("; ")
+                outputs::told(&failed)
             ))),
         }
     }
