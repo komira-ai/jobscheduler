@@ -1,0 +1,38 @@
+[package]
+name = "js-jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The job store suite (`suite`, `job_store_tests!`), the store wrapper that fails or races
+# the next commit (`interfere`) and the scripted id source. Test-only: a production build
+# carries none of it. A crate whose tests run the suite enables it in its
+# `[dev-dependencies]` entry for js-jobs.
+test-support = ["js-state/test-support"]
+# The Postgres backend of js-state, for tests/postgres_jobs.rs. Off by default: the
+# `state-postgres` CI job turns it on.
+postgres = ["js-state/postgres"]
+
+[dependencies]
+# A minted job id and every allocation id are 128 bits from the system's random source.
+getrandom.workspace = true
+js-state = { path = "../js-state" }
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+# A row a later build wrote, which this one cannot read, is logged where a list skips it.
+tracing.workspace = true
+
+[dev-dependencies]
+# This crate's own tests see the suite and the scripted ids.
+js-jobs = { path = ".", features = ["test-support"] }
+# The in-memory fake and its deliberate defects, and the suite's `Backend` trait.
+js-state = { path = "../js-state", features = ["test-support"] }
+# The SQLite test's scratch directories and the Postgres test's server URL.
+js-testkit = { path = "../js-testkit", features = ["postgres"] }
+
+[lints]
+workspace = true

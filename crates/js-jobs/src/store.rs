@@ -1,0 +1,742 @@
+//! [`JobStore`]: the job and allocation tables over a state [`Store`].
+
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
+use js_state::{Commit, Cond, Conflict, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
+use js_types::HostId;
+
+use crate::codec::{
+    Carried, DecodeError, decode_allocation, decode_job, encode_allocation, encode_job,
+};
+use crate::error::JobStoreError;
+use crate::ids::{AllocationId, IdSource, JobId, RandomIds};
+use crate::keys;
+use crate::record::{
+    AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
+    Needs, may_move,
+};
+
+/// The schema version of the rows this build writes.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// How many ids [`JobStore::insert_queued`] mints for a job without one before it gives up.
+pub const MINT_TRIES: usize = 8;
+
+/// The most jobs one [`JobStore::list_jobs`] page holds, whatever limit is asked for.
+pub const MAX_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(999);
+
+/// A job to record: its id if the client gave one, the job, and its priority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewJob {
+    /// The client's id, or `None` for the store to mint one.
+    pub id: Option<JobId>,
+    /// The job.
+    pub spec: JobSpec,
+    /// Its priority.
+    pub priority: i32,
+}
+
+/// What [`JobStore::insert_queued`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inserted {
+    /// The job's record: the new one, or the one already stored, as it is now.
+    pub record: JobRecord,
+    /// Whether this call recorded it.
+    pub created: bool,
+}
+
+/// A page of [`JobStore::list_jobs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobPage {
+    /// The jobs of the page that pass the filter, in key order.
+    pub jobs: Vec<JobRecord>,
+    /// The keys of the page's rows a later build wrote, left out (and logged).
+    pub skipped: Vec<String>,
+    /// Where the next page begins; `None` on the last page.
+    pub resume: Option<ResumeToken>,
+}
+
+/// The job and allocation tables over a state store. Every operation that writes is one
+/// [`Store::txn`]: it commits fully or returns an error having written nothing, and the
+/// record it returns is what it committed. Nothing is cached: each operation reads the rows
+/// it needs, decides, and commits with the versions it read as preconditions, so a row that
+/// changed in between makes the operation [`JobStoreError::Stale`].
+pub struct JobStore<S, I = RandomIds> {
+    store: Arc<S>,
+    ids: I,
+    schema: u32,
+}
+
+/// `Err(error)` unless `ok`.
+fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
+    if ok { Ok(()) } else { Err(error) }
+}
+
+/// The schema version a `meta/jobs/schema` row holds.
+fn schema_of(row: Option<Versioned>) -> Result<u32, JobStoreError> {
+    let corrupt = |why| JobStoreError::Corrupt {
+        key: keys::SCHEMA.to_owned(),
+        why,
+    };
+    let value = row.ok_or(corrupt(DecodeError::Missing { tag: 0 }))?.value;
+    let bytes: [u8; 4] = value
+        .as_slice()
+        .try_into()
+        .map_err(|_| corrupt(DecodeError::BadLength { tag: 0 }))?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+impl<S: Store, I: IdSource> JobStore<S, I> {
+    /// The job store over `store`, minting ids from `ids`. The first store to open writes the
+    /// schema version; a version above this build's is accepted, since rows change only by
+    /// adding fields.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Store`] when the store fails; [`JobStoreError::Corrupt`] when the
+    /// schema row is not four bytes.
+    pub fn new(store: Arc<S>, ids: I) -> Result<JobStore<S, I>, JobStoreError> {
+        let mark = Txn::new().put(
+            keys::SCHEMA,
+            SCHEMA_VERSION.to_be_bytes().to_vec(),
+            Cond::Absent,
+        );
+        // A conflict is a schema row another store wrote first; it is read back below.
+        let _first: Result<Commit, Conflict> = store.txn(mark)?;
+        let schema = schema_of(store.get(keys::SCHEMA)?)?;
+        Ok(JobStore { store, ids, schema })
+    }
+
+    /// The schema version the store holds, which a later build may have raised.
+    #[must_use]
+    pub fn stored_schema(&self) -> u32 {
+        self.schema
+    }
+
+    /// Records a job as queued (design section 5.3, steps 2 and 4).
+    ///
+    /// With an id: when a job with that id exists, the same job (every field of the spec;
+    /// the priority is not compared) is answered from the stored record, in whatever state
+    /// it is now, with `created: false`; a different one is [`JobStoreError::JobIdConflict`].
+    /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
+    /// times.
+    ///
+    /// # Errors
+    /// [`JobStoreError::JobIdConflict`], [`JobStoreError::IdSpaceExhausted`],
+    /// [`JobStoreError::UnknownRow`] when the id's row is one a later build wrote,
+    /// [`JobStoreError::Store`] or [`JobStoreError::Mint`].
+    pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
+        let NewJob { id, spec, priority } = job;
+        match id {
+            Some(id) => self.insert_with_id(id, spec, priority),
+            None => self.insert_minted(&spec, priority),
+        }
+    }
+
+    fn queued(&self, id: JobId, spec: JobSpec, priority: i32) -> JobRecord {
+        JobRecord {
+            id,
+            spec,
+            priority,
+            state: JobState::Queued,
+            submitted_at: self.store.now(),
+            placed_at: None,
+            started_at: None,
+            ended_at: None,
+            host: None,
+            cancel_requested: false,
+            cancel_requested_at: None,
+            retention_ends: None,
+            carried: Carried::default(),
+        }
+    }
+
+    /// The stored job `id` when it is the same job as `spec`, `None` when there is none.
+    fn same_job(&self, id: &JobId, spec: &JobSpec) -> Result<Option<Inserted>, JobStoreError> {
+        let Some((record, _)) = self.read_job(id)? else {
+            return Ok(None);
+        };
+        ensure(
+            record.spec == *spec,
+            JobStoreError::JobIdConflict { id: id.clone() },
+        )?;
+        Ok(Some(Inserted {
+            record,
+            created: false,
+        }))
+    }
+
+    fn insert_with_id(
+        &self,
+        id: JobId,
+        spec: JobSpec,
+        priority: i32,
+    ) -> Result<Inserted, JobStoreError> {
+        if let Some(found) = self.same_job(&id, &spec)? {
+            return Ok(found);
+        }
+        let record = self.queued(id, spec, priority);
+        let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
+        match self.store.txn(txn)? {
+            Ok(_) => Ok(Inserted {
+                record,
+                created: true,
+            }),
+            // Another writer recorded the id between the read and the commit.
+            Err(_) => self
+                .same_job(&record.id, &record.spec)?
+                .ok_or(JobStoreError::Stale {
+                    id: record.id.clone(),
+                }),
+        }
+    }
+
+    fn insert_minted(&self, spec: &JobSpec, priority: i32) -> Result<Inserted, JobStoreError> {
+        for _ in 0..MINT_TRIES {
+            let record = self.queued(JobId::minted(self.ids.mint()?), spec.clone(), priority);
+            let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
+            if self.store.txn(txn)?.is_ok() {
+                return Ok(Inserted {
+                    record,
+                    created: true,
+                });
+            }
+        }
+        Err(JobStoreError::IdSpaceExhausted { tries: MINT_TRIES })
+    }
+
+    /// Places a queued job (design section 5.3, step 5): in one transaction the job becomes
+    /// placed on `host`, and its allocation is written as booked with a newly minted
+    /// allocation id. The job must still be queued at the version read, and its allocation
+    /// row must still be absent, or freed (a requeued job's earlier allocation, which the new
+    /// one overwrites), at the version read.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
+    /// queued; [`JobStoreError::AllocationHeld`] when its allocation is not freed;
+    /// [`JobStoreError::Stale`] when either row changed before the commit; as for any read and
+    /// write.
+    pub fn place(
+        &self,
+        id: &JobId,
+        host: HostId,
+        booked: Booked,
+    ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
+        let (job, job_version) = self.job_row(id)?;
+        ensure(
+            job.state == JobState::Queued,
+            JobStoreError::UnexpectedState {
+                id: id.clone(),
+                expected: JobState::Queued,
+                found: job.state,
+            },
+        )?;
+        let allocation_cond = match self.read_allocation(id)? {
+            None => Cond::Absent,
+            Some((earlier, version)) => {
+                ensure(
+                    earlier.step == AllocationStep::Freed,
+                    JobStoreError::AllocationHeld {
+                        id: id.clone(),
+                        step: earlier.step,
+                    },
+                )?;
+                Cond::Version(version)
+            }
+        };
+        let now = self.store.now();
+        let allocation = AllocationRecord {
+            job: id.clone(),
+            allocation_id: AllocationId::from_bits(self.ids.mint()?),
+            host: host.clone(),
+            booked,
+            step: AllocationStep::Booked,
+            created_at: now,
+            freed_at: None,
+            end_reason: None,
+            carried: Carried::default(),
+        };
+        let placed = JobRecord {
+            state: JobState::Placed,
+            host: Some(host),
+            placed_at: Some(now),
+            ..job
+        };
+        let txn = Txn::new()
+            .put(
+                keys::job(id),
+                encode_job(&placed)?,
+                Cond::Version(job_version),
+            )
+            .put(
+                keys::allocation(id),
+                encode_allocation(&allocation)?,
+                allocation_cond,
+            );
+        self.commit(id, txn)?;
+        Ok((placed, allocation))
+    }
+
+    /// Moves a job from `expected` to `next`: placed to starting to running to succeeded or
+    /// failed; a start failure from the state the design names for it; any state that has
+    /// not ended to cancelled or lost. Moving to running sets `started_at`; moving to an end
+    /// sets `ended_at` and, in the same transaction, moves a booked allocation of the job to
+    /// releasing (design section 8, row 25), so the job and its allocation never disagree.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not in
+    /// `expected`; [`JobStoreError::IllegalTransition`] for a move the design does not name
+    /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`]
+    /// and [`JobStore::place`] do); [`JobStoreError::Stale`]; as for any read and write.
+    pub fn transition(
+        &self,
+        id: &JobId,
+        expected: JobState,
+        next: JobState,
+    ) -> Result<JobRecord, JobStoreError> {
+        let (job, job_version) = self.job_row(id)?;
+        ensure(
+            job.state == expected,
+            JobStoreError::UnexpectedState {
+                id: id.clone(),
+                expected,
+                found: job.state,
+            },
+        )?;
+        ensure(
+            may_move(job.state, next),
+            JobStoreError::IllegalTransition {
+                id: id.clone(),
+                from: job.state,
+                to: next,
+            },
+        )?;
+        let now = self.store.now();
+        let ends = next.is_ended();
+        let moved = JobRecord {
+            state: next,
+            started_at: (next == JobState::Running)
+                .then_some(now)
+                .or(job.started_at),
+            ended_at: ends.then_some(now).or(job.ended_at),
+            ..job
+        };
+        let mut txn = Txn::new().put(
+            keys::job(id),
+            encode_job(&moved)?,
+            Cond::Version(job_version),
+        );
+        if ends
+            && let Some((allocation, version)) = self.read_allocation(id)?
+            && allocation.step == AllocationStep::Booked
+        {
+            let releasing = AllocationRecord {
+                step: AllocationStep::Releasing,
+                ..allocation
+            };
+            txn = txn.put(
+                keys::allocation(id),
+                encode_allocation(&releasing)?,
+                Cond::Version(version),
+            );
+        }
+        self.commit(id, txn)?;
+        Ok(moved)
+    }
+
+    /// The one requeue (design section 5.4): a placed whole-host job whose prepare failed goes
+    /// back to queued, with no host, and its allocation is freed with
+    /// [`EndReason::FailedPrepare`] in the same transaction (no container was made, so there
+    /// is nothing for the host to confirm). Its next placement gets a new allocation id.
+    ///
+    /// # Errors
+    /// [`JobStoreError::UnexpectedState`] when the job is not placed;
+    /// [`JobStoreError::IllegalTransition`] when it does not need the whole host or a cancel
+    /// was asked for (it is then cancelled, not requeued); [`JobStoreError::NoAllocation`];
+    /// [`JobStoreError::Stale`]; as for any read and write.
+    pub fn requeue_failed_prepare(
+        &self,
+        id: &JobId,
+    ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
+        let (job, job_version) = self.job_row(id)?;
+        ensure(
+            job.state == JobState::Placed,
+            JobStoreError::UnexpectedState {
+                id: id.clone(),
+                expected: JobState::Placed,
+                found: job.state,
+            },
+        )?;
+        ensure(
+            (job.spec.needs == Needs::WholeHost) & !job.cancel_requested,
+            JobStoreError::IllegalTransition {
+                id: id.clone(),
+                from: job.state,
+                to: JobState::Queued,
+            },
+        )?;
+        let (allocation, allocation_version) = self.allocation_row(id)?;
+        let now = self.store.now();
+        let queued = JobRecord {
+            state: JobState::Queued,
+            host: None,
+            placed_at: None,
+            ..job
+        };
+        let freed = AllocationRecord {
+            step: AllocationStep::Freed,
+            freed_at: Some(now),
+            end_reason: Some(EndReason::FailedPrepare),
+            ..allocation
+        };
+        let txn = Txn::new()
+            .put(
+                keys::job(id),
+                encode_job(&queued)?,
+                Cond::Version(job_version),
+            )
+            .put(
+                keys::allocation(id),
+                encode_allocation(&freed)?,
+                Cond::Version(allocation_version),
+            );
+        self.commit(id, txn)?;
+        Ok((queued, freed))
+    }
+
+    /// The client's cancel (design section 5.3): a queued job is cancelled at once (it has no
+    /// allocation to release); a placed, starting or running job gets the cancel intent and
+    /// nothing else, the job ending when the host reports it stopped; an ended job, or one
+    /// whose cancel was already asked for, is returned as it is, unwritten.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NotFound`]; [`JobStoreError::Stale`]; as for any read and write.
+    pub fn request_cancel(&self, id: &JobId) -> Result<JobRecord, JobStoreError> {
+        let (job, job_version) = self.job_row(id)?;
+        if job.state.is_ended() | job.cancel_requested {
+            return Ok(job);
+        }
+        let now = self.store.now();
+        let queued = job.state == JobState::Queued;
+        let next = JobRecord {
+            state: if queued {
+                JobState::Cancelled
+            } else {
+                job.state
+            },
+            ended_at: queued.then_some(now),
+            cancel_requested: true,
+            cancel_requested_at: Some(now),
+            ..job
+        };
+        let txn = Txn::new().put(
+            keys::job(id),
+            encode_job(&next)?,
+            Cond::Version(job_version),
+        );
+        self.commit(id, txn)?;
+        Ok(next)
+    }
+
+    /// Moves the allocation of a job that ended, or whose cancel was asked for, from booked to
+    /// releasing (design section 6.2). An allocation already releasing or freed is returned
+    /// as it is, unwritten.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NotFound`], [`JobStoreError::NoAllocation`];
+    /// [`JobStoreError::NotReleasable`] when the job has neither ended nor been asked to
+    /// cancel; [`JobStoreError::Stale`]; as for any read and write.
+    pub fn mark_releasing(&self, id: &JobId) -> Result<AllocationRecord, JobStoreError> {
+        let (job, _) = self.job_row(id)?;
+        let (allocation, version) = self.allocation_row(id)?;
+        ensure(
+            job.state.is_ended() | job.cancel_requested,
+            JobStoreError::NotReleasable { id: id.clone() },
+        )?;
+        if allocation.step != AllocationStep::Booked {
+            return Ok(allocation);
+        }
+        let releasing = AllocationRecord {
+            step: AllocationStep::Releasing,
+            ..allocation
+        };
+        let txn = Txn::new().put(
+            keys::allocation(id),
+            encode_allocation(&releasing)?,
+            Cond::Version(version),
+        );
+        self.commit(id, txn)?;
+        Ok(releasing)
+    }
+
+    /// Frees a job's allocation (design section 6.2): booked or releasing becomes freed, with
+    /// the time and `reason`. The row is kept and books nothing. An allocation already freed
+    /// is returned as it is, unwritten: the first reason stands.
+    ///
+    /// # Errors
+    /// [`JobStoreError::NoAllocation`]; [`JobStoreError::Stale`]; as for any read and write.
+    pub fn free(&self, id: &JobId, reason: EndReason) -> Result<AllocationRecord, JobStoreError> {
+        let (allocation, version) = self.allocation_row(id)?;
+        if allocation.step == AllocationStep::Freed {
+            return Ok(allocation);
+        }
+        let freed = AllocationRecord {
+            step: AllocationStep::Freed,
+            freed_at: Some(self.store.now()),
+            end_reason: Some(reason),
+            ..allocation
+        };
+        let txn = Txn::new().put(
+            keys::allocation(id),
+            encode_allocation(&freed)?,
+            Cond::Version(version),
+        );
+        self.commit(id, txn)?;
+        Ok(freed)
+    }
+
+    /// The job `id`, if there is one.
+    ///
+    /// # Errors
+    /// [`JobStoreError::UnknownRow`] when a later build wrote its row,
+    /// [`JobStoreError::Corrupt`] when it does not parse, [`JobStoreError::Store`].
+    pub fn get_job(&self, id: &JobId) -> Result<Option<JobRecord>, JobStoreError> {
+        Ok(self.read_job(id)?.map(|(record, _)| record))
+    }
+
+    /// The allocation of the job `id`, if it has one (freed ones included).
+    ///
+    /// # Errors
+    /// As [`JobStore::get_job`].
+    pub fn get_allocation(&self, id: &JobId) -> Result<Option<AllocationRecord>, JobStoreError> {
+        Ok(self.read_allocation(id)?.map(|(record, _)| record))
+    }
+
+    /// A page of jobs in id order, at most `limit` rows of the table (and at most
+    /// [`MAX_PAGE`]), from the start or from `resume`, keeping those in `state` when one is
+    /// given. Filtering happens within the page, so a page can hold fewer jobs than the limit,
+    /// or none, and still have a next page. A row a later build wrote is left out, logged and
+    /// named in [`JobPage::skipped`].
+    ///
+    /// # Errors
+    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Store`].
+    pub fn list_jobs(
+        &self,
+        state: Option<JobState>,
+        resume: Option<&ResumeToken>,
+        limit: NonZeroUsize,
+    ) -> Result<JobPage, JobStoreError> {
+        let scan = ScanRange::new(keys::JOB, limit.min(MAX_PAGE));
+        let scan = match resume {
+            Some(token) => scan.resume(token),
+            None => scan,
+        };
+        let page = self.store.scan_range(scan)?;
+        let mut jobs = Vec::new();
+        let mut skipped = Vec::new();
+        for (key, row) in page.rows {
+            match decode_job(&row.value) {
+                Ok(job) => {
+                    if state.is_none_or(|state| state == job.state) {
+                        jobs.push(job);
+                    }
+                }
+                Err(DecodeError::Newer) => {
+                    tracing::warn!(%key, "a job row a later build wrote is left out of the list");
+                    skipped.push(key);
+                }
+                Err(why) => return Err(JobStoreError::Corrupt { key, why }),
+            }
+        }
+        Ok(JobPage {
+            jobs,
+            skipped,
+            resume: page.resume,
+        })
+    }
+
+    /// What the live (booked and releasing) allocations on `host` book, summed. It reads
+    /// every allocation row, freed ones included.
+    ///
+    /// # Errors
+    /// [`JobStoreError::UnknownRow`] or [`JobStoreError::Corrupt`] when an allocation row
+    /// cannot be read (a booking that cannot be counted is not taken as none);
+    /// [`JobStoreError::BookingOverflow`]; [`JobStoreError::Store`].
+    pub fn booked_on(&self, host: &HostId) -> Result<HostBooking, JobStoreError> {
+        let mut total = HostBooking::default();
+        for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
+            let allocation =
+                decode_allocation(&row.value).map_err(|why| JobStoreError::row(&key, why))?;
+            if allocation.host == *host && allocation.step != AllocationStep::Freed {
+                total = total
+                    .plus(&allocation.booked)
+                    .ok_or(JobStoreError::BookingOverflow { host: host.clone() })?;
+            }
+        }
+        Ok(total)
+    }
+
+    // ---- rows --------------------------------------------------------------------------
+
+    fn read_job(&self, id: &JobId) -> Result<Option<(JobRecord, Version)>, JobStoreError> {
+        let key = keys::job(id);
+        self.store
+            .get(&key)?
+            .map(|row| {
+                decode_job(&row.value)
+                    .map(|record| (record, row.version))
+                    .map_err(|why| JobStoreError::row(&key, why))
+            })
+            .transpose()
+    }
+
+    fn job_row(&self, id: &JobId) -> Result<(JobRecord, Version), JobStoreError> {
+        self.read_job(id)?
+            .ok_or(JobStoreError::NotFound { id: id.clone() })
+    }
+
+    fn read_allocation(
+        &self,
+        id: &JobId,
+    ) -> Result<Option<(AllocationRecord, Version)>, JobStoreError> {
+        let key = keys::allocation(id);
+        self.store
+            .get(&key)?
+            .map(|row| {
+                decode_allocation(&row.value)
+                    .map(|record| (record, row.version))
+                    .map_err(|why| JobStoreError::row(&key, why))
+            })
+            .transpose()
+    }
+
+    fn allocation_row(&self, id: &JobId) -> Result<(AllocationRecord, Version), JobStoreError> {
+        self.read_allocation(id)?
+            .ok_or(JobStoreError::NoAllocation { id: id.clone() })
+    }
+
+    /// Commits `txn`, whose preconditions are the versions of the job `id`'s rows the caller
+    /// read: a conflict is [`JobStoreError::Stale`].
+    fn commit(&self, id: &JobId, txn: Txn) -> Result<Commit, JobStoreError> {
+        self.store
+            .txn(txn)?
+            .map_err(|_| JobStoreError::Stale { id: id.clone() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use js_state::fake::Fake;
+    use js_state::{Cond, ManualClock, Store, Txn, Version, Versioned};
+
+    use super::{JobStore, SCHEMA_VERSION, schema_of};
+    use crate::codec::DecodeError;
+    use crate::error::JobStoreError;
+    use crate::ids::RandomIds;
+    use crate::keys;
+
+    fn fake() -> Arc<Fake> {
+        Arc::new(Fake::with_flaw(
+            Arc::new(ManualClock::default()),
+            js_state::fake::Flaw::None,
+        ))
+    }
+
+    // Catches a store that writes the schema row again over a later build's, or refuses a
+    // version above its own.
+    #[test]
+    fn the_schema_row_is_written_once_and_a_higher_version_is_accepted() {
+        let store = fake();
+        let jobs = JobStore::new(store.clone(), RandomIds).expect("opens");
+        assert_eq!(jobs.stored_schema(), SCHEMA_VERSION);
+        let row = store.get(keys::SCHEMA).expect("reads").expect("written");
+        assert_eq!(row.value, SCHEMA_VERSION.to_be_bytes());
+
+        store
+            .txn(Txn::new().put(keys::SCHEMA, 7u32.to_be_bytes().to_vec(), Cond::Any))
+            .expect("reachable")
+            .expect("commits");
+        let later = JobStore::new(store.clone(), RandomIds).expect("a higher version opens");
+        assert_eq!(later.stored_schema(), 7);
+        let row = store.get(keys::SCHEMA).expect("reads").expect("kept");
+        assert_eq!(
+            row.value,
+            7u32.to_be_bytes(),
+            "the later build's row is kept"
+        );
+    }
+
+    // Catches a schema row of another width read as some version rather than refused.
+    #[test]
+    fn a_schema_row_that_is_not_four_bytes_is_corrupt() {
+        let store = fake();
+        store
+            .txn(Txn::new().put(keys::SCHEMA, vec![1u8, 2, 3], Cond::Any))
+            .expect("reachable")
+            .expect("commits");
+        let refused = JobStore::new(store, RandomIds).err();
+        assert_eq!(
+            refused,
+            Some(JobStoreError::Corrupt {
+                key: keys::SCHEMA.to_owned(),
+                why: DecodeError::BadLength { tag: 0 },
+            })
+        );
+        let missing = schema_of(None);
+        assert_eq!(
+            missing,
+            Err(JobStoreError::Corrupt {
+                key: keys::SCHEMA.to_owned(),
+                why: DecodeError::Missing { tag: 0 },
+            })
+        );
+        let read = schema_of(Some(Versioned {
+            value: 3u32.to_be_bytes().to_vec(),
+            version: Version(1),
+            expires_at: None,
+        }));
+        assert_eq!(read, Ok(3));
+    }
+
+    /// A source whose every draw fails.
+    struct Broken;
+
+    impl crate::ids::IdSource for Broken {
+        fn mint(&self) -> Result<[u8; 16], crate::ids::MintError> {
+            Err(crate::ids::MintError {
+                code: std::num::NonZeroU32::MIN,
+            })
+        }
+    }
+
+    // Catches a failed draw turned into an id (all zeros, say), or one that leaves a row behind.
+    #[test]
+    fn a_source_that_cannot_mint_is_an_error_and_writes_nothing() {
+        let store = fake();
+        let jobs = JobStore::new(store.clone(), Broken).expect("opens");
+        let failed = Err(JobStoreError::Mint(crate::ids::MintError {
+            code: std::num::NonZeroU32::MIN,
+        }));
+        let job = |id| crate::NewJob {
+            id,
+            spec: crate::suite::full_spec(),
+            priority: 0,
+        };
+        assert_eq!(jobs.insert_queued(job(None)).map(drop), failed);
+        let id = crate::JobId::parse("a").expect("an id");
+        jobs.insert_queued(job(Some(id.clone())))
+            .expect("a job with an id mints nothing");
+        assert_eq!(
+            jobs.place(&id, crate::suite::host("host-a"), crate::suite::share())
+                .map(drop),
+            failed
+        );
+        assert_eq!(
+            store.scan_prefix(keys::ALLOCATION).expect("reads"),
+            Vec::new()
+        );
+        assert_eq!(store.scan_prefix(keys::JOB).expect("reads").len(), 1);
+    }
+}
