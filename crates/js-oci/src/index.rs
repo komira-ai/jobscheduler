@@ -216,11 +216,17 @@ mod tests {
         .into_bytes()
     }
 
-    fn selected(bytes: &[u8]) -> Result<Digest, Error> {
-        match read(bytes, &Digest::of(bytes), &Kind::bundle_from_index())? {
+    /// The digest `bytes`, pinned by their own digest, resolve to under `kind`: the
+    /// platform manifest an index names, or a manifest's own.
+    fn resolved(bytes: &[u8], kind: &Kind) -> Result<Digest, Error> {
+        match read(bytes, &Digest::of(bytes), kind)? {
             Read::Child(digest) => Ok(digest),
-            Read::Manifest(_) => panic!("a manifest, not an index"),
+            Read::Manifest(manifest) => Ok(manifest.digest().clone()),
         }
+    }
+
+    fn selected(bytes: &[u8]) -> Result<Digest, Error> {
+        resolved(bytes, &Kind::bundle_from_index())
     }
 
     fn refused(bytes: &[u8]) -> String {
@@ -336,7 +342,13 @@ mod tests {
         for nested in [OCI_INDEX, DOCKER_LIST] {
             let bytes = index(&[entry(nested, &hex(7), &on("darwin", "arm64"))]);
             let err = selected(&bytes).expect_err("nested");
-            assert!(matches!(&err, Error::Index(d) if *d == hex(7)), "{err}");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "{} names an image index; pin the manifest of one platform",
+                    hex(7)
+                )
+            );
         }
         let bytes = index(&[entry("text/plain", &hex(7), &on("darwin", "arm64"))]);
         let err = selected(&bytes).expect_err("other");
@@ -358,10 +370,7 @@ mod tests {
         .into_bytes();
         let mut kind = Kind::image(Platform::DARWIN_ARM64);
         kind.index = IndexPolicy::SelectPlatform;
-        let Read::Child(child) = read(&list, &Digest::of(&list), &kind).expect("list") else {
-            panic!("a list is not a manifest");
-        };
-        assert_eq!(child.as_str(), hex(8));
+        assert_eq!(resolved(&list, &kind).expect("list").as_str(), hex(8));
         let bare = format!(
             r#"{{"manifests":[{}]}}"#,
             entry(OCI_MANIFEST, &hex(8), &on("darwin", "arm64"))
@@ -407,7 +416,7 @@ mod tests {
             hex(1)
         )
         .into_bytes();
-        let read = read(&manifest, &Digest::of(&manifest), &kind).expect("manifest");
-        assert!(matches!(read, Read::Manifest(m) if m.digest() == &Digest::of(&manifest)));
+        let own = resolved(&manifest, &kind).expect("manifest");
+        assert_eq!(own, Digest::of(&manifest));
     }
 }

@@ -105,7 +105,7 @@ impl Admission {
                 format!("the store cannot be listed: {why}"),
             )
         })?;
-        if !held.iter().any(|have| *have == manifest) {
+        if !held.contains(&manifest) {
             return self.missing(pin.name(), digest);
         }
         let needs = self.fits_host(&manifest)?;
