@@ -88,13 +88,16 @@ async fn configured(name: &str, hosts_line: &str, pool_percent: Option<&str>) ->
 }
 
 /// Asserts that a static hosts file with 90 books exactly floor(251 GiB x 90 / 100) of
-/// its host: a request of one byte more is refused `no-fit` and books nothing, and a
+/// its host: a request of one byte more is refused `no-capable-host` and books nothing, and a
 /// request of exactly that is granted. It catches a key that is read and dropped, a cut
 /// that rounds up, and one applied to the request.
 #[tokio::test]
 async fn the_hosts_file_percent_books_the_cut() {
     let h = flagged("mempct_flag_90", "memory_schedulable_percent = 90").await;
-    assert_eq!(ask(&h, NINETY + 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(
+        ask(&h, NINETY + 1).await,
+        (409, "no-capable-host".to_owned())
+    );
     assert_eq!(ask(&h, NINETY).await, (201, "granted".to_owned()));
 }
 
@@ -103,7 +106,10 @@ async fn the_hosts_file_percent_books_the_cut() {
 #[tokio::test]
 async fn without_the_key_all_of_the_memory_is_booked() {
     let h = flagged("mempct_flag_default", "").await;
-    assert_eq!(ask(&h, LISTED + 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(
+        ask(&h, LISTED + 1).await,
+        (409, "no-capable-host".to_owned())
+    );
     assert_eq!(ask(&h, LISTED).await, (201, "granted".to_owned()));
     let h = flagged("mempct_flag_100", "memory_schedulable_percent = 100").await;
     assert_eq!(ask(&h, LISTED).await, (201, "granted".to_owned()));
@@ -116,7 +122,10 @@ async fn without_the_key_all_of_the_memory_is_booked() {
 #[tokio::test]
 async fn the_pool_key_books_the_cut_of_a_static_pool() {
     let h = configured("mempct_pool_90", "", Some("90")).await;
-    assert_eq!(ask(&h, NINETY + 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(
+        ask(&h, NINETY + 1).await,
+        (409, "no-capable-host".to_owned())
+    );
     assert_eq!(ask(&h, NINETY).await, (201, "granted".to_owned()));
     let both = configured(
         "mempct_pool_over_file",
@@ -126,7 +135,10 @@ async fn the_pool_key_books_the_cut_of_a_static_pool() {
     let both = both.await;
     assert_eq!(ask(&both, NINETY).await, (201, "granted".to_owned()));
     let file_only = configured("mempct_file_only", "memory_schedulable_percent = 50", None).await;
-    assert_eq!(ask(&file_only, NINETY).await, (409, "no-fit".to_owned()));
+    assert_eq!(
+        ask(&file_only, NINETY).await,
+        (409, "no-capable-host".to_owned())
+    );
     assert_eq!(
         ask(&file_only, LISTED / 2).await,
         (201, "granted".to_owned())
@@ -206,7 +218,7 @@ fn claiming(host: &str, memory_bytes: u64) -> Value {
 
 /// Asserts that an agent pool with 90 books exactly floor(16 GiB x 90 / 100) of its
 /// `[shape]` memory for a host, whatever the host claims: a host that claims 100 GiB is
-/// booked at the cut all the same (a request of one byte more is `no-fit`, exactly the cut
+/// booked at the cut all the same (a request of one byte more is `no-capable-host`, exactly the cut
 /// is granted), so an agent cannot inflate a lease. It catches a booking that follows the
 /// claim and a cut that is not applied to the pool file's shape.
 #[tokio::test]
@@ -220,8 +232,11 @@ async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
     )
     .await;
     session(&reply, "big-1");
-    assert_eq!(ask(&h, POOLED_NINETY + 1).await, (409, "no-fit".to_owned()));
-    assert_eq!(ask(&h, POOLED).await.1, "no-fit");
+    assert_eq!(
+        ask(&h, POOLED_NINETY + 1).await,
+        (409, "no-capable-host".to_owned())
+    );
+    assert_eq!(ask(&h, POOLED).await.1, "no-capable-host");
     assert_eq!(ask(&h, POOLED_NINETY).await, (201, "granted".to_owned()));
 }
 
@@ -259,7 +274,10 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
         &post(&h, "/v1/agent/hello", Some(JOIN), &claiming("a-1", POOLED)).await,
         "a-1",
     );
-    assert_eq!(ask(&h, POOLED + 1).await, (409, "no-fit".to_owned()));
+    assert_eq!(
+        ask(&h, POOLED + 1).await,
+        (409, "no-capable-host".to_owned())
+    );
     assert_eq!(ask(&h, POOLED).await, (201, "granted".to_owned()));
     for bad in ["0", "101"] {
         let scratch = Scratch::new(&format!("mempct_agents_bad_{bad}"));

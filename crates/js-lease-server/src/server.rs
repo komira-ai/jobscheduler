@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::adapt::{BoxedPool, SharedClock};
+use crate::admit::{Admit, Launching};
 use crate::agents::{Agents, assemble};
 use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
@@ -197,6 +198,7 @@ pub(crate) struct Prepared {
     monotonic: Arc<dyn Monotonic>,
     warnings: Vec<String>,
     status: bool,
+    admit: Admit,
 }
 
 /// What a start has built once the lease table is open: the state the routes and the tick
@@ -243,6 +245,12 @@ pub(crate) fn prepare(
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(hosts, usage, clock, &state_file)?;
+    let launching = elastic.iter().map(|plan| Launching {
+        provider: Arc::clone(&plan.provider),
+        share: plan.share,
+        limits: plan.limits.clone(),
+    });
+    let admit = Admit::new(launching.collect());
     let elastic = elastic.map(|mut plan| {
         let setup = Setup {
             advertise: advertise_url.clone(),
@@ -287,6 +295,7 @@ pub(crate) fn prepare(
         monotonic,
         warnings,
         status,
+        admit,
     };
     let listeners = Listeners {
         listen,
@@ -323,6 +332,7 @@ pub(crate) fn open(
         monotonic,
         warnings,
         status: serves_status,
+        admit,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
     if let Some(scaler) = &scaler {
@@ -358,6 +368,7 @@ pub(crate) fn open(
     let status = serves_status.then(|| Arc::new(status));
     let shared = Arc::new(
         Shared::new(table, token, agents)
+            .with_admit(admit)
             .with_status(status)
             .with_scaler(scaler.clone()),
     );

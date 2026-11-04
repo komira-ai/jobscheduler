@@ -19,6 +19,7 @@ use js_elastic::{Artifact, CapacityProvider, Demand, SchedulerId};
 use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_scaler::{Budgets, Millis};
+use js_sched::admission_ever::PoolLimits;
 use js_types::{
     Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
     ResourceClass, Resources, Shape,
@@ -210,6 +211,11 @@ pub struct ElasticPlan {
     /// The pool's name as the registry knows it.
     pub(crate) id: ProviderId,
     pub(crate) provider: Arc<dyn CapacityProvider>,
+    /// How many machines the provider may hold for the pool, as admission reads it: its
+    /// `provider_limits` `max_machines`, else the pool's.
+    pub(crate) share: u32,
+    /// The pool's `provider_limits` on the provider, as admission reads them.
+    pub(crate) limits: PoolLimits,
 }
 
 impl ElasticPlan {
@@ -261,6 +267,23 @@ pub(crate) struct Registering {
     /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
     /// elastic pool's launches are minted for under the provider kind's name.
     pub(crate) mint_provider: Option<String>,
+}
+
+impl Registering {
+    /// Gives the launching side the share and the limits admission reads, from the pool's
+    /// `provider_limits` (`limits`; a pool has one launching provider and a limit is refused
+    /// for any other, so it holds that provider's limits or none) and its `max_machines`.
+    fn admit(&mut self, limits: &BTreeMap<String, ProviderLimits>, max_machines: Option<u64>) {
+        let limit = limits.values().next().cloned().unwrap_or_default();
+        let share = limit.max_machines.or(max_machines).unwrap_or_default();
+        self.plan.iter_mut().for_each(|plan| {
+            plan.share = u32::try_from(share).unwrap_or(u32::MAX);
+            plan.limits = PoolLimits {
+                allowed_instance_types: limit.allowed_instance_types.clone(),
+                max_price_cents_per_hour: limit.max_price_cents_per_hour,
+            };
+        });
+    }
 }
 
 /// The pools of the file, as the sources of hosts they make.
@@ -632,14 +655,16 @@ fn read_pool(
                 scheduler,
                 max_lease_wall,
                 budgets,
+                path_grace: settings.path_grace,
             };
-            let registering = elastic.finish(built, client)?;
+            let mut registering = elastic.finish(built, client)?;
             let reach = match reach {
                 Some(reach) => reach,
                 None => resolved.shorthand(&name, &kind, &p.map),
             };
             let provider_limits =
                 resolved.limits(limits, &s.head, &reach.providers, max_instances)?;
+            registering.admit(&provider_limits, max_instances);
             resolved.pools.push(ResolvedPool {
                 name: name.clone(),
                 platforms: reach.platforms,
@@ -681,6 +706,9 @@ struct Elastic<'a> {
     scheduler: &'a SchedulerId,
     max_lease_wall: Option<Duration>,
     budgets: &'a Budgets,
+    /// The pool's `path_grace`: how long a waiting whole-node request with no capable host
+    /// left keeps its place (the registry's `regain_grace`).
+    path_grace: Duration,
 }
 
 impl Elastic<'_> {
@@ -697,6 +725,7 @@ impl Elastic<'_> {
             scheduler,
             max_lease_wall,
             budgets,
+            path_grace,
         } = self;
         let max_instances = require(s, keys.cap_key, keys.max_instances)?;
         if max_instances == 0 {
@@ -779,7 +808,13 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id.clone(), &class, shape, max, exec, memory_percent)?;
+        let pool = registry_pool(
+            s,
+            (id.clone(), &class, shape, max),
+            exec,
+            memory_percent,
+            path_grace,
+        )?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
@@ -804,6 +839,8 @@ impl Elastic<'_> {
             scheduler: scheduler.clone(),
             id,
             provider: Arc::from(built.provider),
+            share: u32::try_from(max).unwrap_or(u32::MAX),
+            limits: PoolLimits::default(),
         };
         Ok(Registering {
             plan: Some(plan),
@@ -824,15 +861,15 @@ fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupErr
 
 /// The registry's pool for an elastic pool of `class`: `max` machines, the floor `shape`,
 /// the host contract of `exec` when the pool asks for one, the booked share of the floor's
-/// memory, and, for a whole-node class, the settings of a dedicated pool.
+/// memory, and, for a whole-node class, the settings of a dedicated pool with `path_grace`
+/// as its `regain_grace`: how long a waiting request whose last capable host went away
+/// keeps its place before it is refused `no-capable-host`.
 fn registry_pool(
     s: &Section,
-    id: ProviderId,
-    class: &ResourceClass,
-    shape: Shape,
-    max: usize,
+    (id, class, shape, max): (ProviderId, &ResourceClass, Shape, usize),
     exec: Option<ExecMode>,
     memory_percent: MemoryPercent,
+    path_grace: Duration,
 ) -> Result<PoolConfig, StartupError> {
     let pool = PoolConfig::new(id, class.clone(), shape, max).with_memory_percent(memory_percent);
     let pool = match exec {
@@ -840,7 +877,10 @@ fn registry_pool(
         None => pool,
     };
     match class.admission() {
-        Admission::Whole => match pool.with_whole_node(WholeNodeConfig::dedicated(max)) {
+        Admission::Whole => match pool.with_whole_node(WholeNodeConfig {
+            regain_grace_ms: u64::try_from(path_grace.as_millis()).unwrap_or(u64::MAX),
+            ..WholeNodeConfig::dedicated(max)
+        }) {
             Ok(pool) => Ok(pool),
             Err(err) => Err(s.fail("class", &err.to_string())),
         },
@@ -894,16 +934,19 @@ mod tests {
         let id = ProviderId::new("x").unwrap();
         let full = MemoryPercent::FULL;
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None, full);
+        let grace = Duration::from_millis(250);
+        let at = |max| (id.clone(), &whole, floor(), max);
+        let refused = registry_pool(&section(), at(0), None, full, grace);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
         let exec = Some(ExecMode::Container);
-        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec, full).unwrap();
+        let built = registry_pool(&section(), at(2), exec, full, grace).unwrap();
         assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
+        assert_eq!(built.whole_node().unwrap().regain_grace_ms, 250);
         assert_eq!(built.exec(), exec);
         let gpu = ResourceClass::gpu_host();
-        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None, full).unwrap();
+        let plain = registry_pool(&section(), (id, &gpu, floor(), 2), None, full, grace).unwrap();
         assert!(plain.whole_node().is_none());
         assert_eq!(plain.exec(), None);
     }

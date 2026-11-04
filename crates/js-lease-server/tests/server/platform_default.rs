@@ -4,7 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
+use std::time::Duration;
+
+use js_agent_wire::{Hello, Phase, ProtocolRange, Taint, WireShape};
 use js_elastic::{
     AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, GpuClass, Held, HostRef,
     Observed, Offer, ProviderCaps, ProviderError, Released,
@@ -12,10 +14,15 @@ use js_elastic::{
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::DefaultPlatform;
 use js_platform::{ContainerPlatform, PlatformId};
-use js_registry::{Credential, PoolConfig, Registry, StaticCapacity};
+use js_provider::{Pool, StartAck, StartSpec};
+use js_registry::{Binding, Credential, PoolConfig, Registry, StaticCapacity};
+use js_sched::admission_ever::{
+    Admission as AdmitVerdict, CatalogView, HostState, HostView, PoolLimits, ProviderView,
+    can_ever_serve,
+};
 use js_types::{
-    Admission, Arch, ClassId, ExecMode, IsaLevel, Os, ProviderId, Requirements, ResourceClass,
-    Resources, Shape,
+    Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, LeaseId, Os, ProviderId, Request,
+    Requirements, ResourceClass, Resources, Shape,
 };
 
 /// The capabilities every host of the test pool reports and the pool books.
@@ -32,12 +39,21 @@ fn facts() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// The class of the test pool: a whole host each.
+fn rack() -> ResourceClass {
+    ResourceClass::new(ClassId::new("rack").unwrap(), Admission::BookAll, 0)
+}
+
 /// A host table of a pool of 4 cores and 8 GiB per host, with `hosts` registered.
 fn table(hosts: &[&str]) -> Registry {
-    let class = ResourceClass::new(ClassId::new("rack").unwrap(), Admission::BookAll, 0);
+    table_on(hosts, ManualClock::new(Timestamp::from_millis(1)))
+}
+
+/// [`table`], on `clock`.
+fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
     let shape = Shape::new(Resources::new(4000, 8 << 30, 0, None).unwrap(), facts());
-    let config = PoolConfig::new(ProviderId::new("rack").unwrap(), class, shape, 4);
-    let registry = Registry::new(config, ManualClock::new(Timestamp::from_millis(1)));
+    let config = PoolConfig::new(ProviderId::new("rack").unwrap(), rack(), shape, 4);
+    let registry = Registry::new(config, clock);
     for host in hosts {
         let hello = Hello {
             protocol: ProtocolRange { min: 1, max: 1 },
@@ -82,7 +98,7 @@ impl CapacityProvider for Cloud {
     }
 
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Err(ProviderError::new("the catalog is not read for admission"))
+        Err(ProviderError::new("the cloud's API did not answer"))
     }
 
     fn capacity(&self) -> Capacity {
@@ -147,7 +163,8 @@ fn wanting(cores: u64, gpus: u64) -> Requirements {
 /// Asserts that the `default` platform could ever serve a job when a registered host could
 /// hold it, whether or not a launching provider could offer one; that it could not when
 /// no host could and no launching provider says it could (the `static` provider's pooled
-/// capabilities do not count); that a launching provider's capabilities alone are enough;
+/// capabilities do not count); that a launching provider whose catalog cannot be read is
+/// enough within its capabilities;
 /// that a request naming every capability a host reports (disk in whole GiB, rounded up) is
 /// judged on all of them; and that its capabilities are the union of its providers'. It
 /// catches a `can_ever_serve` that ignores either source.
@@ -192,4 +209,98 @@ fn default_platform_can_ever_serve_follows_hosts_and_provider_caps() {
     assert_eq!(caps.accelerators, BTreeSet::from(["nvidia-a10".to_owned()]));
     assert!(caps.whole_host);
     assert_eq!(nothing.capabilities(), js_platform::PlatformCaps::default());
+}
+
+/// The view admission takes of host `a` of [`table`], in `state`, tainted and draining or
+/// not.
+fn view(state: HostState, tainted: bool, draining: bool) -> HostView {
+    HostView {
+        id: HostId::new("a").unwrap(),
+        state,
+        tainted,
+        draining,
+        total: Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        facts: facts(),
+    }
+}
+
+/// Asserts that `platform` answers for [`wanting`] two cores what admission's own function
+/// answers over `hosts` and `providers`, the views of the same host table and providers;
+/// that answer.
+fn agrees(platform: &DefaultPlatform, hosts: &[HostView], providers: &[ProviderView]) -> bool {
+    let want = wanting(2, 0);
+    let admitted = can_ever_serve(&want, hosts, providers) != AdmitVerdict::Refuse;
+    assert_eq!(platform.can_ever_serve(&want), admitted);
+    admitted
+}
+
+/// Asserts that the `default` platform's `can_ever_serve` is admission's function: for a
+/// host that is busy, then lost (silent past its grace), for one that is tainted, for one
+/// marked to drain (capable: the mark is undone when a request needs the host) and then
+/// being released (draining out of the pool), and for a launching provider whose catalog
+/// cannot be read, it answers what `js_sched`'s `can_ever_serve` answers over the same
+/// views. Catches a platform that keeps a check of its own, which could disagree about a
+/// tainted or draining host.
+#[test]
+fn default_platform_can_ever_serve_is_the_admission_function() {
+    let id = PlatformId::new("ours");
+    let on = |hosts: &Registry| DefaultPlatform::new(id.clone(), Vec::new(), Some(hosts.clone()));
+    let clock = ManualClock::new(Timestamp::from_millis(1));
+    let busy = table_on(&["a"], clock.clone());
+    let request = Request {
+        class: rack().id().clone(),
+        resources: Resources::new(1000, 1 << 30, 0, None).unwrap(),
+        capabilities: BTreeMap::new(),
+        max_wall: Duration::from_secs(600),
+        labels: BTreeMap::new(),
+        validation_run: None,
+        probe_host: None,
+    };
+    let spec = StartSpec::new(LeaseId::new(1, 1), request, &[rack()]).unwrap();
+    assert!(matches!(
+        busy.provider().start(spec),
+        StartAck::Started { .. }
+    ));
+    assert!(agrees(
+        &on(&busy),
+        &[view(HostState::Busy, false, false)],
+        &[]
+    ));
+    clock.advance(Duration::from_secs(3600));
+    assert!(agrees(
+        &on(&busy),
+        &[view(HostState::Lost, false, false)],
+        &[]
+    ));
+    let tainted = table(&[]);
+    let taint = Taint {
+        reason: "post-job-check".to_owned(),
+        run_id: None,
+        check: None,
+    };
+    let binding = Binding::new(Credential::of_token("t"), None).with_taint(Some(taint));
+    tainted.restore_tainted(&HostId::new("a").unwrap(), binding);
+    assert!(!agrees(
+        &on(&tainted),
+        &[view(HostState::Lost, true, false)],
+        &[]
+    ));
+    let draining = table(&["a"]);
+    let a = HostId::new("a").unwrap();
+    draining.drain(&a).unwrap();
+    let marked = [view(HostState::Serving, false, false)];
+    assert!(agrees(&on(&draining), &marked, &[]));
+    draining.release_host(&a).unwrap();
+    let released = [view(HostState::Serving, false, true)];
+    assert!(!agrees(&on(&draining), &released, &[]));
+    let cloud = DefaultPlatform::new(id.clone(), vec![gpu_cloud()], None);
+    let unread = ProviderView {
+        kind_is_static: false,
+        enabled: true,
+        share: u32::MAX,
+        capabilities: gpu_cloud().capabilities(),
+        catalog: CatalogView::Unread,
+        limits: PoolLimits::default(),
+    };
+    assert!(agrees(&cloud, &[], &[unread]));
 }

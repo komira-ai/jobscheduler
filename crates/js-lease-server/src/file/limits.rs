@@ -1,9 +1,11 @@
 //! A pool's `[pool.provider_limits.<name>]` tables: what the pool lets each machine
 //! provider of its platforms launch (design 4.2).
 //!
-//! They are read and checked at start, and nothing enforces them yet: the pick of an offer
-//! when a pool acquires a machine (design 5.6, pass 2) is what will read them. A static
-//! machine provider launches nothing, so a limit for one is refused.
+//! They are read and checked at start. Admission reads `allowed_instance_types`,
+//! `max_price_cents_per_hour` and `max_machines` (an offer outside them does not admit a
+//! request, design 5.6, step 2); the pick of an offer when a pool acquires a machine
+//! (design 5.6, pass 2) does not read them yet. A static machine provider launches nothing,
+//! so a limit for one is refused.
 
 use std::collections::BTreeMap;
 
@@ -17,8 +19,8 @@ const KEYS: &[&str] = &[
     "max_spot_machines",
 ];
 
-/// What a pool lets one machine provider launch. Read and checked at start; not enforced
-/// yet (the pick of an offer in design 5.6, pass 2, will read it).
+/// What a pool lets one machine provider launch. Read and checked at start, and read by
+/// admission; the pick of an offer (design 5.6, pass 2) does not read it yet.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ProviderLimits {
