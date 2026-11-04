@@ -1,5 +1,6 @@
 //! The ids and names a scheduler and a provider agree on.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use sha2::{Digest, Sha256};
@@ -9,6 +10,9 @@ const MAX_ACQUIRE: usize = 128;
 
 /// The longest scheduler id.
 const MAX_SCHEDULER: usize = 64;
+
+/// The longest provider id.
+const MAX_PROVIDER: usize = 64;
 
 /// Characters of a hash kept in a name.
 const HASH_CHARS: usize = 12;
@@ -20,12 +24,21 @@ pub struct InvalidId {
     max: usize,
 }
 
+/// Whether `text` is 1 to `max` letters, digits, `.`, `_` or `-`. A `const fn`, so that
+/// [`ProviderId::known`] can check its text when the program is built.
+const fn is_id(text: &[u8], max: usize) -> bool {
+    let mut fits = (!text.is_empty()) & (text.len() <= max);
+    let mut at = 0;
+    while at < text.len() {
+        let b = text[at];
+        fits &= b.is_ascii_alphanumeric() | (b == b'.') | (b == b'_') | (b == b'-');
+        at += 1;
+    }
+    fits
+}
+
 fn valid_id(text: &str, max: usize) -> Result<String, InvalidId> {
-    let fits = (1..=max).contains(&text.len())
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    match fits {
+    match is_id(text.as_bytes(), max) {
         true => Ok(text.to_owned()),
         false => Err(InvalidId { max }),
     }
@@ -48,6 +61,47 @@ impl SchedulerId {
     /// The id as text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// The stable name of a provider, such as `lambdalabs`: 1 to 64 letters, digits, `.`, `_`
+/// or `-`. The scheduler tells providers apart by it and never branches on its text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProviderId(Cow<'static, str>);
+
+impl ProviderId {
+    /// The id `text`.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidId`] when `text` is not an id.
+    pub fn new(text: &str) -> Result<Self, InvalidId> {
+        valid_id(text, MAX_PROVIDER).map(|text| Self(Cow::Owned(text)))
+    }
+
+    /// The id `text`, a name written in a provider's code. In a `const` item, text that is
+    /// not an id fails the build, so a provider names itself with no error to handle.
+    ///
+    /// # Panics
+    ///
+    /// When `text` is not an id and this is called outside a `const` item.
+    pub const fn known(text: &'static str) -> Self {
+        assert!(
+            is_id(text.as_bytes(), MAX_PROVIDER),
+            "a provider id is 1 to 64 letters, digits, '.', '_' or '-'"
+        );
+        Self(Cow::Borrowed(text))
+    }
+
+    /// The id as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProviderId {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(&self.0)
     }
 }
 
@@ -145,6 +199,17 @@ impl fmt::Display for HostRef {
     }
 }
 
+/// What a machine's agent says in its first hello that a provider can match to one of its
+/// launches: the host name it was given and, when it read one, its instance id as its cloud
+/// spells it. The join token and every other secret of the hello are not part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hello {
+    /// The host name the agent was launched with.
+    pub name: String,
+    /// The cloud's id of the machine, when the agent knows it.
+    pub instance_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +238,36 @@ mod tests {
         let acquire = AcquireId::new("first-launch-ab12").unwrap();
         assert_eq!(acquire.as_str(), "first-launch-ab12");
         assert_eq!(acquire.to_string(), "first-launch-ab12");
+    }
+
+    /// Asserts that a provider id is checked as a scheduler id is, at 64 characters, that
+    /// one named in code compares equal to the same text read at run time, and that both
+    /// print as given. It catches an id that takes any text, and a named id that differs
+    /// from a parsed one.
+    #[test]
+    fn a_provider_id_is_checked_and_a_named_one_is_the_same_id() {
+        const FAKE: ProviderId = ProviderId::known("fake");
+        let read = ProviderId::new("fake").unwrap();
+        assert_eq!(read, FAKE);
+        assert_eq!(ProviderId::known("lambdalabs").as_str(), "lambdalabs");
+        assert_eq!((read.as_str(), read.to_string().as_str()), ("fake", "fake"));
+        assert!(ProviderId::new(&"p".repeat(64)).is_ok());
+        let long = "p".repeat(65);
+        for bad in ["", "has space", "a/b", "é", long.as_str()] {
+            assert!(ProviderId::new(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            ProviderId::new("").unwrap_err().to_string(),
+            "an id is 1 to 64 letters, digits, '.', '_' or '-'"
+        );
+    }
+
+    /// Asserts that a provider id named in code that is not an id is refused, here at run
+    /// time; in a `const` item the same text fails the build.
+    #[test]
+    #[should_panic(expected = "a provider id is 1 to 64 letters")]
+    fn a_named_provider_id_that_is_not_an_id_is_refused() {
+        let _ = ProviderId::known("not an id");
     }
 
     /// Asserts that a host name is the scheduler's prefix and a hash of the acquire id,

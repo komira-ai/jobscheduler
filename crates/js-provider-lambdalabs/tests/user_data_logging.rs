@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, GpuClass, HostName, Offer,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, GpuClass, HostName, Offer,
     PriceUnit, SchedulerId,
 };
 use js_provider_lambdalabs::{

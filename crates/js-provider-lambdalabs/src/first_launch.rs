@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, Claim, Demand, ElasticProvider, Held,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, Claim, Demand, Held,
     HostName, HostRef, HostStatus, Offer, Released, SchedulerId,
 };
 use js_types::Resources;

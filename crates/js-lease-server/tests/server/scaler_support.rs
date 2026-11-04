@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, ElasticProvider, GpuClass, Held, HostName,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostName,
     HostRef, Offer, ProviderError, Released,
 };
 use js_elastic_fake::ElasticFake;
@@ -55,9 +55,9 @@ pub fn panic_on_list(scratch: &Scratch) {
 }
 
 /// A provider that is another one in every call but `list`, which panics.
-struct PanicOnList(Box<dyn ElasticProvider>);
+struct PanicOnList(Box<dyn CapacityProvider>);
 
-impl ElasticProvider for PanicOnList {
+impl CapacityProvider for PanicOnList {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         self.0.catalog()
     }
@@ -88,6 +88,30 @@ impl ElasticProvider for PanicOnList {
 
     fn is_gone(&self, id: &HostRef) -> bool {
         self.0.is_gone(id)
+    }
+
+    fn id(&self) -> js_elastic::ProviderId {
+        self.0.id()
+    }
+
+    fn can_launch(&self) -> bool {
+        self.0.can_launch()
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        self.0.capabilities()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        self.0.capacity()
+    }
+
+    fn observe(&self, id: &HostRef) -> js_elastic::Observed {
+        self.0.observe(id)
+    }
+
+    fn verify_instance(&self, hello: &js_elastic::Hello) -> Option<HostRef> {
+        self.0.verify_instance(hello)
     }
 }
 
@@ -145,7 +169,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
     let clock = Arc::new(ManualClock::new());
     let provider = LambdaProvider::new(account, clock, options, config);
     let panicky = PANICKY.lock().unwrap().contains(path.unwrap_or_default());
-    let provider: Box<dyn ElasticProvider> = match panicky {
+    let provider: Box<dyn CapacityProvider> = match panicky {
         true => Box::new(PanicOnList(Box::new(provider))),
         false => Box::new(provider),
     };

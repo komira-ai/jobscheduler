@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, Artifact, BootStep, ElasticProvider, HostName, HostRef,
+    AcquireId, AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, HostName, HostRef,
     Offer, ProviderError, Reason, RefusalCode, Released, SchedulerId, Secret, SlotName,
 };
 use js_lease_server::network::{ApiFailure, Contribution, LaunchCtx, NetworkError, NetworkMode};
@@ -28,7 +28,7 @@ struct Provider {
     asked: Mutex<Asked>,
 }
 
-impl ElasticProvider for Provider {
+impl CapacityProvider for Provider {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         Ok(Vec::new())
     }
@@ -58,6 +58,33 @@ impl ElasticProvider for Provider {
 
     fn release(&self, _id: &HostRef) -> Released {
         Released::Unknown
+    }
+
+    fn id(&self) -> js_elastic::ProviderId {
+        js_elastic::ProviderId::known("launcher")
+    }
+
+    fn can_launch(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        js_elastic::ProviderCaps::default()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        js_elastic::Capacity {
+            supplied: 0,
+            can_add: None,
+        }
+    }
+
+    fn observe(&self, _id: &HostRef) -> js_elastic::Observed {
+        js_elastic::Observed::Unknown
+    }
+
+    fn verify_instance(&self, _hello: &js_elastic::Hello) -> Option<HostRef> {
+        None
     }
 }
 

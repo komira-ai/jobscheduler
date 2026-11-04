@@ -1135,6 +1135,7 @@ dependencies = [
 name = "js-elastic"
 version = "0.1.0"
 dependencies = [
+ "js-elastic",
  "js-types",
  "sha2 0.11.1",
  "thiserror",

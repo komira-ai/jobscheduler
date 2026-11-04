@@ -1,7 +1,9 @@
 //! The instance types as offers, and the choice among offers: the ones that fit a demand,
 //! best first.
 
-use js_elastic::{Demand, Offer, PriceUnit};
+use std::collections::BTreeSet;
+
+use js_elastic::{Demand, Offer, PriceUnit, ProviderCaps};
 use js_types::ExecMode;
 
 use crate::model::{Architecture, InstanceTypeOffer};
@@ -17,6 +19,29 @@ fn arch_name(architecture: &Architecture) -> String {
         Architecture::X86_64 => "x86_64".to_owned(),
         Architecture::Arm64 => "aarch64".to_owned(),
         Architecture::Other(other) => other.clone(),
+    }
+}
+
+/// The architectures Lambda documents for an instance type.
+const DOCUMENTED: [Architecture; 2] = [Architecture::X86_64, Architecture::Arm64];
+
+/// What the provider could ever offer, from the same sources as [`offers`]: the one
+/// operating system, the architecture of every instance type Lambda documents as
+/// [`offers`] spells it, and the GPU class of every row of `table`, which is where an
+/// offer's class comes from. An instance type of an architecture Lambda does not document
+/// yields an offer outside it. A machine runs the agent, so it can be had whole and its
+/// jobs may declare host ports.
+pub(crate) fn capabilities(table: &OptionTable) -> ProviderCaps {
+    ProviderCaps {
+        os: BTreeSet::from([OS.to_owned()]),
+        arch: DOCUMENTED.iter().map(arch_name).collect(),
+        accelerators: table
+            .rows()
+            .iter()
+            .map(|row| row.gpu_class.clone())
+            .collect(),
+        whole_host: true,
+        host_ports: true,
     }
 }
 

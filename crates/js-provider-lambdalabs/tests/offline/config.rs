@@ -47,7 +47,7 @@ fn an_ssh_key_name_is_one_to_sixty_four_printable_characters() {
 
 #[test]
 fn the_default_launch_interval_is_the_apis_twelve_seconds() {
-    use js_elastic::{Acquired, ElasticProvider};
+    use js_elastic::{Acquired, CapacityProvider};
     use js_provider_lambdalabs::{Architecture, FakeLambda, LambdaProvider, OptionTable};
     use std::sync::Arc;
 

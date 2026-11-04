@@ -13,6 +13,8 @@ publish.workspace = true
 js-elastic = { path = "../js-elastic" }
 
 [dev-dependencies]
+# The provider contract's conformance suite (tests/conformance.rs).
+js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-types = { path = "../js-types" }
 
 [lints]

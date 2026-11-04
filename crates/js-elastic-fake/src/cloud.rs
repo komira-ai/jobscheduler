@@ -1,12 +1,14 @@
-//! The fake cloud: an [`ElasticProvider`] over memory that keeps its own bill.
+//! The fake cloud: a [`CapacityProvider`] over memory that keeps its own bill.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CheckResult, Claim, ElasticProvider, Held,
-    HostRef, HostStatus, Offer, ProviderError, ReadHandle, Reason, Refusal, RefusalCode, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
+    EventStream, Held, Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError,
+    ProviderEvent, ProviderId, ReadHandle, Reason, Refusal, RefusalCode, Released,
 };
 
 use crate::bill::{Bill, Billing};
@@ -16,11 +18,15 @@ use crate::script::{Call, Script, Step, THROTTLE_WAIT};
 /// The most payload the fake carries, in bytes.
 pub const PAYLOAD_LIMIT: usize = 1 << 20;
 
+/// The fake's name as a provider.
+pub const PROVIDER_ID: ProviderId = ProviderId::known("fake");
+
 /// The limits and delays of the cloud, which a test sets as a whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Knobs {
     /// The most machines that may run at once before an acquire is refused as
-    /// [`RefusalCode::Quota`]. `None`: no limit.
+    /// [`RefusalCode::Quota`]. `None`: no limit. It is the bound
+    /// [`CapacityProvider::capacity`] reports.
     pub quota: Option<usize>,
     /// The most machines the cloud has room for before an acquire is refused as
     /// [`RefusalCode::Capacity`]. `None`: no limit.
@@ -56,7 +62,12 @@ impl Default for Knobs {
 struct Machine {
     id: HostRef,
     acquire: String,
-    name: String,
+    name: Option<String>,
+    /// Whether it carries the caller's mark: launched by an acquire, not added as another
+    /// scheduler's or as an unmarked machine of the account.
+    marked: bool,
+    /// Whether the cloud dropped it: a read by id answers that it does not exist.
+    dropped: bool,
     offer: Offer,
     /// The price per hour in the cloud's own catalog when it was launched, not what the
     /// caller believed.
@@ -86,8 +97,12 @@ struct Inner {
     machines: Vec<Machine>,
     scripts: BTreeMap<Call, Script>,
     calls: Vec<Call>,
+    /// The step the next scripted call of any kind takes, before its own script.
+    next: Option<Step>,
     /// The acquires whose answer was lost, and when.
     unresolved: BTreeMap<AcquireId, u64>,
+    /// Where the notices go: one sender per event stream handed out.
+    watchers: Vec<Sender<ProviderEvent>>,
 }
 
 fn refusal(code: RefusalCode, reason: Reason) -> Refusal {
@@ -98,7 +113,14 @@ impl Inner {
     /// Records `call` and returns what its script says it does.
     fn enter(&mut self, call: Call) -> Step {
         self.calls.push(call);
-        self.scripts.entry(call).or_default().take()
+        self.step(call)
+    }
+
+    /// The step a scripted call of kind `call` takes: the one set for the next call of any
+    /// kind, else its own script's.
+    fn step(&mut self, call: Call) -> Step {
+        let script = self.scripts.entry(call).or_default();
+        self.next.take().unwrap_or_else(|| script.take())
     }
 
     /// What the cloud held of `machine` at time `t`, or `None` when it did not show yet
@@ -106,7 +128,8 @@ impl Inner {
     fn status_at(&self, machine: &Machine, t: u64) -> Option<HostStatus> {
         let released = machine.released.filter(|at| *at <= t);
         let ended = machine.ended.filter(|at| *at <= t);
-        let removed = released.is_some_and(|at| at + millis(self.knobs.remove_lag) <= t);
+        let removed =
+            released.is_some_and(|at| at + millis(self.knobs.remove_lag) <= t) | machine.dropped;
         let booted = machine.launched + millis(self.knobs.boot) <= t;
         let status = match (released, ended, booted) {
             (Some(_), _, _) => HostStatus::Terminating,
@@ -121,7 +144,7 @@ impl Inner {
         Held {
             id: machine.id.clone(),
             acquire: machine.acquire.clone(),
-            name: Some(machine.name.clone()),
+            name: machine.name.clone(),
             offer: machine.offer.id.clone(),
             zone: machine.offer.zone.clone(),
             status,
@@ -143,10 +166,11 @@ impl Inner {
         u128::from(machine.price) * u128::from(stop.saturating_sub(start))
     }
 
-    /// The machines as the cloud showed them `lag` ago.
+    /// The caller's machines as the cloud showed them `lag` ago.
     fn view(&self, lag: Duration) -> Vec<Held> {
         let seen = self.clock.now_ms().saturating_sub(millis(lag));
-        let shown = self.machines.iter().filter_map(|machine| {
+        let ours = self.machines.iter().filter(|machine| machine.marked);
+        let shown = ours.filter_map(|machine| {
             let status = self.status_at(machine, seen);
             status.map(|status| Self::held(machine, status))
         });
@@ -188,9 +212,11 @@ impl Inner {
             ));
         }
         let machine = Machine {
-            id: HostRef(format!("fake-{:04}", self.machines.len() + 1)),
+            id: self.next_id(),
             acquire: request.acquire.as_str().to_owned(),
-            name: request.name.to_string(),
+            name: Some(request.name.to_string()),
+            marked: true,
+            dropped: false,
             price,
             offer: offer.clone(),
             launched: self.clock.now_ms(),
@@ -202,14 +228,29 @@ impl Inner {
         self.machines.push(machine);
         Ok(held)
     }
+
+    /// The id of the next machine the cloud makes.
+    fn next_id(&self) -> HostRef {
+        HostRef(format!("fake-{:04}", self.machines.len() + 1))
+    }
+
+    /// The marked machines that have not ended (running and billing), and every machine
+    /// that has not ended, the account's others included.
+    fn running(&self) -> (usize, usize) {
+        let live = self.machines.iter().filter(|m| m.ended.is_none());
+        let ours = live.clone().filter(|m| m.marked).count();
+        (ours, live.count())
+    }
 }
 
 /// An elastic cloud in memory.
 ///
-/// It implements [`ElasticProvider`], so a scaler, a registry and a server can run against
+/// It implements [`CapacityProvider`], so a scaler, a registry and a server can run against
 /// it, and it scripts what real clouds do: capacity refusal, quota, denial, a request that
-/// does not fit, preemption, a call that gets no answer (and may have landed), a 429
-/// storm, a list that fails, a release that is refused, and a list that lags the truth.
+/// does not fit, preemption (with a notice on its event stream), a call that gets no answer
+/// (and may have landed), a 429 storm, a list that fails, a release that is refused, a
+/// list that lags the truth, a machine of the account it did not launch, and a machine
+/// the cloud drops.
 ///
 /// It keeps its own bill: from the times the cloud launched and ended each machine, at the
 /// [`Billing`] granularity of the provider it stands for, at the price in its own
@@ -234,7 +275,9 @@ impl ElasticFake {
                 machines: Vec::new(),
                 scripts: BTreeMap::new(),
                 calls: Vec::new(),
+                next: None,
                 unresolved: BTreeMap::new(),
+                watchers: Vec::new(),
             })),
         }
     }
@@ -276,6 +319,13 @@ impl ElasticFake {
         self.state().scripts.entry(call).or_default().repeat(step);
     }
 
+    /// Makes the next scripted call, of whatever kind, take `step` before any step queued
+    /// for its kind. An acquire takes it only when it reaches the cloud: not when it is
+    /// deferred or answered with a machine it launched before.
+    pub fn script_next(&self, step: Step) {
+        self.state().next = Some(step);
+    }
+
     /// Every call made so far, in order, whether it worked or not.
     pub fn calls(&self) -> Vec<Call> {
         self.state().calls.clone()
@@ -291,13 +341,65 @@ impl ElasticFake {
     }
 
     /// The cloud reclaims the machine `id`: it stops running and billing now and reads
-    /// `preempted` until it is released. An id the cloud does not hold changes nothing.
+    /// `preempted` until it is released, and every event stream gets
+    /// [`ProviderEvent::Reclaimed`] for it. An id the cloud does not hold, or a machine
+    /// that has already ended, changes nothing and sends no notice.
     pub fn preempt(&self, id: &HostRef) {
+        let mut state = self.state();
+        let now = state.clock.now_ms();
+        let found = state.machines.iter_mut().find(|m| m.id == *id);
+        let Some(machine) = found.filter(|m| m.ended.is_none()) else {
+            return;
+        };
+        machine.ended = Some(now);
+        let notice = ProviderEvent::Reclaimed(id.clone());
+        state
+            .watchers
+            .retain(|watcher| watcher.send(notice.clone()).is_ok());
+    }
+
+    /// Adds a machine to the account that no acquire of the caller launched (another
+    /// scheduler's, named `name`, or an unmarked one with no name), running from now on
+    /// `offer`, and returns its id. A list does not show it, a release refuses it as
+    /// foreign and a hello is never matched to it; a read by id finds it, and it counts
+    /// toward the quota and the room as every running machine of the account does.
+    pub fn add_foreign(&self, name: Option<&str>, offer: Offer) -> HostRef {
+        let mut state = self.state();
+        let id = state.next_id();
+        let machine = Machine {
+            id: id.clone(),
+            acquire: String::new(),
+            name: name.map(str::to_owned),
+            marked: false,
+            dropped: false,
+            price: offer.price_cents_per_hour.unwrap_or(0),
+            offer,
+            launched: state.clock.now_ms(),
+            ended: None,
+            released: None,
+            user_data: String::new(),
+        };
+        state.machines.push(machine);
+        id
+    }
+
+    /// The cloud drops the machine `id` at once, as a delete made outside the scheduler
+    /// does: it stops running and billing, and a read of it by id answers that it does not
+    /// exist. An id the cloud does not hold changes nothing.
+    pub fn drop_machine(&self, id: &HostRef) {
         let mut state = self.state();
         let now = state.clock.now_ms();
         if let Some(machine) = state.machines.iter_mut().find(|m| m.id == *id) {
             machine.ended = machine.ended.or(Some(now));
+            machine.dropped = true;
         }
+    }
+
+    /// The machines a release has ended, in the order they were launched.
+    pub fn released(&self) -> Vec<HostRef> {
+        let state = self.state();
+        let ended = state.machines.iter().filter(|m| m.released.is_some());
+        ended.map(|m| m.id.clone()).collect()
     }
 
     /// The program that calls the cloud restarts: it forgets the acquires whose answer it
@@ -306,8 +408,8 @@ impl ElasticFake {
         self.state().unresolved.clear();
     }
 
-    /// The machines as the cloud holds them now, with no lag and no scripted failure: what
-    /// is true, for a test to check what the scheduler believes against.
+    /// The caller's machines as the cloud holds them now, with no lag and no scripted
+    /// failure: what is true, for a test to check what the scheduler believes against.
     pub fn truth(&self) -> Vec<Held> {
         self.state().view(Duration::ZERO)
     }
@@ -319,7 +421,8 @@ impl ElasticFake {
         running.map(|m| m.id.clone()).collect()
     }
 
-    /// How many machines the cloud has made so far.
+    /// How many machines the cloud has made so far, the ones [`ElasticFake::add_foreign`]
+    /// added included.
     pub fn launched(&self) -> usize {
         self.state().machines.len()
     }
@@ -360,11 +463,55 @@ impl ElasticFake {
     }
 }
 
-impl ElasticProvider for ElasticFake {
+impl CapacityProvider for ElasticFake {
+    fn id(&self) -> ProviderId {
+        self.state().calls.push(Call::Id);
+        PROVIDER_ID
+    }
+
+    fn can_launch(&self) -> bool {
+        self.state().calls.push(Call::CanLaunch);
+        true
+    }
+
+    /// The operating systems, architectures and GPU classes of the offers it lists, and a
+    /// whole machine with host ports, as every machine that runs the agent has.
+    fn capabilities(&self) -> ProviderCaps {
+        let mut state = self.state();
+        state.calls.push(Call::Capabilities);
+        let offers = &state.offers;
+        ProviderCaps {
+            os: offers.iter().map(|offer| offer.os.clone()).collect(),
+            arch: offers.iter().map(|offer| offer.arch.clone()).collect(),
+            accelerators: offers
+                .iter()
+                .filter_map(|offer| offer.gpu_class.clone())
+                .collect::<BTreeSet<_>>(),
+            whole_host: true,
+            host_ports: true,
+        }
+    }
+
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         let mut state = self.state();
         state.calls.push(Call::Catalog);
         Ok(state.offers.clone())
+    }
+
+    /// The caller's machines that have not ended, and what the quota leaves of it once
+    /// every running machine of the account is counted (`None` with no quota).
+    fn capacity(&self) -> Capacity {
+        let mut state = self.state();
+        state.calls.push(Call::Capacity);
+        let (ours, running) = state.running();
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Capacity {
+            supplied: count(ours),
+            can_add: state
+                .knobs
+                .quota
+                .map(|quota| count(quota.saturating_sub(running))),
+        }
     }
 
     fn checks(&self) -> Vec<CheckResult> {
@@ -397,7 +544,7 @@ impl ElasticProvider for ElasticFake {
         let earlier = state
             .machines
             .iter()
-            .find(|m| m.acquire == request.acquire.as_str() && m.released.is_none());
+            .find(|m| (m.acquire == request.acquire.as_str()) & m.released.is_none() & m.marked);
         if let Some(machine) = earlier {
             let status = state.status_at(machine, now);
             let held = Inner::held(machine, status.unwrap_or(HostStatus::Booting));
@@ -406,8 +553,7 @@ impl ElasticProvider for ElasticFake {
                 extras: Vec::new(),
             };
         }
-        let step = state.scripts.entry(Call::Acquire).or_default().take();
-        match step {
+        match state.step(Call::Acquire) {
             Step::Pass => match state.launch(request) {
                 Ok(held) => Acquired::Accepted {
                     held,
@@ -451,7 +597,8 @@ impl ElasticProvider for ElasticFake {
         let mut state = self.state();
         let step = state.enter(Call::Release);
         let now = state.clock.now_ms();
-        let Some(at) = state.machines.iter().position(|m| m.id == *id) else {
+        let ours = state.machines.iter().position(|m| (m.id == *id) & m.marked);
+        let Some(at) = ours else {
             return Released::Refused(Claim::Foreign);
         };
         let lands = match step {
@@ -479,11 +626,42 @@ impl ElasticProvider for ElasticFake {
         state.unresolved.keys().cloned().collect()
     }
 
-    fn is_gone(&self, id: &HostRef) -> bool {
+    /// A machine of the account in the status it has now; `Absent` for an id the cloud
+    /// never issued, a machine whose removal has passed and a dropped one. The read is
+    /// scripted as [`Call::IsGone`]: any step but [`Step::Pass`] is a read with no answer.
+    fn observe(&self, id: &HostRef) -> Observed {
         let mut state = self.state();
-        state.calls.push(Call::IsGone);
+        let step = state.enter(Call::IsGone);
         let now = state.clock.now_ms();
         let known = state.machines.iter().find(|m| m.id == *id);
-        known.is_none_or(|machine| state.status_at(machine, now).is_none())
+        let status = known.and_then(|machine| state.status_at(machine, now));
+        match (step, status) {
+            (Step::Pass, Some(status)) => Observed::Present(status),
+            (Step::Pass, None) => Observed::Absent,
+            (Step::Refuse(_) | Step::Lost { .. } | Step::Throttled, _) => Observed::Unknown,
+        }
+    }
+
+    /// The caller's machine that was launched with the hello's name and, when the hello
+    /// carries one, has its id.
+    fn verify_instance(&self, hello: &Hello) -> Option<HostRef> {
+        let mut state = self.state();
+        state.calls.push(Call::VerifyInstance);
+        let name = Some(hello.name.as_str());
+        let wanted = hello.instance_id.as_deref();
+        let found = state.machines.iter().find(|m| {
+            let id_fits = wanted.is_none_or(|id| id == m.id.as_str());
+            (m.name.as_deref() == name) & id_fits & m.marked
+        });
+        found.map(|m| m.id.clone())
+    }
+
+    /// A stream of the reclaims [`ElasticFake::preempt`] makes from now on.
+    fn events(&self) -> Option<EventStream> {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = self.state();
+        state.calls.push(Call::Events);
+        state.watchers.push(sender);
+        Some(Box::new(receiver.into_iter()))
     }
 }

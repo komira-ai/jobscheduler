@@ -4,6 +4,7 @@
 mod acquire;
 mod checks;
 mod config;
+mod conformance;
 mod fake;
 mod host_prep;
 mod inputs;
