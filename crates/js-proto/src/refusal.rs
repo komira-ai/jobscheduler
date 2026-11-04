@@ -61,7 +61,8 @@ impl RefusalCode {
 }
 
 /// The status a server answers a refused submit with: the code's [`RefusalCode::grpc_code`],
-/// the message `<code>: <detail>`, and the [`Refusal`] in the details.
+/// the detail as its message, and in its details a `google.rpc.Status` with the same code
+/// and message whose one detail is the [`Refusal`].
 #[must_use]
 pub fn refusal_status(code: RefusalCode, detail: impl Into<String>) -> Status {
     let refusal = Refusal {
@@ -69,21 +70,25 @@ pub fn refusal_status(code: RefusalCode, detail: impl Into<String>) -> Status {
         detail: detail.into(),
     };
     let grpc_code = code.grpc_code();
-    let message = format!("{}: {}", code.as_str(), refusal.detail);
     let details = RpcStatus {
         code: grpc_code.into(),
-        message: message.clone(),
+        message: refusal.detail.clone(),
         details: vec![Any {
             type_url: REFUSAL_TYPE_URL.to_owned(),
             value: refusal.encode_to_vec(),
         }],
     };
-    Status::with_details(grpc_code, message, Bytes::from(details.encode_to_vec()))
+    Status::with_details(
+        grpc_code,
+        refusal.detail,
+        Bytes::from(details.encode_to_vec()),
+    )
 }
 
-/// The [`Refusal`] a status carries, if it carries one: `None` for a status without
+/// The [`Refusal`] a status carries, if it carries one: the first detail of
+/// [`REFUSAL_TYPE_URL`] in the status's `google.rpc.Status`. `None` for a status without
 /// details, with details that do not decode as a `google.rpc.Status`, with no detail of
-/// [`REFUSAL_TYPE_URL`], or with one whose value does not decode as a [`Refusal`].
+/// that type URL, or with one whose value does not decode as a [`Refusal`].
 #[must_use]
 pub fn refusal_of(status: &Status) -> Option<Refusal> {
     let details = RpcStatus::decode(status.details()).ok()?;
@@ -104,6 +109,19 @@ mod tests {
         RefusalCode::WallTimeNotPositive,
         RefusalCode::WallTimeAboveCeiling,
     ];
+
+    /// A status with `details` as its details bytes.
+    fn with(details: Vec<u8>) -> Status {
+        Status::with_details(Code::Unknown, "m", details.into())
+    }
+
+    /// A detail of a type other than the refusal's.
+    fn error_info() -> Any {
+        Any {
+            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_owned(),
+            value: vec![0x0a, 0x01, b'x'],
+        }
+    }
 
     /// Asserts that the refusal codes are the four of design section 5.3, each with its
     /// kebab-case name, that no two share a name, and that the value that is no refusal
@@ -134,7 +152,7 @@ mod tests {
     }
 
     /// Asserts that each code, with its detail text, comes back unchanged from a status
-    /// made by `refusal_status`, and that the status's message names the code.
+    /// made by `refusal_status`, and that the status's message is the detail.
     #[test]
     fn refusal_survives_a_status_round_trip() {
         for code in ALL {
@@ -147,12 +165,11 @@ mod tests {
                     detail: detail.clone(),
                 })
             );
-            assert_eq!(status.message(), format!("{}: {detail}", code.as_str()));
+            assert_eq!(status.message(), detail);
         }
     }
 
-    /// Asserts that each refusal is answered with the gRPC code of the module's table, and
-    /// that the details' own code agrees with the status's.
+    /// Asserts that each refusal is answered with the gRPC code of the module's table.
     #[test]
     fn each_refusal_uses_its_documented_grpc_code() {
         let expected = [
@@ -163,12 +180,38 @@ mod tests {
             (RefusalCode::Unspecified, Code::Unknown),
         ];
         for (refusal, code) in expected {
-            let status = refusal_status(refusal, "x");
-            assert_eq!(status.code(), code, "{}", refusal.as_str());
-            let details = RpcStatus::decode(status.details()).expect("details decode");
-            assert_eq!(details.code, i32::from(code));
-            assert_eq!(details.message, status.message());
+            assert_eq!(
+                refusal_status(refusal, "x").code(),
+                code,
+                "{}",
+                refusal.as_str()
+            );
         }
+    }
+
+    /// Asserts that a status's details are a `google.rpc.Status` with the status's own
+    /// numeric code and the detail as its message, holding exactly one detail: the refusal
+    /// under its type URL. Catches details written as the bare `Refusal`, which a gRPC
+    /// client decoding the standard message would misread.
+    #[test]
+    fn refusal_details_are_a_google_rpc_status() {
+        let status = refusal_status(RefusalCode::NoCapableHost, "no host has 8 GPUs");
+        let details = RpcStatus::decode(status.details()).expect("details decode");
+        assert_eq!(details.code, 9, "FAILED_PRECONDITION");
+        assert_eq!(details.code, i32::from(status.code()));
+        assert_eq!(details.message, "no host has 8 GPUs");
+        assert_eq!(details.details.len(), 1);
+        assert_eq!(
+            details.details[0].type_url,
+            "type.googleapis.com/jobscheduler.v1.Refusal"
+        );
+        assert_eq!(
+            Refusal::decode(details.details[0].value.as_slice()).expect("the refusal decodes"),
+            Refusal {
+                code: RefusalCode::NoCapableHost.into(),
+                detail: "no host has 8 GPUs".to_owned(),
+            }
+        );
     }
 
     /// Asserts that a status with no details at all is not read as a refusal (an empty
@@ -178,40 +221,41 @@ mod tests {
         assert_eq!(refusal_of(&Status::already_exists("job-id-conflict")), None);
     }
 
-    /// Asserts that details that do not decode, a `google.rpc.Status` without a refusal
-    /// among its details, and a refusal detail whose value does not decode are each not
-    /// read as a refusal, and that a refusal after a detail of another type is found.
+    /// Asserts that details that do not decode as a `google.rpc.Status`, and a refusal
+    /// detail whose value does not decode, are each not read as a refusal.
     #[test]
     fn status_with_undecodable_details_is_not_a_refusal() {
-        let with = |details: Vec<u8>| Status::with_details(Code::Unknown, "m", details.into());
         // A field of number 0 is never valid protobuf.
         assert_eq!(refusal_of(&with(vec![0x00, 0x01])), None);
-        let other = Any {
-            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_owned(),
-            value: vec![0x0a, 0x01, b'x'],
-        };
-        let only_other = RpcStatus {
-            code: 2,
-            message: "m".to_owned(),
-            details: vec![other.clone()],
-        };
-        assert_eq!(refusal_of(&with(only_other.encode_to_vec())), None);
         let broken = RpcStatus {
+            code: 9,
+            message: "m".to_owned(),
             details: vec![Any {
                 type_url: REFUSAL_TYPE_URL.to_owned(),
                 // A length-delimited field 2 that claims more bytes than follow.
                 value: vec![0x12, 0x05, b'x'],
             }],
-            ..only_other.clone()
         };
         assert_eq!(refusal_of(&with(broken.encode_to_vec())), None);
+    }
+
+    /// Asserts that a `google.rpc.Status` holding only a detail of another type is not
+    /// read as a refusal, and that a refusal after such a detail is found.
+    #[test]
+    fn a_detail_of_another_type_is_not_a_refusal() {
+        let only_other = RpcStatus {
+            code: 9,
+            message: "m".to_owned(),
+            details: vec![error_info()],
+        };
+        assert_eq!(refusal_of(&with(only_other.encode_to_vec())), None);
         let refusal = Refusal {
             code: RefusalCode::NoCapableHost.into(),
             detail: "after another detail".to_owned(),
         };
         let second = RpcStatus {
             details: vec![
-                other,
+                error_info(),
                 Any {
                     type_url: REFUSAL_TYPE_URL.to_owned(),
                     value: refusal.encode_to_vec(),
