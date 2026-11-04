@@ -1,12 +1,24 @@
-//! The one egress setting of the agent, checked once at start: how much network a job's
-//! container has. There is exactly one mode at a time.
+//! The egress setting of the agent, checked once at start: the most network a job's
+//! container may have, its ceiling (design 5.8). Each job asks for a level of its own
+//! (`JobSpec::network`), and one above the ceiling is refused ([`super::admit`]); the mode
+//! is the highest level the host is set up for.
 //!
-//! - `none` (the default): loopback only and no route. Nothing is set up on the host.
-//! - `allow-list`: the container has one interface whose only route leads to the host,
-//!   and the host forwards what the job opens to the endpoints this configuration names
-//!   (`--egress-allow`, TCP, `IPV4:PORT` or `CIDR:PORT`) and the resolvers it names
-//!   (`--egress-dns`, port 53), and refuses everything else, the link-local range
-//!   (cloud metadata) first and IPv6 entirely.
+//! - `none` (the default): every job has loopback only and no route. Nothing is set up on
+//!   the host.
+//! - `allow-list`: a job may ask for `allow-list`, whose container has one interface whose
+//!   only route leads to the host; the host forwards what the job opens to the endpoints
+//!   this configuration names (`--egress-allow`, TCP, `IPV4:PORT` or `CIDR:PORT`) and the
+//!   resolvers it names (`--egress-dns`, port 53), and refuses everything else, the
+//!   link-local range (cloud metadata) first and IPv6 entirely.
+//! - `open`: a job may also ask for `open`, wired the same way, whose new IPv4 traffic may go
+//!   to any address but what is always refused: the metadata range, IPv6, a spoofed source,
+//!   the host itself and another job. An `allow-list` job under this ceiling gets the list
+//!   (with no `--egress-allow` it reaches the resolvers only).
+//!
+//! `--egress-forward-port` names the host ports a job may declare (`JobSpec::ports`); it
+//! needs `allow-list` or `open`. The agent reports them (`egress-ports`) and forwards each
+//! port an admitted job declares from the host's port to the job (`super::forward`); a job
+//! that declares one it does not list is refused.
 //!
 //! The flags are the only configuration: no environment variable, no file the job can reach.
 
@@ -15,7 +27,11 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::cli_runtime::{Allow, EGRESS_ALLOW_MAX};
+use js_agent_wire::limits::MAX_PORTS;
+use js_agent_wire::{NetworkCeiling, PortRange};
+use js_types::JobNetwork;
+
+use super::allow::{ALLOW_MAX, Allow};
 
 /// The addresses the per-run /30 blocks are taken from, unless `--egress-pool` names others:
 /// the benchmarking range, which no real network routes.
@@ -33,6 +49,9 @@ pub const DEFAULT_NSENTER: &str = "/usr/bin/nsenter";
 /// The most `--egress-dns` entries accepted.
 pub const DNS_MAX: usize = 4;
 
+/// The most `--egress-forward-port` entries accepted: as many as a job may declare.
+pub const FORWARD_PORT_MAX: usize = MAX_PORTS;
+
 /// How long a container's init waits for its network before the job is given up on.
 pub const ROUTE_WAIT: Duration = Duration::from_secs(30);
 
@@ -42,13 +61,28 @@ const POOL_PREFIX_MAX: u8 = 24;
 /// The shortest prefix a pool may have: 16384 runs at a time at the most is plenty.
 const POOL_PREFIX_MIN: u8 = 16;
 
-/// How the network of a job's container is made.
+/// The most network a job's container may have: the agent's ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Loopback only, no route.
     None,
     /// An interface to the host, limited to the configured endpoints.
     AllowList,
+    /// An interface to the host, to any address but the ones always refused; a job may also
+    /// ask for the allow-list.
+    Open,
+}
+
+impl Mode {
+    /// The job level this mode is the ceiling of.
+    #[must_use]
+    pub fn level(self) -> JobNetwork {
+        match self {
+            Self::None => JobNetwork::None,
+            Self::AllowList => JobNetwork::AllowList,
+            Self::Open => JobNetwork::Open,
+        }
+    }
 }
 
 /// The address pool for the per-run blocks: an IPv4 network of 16 to 24 bits, cut into
@@ -115,12 +149,12 @@ impl Pool {
 /// Why the egress flags were refused. Each text names the flag.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
-    /// `--egress` is neither `none` nor `allow-list`.
-    #[error("--egress: expected none or allow-list")]
+    /// `--egress` is not `none`, `allow-list` or `open`.
+    #[error("--egress: expected none, allow-list or open")]
     Mode,
-    /// A flag that only an allow-list takes was given with mode none.
-    #[error("{0}: needs --egress allow-list")]
-    NeedsAllowList(&'static str),
+    /// A flag that only a job network takes was given with mode none.
+    #[error("{0}: needs --egress allow-list or open")]
+    NeedsNetwork(&'static str),
     /// An allow-list with nothing to allow.
     #[error("--egress allow-list: needs at least one --egress-allow")]
     Empty,
@@ -136,6 +170,13 @@ pub enum ConfigError {
     /// More than the most `--egress-dns` entries.
     #[error("--egress-dns: at most 4 entries")]
     DnsMany,
+    /// An `--egress-forward-port` is not `PORT` or `LO-HI`, each from 1 to 65535, `LO` not
+    /// above `HI`.
+    #[error("--egress-forward-port: not <PORT> or <LO-HI>, each from 1 to 65535, LO not above HI")]
+    ForwardPort,
+    /// More than the most `--egress-forward-port` entries.
+    #[error("--egress-forward-port: at most 16 entries")]
+    ForwardPortMany,
     /// `--egress-pool` is not an IPv4 network of 16 to 24 bits.
     #[error(
         "--egress-pool: not <ipv4>/<16-24> with no host bits, outside loopback, link-local and multicast space"
@@ -149,7 +190,7 @@ pub enum ConfigError {
     #[error("{0}: not an absolute UTF-8 path to an executable file")]
     Program(&'static str),
     /// Egress needs the Linux host side.
-    #[error("--egress allow-list: only a Linux host can make a job's network")]
+    #[error("--egress: only a Linux host can make a job's network")]
     NotLinux,
 }
 
@@ -162,6 +203,8 @@ pub struct Flags<'a> {
     pub allow: &'a [String],
     /// `--egress-dns`, each an IPv4 address.
     pub dns: &'a [String],
+    /// `--egress-forward-port`, each `PORT` or `LO-HI`.
+    pub forward_ports: &'a [String],
     /// `--egress-pool`.
     pub pool: Option<&'a str>,
     /// `--egress-ip`.
@@ -178,6 +221,7 @@ pub struct Config {
     mode: Mode,
     allow: Vec<Allow>,
     dns: Vec<Ipv4Addr>,
+    forward_ports: Vec<PortRange>,
     pool: Pool,
     ip: String,
     nft: String,
@@ -199,6 +243,7 @@ impl Config {
             mode: Mode::None,
             allow: Vec::new(),
             dns: Vec::new(),
+            forward_ports: Vec::new(),
             pool: Pool::parse(DEFAULT_POOL).expect("the default pool is sound"),
             ip: DEFAULT_IP.to_owned(),
             nft: DEFAULT_NFT.to_owned(),
@@ -207,7 +252,8 @@ impl Config {
     }
 
     /// Checks the flags: the mode, the endpoints (each once, sorted), the resolvers, the
-    /// pool and the two programs.
+    /// host ports a job may declare (each once, sorted), the pool and the three programs. An
+    /// allow-list needs an endpoint; `open` needs nothing more than itself.
     ///
     /// # Errors
     ///
@@ -216,28 +262,30 @@ impl Config {
         let mode = match flags.mode {
             None | Some("none") => Mode::None,
             Some("allow-list") => Mode::AllowList,
+            Some("open") => Mode::Open,
             Some(_) => return Err(ConfigError::Mode),
         };
         if mode == Mode::None {
             let given = [
                 ("--egress-allow", !flags.allow.is_empty()),
                 ("--egress-dns", !flags.dns.is_empty()),
+                ("--egress-forward-port", !flags.forward_ports.is_empty()),
                 ("--egress-pool", flags.pool.is_some()),
                 ("--egress-ip", flags.ip.is_some()),
                 ("--egress-nft", flags.nft.is_some()),
                 ("--egress-nsenter", flags.nsenter.is_some()),
             ];
             if let Some((name, _)) = given.iter().find(|(_, given)| *given) {
-                return Err(ConfigError::NeedsAllowList(name));
+                return Err(ConfigError::NeedsNetwork(name));
             }
             return Ok(Self::none());
         }
         platform()?;
         let pool = Pool::parse(flags.pool.unwrap_or(DEFAULT_POOL)).ok_or(ConfigError::Pool)?;
-        if flags.allow.is_empty() {
+        if mode == Mode::AllowList && flags.allow.is_empty() {
             return Err(ConfigError::Empty);
         }
-        if flags.allow.len() > EGRESS_ALLOW_MAX {
+        if flags.allow.len() > ALLOW_MAX {
             return Err(ConfigError::AllowMany);
         }
         let mut allow = flags
@@ -268,6 +316,7 @@ impl Config {
             mode,
             allow,
             dns,
+            forward_ports: forward_ports(flags.forward_ports)?,
             pool,
             ip: program("--egress-ip", flags.ip, DEFAULT_IP)?,
             nft: program("--egress-nft", flags.nft, DEFAULT_NFT)?,
@@ -291,6 +340,22 @@ impl Config {
     #[must_use]
     pub fn dns(&self) -> &[Ipv4Addr] {
         &self.dns
+    }
+
+    /// The host ports a job may declare (`--egress-forward-port`), sorted, each once.
+    #[must_use]
+    pub fn forward_ports(&self) -> &[PortRange] {
+        &self.forward_ports
+    }
+
+    /// The ceiling of the jobs of this agent: the mode's level and the host ports a job may
+    /// declare. [`super::admit`] holds every start to it.
+    #[must_use]
+    pub fn ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling {
+            level: self.mode.level(),
+            ports: self.forward_ports.clone(),
+        }
     }
 
     /// The pool the runs' address blocks are cut from.
@@ -317,10 +382,10 @@ impl Config {
         &self.nsenter
     }
 
-    /// The `/etc/resolv.conf` of a job's container when this configuration names resolvers:
-    /// those, and no other. `None` when it names none (mode none, or an allow-list whose
-    /// jobs resolve nothing), where the backend's own file stands: a loopback nameserver
-    /// that nothing listens on.
+    /// The `/etc/resolv.conf` of a wired job's container (`allow-list` or `open`) when this
+    /// configuration names resolvers: those, and no other. `None` when it names none (mode
+    /// none, or a ceiling whose jobs resolve nothing), where the backend's own file stands: a
+    /// loopback nameserver that nothing listens on. A `none` job always has the backend's.
     #[must_use]
     pub fn resolv_conf(&self) -> Option<String> {
         (!self.dns.is_empty()).then(|| {
@@ -333,21 +398,32 @@ impl Config {
         })
     }
 
-    /// How long a container's init waits for its network: `None` in mode none, where there
-    /// is nothing to wait for.
+    /// How long the init of a wired job's container (`allow-list` or `open`) waits for its
+    /// network: `None` in mode none, where no job is wired. A `none` job never waits.
     #[must_use]
     pub fn route_wait(&self) -> Option<Duration> {
-        (self.mode == Mode::AllowList).then_some(ROUTE_WAIT)
+        (self.mode != Mode::None).then_some(ROUTE_WAIT)
     }
 }
 
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::None => "none",
-            Self::AllowList => "allow-list",
-        })
+        f.write_str(self.level().name())
     }
+}
+
+/// The `--egress-forward-port` entries, each `PORT` or `LO-HI`, sorted and each once.
+fn forward_ports(given: &[String]) -> Result<Vec<PortRange>, ConfigError> {
+    if given.len() > FORWARD_PORT_MAX {
+        return Err(ConfigError::ForwardPortMany);
+    }
+    let mut ports = given
+        .iter()
+        .map(|text| PortRange::parse(text).ok_or(ConfigError::ForwardPort))
+        .collect::<Result<Vec<_>, _>>()?;
+    ports.sort();
+    ports.dedup();
+    Ok(ports)
 }
 
 /// Whether this host can make a job's network: Linux only.
@@ -400,6 +476,7 @@ mod tests {
             mode: Some("allow-list"),
             allow,
             dns,
+            forward_ports: &[],
             pool: None,
             ip: Some("/bin/sh"),
             nft: Some("/bin/sh"),
@@ -407,16 +484,18 @@ mod tests {
         }
     }
 
-    /// Catches a default that gives jobs a network, and flags of an allow-list that a mode
+    /// Catches a default that gives jobs a network, and flags of a job network that a mode
     /// none accepts silently: no flag at all and `--egress none` are mode none with nothing
-    /// set up, and every other egress flag names the mode it needs.
+    /// set up and a ceiling of `none` with no port, and every other egress flag names the
+    /// modes it needs.
     #[test]
-    fn the_default_is_none_and_the_other_flags_need_an_allow_list() {
+    fn the_default_is_none_and_the_other_flags_need_a_network() {
         let none = Config::from_flags(&Flags::default()).expect("none");
         assert_eq!(none, Config::none());
         assert_eq!(none.mode(), Mode::None);
         assert_eq!(none.route_wait(), None);
         assert_eq!(none.resolv_conf(), None);
+        assert_eq!(none.ceiling(), NetworkCeiling::default());
         let explicit = Flags {
             mode: Some("none"),
             ..Flags::default()
@@ -424,6 +503,7 @@ mod tests {
         assert_eq!(Config::from_flags(&explicit), Ok(Config::none()));
         let allow = strings(&["192.0.2.10:443"]);
         let dns = strings(&["192.0.2.53"]);
+        let ports = strings(&["80"]);
         let cases = [
             (
                 Flags {
@@ -438,6 +518,13 @@ mod tests {
                     ..Flags::default()
                 },
                 "--egress-dns",
+            ),
+            (
+                Flags {
+                    forward_ports: &ports,
+                    ..Flags::default()
+                },
+                "--egress-forward-port",
             ),
             (
                 Flags {
@@ -471,15 +558,121 @@ mod tests {
         for (flags, name) in cases {
             assert_eq!(
                 Config::from_flags(&flags),
-                Err(ConfigError::NeedsAllowList(name)),
+                Err(ConfigError::NeedsNetwork(name)),
                 "{name}"
             );
+            let said = ConfigError::NeedsNetwork(name).to_string();
+            assert_eq!(said, format!("{name}: needs --egress allow-list or open"));
         }
-        let other = Flags {
+        for other in ["wide", "allow_list", "Open", ""] {
+            let other = Flags {
+                mode: Some(other),
+                ..Flags::default()
+            };
+            assert_eq!(Config::from_flags(&other), Err(ConfigError::Mode));
+        }
+        assert_eq!(
+            ConfigError::Mode.to_string(),
+            "--egress: expected none, allow-list or open"
+        );
+    }
+
+    /// Flags for `--egress open` with the stand-in programs and the given forward ports and
+    /// endpoints.
+    #[cfg(target_os = "linux")]
+    fn open<'a>(allow: &'a [String], forward_ports: &'a [String]) -> Flags<'a> {
+        Flags {
             mode: Some("open"),
-            ..Flags::default()
+            allow,
+            forward_ports,
+            ..allow_list(&[], &[])
+        }
+    }
+
+    /// Catches an `open` ceiling that needs what only an allow-list needs, forward ports that
+    /// are accepted outside their bounds or with mode none, and refusals that do not name the
+    /// flag: `--egress open` alone (no endpoint, no resolver) is accepted, is the ceiling
+    /// `open`, arms the route wait and names no resolver; `--egress none` with an endpoint or a
+    /// forward port is refused naming that flag; a forward port of 0, 70000, a backwards range
+    /// or text, and 17 of them, are refused naming `--egress-forward-port`; 16 are accepted,
+    /// sorted and each once, and the ceiling holds them. An allow-list under an open ceiling
+    /// keeps its endpoints.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn egress_flags_are_checked_naming_the_flag() {
+        let config = Config::from_flags(&open(&[], &[])).expect("open alone");
+        assert_eq!(config.mode(), Mode::Open);
+        assert_eq!(config.ceiling().level, JobNetwork::Open);
+        assert_eq!(config.route_wait(), Some(ROUTE_WAIT));
+        assert_eq!(config.resolv_conf(), None);
+        assert!(config.allow().is_empty());
+        assert!(config.forward_ports().is_empty());
+        assert_eq!(Mode::Open.to_string(), "open");
+
+        let allow = strings(&["192.0.2.10:443"]);
+        let ports = strings(&["80"]);
+        for (flags, name) in [
+            (
+                Flags {
+                    mode: Some("none"),
+                    allow: &allow,
+                    ..Flags::default()
+                },
+                "--egress-allow",
+            ),
+            (
+                Flags {
+                    mode: Some("none"),
+                    forward_ports: &ports,
+                    ..Flags::default()
+                },
+                "--egress-forward-port",
+            ),
+        ] {
+            let said = Config::from_flags(&flags).expect_err(name).to_string();
+            assert!(said.starts_with(&format!("{name}: ")), "{said}");
+        }
+
+        for bad in ["0", "70000", "90-80", "x", "80-", ""] {
+            let bad = strings(&[bad]);
+            let refused = Config::from_flags(&open(&[], &bad)).expect_err("refused");
+            assert_eq!(refused, ConfigError::ForwardPort, "{bad:?}");
+            assert!(refused.to_string().starts_with("--egress-forward-port: "));
+        }
+        let many: Vec<String> = (1..=17).map(|n| (8000 + n).to_string()).collect();
+        let refused = Config::from_flags(&open(&[], &many)).expect_err("17");
+        assert_eq!(refused, ConfigError::ForwardPortMany);
+        assert_eq!(
+            refused.to_string(),
+            "--egress-forward-port: at most 16 entries"
+        );
+
+        let mut sixteen: Vec<String> = (1..=15).map(|n| (8000 + n).to_string()).collect();
+        sixteen.push("80".to_owned());
+        sixteen[0] = "8000-8010".to_owned();
+        let config = Config::from_flags(&open(&allow, &sixteen)).expect("16");
+        let shown: Vec<String> = config
+            .forward_ports()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(shown[..2], ["80", "8000-8010"]);
+        assert_eq!(shown.len(), 16);
+        assert_eq!(config.ceiling().ports, config.forward_ports());
+        assert_eq!(config.ceiling().level, JobNetwork::Open);
+        let shown: Vec<String> = config.allow().iter().map(ToString::to_string).collect();
+        assert_eq!(shown, ["192.0.2.10:443"]);
+
+        let twice = strings(&["80", "80", "443"]);
+        let config = Config::from_flags(&open(&[], &twice)).expect("twice");
+        assert_eq!(config.forward_ports().len(), 2);
+        let listed = Flags {
+            forward_ports: &twice,
+            ..allow_list(&allow, &[])
         };
-        assert_eq!(Config::from_flags(&other), Err(ConfigError::Mode));
+        let config = Config::from_flags(&listed).expect("an allow-list takes ports");
+        assert_eq!(config.ceiling().level, JobNetwork::AllowList);
+        assert_eq!(config.ceiling().ports.len(), 2);
     }
 
     /// Catches an allow-list that accepts what it cannot enforce: nothing to allow, an
@@ -622,6 +815,11 @@ mod tests {
         assert_eq!(config.pool().text(), DEFAULT_POOL);
         assert_eq!(Mode::None.to_string(), "none");
         assert_eq!(Mode::AllowList.to_string(), "allow-list");
+        assert_eq!(Mode::Open.to_string(), "open");
+        assert_eq!(
+            [Mode::None, Mode::AllowList, Mode::Open].map(Mode::level),
+            [JobNetwork::None, JobNetwork::AllowList, JobNetwork::Open]
+        );
     }
 
     /// Catches a block arithmetic that hands two runs the same address, or an address

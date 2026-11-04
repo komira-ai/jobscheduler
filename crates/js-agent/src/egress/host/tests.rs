@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::*;
 use crate::egress::Flags;
+use js_types::JobNetwork;
 
 const PID: u32 = 77;
 const NET: &str = "/proc/77/ns/net";
@@ -75,6 +76,8 @@ struct State {
     calls: usize,
     fail: Option<usize>,
     answers: Vec<(String, Result<String, String>)>,
+    /// The calls whose program cannot be started, by a part of their logged line.
+    not_run: Vec<String>,
     files: HashMap<String, String>,
     write_errors: HashMap<String, ErrorKind>,
     identities: HashMap<String, (Seen, usize)>,
@@ -114,6 +117,17 @@ impl Fake {
 
     /// Answers the calls whose logged line contains `needle` with `result` (the latest
     /// script wins).
+    /// Makes the program of the calls whose logged line contains `needle` impossible to
+    /// start (as a missing program is), until [`Fake::run_again`].
+    fn not_run(&self, needle: &str) {
+        self.state().not_run.push(needle.to_owned());
+    }
+
+    /// Makes every program startable again.
+    fn run_again(&self) {
+        self.state().not_run.clear();
+    }
+
     fn answer(&self, needle: &str, result: Result<String, String>) {
         self.state().answers.insert(0, (needle.to_owned(), result));
     }
@@ -145,7 +159,7 @@ impl Fake {
 }
 
 impl Sys for Fake {
-    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+    fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, RunError> {
         let mut state = self.state();
         let name = program.rsplit('/').next().expect("a name");
         let line = format!("{name} {}", args.join(" "));
@@ -156,14 +170,24 @@ impl Sys for Fake {
             })
         ));
         state.stdins.push(stdin.unwrap_or_default().to_owned());
+        if state
+            .not_run
+            .iter()
+            .any(|needle| line.contains(needle.as_str()))
+        {
+            return Err(RunError::NotRun(format!(
+                "{program}: No such file or directory (os error 2)"
+            )));
+        }
         if Self::counted(&mut state) {
-            return Err("injected".to_owned());
+            return Err(RunError::Failed("injected".to_owned()));
         }
         state
             .answers
             .iter()
             .find(|(needle, _)| line.contains(needle.as_str()))
             .map_or(Ok(String::new()), |(_, answer)| answer.clone())
+            .map_err(RunError::Failed)
     }
 
     fn write(&self, path: &str, text: &str) -> std::io::Result<()> {
@@ -258,7 +282,9 @@ fn mode_none_does_nothing() {
     assert_eq!(fake.log(), Vec::<String>::new());
     assert_eq!(egress.config().mode(), Mode::None);
     egress.check().expect("mode none has nothing to check");
-    let attachment = egress.attach("run", PID).expect("nothing to wire");
+    let attachment = egress
+        .attach("run", PID, JobNetwork::None, &[])
+        .expect("nothing to wire");
     assert_eq!(attachment.interface(), None);
     drop(attachment);
     assert_eq!(fake.calls(), 0, "no call for a mode that wires nothing");
@@ -395,7 +421,9 @@ fn a_run_is_wired_in_order_and_unwired_on_release() {
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
     let before = fake.log().len();
-    let first = egress.attach("one", PID).expect("attach");
+    let first = egress
+        .attach("one", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     assert_eq!(first.interface(), Some("jsv0"));
     assert_eq!(fake.log()[before..], attach_calls()[..]);
     let batch = fake.state().stdins.last().expect("a batch").clone();
@@ -404,12 +432,16 @@ fn a_run_is_wired_in_order_and_unwired_on_release() {
         "link set lo up\nlink set eth0 addrgenmode none\naddr add 198.18.0.2/30 dev eth0\n\
          link set eth0 up\nroute add default via 198.18.0.1\n"
     );
-    let second = egress.attach("two", PID).expect("attach");
+    let second = egress
+        .attach("two", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     assert_eq!(second.interface(), Some("jsv1"));
     let after_second = fake.log().len();
     first.release().expect("release");
     assert_eq!(fake.log()[after_second..], release_calls(0)[..]);
-    let third = egress.attach("three", PID).expect("attach");
+    let third = egress
+        .attach("three", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     assert_eq!(
         third.interface(),
         Some("jsv0"),
@@ -427,7 +459,9 @@ fn a_failure_at_every_step_of_the_wiring_is_undone() {
         let fake = Fake::new();
         let egress = started(&fake, allow_list());
         let before = fake.calls();
-        let _attachment = egress.attach("count", PID).expect("attach");
+        let _attachment = egress
+            .attach("count", PID, JobNetwork::AllowList, &[])
+            .expect("attach");
         fake.calls() - before
     };
     assert_eq!(calls, 7);
@@ -436,7 +470,9 @@ fn a_failure_at_every_step_of_the_wiring_is_undone() {
         let egress = started(&fake, allow_list());
         let (before, logged) = (fake.calls(), fake.log().len());
         fake.fail_call(before + n);
-        let error = egress.attach("victim", PID).expect_err("fails");
+        let error = egress
+            .attach("victim", PID, JobNetwork::AllowList, &[])
+            .expect_err("fails");
         let text = error.to_string();
         assert!(
             text.contains("wiring run victim") && text.contains("injected"),
@@ -444,7 +480,9 @@ fn a_failure_at_every_step_of_the_wiring_is_undone() {
         );
         let log = fake.log();
         assert!(log[logged..].ends_with(&release_calls(0)), "{n}: {log:?}");
-        let again = egress.attach("next", PID).expect("the block is free");
+        let again = egress
+            .attach("next", PID, JobNetwork::AllowList, &[])
+            .expect("the block is free");
         assert_eq!(again.interface(), Some("jsv0"), "{n}");
     }
 }
@@ -459,14 +497,18 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
     let before = fake.log().len();
 
     fake.state().identities.remove(NET);
-    let error = egress.attach("gone", PID).expect_err("gone");
+    let error = egress
+        .attach("gone", PID, JobNetwork::AllowList, &[])
+        .expect_err("gone");
     assert!(
         matches!(error, EgressError::Container { pid: PID, .. }),
         "{error}"
     );
 
     fake.identity(NET, vec![(1, 1)]);
-    let error = egress.attach("host", PID).expect_err("the host's own");
+    let error = egress
+        .attach("host", PID, JobNetwork::AllowList, &[])
+        .expect_err("the host's own");
     assert!(
         error
             .to_string()
@@ -483,7 +525,7 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
     fake.identity(NET, vec![(1, 2)]);
     fake.state().identities.remove(OWN);
     let error = egress
-        .attach("blind", PID)
+        .attach("blind", PID, JobNetwork::AllowList, &[])
         .expect_err("own namespace unreadable");
     assert!(
         error
@@ -495,7 +537,7 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
 
     fake.identity(NET, vec![(1, 2)]);
     let attachment = egress
-        .attach("fine", PID)
+        .attach("fine", PID, JobNetwork::AllowList, &[])
         .expect("no block was held by the failures");
     assert_eq!(attachment.interface(), Some("jsv0"));
 }
@@ -513,7 +555,7 @@ fn a_missing_ipv6_switch_is_tolerated_and_nothing_else_is() {
         let fake = Fake::new();
         let egress = started(&fake, allow_list());
         fake.state().write_errors.insert(ipv6.to_owned(), kind);
-        let result = egress.attach("run", PID);
+        let result = egress.attach("run", PID, JobNetwork::AllowList, &[]);
         assert_eq!(result.is_ok(), works, "{kind:?}: {result:?}");
     }
     let fake = Fake::new();
@@ -526,13 +568,16 @@ fn a_missing_ipv6_switch_is_tolerated_and_nothing_else_is() {
 
 /// Catches a release that fails for what is not a failure, or hides one that is: a set
 /// member and a veth that are gone already (the container ended first) release cleanly, a
-/// real error is reported (and the block is freed anyway), and an attachment dropped without
-/// a release takes itself down once, as does one released and then dropped.
+/// real error is reported (and the block is kept out of use, so its name is not given out
+/// again), and an attachment dropped without a release takes itself down once, as does one
+/// released and then dropped.
 #[test]
 fn a_release_forgives_what_is_gone_and_reports_what_is_not() {
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
-    let first = egress.attach("one", PID).expect("attach");
+    let first = egress
+        .attach("one", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     fake.answer(
         "delete element",
         Err("Error: No such file or directory".to_owned()),
@@ -540,7 +585,9 @@ fn a_release_forgives_what_is_gone_and_reports_what_is_not() {
     fake.answer("link del", Err("Cannot find device \"jsv0\"".to_owned()));
     first.release().expect("gone is not an error");
 
-    let second = egress.attach("two", PID).expect("the block is free");
+    let second = egress
+        .attach("two", PID, JobNetwork::AllowList, &[])
+        .expect("the block is free");
     fake.answer("link del", Err("Operation not permitted".to_owned()));
     let error = second.release().expect_err("a real error");
     assert!(
@@ -549,15 +596,19 @@ fn a_release_forgives_what_is_gone_and_reports_what_is_not() {
     );
 
     let third = egress
-        .attach("three", PID)
-        .expect("freed even by a failed release");
-    assert_eq!(third.interface(), Some("jsv0"));
+        .attach("three", PID, JobNetwork::AllowList, &[])
+        .expect("another block is free");
+    assert_eq!(
+        third.interface(),
+        Some("jsv1"),
+        "a block whose veth could not be deleted is not given out again"
+    );
     fake.answer("link del", Ok(String::new()));
     let logged = fake.log().len();
     drop(third);
     assert_eq!(
         fake.log()[logged..],
-        release_calls(0)[..],
+        release_calls(1)[..],
         "a drop is a release"
     );
 }
@@ -571,15 +622,19 @@ fn a_full_pool_refuses_the_next_run() {
     let mut held: Vec<Attachment> = (0..64)
         .map(|n| {
             egress
-                .attach(&format!("run{n}"), PID)
+                .attach(&format!("run{n}"), PID, JobNetwork::AllowList, &[])
                 .expect("a free block")
         })
         .collect();
     assert_eq!(held[63].interface(), Some("jsv63"));
-    let error = egress.attach("late", PID).expect_err("full");
+    let error = egress
+        .attach("late", PID, JobNetwork::AllowList, &[])
+        .expect_err("full");
     assert_eq!(error, EgressError::Exhausted);
     held.remove(5);
-    let again = egress.attach("again", PID).expect("one is free");
+    let again = egress
+        .attach("again", PID, JobNetwork::AllowList, &[])
+        .expect("one is free");
     assert_eq!(again.interface(), Some("jsv5"));
 }
 
@@ -607,6 +662,10 @@ fn each_error_reads_as_what_it_is() {
             EgressError::Rules,
             "egress: the firewall tables are not what the agent loaded",
         ),
+        (
+            EgressError::PortTaken { port: 8080 },
+            "egress: host port 8080 is forwarded to another run already",
+        ),
     ];
     for (error, text) in kinds {
         assert_eq!(error.to_string(), text);
@@ -632,11 +691,19 @@ fn the_real_machine_runs_programs_and_reads_files() {
     let failed = system
         .run("/bin/ls", &["/no/such/directory"], None)
         .expect_err("fails");
-    assert!(failed.contains("No such file or directory"), "{failed}");
+    let RunError::Failed(said) = &failed else {
+        panic!("ran and failed: {failed:?}");
+    };
+    assert!(said.contains("No such file or directory"), "{said}");
+    assert_eq!(failed.to_string(), *said);
     let missing = system
         .run("/no/such/program", &[], None)
         .expect_err("not started");
-    assert!(missing.starts_with("/no/such/program: "), "{missing}");
+    let RunError::NotRun(why) = &missing else {
+        panic!("not started: {missing:?}");
+    };
+    assert!(why.starts_with("/no/such/program: "), "{why}");
+    assert_eq!(missing.to_string(), format!("not run: {why}"));
 
     let file = programs().join("note");
     let path = file.to_string_lossy().into_owned();
@@ -697,14 +764,18 @@ fn the_crun_runtimes_port_is_the_host_side() {
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
     let port: Arc<dyn EgressPort> = crate::crun::port_of(&egress);
+    assert_eq!(port.ceiling(), egress.config().ceiling());
+    assert_eq!(port.ceiling().level, JobNetwork::AllowList);
     port.check().expect("as loaded");
     let before = fake.log().len();
-    let wired = port.attach("one", PID).expect("attach");
+    let wired = port
+        .attach("one", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     assert_eq!(fake.log()[before..], attach_calls()[..]);
     let attached = fake.log().len();
     crate::crun::Wired::release(wired).expect("release");
     assert_eq!(fake.log()[attached..], release_calls(0)[..]);
-    let again = port.attach("two", PID);
+    let again = port.attach("two", PID, JobNetwork::AllowList, &[]);
     assert!(again.is_ok(), "the block is free again");
     drop(again);
     fake.answer("list table inet", Ok(INET_CHANGED.to_owned()));
@@ -763,8 +834,12 @@ fn every_runtime_opened_from_a_crun_plan_shares_its_egress() {
     assert_eq!(plans[0].egress.as_ref(), Some(&egress));
     assert_eq!(plans[1].egress.as_ref(), Some(&egress));
     let ports = plans.map(|plan| crate::crun::port_of(plan.egress.as_ref().expect("egress")));
-    let first = ports[0].attach("worker", PID).expect("attach");
-    let second = ports[1].attach("rescue", PID).expect("attach");
+    let first = ports[0]
+        .attach("worker", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
+    let second = ports[1]
+        .attach("rescue", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     let made: Vec<String> = fake
         .log()
         .into_iter()
@@ -790,7 +865,9 @@ fn every_runtime_opened_from_a_crun_plan_shares_its_egress() {
 fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
     let fake = Fake::new();
     let egress = started(&fake, allow_list());
-    let attachment = egress.attach("run", PID).expect("attach");
+    let attachment = egress
+        .attach("run", PID, JobNetwork::AllowList, &[])
+        .expect("attach");
     drop(egress);
     let logged = fake.log().len();
     let refused = Egress::start_on(allow_list(), fake.clone()).map(drop);
@@ -799,3 +876,6 @@ fn an_attachment_keeps_the_host_held_after_the_last_egress_is_dropped() {
     attachment.release().expect("release");
     started(&fake, allow_list());
 }
+
+mod levels;
+mod ports;

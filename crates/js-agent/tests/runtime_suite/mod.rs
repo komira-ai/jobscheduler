@@ -239,6 +239,8 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
             js_agent::lifecycle::label::RUN.to_owned(),
             run_id.to_owned(),
         )]),
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

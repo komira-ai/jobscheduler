@@ -261,6 +261,8 @@ fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
             gpu_indices: Vec::new(),
         },
         wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
     }))
 }
 

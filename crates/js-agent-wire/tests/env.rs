@@ -35,6 +35,8 @@ fn start(env: BTreeMap<String, String>) -> JobStartSpec {
             gpu_indices: Vec::new(),
         },
         wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

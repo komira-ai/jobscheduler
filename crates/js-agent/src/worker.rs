@@ -126,8 +126,9 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
 
-/// The calls a start is counted as: the create, and the egress check's `network inspect`
-/// and `nft` before it (the other calls of a start are inside the margin, as before).
+/// The calls a start is counted as: the create, and the two `nft` listings of the `crun`
+/// runtime's egress check before it (the other calls of a start are inside the margin, as
+/// before).
 pub const CALLS_PER_START: usize = 3;
 
 /// The most calls [`stall_bound`] allows time for.

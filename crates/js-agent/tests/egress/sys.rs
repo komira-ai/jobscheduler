@@ -107,6 +107,20 @@ pub fn allow_list(allow: &[&str], dns: &[&str]) -> Config {
     .expect("a sound configuration")
 }
 
+/// The ceiling `open` of a test, with the endpoints and resolvers given, the default pool and
+/// programs.
+pub fn open(allow: &[&str], dns: &[&str]) -> Config {
+    let allow: Vec<String> = allow.iter().map(|s| (*s).to_owned()).collect();
+    let dns: Vec<String> = dns.iter().map(|s| (*s).to_owned()).collect();
+    Config::from_flags(&Flags {
+        mode: Some("open"),
+        allow: &allow,
+        dns: &dns,
+        ..Flags::default()
+    })
+    .expect("a sound configuration")
+}
+
 /// Runs `body` on a thread that has joined `netns`: its sockets, and the programs it starts,
 /// are in that namespace.
 pub fn in_netns<T: Send>(netns: &File, body: impl FnOnce() -> T + Send) -> T {
@@ -345,19 +359,22 @@ impl Far {
         // the IPv6 networks the jobs invent, except what the test adds.
         // Only what comes in from a job's link goes there: the runner's own agents talk to the
         // real metadata address, and a route for them would count as a connection of a job.
-        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
-        ip_args(&[
-            "rule",
-            "add",
-            "pref",
-            "4242",
-            "iif",
-            "jsv0",
-            "to",
-            "169.254.169.254/32",
-            "lookup",
-            "4242",
-        ]);
+        // The first two blocks' links: a test with a neighbour wires its job as `jsv1`.
+        for (pref, link) in [("4242", "jsv0"), ("4243", "jsv1")] {
+            let _ = run(&ip, &["rule", "del", "pref", pref]);
+            ip_args(&[
+                "rule",
+                "add",
+                "pref",
+                pref,
+                "iif",
+                link,
+                "to",
+                "169.254.169.254/32",
+                "lookup",
+                "4242",
+            ]);
+        }
         ip_args(&[
             "route",
             "add",
@@ -389,7 +406,9 @@ impl Drop for Far {
         let ip = tool("ip");
         let _ = run(&ip, &["netns", "del", FAR_NS]);
         let _ = run(&ip, &["link", "del", "vfar0"]);
-        let _ = run(&ip, &["rule", "del", "pref", "4242"]);
+        for pref in ["4242", "4243"] {
+            let _ = run(&ip, &["rule", "del", "pref", pref]);
+        }
         let _ = run(&ip, &["route", "flush", "table", "4242"]);
     }
 }
@@ -516,12 +535,18 @@ pub fn delete_rule(comment: &str) {
     ]);
 }
 
-/// The members of the set of wired interfaces, sorted; empty when the set (or the table)
-/// does not exist.
+/// The members of the set of wired interfaces of `allow-list` runs, sorted; empty when the
+/// set (or the table) does not exist.
 pub fn wired() -> Vec<String> {
+    members("jobifs")
+}
+
+/// The members of the set `set` of the table `inet js_crun_egress`, sorted; empty when the
+/// set (or the table) does not exist.
+pub fn members(set: &str) -> Vec<String> {
     let output = run(
         &tool("nft"),
-        &["-j", "list", "set", "inet", "js_crun_egress", "jobifs"],
+        &["-j", "list", "set", "inet", "js_crun_egress", set],
     );
     if !output.status.success() {
         return Vec::new();

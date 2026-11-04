@@ -263,9 +263,9 @@ pub mod detail {
     /// The job is a host job and carries run files, which only a container can be given
     /// (they are mounted read-only at `/run/js-files`). Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
-    /// The network the job would get is not limited as the agent was told
-    /// (`--container-egress-allow`): the firewall table or the network is missing or
-    /// changed. Nothing is created.
+    /// The network the job would get is not limited as the agent was told: the `crun`
+    /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
+    /// is missing or changed. Nothing is created.
     pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
@@ -543,8 +543,8 @@ pub struct Local {
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
     pub files_warning: Option<String>,
-    /// `--container-bin`, `--container-network` and `--container-user`, when containers
-    /// are enabled by `--container-bin`.
+    /// `--container-bin` and the container flags beside it, when containers are enabled by
+    /// `--container-bin`.
     pub container: Option<Settings>,
     /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
     /// together with [`Local::container`].
@@ -559,8 +559,8 @@ pub struct Local {
     pub drain_wait: Duration,
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
-    /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
-    /// allow-list was given, which only `--runtime crun` takes (see [`crate::egress`]).
+    /// The `--egress*` flags: the most network a `crun` job may ask for. Mode none unless
+    /// `allow-list` or `open` was given, which only `--runtime crun` takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
 }
 
@@ -654,14 +654,11 @@ impl Local {
         let from_flags = Settings::from_flags(
             &Flags {
                 bin: cli.container_bin.as_deref(),
-                network: cli.container_network.as_deref(),
                 user: cli.container_user.as_deref(),
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
                 add_hosts: &cli.container_add_host,
-                egress_allow: &cli.container_egress_allow,
-                nft: cli.container_nft.as_deref(),
                 actions_cgroup: cli.actions_cgroup.as_deref(),
                 subuid: cli.container_subuid.as_deref(),
             },
@@ -846,33 +843,26 @@ impl Local {
     }
 }
 
-/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. There is
-/// one network mode: the Podman runtime's own network flags (`--container-network`) cannot
-/// be given with this one, and only the `crun` runtime enforces an allow-list, so another
-/// runtime is refused one rather than silently run with no network at all or the wrong one.
+/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
+/// `crun` enforces a ceiling, so a ceiling above none on another runtime is refused rather
+/// than run with no network at all.
 fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
     use crate::egress::{Config, Flags, Mode};
     let config = Config::from_flags(&Flags {
         mode: cli.egress.as_deref(),
         allow: &cli.egress_allow,
         dns: &cli.egress_dns,
+        forward_ports: &cli.egress_forward_port,
         pool: cli.egress_pool.as_deref(),
         ip: cli.egress_ip.as_deref(),
         nft: cli.egress_nft.as_deref(),
         nsenter: cli.egress_nsenter.as_deref(),
     })
     .map_err(|why| why.to_string())?;
-    if config.mode() != Mode::None && cli.container_network.is_some() {
-        return Err(
-            "--egress and --container-network: --egress is the crun runtime's network and \
-             --container-network the Podman runtime's; give only one"
-                .to_owned(),
-        );
-    }
     if config.mode() != Mode::None && !crun {
         return Err(format!(
-            "--egress {}: needs --runtime crun, the only runtime that enforces it; with \
-             --container-bin the network is --container-network",
+            "--egress {}: needs --runtime crun, the only runtime that enforces it; a job run \
+             through --container-bin has network none",
             config.mode()
         ));
     }

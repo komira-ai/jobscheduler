@@ -80,6 +80,8 @@ pub fn job() -> JobSpec {
         valid_for_ms: 10_000,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
         run: None,
         os: None,
         arch: None,

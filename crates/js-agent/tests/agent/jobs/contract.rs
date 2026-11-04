@@ -68,6 +68,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "runtime": "container",
             "exec": "container",
             "run-files": "true",
+            "egress": "none",
             "per-job": "true",
         })
     );

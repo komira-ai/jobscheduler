@@ -117,6 +117,8 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         labels,
         slot: 0,
         bundle: None,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 
@@ -201,7 +203,7 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
     let scratch: PathBuf = root.path().join("live1");
     fs::DirBuilder::new().mode(0o700).create(&scratch).unwrap();
 
-    let settings = Settings::new(Path::new(PODMAN), None, None)
+    let settings = Settings::new(Path::new(PODMAN), None)
         .unwrap()
         .with_subuid(&user)
         .unwrap()
