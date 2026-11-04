@@ -356,6 +356,57 @@ mod tests {
         );
     }
 
+    /// Asserts that one bad field among `disk-gib`, `exec` and `isa_level` is refused by
+    /// name while the others are good, and that the lenient read then keeps the resources,
+    /// the operating system and the architecture (in the one spelling) and reads all three
+    /// of disk, mode and level as not asked, as its doc says. Catches a fallback that keeps
+    /// a valid level beside a bad disk, or loses the platform.
+    #[test]
+    fn one_bad_field_clears_disk_mode_and_level_together() {
+        let platform = [("os", "linux"), ("arch", "aarch64")];
+        let cases = [
+            (
+                [
+                    (DISK_GIB_KEY, "lots"),
+                    (EXEC_KEY, "container"),
+                    (ISA_LEVEL_KEY, "x86-64-v3"),
+                ],
+                RequirementsError::BadDisk("lots".to_owned()),
+            ),
+            (
+                [
+                    (DISK_GIB_KEY, "40"),
+                    (EXEC_KEY, "native"),
+                    (ISA_LEVEL_KEY, "x86-64-v3"),
+                ],
+                RequirementsError::BadExec("native".to_owned()),
+            ),
+            (
+                [
+                    (DISK_GIB_KEY, "40"),
+                    (EXEC_KEY, "container"),
+                    (ISA_LEVEL_KEY, "x86-64-v9"),
+                ],
+                RequirementsError::BadIsaLevel("x86-64-v9".to_owned()),
+            ),
+        ];
+        for (fields, refusal) in cases {
+            let caps: Vec<(&str, &str)> = platform.iter().chain(&fields).copied().collect();
+            let asked = request(&caps);
+            assert_eq!(Requirements::try_from_request(&asked), Err(refusal.clone()));
+            let lenient = Requirements::from_request(&asked);
+            let want = Requirements {
+                resources: asked.resources.clone(),
+                disk_bytes: None,
+                os: Some("linux".to_owned()),
+                arch: Some("arm64".to_owned()),
+                isa_level: None,
+                exec: None,
+            };
+            assert_eq!(lenient, want, "{refusal}");
+        }
+    }
+
     /// Asserts that `isa_level` is read as a level of either family, that a request
     /// without it asks for none, and that a name that is not a level is refused naming
     /// the text, and read as not asked by `from_request`. Catches a requirement that drops

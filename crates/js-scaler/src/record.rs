@@ -116,6 +116,11 @@ pub struct StoredOffer {
     pub os: String,
     /// The CPU architecture.
     pub arch: String,
+    /// The highest ISA level the offer stated, by its name (`x86-64-v3`). Left out of the
+    /// file when the offer stated none, so a record of such an offer is written as before
+    /// and a record written before the field reads as stating none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isa_level: Option<String>,
     /// The execution mode.
     pub exec: StoredExec,
 }
@@ -134,6 +139,7 @@ impl StoredOffer {
             gpu_class: offer.gpu_class.as_ref().map(|c| c.as_str().to_owned()),
             os: offer.os.clone(),
             arch: offer.arch.clone(),
+            isa_level: offer.isa_level.map(|level| level.name().to_owned()),
             exec: match offer.exec {
                 ExecMode::Container => StoredExec::Container,
                 ExecMode::SandboxExec => StoredExec::SandboxExec,
@@ -154,14 +160,15 @@ impl StoredOffer {
             gpu_class: None,
             os: String::new(),
             arch: String::new(),
+            isa_level: None,
             exec: StoredExec::Container,
         }
     }
 
     /// The offer this shape was taken from, priced at `price`, available. The architecture
     /// is read in the one spelling, so a record written when offers spelt Arm `aarch64`
-    /// rebuilds an `arm64` offer. The ISA level is not kept in the file: the offers a record
-    /// is taken from, the catalog's, state none, so the rebuilt offer states none either.
+    /// rebuilds an `arm64` offer. The ISA level is the one stored; a stored name that is not
+    /// a level (a file edited by hand) states none, as an offer that has not said.
     #[must_use]
     pub fn to_offer(&self, price: u64) -> Offer {
         Offer {
@@ -177,7 +184,7 @@ impl StoredOffer {
                 .and_then(|class| GpuClass::parse(class).ok()),
             os: self.os.clone(),
             arch: normalise_arch(&self.arch).to_owned(),
-            isa_level: None,
+            isa_level: self.isa_level.as_deref().and_then(|name| name.parse().ok()),
             exec: match self.exec {
                 StoredExec::Container => ExecMode::Container,
                 StoredExec::SandboxExec => ExecMode::SandboxExec,

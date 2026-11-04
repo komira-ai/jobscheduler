@@ -392,9 +392,9 @@ mod tests {
         );
     }
 
-    /// Asserts that a stated level is the highest of a list of one family, in any order
-    /// and with spaces, and that an empty list, an unknown name or a mix of families
-    /// states none. Catches a list read as its first or last entry, and a mixed list
+    /// Asserts that a stated level is the highest of a list of one family, in any order,
+    /// with spaces and with a level repeated, and that an empty or blank text, an empty
+    /// element anywhere in the list, an unknown name or a mix of families states none. Catches a list read as its first or last entry, and a mixed list
     /// ranked on one scale.
     #[test]
     fn the_highest_listed_level_is_the_top_of_one_family() {
@@ -409,9 +409,19 @@ mod tests {
             IsaLevel::highest_listed("armv8.0-a,armv8.2-a"),
             Some(IsaLevel::Arm64(ArmVersion::V8_2))
         );
+        assert_eq!(IsaLevel::highest_listed("x86-64-v3,x86-64-v3"), v3);
+        assert_eq!(
+            IsaLevel::highest_listed("armv8.2-a,armv8.2-a,armv8.0-a"),
+            Some(IsaLevel::Arm64(ArmVersion::V8_2))
+        );
         for none in [
             "",
+            " ",
+            " , ",
             ",",
+            ",x86-64-v3",
+            "x86-64-v1,,x86-64-v3",
+            "armv8.0-a, ,armv8.2-a",
             "x86-64-v9",
             "x86-64-v3,",
             "x86-64-v3,armv8.4-a",

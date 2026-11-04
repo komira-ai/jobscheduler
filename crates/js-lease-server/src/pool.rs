@@ -375,4 +375,54 @@ mod tests {
         assert!(name.starts_with("js-"), "{name}");
         assert_eq!(name, preview_host().to_string());
     }
+
+    /// An available, priced linux x86_64 offer `id` stating `level`.
+    fn offer_at(id: &str, level: Option<&str>) -> Offer {
+        Offer {
+            id: id.to_owned(),
+            zone: None,
+            cpu_millis: 8000,
+            memory_bytes: 64 << 30,
+            disk_bytes: 100 << 30,
+            gpus: 0,
+            gpu_class: None,
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            isa_level: level.map(|name| name.parse().unwrap()),
+            exec: ExecMode::Container,
+            price_cents_per_hour: Some(10),
+            price_unit: js_elastic::PriceUnit::UsCents,
+            available: true,
+        }
+    }
+
+    /// Asserts the spelling the pools page gives a request whose offers miss only on the
+    /// ISA level (`isa_level`, as an offer that states none and one that states a lower
+    /// level both do), that an offer of the right level is chosen, and that every dimension
+    /// has one spelling. Catches a dimension with no name, which the page would show as
+    /// `available` though nothing fits.
+    #[test]
+    fn a_request_that_misses_only_on_the_level_is_named_isa_level() {
+        let mut demand = Demand::from_request(&js_types::Request {
+            class: js_types::ClassId::new("whole-node").unwrap(),
+            resources: js_types::Resources::new(1000, 1 << 30, 0, None).unwrap(),
+            capabilities: [("isa_level".to_owned(), "x86-64-v3".to_owned())].into(),
+            max_wall: Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+            probe_host: None,
+        });
+        let misses = [offer_at("none", None), offer_at("low", Some("x86-64-v2"))];
+        assert_eq!(choose(&misses, &demand).err().as_deref(), Some("isa_level"));
+        let fits = [
+            offer_at("low", Some("x86-64-v2")),
+            offer_at("v4", Some("x86-64-v4")),
+        ];
+        assert_eq!(choose(&fits, &demand).map(|o| o.id.as_str()), Ok("v4"));
+        demand.isa_level = None;
+        assert_eq!(choose(&misses, &demand).map(|o| o.id.as_str()), Ok("low"));
+        let names: std::collections::BTreeSet<&str> =
+            DIMENSIONS.iter().map(|(_, name)| *name).collect();
+        assert_eq!(names.len(), DIMENSIONS.len());
+    }
 }

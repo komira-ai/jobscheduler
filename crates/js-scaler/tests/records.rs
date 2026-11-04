@@ -265,6 +265,33 @@ fn a_stored_aarch64_offer_rebuilds_as_arm64() {
     assert_eq!(stored.to_offer(60).arch, "riscv64");
 }
 
+/// Asserts that an offer's stated ISA level survives the records file: it is stored by
+/// name, written into the file, read back and rebuilt into the offer it was taken from;
+/// that a record of an offer stating none is written without the field (the golden text
+/// above), and that a stored name that is not a level rebuilds an offer stating none.
+/// Catches a level dropped on the way through the file, after which the machine of the
+/// offer would no longer count for the request it was launched for.
+#[test]
+fn a_stated_isa_level_survives_the_records_file() {
+    let level: js_types::IsaLevel = "x86-64-v3".parse().unwrap();
+    let original = Offer {
+        isa_level: Some(level),
+        ..offer("a10", 60)
+    };
+    let stored = StoredOffer::from_offer(&original);
+    assert_eq!(stored.isa_level.as_deref(), Some("x86-64-v3"));
+    assert_eq!(stored.to_offer(60), original);
+    let mut records = sample();
+    records.instances[0].offer = stored;
+    let text = records.encode().unwrap();
+    assert!(text.contains("\"isa_level\": \"x86-64-v3\""), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), records);
+    assert!(!GOLDEN.contains("isa_level"));
+    let mut unknown = StoredOffer::from_offer(&original);
+    unknown.isa_level = Some("x86-64-v9".to_owned());
+    assert_eq!(unknown.to_offer(60).isa_level, None);
+}
+
 const ALL: [Phase; 11] = [
     Phase::Planned,
     Phase::Launching,

@@ -49,9 +49,11 @@ impl Shape {
     ///   one) does not satisfy it.
     /// - `arch` is equal in the one spelling ([`normalise_arch`]), so a host that reports
     ///   `aarch64` serves `arch=arm64` and the reverse.
-    /// - `isa_level` is at least, within the family ([`IsaLevel::satisfies`]): the host's
-    ///   value states its highest level ([`IsaLevel::highest_listed`]), and a host that
-    ///   states none (or a required text that is not a level) does not satisfy it.
+    /// - `isa_level` is at least, within the family ([`IsaLevel::satisfies`]), when both
+    ///   values state a level ([`IsaLevel::highest_listed`]: one level, or the list of it
+    ///   and those below, as a pool's shape may name it); otherwise the two texts must be
+    ///   equal, as before levels were compared, so every pairing that satisfied before
+    ///   still does. A host that states no level satisfies no level.
     pub fn satisfies(&self, wanted: &Resources, required: &Capabilities) -> bool {
         let caps_ok = required.iter().all(|(key, value)| {
             let have = self.capabilities.get(key);
@@ -61,11 +63,13 @@ impl Shape {
                     .zip(value.parse::<u64>().ok())
                     .is_some_and(|(have, want)| want <= have),
                 ARCH_KEY => have.is_some_and(|have| normalise_arch(have) == normalise_arch(value)),
-                ISA_LEVEL_KEY => have
-                    .map(String::as_str)
-                    .and_then(IsaLevel::highest_listed)
-                    .zip(value.parse::<IsaLevel>().ok())
-                    .is_some_and(|(have, want)| have.satisfies(want)),
+                ISA_LEVEL_KEY => {
+                    let listed = have.map(String::as_str).and_then(IsaLevel::highest_listed);
+                    match listed.zip(IsaLevel::highest_listed(value)) {
+                        Some((have, want)) => have.satisfies(want),
+                        None => have == Some(value),
+                    }
+                }
                 _ => have == Some(value),
             }
         });
@@ -177,6 +181,33 @@ mod tests {
         let bare = Shape::new(Resources::new(8000, 100, 0, None).unwrap(), caps(&[]));
         assert!(!bare.satisfies(&none, &v3));
         assert!(!host("x86-64-v4").satisfies(&none, &caps(&[("isa_level", "fast")])));
+    }
+
+    /// Asserts that every `isa_level` pairing that satisfied before levels were compared
+    /// still does: a pool floor that names the list `x86-64-v1,x86-64-v2` is met by a host
+    /// reporting that same list, or a higher level, and not by one reporting only v1; and
+    /// two equal texts that are not levels still satisfy each other, while unequal ones do
+    /// not. Catches a floor written as a list that no host can meet any more, which would
+    /// refuse every hello of a pool whose configuration was accepted before.
+    #[test]
+    fn a_floor_that_lists_levels_is_met_as_before() {
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        let host = |level: &str| {
+            Shape::new(
+                Resources::new(8000, 100, 0, None).unwrap(),
+                caps(&[("isa_level", level)]),
+            )
+        };
+        let floor = caps(&[("isa_level", "x86-64-v1,x86-64-v2")]);
+        assert!(host("x86-64-v1,x86-64-v2").satisfies(&none, &floor));
+        assert!(host("x86-64-v3").satisfies(&none, &floor));
+        assert!(!host("x86-64-v1").satisfies(&none, &floor));
+        assert!(!host("armv8.4-a").satisfies(&none, &floor));
+        let fast = caps(&[("isa_level", "fast")]);
+        assert!(host("fast").satisfies(&none, &fast));
+        assert!(!host("slow").satisfies(&none, &fast));
+        let mixed = "x86-64-v3,armv8.4-a";
+        assert!(host(mixed).satisfies(&none, &caps(&[("isa_level", mixed)])));
     }
 
     /// Asserts that cutting a shape's memory changes only the memory: cpu, gpus, the gpu

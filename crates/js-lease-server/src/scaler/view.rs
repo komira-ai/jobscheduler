@@ -23,9 +23,13 @@ const GIB: u64 = 1 << 30;
 /// `u64::MAX`: a host said to have all the disk covers a request the scheduler refuses.
 ///
 /// The architecture is the host's `arch` capability in the one spelling ([`normalise_arch`]:
-/// an agent that reports `aarch64` offers `arm64`), and the ISA level is the highest of the
-/// levels its `isa_level` capability lists ([`IsaLevel::highest_listed`]); a host that lists
-/// none, or a text that is not a list of levels of one family, states no level.
+/// an agent that reports `aarch64` offers `arm64`). The ISA level is the one the pool books
+/// for the host: the highest of the levels the `isa_level` capability of `booked` lists
+/// ([`IsaLevel::highest_listed`]). The registry places a request against the booked shape,
+/// which every host of the pool was held to at its hello, so a level the host reports above
+/// it is not stated: the scaler would count the host for a request the registry never
+/// places on it. A pool that books no level, or a text that is not a list of levels of one
+/// family, states none.
 ///
 /// Today only agent pools and static host files can book disk; elastic and joined pools
 /// have no `disk_bytes` key, so a request for disk there is refused before the scaler
@@ -52,7 +56,8 @@ fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
             .and_then(|class| GpuClass::parse(class).ok()),
         os: text("os"),
         arch: normalise_arch(&text("arch")).to_owned(),
-        isa_level: capabilities
+        isa_level: booked
+            .capabilities()
             .get("isa_level")
             .map(String::as_str)
             .and_then(IsaLevel::highest_listed),
@@ -229,33 +234,40 @@ mod tests {
         assert_eq!(other.arch, "sparc");
     }
 
-    /// Asserts that a host's offer states the highest ISA level its `isa_level`
-    /// capability lists, one level or the list of it and those below, and states none for
-    /// a host that lists none, an unknown level or both families; and that a request for
-    /// a level fits only the host that states one at least as high. Catches an offer that
-    /// never states the level (no registered host would count for a level request) or
-    /// takes the first of the list.
+    /// Asserts that a host's offer states the highest ISA level the pool books for it, one
+    /// level or the list of it and those below, never a higher one the host reports, and
+    /// none when the pool books none (whatever the host reports), an unknown name or a
+    /// mixed list; and that a request for a level fits only the host whose pool books one at
+    /// least as high. Catches an offer that reads the host's own claim, which counts a host
+    /// for a request the registry never places on it, so nothing is launched and the
+    /// request waits for ever.
     #[test]
-    fn a_hosts_offer_states_the_highest_level_it_lists() {
+    fn a_hosts_offer_states_the_level_the_pool_books() {
         use js_types::X86Level;
-        let level = |caps: &[(&str, &str)]| {
-            offer_of(&shape(0, caps), &shape(0, &[]), ExecMode::Container).isa_level
+        let at = |claim: &[(&str, &str)], booked: &[(&str, &str)]| {
+            offer_of(&shape(0, claim), &shape(0, booked), ExecMode::Container)
         };
+        let level = |claim: &[(&str, &str)], booked: &[(&str, &str)]| at(claim, booked).isa_level;
         let v3 = Some(IsaLevel::X86_64(X86Level::V3));
-        assert_eq!(level(&[("isa_level", "x86-64-v3")]), v3);
-        assert_eq!(level(&[("isa_level", "x86-64-v1,x86-64-v2,x86-64-v3")]), v3);
-        for none in ["", "x86-64-v9", "x86-64-v3,armv8.4-a"] {
-            assert_eq!(level(&[("isa_level", none)]), None, "{none:?}");
-        }
-        assert_eq!(level(&[]), None);
-        let at =
-            |caps: &[(&str, &str)]| offer_of(&shape(0, caps), &shape(0, &[]), ExecMode::Container);
-        let wants_v3 = demand_of(&[("isa_level", "x86-64-v3")]);
-        assert_eq!(at(&[("isa_level", "x86-64-v4")]).fit(&wants_v3), Ok(()));
+        let v4 = [("isa_level", "x86-64-v4")];
+        assert_eq!(level(&v4, &[("isa_level", "x86-64-v3")]), v3);
         assert_eq!(
-            at(&[("isa_level", "x86-64-v2")]).fit(&wants_v3),
+            level(&v4, &[("isa_level", "x86-64-v1,x86-64-v2,x86-64-v3")]),
+            v3
+        );
+        assert_eq!(level(&v4, &[]), None);
+        for none in ["", "x86-64-v9", "x86-64-v3,armv8.4-a"] {
+            assert_eq!(level(&v4, &[("isa_level", none)]), None, "{none:?}");
+        }
+        let wants_v3 = demand_of(&[("isa_level", "x86-64-v3")]);
+        assert_eq!(at(&v4, &v4).fit(&wants_v3), Ok(()));
+        assert_eq!(
+            at(&v4, &[("isa_level", "x86-64-v2")]).fit(&wants_v3),
             Err(js_elastic::Dimension::IsaLevel)
         );
-        assert_eq!(at(&[]).fit(&wants_v3), Err(js_elastic::Dimension::IsaLevel));
+        assert_eq!(
+            at(&v4, &[]).fit(&wants_v3),
+            Err(js_elastic::Dimension::IsaLevel)
+        );
     }
 }
