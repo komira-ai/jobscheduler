@@ -219,9 +219,7 @@ where
     let name = "concurrent_frees_keep_the_first_committed_reason";
     let rig = rig(backend);
     let id = rig.placed("ff");
-    rig.jobs
-        .transition(&id, JobState::Placed, JobState::Cancelled)
-        .expect("ends");
+    rig.jobs.end_job(&id, super::cancelled()).expect("ends");
     let other = rig.other();
     let target = id.clone();
     rig.store.before_next(move || {

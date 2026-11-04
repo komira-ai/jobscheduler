@@ -7,6 +7,7 @@ use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources};
 
 use crate::codec::Carried;
 use crate::ids::{AllocationId, JobId};
+use crate::result::JobResult;
 
 /// What a job needs of the host it runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,9 +132,10 @@ impl JobState {
     }
 }
 
-/// Whether [`crate::JobStore::transition`] may move a job from `from` to `to`. Placement
-/// (queued to placed) and the requeue after a failed whole-host prepare (placed to queued)
-/// have operations of their own and are not moves here.
+/// Whether a job may move from `from` to `to`: [`crate::JobStore::transition`] makes the
+/// moves to a state that has not ended, [`crate::JobStore::end_job`] the moves to an end.
+/// Placement (queued to placed) and the requeue after a failed whole-host prepare (placed to
+/// queued) have operations of their own and are not moves here.
 pub(crate) fn may_move(from: JobState, to: JobState) -> bool {
     use JobState::{Cancelled, FailedToStart, Lost, Placed, Queued, Running, Starting};
     use StartFailure::{AgentRefused, ExclusiveNotReady, NoCapacity, StartTimeout};
@@ -173,7 +175,12 @@ pub struct JobRecord {
     pub cancel_requested: bool,
     /// When the client first asked to cancel it.
     pub cancel_requested_at: Option<StoreTime>,
-    /// When the job's record may be deleted. Nothing in this crate sets it.
+    /// What the job left for its client to read, set when it ends: `None` until then, and
+    /// for a job that was lost or failed to start.
+    pub result: Option<JobResult>,
+    /// When the job's record may be deleted: set when it ends, to the end plus the store's
+    /// retention window, and raised at boot ([`crate::JobStore::raise_deadlines_at_boot`]);
+    /// `None` until it ends.
     pub retention_ends: Option<StoreTime>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
