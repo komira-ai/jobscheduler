@@ -624,8 +624,8 @@ pub struct Local {
     pub drain_wait: Duration,
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
-    /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
-    /// allow-list was given, which only `--runtime crun` takes (see [`crate::egress`]).
+    /// The `--egress*` flags: the most network a `crun` job may ask for. Mode none unless
+    /// `allow-list` or `open` was given, which only `--runtime crun` takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
 }
 
@@ -911,16 +911,16 @@ impl Local {
     }
 }
 
-/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. There is
-/// one network mode: the Podman runtime's own network flags (`--container-network`) cannot
-/// be given with this one, and only the `crun` runtime enforces an allow-list, so another
-/// runtime is refused one rather than silently run with no network at all or the wrong one.
+/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
+/// `crun` enforces a ceiling and `--container-network` is the Podman runtime's own, so either
+/// clash is refused rather than run with no network at all or the wrong one.
 fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
     use crate::egress::{Config, Flags, Mode};
     let config = Config::from_flags(&Flags {
         mode: cli.egress.as_deref(),
         allow: &cli.egress_allow,
         dns: &cli.egress_dns,
+        forward_ports: &cli.egress_forward_port,
         pool: cli.egress_pool.as_deref(),
         ip: cli.egress_ip.as_deref(),
         nft: cli.egress_nft.as_deref(),

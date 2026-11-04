@@ -59,6 +59,8 @@ fn job(node: &Node, run_id: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

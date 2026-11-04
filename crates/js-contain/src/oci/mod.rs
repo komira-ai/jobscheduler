@@ -67,6 +67,8 @@ pub mod words;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
+mod loopback_tests;
+#[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
 mod pin_fault_tests;

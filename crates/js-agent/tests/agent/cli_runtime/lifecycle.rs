@@ -436,3 +436,31 @@ fn run_files_are_read_only_to_the_job_and_removed_by_the_agent_at_run_end() {
     );
     assert!(!dir.exists());
 }
+
+/// Proves the container-engine fallback gives a job no network of its own choosing: over the
+/// Docker runtime the ceiling is `none` with no port, a start that asks for `allow-list` is
+/// refused `network-above-ceiling` naming the ceiling `none` and creates no container, and a
+/// start that asks for nothing runs. Catches a fallback that runs an `allow-list` job on its
+/// own engine network, which is not the allow-list the job asked for.
+#[test]
+fn a_docker_run_gets_none_only() {
+    use js_agent::lifecycle::Runtime as _;
+    use js_types::JobNetwork;
+    let ceiling = open_at(&docker(), "linux", made_at).network_ceiling();
+    assert_eq!(ceiling, js_agent_wire::NetworkCeiling::default());
+    let mut w = World::new("network-none", "linux");
+    let mut spec = job("r1");
+    spec.network = JobNetwork::AllowList;
+    let events = w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+    assert_eq!(names(&events), ["refused r1 network-above-ceiling"]);
+    let said = events.iter().find_map(|event| match event {
+        Event::Refused { why, .. } => Some(why.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        said.as_deref(),
+        Some("network allow-list asked, agent ceiling is none")
+    );
+    assert!(w.docker.ids().is_empty(), "a container was made");
+    assert_eq!(names(&w.start("r2")), ["started r2"]);
+}

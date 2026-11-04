@@ -62,12 +62,18 @@
 //! - an unknown [`Phase`] reads as [`Phase::Quarantined`], which takes no work;
 //! - an unknown [`Isolation`] value is a decode error (inside a reply, that one start reads
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
-//!   absent one means [`Isolation::Contained`].
+//!   absent one means [`Isolation::Contained`];
+//! - an unknown `JobSpec::network` level is a decode error in the same way, so an agent
+//!   never runs a job at a level it did not name, while an absent one means `none`.
 //!
 //! A field an old receiver would silently ignore cannot carry something the job needs.
 //! `JobSpec::files` is such a field (a presigned URL is a secret the task cannot run
 //! without), so an agent that can write them reports the capability `run-files` in its
 //! hello, and the server queues and sends a start with files only to a host that did.
+//! `JobSpec::network` and `JobSpec::ports` are two more: an agent reports its network ceiling
+//! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
+//! sends a start that asks for more than `none`, or declares a port, only to a host whose
+//! ceiling covers it.
 //!
 //! # Not here yet
 //!
@@ -111,6 +117,7 @@ mod image;
 pub mod limits;
 mod load;
 mod native;
+mod network;
 pub mod protocol;
 pub mod refusal;
 
@@ -131,6 +138,7 @@ pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
     OutputSpec, Placement,
 };
+pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration

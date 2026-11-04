@@ -1,6 +1,7 @@
 //! IPv6 is off for a job, with a before/after control.
 
 use js_agent::egress::Egress;
+use js_types::JobNetwork;
 
 use crate::sys::{
     Far, Holder, Reach, Server, allow_list, in_netns, ip, ip_in, packets, serial, sysctl,
@@ -77,7 +78,9 @@ fn ipv6_is_off_for_a_wired_namespace_and_on_for_one_wired_by_hand() {
     // After.
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let holder = Holder::new();
-    let attachment = egress.attach("v6", holder.pid()).expect("attach");
+    let attachment = egress
+        .attach("v6", holder.pid(), JobNetwork::AllowList)
+        .expect("attach");
     let addresses = text(&ip_in(&holder.ns, &["-6", "addr", "show", "dev", "eth0"]));
     assert!(
         !addresses.contains("inet6"),

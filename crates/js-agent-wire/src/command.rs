@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use js_types::{JobNetwork, PortMap};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
@@ -11,6 +12,7 @@ use crate::hello::WireShape;
 use crate::image;
 use crate::limits;
 use crate::native::{self, NativeSpec};
+use crate::network;
 use crate::refusal;
 
 /// Whether a job is confined to a container or may change the machine (design 5.12).
@@ -227,6 +229,28 @@ pub struct JobSpec {
     /// `bundle` capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
+    /// How much network the job's container has: `none` (loopback only, the default),
+    /// `allow-list` or `open` ([`JobNetwork`]). It is left out when `none`, so a start that
+    /// asks for nothing is the text it was before the field. A level this version does not
+    /// know fails to decode (inside a reply that start reads as [`Command::Unknown`]), so an
+    /// agent never runs a job at a level it did not name. An agent refuses a start above its
+    /// ceiling (`network-above-ceiling`) and never runs it with less. A native job has its
+    /// own `network` ([`NativeSpec::network`]) and leaves this one `none`.
+    ///
+    /// An agent that predates the field ignores it and would run the job with less than it
+    /// asked for, so a server sends a start with a level other than `none` only to a host
+    /// whose hello reports a ceiling that covers it ([`crate::NetworkCeiling`]).
+    #[serde(default, skip_serializing_if = "JobNetwork::is_none")]
+    pub network: JobNetwork,
+    /// The ports the job declares ([`PortMap`]): at most [`limits::MAX_PORTS`], each port
+    /// above zero, no host port twice. Left out when there are none. An agent refuses a host
+    /// port it does not list (`port-above-ceiling`), and until it forwards declared ports it
+    /// refuses a start that declares any (`ports-not-supported`). A native job declares none.
+    ///
+    /// An agent that predates the field ignores it, so a server sends a start with ports only
+    /// to a host whose hello lists them ([`crate::NetworkCeiling`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortMap>,
 }
 
 impl JobSpec {
@@ -265,8 +289,8 @@ impl JobSpec {
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
-    /// indices, mounts, files and labels. The server calls it before it queues a start and the
-    /// agent before it acts on one.
+    /// indices, mounts, files, labels and declared ports. The server calls it before it queues
+    /// a start and the agent before it acts on one.
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
@@ -293,6 +317,7 @@ impl JobSpec {
             .map(|mount| (mount.root_name.as_str(), mount.rel.as_str()));
         check::distinct(mounts, places)?;
         files::validate_files(&self.files)?;
+        network::check_ports(&self.ports)?;
         check::labels(at.field("labels"), &self.labels)?;
         check::range(
             at.field("valid_for_ms"),

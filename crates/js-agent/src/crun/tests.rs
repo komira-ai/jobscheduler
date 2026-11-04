@@ -93,6 +93,7 @@ fn run(pids: Option<u64>, files: Option<PathBuf>) -> RunSpec {
         isolation: js_agent_wire::Isolation::Contained,
         bundle: None,
         labels: BTreeMap::new(),
+        network: Default::default(),
     }
 }
 

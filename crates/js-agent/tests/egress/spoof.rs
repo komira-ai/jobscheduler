@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 
 use js_agent::egress::Egress;
+use js_types::JobNetwork;
 
 use crate::sys::{
     Far, Holder, Reach, Server, allow_list, delete_rule, far, ip, ip_in, packets, serial, sysctl,
@@ -80,8 +81,12 @@ fn a_job_cannot_send_from_an_address_that_is_not_its_own() {
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let _rp = RpFilter::off();
     let (a, b) = (Holder::new(), Holder::new());
-    let _first = egress.attach("a", a.pid()).expect("attach a");
-    let _second = egress.attach("b", b.pid()).expect("attach b");
+    let _first = egress
+        .attach("a", a.pid(), JobNetwork::AllowList)
+        .expect("attach a");
+    let _second = egress
+        .attach("b", b.pid(), JobNetwork::AllowList)
+        .expect("attach b");
     sysctl("net/ipv4/conf/jsv0/rp_filter", "0");
     let mac = std::fs::read_to_string("/sys/class/net/jsv0/address").expect("mac");
     let mac = mac.trim();

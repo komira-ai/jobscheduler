@@ -12,6 +12,7 @@ use crate::credential::HostCredential;
 use crate::error::{Rule, ValidationError};
 use crate::heartbeat::HeldRun;
 use crate::limits;
+use crate::network::NetworkCeiling;
 use crate::protocol::{self, ProtocolRange};
 use crate::refusal;
 
@@ -251,7 +252,8 @@ impl Hello {
     }
 
     /// Checks the hello against every bound of [`crate::limits`]: the protocol range, the
-    /// ids, the shape, GPU facts, labels and capabilities, and the held runs (no run id
+    /// ids, the shape, GPU facts, labels and capabilities (the network ceiling among them, as
+    /// [`NetworkCeiling::from_capabilities`] reads it), and the held runs (no run id
     /// twice). The server calls it on every hello before it looks at the pool or the
     /// credential; `validate` reads no state.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -269,6 +271,7 @@ impl Hello {
         }
         self.shape.check(at)?;
         self.check_capabilities(at.field("capabilities"))?;
+        NetworkCeiling::from_capabilities(&self.capabilities)?;
         self.check_gpu_devices(at.field("gpu_devices"))?;
         check::labels(at.field("labels"), &self.labels)?;
         crate::heartbeat::check_held(at.field("held"), &self.held)

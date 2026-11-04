@@ -16,6 +16,7 @@ mod layout;
 mod lease_dir;
 mod logs;
 mod mounts;
+mod network;
 mod owed;
 mod prepare;
 pub mod quota;
@@ -253,6 +254,8 @@ pub fn job(run_id: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

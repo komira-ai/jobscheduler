@@ -330,6 +330,8 @@ async fn start(
         valid_for_ms: left.min(limits::MAX_VALID_FOR_MS),
         bundle: body.bundle,
         native: body.native.map(NativeSpec::from),
+        network: Default::default(),
+        ports: Vec::new(),
     };
     let queued = api
         .agents

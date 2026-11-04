@@ -29,6 +29,7 @@ mod dns;
 mod ipv6;
 mod lifecycle;
 mod modes;
+mod open;
 mod premise;
 mod spoof;
 mod sys;

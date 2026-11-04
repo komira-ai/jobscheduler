@@ -512,6 +512,7 @@ impl RuntimeHost {
             isolation: js_agent_wire::Isolation::Contained,
             bundle: None,
             labels: BTreeMap::new(),
+            network: js_types::JobNetwork::AllowList,
         }
     }
 }

@@ -438,35 +438,47 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
 }
 
 /// Asserts the egress flags of an agent whose runtime is not `crun`. The default is no
-/// network and is accepted with and without `--egress none`; every flag of an allow-list
-/// names the mode it needs; a mode that is not one of the two is refused; and an allow-list
-/// is refused at start, naming `--runtime crun` (the only runtime that enforces it), with no
-/// runtime given and with `--runtime docker`, as is the Podman network flag beside it,
-/// so an operator who asks for a network never gets a different one. It catches an
-/// allow-list accepted and silently ignored by a runtime that gives jobs no such network,
-/// and one that is accepted together with `--container-network`.
+/// network and is accepted with and without `--egress none`; every flag of a job network
+/// names the modes it needs (`--egress-forward-port` among them); a mode that is not one of
+/// the three is refused; `allow-list` and `open` are refused at start, naming `--runtime
+/// crun` (the only runtime that enforces them), with no runtime given and with `--runtime
+/// docker`, as is the Podman network flag beside them, so an operator who asks for a network
+/// never gets a different one; and an operator cannot claim a ceiling with `--capability`.
+/// It catches a ceiling accepted and silently ignored by a runtime that gives jobs no such
+/// network, one that is accepted together with `--container-network`, and a hello that says
+/// `egress=open` on an operator's word.
 #[test]
 fn egress_allow_list_is_refused_without_the_crun_runtime() {
     let host = linux_host();
     let hello = hello_of(&["--egress", "none"], &host);
     assert_eq!(hello["phase"], "serving");
-    let said = refused(&["--egress", "open"], &host);
+    let said = refused(&["--egress", "wide"], &host);
     assert!(
-        said.contains("--egress: expected none or allow-list"),
+        said.contains("--egress: expected none, allow-list or open"),
         "{said}"
     );
     for (flags, name) in [
         (&["--egress-allow", "192.0.2.10:443"][..], "--egress-allow"),
         (&["--egress-dns", "192.0.2.53"][..], "--egress-dns"),
+        (
+            &["--egress-forward-port", "80"][..],
+            "--egress-forward-port",
+        ),
         (&["--egress-pool", "198.18.0.0/16"][..], "--egress-pool"),
         (&["--egress-nft", "/bin/sh"][..], "--egress-nft"),
         (&["--egress-nsenter", "/bin/sh"][..], "--egress-nsenter"),
     ] {
         let said = refused(flags, &host);
         assert!(
-            said.contains(&format!("{name}: needs --egress allow-list")),
+            said.contains(&format!("{name}: needs --egress allow-list or open")),
             "{said}"
         );
+    }
+    for key in ["egress", "egress-ports"] {
+        let claim = format!("{key}=open");
+        let said = refused(&["--capability", &claim], &host);
+        let want = format!("--capability: {key} is detected and cannot be set");
+        assert!(said.contains(&want), "{said}");
     }
     #[cfg(target_os = "linux")]
     {
@@ -495,5 +507,16 @@ fn egress_allow_list_is_refused_without_the_crun_runtime() {
         assert!(said.contains("give only one"), "{said}");
         let said = refused(&["--egress", "allow-list"], &host);
         assert!(said.contains("needs at least one --egress-allow"), "{said}");
+        let programs = ["--egress-ip", "/bin/sh", "--egress-nft", "/bin/sh"];
+        let mut open = vec!["--egress", "open", "--egress-nsenter", "/bin/sh"];
+        open.extend(programs);
+        let said = refused(&open, &host);
+        assert!(
+            said.contains("--egress open: needs --runtime crun"),
+            "{said}"
+        );
+        open.extend(["--egress-forward-port", "70000"]);
+        let said = refused(&open, &host);
+        assert!(said.contains("--egress-forward-port: not <PORT>"), "{said}");
     }
 }

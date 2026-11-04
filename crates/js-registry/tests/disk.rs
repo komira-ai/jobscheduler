@@ -75,6 +75,8 @@ fn job(run: &str, disk: Option<u64>) -> JobSpec {
         labels: Default::default(),
         heartbeat_seq: 0,
         valid_for_ms: 0,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

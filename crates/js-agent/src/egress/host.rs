@@ -11,7 +11,8 @@
 //! holds the job until the wiring is done (`js-init --wait-route`): the job's first
 //! instruction runs after the last step below, the default route.
 //!
-//! For a run whose container's first process is `pid` ([`Egress::attach`]):
+//! For a run whose container's first process is `pid` and whose job asked for `allow-list` or
+//! `open` ([`Egress::attach`]; a `none` job is not wired at all):
 //!
 //! 1. take a /30 of the pool, and the names `jsvN` (host end) and `jspN` (job end);
 //! 2. open `/proc/<pid>/ns/net` once, keep the descriptor, and refuse the host's own
@@ -19,18 +20,20 @@
 //!    later steps name it as `/proc/<agent pid>/fd/<n>`, never by the container's pid again;
 //! 3. in the initial namespace: make the veth pair, turn IPv6 off on the host end, address the
 //!    host end and set it up;
-//! 4. add `jsvN` to the firewall's set of wired interfaces;
+//! 4. add `jsvN` to the firewall's set of wired interfaces of its level: `jobifs` for
+//!    `allow-list`, `openifs` for `open`;
 //! 5. move the job end into the namespace, named `eth0`;
 //! 6. enter that namespace with `nsenter` and, in one `ip -batch`: raise `lo`, give `eth0` no
 //!    IPv6 link-local address, address and raise it, and add the default route last.
 //!
 //! Releasing a run removes the set member and the host end (which takes the job end with
 //! it); the container's namespace is the kernel's to free when its last process ends, so
-//! nothing of it outlives the run. An allow-list start begins by removing every interface
-//! named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and the two tables, because
-//! the keeper kills the containers with the agent: nothing a previous process wired is in
-//! use; and only one agent at a time holds the host's egress ([`HOST_LOCK`]), so the sweep
-//! never removes the live wiring of another agent. Mode none runs no program and touches nothing.
+//! nothing of it outlives the run. A start under the ceiling `allow-list` or `open` begins by
+//! removing every interface named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and
+//! the two tables, because the keeper kills the containers with the agent: nothing a previous
+//! process wired is in use; and only one agent at a time holds the host's egress
+//! ([`HOST_LOCK`]), so the sweep never removes the live wiring of another agent. Mode none runs
+//! no program and touches nothing.
 //!
 //! Everything the agent does to the machine goes through [`Sys`], so the unit tests script
 //! the whole sequence, including a failure at each step, and the tests that need the real
@@ -44,10 +47,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use js_mac_session::disclaim::Program;
+use js_types::JobNetwork;
 use serde_json::Value;
 
 use super::config::{Config, Mode};
-use super::ruleset::{self, IF_PREFIX, IFACE_SET, NAT_TABLE, TABLE};
+use super::ruleset::{self, IF_PREFIX, IFACE_SET, NAT_TABLE, OPEN_SET, TABLE};
 
 /// The name of the job's end of a pair before it is moved.
 const PEER_PREFIX: &str = "jsp";
@@ -55,10 +59,10 @@ const PEER_PREFIX: &str = "jsp";
 /// The name every job's interface has inside its container.
 const INSIDE_NAME: &str = "eth0";
 
-/// The abstract socket an allow-list holds bound while its egress lives: one per network
-/// namespace (the host's, for the agent), freed by the kernel when the process ends however it
-/// ends. The interfaces and tables an allow-list makes and removes are named for the host, not
-/// for an agent, so one agent at a time may hold them.
+/// The abstract socket a wired ceiling (`allow-list` or `open`) holds bound while its egress
+/// lives: one per network namespace (the host's, for the agent), freed by the kernel when the
+/// process ends however it ends. The interfaces and tables it makes and removes are named for
+/// the host, not for an agent, so one agent at a time may hold them.
 pub const HOST_LOCK: &str = "js-agent-egress";
 
 /// What holds the host's egress for an agent: the bound [`HOST_LOCK`].
@@ -79,6 +83,15 @@ pub enum EgressError {
     /// Every block of the pool is in use.
     #[error("egress: every address block of the pool is in use")]
     Exhausted,
+    /// A run was to be wired at a level above the ceiling the host was set up for; the
+    /// admission ([`super::admit`]) refuses such a job before anything is made.
+    #[error("egress: a {asked} job cannot be wired under the ceiling {ceiling}")]
+    AboveCeiling {
+        /// The level the run asked for.
+        asked: JobNetwork,
+        /// The ceiling.
+        ceiling: JobNetwork,
+    },
     /// The container is not in a network namespace of its own, or is gone.
     #[error("egress: container {pid}: {why}")]
     Container {
@@ -196,10 +209,11 @@ fn spawn(program: &str, args: &[&str], stdin: &str) -> std::io::Result<std::proc
     child.wait_with_output()
 }
 
-/// The host side of the egress mode: the pool of address blocks and the firewall. Cheap to
-/// clone; every clone is the same pool, and two are equal when they are the same pool. An
-/// allow-list holds the host's egress ([`HOST_LOCK`]) until its last clone and its last
-/// [`Attachment`] are dropped: a run still wired keeps another start from sweeping it.
+/// The host side of the egress ceiling: the pool of address blocks and the firewall. Cheap to
+/// clone; every clone is the same pool, and two are equal when they are the same pool. A wired
+/// ceiling (`allow-list` or `open`) holds the host's egress ([`HOST_LOCK`]) until its last
+/// clone and its last [`Attachment`] are dropped: a run still wired keeps another start from
+/// sweeping it.
 #[derive(Debug, Clone)]
 pub struct Egress {
     inner: Arc<Inner>,
@@ -229,8 +243,9 @@ struct Inner {
 #[derive(Debug)]
 pub struct Attachment {
     inner: Arc<Inner>,
-    /// The block's index and the host end's name, none in mode none or once taken down.
-    wired: Option<(u32, String)>,
+    /// The block's index, the host end's name and the set it is in; none for a run that is
+    /// not wired (mode none, a `none` job) or once taken down.
+    wired: Option<(u32, String, &'static str)>,
 }
 
 fn command(what: impl Into<String>, why: impl std::fmt::Display) -> EgressError {
@@ -270,12 +285,12 @@ fn sysctl(sys: &dyn Sys, path: &str, value: &str) -> Result<(), EgressError> {
 }
 
 impl Egress {
-    /// Starts the host side for `config`. Mode none runs nothing. An allow-list first holds
-    /// the host's egress ([`HOST_LOCK`]: another agent's live wiring is never swept), then
-    /// removes what an earlier agent left (the interfaces `jsv<digits>` and `jsp<digits>`, both tables),
-    /// switches IPv4 forwarding on (a host-wide switch, which stays on when the agent ends:
-    /// other users of the host may rely on it, and the agent cannot know) and loads the
-    /// firewall.
+    /// Starts the host side for `config`. Mode none runs nothing. A wired ceiling
+    /// (`allow-list` or `open`) first holds the host's egress ([`HOST_LOCK`]: another agent's
+    /// live wiring is never swept), then removes what an earlier agent left (the interfaces
+    /// `jsv<digits>` and `jsp<digits>`, both tables), switches IPv4 forwarding on (a host-wide
+    /// switch, which stays on when the agent ends: other users of the host may rely on it, and
+    /// the agent cannot know) and loads the firewall.
     ///
     /// # Errors
     ///
@@ -292,7 +307,7 @@ impl Egress {
     /// test on the real machine holds a name of its own, never the host's.
     fn start_holding(config: Config, sys: Arc<dyn Sys>, lock: &str) -> Result<Self, EgressError> {
         let (mut baseline, mut host) = (None, None);
-        if config.mode() == Mode::AllowList {
+        if config.mode() != Mode::None {
             let held = sys
                 .lock_host(lock)
                 .map_err(|why| command("holding the host's egress", why))?;
@@ -325,11 +340,11 @@ impl Egress {
         &self.inner.config
     }
 
-    /// Whether the host is as the agent set it up: in allow-list mode IPv4 forwarding is on
-    /// and both tables are, rule for rule, what [`Egress::start`] loaded (a rule changed,
-    /// added or removed, a chain unhooked, a table gone). Counters and the members of the
-    /// set of wired interfaces are not compared. Mode none has nothing to check. The lifecycle
-    /// asks before every create.
+    /// Whether the host is as the agent set it up: under a wired ceiling (`allow-list` or
+    /// `open`) IPv4 forwarding is on and both tables are, rule for rule, what [`Egress::start`]
+    /// loaded (a rule changed, added or removed, a chain unhooked, a table or a set gone).
+    /// Counters and the members of the sets of wired interfaces are not compared. Mode none
+    /// has nothing to check. The lifecycle asks before every create.
     ///
     /// # Errors
     ///
@@ -350,31 +365,49 @@ impl Egress {
     }
 
     /// Wires the network namespace of the container whose first process is `pid`, for run
-    /// `run` (used in errors only). In mode none there is nothing to wire and the result is
-    /// an attachment that does nothing.
+    /// `run` (used in errors only), whose job asked for `level`: its interface goes in the set
+    /// of that level (`jobifs` for `allow-list`, `openifs` for `open`). For a `none` job, and in
+    /// mode none, there is nothing to wire and the result is an attachment that does nothing.
     ///
     /// The container's init must be waiting for its route (`OciConfig::route_wait`): the
     /// default route is the last thing made.
     ///
     /// # Errors
     ///
-    /// The container is gone or shares the host's network namespace, the pool is full, or a
-    /// program failed; whatever was made is taken down again.
-    pub fn attach(&self, run: &str, pid: u32) -> Result<Attachment, EgressError> {
+    /// [`EgressError::AboveCeiling`] for a level above the ceiling (nothing is made); the
+    /// container is gone or shares the host's network namespace, the pool is full, or a
+    /// program failed, and whatever was made is taken down again.
+    pub fn attach(
+        &self,
+        run: &str,
+        pid: u32,
+        level: JobNetwork,
+    ) -> Result<Attachment, EgressError> {
         let inner = &self.inner;
-        if inner.config.mode() == Mode::None {
-            return Ok(Attachment {
-                inner: inner.clone(),
-                wired: None,
+        let ceiling = inner.config.mode().level();
+        if level > ceiling {
+            return Err(EgressError::AboveCeiling {
+                asked: level,
+                ceiling,
             });
         }
+        let set = match level {
+            JobNetwork::None => {
+                return Ok(Attachment {
+                    inner: inner.clone(),
+                    wired: None,
+                });
+            }
+            JobNetwork::AllowList => IFACE_SET,
+            JobNetwork::Open => OPEN_SET,
+        };
         let index = take(inner)?;
         let attachment = Attachment {
             inner: inner.clone(),
-            wired: Some((index, format!("{IF_PREFIX}{index}"))),
+            wired: Some((index, format!("{IF_PREFIX}{index}"), set)),
         };
         // On failure the attachment drops here and takes down whatever was made.
-        wire(&*inner.sys, &inner.config, index, pid).map_err(|why| match why {
+        wire(&*inner.sys, &inner.config, (index, set), pid).map_err(|why| match why {
             container @ EgressError::Container { .. } => container,
             other => command(format!("wiring run {run}"), other),
         })?;
@@ -383,10 +416,10 @@ impl Egress {
 }
 
 impl Attachment {
-    /// The name of the host end of the run's veth pair, none in mode none.
+    /// The name of the host end of the run's veth pair, none for a run that is not wired.
     #[must_use]
     pub fn interface(&self) -> Option<&str> {
-        self.wired.as_ref().map(|(_, name)| name.as_str())
+        self.wired.as_ref().map(|(_, name, _)| name.as_str())
     }
 
     /// Takes the run's wiring down: the set member and the host end. Nothing is left to do
@@ -400,7 +433,7 @@ impl Attachment {
     }
 
     fn take_down(&mut self) -> Result<(), EgressError> {
-        let Some((index, name)) = self.wired.take() else {
+        let Some((index, name, set)) = self.wired.take() else {
             return Ok(());
         };
         let (config, sys) = (&self.inner.config, &*self.inner.sys);
@@ -409,7 +442,7 @@ impl Attachment {
             sys,
             "removing the interface from the firewall set",
             config.nft(),
-            &["delete", "element", "inet", TABLE, IFACE_SET, &element],
+            &["delete", "element", "inet", TABLE, set, &element],
             None,
         );
         let deleted = call(
@@ -452,8 +485,14 @@ fn take(inner: &Inner) -> Result<u32, EgressError> {
     Ok(index)
 }
 
-/// The steps of the module documentation, for block `index` and container `pid`.
-fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), EgressError> {
+/// The steps of the module documentation, for block `index`, whose interface goes in the set
+/// `set`, and container `pid`.
+fn wire(
+    sys: &dyn Sys,
+    config: &Config,
+    (index, set): (u32, &str),
+    pid: u32,
+) -> Result<(), EgressError> {
     let (host_ip, job_ip) = config.pool().block(index).ok_or(EgressError::Exhausted)?;
     let (host, peer) = (
         format!("{IF_PREFIX}{index}"),
@@ -497,7 +536,7 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
             "element",
             "inet",
             TABLE,
-            IFACE_SET,
+            set,
             &format!("{{ \"{host}\" }}"),
         ],
     )?;
@@ -556,7 +595,7 @@ fn numbered(name: &str, prefix: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Removes every interface an earlier allow-list made and both tables.
+/// Removes every interface an earlier wired ceiling made and both tables.
 fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
     let text = call(
         sys,

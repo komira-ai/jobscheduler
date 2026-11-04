@@ -516,12 +516,18 @@ pub fn delete_rule(comment: &str) {
     ]);
 }
 
-/// The members of the set of wired interfaces, sorted; empty when the set (or the table)
-/// does not exist.
+/// The members of the set of wired interfaces of `allow-list` runs, sorted; empty when the
+/// set (or the table) does not exist.
 pub fn wired() -> Vec<String> {
+    members("jobifs")
+}
+
+/// The members of the set `set` of the table `inet js_crun_egress`, sorted; empty when the
+/// set (or the table) does not exist.
+pub fn members(set: &str) -> Vec<String> {
     let output = run(
         &tool("nft"),
-        &["-j", "list", "set", "inet", "js_crun_egress", "jobifs"],
+        &["-j", "list", "set", "inet", "js_crun_egress", set],
     );
     if !output.status.success() {
         return Vec::new();
