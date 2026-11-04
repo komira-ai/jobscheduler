@@ -379,6 +379,21 @@ fn os_and_arch_must_match_the_image_platform() {
     }
 }
 
+/// Asserts that a start sent with `arch: aarch64` decodes as `arm64` and re-encodes as
+/// `arm64`, the one spelling, and that `arm64` itself round-trips unchanged. Catches a start
+/// that refuses the alias, or echoes `aarch64` back to a peer that compares names.
+#[test]
+fn an_aarch64_start_decodes_and_reencodes_as_arm64() {
+    let mut sent = serde_json::to_value(start(Os::Macos, Arch::Arm64)).unwrap();
+    assert_eq!(sent["arch"], json!("arm64"));
+    sent["arch"] = json!("aarch64");
+    let decoded: JobSpec = serde_json::from_value(sent).unwrap();
+    assert_eq!(decoded.arch, Some(Arch::Arm64));
+    let again = serde_json::to_value(&decoded).unwrap();
+    assert_eq!(again["arch"], json!("arm64"));
+    assert_eq!(serde_json::from_value::<JobSpec>(again).unwrap(), decoded);
+}
+
 /// Asserts that an `os` or `arch` this version cannot name fails to decode, and inside a
 /// reply reads as an unknown command while the stop beside it still arrives; an image
 /// start without either decodes as a legacy one. Catches a start for a platform the agent
