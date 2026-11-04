@@ -5,18 +5,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use axum::{Json, Router};
 use http_body_util::LengthLimitError;
 use js_proto::v1::job_service_server::JobService;
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, SerializeOptions};
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 
 use crate::annotation::{Segment, Template};
-use crate::answer::{Answer, ok_json};
+use crate::answer::Answer;
 use crate::{BODY_LIMIT, ROUTES, Route, input};
 
 /// A route with what serving it needs: its parsed template and its messages' descriptors.
@@ -117,7 +117,7 @@ impl<T: JobService> Gateway<T> {
             &binding.output,
         )
         .await?;
-        respond(binding.status, &output)
+        Ok(respond(binding.status, &output))
     }
 }
 
@@ -184,11 +184,8 @@ async fn read(body: Body) -> Result<Bytes, Answer> {
     })
 }
 
-/// The success answer `status` of a call's response, by the proto3 JSON mapping; a
-/// response that does not serialize is a 500 `internal`.
-fn respond(status: StatusCode, output: &DynamicMessage) -> Result<Response, Answer> {
-    let value = output
-        .serialize_with_options(serde_json::value::Serializer, &SerializeOptions::new())
-        .map_err(|_| Answer::internal())?;
-    Ok(ok_json(status, &value))
+/// The success answer `status` of a call's response, written by the proto3 JSON mapping
+/// (`DynamicMessage`'s own serialization, the default options of prost-reflect).
+fn respond(status: StatusCode, output: &DynamicMessage) -> Response {
+    (status, Json(output)).into_response()
 }

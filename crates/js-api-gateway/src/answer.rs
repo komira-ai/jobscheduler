@@ -200,8 +200,3 @@ impl IntoResponse for Answer {
             .into_response()
     }
 }
-
-/// A success answer `status` whose body is `value`.
-pub(crate) fn ok_json(status: StatusCode, value: &Value) -> Response {
-    (status, [(header::CONTENT_TYPE, JSON)], value.to_string()).into_response()
-}

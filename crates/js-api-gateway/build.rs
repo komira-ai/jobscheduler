@@ -111,7 +111,7 @@ fn render(routes: &[RouteSpec]) -> Result<String, Box<dyn Error>> {
     )?;
     writeln!(
         code,
-        "/// and answers its response as a message of `output` (see [`unary`])."
+        "/// and answers its response as a message of `output` (see [`decode_as`] and [`answer_of`])."
     )?;
     writeln!(
         code,
@@ -131,15 +131,18 @@ fn render(routes: &[RouteSpec]) -> Result<String, Box<dyn Error>> {
         writeln!(code, "        Rpc::{} => {{", route.rpc)?;
         writeln!(
             code,
-            "            unary(input, output, move |request: ::tonic::Request<{request}>| {{"
+            "            let request = decode_as::<{request}>(&input)?;"
         )?;
         writeln!(
             code,
-            "                service.{}(request)",
+            "            let response = service.{}(::tonic::Request::new(request)).await;",
             snake_case(&route.rpc)
         )?;
-        writeln!(code, "            }})")?;
-        writeln!(code, "            .await")?;
+        writeln!(
+            code,
+            "            answer_of(output, response.map(|response| \
+             ::prost::Message::encode_to_vec(response.get_ref())))"
+        )?;
         writeln!(code, "        }}")?;
     }
     writeln!(code, "    }}")?;

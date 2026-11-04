@@ -108,7 +108,6 @@
 //! wildcard arm over the codes, so a refusal code added to the service fails the build
 //! until its row is chosen.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use axum::Router;
@@ -159,31 +158,29 @@ pub fn router<T: JobService>(service: Arc<T>) -> Router {
     serve::router_over(service, js_proto::FILE_DESCRIPTOR_SET)
 }
 
-/// Calls one method: `input` as its request type `Req`, through `call`, and the response as
-/// a message of `output`. A status is answered by [`Answer::of_status`]; a message that does
-/// not convert between the descriptor and the generated type is a 500 `internal`.
-pub(crate) async fn unary<Req, Resp, F, Fut>(
-    input: DynamicMessage,
+/// The request message `input` as the method's generated request type `Req`. A message that
+/// does not convert is a 500 `internal`.
+pub(crate) fn decode_as<Req: prost::Message + Default>(
+    input: &DynamicMessage,
+) -> Result<Req, Answer> {
+    input.transcode_to::<Req>().map_err(conversion_failed)
+}
+
+/// The answer to a call: its response, encoded, as a message of `output`, or the answer to
+/// its status ([`Answer::of_status`]). A response that does not decode as `output` is a 500
+/// `internal`.
+pub(crate) fn answer_of(
     output: &MessageDescriptor,
-    call: F,
-) -> Result<DynamicMessage, Answer>
-where
-    Req: prost::Message + Default,
-    Resp: prost::Message,
-    F: FnOnce(tonic::Request<Req>) -> Fut,
-    Fut: Future<Output = Result<tonic::Response<Resp>, Status>>,
-{
-    let request = input
-        .transcode_to::<Req>()
-        .map_err(|_| Answer::internal())?;
-    let response = call(tonic::Request::new(request))
-        .await
-        .map_err(|status| Answer::of_status(&status))?;
-    let mut message = DynamicMessage::new(output.clone());
-    message
-        .transcode_from(response.get_ref())
-        .map_err(|_| Answer::internal())?;
-    Ok(message)
+    response: Result<Vec<u8>, Status>,
+) -> Result<DynamicMessage, Answer> {
+    let bytes = response.map_err(|status| Answer::of_status(&status))?;
+    let message = DynamicMessage::decode(output.clone(), bytes.as_slice());
+    message.map_err(conversion_failed)
+}
+
+/// The answer to a message that does not convert between a descriptor and a generated type.
+fn conversion_failed(_: prost::DecodeError) -> Answer {
+    Answer::internal()
 }
 
 #[cfg(test)]
