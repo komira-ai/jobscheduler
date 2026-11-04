@@ -206,7 +206,73 @@
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
-//! = ... }`. At most one elastic pool and one static pool are served in this version.
+//! = ... }`. Any number of elastic and joined pools may be declared, each with its own
+//! `join_token_file`, but this version starts only on a file with at most one pool that
+//! registers agents (an elastic or a joined pool): with more it refuses to start, naming the
+//! second, `several elastic pools are parsed; running them needs the ordered walk of design
+//! 5.6` ([`Config::resolve_file`] still reads such a file). At most one pool whose
+//! provider is the agentless `static` kind is served. That kind is deprecated: the
+//! `static` machine provider below is a different thing (hosts that run `js-agent` and
+//! register themselves), and a later version removes the agentless kind.
+//!
+//! ## Machine providers, platforms and pool settings
+//!
+//! A pool may name container platforms instead of a provider (design 4.2). A
+//! `[[machine_provider]]` has a `name` (the grammar of pool names) and a `kind`: `static`
+//! (the hosts that run `js-agent` and register themselves; no other key) or a provider kind
+//! compiled in, such as `lambdalabs`, whose other keys are that kind's, as under a pool's
+//! `provider` (`api_key_file` and the rest; secrets stay paths). `ec2` and `gce` are refused
+//! as not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
+//! (`kubernetes`, `cloud_run` and `ecs` are refused as not built), and its
+//! `machine_providers` lists declared machine providers first to last. A pool's `platforms`
+//! lists declared platforms first to last; it is refused beside `provider`. Each declared
+//! machine provider must be named by a platform, and each platform by a pool.
+//!
+//! ```toml
+//! [[machine_provider]]
+//! name = "rack"
+//! kind = "static"
+//!
+//! [[machine_provider]]
+//! name         = "lambda"
+//! kind         = "lambdalabs"
+//! api_key_file = "/run/credentials/js/lambda-key"
+//!
+//! [[platform]]
+//! name              = "ours"
+//! kind              = "default"
+//! machine_providers = ["rack", "lambda"]   # first to last
+//!
+//! [[pool]]
+//! name           = "gpu"
+//! class          = "whole-node"
+//! platforms      = ["ours"]
+//! max_machines   = 4          # max_instances is the same cap; give one
+//! max_queue_wait = "30m"      # default 1h
+//! start_timeout  = "15m"      # default 15m
+//! path_grace     = "15s"      # default 15s
+//! # max_spend_per_hour, max_spend_per_day and the other keys of an elastic pool as above
+//!
+//! [pool.provider_limits.lambda]
+//! allowed_instance_types   = ["gpu_1x_a10"]
+//! max_price_cents_per_hour = 200
+//! max_machines             = 2   # at most the pool's
+//! max_spot_machines        = 1   # at most this table's max_machines
+//! ```
+//!
+//! A pool with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables:
+//! a machine provider made from its provider table, the `static` machine provider, and a
+//! `default` platform naming the two, `static` first. Their names start with `+`, which no
+//! name in the file may hold. This version keeps the one fixed order of hosts, registered
+//! hosts first and then the elastic provider: a platform that lists a launching machine
+//! provider before `static` is refused, and a pool's platforms must reach exactly one
+//! machine provider that launches. `max_queue_wait`, `start_timeout` and `path_grace` (each
+//! a positive duration) and the `provider_limits` tables (for a launching machine provider
+//! of the pool's platforms; unknown keys are refused) are read and checked, and nothing
+//! enforces them yet: the job lifecycle ticks (design 6.1) will enforce the first two,
+//! whole-host jobs and admission (design 5.6) `path_grace`, and the pick of an offer (design
+//! 5.6, pass 2) the limits. [`Config::resolve_file`] answers the [`Resolved`] machine
+//! providers, platforms and pools of a file, and [`Resolved::describe`] prints them.
 //!
 //! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
 //! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
@@ -218,8 +284,8 @@
 //! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
 //! shared pool token). It launches nothing: `launch`, `network`, `provider`,
 //! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
-//! are each refused naming the key. It is the pool that registers agents, so it excludes
-//! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
+//! are each refused naming the key. It registers agents, so the server starts only when it
+//! is the one pool that does, and `server.agent_listen` is required. One-time tokens for its nodes
 //! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
 //! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
 //! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
@@ -660,6 +726,7 @@ mod layered;
 mod listener;
 pub mod network;
 mod per_job;
+mod platform;
 mod pool;
 mod rate;
 mod reservations;
@@ -696,12 +763,17 @@ pub use config::{
     Token, is_private_address, parse_duration,
 };
 pub use error::StartupError;
-pub use file::{BrakePlan, ElasticPlan, JoinedPool, Launch, NetworkPlan};
+pub use file::{
+    BrakePlan, ElasticPlan, JoinedPool, Launch, NetworkPlan, PoolSettings, ProviderLimits,
+    Resolved, ResolvedMachineProvider, ResolvedPlatform, ResolvedPool,
+};
 pub use kinds::{
-    BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
+    BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
+    SecretFiles,
 };
 #[doc(hidden)]
 pub use layered::LayeredProvider;
+pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
 pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
