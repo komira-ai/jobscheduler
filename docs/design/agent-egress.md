@@ -149,7 +149,7 @@ removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both 
 process left (the keeper kills the containers with the agent), loads the firewall and switches
 IPv4 forwarding on. That switch is host-wide and is never switched back: other users of the host
 may rely on it by then, and the agent cannot know. The tables are named `js_crun_egress` and
-`js_crun_egress_nat`, apart from the Podman path's `js_egress`, which stays as it was. The kernel's
+`js_crun_egress_nat`; the Podman path's table `js_egress` and its flags were removed. The kernel's
 own reverse-path filter is not relied on; the firewall's `spoof` rule is, because it counts.
 
 DNS: a configured ceiling names its resolvers; the backend writes a `resolv.conf` with those and
@@ -180,10 +180,12 @@ addresses only for an `allow-list` job (an `open` job reaches them through its o
   leases an earlier process left needs no call of its own: no `Attachment` of that process
   exists, and the egress start has already removed its interfaces and tables. Only
   `--runtime crun` enforces a ceiling, so another runtime is refused `allow-list` and `open` at
-  start (its jobs get `none` only), and `--container-network` is refused beside them. Declared
-  ports are forwarded through the DNAT rules of "Declared ports". The old Podman flags (`--container-network`, `--container-egress-allow`, `--container-nft`), their
-  check and `deploy/js-agent/egress-network.sh` stay as the Podman runtime's own until that runtime
-  is removed; deleting them now would take egress away from the runtime nodes run today.
+  start (its jobs get `none` only). Declared ports are forwarded through the DNAT rules of
+  "Declared ports". The old Podman flags (`--container-network`, `--container-egress-allow`,
+  `--container-nft`), their check and the operator script that set up the Podman network were
+  removed: a job on the container-engine fallback (Docker or Podman, `--container-bin`) gets
+  network none, and an agent started with one of those flags is refused at start with a message
+  that names the replacement.
 - The hosts must not drop forwarded packets in another chain: Docker's forward policy does. The CI
   job stops Docker; a node with Docker's firewall needs its own allowance. The farm's kernel and
   AppArmor policy are not exercised in CI.

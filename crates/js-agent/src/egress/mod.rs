@@ -1,6 +1,8 @@
 //! Egress for jobs that run in `crun` containers: a ceiling the agent is configured with
 //! (default none), and a level each job asks for at or under it (design 5.8).
 //!
+//! - [`Allow`] (portable): an endpoint of `--egress-allow`, an IPv4 address or a narrow CIDR
+//!   and a TCP port.
 //! - [`Config`] (portable): the flags `--egress`, `--egress-allow`, `--egress-dns`,
 //!   `--egress-forward-port`, `--egress-pool`, `--egress-ip`, `--egress-nft` and
 //!   `--egress-nsenter`, checked once at start; [`Config::ceiling`] is the most a job may
@@ -30,6 +32,7 @@
 //! sends does not pass `prerouting`.
 
 mod admit;
+mod allow;
 mod config;
 pub mod forward;
 #[cfg(target_os = "linux")]
@@ -39,6 +42,7 @@ pub mod ruleset;
 pub(crate) mod stand_in;
 
 pub use admit::{NetworkRefusal, admit};
+pub use allow::{ALLOW_MAX, Allow};
 pub use config::{
     Config, ConfigError, DEFAULT_IP, DEFAULT_NFT, DEFAULT_NSENTER, DEFAULT_POOL, DNS_MAX,
     FORWARD_PORT_MAX, Flags, Mode, Pool, ROUTE_WAIT,
