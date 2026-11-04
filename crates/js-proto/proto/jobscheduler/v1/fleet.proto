@@ -1,0 +1,196 @@
+// The fleet as an operator reads it: hosts with the resources booked on them, pools and
+// machine providers. No message here carries a secret or a launch plan. The evolution rule
+// of every file of this package is in the header of service.proto.
+
+syntax = "proto3";
+
+package jobscheduler.v1;
+
+// Where a host comes from.
+enum HostSource {
+  // Not given: a reader reads a source it does not know (one a newer server added) as this
+  // value.
+  HOST_SOURCE_UNSPECIFIED = 0;
+  // Listed by the operator in a static pool.
+  HOST_SOURCE_STATIC = 1;
+  // Registered by its own agent.
+  HOST_SOURCE_REGISTERED = 2;
+}
+
+// Whether the service hears a registered host.
+enum HostState {
+  // No state: the host is not a registered one (a static host has no agent to hear), or a
+  // reader met a state it does not know.
+  HOST_STATE_UNSPECIFIED = 0;
+  // Heard within its grace.
+  HOST_STATE_LIVE = 1;
+  // Not heard within its grace.
+  HOST_STATE_LOST = 2;
+  // Known from before a restart of the service and not heard since.
+  HOST_STATE_AWAITING = 3;
+}
+
+// Why a host is set aside from ordinary placement.
+enum HostMark {
+  // No mark: the host takes jobs as its room allows.
+  HOST_MARK_UNSPECIFIED = 0;
+  // Set aside for a waiting whole-host job and draining for it; only backfill starts on
+  // it.
+  HOST_MARK_RESERVED = 1;
+  // Committed to a whole-host job.
+  HOST_MARK_HELD = 2;
+  // Being drained so that it can be scaled away.
+  HOST_MARK_DRAINING = 3;
+  // Being handed back to its provider.
+  HOST_MARK_RELEASING = 4;
+}
+
+// What a host provides.
+message Shape {
+  // CPU, in thousandths of a core.
+  uint64 cpu_millis = 1;
+  // Memory, in bytes.
+  uint64 memory_bytes = 2;
+  // The number of GPUs.
+  uint32 gpus = 3;
+  // The GPU class, in the spelling the agent reports. Empty: the host has no GPU or names
+  // no class.
+  string gpu_class = 4;
+  // The scratch disk the host offers, in bytes. Absent: none is booked on it.
+  optional uint64 disk_bytes = 5;
+}
+
+// The memory of a host or a pool that placement may book.
+message Memory {
+  // The memory configured or reported, in bytes.
+  uint64 configured_bytes = 1;
+  // The share of the configured memory placement may book, a whole percent from 1 to 100.
+  uint32 schedulable_percent = 2;
+  // The bytes placement may book: the configured bytes times the percent, rounded down.
+  uint64 schedulable_bytes = 3;
+}
+
+// The resources booked on a host for one job. It is read-only: no call creates or ends
+// one.
+message HostBooking {
+  // The job the resources are booked for.
+  string job_id = 1;
+  // CPU, in thousandths of a core.
+  uint64 cpu_millis = 2;
+  // Memory, in bytes.
+  uint64 memory_bytes = 3;
+  // Scratch disk, in bytes. 0: none.
+  uint64 disk_bytes = 4;
+  // The number of GPUs.
+  uint32 gpus = 5;
+  // The host ports the job holds.
+  repeated uint32 host_ports = 6;
+}
+
+// A host as an operator reads it.
+message Host {
+  // The host's id.
+  string id = 1;
+  // Where the host comes from.
+  HostSource source = 2;
+  // Whether the service hears the host. Unspecified for a static host.
+  HostState state = 3;
+  // What the host provides.
+  Shape shape = 4;
+  // The host's memory as placement books it.
+  Memory memory = 5;
+  // The capabilities the host reports, by key, in the vocabulary of design section 3.8.
+  map<string, string> capabilities = 6;
+  // The host's labels, by key.
+  map<string, string> labels = 7;
+  // The resources booked on the host, one entry per job, in booking order.
+  repeated HostBooking booked = 8;
+  // Why the host is set aside from ordinary placement. Unspecified: it is not.
+  HostMark mark = 9;
+  // When the host's cordon lapses unless it is extended, in milliseconds since the Unix
+  // epoch. Absent: the host is not cordoned.
+  optional uint64 cordon_expires_at_ms = 10;
+  // The reason code the host reported when it found itself no longer clean. Empty: the
+  // host is not tainted.
+  string taint_reason = 11;
+  // The version of the host's agent. Empty: no agent reported one.
+  string agent_version = 12;
+}
+
+// Whether a pool or a machine provider can serve.
+enum Availability {
+  // Not given: a reader reads a value it does not know (one a newer server added) as this
+  // value.
+  AVAILABILITY_UNSPECIFIED = 0;
+  // No check has passed or failed yet.
+  AVAILABILITY_CHECKING = 1;
+  // The last check passed.
+  AVAILABILITY_AVAILABLE = 2;
+  // The last check failed; the reasons say why.
+  AVAILABILITY_UNAVAILABLE = 3;
+}
+
+// A pool as an operator reads it.
+message Pool {
+  // The pool's name.
+  string name = 1;
+  // The kind of the pool's provider, such as static or lambdalabs.
+  string kind = 2;
+  // Whether the pool can serve.
+  Availability state = 3;
+  // Why the pool cannot serve, one short text each. Empty when it can.
+  repeated string reasons = 4;
+  // The memory of one host of the pool as placement books it (per host, not summed over
+  // the pool's machines).
+  Memory memory = 5;
+  // The number of machines the pool holds.
+  uint32 instances = 6;
+  // When the pool was last advanced by the service's tick, in milliseconds since the Unix
+  // epoch. Absent: not yet.
+  optional uint64 last_tick_ms = 7;
+}
+
+// One check a machine provider ran of itself.
+message ProviderCheck {
+  // The check's name.
+  string name = 1;
+  // The check passed.
+  bool ok = 2;
+  // Why the check failed. Empty when it passed.
+  string reason = 3;
+  // More text from the check for a person, when it gave some.
+  string note = 4;
+  // When the check ran, in milliseconds since the Unix epoch.
+  uint64 checked_at_ms = 5;
+}
+
+// One machine a provider launched for the service.
+message Machine {
+  // The id of the host the machine is.
+  string host = 1;
+  // The machine's phase in the scaler's records, such as launching, booting or
+  // registered.
+  string state = 2;
+  // The offer the machine was launched from, such as the provider's instance type.
+  string offer = 3;
+  // The zone or region the machine is in.
+  string zone = 4;
+  // The machine's price, in cents per hour. Absent: the provider states none.
+  optional uint64 price_cents_per_hour = 5;
+  // The provider's own id of the machine.
+  string provider_id = 6;
+}
+
+// A machine provider as an operator reads it.
+message Provider {
+  // The provider's name.
+  string name = 1;
+  // The provider's kind, such as static or lambdalabs.
+  string kind = 2;
+  // Whether the provider can serve.
+  Availability state = 3;
+  // The provider's own checks of its last pass.
+  repeated ProviderCheck checks = 4;
+  // The machines the provider launched for the service.
+  repeated Machine machines = 5;
+}

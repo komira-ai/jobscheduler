@@ -1,0 +1,27 @@
+[package]
+name = "js-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+hyper-util = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+tonic = { workspace = true, features = ["transport"] }
+
+[lints]
+workspace = true

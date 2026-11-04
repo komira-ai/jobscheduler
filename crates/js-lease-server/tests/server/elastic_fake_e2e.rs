@@ -33,6 +33,7 @@ fn offer() -> Offer {
         gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
+        isa_level: None,
         exec: ExecMode::Container,
         price_cents_per_hour: Some(PRICE),
         price_unit: PriceUnit::UsCents,

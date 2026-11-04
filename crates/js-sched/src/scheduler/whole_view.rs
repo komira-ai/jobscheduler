@@ -2,12 +2,13 @@
 //! numbers the caps use ([`Scheduler::whole_summary`]), for a caller that shows them
 //! (a status page, a metric) without reading the accessors one by one.
 //!
-//! Both read what the placement rounds recorded, the marks, give-ups, back-offs and
-//! waits ([`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`],
-//! [`Scheduler::whole_wait`]), and count with the code the caps use, so neither can
-//! drift from what admission enforces. Two things are read at the scheduler's time now
-//! instead: whether a request is before `drain_after`, and which back-offs have not
-//! ended, so a back-off that ended since the last round no longer shows as barring.
+//! Both read what the placement rounds recorded, the marks, give-ups, bars and waits
+//! ([`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`],
+//! [`Scheduler::whole_barred`], [`Scheduler::whole_wait`]), and count with the code the
+//! caps use, so neither can drift from what admission enforces. Two things are read at
+//! the scheduler's time now instead: whether a request is before `drain_after`, and which
+//! bars have not ended, so a bar that ended since the last round no longer shows as
+//! barring.
 
 use std::collections::BTreeMap;
 
@@ -44,11 +45,16 @@ pub enum WholeState {
         /// Whether the worker still has leases, so it is draining; when it has none the
         /// next round grants it.
         draining: bool,
+        /// The end of the worker's tail when the mark was made on it
+        /// ([`super::WholeMark::tail_end`]): when the request is expected to start there.
+        tail_end: Option<FarmTime>,
     },
-    /// It gave up a hold and holds no worker: the workers it gave up are barred until
-    /// their back-off ends, and no other worker could be held.
+    /// It holds no worker and some are barred to it ([`Scheduler::whole_barred`]): the
+    /// workers it gave up a hold on, until their back-off ends, and those barred with
+    /// [`Scheduler::bar_whole`]; no other worker could be held.
     Barred {
-        /// The barred workers, each with when its back-off ends (exclusive).
+        /// The barred workers, each with when its bar ends (exclusive; the end of time,
+        /// `u64::MAX` milliseconds, for a bar for life).
         workers: BTreeMap<WorkerId, FarmTime>,
         /// How many holds it has given up so far.
         give_ups: u32,
@@ -59,7 +65,7 @@ pub enum WholeState {
     /// It has waited out `drain_after` and holds nothing, and no cap, give-up or
     /// unservable reason is recorded. Either every worker it could hold is held by a
     /// request ahead of it, or no placement round has run since it became due (or since
-    /// its back-off ended). A status page may label it "Waiting".
+    /// its bar ended). A status page may label it "Waiting".
     Queued,
     /// No live worker could ever hold it. It is shown before `drain_after` too: the
     /// first round that finds no worker records it.
@@ -140,9 +146,9 @@ impl Scheduler {
     /// Why queued whole-machine `operation` is not yet granted a worker, with whole-node
     /// settings on ([`Scheduler::with_whole_node`]); `None` without them, or if
     /// `operation` is not a queued whole-machine request (unknown, cancelled, placed or
-    /// finished). The marks, waits and back-offs are as of the last placement round;
-    /// whether it is before `drain_after`, and which back-offs have not ended, are read at
-    /// the scheduler's time now: a back-off that ended since the last round shows
+    /// finished). The marks and waits are as of the last placement round; whether it is
+    /// before `drain_after`, and which bars have not ended, are read at the scheduler's
+    /// time now: a bar that ended since the last round shows
     /// [`WholeState::Queued`], not [`WholeState::Barred`], until the next round.
     #[must_use]
     pub fn whole_state(&self, operation: OperationId) -> Option<WholeState> {
@@ -206,6 +212,7 @@ impl Scheduler {
                 deadline: self.drain.gives_up(operation, cfg).then_some(mark.deadline),
                 give_ups,
                 draining: self.workers.get(&mark.worker).is_some_and(|w| w.leases > 0),
+                tail_end: mark.tail_end,
             };
         }
         if let Some(wait) = self.whole_wait(operation) {

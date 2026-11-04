@@ -1,0 +1,281 @@
+// The job: what a client submits, the record the service keeps of it, its result, and why
+// a submit is refused. The evolution rule of every file of this package is in the header of
+// service.proto.
+
+syntax = "proto3";
+
+package jobscheduler.v1;
+
+// How a host runs a job (the `exec` term of the capability vocabulary, design section 3.8).
+enum ExecMode {
+  // Not given: the job may run in either mode.
+  EXEC_MODE_UNSPECIFIED = 0;
+  // In a container, through the host's container runtime.
+  EXEC_MODE_CONTAINER = 1;
+  // Natively, under a sandbox-exec profile (macOS).
+  EXEC_MODE_SANDBOX_EXEC = 2;
+}
+
+// What a job may reach over the network (design section 5.8). A host refuses at start a
+// job that asks for more than its agent allows; it never runs a job with less than it
+// asked for. Nothing enforces the level yet.
+enum NetworkLevel {
+  // Not given: read as none, the default.
+  NETWORK_LEVEL_UNSPECIFIED = 0;
+  // No route out. A Linux job has loopback only, in its own network namespace.
+  NETWORK_LEVEL_NONE = 1;
+  // Only the endpoints and DNS resolvers the host's agent is configured with. The list is
+  // the operator's; a job picks the level and cannot add endpoints.
+  NETWORK_LEVEL_ALLOW_LIST = 2;
+  // Any address except what the agent always denies: the link-local range where clouds
+  // serve instance metadata, IPv6, and spoofed source addresses.
+  NETWORK_LEVEL_OPEN = 3;
+}
+
+// The resources a job needs of its host. A host is capable when it has at least each of
+// them.
+message Needs {
+  // CPU, in thousandths of a core.
+  uint64 cpu_millis = 1;
+  // Memory, in bytes.
+  uint64 memory_bytes = 2;
+  // Scratch disk, in bytes. Absent: none is asked for.
+  optional uint64 disk_bytes = 3;
+  // The number of GPUs. 0: none.
+  uint32 gpus = 4;
+  // The GPU class, in the spelling the agent reports: the lower-case model name with its
+  // words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class.
+  string gpu_class = 5;
+  // The job needs the whole host: it is placed only on a host that holds no other job, and
+  // a host is drained for it (design section 5.4). The other needs still bound which hosts
+  // are capable.
+  bool whole_host = 6;
+}
+
+// What a job requires of its host beside resources, in the vocabulary of design section
+// 3.8 as it exists today. Each field the job leaves empty matches any host.
+message Constraints {
+  // The operating system: linux or macos. Empty: any.
+  string os = 1;
+  // The CPU architecture, as free text matched exactly against the spelling the host or
+  // offer reports, such as x86_64. Today ARM is spelt arm64 by some sources and aarch64 by
+  // others (design section 3.8). Empty: any.
+  string arch = 2;
+  // The mode the host runs jobs in. Unspecified: either.
+  ExecMode exec = 3;
+}
+
+// One host port forwarded to a port of the job (design section 5.8). New traffic toward a
+// job is refused except through its declared ports. A host port is a resource of the host:
+// two jobs cannot hold the same one on one host. Nothing enforces the forward yet.
+message PortForward {
+  // The port on the host, 1 to 65535.
+  uint32 host_port = 1;
+  // The port inside the job, 1 to 65535.
+  uint32 container_port = 2;
+}
+
+// One file the host writes for the job before it starts, readable by the job at
+// /run/js-files/NAME on a read-only mount.
+message JobFile {
+  // The file name: letters, digits, dot, underscore and dash, starting with a letter or a
+  // digit, unique among the job's files.
+  string name = 1;
+  // The contents, UTF-8 text such as a URL or a token. They are secret: no response of
+  // the service carries them, so this field is empty in every job a read returns.
+  string contents = 2;
+}
+
+// A job as the client submits it: one OCI image run to completion (design section 3.2).
+message JobSpec {
+  // The job's id: 1 to 63 bytes of letters, digits, dot, underscore and dash (design
+  // section 5.3; the service checks it). Submitting the same id with the same job (every
+  // field but the priority) answers from the job already made; the same id with a
+  // different job is refused job-id-conflict. Empty: the service mints one, so a submit
+  // without an id that is repeated after a lost answer makes a second job.
+  string job_id = 1;
+  // The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The
+  // service rejects an image without a digest.
+  string image = 2;
+  // The program to run. Empty: the image's default. How it combines with the image's own
+  // entrypoint and command is set by the server that implements SubmitJob.
+  string command = 3;
+  // The arguments the program is started with, in order.
+  repeated string args = 4;
+  // The environment of the job, by variable name.
+  map<string, string> env = 5;
+  // The resources the job needs.
+  Needs needs = 10;
+  // The constraints on the host beside resources.
+  Constraints constraints = 11;
+  // The most seconds the job may run, counted from running. The service refuses a job
+  // without one (absent or 0, wall-time-not-positive) and one above its ceiling
+  // (wall-time-above-ceiling).
+  optional uint64 wall_limit_seconds = 20;
+  // What the job may reach over the network. Unspecified: none.
+  NetworkLevel network = 30;
+  // The host ports forwarded to the job. Empty: none, and no inbound path to the job.
+  repeated PortForward ports = 31;
+  // The files the host writes for the job before it starts.
+  repeated JobFile files = 40;
+  // The job's priority among queued jobs. 0 when not given. A resubmit that differs from
+  // the job already made only in its priority is the same job (design section 5.3).
+  int32 priority = 50;
+  // The client's labels, by key. A listing can filter by them.
+  map<string, string> labels = 51;
+}
+
+// The states of a job (design section 3.2). Queued, placed, starting and running are live;
+// the others are ended and do not change again.
+enum JobState {
+  // No state: a server never sends it, and a reader reads a state it does not know (one a
+  // newer server added) as this value.
+  JOB_STATE_UNSPECIFIED = 0;
+  // Recorded and waiting for placement. It books nothing.
+  JOB_STATE_QUEUED = 1;
+  // A host was chosen and the job's resources there are booked. A whole-host job stays
+  // placed until its host is quiet and ready.
+  JOB_STATE_PLACED = 2;
+  // The host's agent has the start and is fetching the image and making the container.
+  JOB_STATE_STARTING = 3;
+  // The container is running. The wall limit is counted from here.
+  JOB_STATE_RUNNING = 4;
+  // Ended with exit code 0.
+  JOB_STATE_SUCCEEDED = 5;
+  // Ended with a nonzero exit code, or stopped at the wall limit or for memory; the result
+  // says which.
+  JOB_STATE_FAILED = 6;
+  // Ended because the client cancelled it.
+  JOB_STATE_CANCELLED = 7;
+  // The job's container is gone and no result exists: the provider says the host is
+  // absent, or the host came back and does not list the job.
+  JOB_STATE_LOST = 8;
+  // The job did not get to run; the job's start failure says why.
+  JOB_STATE_FAILED_TO_START = 9;
+}
+
+// Why a job failed to start (design section 3.2).
+enum StartFailureCode {
+  // The job did not fail to start.
+  START_FAILURE_CODE_UNSPECIFIED = 0;
+  // No capacity came within the pool's maximum queue wait.
+  START_FAILURE_CODE_NO_CAPACITY = 1;
+  // The start did not complete within the pool's start timeout, counted from placement.
+  START_FAILURE_CODE_START_TIMEOUT = 2;
+  // The whole-host prepare failed as many times as the pool allows.
+  START_FAILURE_CODE_EXCLUSIVE_NOT_READY = 3;
+  // The host's agent refused the start, for example because the host is tainted or the
+  // image fetch failed; the start failure detail holds the agent's own code.
+  START_FAILURE_CODE_AGENT_REFUSED = 4;
+}
+
+// The times of a job, in milliseconds since the Unix epoch. A time the job has not reached
+// is absent.
+message JobTimes {
+  // When the job was recorded as queued.
+  uint64 queued_at_ms = 1;
+  // When the job was placed.
+  optional uint64 placed_at_ms = 2;
+  // When the job started running.
+  optional uint64 started_at_ms = 3;
+  // When the job ended.
+  optional uint64 ended_at_ms = 4;
+}
+
+// The record the service keeps of a job.
+message Job {
+  // The job's id, the client's or the one the service minted.
+  string id = 1;
+  // The job as submitted. Each file's contents are empty here (JobFile says why).
+  JobSpec spec = 2;
+  // The job's state.
+  JobState state = 3;
+  // Why the job failed to start, when its state is failed to start; unspecified otherwise.
+  StartFailureCode start_failure = 4;
+  // The agent's own code or text for a start failure, when it gave one. Empty otherwise.
+  string start_failure_detail = 5;
+  // The host the job is placed on, once it is placed. Empty before.
+  string host_id = 10;
+  // The job's times.
+  JobTimes times = 20;
+  // Since when the host holding the job has missed its grace, in milliseconds since the
+  // Unix epoch (design section 6.3). Absent while the host is heard, or when no host holds
+  // the job.
+  optional uint64 host_silent_since_ms = 30;
+  // The client asked to cancel the job and it has not yet ended. Also kept on a job that
+  // ended lost after the cancel was asked for.
+  bool cancel_requested = 31;
+}
+
+// How an ended job ended, as its result says.
+enum ResultReason {
+  // No reason: the job ended without one (lost, or failed to start), or a reader met a
+  // reason it does not know.
+  RESULT_REASON_UNSPECIFIED = 0;
+  // The job's process exited by itself; the exit code says how.
+  RESULT_REASON_EXIT = 1;
+  // The job was stopped at its wall limit.
+  RESULT_REASON_WALL_LIMIT = 2;
+  // The job was stopped because it passed its memory.
+  RESULT_REASON_MEMORY = 3;
+  // The job was stopped because the client cancelled it.
+  RESULT_REASON_CANCELLED = 4;
+}
+
+// The resources a job used, as the host's agent reported them.
+message ResourceUsage {
+  // CPU time, in microseconds.
+  uint64 cpu_usec = 1;
+  // The largest memory the job held at once, in bytes.
+  uint64 peak_memory_bytes = 2;
+  // The scratch disk the job used, in bytes. Absent: the agent did not measure it.
+  optional uint64 disk_bytes = 3;
+  // The number of GPUs the job held.
+  uint32 gpus = 4;
+}
+
+// The result of an ended job.
+message JobResult {
+  // The state the job ended in.
+  JobState state = 1;
+  // The job's exit code, when its process exited by itself. Absent otherwise.
+  optional int32 exit_code = 2;
+  // How the job ended.
+  ResultReason reason = 3;
+  // The last bytes the job wrote to its standard output: at most 8 KiB (8192 bytes).
+  bytes stdout_tail = 4;
+  // The last bytes the job wrote to its standard error: at most 8 KiB (8192 bytes).
+  bytes stderr_tail = 5;
+  // The job wrote more to either stream than its tail holds.
+  bool truncated = 6;
+  // The job's times.
+  JobTimes times = 10;
+  // The resources the job used.
+  ResourceUsage usage = 11;
+}
+
+// Why the service refuses a submit. A refused submit records nothing, so the client may
+// change the job and submit it again.
+enum RefusalCode {
+  // Not a refusal code: a reader reads a code it does not know (one a newer server added)
+  // as this value.
+  REFUSAL_CODE_UNSPECIFIED = 0;
+  // The job id names a job that differs from this one in more than its priority.
+  REFUSAL_CODE_JOB_ID_CONFLICT = 1;
+  // No host, catalog or platform could ever serve the job (design section 5.6).
+  REFUSAL_CODE_NO_CAPABLE_HOST = 2;
+  // The job has no wall limit, or one of 0.
+  REFUSAL_CODE_WALL_TIME_NOT_POSITIVE = 3;
+  // The job's wall limit is above the service's ceiling.
+  REFUSAL_CODE_WALL_TIME_ABOVE_CEILING = 4;
+}
+
+// A refused submit, carried in the details of the call's gRPC status. Only the faults of
+// RefusalCode carry one; any other fault of a job (a bad id, image, file or port) answers
+// an error status without a Refusal.
+message Refusal {
+  // Why the submit is refused.
+  RefusalCode code = 1;
+  // Text for a person saying more. A program acts on the code only.
+  string detail = 2;
+}

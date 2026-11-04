@@ -141,7 +141,7 @@ fn rig(limit: usize, mode: Mode) -> Rig {
                 },
             ),
             (
-                "aarch64".to_owned(),
+                "arm64".to_owned(),
                 Artifact {
                     url: "https://sched.example.org:7301/agent-arm".to_owned(),
                     sha256: [9; 32],
@@ -298,7 +298,8 @@ fn a_released_host_is_forgotten_and_a_failed_cleanup_is_not_fatal() {
 }
 
 /// Asserts that each architecture gets its own agent: an x86_64 offer is launched with the
-/// x86_64 address and hash, an aarch64 offer with the aarch64 ones and not the others'; and
+/// x86_64 address and hash, an arm64 offer with the arm64 ones (pins and offers are both
+/// keyed in the one spelling) and not the others'; and
 /// an offer of an architecture with no pin is refused `Shape` and nothing is sent, never
 /// launched with another architecture's binary. It catches a launch that uses the wrong
 /// binary for a machine, which would boot and never join.
@@ -307,7 +308,7 @@ fn each_architecture_gets_its_own_agent_and_one_with_none_is_refused() {
     let rig = rig(1 << 20, mode("network.key"));
     let (mut plan, _) = plan();
     rig.launcher.acquire(&plan, join_token());
-    plan.offer.arch = "aarch64".to_owned();
+    plan.offer.arch = "arm64".to_owned();
     rig.launcher.acquire(&plan, join_token());
     {
         let asked = rig.provider.asked.lock().unwrap();

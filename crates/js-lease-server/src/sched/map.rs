@@ -344,6 +344,29 @@ mod tests {
         assert!(!ask(&[("arch", "arm64")]).runnable_on(&plain, &capacity));
     }
 
+    /// Asserts that a pool shape or static host that writes `arch = "aarch64"` is read as
+    /// the node `arm64`: a job asking for `arch=arm64`, or for `arch=aarch64`, runs on it, an
+    /// `x86_64` job does not, and it is the node a shape writing `arm64` gives. Catches a
+    /// shape refused as an unknown architecture, or kept apart from `arm64` work.
+    #[test]
+    fn a_shape_that_writes_aarch64_is_an_arm64_node() {
+        let arm = |arch: &str| {
+            host(&shape(
+                resources(4000, 1 << 30, 0, None),
+                &[("os", "linux"), ("arch", arch)],
+            ))
+            .unwrap()
+        };
+        let (capacity, caps) = arm("aarch64");
+        assert_eq!(caps, arm("arm64").1);
+        let ask = |pairs: &[(&str, &str)]| {
+            job(&request(resources(1000, 1, 0, None), pairs), "j").unwrap()
+        };
+        assert!(ask(&[("arch", "arm64")]).runnable_on(&caps, &capacity));
+        assert!(ask(&[("arch", "aarch64")]).runnable_on(&caps, &capacity));
+        assert!(!ask(&[("arch", "x86_64")]).runnable_on(&caps, &capacity));
+    }
+
     /// Bad capabilities are refused with a typed error, not dropped: a shape with an
     /// unknown arch or a non-numeric countable, a request with an unknown key, and a
     /// request whose `gpu.kind` capability contradicts its class.

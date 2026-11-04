@@ -127,7 +127,8 @@ pub struct ContainerSpec { pub image: ImageDigestRef, pub command: Vec<String> }
 pub struct Requirements {
     pub resources: Resources,            // existing: cpu, memory, gpus, gpu class
     pub disk_bytes: Option<u64>,         // new
-    pub os: Option<String>, pub arch: Option<String>,      // "linux"/"macos", "x86_64"/"aarch64"
+    pub os: Option<String>, pub arch: Option<String>,      // "linux"/"macos", "x86_64"/"arm64" ("aarch64" read as "arm64")
+    pub isa_level: Option<IsaLevel>,     // the least ISA level, at least within the family
     pub exec: Option<ExecMode>,          // Container | SandboxExec; None = either
 }
 impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, arch, disk (disk-gib),

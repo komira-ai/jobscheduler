@@ -64,6 +64,7 @@ pub fn offer(id: &str, gpus: u32, class: Option<&str>, price: Option<u64>, ok: b
         gpu_class: class.map(|class| GpuClass::parse(class).unwrap()),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
+        isa_level: None,
         exec: ExecMode::Container,
         price_cents_per_hour: price,
         price_unit: PriceUnit::UsCents,

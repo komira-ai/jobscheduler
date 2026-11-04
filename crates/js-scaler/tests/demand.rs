@@ -329,6 +329,68 @@ fn an_offer_of_another_platform_is_refused_and_the_miss_is_named() {
     }
 }
 
+/// Asserts that a machine launched from an offer that states an ISA level covers the
+/// request for that level on every later step, so the request is launched for once
+/// however many steps pass. Catches a level lost in the record, which would leave the
+/// machine on its way unable to cover the request and launch another each step.
+#[test]
+fn a_machine_on_its_way_with_a_stated_level_covers_its_request() {
+    let level: js_types::IsaLevel = "x86-64-v3".parse().unwrap();
+    let mut rig = Rig::new(settings("gpu"));
+    rig.pool().offers = vec![Offer {
+        isa_level: Some(level),
+        ..offer("a10", 60)
+    }];
+    let mut wanting = request("r1");
+    wanting.demand.isa_level = Some(level);
+    rig.input.waiting = vec![wanting];
+    assert_eq!(acquires(&rig.tick(at(0))).len(), 1);
+    for step_at in [5, 10, 15] {
+        assert!(acquires(&rig.tick(at(step_at * SECOND))).is_empty());
+    }
+    assert_eq!(rig.state.records.instances.len(), 1);
+    assert_eq!(rig.state.no_offer.get(&id("r1")), None);
+}
+
+/// Asserts that `no_offer` names the miss deepest in the order `Offer::fit` checks (the
+/// operating system, the architecture, the ISA level, the mode, then size) when offers
+/// miss in different places: an ISA miss beside an architecture miss is named, a mode
+/// miss beside an ISA miss is named, and an ISA miss alone is named. Catches an ISA level
+/// left out of the nearest-miss order, which would name the architecture for a request
+/// whose platform an offer has.
+#[test]
+fn the_nearest_miss_counts_the_isa_level_after_the_architecture() {
+    let v2: js_types::IsaLevel = "x86-64-v2".parse().unwrap();
+    let low = Offer {
+        isa_level: Some(v2),
+        ..offer("low", 60)
+    };
+    let arm = Offer {
+        arch: "arm64".to_owned(),
+        isa_level: Some("armv8.4-a".parse().unwrap()),
+        ..offer("arm", 60)
+    };
+    let sandbox = Offer {
+        exec: ExecMode::SandboxExec,
+        isa_level: Some("x86-64-v4".parse().unwrap()),
+        ..offer("sb", 60)
+    };
+    let cases = [
+        (vec![low.clone()], js_elastic::Dimension::IsaLevel),
+        (vec![arm, low.clone()], js_elastic::Dimension::IsaLevel),
+        (vec![low, sandbox], js_elastic::Dimension::Exec),
+    ];
+    for (offers, miss) in cases {
+        let mut rig = Rig::new(settings("gpu"));
+        rig.pool().offers = offers;
+        let mut wanting = request("r1");
+        wanting.demand.isa_level = Some("x86-64-v3".parse().unwrap());
+        rig.input.waiting = vec![wanting];
+        assert!(rig.tick(at(0)).is_empty());
+        assert_eq!(rig.state.no_offer.get(&id("r1")).copied(), Some(miss));
+    }
+}
+
 fn two_pools(first: Settings) -> Rig {
     let mut rig = Rig::new(first);
     rig.input.pools.push(pool(settings("second")));

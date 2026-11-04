@@ -293,6 +293,7 @@ impl Runner<'_, '_> {
             disk_bytes: None,
             os: None,
             arch: Some("x86_64".to_owned()),
+            isa_level: None,
             exec: None,
         };
         let options = match provider.launch_options(&want) {

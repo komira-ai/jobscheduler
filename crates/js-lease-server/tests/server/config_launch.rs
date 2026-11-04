@@ -113,8 +113,9 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
         url: "https://pkgs.example.org/agent-arm".to_owned(),
         sha256: expected.sha256,
     };
+    // `aarch64` is read as `arm64`, the spelling of an offer's architecture.
     let want: BTreeMap<String, Artifact> =
-        [("x86_64".to_owned(), expected), ("aarch64".to_owned(), arm)].into();
+        [("x86_64".to_owned(), expected), ("arm64".to_owned(), arm)].into();
     assert_eq!(pinned, want);
 
     let case = |value: String, said: &str| {
@@ -183,6 +184,39 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
     assert_eq!(
         refusal(&scratch, &text),
         "pool \"hosts\": agent: only for an elastic pool"
+    );
+}
+
+/// Asserts that the agent pin a file writes as `agent.aarch64` is the pin of an `arm64`
+/// offer, as is one written `agent.arm64`, so the configuration of a pool that pinned
+/// `aarch64` launches the offers that now say `arm64`; and that a file that writes both
+/// names one architecture twice and is refused naming both keys, rather than one being
+/// picked. It catches a launch that looks the pin up by an offer's `arm64` in a table
+/// keyed `aarch64`, which reports "no agent pin" for every Arm offer.
+#[test]
+fn the_agent_pin_for_aarch64_is_found_by_an_arm64_offer() {
+    let scratch = Scratch::new("launch_agent_arm64");
+    let pool = |value: &str| PoolText::elastic(&scratch).set("agent", value);
+    let arm = Artifact {
+        url: "https://pkgs.example.org/agent-arm".to_owned(),
+        sha256: [0x11; 32],
+    };
+    let arm_sha = "11".repeat(32);
+    for key in ["aarch64", "arm64"] {
+        let text = format!("{{ {key} = {} }}", pin(&arm.url, &arm_sha));
+        let config = load(&scratch, &file(&dialable(&scratch), &[&pool(&text)])).unwrap();
+        let pinned = &config.elastic_pool().unwrap().agent;
+        assert_eq!(pinned.get("arm64"), Some(&arm), "{key}");
+        assert_eq!(pinned.len(), 1, "{key}");
+    }
+    let both = format!(
+        "{{ aarch64 = {}, arm64 = {} }}",
+        pin(&arm.url, &arm_sha),
+        pin(URL, SHA)
+    );
+    assert_eq!(
+        elastic(&scratch, &pool(&both)),
+        "pool \"gpu\": agent: aarch64 and arm64 are both arm64; pin it once"
     );
 }
 

@@ -24,19 +24,28 @@ impl Scheduler {
         self.ops
             .get(&operation)
             .filter(|op| op.state == OpState::Queued)?;
-        let op = self.ops.remove(&operation).expect("checked above");
-        self.queue
-            .remove(&(Reverse(op.request.qos.clone()), operation));
-        if self.in_flight.get(&op.request.key) == Some(&operation) {
-            self.in_flight.remove(&op.request.key);
-        }
-        self.reservations.remove(&operation);
-        self.memory.forget(operation);
-        self.size_keys.remove(&operation);
-        self.max_walls.remove(&operation);
-        self.drain.forget(operation);
-        self.admission.forget(operation);
-        Some(op.waiters)
+        Some(self.drop_operation(operation))
+    }
+
+    /// Removes `operation` from the queue and every table that names it, recording
+    /// nothing; returns the callers it had (none for one it does not hold). Its lease, if
+    /// it holds one, is released first by the caller.
+    pub(super) fn drop_operation(&mut self, operation: OperationId) -> Vec<WaiterId> {
+        self.ops.remove(&operation).map_or_else(Vec::new, |op| {
+            self.queue
+                .remove(&(Reverse(op.request.qos.clone()), operation));
+            if self.in_flight.get(&op.request.key) == Some(&operation) {
+                self.in_flight.remove(&op.request.key);
+            }
+            self.reservations.remove(&operation);
+            self.memory.forget(operation);
+            self.size_keys.remove(&operation);
+            self.max_walls.remove(&operation);
+            self.drain.forget(operation);
+            self.backfill.forget(operation);
+            self.admission.forget(operation);
+            op.waiters
+        })
     }
 }
 
