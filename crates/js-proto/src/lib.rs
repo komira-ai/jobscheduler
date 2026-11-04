@@ -19,7 +19,8 @@
 //! Each method of the service carries a `google.api.http` option, its route under the
 //! HTTP/JSON gateway (crate `js-api-gateway`, which generates its routes from them). The two
 //! files that define the option, `google/api/annotations.proto` and `google/api/http.proto`,
-//! are copied unchanged from googleapis (Apache-2.0) into `proto/google/api/`.
+//! are copied from googleapis (Apache-2.0) into `proto/google/api/`, with the long comments
+//! of `http.proto` shortened and every definition unchanged.
 //!
 //! A refused submit is a [`tonic::Status`] carrying a [`v1::Refusal`] in its details;
 //! [`refusal`] makes one and reads one back. [`FILE_DESCRIPTOR_SET`] is the encoded

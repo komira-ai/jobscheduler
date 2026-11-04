@@ -121,14 +121,14 @@ impl<T: JobService> Gateway<T> {
     }
 }
 
+/// A binding that serves a request, with the path variables it captured (field name and
+/// text).
+type Matched<'a> = (&'a Binding, Vec<(String, String)>);
+
 /// The binding that serves `method` on `path`, with the path variables it captures; the
 /// first in the order of [`ROUTES`] when two match. A 404 when no template matches the
 /// path, a 405 naming the methods that would when only other methods' do.
-fn find<'a>(
-    bindings: &'a [Binding],
-    method: &Method,
-    path: &str,
-) -> Result<(&'a Binding, Vec<(String, String)>), Answer> {
+fn find<'a>(bindings: &'a [Binding], method: &Method, path: &str) -> Result<Matched<'a>, Answer> {
     let mut allow = Vec::new();
     for binding in bindings {
         let Some(variables) = capture(&binding.template, path) else {
