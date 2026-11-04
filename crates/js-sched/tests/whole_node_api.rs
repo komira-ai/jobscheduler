@@ -38,8 +38,8 @@ use crate::whole_rig::{Farm, request, secs, w};
 /// `recover` takes the time now and starts every count at zero): an operation taken up at
 /// 200 s and restored as queued at 100 s with one give-up and a mark on `a` keeps the mark
 /// in the next round without waiting `drain_after` (30 s) again, with the restored time,
-/// deadline and tail end (500 s, not the 600 s the worker's tail reads now), and the give-up at that deadline is counted as the second, with
-/// the back-off it sets readable.
+/// deadline and tail end (500 s, not the 600 s the worker's tail reads now), and the
+/// give-up at that deadline is counted as the second, with the back-off it sets readable.
 #[test]
 fn restore_whole_keeps_give_ups_queued_at_and_the_mark() {
     let mut f = busy(cfg(30_000, 2));
