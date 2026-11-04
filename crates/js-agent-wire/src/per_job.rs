@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use js_types::{Arch, Os};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
@@ -24,8 +25,8 @@ use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
 use crate::image;
 use crate::limits;
-use crate::native;
 use crate::refusal;
+use crate::run::{self, RunSpec};
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
@@ -86,9 +87,10 @@ impl BookedResources {
 
 /// The body of a job start: one placement of one job.
 ///
-/// Fields of the job a later change adds, as optional fields: the network policy and the
-/// declared ports (the job network change), and `os` and `arch` (the one job definition,
-/// which also makes the image the definition on macOS; a native body is not carried here).
+/// The `run`, `os` and `arch` of the one job definition are here as on a run start
+/// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
+/// change adds, as optional fields: the network policy and the declared ports (the job
+/// network change).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
     /// The job's id; the key of every idempotent step. The grammar of every id here
@@ -105,11 +107,23 @@ pub struct JobStartSpec {
     /// [`limits::MAX_ARGS`] entries, no NUL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
-    /// The environment, literal and not secret, held to the rules of a native job's
-    /// ([`crate::NativeSpec::env`]): at most [`limits::MAX_ENV`] entries, names
-    /// `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values without NUL. The check is the
-    /// native body's, shared until the one job definition (`js-one-job-definition`) owns
-    /// it. An agent of this version answers a start whose environment is not empty
+    /// What runs from the image ([`RunSpec`]), as [`crate::JobSpec::run`]: checked by
+    /// [`RunSpec::validate`], and `command` is then empty (refused `invalid-job` naming
+    /// `command` otherwise). An agent of this version runs no `run` yet and answers it
+    /// `run-unsupported`, as for a run start. Absent when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunSpec>,
+    /// The operating system of the image manifest the digest pins, as
+    /// [`crate::JobSpec::os`]. Absent when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<Os>,
+    /// The CPU architecture of the image manifest the digest pins, as
+    /// [`crate::JobSpec::arch`]. Absent when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<Arch>,
+    /// The environment, literal and not secret, held to the rules of a run's
+    /// ([`RunSpec::env`]) by the same check: at most [`limits::MAX_ENV`] entries, names
+    /// `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values without NUL. An agent of this version answers a start whose environment is not empty
     /// `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing, until its
     /// runtimes can set it (`js-agent-job-env-runtimes`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -140,7 +154,13 @@ impl JobStartSpec {
         }
         image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
         check::args(at.field("command"), &self.command)?;
-        native::check_env(At::new("env", refusal::INVALID_ENV), &self.env)?;
+        if let Some(run) = &self.run {
+            run.validate()?;
+            if !self.command.is_empty() {
+                return Err(at.field("command").fail(Rule::Inconsistent));
+            }
+        }
+        run::check_env(At::new("env", refusal::INVALID_ENV), &self.env)?;
         files::validate_files(&self.files)?;
         self.booked.check(at)?;
         if self.wall_ms == 0 {

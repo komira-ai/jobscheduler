@@ -271,6 +271,9 @@ fn keyed_run_of(served: &Served, on: &str, sequence: u64, run: &str, name: &str)
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        run: None,
+        os: None,
+        arch: None,
     };
     let profile = Some(ProfileKey::parse(name).unwrap());
     let lease = LeaseId::new(1, sequence);

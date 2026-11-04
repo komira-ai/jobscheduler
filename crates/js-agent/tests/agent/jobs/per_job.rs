@@ -28,6 +28,9 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                 allocation_id: format!("alloc-{id}"),
                 image: "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
                 command: vec!["--go".to_owned()],
+                run: None,
+                os: None,
+                arch: None,
                 env: Default::default(),
                 files: Vec::new(),
                 booked: BookedResources {

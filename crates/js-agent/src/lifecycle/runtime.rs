@@ -338,6 +338,18 @@ pub trait Runtime {
         })
     }
 
+    /// Whether this runtime runs a start named by its image (an `image`, with or without a
+    /// `run`), asked before such a start creates anything. The default runs them, which is
+    /// every container runtime. The runtime a Mac agent has runs only the legacy native body
+    /// and refuses them (`image-unsupported-here`).
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        Ok(())
+    }
+
     /// Ends and removes whatever an earlier process left, which no list of the runtime's
     /// can say: the leases a native runtime journalled and never saw deleted. Called when a
     /// worker starts and by the rescue, before anything else; returns one line for each

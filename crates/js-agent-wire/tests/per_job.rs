@@ -22,6 +22,9 @@ fn start() -> JobStartSpec {
         allocation_id: "0123456789abcdef0123456789abcdef".into(),
         image: format!("ubuntu:24.04@{DIGEST}"),
         command: vec!["make".into(), "all".into()],
+        run: None,
+        os: None,
+        arch: None,
         env: map(&[("LANG", "C")]),
         files: vec![RunFile {
             name: "grant".into(),
@@ -679,4 +682,59 @@ fn a_job_start_with_a_reserved_or_malformed_env_name_is_refused() {
     let mut none = start();
     none.env.clear();
     assert_eq!(validate_start(&none), Ok(()));
+}
+
+/// A run body for a job start: a program with an argument, nothing else.
+fn run_body() -> js_agent_wire::RunSpec {
+    js_agent_wire::RunSpec {
+        program: "/usr/bin/make".into(),
+        args: vec!["all".into()],
+        env: Default::default(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    }
+}
+
+/// Asserts the `run`, `os` and `arch` of a job start, the fields of the one job definition:
+/// with an empty `command` a valid run passes and is sent as `run` with `os` and `arch`
+/// beside it; a run beside a `command` is refused `invalid-job` naming `command`, and a bad
+/// run body is refused on its own field; absent, none of the three is sent. It catches a job
+/// start that carries two command lines, and a run body held to weaker rules than a run
+/// start's.
+#[test]
+fn a_job_start_carries_the_run_os_and_arch_of_the_job() {
+    let mut spec = start();
+    spec.command.clear();
+    spec.run = Some(run_body());
+    spec.os = Some(js_types::Os::Linux);
+    spec.arch = Some(js_types::Arch::Arm64);
+    assert_eq!(validate_start(&spec), Ok(()));
+    let wire = serde_json::to_value(Command::JobStart(Box::new(spec.clone()))).unwrap();
+    assert_eq!(wire["run"]["program"], json!("/usr/bin/make"));
+    assert_eq!(wire["os"], json!("linux"));
+    assert_eq!(wire["arch"], json!("arm64"));
+    assert!(wire.get("command").is_none());
+    assert_eq!(
+        serde_json::from_value::<Command>(wire).unwrap(),
+        Command::JobStart(Box::new(spec.clone()))
+    );
+
+    let both = broken(&spec, |s| s.command = vec!["x".into()], validate_start);
+    expect(both, "command", Rule::Inconsistent, refusal::INVALID_JOB);
+    let bad = broken(
+        &spec,
+        |s| s.run.as_mut().unwrap().program.clear(),
+        validate_start,
+    );
+    assert_eq!(
+        (bad.field(), bad.code()),
+        ("run.program", refusal::INVALID_PROGRAM)
+    );
+
+    let plain = serde_json::to_value(Command::JobStart(Box::new(start()))).unwrap();
+    for key in ["run", "os", "arch"] {
+        assert!(plain.get(key).is_none(), "{key} is sent when absent");
+    }
 }

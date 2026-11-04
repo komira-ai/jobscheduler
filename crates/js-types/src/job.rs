@@ -4,13 +4,17 @@
 //! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
 //! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib` and `exec`
-//! from the capabilities the request requires.
+//! from the capabilities the request requires. A job's image is built for one platform
+//! ([`Os`] and [`Arch`]): [`Requirements::with_image_platform`] adds it to what the
+//! request asked for.
 
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 use crate::digest::{DigestRef, DigestRefError};
-use crate::{IsaLevel, Request, Resources, normalise_arch};
+use crate::{Arch, IsaLevel, Request, Resources, normalise_arch};
 
 /// The capability key a request names its operating system by.
 const OS_KEY: &str = "os";
@@ -70,6 +74,52 @@ impl FromStr for ExecMode {
     }
 }
 
+/// An operating system a job's image is built for: the closed set a start and a request
+/// name it by. On the wire it is its [name](Os::name); any other text fails to decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Os {
+    /// Linux: `linux`.
+    Linux,
+    /// macOS: `macos`.
+    Macos,
+}
+
+impl Os {
+    /// The name a request, a host and a start use: `linux` or `macos`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+        }
+    }
+}
+
+impl fmt::Display for Os {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A string that names no operating system of [`Os`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown operating system {0:?}; known: linux, macos")]
+pub struct UnknownOs(pub String);
+
+impl FromStr for Os {
+    type Err = UnknownOs;
+
+    /// `linux` or `macos`, exactly: no other spelling and no other case.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "linux" => Ok(Self::Linux),
+            "macos" => Ok(Self::Macos),
+            _ => Err(UnknownOs(s.to_owned())),
+        }
+    }
+}
+
 /// Why text is not an image reference with a digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ImageRefError {
@@ -124,6 +174,9 @@ pub struct ContainerSpec {
     pub image: ImageDigestRef,
     /// The command and its arguments.
     pub command: Vec<String>,
+    /// The platform of the image manifest the digest pins, when the job names it. `None`:
+    /// not named (a job from before the field).
+    pub platform: Option<(Os, Arch)>,
 }
 
 /// What a job needs of the host it runs on.
@@ -157,6 +210,16 @@ pub enum RequirementsError {
     /// `isa_level` names no ISA level.
     #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
     BadIsaLevel(String),
+}
+
+/// The request asks for another operating system or architecture than the job's image is
+/// built for ([`Requirements::with_image_platform`]). It is its own type, not a
+/// [`RequirementsError`], because reading a request never meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the request asks for another {os_or_arch} than the job's image is built for")]
+pub struct PlatformConflict {
+    /// `os` or `arch`: the one that differs (`os` when both do).
+    pub os_or_arch: &'static str,
 }
 
 impl Requirements {
@@ -218,6 +281,39 @@ impl Requirements {
             isa_level,
             exec,
         })
+    }
+
+    /// These requirements with the platform the job's image is built for: `os` and `arch`
+    /// become `os` and `arch` by name ([`Os::name`], [`Arch::name`]), so a placement that
+    /// reads them only offers the job to a host of that platform. A value the request
+    /// already named is kept when it is the same and never overwritten when it is not.
+    ///
+    /// The comparison is exact and case-sensitive, as [`Requirements::os`] and
+    /// [`Requirements::arch`] are compared with a host's: a request's `arch` is already in
+    /// the one spelling (`aarch64` is held as `arm64`), and a request's `Linux` is not
+    /// `linux`.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformConflict`] naming `os` or `arch` when the request named another value than
+    /// the image's (`os` first).
+    pub fn with_image_platform(mut self, os: Os, arch: Arch) -> Result<Self, PlatformConflict> {
+        self.os = Some(platform_part(OS_KEY, self.os.take(), os.name())?);
+        self.arch = Some(platform_part(ARCH_KEY, self.arch.take(), arch.name())?);
+        Ok(self)
+    }
+}
+
+/// The value of one platform requirement once the image's `image` is added to what the
+/// request `asked`: the image's, unless the request named another.
+fn platform_part(
+    key: &'static str,
+    asked: Option<String>,
+    image: &str,
+) -> Result<String, PlatformConflict> {
+    match asked {
+        Some(asked) if asked != image => Err(PlatformConflict { os_or_arch: key }),
+        _ => Ok(image.to_owned()),
     }
 }
 
@@ -498,9 +594,109 @@ mod tests {
         let spec = ContainerSpec {
             image: image.clone(),
             command: vec!["run".into(), "--fast".into()],
+            platform: Some((Os::Macos, Arch::Arm64)),
         };
         assert_eq!(spec.image, image);
         assert_eq!(spec.command.len(), 2);
+        assert_eq!(spec.platform, Some((Os::Macos, Arch::Arm64)));
+    }
+
+    /// Asserts that both operating systems parse from and print as their names and cross
+    /// the wire by them, and that any other text (the OCI name `darwin`, another case, the
+    /// empty text) is refused naming the text, by the parser and by the decoder. Catches a
+    /// parser that folds case without saying so, or a wire form that is the variant's name.
+    #[test]
+    fn os_names_round_trip_and_others_are_refused() {
+        for (os, name) in [(Os::Linux, "linux"), (Os::Macos, "macos")] {
+            assert_eq!(os.name(), name);
+            assert_eq!(os.to_string().parse::<Os>(), Ok(os));
+            let text = serde_json::to_string(&os).unwrap();
+            assert_eq!(text, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<Os>(&text).unwrap(), os);
+        }
+        for bad in ["darwin", "Linux", "MACOS", ""] {
+            assert_eq!(bad.parse::<Os>(), Err(UnknownOs(bad.to_owned())));
+            let text = format!("\"{bad}\"");
+            assert!(serde_json::from_str::<Os>(&text).is_err(), "{bad}");
+        }
+        assert_eq!(
+            UnknownOs("darwin".into()).to_string(),
+            "unknown operating system \"darwin\"; known: linux, macos"
+        );
+    }
+
+    /// Asserts that the image's platform fills a request that named none, keeps one that
+    /// named the same (an `aarch64` request is held as `arm64` and so is the same as
+    /// [`Arch::Arm64`]), and that a request naming another `os` or `arch` is refused naming
+    /// that one, `os` first, compared with case (`Macos` and `ARM64` conflict); and that a
+    /// request with disk, ISA level and mode keeps all three, the whole result compared.
+    /// Catches a platform that overwrites what the request asked for, one that is dropped,
+    /// and a merge that drops another placement constraint.
+    #[test]
+    fn the_image_platform_joins_the_requirements_and_a_conflict_is_refused() {
+        let with = |caps: &[(&str, &str)], os, arch| {
+            Requirements::from_request(&request(caps)).with_image_platform(os, arch)
+        };
+        let filled = with(&[], Os::Macos, Arch::Arm64).unwrap();
+        assert_eq!(filled.os.as_deref(), Some("macos"));
+        assert_eq!(filled.arch.as_deref(), Some("arm64"));
+        assert_eq!(filled.resources, request(&[]).resources);
+        let same = with(
+            &[("os", "linux"), ("arch", "x86_64")],
+            Os::Linux,
+            Arch::X86_64,
+        );
+        assert_eq!(same.unwrap().os.as_deref(), Some("linux"));
+        let alias = with(&[("arch", "aarch64")], Os::Macos, Arch::Arm64);
+        assert_eq!(alias.unwrap().arch.as_deref(), Some("arm64"));
+        let conflict = |os_or_arch| Err(PlatformConflict { os_or_arch });
+        assert_eq!(
+            with(&[("os", "linux")], Os::Macos, Arch::Arm64),
+            conflict("os")
+        );
+        assert_eq!(
+            with(&[("os", "Macos")], Os::Macos, Arch::Arm64),
+            conflict("os")
+        );
+        assert_eq!(
+            with(&[("arch", "x86_64")], Os::Macos, Arch::Arm64),
+            conflict("arch")
+        );
+        assert_eq!(
+            with(
+                &[("os", "linux"), ("arch", "x86_64")],
+                Os::Macos,
+                Arch::Arm64
+            ),
+            conflict("os")
+        );
+        assert_eq!(
+            with(&[("arch", "ARM64")], Os::Macos, Arch::Arm64),
+            conflict("arch")
+        );
+        let constrained = Requirements::try_from_request(&request(&[
+            (DISK_GIB_KEY, "40"),
+            (ISA_LEVEL_KEY, "armv8.2-a"),
+            (EXEC_KEY, "sandbox-exec"),
+        ]))
+        .unwrap();
+        assert_eq!(constrained.disk_bytes, Some(40 << 30));
+        assert_eq!(constrained.isa_level, "armv8.2-a".parse().ok());
+        assert_eq!(constrained.exec, Some(ExecMode::SandboxExec));
+        let merged = constrained
+            .clone()
+            .with_image_platform(Os::Macos, Arch::Arm64)
+            .unwrap();
+        let want = Requirements {
+            os: Some("macos".to_owned()),
+            arch: Some("arm64".to_owned()),
+            ..constrained
+        };
+        assert_eq!(merged, want, "disk, ISA level and mode are kept");
+        assert_eq!(
+            PlatformConflict { os_or_arch: "os" }.to_string(),
+            "the request asks for another os than the job's image is built for"
+        );
     }
 
     /// Asserts that each way a reference can fail to pin its content is refused with its

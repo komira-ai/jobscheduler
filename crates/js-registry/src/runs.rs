@@ -769,6 +769,9 @@ mod tests {
             valid_for_ms: 0,
             bundle: None,
             native: None,
+            run: None,
+            os: None,
+            arch: None,
         }
     }
 

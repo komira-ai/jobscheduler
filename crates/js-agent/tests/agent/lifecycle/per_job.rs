@@ -18,6 +18,9 @@ fn start(job_id: &str) -> JobStartSpec {
         allocation_id: format!("alloc-{job_id}"),
         image: IMAGE.to_owned(),
         command: vec!["--go".to_owned()],
+        run: None,
+        os: None,
+        arch: None,
         env: Default::default(),
         files: Vec::new(),
         booked: BookedResources {
@@ -416,4 +419,32 @@ fn a_job_start_with_an_environment_is_refused_and_runs_nothing() {
     assert!(h.apply(vec![job_start(spec)]).is_empty());
     assert_eq!(listed(&h), ["j1", "j2"]);
     assert_eq!(h.fake.created().len(), 1);
+}
+
+/// Asserts that a job start with a `run` body is answered `failed_to_start` with
+/// `run-unsupported` in the job's listing and creates nothing, as a run start with one is:
+/// this agent runs an image's own command and no run body yet. It catches a run body
+/// dropped and the image's own command run instead.
+#[test]
+fn a_job_start_with_a_run_body_is_refused_and_runs_nothing() {
+    let mut h = Harness::new("job-run");
+    let mut spec = start("j1");
+    spec.command.clear();
+    spec.run = Some(js_agent_wire::RunSpec {
+        program: "/usr/bin/make".to_owned(),
+        args: Vec::new(),
+        env: Default::default(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    });
+    let events = h.apply(vec![job_start(spec)]);
+    assert_eq!(
+        names(&events),
+        [format!("refused j1 {}", refusal::RUN_UNSUPPORTED)]
+    );
+    assert!(h.fake.created().is_empty());
+    let result = listing(&h, "j1").result.expect("a result");
+    assert_eq!(result.detail.as_deref(), Some(refusal::RUN_UNSUPPORTED));
 }

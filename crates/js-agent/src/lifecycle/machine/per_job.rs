@@ -41,6 +41,9 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
         run_id: spec.job_id.clone(),
         lease_id: spec.allocation_id.clone(),
         image: spec.image.clone(),
+        run: spec.run.clone(),
+        os: spec.os,
+        arch: spec.arch,
         native: None,
         args: spec.command.clone(),
         limits: Limits {

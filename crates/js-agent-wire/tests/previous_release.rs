@@ -156,6 +156,9 @@ fn job_start(id: &str) -> Command {
             "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .into(),
         command: vec!["make".into()],
+        run: None,
+        os: None,
+        arch: None,
         env: Default::default(),
         files: Vec::new(),
         booked: BookedResources {
