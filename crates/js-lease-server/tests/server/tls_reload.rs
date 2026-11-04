@@ -363,15 +363,8 @@ async fn sighup_reloads_the_program() {
     // The program serves only hosts that register: one says hello before the lease.
     let hello = hello_body("gpu-01").to_string().into_bytes();
     let path = "/v1/agent/hello";
-    let welcome = tls_request(
-        addr,
-        &connector(&first.0),
-        "POST",
-        path,
-        Some(JOIN),
-        Some(&hello),
-    );
-    let welcome = welcome.await;
+    let trusting = connector(&first.0);
+    let welcome = tls_request(addr, &trusting, "POST", path, Some(JOIN), Some(&hello)).await;
     assert_eq!(welcome.status, 200, "{}", welcome.body);
     let body = lease_body().to_string().into_bytes();
     let made = tls_request(
