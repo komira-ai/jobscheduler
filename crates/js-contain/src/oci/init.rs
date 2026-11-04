@@ -7,8 +7,10 @@
 //! at [`super::OciConfig::init_dest`], in the container's own `/dev` (a `tmpfs` made fresh per container, so
 //! the image's root is never written to).
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+use super::install::{WhileOpen, nothing_while_open};
 
 /// The program, empty on a target that runs no containers.
 const BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/js-init"));
@@ -30,30 +32,42 @@ pub(crate) fn create_report(lease: &Path) -> Result<std::fs::File, String> {
 }
 
 /// Writes the program into `<scratch>/oci-bin/js-init` (mode 0755, replaced
-/// atomically) and returns that path.
+/// atomically) and returns that path. It is written on a thread with a descriptor table of
+/// its own, so no forked child holds it busy (`super::install`).
 pub(crate) fn install(scratch: &Path) -> std::io::Result<PathBuf> {
-    install_bytes(scratch, BINARY)
+    install_with(scratch, &mut nothing_while_open)
 }
 
-fn install_bytes(scratch: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+/// [`install`], running `while_open` on the writing thread once the program is written and
+/// before its file is closed: the seam a test forks through.
+pub(crate) fn install_with(
+    scratch: &Path,
+    while_open: &mut WhileOpen<'_>,
+) -> std::io::Result<PathBuf> {
+    install_bytes(scratch, BINARY, while_open)
+}
+
+fn install_bytes(
+    scratch: &Path,
+    bytes: &[u8],
+    while_open: &mut WhileOpen<'_>,
+) -> std::io::Result<PathBuf> {
     if bytes.is_empty() {
         return Err(std::io::Error::other(
             "this build has no container init: containers run on Linux only",
         ));
     }
-    let dir = scratch.join("oci-bin");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
-    let staged = dir.join(format!(".js-init-{}", std::process::id()));
-    std::fs::write(&staged, bytes)?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-    let target = dir.join("js-init");
-    std::fs::rename(&staged, &target)?;
-    Ok(target)
+    super::install::publish(scratch, "js-init", &mut |file| {
+        file.write_all(bytes)?;
+        while_open();
+        Ok(())
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -98,7 +112,7 @@ mod tests {
         assert_eq!(std::fs::read(report_path(&lease)).expect("read"), b"");
         let why = create_report(&scratch.join("gone")).expect_err("no lease directory");
         assert!(why.contains("gone/init-report: "), "{why}");
-        let empty = install_bytes(&scratch, b"").expect_err("empty");
+        let empty = install_bytes(&scratch, b"", &mut nothing_while_open).expect_err("empty");
         assert!(empty.to_string().contains("no container init"), "{empty}");
     }
 }

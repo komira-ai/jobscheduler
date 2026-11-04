@@ -42,6 +42,9 @@ hyper-util = { version = "0.1.21", default-features = false }
 libc = "0.2.190"
 # Dev-dependency of js-provider-lambdalabs: a sink for the HTTP client's own log lines.
 log = "0.4.34"
+# js-contain: `unshare(CLONE_FILES)` as a safe call, for the thread that writes an installed
+# program (its `sched` feature). rustix has the call only as `unshare_unsafe`.
+nix = { version = "0.31.3", default-features = false }
 # macOS only (js-vmm, js-mac-session): the Objective-C runtime and the Foundation binding.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
