@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_lease::{Clock, ManualClock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::Credential;
 use js_testkit::dir::TestDir;
 use js_types::{HostId, LeaseId, ResourceClass, Resources};
@@ -26,7 +26,7 @@ use crate::config::{Cli, Config};
 /// and the whole-node requests a consumer polls (lease sequence and request name).
 struct Live {
     agents: Arc<Agents>,
-    provider: Box<dyn Provider + Send>,
+    provider: Box<dyn Pool + Send>,
     /// What the server builds its lease table from: the capacity source, its settings,
     /// its file and how it boots.
     source: Box<dyn crate::CapacitySource>,
@@ -97,8 +97,8 @@ fn live_over(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Live {
 impl Live {
     /// The lease table the server runs over this agent side, on the same clock: it ends a
     /// lease at its wall time when it ticks.
-    fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedProvider, SharedClock> {
-        let provider = crate::adapt::BoxedProvider(self.source.provider(&[]).unwrap().provider);
+    fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedPool, SharedClock> {
+        let provider = crate::adapt::BoxedPool(self.source.provider(&[]).unwrap().provider);
         let (settings, file, boot) = self.table_of.clone();
         let clock = SharedClock::new(self.clock.clone());
         js_lease::LeaseTable::open(provider, clock, settings, &file, boot).unwrap()
@@ -125,6 +125,8 @@ impl Live {
                     exclusive_refused: None,
                     load: None,
                     disk_gib: None,
+                    jobs: Vec::new(),
+                    retired_jobs: Vec::new(),
                 };
                 self.agents.registry.heartbeat(&beat, &credential).unwrap();
             }

@@ -14,7 +14,7 @@ use js_elastic::{
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, Scaler, SharedClock, UnremovedFile};
-use js_provider::{Provider, StartAck, StartSpec};
+use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions, Waiting};
 use js_scaler::{AcquirePlan, Health, Phase as Stage, Records};
 use js_testkit::dir::TestDir;

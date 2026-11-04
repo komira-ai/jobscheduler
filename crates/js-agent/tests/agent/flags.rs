@@ -4,8 +4,8 @@ use js_agent::Dialer;
 use serde_json::{Value, json};
 
 use crate::support::{
-    CountingSleeper, Highest, Scratch, code, flags, linux_host, mac_host, run, run_scripted,
-    welcome,
+    CountingSleeper, Highest, Lowest, Ran, Scratch, Script, ScriptConnector, code, flags,
+    linux_host, mac_host, run, run_scripted, welcome,
 };
 
 /// Runs the program to its first wait with a welcome and returns the hello it sent.
@@ -437,35 +437,47 @@ fn a_low_water_mark_without_a_scratch_root_is_refused() {
     );
 }
 
-/// Asserts the egress flags. The default is no network and is accepted with and without
-/// `--egress none`; every flag of an allow-list names the mode it needs; a mode that is not
-/// one of the two is refused; and an allow-list is refused at start, whatever else it says
-/// (only the `crun` runtime enforces it, and these flags select a container engine), as is
-/// the Podman network flag beside it, so an operator who asks for a network never gets a
-/// different one. It catches an allow-list that starts and runs with no network at all, and
-/// one that is accepted together with `--container-network`.
+/// Asserts the egress flags of an agent whose runtime is not `crun`. The default is no
+/// network and is accepted with and without `--egress none`; every flag of a job network
+/// names the modes it needs (`--egress-forward-port` among them); a mode that is not one of
+/// the three is refused; `allow-list` and `open` are refused at start, naming `--runtime
+/// crun` (the only runtime that enforces them) and saying that a container-engine job has
+/// network none, with no runtime given and with `--runtime docker`, so an operator who asks
+/// for a network never gets a different one; and an operator cannot claim a ceiling with
+/// `--capability`. It catches a ceiling accepted and silently ignored by a runtime that gives
+/// jobs no such network, and a hello that says `egress=open` on an operator's word.
 #[test]
-fn egress_flags_default_to_none_and_an_allow_list_is_refused_without_the_crun_runtime() {
+fn egress_allow_list_is_refused_without_the_crun_runtime() {
     let host = linux_host();
     let hello = hello_of(&["--egress", "none"], &host);
     assert_eq!(hello["phase"], "serving");
-    let said = refused(&["--egress", "open"], &host);
+    let said = refused(&["--egress", "wide"], &host);
     assert!(
-        said.contains("--egress: expected none or allow-list"),
+        said.contains("--egress: expected none, allow-list or open"),
         "{said}"
     );
     for (flags, name) in [
         (&["--egress-allow", "192.0.2.10:443"][..], "--egress-allow"),
         (&["--egress-dns", "192.0.2.53"][..], "--egress-dns"),
+        (
+            &["--egress-forward-port", "80"][..],
+            "--egress-forward-port",
+        ),
         (&["--egress-pool", "198.18.0.0/16"][..], "--egress-pool"),
         (&["--egress-nft", "/bin/sh"][..], "--egress-nft"),
         (&["--egress-nsenter", "/bin/sh"][..], "--egress-nsenter"),
     ] {
         let said = refused(flags, &host);
         assert!(
-            said.contains(&format!("{name}: needs --egress allow-list")),
+            said.contains(&format!("{name}: needs --egress allow-list or open")),
             "{said}"
         );
+    }
+    for key in ["egress", "egress-ports"] {
+        let claim = format!("{key}=open");
+        let said = refused(&["--capability", &claim], &host);
+        let want = format!("--capability: {key} is detected and cannot be set");
+        assert!(said.contains(&want), "{said}");
     }
     #[cfg(target_os = "linux")]
     {
@@ -479,16 +491,185 @@ fn egress_flags_default_to_none_and_an_allow_list_is_refused_without_the_crun_ru
             "--egress-nft",
             "/bin/sh",
         ];
-        let said = refused(&allow, &host);
-        assert!(
-            said.contains("--egress allow-list: only the crun runtime enforces it"),
-            "{said}"
-        );
-        let mut both = allow.to_vec();
-        both.extend(["--container-network", "jsnet"]);
-        let said = refused(&both, &host);
-        assert!(said.contains("give only one"), "{said}");
+        let mut docker = allow.to_vec();
+        docker.extend(["--runtime", "docker", "--container-bin", "/bin/sh"]);
+        for given in [&allow[..], &docker[..]] {
+            let said = refused(given, &host);
+            assert!(
+                said.contains(
+                    "--egress allow-list: needs --runtime crun, the only runtime that enforces \
+                     it; a job run through --container-bin has network none"
+                ),
+                "{given:?}: {said}"
+            );
+        }
         let said = refused(&["--egress", "allow-list"], &host);
         assert!(said.contains("needs at least one --egress-allow"), "{said}");
+        let programs = ["--egress-ip", "/bin/sh", "--egress-nft", "/bin/sh"];
+        let mut open = vec!["--egress", "open", "--egress-nsenter", "/bin/sh"];
+        open.extend(programs);
+        let said = refused(&open, &host);
+        assert!(
+            said.contains("--egress open: needs --runtime crun"),
+            "{said}"
+        );
+        open.extend(["--egress-forward-port", "70000"]);
+        let said = refused(&open, &host);
+        assert!(said.contains("--egress-forward-port: not <PORT>"), "{said}");
+    }
+}
+
+/// What the agent prints for `--container-network`, which was removed.
+const NO_NETWORK: &str = "--container-network: removed. A job run through the container \
+    engine now always has network none. For networking give --runtime crun with --egress, and \
+    ask for a network per job in the job's network field";
+
+/// What the agent prints for `--container-egress-allow`, which was removed.
+const NO_EGRESS_ALLOW: &str = "--container-egress-allow: removed. Use --egress allow-list with \
+    --egress-allow on the crun runtime, or the job's network field";
+
+/// What the agent prints for `--container-nft`, which was removed.
+const NO_NFT: &str = "--container-nft: removed together with --container-network. The crun \
+    runtime's nft program is --egress-nft";
+
+/// Runs the program on Linux with `extra` beside the flags every run needs, until its first
+/// wait; returns how it ended, whether it connected to the server (the scripted connector
+/// hands its one transport out at the first connect) and how many messages it sent.
+fn run_counting(extra: &[&str]) -> (Ran, bool, usize) {
+    let (script, sent) = Script::new(vec![welcome(1)]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = run(
+        &flags(extra),
+        &linux_host(),
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+    );
+    let connected = connector.0.borrow().is_none();
+    let sent = sent.borrow().len();
+    (ran, connected, sent)
+}
+
+/// Asserts that each removed flag, in both spellings and beside an otherwise valid command
+/// line, ends the program with status 2 and exactly one line that names the flag and what
+/// replaces it, before the agent connects or sends anything; that the refusal comes before
+/// clap's own (an unknown flag ahead of it does not turn it into clap's usage error); that a
+/// removed name after a flag whose value cannot start with `-` is read as the flag, as clap
+/// reads it; that a removed flag with no value, or an empty attached one, is refused the
+/// same way; that the scan goes on after a value it skipped, a `--` taken as the value of
+/// `--readiness-hook-arg` included; and that of two removed flags only the first given is
+/// reported. Catches a removed flag silently accepted, clap's generic error printed in place
+/// of the replacement, and a refusal that comes after the agent registered.
+#[test]
+fn the_removed_flags_are_refused_with_a_message() {
+    let cases: [(&[&str], &str); 14] = [
+        (&["--container-network", "jobs"], NO_NETWORK),
+        (&["--container-network=jobs"], NO_NETWORK),
+        (
+            &["--container-egress-allow", "192.0.2.1:443"],
+            NO_EGRESS_ALLOW,
+        ),
+        (&["--container-egress-allow=192.0.2.1:443"], NO_EGRESS_ALLOW),
+        (&["--container-nft", "/usr/sbin/nft"], NO_NFT),
+        (&["--container-nft=/usr/sbin/nft"], NO_NFT),
+        (&["--container-network"], NO_NETWORK),
+        (&["--container-egress-allow="], NO_EGRESS_ALLOW),
+        (&["--container-nft="], NO_NFT),
+        (
+            &[
+                "--readiness-hook",
+                "/bin/sh",
+                "--readiness-hook-arg",
+                "--container-network",
+                "--container-nft=/usr/sbin/nft",
+            ],
+            NO_NFT,
+        ),
+        (
+            &[
+                "--readiness-hook",
+                "/bin/sh",
+                "--readiness-hook-arg",
+                "--",
+                "--container-network",
+                "jobs",
+            ],
+            NO_NETWORK,
+        ),
+        (
+            &["--no-such-flag", "--container-network", "jobs"],
+            NO_NETWORK,
+        ),
+        (&["--label", "--container-network", "jobs"], NO_NETWORK),
+        (
+            &[
+                "--container-nft",
+                "/usr/sbin/nft",
+                "--container-network",
+                "jobs",
+            ],
+            NO_NFT,
+        ),
+    ];
+    for (given, want) in cases {
+        let (ran, connected, sent) = run_counting(given);
+        assert_eq!(ran.status(), code(2), "{given:?}: {}", ran.err);
+        assert_eq!(ran.err, format!("js-agent: {want}\n"), "{given:?}");
+        assert!(!connected, "{given:?}: the agent connected");
+        assert_eq!(sent, 0, "{given:?}");
+    }
+}
+
+/// Asserts that a removed flag's name given as the value of another flag is that flag's
+/// value and not a refusal: as the value of `--readiness-hook-arg` (which takes values that
+/// start with `-`) the agent starts and serves with a hook, and without the hook it goes on
+/// to the next check, after it connected, which names `--readiness-hook`; attached with `=`
+/// it is a value of `--label`, which reaches the hello. And a removed name after a bare `--`
+/// is not read as a flag (clap refuses the stray word). Catches a scan that is a substring
+/// or `contains` over the arguments.
+#[test]
+fn a_removed_flag_name_as_a_value_is_not_a_refusal() {
+    let host = linux_host();
+    let hook = [
+        "--readiness-hook",
+        "/bin/sh",
+        "--readiness-hook-arg",
+        "--container-network",
+    ];
+    assert_eq!(hello_of(&hook, &host)["phase"], "serving");
+    let (ran, connected, sent) = run_counting(&["--readiness-hook-arg", "--container-network"]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let want = "js-agent: --readiness-hook-arg: needs --readiness-hook\n";
+    assert!(ran.err.ends_with(want), "{}", ran.err);
+    assert!(!ran.err.contains("removed"), "{}", ran.err);
+    assert!(connected, "the run stopped before the hook check");
+    assert_eq!(sent, 0);
+    let hello = hello_of(&["--label=k=--container-nft"], &host);
+    assert_eq!(hello["labels"], json!({ "k": "--container-nft" }));
+    let (ran, connected, _) = run_counting(&["--", "--container-egress-allow", "192.0.2.1:443"]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(!ran.err.contains("removed"), "{}", ran.err);
+    assert!(!connected);
+}
+
+/// Asserts that a flag whose name only starts like a removed one is an ordinary unknown
+/// argument: clap's own usage error, status 2, no removal message, and no connect. Catches a
+/// scan that matches a prefix and tells an operator that a flag they never gave was removed.
+#[test]
+fn a_name_like_a_removed_flag_is_an_unknown_argument() {
+    for given in ["--container-network-extra", "--container-nftx=/x"] {
+        let (ran, connected, sent) = run_counting(&[given]);
+        assert_eq!(ran.status(), code(2), "{given}: {}", ran.err);
+        let name = given.split('=').next().unwrap_or(given);
+        assert!(
+            ran.err.contains("unexpected argument"),
+            "{given}: {}",
+            ran.err
+        );
+        assert!(ran.err.contains(name), "{given}: {}", ran.err);
+        assert!(!ran.err.contains("removed"), "{given}: {}", ran.err);
+        assert!(!connected, "{given}");
+        assert_eq!(sent, 0, "{given}");
     }
 }

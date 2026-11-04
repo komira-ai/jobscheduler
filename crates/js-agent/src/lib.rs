@@ -42,7 +42,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle` and `bundle-root` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress` and `egress-ports` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -59,7 +59,7 @@
 //! | `--scratch-low-water-gib <n>` | GiB of the scratch root's free disk kept back from jobs; the disk offered (`shape.disk_bytes`, and `disk-gib` in GiB) is the free space read at start minus this, 0 when this is more; needs `--scratch-root` |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
-//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on `--runtime crun`, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit is enforced only while an agent runs; the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
 //! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
 //! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every job that asks for the network it checks again and refuses the job (`egress-unchecked`) if it is not; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
@@ -70,25 +70,26 @@
 //! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
 //! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
 //! | `--native-max-processes <n>` | the most processes a native run's user may have (the run's `RLIMIT_NPROC`); by default 512; the helper's kill is not held by it; needs `--native-helper-socket` |
-//! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; a named network needs at least one `--container-egress-allow` (the agent does not start without it), and before every contained job is created the agent checks that the network is a bridge with DNS and IPv6 off and that the host's nftables table `inet js_egress` limits it to those endpoints, or refuses the job (`egress-unchecked`); Podman only; docs/egress.md sets the network up; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the base of the users containers run as, container ids both above zero; by default `1000:1000`. Every run holds a slot, numbered from 0, and runs as the base plus its slot number, uid and gid (`1000:1000`, `1001:1001`, ...), so two runs held at once never share a host uid; the slot is given again only after its last run's cleanup passed (container and scratch gone, no process left), and never if a check found something. Each of the 4096 slots needs an id, so both numbers of the base are at most 61440 (the agent refuses to start otherwise). The agent gives each run's scratch directory to the host ids of its slot's user (the start of the `--container-subuid` range plus each id); needs `--container-bin` |
 //! | `--container-subuid <user>` | required with `--container-bin`: the user whose range in `/etc/subuid` and `/etc/subgid` every job's user namespace (container ids 0 to 65535) is mapped onto, so no container id is a host id. The agent refuses to start unless both files give the user at least 65536 ids, not from 0, holding no id of `/etc/passwd` or `/etc/group`; Podman gets `--uidmap` and `--gidmap` for every container, a Docker daemon must run with `userns-remap` set to the user and onto that range; a second agent on the host with an overlapping range is refused (a lock under `/run/js-agent/subid`); the agent must run as root |
 //! | `--container-host <uri>` | the engine to talk to: a socket on this machine, `unix:///<path>`, passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; `tcp://` and `ssh://` are refused (the post-job checks read this machine, and a job on another one would pass them all); needs `--container-bin` |
 //! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`; on Podman also of `/var/tmp` and `/run`), such as `64m` (the default) or `1g`; needs `--container-bin` |
-//! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); a network made without DNS resolves nothing, and a presigned URL names its host (its signature covers the Host header), so every endpoint a job may reach is given this way; needs `--container-bin` |
-//! | `--container-egress-allow <ip:port>` | an endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (prefix 24 to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16; required with a named `--container-network` (the agent does not start without it); before every job is created the agent reads back the network (a bridge, DNS off, no IPv6, one IPv4 subnet), `br_netfilter` and the nftables table `inet js_egress`, and refuses the job (`egress-unchecked`) unless the table holds exactly the rules for these endpoints; Podman only; see docs/egress.md; needs `--container-bin` |
-//! | `--container-nft <path>` | the absolute path of `nft` for that check; by default `/usr/sbin/nft`; needs `--container-egress-allow` |
-//! | `--egress <none\|allow-list>` | the network a job's `crun` container gets: `none` (the default) loopback only, no route; `allow-list` one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; the agent, as root, wires each container from outside and keeps the firewall (docs/design/agent-egress.md); only the `crun` runtime reads it and this build cannot select that runtime yet, so `allow-list` is refused at start, as is `--container-network` beside it |
-//! | `--egress-allow <ip:port>` | an endpoint an allow-list may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required; needs `--egress allow-list` |
-//! | `--egress-dns <ip>` | a resolver an allow-list may ask (UDP and TCP port 53) and the only nameserver of a job's `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` |
-//! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` |
-//! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` |
+//! | `--container-add-host <name>:<ip>` | a static host entry for every container, passed at create as `--add-host`; repeatable, at most 16; the name is a DNS name, the address IPv4 or IPv6 (`host-gateway` and anything else is refused, a name twice too); needs `--container-bin` |
+//! | `--egress <none\|allow-list\|open>` | the most network a job's `crun` container may ask for (its `network`), the agent's ceiling, reported in the hello as the capability `egress`: `none` (the default) loopback only, no route, for every job; `allow-list` a job may ask for one interface to the host, which forwards only what `--egress-allow` and `--egress-dns` name; `open` a job may also ask for any IPv4 address but the metadata range `169.254.0.0/16`, the host itself and another job (IPv6 and a spoofed source are refused as under `allow-list`); a start above the ceiling is refused `network-above-ceiling` before anything is made and is never run with less; the agent, as root, wires each container that asked for `allow-list` or `open` from outside after its start, while the container's init holds the job until its default route is there, keeps the firewall and checks it before every create (`egress-unchecked` when it changed), and takes the wiring down when the run ends or is removed; a `none` job is not wired and waits for nothing (docs/design/agent-egress.md); started once, after the claims of the scratch root and the host id, holding the host's egress (the abstract socket `@js-agent-egress`: one agent with `allow-list` or `open` per host, a second is refused), and a ceiling that cannot be set up ends the agent with status 2; only `--runtime crun` reads it, so another runtime is refused `allow-list` and `open` at start (its jobs get `none` only) |
+//! | `--egress-allow <ip:port>` | an endpoint an `allow-list` job may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; prefix 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one is required by `--egress allow-list`, none by `--egress open`; needs `--egress allow-list` or `open` |
+//! | `--egress-dns <ip>` | a resolver a job with a network may ask (UDP and TCP port 53) and the only nameserver of its `resolv.conf`; repeatable, at most 4; without one a job resolves no name; needs `--egress allow-list` or `open` |
+//! | `--egress-forward-port <port\|lo-hi>` | a host port a job may declare (`ports`), each from 1 to 65535; repeatable, at most 16; a start that declares a port not listed is refused `port-above-ceiling`; each declared port of an admitted `allow-list` or `open` job is forwarded from the host's port to the job's (a `none` job that declares one is refused `ports-not-supported`); the hello reports them as `egress-ports`; needs `--egress allow-list` or `open` |
+//! | `--egress-pool <cidr>` | the IPv4 network the jobs' addresses come from, one /30 each, `/16` to `/24`; by default `198.18.0.0/16`; needs `--egress allow-list` or `open` |
+//! | `--egress-ip <path>`, `--egress-nft <path>`, `--egress-nsenter <path>` | the absolute paths of the `ip`, `nft` and `nsenter` programs the egress setup runs, by default `/usr/sbin/ip`, `/usr/sbin/nft` and `/usr/bin/nsenter`; need `--egress allow-list` or `open` |
 //! | `--actions-cgroup <path>` | the cgroup version 2 directory below `/sys/fs/cgroup` that holds every container (made and delegated by the operator): each container is created with `--cgroup-parent` naming it (the slice name for one `.slice` directly below `/sys/fs/cgroup`, the systemd driver; the path with a leading `/` otherwise, the cgroupfs driver), and the heartbeat carries the usage of the directory and of each lease's cgroup (see [`usage`]); without it the heartbeat carries no load, and the agent says so at start; needs `--container-bin` |
 //! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
 //! | `--runtime <docker\|crun>` | what runs a job: `docker` (the engine program of `--container-bin`, Docker or Podman, which is also what no flag means) or `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only). The packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun` the agent checks the host before it registers and exits 2 naming every piece that is missing: `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
+//! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
+//! | `--gpu-mount <src>:<dst>` | a host directory a `crun` GPU job is given read-only (`nosuid,nodev`, not recursive), such as the driver's libraries; repeatable; both absolute, the source a directory not below `/proc`, `/sys` or `/dev`, the destination not at or below those, `/scratch` or a place the runtime mounts itself (`/work`, `/root`, `/tmp`, `/var/tmp`, `/run`, the `/etc` name files), nor hold one of them (`/etc`, `/var`), nor at or below another's. A file source is refused: binding a file where the image has none would leave a file in the image's root that every job of that image shares. A GPU job whose image has a link or a file on the way to the destination, or whose driver directory is gone, is refused when it starts, naming the flag. Needs `--gpu-device` |
+//! | `--gpu-env <name>=<value>` | a variable set in a `crun` GPU job's environment, over the image's of that name, such as the library path; repeatable; the name `[A-Z_][A-Z0-9_]*`, not starting with `JS_`, given once; needs `--gpu-device` |
 //! | `--image-allow <host[:port]/prefix>` | a registry and namespace an image may be pulled from, such as `ghcr.io/komira-ai/` (whole path components: `komira-ai/` admits `komira-ai/x`, not `komira-ai-x/y`); repeatable; a bare host is refused at start. An image on none of the entries is never pulled, so a job cannot make the host reach a registry of its choosing. Read at start and kept for the runtime that pulls with js-oci; the Docker and Podman runtimes pull as `--container-pull` says and do not read it |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
@@ -146,8 +147,10 @@
 //!
 //! The host contract (see `contract`): once the job half has started, which ran the engine
 //! program, the hello carries `runtime=container` and `exec=container`; with GPUs offered
-//! and a `--gpu-toolkit-hook` that exits 0 it also carries `gpu-toolkit=true`. An agent that
-//! runs no jobs reports none of them, as an older agent does not. A pool that declares an
+//! and a `--gpu-toolkit-hook` that exits 0 it also carries `gpu-toolkit=true`; a `crun` agent
+//! given `--gpu-device` carries `gpu-passthrough=true`, which tells the operator it gives jobs
+//! the GPUs they book (it is not a placement rule). An agent that runs no jobs reports none
+//! of them, as an older agent does not. A pool that declares an
 //! execution mode refuses a host without them (`host-contract`, `execution-mismatch`).
 //!
 //! On Linux the CPU count and memory are the lowest of the machine's total and what the
@@ -392,12 +395,14 @@ enum Failure {
 /// Checks `--runtime` and the flags that belong to it, and for `crun` the host: a wrong
 /// flag or a missing piece of the host ends the agent with status 2 before it registers.
 /// For `crun` it returns the settings of the crun runtime, which stand where
-/// `--container-bin` stands for the engines.
+/// `--container-bin` stands for the engines; `gpus` are the indices of the GPUs the host
+/// offers, whose nodes the GPU flags must name.
 fn runtime_flags(
     cli: &Cli,
     platform: &Platform,
     services: &Services<'_>,
     image_allow: Vec<js_oci::Allow>,
+    gpus: &[u32],
     err: &mut dyn Write,
 ) -> Result<Option<Settings>, Failure> {
     let usage = |text: &str| Err(Failure::Usage(text.to_owned()));
@@ -408,22 +413,22 @@ fn runtime_flags(
             }
             #[cfg(target_os = "linux")]
             {
+                // The GPU flags need no host check, so a wrong one is named first.
+                let passthrough = crun::GpuPassthrough::from_cli(cli, gpus, crun::read_node);
+                let passthrough = passthrough.map_err(|why| Failure::Usage(why.to_string()))?;
                 let host = services.machine.crun_host();
                 let ready = crun_host::start(cli, &host, services.commands);
                 let ready = ready.map_err(Failure::Usage)?;
                 for warning in &ready.warnings {
                     let _ = writeln!(err, "js-agent: warning: {warning}");
                 }
-                Ok(Some(Settings::for_crun(
-                    ready.crun,
-                    &ready.job_user,
-                    ready.job_ids,
-                    image_allow,
-                )))
+                let settings =
+                    Settings::for_crun(ready.crun, &ready.job_user, ready.job_ids, image_allow);
+                Ok(Some(settings.with_gpus(passthrough)))
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (services, image_allow, err);
+                let _ = (services, image_allow, gpus, err);
                 usage("--runtime crun: this build has no crun runtime")
             }
         }
@@ -432,7 +437,12 @@ fn runtime_flags(
         }
         _ if cli.crun_bin.is_some() => usage("--crun-bin: needs --runtime crun"),
         _ if cli.job_user.is_some() => usage("--job-user: needs --runtime crun"),
-        _ => Ok(None),
+        // Only the crun runtime gives a job a GPU's nodes: the engines take theirs by index
+        // from the toolkit, and a Mac runs no container.
+        _ => match cli.gpu_flags().into_iter().find(|(_, given)| *given) {
+            Some((flag, _)) => usage(&format!("{flag}: needs --runtime crun")),
+            None => Ok(None),
+        },
     }
 }
 
@@ -557,6 +567,11 @@ fn execute(
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> Result<(), Failure> {
+    // A removed flag is refused by name with what replaces it, before clap would call it
+    // unknown, and before anything is read or the agent registers.
+    if let Some(refusal) = cli::removed_flag(&args) {
+        return Err(Failure::Usage(refusal.to_owned()));
+    }
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
     // Read once, before anything else: a credentials file that breaks a rule stops the
     // agent before it registers, and the files are never read again.
@@ -619,7 +634,13 @@ fn execute(
                 .to_owned(),
         ));
     }
-    let crun = runtime_flags(&cli, platform, services, image_allow, err)?;
+    let gpus: Vec<u32> = offer
+        .hello
+        .gpu_devices
+        .iter()
+        .map(|gpu| gpu.index)
+        .collect();
+    let crun = runtime_flags(&cli, platform, services, image_allow, &gpus, err)?;
     // Native jobs need the Seatbelt and the helper of a Mac.
     if cli.native_helper_socket.is_some() && !platform.is_macos() {
         return Err(Failure::Usage(
@@ -662,6 +683,15 @@ fn execute(
         }
         None => None,
     };
+    // The egress of the crun runtime starts once, here: after the claims, because an
+    // allow-list's start removes every interface and table a previous agent left, which must
+    // not be another agent's that still runs. Mode none starts nothing.
+    #[cfg(target_os = "linux")]
+    if let Some(plan) = local.container.as_mut().and_then(Settings::crun_mut) {
+        let started = crun::start_egress(&local.egress, crate::egress::Egress::start);
+        let mode = local.egress.mode();
+        plan.egress = started.map_err(|why| Failure::Usage(format!("--egress {mode}: {why}")))?;
+    }
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
@@ -710,6 +740,15 @@ fn execute(
     // only after the job half below has started, and that ends the agent first if the program
     // (or the helper) does not run, so no hello that names a runtime is sent for one that was
     // not found.
+    // A crun agent given a device list gives jobs the GPUs they book.
+    #[cfg(target_os = "linux")]
+    let passthrough = local
+        .container
+        .as_ref()
+        .and_then(Settings::crun)
+        .is_some_and(|plan| plan.gpus.is_some());
+    #[cfg(not(target_os = "linux"))]
+    let passthrough = false;
     let reported = match (local.container.is_some(), local.native.is_some()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
@@ -717,6 +756,7 @@ fn execute(
             commands,
             local.files.is_some(),
             default_gib,
+            (passthrough, &local.egress.ceiling()),
         )),
         (false, true) => Some(contract::report_native(&mut offer.hello)),
         (false, false) => None,

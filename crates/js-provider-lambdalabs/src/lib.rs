@@ -8,7 +8,9 @@
 //!   implementations: [`HttpApi`], the real client, and [`FakeLambda`], the same calls
 //!   over memory;
 //! - [`LambdaProvider`], which implements the scheduler's provider-neutral contract
-//!   ([`js_elastic::ElasticProvider`]: catalog, host preparation, acquire, list, release) over a
+//!   ([`js_elastic::CapacityProvider`]: catalog, capabilities, capacity, host preparation,
+//!   acquire, list, release, a read by id and the match of a first hello; it passes the
+//!   contract's conformance suite, `tests/offline/conformance.rs`) over a
 //!   [`LambdaApi`]: ownership marks on
 //!   everything it launches (tags and a name prefix; both are needed to terminate, either
 //!   counts toward `max_machines`), an acquire that launches once per acquire id, a release that
@@ -60,13 +62,13 @@
 //! [`HttpApi`] trusts the public roots bundled in the program for `https` unless it is
 //! given a CA bundle, which then replaces them.
 //!
-//! [`js_elastic::ElasticProvider::host_prep`] returns the steps that prepare Lambda's
+//! [`js_elastic::CapacityProvider::host_prep`] returns the steps that prepare Lambda's
 //! stock image (the driver and container program checks, and a scratch file system of its
 //! own under the agent's scratch root, sized by [`ElasticConfig::scratch_gib`]).
 //!
 //! The provider is not wired to a scheduler. The calls block, each under a time limit, so
 //! they must not run under a lock that other work waits on. It does not implement the
-//! delivered whole-host `Provider` trait, which is called under the lease table's lock.
+//! lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock.
 
 mod aborter;
 mod api;
@@ -105,5 +107,5 @@ pub use model::{
 };
 pub use options::{OptionRow, OptionTable, OptionsError};
 pub use own::{ACQUIRE_TAG, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG};
-pub use provider::{LambdaProvider, PAYLOAD_LIMIT, PrepareError, Sweep};
+pub use provider::{LambdaProvider, PAYLOAD_LIMIT, PROVIDER_ID, PrepareError, Sweep};
 pub use read::{LambdaRead, Reader, Tagged};

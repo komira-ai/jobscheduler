@@ -9,7 +9,7 @@ use js_agent_wire::{ExclusiveRefusal, RefusalReason};
 use js_lease::{
     Exclusion as LeaseExclusion, ExclusionEnd, Held, Queued, ReservationRecord, Timestamp,
 };
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Exclusion, PoolConfig, Restored, WholeNodeConfig};
 use js_types::ProviderId;
 use support::world::*;

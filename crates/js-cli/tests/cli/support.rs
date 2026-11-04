@@ -19,7 +19,7 @@ use js_lease_server::{
 };
 use js_pool_static::EXAMPLE_CONFIG;
 use js_provider::Call;
-use js_provider_fake::FakeProvider;
+use js_provider_fake::FakePool;
 use js_testkit::dir::TestDir;
 use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::Value;
@@ -354,7 +354,7 @@ impl CapacitySource for Scripted {
         let caps = BTreeMap::from([("isa".to_string(), "x86-64-v3".to_string())]);
         let shape = Shape::new(resources, caps);
         let hosts = ["h1", "h2"].map(|name| (HostId::new(name).unwrap(), shape.clone()));
-        let mut fake = FakeProvider::new(ProviderId::new("fake").unwrap(), hosts.to_vec());
+        let mut fake = FakePool::new(ProviderId::new("fake").unwrap(), hosts.to_vec());
         for (call, landed) in &self.0 {
             fake.script_unknown(*call, *landed);
         }

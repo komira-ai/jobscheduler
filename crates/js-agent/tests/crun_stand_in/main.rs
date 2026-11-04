@@ -11,6 +11,8 @@
 #![cfg(target_os = "linux")]
 
 mod blind;
+mod egress;
+mod gpus;
 mod images;
 mod node;
 mod open;

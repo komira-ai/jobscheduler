@@ -10,7 +10,7 @@ use super::super::{BIN, docker, in_another_pid_namespace, open_with, spec};
 
 /// The settings of an agent whose containers belong in `/sys/fs/cgroup/jobs.slice`.
 fn in_jobs_slice() -> Settings {
-    Settings::new(Path::new(BIN), None, None)
+    Settings::new(Path::new(BIN), None)
         .unwrap()
         .with_actions_cgroup(Some(Path::new("/sys/fs/cgroup/jobs.slice")))
         .unwrap()
@@ -53,7 +53,7 @@ fn the_control_group_is_the_unified_line_of_the_containers_process() {
 /// counter does not hold, which would make the leases add up to more than the node.
 #[test]
 fn a_control_group_outside_the_actions_group_is_not_reported() {
-    let plain = Settings::new(Path::new(BIN), None, None).unwrap();
+    let plain = Settings::new(Path::new(BIN), None).unwrap();
     assert_eq!(cgroup_with(plain, systemd_table), None, "no flag");
     let tables: [(&str, ProcRead); 6] = [
         ("no file", |_| None),

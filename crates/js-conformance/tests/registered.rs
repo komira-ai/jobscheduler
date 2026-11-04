@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use js_conformance::{Check, Subject, Verdict, run};
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Call, Provider};
+use js_provider::{Call, Pool};
 use js_registry::{Credential, PoolConfig, RegisteredProvider, Registry};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
@@ -33,7 +33,7 @@ fn registered() -> Registered {
 }
 
 impl Subject for Registered {
-    fn provider(&mut self) -> &mut dyn Provider {
+    fn provider(&mut self) -> &mut dyn Pool {
         &mut self.provider
     }
 
@@ -94,7 +94,7 @@ fn registered_whole() -> RegisteredWhole {
 }
 
 impl Subject for RegisteredWhole {
-    fn provider(&mut self) -> &mut dyn Provider {
+    fn provider(&mut self) -> &mut dyn Pool {
         self.0.provider()
     }
 

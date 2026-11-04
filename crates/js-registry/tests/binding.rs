@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, InstanceIdentity, refusal};
 use js_lease::ManualClock;
-use js_provider::{Observed, Provider, RefusalCode, StartAck};
+use js_provider::{Observed, Pool, RefusalCode, StartAck};
 use js_registry::{
     Binding, ConfigError, DEFAULT_LOST_RETENTION_MS, HostState, MAX_LOST_RETENTION_MS,
     MIN_LOST_RETENTION_MS, Refusal, Registry, SequentialSessions, SessionSource,

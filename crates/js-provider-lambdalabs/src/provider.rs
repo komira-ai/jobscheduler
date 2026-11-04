@@ -1,4 +1,4 @@
-//! The provider: [`ElasticProvider`] over [`LambdaApi`], with the cost guard.
+//! The provider: [`CapacityProvider`] over [`LambdaApi`], with the cost guard.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CheckResult, Claim, Demand, ElasticProvider,
-    Extra, Held, HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released,
-    Secret,
+    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
+    Demand, Extra, Held, Hello, HostName, HostRef, HostStatus, Observed, Offer, ProviderCaps,
+    ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
 };
+use js_types::ProviderId;
 
 use crate::api::LambdaApi;
 use crate::clock::Clock;
@@ -22,6 +23,12 @@ use crate::own::{LabelError, Owner};
 use crate::select;
 
 mod checks;
+mod records;
+
+use records::Records;
+
+/// The provider's name: the kind a configuration names it by.
+pub const PROVIDER_ID: ProviderId = ProviderId::known("lambdalabs");
 
 /// The most bytes of boot payload this provider carries: the user data of a launch.
 ///
@@ -43,6 +50,12 @@ struct Launching {
     /// An entry ends when a list shows the instance, when the launch is answered, or
     /// when the hold runs out.
     unknown: BTreeMap<String, Duration>,
+    /// How many launches have been sent.
+    sent: u64,
+    /// The number of the last launch sent for each acquire id: a launch sent again under
+    /// the same acquire id is another attempt, which the records must not take for the one
+    /// before.
+    attempts: BTreeMap<String, u64>,
     /// Instances a launch answered with, until a list shows them as ours. A list can lag
     /// a write, so for a while an instance exists only in the API's list-to-be: it counts
     /// toward `max_machines` and a retry of the same acquire gets the earlier answer.
@@ -52,6 +65,9 @@ struct Launching {
     /// instance terminated or (a trusted 404) gone. A probe that finds it, or fails,
     /// holds the entry for another period.
     answered: Vec<Answered>,
+    /// What the probes of unlisted instances read, by id, since an acquire last copied
+    /// the guard into the records.
+    probed: Vec<(HostRef, Observed)>,
 }
 
 /// An instance a launch answered with that no list has shown as ours yet.
@@ -151,6 +167,10 @@ pub struct LambdaProvider {
     dry_run_logged: AtomicBool,
     /// The name of the ssh key every launch holds, once settled.
     key: Mutex<Option<String>>,
+    /// What it knows of the instances it holds, for the calls that make no request. Never
+    /// held while a request is in flight, so those calls never wait for one; taken after
+    /// the launch lock when both are held.
+    records: Mutex<Records>,
 }
 
 impl LambdaProvider {
@@ -173,6 +193,7 @@ impl LambdaProvider {
             probed: AtomicBool::new(false),
             dry_run_logged: AtomicBool::new(false),
             key: Mutex::new(None),
+            records: Mutex::new(Records::default()),
         }
     }
 
@@ -180,6 +201,42 @@ impl LambdaProvider {
         self.launching
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn records(&self) -> MutexGuard<'_, Records> {
+        self.records.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Notes what a list that worked showed.
+    fn saw(&self, rows: &[Instance]) {
+        let claimed = rows.iter().map(|row| (self.owner.claim(row), held_of(row)));
+        self.records().listed(claimed);
+    }
+
+    /// Copies what the launch guard holds after an acquire whose answer is `answer`: every
+    /// instance a launch answered with that no list has shown as ours (the extras of a
+    /// launch included), and the acquire ids of the launches with no answer. The extras the
+    /// answer released are noted as their release read them back.
+    ///
+    /// What the guard's probes of unlisted instances read is noted after it, so an instance
+    /// a probe found gone or terminated is not left supplied.
+    fn remember(&self, gate: &mut Launching, answer: &Acquired) {
+        let extras = match answer {
+            Acquired::Accepted { extras, .. } => extras.as_slice(),
+            _ => &[],
+        };
+        let held = gate.answered.iter().map(|launched| launched.held.clone());
+        let attempts = &gate.attempts;
+        let attempt = |acquire: &str| attempts.get(acquire).copied().unwrap_or_default();
+        let unresolved = gate
+            .unknown
+            .keys()
+            .map(|acquire| (acquire.clone(), attempt(acquire)));
+        let mut records = self.records();
+        records.guarded(held, unresolved, extras);
+        for (id, observed) in gate.probed.drain(..) {
+            records.observed(&id, &observed);
+        }
     }
 
     /// Where `demand` can launch, best first (see the module docs of the choice): empty
@@ -374,8 +431,9 @@ impl LambdaProvider {
                 .any(|row| Owner::acquire_of(row) == Some(acquire.as_str()));
             !seen && now.saturating_sub(*sent) < hold
         });
+        let probed = &mut gate.probed;
         gate.answered
-            .retain_mut(|launched| self.still_held(launched, rows, now));
+            .retain_mut(|launched| self.still_held(launched, rows, now, probed));
     }
 
     /// Whether the answered instance still counts. A list row of its id that is ours ends
@@ -383,7 +441,14 @@ impl LambdaProvider {
     /// is filtered out of the live set). When the hold has run out the instance is read
     /// by id: found and not terminated, or any error, keeps it for another hold; only
     /// a terminated reading or a 404 that [`Self::trust_absent`] accepts ends it.
-    fn still_held(&self, launched: &mut Answered, rows: &[Instance], now: Duration) -> bool {
+    /// What a probe reads is added to `probed`, for the records.
+    fn still_held(
+        &self,
+        launched: &mut Answered,
+        rows: &[Instance],
+        now: Duration,
+        probed: &mut Vec<(HostRef, Observed)>,
+    ) -> bool {
         let listed_ours = rows
             .iter()
             .any(|row| row.id == launched.id && self.owner.claim(row) == Claim::Ours);
@@ -394,14 +459,20 @@ impl LambdaProvider {
             return true;
         }
         let id = &launched.id;
-        let keep = match self.api.get_instance(id) {
-            Ok(found) => found.status != HostStatus::Terminated,
-            Err(error) if self.trust_absent(&error) => false,
+        let observed = match self.api.get_instance(id) {
+            Ok(found) => Observed::Present(found.status),
+            Err(error) if self.trust_absent(&error) => Observed::Absent,
             Err(error) => {
                 tracing::warn!(%error, %id, "the probe of an unlisted instance failed; still counting it");
-                true
+                Observed::Unknown
             }
         };
+        let ended = matches!(
+            observed,
+            Observed::Absent | Observed::Present(HostStatus::Terminated)
+        );
+        probed.push((launched.held.id.clone(), observed));
+        let keep = !ended;
         if keep {
             tracing::warn!(%id, "an answered instance is still not listed as ours; still counting it");
             launched.due = now + self.config.unknown_hold;
@@ -465,6 +536,7 @@ impl LambdaProvider {
                 return Acquired::Unknown;
             }
         };
+        self.saw(&rows);
         let now = self.clock.now();
         self.settle(gate, &rows, now);
         let live: Vec<(&Instance, Claim)> = rows
@@ -544,6 +616,9 @@ impl LambdaProvider {
         gate.last_launch = Some(now);
         gate.unknown
             .insert(request.acquire.as_str().to_owned(), now);
+        gate.sent += 1;
+        gate.attempts
+            .insert(request.acquire.as_str().to_owned(), gate.sent);
         tracing::info!(
             instance_type = %launch.instance_type,
             region = %launch.region,
@@ -614,14 +689,40 @@ impl LambdaProvider {
     }
 }
 
-impl ElasticProvider for LambdaProvider {
+impl CapacityProvider for LambdaProvider {
+    fn id(&self) -> ProviderId {
+        PROVIDER_ID
+    }
+
+    fn can_launch(&self) -> bool {
+        true
+    }
+
+    /// Linux, the architectures of the instance types Lambda documents, and the GPU classes
+    /// of the option table: the table [`CapacityProvider::catalog`] takes each offer's class
+    /// from.
+    ///
+    /// An architecture Lambda does not document reaches the catalog as its own text; once a
+    /// catalog has carried it, it is in the capabilities too, so every offer the catalog
+    /// has returned is inside them. No call is made.
+    fn capabilities(&self) -> ProviderCaps {
+        let mut caps = select::capabilities(&self.options);
+        caps.arch.extend(self.records().arches());
+        caps
+    }
+
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         let types = self.api.instance_types().map_err(provider_error)?;
-        Ok(select::offers(
-            &self.options,
-            &types,
-            self.config.regions.as_deref(),
-        ))
+        let offers = select::offers(&self.options, &types, self.config.regions.as_deref());
+        self.records().offered(&offers);
+        Ok(offers)
+    }
+
+    /// From what the provider last listed, launched, released and read by id; `can_add`
+    /// is what `max_machines` leaves once the launch guard's count is taken off it (ours
+    /// and not terminated, the suspects, the launches with no answer and the extras).
+    fn capacity(&self) -> Capacity {
+        self.records().capacity(self.config.max_machines.get())
     }
 
     fn checks(&self) -> Vec<CheckResult> {
@@ -687,14 +788,15 @@ impl ElasticProvider for LambdaProvider {
             return answer;
         }
         let mut gate = self.launching();
-        self.launch_locked(&mut gate, request, &launch)
+        let answer = self.launch_locked(&mut gate, request, &launch);
+        self.remember(&mut gate, &answer);
+        answer
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
-        Ok(self
-            .api
-            .list_instances()
-            .map_err(provider_error)?
+        let rows = self.api.list_instances().map_err(provider_error)?;
+        self.saw(&rows);
+        Ok(rows
             .iter()
             .filter(|row| self.owner.claim(row) == Claim::Ours)
             .map(held_of)
@@ -702,12 +804,14 @@ impl ElasticProvider for LambdaProvider {
     }
 
     fn release(&self, id: &HostRef) -> Released {
-        match InstanceId::new(id.as_str()) {
+        let released = match InstanceId::new(id.as_str()) {
             Ok(id) => self.release_instance(&id),
             // Not an id of this API, so not an instance of it and not ours: a definite
             // answer, never "gone" and never one to retry. Nothing is asked of the API.
             Err(_) => Released::Refused(Claim::Foreign),
-        }
+        };
+        self.records().released(id, &released);
+        released
     }
 
     fn unresolved(&self) -> Vec<AcquireId> {
@@ -716,14 +820,27 @@ impl ElasticProvider for LambdaProvider {
         ids.filter_map(|id| AcquireId::new(id).ok()).collect()
     }
 
-    fn is_gone(&self, id: &HostRef) -> bool {
-        let Ok(id) = InstanceId::new(id.as_str()) else {
-            return false;
+    /// A reference that is no id of the API is not read and is `Unknown`; a 404 is
+    /// `Absent` only once [`Self::trust_absent`] accepts it.
+    fn observe(&self, id: &HostRef) -> Observed {
+        let Ok(instance) = InstanceId::new(id.as_str()) else {
+            return Observed::Unknown;
         };
-        match self.api.get_instance(&id) {
-            Ok(_) => false,
-            Err(error) => self.trust_absent(&error),
-        }
+        let observed = match self.api.get_instance(&instance) {
+            Ok(found) => Observed::Present(found.status),
+            Err(error) if self.trust_absent(&error) => Observed::Absent,
+            Err(_) => Observed::Unknown,
+        };
+        self.records().observed(id, &observed);
+        observed
+    }
+
+    /// The instance launched, or listed, under the hello's name, which must be one this
+    /// scheduler derives: with the hello's instance id when it carries one, else the one
+    /// such instance that is not ending (none when several are).
+    fn verify_instance(&self, hello: &Hello) -> Option<HostRef> {
+        let name = HostName::parse(&self.config.scheduler, &hello.name)?;
+        self.records().verify(&name, hello.instance_id.as_deref())
     }
 }
 

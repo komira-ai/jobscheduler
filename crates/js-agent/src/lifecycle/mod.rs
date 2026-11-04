@@ -4,8 +4,9 @@
 //! [`Lifecycle`] is a state machine over three seams: a [`Runtime`], a
 //! [`CheckHook`] and a [`Clock`]. It consumes the wire types in memory only (it reads a
 //! [`HeartbeatReply`](js_agent_wire::HeartbeatReply) and offers the
-//! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s of
-//! the next heartbeat), and it reads no clock but the one it is given and sleeps never.
+//! [`HeldRun`](js_agent_wire::HeldRun)s and [`RunResult`](js_agent_wire::RunResult)s, the
+//! [`HeldJob`](js_agent_wire::HeldJob)s and the retired job ids of the next heartbeat), and
+//! it reads no clock but the one it is given and sleeps never.
 //!
 //! # What the agent guarantees per job
 //!
@@ -14,6 +15,27 @@
 //!   (the agent remembers the last [`RETIRED_CAP`] run ids). A start that reaches the
 //!   agent later than its `valid_for_ms` allows (the agent's clock, measured from the
 //!   moment the reply arrived) is dropped and nothing is sent.
+//! - **A job start is a start keyed by job id** (`JobStart`, see `js_agent_wire::per_job`).
+//!   It is made into the start a run start makes (run id the job id, lease id the
+//!   allocation id, limits the booked resources and the job's `wall_ms`, and no
+//!   `valid_for_ms`, so no lease bounds it) and goes through the same admission, refusals,
+//!   slots and wall clock: the wall limit counts from the moment the container is made, so a
+//!   start delayed in delivery is neither shortened nor stretched. It is idempotent on the
+//!   job id, and job ids share the bounded set of retired run ids above (in memory: a
+//!   restart forgets them, so a late start of a stopped job can run again: design section
+//!   8, row 31). Such a job is listed in the heartbeat's `jobs` alone, with its
+//!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
+//!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
+//!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
+//!   whose id names held work of the other keying is not taken (`Skip::Clash`), and one
+//!   that names an environment is refused `env-unsupported` and runs nothing (no runtime
+//!   sets a container's environment yet; `js-agent-job-env-runtimes` adds it). A
+//!   `JobStop` for a held job ends it as a `Stop` does (`killed`, once however often it
+//!   comes); for a job the agent does not hold it retires the id and lists it in
+//!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
+//!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
+//!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it (the
+//!   Docker and Podman path; `crun` adopts nothing yet) lists it as a job again.
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
@@ -128,8 +150,9 @@
 //!   differ; the time between the agent's resolution and the daemon's bind stays open (see
 //!   [`MountRoots`]).
 //! - **Held and retired state is in memory.** After a restart an unacknowledged result
-//!   whose container was removed is lost, and the agent forgets which run ids it was told
-//!   to stop; a late `Start` for one of them runs. Containers that still exist are
+//!   whose container was removed is lost, and the agent forgets which run and job ids it
+//!   was told to stop and which retired job ids it still owed the server; a late `Start`
+//!   or `JobStart` for one of them runs. Containers that still exist are
 //!   re-adopted (and a run that exited in the meantime is reported as its container
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
@@ -162,8 +185,9 @@
 //! a slow docker call cannot make the agent miss its heartbeat deadline and fence itself.
 //! The worker owns the lifecycle (it is built on that thread, so the runtime needs no
 //! `Send` bound); the session loop hands it replies and takes [`Lifecycle::held`],
-//! [`Lifecycle::results`] and [`Lifecycle::pending_taint`] as the snapshot the worker
-//! publishes after each order and step.
+//! [`Lifecycle::results`], [`Lifecycle::held_jobs`], [`Lifecycle::retired_jobs`] and
+//! [`Lifecycle::pending_taint`] as the snapshot the worker publishes after each order and
+//! step.
 //!
 //! # How it is wired
 //!
@@ -173,6 +197,7 @@
 //! runs, the results and the taint in the next heartbeat. The [`Config`] is built from
 //! the flags ([`Local`]) and the hello's shape ([`Capacity::of`]).
 
+mod event;
 mod machine;
 mod mounts;
 mod prefetch;
@@ -189,7 +214,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{Hello, Taint};
+use js_agent_wire::Hello;
 use js_oci::Allow;
 
 use crate::FileReader;
@@ -199,7 +224,10 @@ use crate::cli_runtime::{Flags, Settings};
 use crate::native::{NativeFlags, NativeSettings, PfFlags};
 use crate::quota::ScratchQuota;
 
-pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
+pub use event::{Event, Finding, Skip};
+pub use machine::{
+    Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
+};
 pub use mounts::{MountError, MountRoots};
 pub use prefetch::{Prefetcher, PullFuture};
 pub use quota::RunQuota;
@@ -233,9 +261,9 @@ pub mod detail {
     /// The job is a host job and carries run files, which only a container can be given
     /// (they are mounted read-only at `/run/js-files`). Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
-    /// The network the job would get is not limited as the agent was told
-    /// (`--container-egress-allow`): the firewall table or the network is missing or
-    /// changed. Nothing is created.
+    /// The network the job would get is not limited as the agent was told: the `crun`
+    /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
+    /// is missing or changed. Nothing is created.
     pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
@@ -422,101 +450,6 @@ impl CheckHook for NoChecks {
     }
 }
 
-/// Something the agent keeps because it needs a person or a later step: a cleanup that
-/// failed, a check that found something, a container it could not account for. The text
-/// is local; it is never put into a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
-    /// The run it is about, when it is about one.
-    pub run_id: Option<String>,
-    /// One of [`code`], or the code of a [`CheckFinding`].
-    pub code: &'static str,
-    /// What the runtime, the file system or the check said.
-    pub message: String,
-}
-
-/// Why a start was not acted on, when that is worth a log line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Skip {
-    /// It reached the agent after its validity window.
-    Stale,
-    /// The run was finished, or stopped, earlier.
-    Retired,
-    /// The agent already holds as many runs as a heartbeat can list, so it took on no
-    /// more; the server may send the start again once results are acknowledged.
-    Full,
-}
-
-/// What [`Lifecycle`] did, in order. The caller logs these; a test reads them as the
-/// record of the order of things.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
-    /// A labelled container was taken over after a restart.
-    Adopted {
-        /// The run.
-        run_id: String,
-    },
-    /// The container started.
-    Started {
-        /// The run.
-        run_id: String,
-    },
-    /// The start was refused and nothing was created; a `failed_to_start` result is held.
-    Refused {
-        /// The run.
-        run_id: String,
-        /// The wire refusal code.
-        code: &'static str,
-        /// A local explanation.
-        why: String,
-    },
-    /// The start was not acted on and nothing is sent.
-    Skipped {
-        /// The run.
-        run_id: String,
-        /// Why.
-        why: Skip,
-    },
-    /// A command of the reply failed validation and was not acted on.
-    Invalid {
-        /// Its place in the reply.
-        index: usize,
-        /// The wire refusal code.
-        code: &'static str,
-    },
-    /// The container exited and its result is held for the next heartbeat.
-    ResultReady {
-        /// The run.
-        run_id: String,
-    },
-    /// The container is gone.
-    ContainerRemoved {
-        /// The run.
-        run_id: String,
-    },
-    /// The scratch directory is gone.
-    ScratchRemoved {
-        /// The run.
-        run_id: String,
-    },
-    /// The post-job checks passed.
-    ChecksPassed {
-        /// The run.
-        run_id: String,
-    },
-    /// The host is tainted from now on, and this is why (the first taint stays). It is
-    /// pushed once the marker has been tried and before the findings that follow from the
-    /// same cause; a failure to write the marker is a [`Finding`] after it.
-    Tainted(Taint),
-    /// The slot is free again.
-    SlotFreed {
-        /// The run.
-        run_id: String,
-    },
-    /// Something to look at; see [`Finding`]. Reported once for each code of a run.
-    Finding(Finding),
-}
-
 /// What a host offers jobs: the shape of its hello and the GPU devices it named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capacity {
@@ -608,8 +541,8 @@ pub struct Local {
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
     pub files_warning: Option<String>,
-    /// `--container-bin`, `--container-network` and `--container-user`, when containers
-    /// are enabled by `--container-bin`.
+    /// `--container-bin` and the container flags beside it, when containers are enabled by
+    /// `--container-bin`.
     pub container: Option<Settings>,
     /// `--native-helper-socket` and the flags beside it, when native jobs are enabled; never
     /// together with [`Local::container`].
@@ -624,9 +557,8 @@ pub struct Local {
     pub drain_wait: Duration,
     /// The `--image-allow` flags, in the order given: where an image may be pulled from.
     pub image_allow: Vec<Allow>,
-    /// The `--egress*` flags: how much network a `crun` container gets. Mode none unless an
-    /// allow-list was given, which this build refuses until the `crun` runtime wires it
-    /// (see [`crate::egress`]).
+    /// The `--egress*` flags: the most network a `crun` job may ask for. Mode none unless
+    /// `allow-list` or `open` was given, which only `--runtime crun` takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
 }
 
@@ -710,7 +642,7 @@ impl Local {
                     .to_owned(),
             );
         }
-        let egress = egress_of(cli)?;
+        let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;
         let scratch = cli
             .scratch_root
@@ -720,14 +652,11 @@ impl Local {
         let from_flags = Settings::from_flags(
             &Flags {
                 bin: cli.container_bin.as_deref(),
-                network: cli.container_network.as_deref(),
                 user: cli.container_user.as_deref(),
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
                 add_hosts: &cli.container_add_host,
-                egress_allow: &cli.container_egress_allow,
-                nft: cli.container_nft.as_deref(),
                 actions_cgroup: cli.actions_cgroup.as_deref(),
                 subuid: cli.container_subuid.as_deref(),
             },
@@ -912,34 +841,26 @@ impl Local {
     }
 }
 
-/// The `--egress*` flags, checked. There is one network mode: the Podman runtime's own
-/// network flags (`--container-network`) cannot be given with this one, and only the `crun`
-/// runtime enforces an allow-list, which cannot be selected yet, so an allow-list is
-/// refused here rather than silently run with no network at all or with the wrong one.
-fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
+/// The `--egress*` flags, checked, for an agent whose runtime is `crun` when `crun`. Only
+/// `crun` enforces a ceiling, so a ceiling above none on another runtime is refused rather
+/// than run with no network at all.
+fn egress_of(cli: &Cli, crun: bool) -> Result<crate::egress::Config, String> {
     use crate::egress::{Config, Flags, Mode};
     let config = Config::from_flags(&Flags {
         mode: cli.egress.as_deref(),
         allow: &cli.egress_allow,
         dns: &cli.egress_dns,
+        forward_ports: &cli.egress_forward_port,
         pool: cli.egress_pool.as_deref(),
         ip: cli.egress_ip.as_deref(),
         nft: cli.egress_nft.as_deref(),
         nsenter: cli.egress_nsenter.as_deref(),
     })
     .map_err(|why| why.to_string())?;
-    if config.mode() != Mode::None && cli.container_network.is_some() {
-        return Err(
-            "--egress and --container-network: --egress is the crun runtime's network and \
-             --container-network the Podman runtime's; give only one"
-                .to_owned(),
-        );
-    }
-    if config.mode() != Mode::None {
+    if config.mode() != Mode::None && !crun {
         return Err(format!(
-            "--egress {}: only the crun runtime enforces it, and the crun runtime of this \
-             build gives jobs loopback only; with --container-bin the network is \
-             --container-network",
+            "--egress {}: needs --runtime crun, the only runtime that enforces it; a job run \
+             through --container-bin has network none",
             config.mode()
         ));
     }

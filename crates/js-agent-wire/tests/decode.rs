@@ -182,6 +182,8 @@ fn unknown_fields_ignored_everywhere() {
         }],
         taint_ack: true,
         exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
     };
     let mut body = with_unknown(&reply, &[]);
     body["commands"][0]["field_from_the_future"] = json!(true);

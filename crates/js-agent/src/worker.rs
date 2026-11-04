@@ -9,12 +9,13 @@
 //! - **Replies go in through a bounded queue** ([`QUEUE`] orders). [`Worker::try_deliver`]
 //!   never waits: when the worker is busy and the queue is full the reply is dropped and
 //!   the caller says so. Nothing is lost for good: the server resends a start until the
-//!   run is listed, a stop until it leaves the held list, a cancel for as long as the host
+//!   run (or job) is listed, a stop until it leaves the held list (or the job listing, or
+//!   its id is in `retired_jobs`), a cancel for as long as the host
 //!   lists the run, the acknowledgement of every result the heartbeat still carries and
 //!   the acknowledgement of every heartbeat that carries the taint.
 //! - **State comes out as a snapshot.** After every order and every step the worker
-//!   publishes the held runs, the results not yet acknowledged and the taint to report
-//!   ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
+//!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
+//!   and the retired job ids, and the taint to report ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
 //!   swap it, never across a runtime call.
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
@@ -91,7 +92,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Taint};
+use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
@@ -125,8 +126,9 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
 
-/// The calls a start is counted as: the create, and the egress check's `network inspect`
-/// and `nft` before it (the other calls of a start are inside the margin, as before).
+/// The calls a start is counted as: the create, and the two `nft` listings of the `crun`
+/// runtime's egress check before it (the other calls of a start are inside the margin, as
+/// before).
 pub const CALLS_PER_START: usize = 3;
 
 /// The most calls [`stall_bound`] allows time for.
@@ -317,6 +319,10 @@ pub struct Snapshot {
     pub results: Vec<RunResult>,
     /// The taint to report, until the server acknowledges it.
     pub taint: Option<Taint>,
+    /// Every job a job start began, with its result until acknowledged.
+    pub jobs: Vec<HeldJob>,
+    /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
+    pub retired_jobs: Vec<String>,
 }
 
 impl Snapshot {
@@ -325,18 +331,28 @@ impl Snapshot {
             held: life.held(),
             results: life.results(),
             taint: life.pending_taint(),
+            jobs: life.held_jobs(),
+            retired_jobs: life.retired_jobs(),
         }
     }
 
-    /// Whether a run is in the running state.
+    /// Whether a run, or a job a job start began, is in the running state.
     pub fn running(&self) -> bool {
-        let running = |run: &HeldRun| run.state == HeldState::Running;
-        self.held.iter().any(running)
+        let run = self.held.iter().map(|run| run.state);
+        let job = self.jobs.iter().map(|job| job.state);
+        run.chain(job).any(|state| state == HeldState::Running)
     }
 
     /// Whether the agent holds nothing and owes nothing.
     pub fn is_empty(&self) -> bool {
-        self.held.is_empty() && self.results.is_empty()
+        [
+            self.held.is_empty(),
+            self.results.is_empty(),
+            self.jobs.is_empty(),
+            self.retired_jobs.is_empty(),
+        ]
+        .into_iter()
+        .all(|empty| empty)
     }
 }
 
@@ -602,8 +618,8 @@ impl Worker {
         }
     }
 
-    /// From now on a `Start` is not acted on. Stops, cancels and acknowledgements still
-    /// are.
+    /// From now on a `Start` or `JobStart` is not acted on. Stops, cancels, job stops and
+    /// acknowledgements still are.
     pub fn close(&self) {
         self.handle.shared.closed.store(true, Ordering::SeqCst);
         let _ = self.handle.orders.try_send(Order::Nudge);
@@ -776,9 +792,10 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
-        // A run held may cost three calls (a stop, then an inspect, the read of its log
-        // and a remove).
-        let calls = life.held().len().saturating_mul(3).saturating_add(asked);
+        // A run or job held may cost three calls (a stop, then an inspect, the read of its
+        // log and a remove).
+        let held = life.held().len().saturating_add(life.held_jobs().len());
+        let calls = held.saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
@@ -840,21 +857,25 @@ fn work(
     }
 }
 
-/// A reply that stops every run `life` holds.
+/// A reply that stops every run and every job `life` holds.
 fn stops(life: &Lifecycle) -> HeartbeatReply {
-    let commands = life
+    let runs = life
         .held()
         .into_iter()
-        .map(|run| Command::Stop { run_id: run.run_id })
-        .collect();
+        .map(|run| Command::Stop { run_id: run.run_id });
+    let jobs = life
+        .held_jobs()
+        .into_iter()
+        .map(|job| Command::JobStop { job_id: job.job_id });
+    let commands = runs.chain(jobs).collect();
     HeartbeatReply {
         commands,
         ..HeartbeatReply::default()
     }
 }
 
-/// `reply` with each `Start` made an unknown command (so the places of the others, which
-/// a refusal is logged by, stay), and a line for each.
+/// `reply` with each `Start` and `JobStart` made an unknown command (so the places of the
+/// others, which a refusal is logged by, stay), and a line for each.
 fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
     let mut lines = Vec::new();
     reply.commands = reply
@@ -865,6 +886,13 @@ fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
                 lines.push(format!(
                     "draining: the start of {} is not taken",
                     spec.run_id
+                ));
+                Command::Unknown
+            }
+            Command::JobStart(spec) => {
+                lines.push(format!(
+                    "draining: the start of job {} is not taken",
+                    spec.job_id
                 ));
                 Command::Unknown
             }

@@ -22,6 +22,8 @@ tracing.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The provider contract's conformance suite (tests/offline/conformance.rs).
+js-elastic = { path = "../js-elastic", features = ["conformance"] }
 # The example installs its signal handlers with `libc::signal` (rustix has no form of it);
 # libc is already a workspace dependency, so Cargo.lock gains no package.
 libc.workspace = true

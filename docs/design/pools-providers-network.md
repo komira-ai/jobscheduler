@@ -21,7 +21,7 @@ The design adds, in this order:
 
 1. `js-elastic`: the provider-neutral version of the Lambda `Elastic` trait (acquire, list,
    release) plus `Offer`, `Demand`, `Bootstrap` and `Secret`. The lease-level
-   `js_provider::Provider` trait does not change.
+   trait of `js-provider` (now `js_provider::Pool`) does not change.
 2. In `js-types`: the job types (`ContainerSpec`, `Requirements`) of section 3.1.
 3. A launch payload (`user_data` for Lambda) and a no-inbound firewall attach in the Lambda crate,
    and a bundled-roots HTTPS client so a pool needs no CA file. The service renders the payload;
@@ -177,15 +177,15 @@ Three things are called a provider in the code and must not be merged:
 
 | name | file | calls | who calls it |
 |---|---|---|---|
-| lease-level `Provider` | `crates/js-provider/src/lib.rs` | `start`, `stop`, `observe`, `capacity` per lease, synchronous | the lease table, under its lock |
-| `CapacitySource` | `crates/js-lease-server/src/capacity.rs` | builds a `Provider` once at start | `Config` |
+| lease-level `Pool` (the allocation port; formerly `Provider`) | `crates/js-provider/src/lib.rs` | `start`, `stop`, `observe`, `capacity` per lease, synchronous | the lease table, under its lock |
+| `CapacitySource` | `crates/js-lease-server/src/capacity.rs` | builds a `Pool` once at start | `Config` |
 | `Elastic` | `crates/js-provider-lambdalabs/src/elastic.rs` | `acquire`, `list`, `release` of machines | nothing yet |
 
-An elastic provider does not implement `js_provider::Provider`. It launches machines; those
+An elastic provider does not implement `js_provider::Pool`. It launches machines; those
 machines register through the agent protocol and become hosts of the pool, which the
-registry already serves as a `Provider` (`crates/js-registry/src/provider.rs`). The lease
+registry already serves as a `Pool` (`crates/js-registry/src/provider.rs`). The lease
 table never waits on a cloud call. The Lambda crate says the same ("It does not implement
-the delivered whole-host `Provider` trait, which is called under the lease table's lock",
+the lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock",
 `lib.rs`). The scaler calls the elastic trait from its own task with no lock held.
 
 ### 3.4 Network (requirements 5, 6)
@@ -438,7 +438,7 @@ A table compiled into `js-lease-server`, file `src/kinds.rs`:
 
 ```rust
 pub type Ctor = fn(&toml::Table, &BuildCtx<'_>) -> Result<Built, KindError>;
-pub enum Built { Static(Box<dyn CapacitySource>), Elastic(Box<dyn ElasticProvider>) }
+pub enum Built { Static(Box<dyn CapacitySource>), Elastic(Box<dyn CapacityProvider>) }
 pub struct BuildCtx<'a> { pub pool: &'a str, pub scheduler: &'a SchedulerId,
     pub clock: Arc<dyn Clock>, pub files: &'a dyn SecretFiles }  // files: owner-only reads; tests inject
 pub struct KindError { pub field: String, pub reason: String }
@@ -511,7 +511,7 @@ pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal
 /// (`PoolInput::unresolved`, 6.1) until a call for it is answered.
 pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   // unchanged
 
-pub trait ElasticProvider: Send + Sync {
+pub trait CapacityProvider: Send + Sync {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;   // also the credential check
     fn host_prep(&self, offer: &Offer) -> Vec<BootStep>;      // what this image lacks (7.3); data, from the offer only
     fn payload_limit(&self) -> usize;                         // bytes the cloud accepts
@@ -1498,7 +1498,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 
 | # | PR | crates | content |
 |---|---|---|---|
-| 1 | elastic types | new `js-elastic`; `js-types`; `js-provider-lambdalabs` | trait (`host_prep`, `payload_limit`, `acquire(payload)`), `Offer` (`fit` refuses os/arch mismatch), `Demand`, `Secret`, `BootPayload`, `HostName`, `BootPlan`, `Acquired`/`Released`/`Held` moved; `ContainerSpec`, `Requirements` (os, arch from the request); Lambda implements `ElasticProvider`; the existing provider tests move and stay |
+| 1 | elastic types | new `js-elastic`; `js-types`; `js-provider-lambdalabs` | trait (`host_prep`, `payload_limit`, `acquire(payload)`), `Offer` (`fit` refuses os/arch mismatch), `Demand`, `Secret`, `BootPayload`, `HostName`, `BootPlan`, `Acquired`/`Released`/`Held` moved; `ContainerSpec`, `Requirements` (os, arch from the request); Lambda implements `CapacityProvider`; the existing provider tests move and stay |
 | 2 | network layer, renderer | `js-lease-server` (modules `network`, `bootstrap`) | `NetworkMode` trait, `default`, `tailscale` (OAuth, key mint, device delete), `render` with `Mask`/`Real`, template golden tests, fake HTTP server |
 | 3 | Lambda launch inputs | `js-provider-lambdalabs` | `user_data` as the opaque payload, firewall ids, `ensure_firewall`, ssh key rule, bundled roots, `catalog()` offers, `host_prep`, `payload_limit`, `kind::build`, fake updated, log-grep test |
 | 4 | config file | `js-lease-server`, `js-pool-static` | `--config`, `[server]`, `[[pool]]`, `kinds.rs`, static `kind::build`, offline validation, `StartupError` with pool and field; `listen` and required `agent_listen` (route split), wildcard-bind warning; flags still work when `--config` is absent; one registering pool |

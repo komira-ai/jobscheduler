@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_lease::{Boot, LeaseState, LeaseTable, ManualClock, OpenError, Settings, Timestamp};
-use js_provider::Provider;
-use js_provider_fake::FakeProvider;
+use js_provider::Pool;
+use js_provider_fake::FakePool;
 use js_testkit::dir::TestDir;
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
@@ -65,7 +65,7 @@ fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
     assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
-pub type Table = LeaseTable<FakeProvider, ManualClock>;
+pub type Table = LeaseTable<FakePool, ManualClock>;
 
 pub fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -92,10 +92,9 @@ fn shape() -> Shape {
     Shape::new(resources, BTreeMap::new())
 }
 
-pub fn fake() -> FakeProvider {
+pub fn fake() -> FakePool {
     let hosts = vec![(host("h1"), shape()), (host("h2"), shape())];
-    FakeProvider::new(ProviderId::new("fake").unwrap(), hosts)
-        .with_class(ResourceClass::whole_node())
+    FakePool::new(ProviderId::new("fake").unwrap(), hosts).with_class(ResourceClass::whole_node())
 }
 
 pub fn request(max_wall_secs: u64) -> Request {
@@ -110,7 +109,7 @@ pub fn request(max_wall_secs: u64) -> Request {
     }
 }
 
-pub fn open(provider: FakeProvider, clock: &ManualClock, scratch: &Scratch) -> Table {
+pub fn open(provider: FakePool, clock: &ManualClock, scratch: &Scratch) -> Table {
     LeaseTable::open(
         provider,
         clock.clone(),
@@ -122,7 +121,7 @@ pub fn open(provider: FakeProvider, clock: &ManualClock, scratch: &Scratch) -> T
 }
 
 /// Opens a table over any provider, on a clock of its own.
-pub fn open_with<P: Provider>(provider: P, scratch: &Scratch) -> LeaseTable<P, ManualClock> {
+pub fn open_with<P: Pool>(provider: P, scratch: &Scratch) -> LeaseTable<P, ManualClock> {
     let boot = Boot::Initialise;
     LeaseTable::open(provider, clock(), settings(), scratch.file(), boot).unwrap()
 }
@@ -133,7 +132,7 @@ pub fn fresh(name: &str) -> (Table, ManualClock, Scratch) {
     (open(fake(), &clock, &scratch), clock, scratch)
 }
 
-pub fn states<P: Provider>(table: &LeaseTable<P, ManualClock>) -> Vec<(LeaseId, LeaseState)> {
+pub fn states<P: Pool>(table: &LeaseTable<P, ManualClock>) -> Vec<(LeaseId, LeaseState)> {
     table.list().into_iter().map(|l| (l.id, l.state)).collect()
 }
 
@@ -162,7 +161,7 @@ pub fn plain_class() -> ResourceClass {
 }
 
 /// A fake that also serves [`plain_class`].
-pub fn fake_with_plain() -> FakeProvider {
+pub fn fake_with_plain() -> FakePool {
     fake().with_class(plain_class())
 }
 

@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// The canonical name of 64-bit Arm.
 const ARM64: &str = "arm64";
 /// The name of 64-bit Arm that Rust (`std::env::consts::ARCH`) and Linux use, accepted as
@@ -28,12 +30,15 @@ pub fn normalise_arch(arch: &str) -> &str {
     if arch == AARCH64 { ARM64 } else { arch }
 }
 
-/// A CPU architecture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A CPU architecture. On the wire it is its [name](Arch::name), and `aarch64` decodes as
+/// [`Arch::Arm64`]; any other text fails to decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Arch {
     /// 64-bit x86: `x86_64`.
+    #[serde(rename = "x86_64")]
     X86_64,
     /// 64-bit Arm: `arm64` (`aarch64` is read as it).
+    #[serde(rename = "arm64", alias = "aarch64")]
     Arm64,
 }
 
@@ -390,6 +395,24 @@ mod tests {
             UnknownArch("sparc".into()).to_string(),
             "unknown architecture \"sparc\""
         );
+    }
+
+    /// Asserts the wire form of the architecture: each encodes as its name, both names and
+    /// the alias `aarch64` decode, and the OCI name `amd64`, an upper case name and an
+    /// unknown one fail to decode. Catches a field that encodes `Arm64` (the variant's
+    /// name) or `aarch64`, which a peer that compares names would not match.
+    #[test]
+    fn the_arch_crosses_the_wire_by_its_name() {
+        for arch in [Arch::X86_64, Arch::Arm64] {
+            let text = serde_json::to_string(&arch).unwrap();
+            assert_eq!(text, format!("\"{}\"", arch.name()));
+            assert_eq!(serde_json::from_str::<Arch>(&text).unwrap(), arch);
+        }
+        let alias: Arch = serde_json::from_str("\"aarch64\"").unwrap();
+        assert_eq!(alias, Arch::Arm64);
+        for bad in ["\"amd64\"", "\"ARM64\"", "\"sparc\""] {
+            assert!(serde_json::from_str::<Arch>(bad).is_err(), "{bad}");
+        }
     }
 
     /// Asserts that a stated level is the highest of a list of one family, in any order,

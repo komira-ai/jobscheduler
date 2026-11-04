@@ -1,36 +1,30 @@
 //! Real containers for the end-to-end tests: js-contain's `Oci` driven by this root process
 //! as option B has it (every `crun` runs as the job user, from the distribution's path, with
 //! the AppArmor restriction on), the scratch layout of a lease, a busybox root, and the
-//! agent's egress calls in the order the runtime makes them.
+//! agent's egress calls in the order the runtime makes them; and [`RuntimeHost`], the
+//! agent's own `CrunRuntime` over the same, which makes those calls itself (the shared
+//! `runtime_host` module, given this job's programs and job user and a test directory).
 
 use std::fs;
 use std::future::Future;
-use std::os::unix::fs::{PermissionsExt as _, lchown, symlink};
+use std::ops::{Deref, DerefMut};
+use std::os::unix::fs::{PermissionsExt as _, lchown};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
+use js_agent::egress::Egress;
+use js_agent::lifecycle::RunSpec;
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
-use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
+use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::running::Running;
 use js_contain::subids::{DaemonIds, IdFiles, user_ids};
+use js_testkit::dir::TestDir;
 
+use crate::runtime_host::{self, NoImages, Setup, busybox_rootfs};
 use crate::sys::var;
-
-#[derive(Debug)]
-struct NoImages;
-
-#[async_trait]
-impl ImageSource for NoImages {
-    async fn fetch(&self, _: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
-        Err(FetchError::Failed(
-            "the image is already in the store".to_owned(),
-        ))
-    }
-}
 
 /// Runs a future to its end on a runtime of its own, so a test can hold the lock in plain
 /// synchronous code.
@@ -64,30 +58,6 @@ pub fn world_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     mkdir(&dir, 0o755);
     dir
-}
-
-/// The applets of busybox the probes use.
-const APPLETS: [&str; 18] = [
-    "sh", "cat", "id", "grep", "nc", "ip", "sleep", "echo", "wc", "head", "tr", "sed", "ls",
-    "date", "true", "false", "nslookup", "test",
-];
-
-/// A minimal image root: busybox and the mount points the bundle names.
-fn busybox_rootfs(rootfs: &Path) {
-    for dir in [
-        "bin", "proc", "dev", "sys", "tmp", "var/tmp", "run", "root", "etc", "work",
-    ] {
-        mkdir(&rootfs.join(dir), 0o755);
-    }
-    for file in ["hosts", "hostname", "resolv.conf"] {
-        fs::write(rootfs.join("etc").join(file), "").unwrap();
-    }
-    let busybox = rootfs.join("bin/busybox");
-    fs::copy(var("JS_B_BUSYBOX"), &busybox).unwrap();
-    fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).unwrap();
-    for applet in APPLETS {
-        symlink("busybox", rootfs.join("bin").join(applet)).unwrap();
-    }
 }
 
 /// A node of containers: a backend, an image, a delegated cgroup subtree.
@@ -133,7 +103,11 @@ impl ContainerHost {
             reference: format!("local/busybox@sha256:{hex}"),
             digest: format!("sha256:{hex}"),
         };
-        busybox_rootfs(&scratch.join("oci-images").join(&hex).join("rootfs"));
+        busybox_rootfs(
+            &scratch.join("oci-images").join(&hex).join("rootfs"),
+            Path::new(&var("JS_B_BUSYBOX")),
+        )
+        .unwrap();
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup{cgroup_parent}"));
         let _ = fs::remove_dir(&cgroup);
@@ -200,6 +174,7 @@ impl ContainerHost {
             limits: ContainerLimits::DEFAULT,
             shared: Vec::new(),
             mounts: Vec::new(),
+            devices: Vec::new(),
         }
     }
 
@@ -351,3 +326,63 @@ pub fn section(stdout: &str, name: &str) -> String {
 /// `reach HOST:PORT [what nc said]`, and what the server says (`pong`) when it connected.
 pub const PROBE: &str =
     "p() { o=$(nc -w 2 \"$1\" \"$2\" </dev/null 2>&1); echo \"reach $1:$2 [$o]\"; }\n";
+
+/// The agent's `CrunRuntime` on this host, wired by an `Egress`, as the agent opens it
+/// (`runtime_host::RuntimeHost`), in a test directory below `/tmp`, which it removes after the
+/// runtime and its cgroup tree have gone.
+pub struct RuntimeHost {
+    // Dropped first: the runs, the process goes home and the tree goes, then the files.
+    host: runtime_host::RuntimeHost,
+    _work: TestDir,
+}
+
+impl RuntimeHost {
+    /// The runtime for `label`, wired by `egress`.
+    pub fn new(label: &str, egress: &Egress) -> Self {
+        // Below `/tmp`, where every directory above can be searched by the job user.
+        let work = TestDir::under(std::env::temp_dir(), &format!("js-r-{label}"));
+        fs::set_permissions(work.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let (crun, busybox) = (
+            PathBuf::from(var("JS_B_CRUN")),
+            PathBuf::from(var("JS_B_BUSYBOX")),
+        );
+        let setup = Setup {
+            crun: &crun,
+            busybox: &busybox,
+            job_user: job_user(),
+            daemon: Path::new(env!("CARGO_BIN_EXE_js-agent")),
+            leases_beside: false,
+        };
+        let host = runtime_host::RuntimeHost::open(
+            label,
+            &format!("egress-{label}"),
+            work.path(),
+            &setup,
+            Some(egress),
+        )
+        .unwrap_or_else(|why| panic!("a root agent opens the runtime: {why}"));
+        Self { host, _work: work }
+    }
+
+    /// The run `run_id` of `script` (run by `sh -c` in the image), its scratch directory
+    /// made; the job sees it at `/scratch`.
+    pub fn spec(&self, run_id: &str, script: &str) -> RunSpec {
+        self.host
+            .spec(run_id, script)
+            .unwrap_or_else(|why| panic!("the run {run_id}: {why}"))
+    }
+}
+
+impl Deref for RuntimeHost {
+    type Target = runtime_host::RuntimeHost;
+
+    fn deref(&self) -> &Self::Target {
+        &self.host
+    }
+}
+
+impl DerefMut for RuntimeHost {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.host
+    }
+}

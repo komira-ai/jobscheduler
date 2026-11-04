@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, ElasticProvider, GpuClass, Held, HostRef, Offer,
+    AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostRef, Offer,
     ProviderError, Released,
 };
 use js_lease::{ManualClock, Timestamp};
@@ -25,7 +25,7 @@ pub const OAUTH_SECRET: &str = "PLANTED-OAUTH-SECRET-VALUE";
 /// An elastic provider that launches nothing.
 struct NullElastic;
 
-impl ElasticProvider for NullElastic {
+impl CapacityProvider for NullElastic {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         Ok(Vec::new())
     }
@@ -48,6 +48,33 @@ impl ElasticProvider for NullElastic {
 
     fn release(&self, _id: &HostRef) -> Released {
         Released::Unknown
+    }
+
+    fn id(&self) -> js_types::ProviderId {
+        js_types::ProviderId::known("null")
+    }
+
+    fn can_launch(&self) -> bool {
+        true
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        js_elastic::ProviderCaps::default()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        js_elastic::Capacity {
+            supplied: 0,
+            can_add: None,
+        }
+    }
+
+    fn observe(&self, _id: &HostRef) -> js_elastic::Observed {
+        js_elastic::Observed::Unknown
+    }
+
+    fn verify_instance(&self, _hello: &js_elastic::Hello) -> Option<HostRef> {
+        None
     }
 }
 

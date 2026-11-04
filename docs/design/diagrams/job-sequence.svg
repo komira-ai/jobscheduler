@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 1064" width="1140" height="1064" role="img" aria-label="Sequence between client, service, agent and Postgres: submit with a job id, the service commits the job and then the placement, the agent receives the start on a heartbeat reply, reports the result, the service frees the allocation and the client reads the result; then a cancel of a running job, where the job is cancelled when the host reports it stopped and the allocation is freed in a second commit, when the host confirms the container is gone.">
+<title>Submit, place, start, report, result</title>
+<defs><marker id="job-sequence-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="job-sequence-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="job-sequence-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bd{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-od{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bld{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1140" height="1064" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Two job flows: submit to result, and cancel</text>
+<path d="M90,76 L90,994" class="ln-d"/>
+<rect x="40.0" y="44" width="100" height="32" rx="5" class="box-b"/>
+<text x="90" y="64" class="b" text-anchor="middle">Client</text>
+<path d="M340,76 L340,994" class="ln-d"/>
+<rect x="255.0" y="44" width="170" height="32" rx="5" class="box-b"/>
+<text x="340" y="64" class="b" text-anchor="middle">Service (js-sched)</text>
+<path d="M820,76 L820,994" class="ln-d"/>
+<rect x="770.0" y="44" width="100" height="32" rx="5" class="box-b"/>
+<text x="820" y="64" class="b" text-anchor="middle">Agent</text>
+<path d="M1040,76 L1040,994" class="ln-d"/>
+<rect x="980.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="1040" y="64" class="b" text-anchor="middle">Postgres</text>
+<text x="20" y="104" class="b lbl" text-anchor="start">A  submit to result</text>
+<path d="M90,140 L340,140" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="215.0" y="133" class="t-m lbl" text-anchor="middle">1  SubmitJob (job id, image digest, needs)</text>
+<path d="M340,172 L1040,172" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="165" class="t-m lbl" text-anchor="middle">2  commit job: queued (commit before anything else)</text>
+<path d="M340,204 L90,204" class="ln-d" marker-end="url(#job-sequence-ak)"/>
+<text x="215.0" y="197" class="t-m lbl" text-anchor="middle">3  answer: job id, state queued</text>
+<rect x="352" y="222" width="330" height="24" rx="5" class="box-o"/><text x="362" y="239" class="t-m" text-anchor="start">4  js-sched picks a host (section 5.6)</text>
+<path d="M340,266 L1040,266" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="259" class="t-m lbl" text-anchor="middle">5  commit: job placed + allocation booked</text>
+<path d="M820,304 L340,304" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="297" class="t-m lbl" text-anchor="middle">6  heartbeat, listing the jobs it holds</text>
+<path d="M340,336 L820,336" class="ln-o" marker-end="url(#job-sequence-ao)"/>
+<text x="580.0" y="329" class="t-m lbl" text-anchor="middle">7  reply carries the start (resent until listed)</text>
+<rect x="702" y="354" width="230" height="24" rx="5" class="box-o"/><text x="712" y="371" class="t-m" text-anchor="start">8  agent starts it, contained</text>
+<path d="M820,398 L340,398" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="391" class="t-m lbl" text-anchor="middle">9  heartbeat: job running</text>
+<path d="M340,430 L1040,430" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="423" class="t-m lbl" text-anchor="middle">10  commit: starting, running</text>
+<path d="M820,468 L340,468" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="461" class="t-m lbl" text-anchor="middle">11  exit: result held until acknowledged</text>
+<path d="M340,500 L1040,500" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="493" class="t-m lbl" text-anchor="middle">12  commit result; job succeeded or failed</text>
+<path d="M340,532 L820,532" class="ln-d" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="525" class="t-m lbl" text-anchor="middle">13  acknowledge</text>
+<path d="M820,570 L340,570" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="563" class="t-m lbl" text-anchor="middle">14  cleanup clean: container confirmed gone</text>
+<path d="M340,602 L1040,602" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="595" class="t-m lbl" text-anchor="middle">15  commit: allocation freed</text>
+<path d="M90,650 L340,650" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="215.0" y="643" class="t-m lbl" text-anchor="middle">16  GetJob / GetResult (any time in the retention window)</text>
+<path d="M340,682 L90,682" class="ln-d" marker-end="url(#job-sequence-ak)"/>
+<text x="215.0" y="675" class="t-m lbl" text-anchor="middle">17  state, exit code, log tail, timing, usage</text>
+<text x="20" y="730" class="b lbl" text-anchor="start">B  cancel a running job</text>
+<path d="M90,766 L340,766" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="215.0" y="759" class="t-m lbl" text-anchor="middle">18  CancelJob (idempotent)</text>
+<path d="M340,798 L1040,798" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="791" class="t-m lbl" text-anchor="middle">19  commit: cancel intent on the job</text>
+<path d="M340,830 L820,830" class="ln-o" marker-end="url(#job-sequence-ao)"/>
+<text x="580.0" y="823" class="t-m lbl" text-anchor="middle">20  reply carries the stop (resent until the job is gone)</text>
+<path d="M820,868 L340,868" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="861" class="t-m lbl" text-anchor="middle">21  host reports the job stopped</text>
+<path d="M340,900 L1040,900" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="893" class="t-m lbl" text-anchor="middle">22  commit: job cancelled</text>
+<path d="M820,932 L340,932" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="580.0" y="925" class="t-m lbl" text-anchor="middle">23  host confirms the container is gone</text>
+<path d="M340,964 L1040,964" class="ln" marker-end="url(#job-sequence-ak)"/>
+<text x="690.0" y="957" class="t-m lbl" text-anchor="middle">24  commit: allocation freed</text>
+<text x="20" y="1030" class="t-m" text-anchor="start">Only the tick moves time: wall limit, start timeout, maximum queue wait, retention expiry (section 6.1). A queued job is cancelled at once, with no allocation to free.</text>
+</svg>

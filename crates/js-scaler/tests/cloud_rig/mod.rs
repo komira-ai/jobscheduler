@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootPayload, ElasticProvider, HostName, HostRef, HostStatus,
+    AcquireRequest, Acquired, BootPayload, CapacityProvider, HostName, HostRef, HostStatus,
     SchedulerId,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};

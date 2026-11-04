@@ -4,6 +4,17 @@
 //! server already matches on, so renaming one breaks a peer that was not upgraded with
 //! it. A later change adds a code; it never changes or removes one. The
 //! `refusal_codes_snapshot` test fails on a rename.
+//!
+//! The codes of a start in the one job definition (an `image` with a `run`, `os` and
+//! `arch`):
+//!
+//! | code | when |
+//! |---|---|
+//! | [`INVALID_IMAGE`] | a `run` beside an empty `image` |
+//! | [`INVALID_JOB`] | a `run` beside a `native` body (field `run`) or beside job `args` (field `args`), or a start a server cannot write in the legacy forms for an older host |
+//! | [`PLATFORM_MISMATCH`] | the start's `os` or `arch` is not the platform of its image's config, or that platform is outside the set a start names |
+//! | [`IMAGE_UNSUPPORTED_HERE`] | an image start on a Mac agent, which runs legacy native bodies only |
+//! | [`RUN_UNSUPPORTED`] | a `run` on a Linux agent, which runs the image's own command only |
 
 /// A hello whose body is malformed: a bad id, list, label or shape.
 pub const INVALID_HELLO: &str = "invalid-hello";
@@ -34,12 +45,31 @@ pub const BUNDLE_DIGEST_REQUIRED: &str = "bundle-digest-required";
 /// A native job whose `program` is empty, relative, climbs with `..`, or holds a
 /// character a path may not.
 pub const INVALID_PROGRAM: &str = "invalid-program";
-/// A native job whose environment has a bad name or value, too many entries, or a
-/// name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
+/// A native job, or a job start, whose environment has a bad name or value, too many
+/// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
+/// A job start with a non-empty `env`, answered `failed_to_start` by an agent whose
+/// runtimes cannot yet set a container's environment; nothing runs. Temporary: the change
+/// that passes the environment into the runtimes (`js-agent-job-env-runtimes`) removes it.
+pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
 pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
+/// A start whose `os` or `arch` is not the platform its image's config says it is built
+/// for, or whose image names a platform outside the set a start can name (`linux`,
+/// `darwin`; `amd64`, `arm64`). The refusal's `field` is `os` or `arch`, or `image.os` or
+/// `image.architecture` for the image's own. Retrying cannot change it.
+pub const PLATFORM_MISMATCH: &str = "platform-mismatch";
+/// As the detail of a `failed_to_start` result: a start named by its image (`image`, with or
+/// without `run`) on a Mac agent, whose native runtime runs only the legacy `native` body
+/// and pulls no image yet. Nothing is created. It clears when the Mac agent pulls a bundle
+/// by its digest; until then a server sends a Mac host the legacy form.
+pub const IMAGE_UNSUPPORTED_HERE: &str = "image-unsupported-here";
+/// As the detail of a `failed_to_start` result: a start with a `run` on an agent that runs
+/// containers, which runs an image's own command and has no consumer of `run` yet. Nothing
+/// is created; the field is refused rather than dropped, so the job never runs another
+/// command than it asked for.
+pub const RUN_UNSUPPORTED: &str = "run-unsupported";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A job with a run file that is badly named, named twice, too large, holds a NUL, or
@@ -134,6 +164,26 @@ pub const NOT_READY: &str = "not-ready";
 /// another host. Whether a retry is charged to the run is the consumer's choice; nothing in
 /// the scheduler counts retries.
 pub const QUOTA_UNAVAILABLE: &str = "quota-unavailable";
+
+/// As the detail of a `failed_to_start` result: a start whose `network` is above the agent's
+/// ceiling (`--egress`, reported in the hello as the capability `egress`). Nothing was
+/// created, and the job is never run with less than it asked for. The text that stays on the
+/// host names the level asked for and the ceiling (`network allow-list asked, agent ceiling
+/// is none`). The host's ceiling is at fault, not the run: the run may be sent to a host
+/// whose ceiling covers it. A container-engine run (Docker or Podman) has the ceiling
+/// `none`.
+pub const NETWORK_ABOVE_CEILING: &str = "network-above-ceiling";
+/// As the detail of a `failed_to_start` result: a start that declares a host port the agent
+/// does not list (`--egress-forward-port`, reported in the hello as the capability
+/// `egress-ports`). Nothing was created. The text that stays on the host names the port and
+/// the ports the agent lists. The host's ceiling is at fault, not the run.
+pub const PORT_ABOVE_CEILING: &str = "port-above-ceiling";
+/// As the detail of a `failed_to_start` result: a start within the agent's ceiling that
+/// declares ports, on an agent that forwards none (its hello reports no `egress-ports`), or
+/// for a job whose network is `none` (a forward needs a job with an address). Nothing was
+/// created. It is checked after [`NETWORK_ABOVE_CEILING`]; on an agent that forwards some
+/// ports, after [`PORT_ABOVE_CEILING`].
+pub const PORTS_NOT_SUPPORTED: &str = "ports-not-supported";
 
 /// A capabilities frame whose digests, root or Xcode builds are malformed.
 pub const INVALID_CAPS: &str = "invalid-caps";

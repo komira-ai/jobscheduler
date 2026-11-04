@@ -1,7 +1,8 @@
 //! An elastic fake cloud with a billing oracle of its own.
 //!
-//! [`ElasticFake`] implements [`js_elastic::ElasticProvider`] over memory, for tests of
-//! the scaler and of a server that launches machines. It makes a test able to say what a
+//! [`ElasticFake`] implements [`js_elastic::CapacityProvider`] over memory, for tests of
+//! the scaler and of a server that launches machines, and passes the contract's
+//! conformance suite (`tests/conformance.rs`). It makes a test able to say what a
 //! scheduler spends, from the cloud's side:
 //!
 //! - **Its own bill.** The cloud notes when it launched and ended each machine and bills
@@ -14,9 +15,13 @@
 //! - **What clouds do.** [`Step`]s script each call: a refusal for capacity, quota,
 //!   denial or a request that does not fit; a call whose answer is lost and which may or
 //!   may not have landed (the caller sees `Unknown`); a 429 storm; a list that fails
-//!   forever; a release that is refused forever. [`Knobs`] set a quota, the room the cloud
-//!   has, how long a machine boots, how long a release takes to show, and a lag in the
-//!   list. [`ElasticFake::preempt`] reclaims a machine.
+//!   forever; a release that is refused forever; a read by id with no answer.
+//!   [`ElasticFake::script_next`] scripts the next call whatever its kind. [`Knobs`] set a
+//!   quota, the room the cloud has, how long a machine boots, how long a release takes to
+//!   show, and a lag in the list. [`ElasticFake::preempt`] reclaims a machine and sends a
+//!   notice on every event stream; [`ElasticFake::add_foreign`] puts a machine in the
+//!   account that the caller did not launch; [`ElasticFake::drop_machine`] removes one
+//!   outside the caller.
 //! - **Counted calls.** [`ElasticFake::calls`] lists every call, so a test can prove that
 //!   no `acquire` was made. [`ElasticFake::read_handle`] gives a [`js_elastic::ReadHandle`],
 //!   which cannot make one.
@@ -45,5 +50,5 @@ mod script;
 
 pub use bill::{Bill, Billing};
 pub use clock::FakeClock;
-pub use cloud::{ElasticFake, Knobs, PAYLOAD_LIMIT};
+pub use cloud::{ElasticFake, Knobs, PAYLOAD_LIMIT, PROVIDER_ID};
 pub use script::{Call, Step, THROTTLE_WAIT};

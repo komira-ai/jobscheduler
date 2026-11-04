@@ -311,6 +311,8 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         isolation: Isolation::Contained,
         labels: Default::default(),
         bundle: None,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

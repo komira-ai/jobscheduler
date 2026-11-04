@@ -4,7 +4,7 @@
 mod common;
 
 use common::{cloud, launch, request};
-use js_elastic::{ElasticProvider, HostRef, ReadHandle};
+use js_elastic::{CapacityProvider, HostRef, ReadHandle};
 use js_elastic_fake::{Billing, Call};
 
 /// What code that only plans may do. It takes the read half, so it cannot be written to

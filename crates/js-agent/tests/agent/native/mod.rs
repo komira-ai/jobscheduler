@@ -110,6 +110,8 @@ impl Rig {
             isolation: Isolation::Contained,
             labels: BTreeMap::new(),
             bundle: None,
+            network: Default::default(),
+            ports: Vec::new(),
         }
     }
 

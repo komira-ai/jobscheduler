@@ -105,6 +105,17 @@ pub(super) enum Cause {
     TimedOut,
 }
 
+/// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
+/// and run messages: `held`, `results`, `result_acks`) or a job (the per-job messages:
+/// `jobs`, `jobs[].result`, `job_acks`). A job is listed under its own keying alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Keyed {
+    /// Started by a `Start`: its id is a run id and its lease a lease id.
+    Run,
+    /// Started by a `JobStart`: its id is a job id and its lease the allocation id.
+    Job,
+}
+
 /// What a job holds of the host while its slot is booked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Booking {
@@ -190,8 +201,12 @@ pub(super) struct Stuck {
 }
 
 pub(super) struct Job {
+    /// The run id, or the job id of a job keyed by job.
     pub(super) run_id: String,
+    /// The lease id, or the allocation id of a job keyed by job.
     pub(super) lease_id: String,
+    /// Which messages the job is listed and acknowledged in.
+    pub(super) keyed: Keyed,
     pub(super) booking: Booking,
     /// The slot the run holds, none for a run that was refused and one taken over from a
     /// container no slot is written on.
@@ -286,6 +301,16 @@ impl Job {
         self.stage = Stage::Scratch;
     }
 
+    /// Where the job is, as a heartbeat lists it: starting while it waits for its image,
+    /// running while its container runs, and exited from then on.
+    pub(super) fn held_state(&self) -> HeldState {
+        match self.stage {
+            Stage::Preparing(_) => HeldState::Starting,
+            Stage::Running(_) => HeldState::Running,
+            _ => HeldState::ExitedUnacked,
+        }
+    }
+
     /// Asks a running job, or one still waiting for its image, to stop; a job past its
     /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
@@ -352,6 +377,7 @@ impl Job {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
+            keyed: Keyed::Run,
             booking: Booking {
                 cpu_millis: spec.limits.cpu_millis,
                 memory_bytes: spec.limits.memory_bytes,
@@ -390,6 +416,7 @@ impl Job {
         Some(Self {
             run_id: label_id(found, label::RUN)?.to_owned(),
             lease_id: label_id(found, label::LEASE)?.to_owned(),
+            keyed: keyed_label(found),
             booking,
             slot,
             deadline_ms: now.saturating_add(remaining),
@@ -416,6 +443,18 @@ impl Job {
     /// Marks the job as started `now_ms` on the agent's clock.
     pub(super) fn started_at(&mut self, now_ms: u64) {
         self.started_usec = Some(now_ms.saturating_mul(USEC_PER_MS));
+    }
+}
+
+/// The value of the keying label of a container a job start made.
+const JOB_KEYED_LABEL: &str = "job";
+
+/// How the job of a found container is keyed: by job when the agent labelled it so, and by
+/// run otherwise (a container of a run start, or one an earlier agent made).
+fn keyed_label(found: &Found) -> Keyed {
+    match found.labels.get(label::KEYING).map(String::as_str) {
+        Some(JOB_KEYED_LABEL) => Keyed::Job,
+        _ => Keyed::Run,
     }
 }
 
@@ -464,7 +503,7 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
 /// The run of a start: the spec's own labels with the agent's over them, and the body the
 /// start names, a container's or a native program's.
 pub(super) fn run_spec(
-    spec: &JobSpec,
+    (spec, keyed): (&JobSpec, Keyed),
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
     files: Option<std::path::PathBuf>,
@@ -491,6 +530,9 @@ pub(super) fn run_spec(
     ];
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
+    if keyed == Keyed::Job {
+        labels.insert(label::KEYING.to_owned(), JOB_KEYED_LABEL.to_owned());
+    }
     RunSpec {
         run_id: spec.run_id.clone(),
         body: match &spec.native {
@@ -509,6 +551,8 @@ pub(super) fn run_spec(
         files,
         slot,
         isolation: spec.isolation,
+        network: spec.network,
+        ports: spec.ports.clone(),
         labels,
         bundle: spec.bundle.clone(),
     }

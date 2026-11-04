@@ -8,7 +8,7 @@ mod support;
 use std::time::Duration;
 
 use js_agent_wire::Taint;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{DEFAULT_REGAIN_GRACE_MS, Exclusion, PoolConfig};
 use js_types::{ProviderId, Request, RequestId, ResourceClass};
 use support::*;

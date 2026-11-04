@@ -8,7 +8,7 @@
 mod support;
 
 use js_agent_wire::{ExclusiveRefusal, RefusalReason};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{DEFAULT_RESERVE_BACKOFF_MS, MAX_WAITING_REQUESTS, PoolConfig, WholeNodeConfig};
 use js_types::{ProviderId, Request, RequestId, ResourceClass, Resources, Shape};
 use support::*;

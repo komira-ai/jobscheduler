@@ -531,7 +531,7 @@ fn a_host_with_nothing_set_up_is_refused_naming_every_piece() {
     assert!(text.contains("(fix: "));
 }
 
-fn cli(extra: &[&str]) -> Cli {
+pub(crate) fn cli(extra: &[&str]) -> Cli {
     let mut args = vec!["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
     args.extend_from_slice(extra);
     Cli::try_parse_from(args).unwrap()
@@ -572,13 +572,6 @@ fn the_crun_flags_are_checked_against_each_other() {
     assert!(
         flags(&cli(&quota)).is_ok(),
         "--scratch-quota bounds /scratch, /work and /root alike"
-    );
-    assert!(with(&["--egress", "allow-list"]).starts_with("--egress: "));
-    let mut none = ok.to_vec();
-    none.extend(["--egress", "none"]);
-    assert!(
-        flags(&cli(&none)).is_ok(),
-        "the loopback-only network is the one there is"
     );
     assert!(with(&["--mount-root", "sync=/m"]).starts_with("--mount-root: "));
     assert!(with(&["--mount-root-ro", "sync=/m"]).starts_with("--mount-root-ro: "));

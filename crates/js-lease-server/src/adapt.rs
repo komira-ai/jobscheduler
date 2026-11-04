@@ -1,22 +1,18 @@
 //! Wrappers that give the lease table one concrete type, so the server is not generic
-//! over its provider and clock.
+//! over its pool and clock.
 
 use std::sync::Arc;
 
 use js_lease::{Clock, Timestamp};
-use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
+use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
-/// A provider behind a box.
-pub(crate) struct BoxedProvider(pub(crate) Box<dyn Provider + Send>);
+/// A pool behind a box.
+pub(crate) struct BoxedPool(pub(crate) Box<dyn Pool + Send>);
 
-impl Provider for BoxedProvider {
+impl Pool for BoxedPool {
     fn id(&self) -> ProviderId {
         self.0.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.0.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
@@ -80,9 +76,8 @@ mod tests {
     fn wrappers_delegate() {
         let id = ProviderId::new("p").unwrap();
         let pool = StaticPool::from_toml(id.clone(), EXAMPLE_CONFIG).unwrap();
-        let mut boxed = BoxedProvider(Box::new(pool));
+        let mut boxed = BoxedPool(Box::new(pool));
         assert_eq!(boxed.id(), id);
-        assert_eq!(boxed.flavour(), Flavour::Delegated);
         assert_eq!(boxed.classes(), vec![ResourceClass::gpu_host()]);
         assert_eq!(boxed.capacity().len(), 2);
         let lease = LeaseId::new(1, 1);

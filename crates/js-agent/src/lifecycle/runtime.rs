@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal};
+use js_types::{JobNetwork, PortMap};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -46,6 +47,10 @@ pub mod label {
     /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
     /// as a number; absent on a container an earlier agent made.
     pub const SLOT: &str = "jobscheduler.dev/slot";
+    /// `job` on a container a job start made (its run id is the job id and its lease id the
+    /// allocation id), so a restarted agent lists it under the job keying again; absent on
+    /// a container of a run start and on one an earlier agent made.
+    pub const KEYING: &str = "jobscheduler.dev/keying";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -118,6 +123,14 @@ pub struct RunSpec {
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
+    /// The network level the job was admitted at: never above the runtime's
+    /// [`Runtime::network_ceiling`]. A backend that wires networks gives the container that
+    /// level; `none` is loopback only.
+    pub network: JobNetwork,
+    /// The ports the job declared, each forwarded from the host's port to the job's (design
+    /// 5.8) by a backend that wires networks; the admission let them through only when the
+    /// runtime's ceiling lists their host ports and the level is wired (not `none`).
+    pub ports: Vec<PortMap>,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
     /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
@@ -334,6 +347,18 @@ pub trait Runtime {
         })
     }
 
+    /// Whether this runtime runs a start named by its image (an `image`, with or without a
+    /// `run`), asked before such a start creates anything. The default runs them, which is
+    /// every container runtime. The runtime a Mac agent has runs only the legacy native body
+    /// and refuses them (`image-unsupported-here`).
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        Ok(())
+    }
+
     /// Ends and removes whatever an earlier process left, which no list of the runtime's
     /// can say: the leases a native runtime journalled and never saw deleted. Called when a
     /// worker starts and by the rescue, before anything else; returns one line for each
@@ -358,6 +383,17 @@ pub trait Runtime {
     /// What is wrong with the network or the firewall; the text stays on the host.
     fn check_egress(&self) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// The most network a contained job of this runtime may ask for (design 5.8): a start
+    /// above it is refused (`network-above-ceiling`, `port-above-ceiling`,
+    /// `ports-not-supported`) before anything is made, and never run with less. The default is
+    /// `none` with no port: the container-engine runtimes (Docker, Podman) and the native one
+    /// give a job no network of its own choosing and forward no port, so a job that asks for
+    /// more through them is refused naming the ceiling `none`, and one that declares a port
+    /// `ports-not-supported`. The `crun` runtime answers its egress's ceiling.
+    fn network_ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling::default()
     }
 
     /// Whether the network a native job would get is limited as the agent was told. Called

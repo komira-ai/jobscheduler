@@ -8,7 +8,7 @@ use js_agent_wire::{
     Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Phase, Taint,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, RunRefusal, RunState};
 use js_types::{Admission, ClassId, ProviderId, Request, ResourceClass, Resources};
 use support::*;
@@ -101,6 +101,11 @@ fn job(run: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 
