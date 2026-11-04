@@ -883,9 +883,10 @@ fn only_the_hosts_file_wiring_depends_on_js_pool_static() {
 }
 
 /// Asserts that the scan reports `js-pool-static` under `[dependencies]` of
-/// `js-registry`, under a target-specific `[dependencies]` table, and under a renamed
-/// key, and that a `[dev-dependencies]` entry is not reported. Catches a scan that
-/// passes every workspace because it reads the wrong table or the key alone.
+/// `js-registry`, under a target-specific `[dependencies]` table, under
+/// `[build-dependencies]` plain and target-specific, and under a renamed key, and that a
+/// `[dev-dependencies]` entry is not reported. Catches a scan that passes every
+/// workspace because it reads the wrong table or the key alone.
 #[test]
 fn a_normal_dependency_on_js_pool_static_is_reported() {
     let pool = "js-pool-static = { path = \"../js-pool-static\" }";
@@ -905,6 +906,28 @@ fn a_normal_dependency_on_js_pool_static_is_reported() {
         "crates/js-provider-fake/Cargo.toml",
         "[lints]",
         &format!("[target.'cfg(unix)'.dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-provider-fake"]
+    );
+
+    let copy = Copy::new("pool-static-build");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[build-dependencies]\n{pool}\n\n[lints]"),
+    );
+    assert_eq!(
+        normal_dependents_of_pool_static(&copy.dir),
+        ["js-lease-server", "js-provider-fake"]
+    );
+
+    let copy = Copy::new("pool-static-target-build");
+    copy.edit(
+        "crates/js-provider-fake/Cargo.toml",
+        "[lints]",
+        &format!("[target.'cfg(unix)'.build-dependencies]\n{pool}\n\n[lints]"),
     );
     assert_eq!(
         normal_dependents_of_pool_static(&copy.dir),
