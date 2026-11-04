@@ -901,22 +901,19 @@ fn a_runtime_with_an_egress_still_reports_a_job_that_ended_while_no_agent_ran() 
     assert!(life.held_jobs().is_empty(), "{:?}", life.held_jobs());
 }
 
-/// The identity of `init` (pid 1), from its `/proc` entry: a live process of another user.
-fn init() -> SupervisorId {
-    let stat = std::fs::read_to_string("/proc/1/stat").expect("init's stat");
-    let (_, rest) = stat.rsplit_once(')').expect("a stat line");
-    let start = rest.split_whitespace().nth(19).expect("field 22");
-    SupervisorId {
-        pid: 1,
-        start: start.parse().expect("a start time"),
-    }
-}
+/// A process identity no process has (pids stop far below `u32::MAX`): one that runs as no
+/// user, so the job user's check refuses it before anything else is asked.
+const NO_PROCESS: SupervisorId = SupervisorId {
+    pid: u32::MAX,
+    start: 0,
+};
 
 /// Proves the file that names a lease's supervisor cannot send the teardown after a process
 /// that is not that lease's supervisor: two leases have lost their sidecars (their own
 /// supervisors ended), and their supervisor files, which the job user can write, name the
-/// live supervisor of a third lease (the same job user) and `init`. The next start removes
-/// both leases, ends neither process, and takes the third lease over. Catches a teardown that
+/// live supervisor of a third lease (the same job user, so only its command line tells it
+/// apart) and a process that runs as no user. The next start removes both leases, leaves the
+/// third lease's supervisor running, and takes that lease over. Catches a teardown that
 /// kills whatever process of the job user the file names.
 #[test]
 fn a_supervisor_file_that_names_another_process_ends_nothing() {
@@ -926,7 +923,7 @@ fn a_supervisor_file_that_names_another_process_ends_nothing() {
     let kept_supervisor = supervisor_id(&node, &kept.0);
     let forged = [
         (held(&node, &mut first, "r2-hold"), kept_supervisor),
-        (held(&node, &mut first, "r3-hold"), init()),
+        (held(&node, &mut first, "r3-hold"), NO_PROCESS),
     ];
     drop(first);
     for (id, named) in &forged {
@@ -957,7 +954,6 @@ fn a_supervisor_file_that_names_another_process_ends_nothing() {
         kept_supervisor.alive(),
         "the third lease's supervisor was ended"
     );
-    assert!(init().alive());
     for (id, _) in &forged {
         assert_gone(&node, &id.0);
     }
