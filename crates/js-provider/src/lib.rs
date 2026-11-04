@@ -31,7 +31,7 @@ mod book;
 mod spec;
 
 pub use ack::{Call, HostCapacity, Observed, StartAck, StopAck};
-pub use book::{Candidate, Held, HostBook, SeatError};
+pub use book::{Candidate, ChooseOver, Held, HostBook, SeatError};
 pub use spec::{RefusalCode, StartSpec};
 
 use js_types::{LeaseId, ProviderId, ResourceClass};

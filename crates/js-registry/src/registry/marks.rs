@@ -232,6 +232,7 @@ impl Registry {
         records.remove(host);
         runs.forget(host);
         ending.remove(host);
+        self.tell_gone(host);
         Ok(())
     }
 

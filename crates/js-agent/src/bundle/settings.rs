@@ -74,8 +74,13 @@ pub struct Settings {
     pub low_water_bytes: u64,
     /// `--bundle-pull`.
     pub pull: Pull,
-    /// `--bundle-registry-allow` and `--bundle-registry-allow-private`.
+    /// `--bundle-registry-allow` and `--bundle-registry-allow-private`: the registries a
+    /// `bundle` pin may name.
     pub registries: Vec<Registry>,
+    /// `--image-allow`: the entries an image reference must be under for a start named by
+    /// its image to fetch it (the same list the Linux runtime pulls by), without the
+    /// credentials, which [`Settings::registry_allow`] attaches.
+    pub image_allow: Vec<Allow>,
     /// `--bundle-min-age-min`.
     pub min_age_min: u64,
     /// `--bundle-keep-file`.
@@ -194,8 +199,9 @@ impl Settings {
     /// The text names the flag at fault: a bundle flag without `--bundle-store`; a store
     /// off a Mac, without `--scratch-root`, without a budget, on a volume the checks refuse
     /// or not absolute; a choice that is none of its values; `--read-model allow`; a
-    /// registry entry that is not `HOST[:PORT]/PREFIX`; `--bundle-pull missing` with trust
-    /// `digest` or without a registry; trust `list` without an allow list that holds a
+    /// registry entry that is not `HOST[:PORT]/PREFIX`, or an `--image-allow` entry that is
+    /// not a js-oci allow-list entry; `--bundle-pull missing` with trust `digest` or with
+    /// neither an `--image-allow` entry nor a registry; trust `list` without an allow list that holds a
     /// digest, or `digest` with one; a list file that cannot be read or is malformed.
     pub fn from_cli(
         cli: &Cli,
@@ -265,10 +271,18 @@ impl Settings {
                     .to_owned(),
             );
         }
-        if pull == Pull::Missing && registries.is_empty() {
-            return Err("--bundle-pull missing: needs --bundle-registry-allow or \
-                 --bundle-registry-allow-private"
-                .to_owned());
+        let image_allow = cli
+            .image_allow
+            .iter()
+            .map(|text| Allow::parse(text))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|why| format!("--image-allow: {why}"))?;
+        if pull == Pull::Missing && registries.is_empty() && image_allow.is_empty() {
+            return Err(
+                "--bundle-pull missing: needs --image-allow, --bundle-registry-allow \
+                 or --bundle-registry-allow-private"
+                    .to_owned(),
+            );
         }
         let allow_file = match (trust, &cli.bundle_allow_file) {
             (Trust::List, None) => {
@@ -307,6 +321,7 @@ impl Settings {
             low_water_bytes: cli.bundle_low_water_gib.unwrap_or(0).saturating_mul(GIB),
             pull,
             registries,
+            image_allow,
             min_age_min: cli.bundle_min_age_min.unwrap_or(DEFAULT_MIN_AGE_MIN),
             keep_file: cli.bundle_keep_file.clone(),
             deny_file: cli.bundle_deny_file.clone(),
@@ -328,25 +343,30 @@ impl Settings {
         }
     }
 
-    /// The allow-list of the store's registry client: each registry as an entry, with the
-    /// credentials `--registry-credentials` gave it, and reachable at a private address
-    /// when it came from `--bundle-registry-allow-private`.
+    /// The allow-list of the store's registry client: each bundle registry as an entry, then
+    /// each `--image-allow` entry, with the credentials `--registry-credentials` gave it,
+    /// and reachable at a private address when it came from
+    /// `--bundle-registry-allow-private`. An `--image-allow` entry is never private, as on
+    /// Linux. A pin is checked against the list its origin has before the client is asked
+    /// (see [`super::Admission`]); this is the client's own list.
     ///
     /// # Errors
     ///
     /// A registry that is not a js-oci allow-list entry.
     pub fn registry_allow(&self) -> Result<Vec<Allow>, js_oci::Error> {
-        self.registries
-            .iter()
-            .map(|registry| {
-                let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
-                let entry = self.credentials.attach(entry);
-                Ok(if registry.private {
-                    entry.private()
-                } else {
-                    entry
-                })
+        let bundles = self.registries.iter().map(|registry| {
+            let entry = Allow::parse(&format!("{}/{}", registry.host, registry.prefix))?;
+            let entry = self.credentials.attach(entry);
+            Ok::<_, js_oci::Error>(if registry.private {
+                entry.private()
+            } else {
+                entry
             })
-            .collect()
+        });
+        let images = self
+            .image_allow
+            .iter()
+            .map(|entry| Ok::<_, js_oci::Error>(self.credentials.attach(entry.clone())));
+        bundles.chain(images).collect()
     }
 }
