@@ -21,7 +21,8 @@
 //!   slots and wall clock: the wall limit counts from the moment the container is made, so a
 //!   start delayed in delivery is neither shortened nor stretched. It is idempotent on the
 //!   job id, and job ids share the bounded set of retired run ids above (kept in the state
-//!   root, so a late start of a stopped job does not run after a restart either). Such a
+//!   root, so a late start of a stopped job does not run after a restart either), each with
+//!   its allocation: a job start is judged by its fence (below). Such a
 //!   job is listed in the heartbeat's `jobs` alone, with its
 //!   result inside until a `job_acks` entry of a verdict the agent knows names it; never in
 //!   `held` or `results`, and no `Stop`, `Cancel` or `result_acks` entry touches it (nor a
@@ -35,6 +36,25 @@
 //!   `retired_acks` names it, the answer that the job is stopped and gone. A container a
 //!   job start made is labelled ([`label::KEYING`]), so a restart that adopts it
 //!   lists it as a job again.
+//! - **A job start whose fence is retired runs never.** The fence is the job id with the
+//!   allocation id (`js_agent_wire::START_FENCE_CAPABILITY`, which the hello reports). The
+//!   fence of a job that ended is retired when the job leaves the listing; that of a job
+//!   the server stopped or cancelled, or that the agent stopped for silence, when the stop
+//!   is asked, and it is in the state root before the stop is reported; a stop of a job
+//!   the agent does not hold names no allocation and retires every fence of the job. Such
+//!   a start is skipped (`Skip::FenceRetired`) before anything is booked or made; the same
+//!   job under a new allocation is a new fence and runs. A run start has no fence beyond
+//!   its run id and is judged as before (`Skip::Retired`).
+//! - **A silence of the server stops every job** ([`Lifecycle::stop_on_silence`],
+//!   `--silence-stop`, see [`DEFAULT_SILENCE_STOP`] for the bound). Contact is a welcome or
+//!   a heartbeat reply the session accepted, stamped on the lifecycle's clock by the
+//!   session ([`Contact`]); a reply the worker had no room for counts. Once the server has
+//!   not been heard for the bound, every job that runs or waits for its image is stopped as
+//!   a `Stop` stops it (the stop grace, then the kill; a native run is killed at once), its
+//!   fence is retired and its result is `killed` with the detail `silence-stop`. It is done
+//!   once for each silence; a contact ends the silence, and starts that follow are judged
+//!   as above. It runs while an agent runs: a native run is not bounded while no agent
+//!   does (see [`crate::native`]).
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
@@ -148,7 +168,7 @@
 //!   backend reads back where each mount was bound and refuses a container whose mounts
 //!   differ; the time between the agent's resolution and the daemon's bind stays open (see
 //!   [`MountRoots`]).
-//! - **Held results and retired ids survive a restart** as files in the state root (see
+//! - **Held results and retired fences survive a restart** as files in the state root (see
 //!   `held`); the `retired_jobs` still owed the server do not. Containers that still exist
 //!   are re-adopted, an exited one as its container says.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
@@ -193,6 +213,7 @@
 //! runs, the results and the taint in the next heartbeat. The [`Config`] is built from
 //! the flags ([`Local`]) and the hello's shape ([`Capacity::of`]).
 
+mod codes;
 mod event;
 mod machine;
 mod mounts;
@@ -202,6 +223,7 @@ mod quota_flags;
 mod run_files;
 mod runtime;
 mod scratch;
+mod silence;
 pub mod taint;
 
 use std::collections::BTreeSet;
@@ -220,6 +242,7 @@ use crate::cli_runtime::{Flags, Settings};
 use crate::native::{NativeFlags, NativeSettings, PfFlags};
 use crate::quota::ScratchQuota;
 
+pub use codes::{code, detail};
 pub use event::{Event, Finding, Skip};
 pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
@@ -239,99 +262,11 @@ pub use runtime::{
     RuntimeError, Status, Ticket, label,
 };
 pub use scratch::{DirLayout, ScratchRoot};
+pub use silence::{
+    Contact, DEFAULT_SILENCE_STOP, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO, fits_grace,
+    silence_stop,
+};
 pub use taint::{MARKER_FILE, StateRoot};
-
-/// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
-pub mod detail {
-    /// The scratch directory could not be made.
-    pub const SCRATCH_FAILED: &str = "scratch-failed";
-    /// The runtime could not create or start the container.
-    pub const RUNTIME_FAILED: &str = "runtime-failed";
-    /// The job names a GPU and the runtime's containers cannot use one (a container on a
-    /// Mac cannot reach the Apple GPU). Nothing is created.
-    pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
-    /// The job carries run files and this agent has no files root. A server sends files
-    /// only to an agent that reported the `run-files` capability, so this is a fault of the
-    /// sender.
-    pub const FILES_UNSUPPORTED: &str = "files-unsupported";
-    /// The job is a host job and carries run files, which only a contained job (a container,
-    /// or a native run's own user) can be given. Nothing is created.
-    pub const FILES_NEED_CONTAINER: &str = "files-need-container";
-    /// The network the job would get is not limited as the agent was told: the `crun`
-    /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
-    /// is missing or changed. Nothing is created.
-    pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
-    /// The job may change the host and the taint marker could not be written, so the job
-    /// was not started.
-    pub const TAINT_FAILED: &str = "taint-failed";
-}
-
-/// The codes of a [`Finding`].
-pub mod code {
-    /// The log tails of the held results did not fit the heartbeat even cut down; the tail
-    /// of this run was left out of its result.
-    pub const LOG_TAIL_SHED: &str = "log-tail-shed";
-    /// The runtime could not read the log of a job that exited; its result goes without a
-    /// tail.
-    pub const LOGS_FAILED: &str = "logs-failed";
-    /// The runtime could not tell whether a container has exited.
-    pub const POLL_FAILED: &str = "poll-failed";
-    /// The runtime could not stop a container.
-    pub const STOP_FAILED: &str = "stop-failed";
-    /// The runtime could not start a container.
-    pub const START_FAILED: &str = "start-failed";
-    /// The runtime could not remove a container.
-    pub const CONTAINER_REMOVE_FAILED: &str = "container-remove-failed";
-    /// A native run was removed (its processes and its user are gone) and one or more of
-    /// its declared outputs could not be copied. The host holds nothing of it: not a taint.
-    pub const OUTPUTS_FAILED: &str = "outputs-failed";
-    /// The scratch directory could not be made or removed.
-    pub const SCRATCH_FAILED: &str = "scratch-failed";
-    /// A labelled container could not be accounted for after a restart.
-    pub const UNADOPTABLE: &str = "unadoptable-container";
-    /// A container that could not be accounted for could not be removed either, so it is
-    /// still on the host, unbooked.
-    pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
-    /// A started container's process is not in the agent's `/proc`: the agent does not see
-    /// the host its jobs run on. The container was removed and the host is tainted as
-    /// unchecked.
-    pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
-    /// The taint marker could not be written. The host is tainted in memory all the same.
-    pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
-    /// The record that a job's checks are owed could not be written or removed. While it
-    /// cannot be written the job's container is not removed; while it cannot be removed
-    /// the job's slot is not freed.
-    pub const OWED_FAILED: &str = "owed-record-failed";
-    /// The project id of a slot still holds usage (or its usage cannot be read), so the slot
-    /// takes no run. The slot is read again at every step and is free once the usage reads
-    /// zero; it is reported when it is parked, and again every hour while it stays parked.
-    pub const QUOTA_SLOT_BUSY: &str = "quota-slot-busy";
-    /// A finished run's project still read usage after the time the agent waits for it
-    /// (`--scratch-usage-wait-secs`): the run's cleanup went on, the slot was parked and the
-    /// run's place and booked bytes were given back, and the quota counted one failure.
-    pub const QUOTA_USAGE_ABANDONED: &str = "quota-usage-abandoned";
-    /// A parked slot read zero usage again and takes runs.
-    pub const QUOTA_SLOT_RELEASED: &str = "quota-slot-released";
-    /// A finished run's project still reads usage after its tree was removed (the file
-    /// system frees inodes in the background): the slot stays held and is read again at
-    /// every step.
-    pub const QUOTA_USAGE_HELD: &str = "quota-usage-held";
-    /// The quota failed several calls in a row and the probe no longer finds project quota:
-    /// no run starts until it works again. Reported again every minute.
-    pub const QUOTA_UNHEALTHY: &str = "quota-unhealthy";
-    /// An unhealthy quota probed `Project` again.
-    pub const QUOTA_RECOVERED: &str = "quota-recovered";
-    /// The quota of a finished run's scratch directory could not be cleared. The tree is
-    /// gone; the slot stays held and the clear is tried again at every step.
-    pub const QUOTA_CLEAR_FAILED: &str = "quota-clear-failed";
-    /// The records of owed checks in the state root could not be listed when the agent
-    /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
-    pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
-    /// A held result or the retired list could not be written to the state root.
-    pub const HELD_FAILED: &str = "held-record-failed";
-    /// A held result or the retired list in the state root could not be read at start.
-    pub const HELD_UNREADABLE: &str = "held-record-unreadable";
-}
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
 /// subtracts two readings, so the origin does not matter and a change of the wall clock
@@ -563,6 +498,9 @@ pub struct Local {
     /// The `--egress*` flags: the most network a `crun` job may ask for. Mode none unless
     /// `allow-list` or `open` was given, which only `--runtime crun` takes ([`crate::egress`]).
     pub egress: crate::egress::Config,
+    /// `--silence-stop`, or [`DEFAULT_SILENCE_STOP`]: how long the server may be silent
+    /// before every job is stopped; above the server's default grace plus the stop grace.
+    pub silence_stop: Duration,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -755,6 +693,13 @@ impl Local {
         }
         let stop_grace = seconds("--stop-grace", cli.stop_grace, DEFAULT_STOP_GRACE)?;
         let drain_wait = seconds("--drain-wait", cli.drain_wait, stop_grace)?;
+        if container.is_none() && native.is_none() && cli.silence_stop.is_some() {
+            return Err(
+                "--silence-stop: needs --container-bin or --native-helper-socket".to_owned(),
+            );
+        }
+        let silence_stop = silence::silence_stop(cli.silence_stop)?;
+        silence::fits_grace(silence_stop, js_agent_wire::DEFAULT_GRACE_MS, stop_grace)?;
         if let Some(state) = &state {
             let mut writable = mounts.paths().chain(scratch.iter().map(ScratchRoot::path));
             if writable.any(|root| state.path().starts_with(root)) {
@@ -829,6 +774,7 @@ impl Local {
             drain_wait,
             image_allow: image_allow(&cli.image_allow)?,
             egress,
+            silence_stop,
         })
     }
 }

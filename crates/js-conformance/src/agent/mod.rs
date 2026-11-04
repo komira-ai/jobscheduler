@@ -43,9 +43,15 @@
 //!   wire from the send time of the heartbeat the Start names (so the adapter backdates
 //!   that heartbeat).
 //! - **The fence window comes from the transport.** `fence_window` is the transport's own
-//!   value, or `None` when the agent has none. The legacy agent has no self-fence today
-//!   (it reads no clock), so `SelfFencesAfterSilence` is a check it cannot pass until it
-//!   gains one; the scenario then fails with that reason rather than being skipped.
+//!   value, or `None` when the agent has none. An agent with no self-fence fails
+//!   `SelfFencesAfterSilence` with that reason rather than having it skipped. The js-agent
+//!   adapter (`tests/js_agent_suite.rs`) reports the agent's default silence bound
+//!   (`--silence-stop`).
+//! - **A fenced start names the job and its allocation.** `start_fenced(job, allocation)`
+//!   is a start whose fence is the pair; the agent must refuse one whose fence it retired
+//!   and take the same job under another allocation. The js-agent adapter sends it as a job
+//!   start (`JobStart`), and its other operations as run starts, so `start` keeps its
+//!   validity bound.
 //! - **`Observed.launches` and `never_started` are derived.** Where the agent emits an
 //!   event for a skipped stale Start (the legacy agent does) read that; where it does
 //!   not (the worker wire), derive them from the Results and refusals that reached the
@@ -106,6 +112,11 @@ pub trait AgentHarness {
     /// has waited `waited` ms before the agent acts on it. Counts as scheduler contact
     /// when delivered.
     fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery;
+
+    /// Delivers a start of the job `job` whose fence is `job` with `allocation`, with no
+    /// validity bound. Counts as scheduler contact when delivered. The job is named by
+    /// `job` in [`Observed`] and in the other operations.
+    fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery;
 
     /// Delivers a Cancel for `lease`. Counts as scheduler contact when delivered.
     fn cancel(&mut self, lease: &str) -> Delivery;

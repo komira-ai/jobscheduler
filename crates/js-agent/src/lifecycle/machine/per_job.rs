@@ -81,8 +81,9 @@ pub(super) fn job_result(result: &RunResult) -> JobResult {
 
 impl Lifecycle {
     /// Acts on a job start: the same start as a run's, keyed by job id. It is idempotent on
-    /// the job id: a start for a job the agent holds changes nothing, and one for a job it
-    /// finished or retired is skipped (`Skip::Retired`). A start with an environment is
+    /// the job id: a start for a job the agent holds changes nothing, and one whose fence
+    /// (the job id with the allocation id) is retired is skipped (`Skip::FenceRetired`); the
+    /// same job under a new allocation is new work. A start with an environment is
     /// answered `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing: no
     /// runtime sets a container's environment yet (`js-agent-job-env-runtimes` adds that and
     /// removes the refusal), and a job must never run without the environment it names.
@@ -105,16 +106,21 @@ impl Lifecycle {
     }
 
     /// Acts on a job stop. A held job is asked to stop as a `Stop` asks a run (the stop
-    /// grace, then a kill) and ends `killed`; a second stop changes nothing. A job the agent
-    /// does not hold has its id retired, so a later start of it runs nothing, and listed in
-    /// `retired_jobs` until the server acknowledges it.
+    /// grace, then a kill) and ends `killed`; a second stop changes nothing. Its fence is
+    /// retired at once, so the list in the state root names it before the stop is reported.
+    /// A job the agent does not hold has every fence of its id retired (the stop names no
+    /// allocation), so a later start of it runs nothing, and is listed in `retired_jobs`
+    /// until the server acknowledges it.
     pub(super) fn stop_job(&mut self, job_id: &str) {
         let held = self
             .jobs
             .iter_mut()
             .find(|job| job.keyed == Keyed::Job && job.run_id == job_id);
         match held {
-            Some(job) => job.request_stop(false),
+            Some(job) => {
+                job.request_stop(false);
+                self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+            }
             None => self.answer_stop(job_id),
         }
     }

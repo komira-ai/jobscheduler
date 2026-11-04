@@ -55,6 +55,15 @@ and carries out both commands. The server side is not: the lease server on main 
 with empty `job_acks` and `retired_acks` (`crates/js-registry/src/runs.rs`). The capabilities
 `one-job` (`ONE_JOB_CAPABILITY`) and `run-files` gate start fields an older agent would silently ignore.
 
+The fence of a job start is the pair it already carries, `job_id` with `allocation_id`; no field is added for it, and no existing
+body encodes differently (`crates/js-agent-wire/tests/start_fence.rs`). An agent that enforces it reports the hello capability
+`start-fence` (`START_FENCE_CAPABILITY`), beside `per-job`: it skips a job start whose fence it retired (a job that ended, was
+stopped or cancelled, or that it stopped after a silence of the server; a `job_stop` for a job it does not hold names no
+allocation and retires every fence of the job), keeps the retired fences in its state root across a restart, takes the same job
+under a new allocation, and stops every job it holds once it has not heard the server for its silence bound (`--silence-stop`,
+300 s by default, reported `killed` with the detail `silence-stop`). A server that does not see the capability can expect neither.
+A run start is fenced by its run id alone, as before.
+
 **Cadence.** The welcome sets the heartbeat interval and the grace; the defaults are `DEFAULT_HEARTBEAT_INTERVAL_MS` 5,000 and
 `DEFAULT_GRACE_MS` 15,000, and a grace must exceed two intervals (`grace_covers_heartbeats`). `Welcome::validate` holds the interval
 between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,000 and the grace to at most `MAX_GRACE_MS`
