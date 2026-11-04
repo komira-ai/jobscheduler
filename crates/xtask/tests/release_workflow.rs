@@ -342,15 +342,19 @@ fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
     }
 }
 
-/// Asserts that the `sums` job expects the `js-bundle` archive of both targets, so a build
-/// that stops making one fails before anything is attested, and that both matrix legs build it.
-/// The two Mac host tools are expected for darwin only.
+/// Asserts that the `sums` job expects the `js-bundle` archive of every target (the Mac and both
+/// Linux architectures), so a build that stops making one fails before anything is attested,
+/// and that all three matrix legs build it. The two Mac host tools are expected for darwin only.
 #[test]
 fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let text = workflow();
     let jobs = jobs(&text);
     let sums = job(&jobs, "sums").join("\n");
-    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"] {
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ] {
         let asset = format!("js-bundle-$VERSION-{target}.tar.gz");
         assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
     }
@@ -361,32 +365,41 @@ fn the_js_bundle_archive_is_built_and_expected_for_both_targets() {
     let build = job(&jobs, "build").join("\n");
     assert_eq!(
         build.matches("js-bundle-cli:js-bundle").count(),
-        2,
+        3,
         "{build}"
     );
 }
 
-/// Asserts that `js-mdm` is built for the Linux target only, by the same `build` entry as
+/// Asserts that `js-mdm` is built for the two Linux targets only, by the same `build` entry as
 /// `js-agent` (package and binary named `js-mdm`), and that the `sums` job expects exactly its
-/// Linux archive, so a build that stops making it fails before anything is attested. There
-/// is no darwin archive.
+/// two Linux archives, so a build that stops making one fails before anything is attested.
+/// There is no darwin archive.
 #[test]
 fn the_js_mdm_archive_is_built_and_expected_for_linux_only() {
     let text = workflow();
     let jobs = jobs(&text);
     let build = job(&jobs, "build").join("\n");
-    let linux = build
+    let linux: Vec<&str> = build
         .lines()
-        .find(|line| line.trim_start().starts_with("builds: ") && line.contains("js-lease-server"))
-        .expect("the linux builds line");
-    assert!(linux.contains(" js-mdm:js-mdm"), "{linux}");
-    assert_eq!(build.matches("js-mdm:js-mdm").count(), 1, "{build}");
+        .filter(|line| {
+            line.trim_start().starts_with("builds: ") && line.contains("js-lease-server")
+        })
+        .collect();
+    assert_eq!(linux.len(), 2, "{build}");
+    for line in linux {
+        assert!(line.contains(" js-mdm:js-mdm"), "{line}");
+    }
+    assert_eq!(build.matches("js-mdm:js-mdm").count(), 2, "{build}");
     let sums = job(&jobs, "sums").join("\n");
+    for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+        let asset = format!("js-mdm-$VERSION-{target}.tar.gz");
+        assert!(sums.contains(&asset), "{asset} is not expected: {sums}");
+    }
+    assert_eq!(sums.matches("js-mdm-$VERSION").count(), 2, "{sums}");
     assert!(
-        sums.contains("js-mdm-$VERSION-x86_64-unknown-linux-musl.tar.gz"),
+        !sums.contains("js-mdm-$VERSION-aarch64-apple-darwin"),
         "{sums}"
     );
-    assert_eq!(sums.matches("js-mdm-$VERSION").count(), 1, "{sums}");
 }
 
 /// Asserts that the Apple-silicon build pins the deployment target to 11.0 and that the
@@ -410,4 +423,387 @@ fn the_macos_leg_pins_the_deployment_target_and_checks_each_binary() {
         build.contains(r#"if [ -z "$minos" ]; then"#),
         "a binary with no minos must fail the check, not pass it: {build}"
     );
+}
+
+/// One leg of the `build` matrix: its target, its runner and its `package:binary` entries.
+#[derive(Debug, PartialEq, Eq)]
+struct Leg {
+    target: String,
+    runner: String,
+    builds: Vec<String>,
+}
+
+/// The legs of the `build` job's matrix, in their order, read from its `- target:`, `runner:`
+/// and `builds:` lines.
+fn legs(build: &[String]) -> Vec<Leg> {
+    let mut legs: Vec<Leg> = Vec::new();
+    for line in build {
+        let line = line.trim_start();
+        if let Some(target) = line.strip_prefix("- target: ") {
+            legs.push(Leg {
+                target: target.to_owned(),
+                runner: String::new(),
+                builds: Vec::new(),
+            });
+        } else if let Some(leg) = legs.last_mut() {
+            if let Some(runner) = line.strip_prefix("runner: ") {
+                runner.clone_into(&mut leg.runner);
+            } else if let Some(builds) = line.strip_prefix("builds: ") {
+                leg.builds = builds.split_whitespace().map(str::to_owned).collect();
+            }
+        }
+    }
+    legs
+}
+
+/// The lines of the step named `name` in a job: from its `- name:` line to the next step.
+fn step<'a>(job: &'a [String], name: &str) -> &'a [String] {
+    let start = job
+        .iter()
+        .position(|l| l.trim_start() == format!("- name: {name}"))
+        .unwrap_or_else(|| panic!("no step {name}"));
+    let indent = job[start].len() - job[start].trim_start().len();
+    let end = job[start + 1..]
+        .iter()
+        .position(|l| {
+            let rest = l.trim_start();
+            l.len() - rest.len() == indent && rest.starts_with("- ")
+        })
+        .map_or(job.len(), |n| start + 1 + n);
+    &job[start..end]
+}
+
+/// The five Linux binaries, as `package:binary`, in the order the legs list them.
+const LINUX_BUILDS: [&str; 5] = [
+    "js-lease-server:js-lease-server",
+    "js-cli:js",
+    "js-agent:js-agent",
+    "js-bundle-cli:js-bundle",
+    "js-mdm:js-mdm",
+];
+
+/// Asserts that the `build` matrix has an arm64 Linux leg, `aarch64-unknown-linux-musl` on the
+/// GitHub-hosted arm64 runner `ubuntu-24.04-arm` (a native build: the job runs on
+/// `matrix.runner`), that builds entry for entry what the x86_64 leg builds, the five Linux
+/// binaries. Catches a missing leg, a leg on another runner (an x86_64 one would cross-compile
+/// and could not run the binaries) and a binary dropped from it.
+#[test]
+fn the_linux_arm64_leg_builds_the_five_linux_binaries_on_a_hosted_arm_runner() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let build = job(&jobs, "build");
+    assert!(
+        build
+            .iter()
+            .any(|l| l.trim() == "runs-on: ${{ matrix.runner }}"),
+        "{build:?}"
+    );
+    let legs = legs(build);
+    let arm: Vec<&Leg> = legs
+        .iter()
+        .filter(|leg| leg.target == "aarch64-unknown-linux-musl")
+        .collect();
+    assert_eq!(arm.len(), 1, "{legs:?}");
+    assert_eq!(arm[0].runner, "ubuntu-24.04-arm", "{legs:?}");
+    let x86 = legs
+        .iter()
+        .find(|leg| leg.target == "x86_64-unknown-linux-musl")
+        .expect("the x86_64 leg");
+    assert_eq!(arm[0].builds, x86.builds);
+    assert_eq!(arm[0].builds, LINUX_BUILDS);
+    assert_eq!(
+        legs.iter()
+            .map(|leg| leg.target.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin"
+        ]
+    );
+}
+
+/// The archive names `sums` expects, `$VERSION` as the workflow spells it.
+fn expected_assets(sums: &[String]) -> Vec<String> {
+    let line = sums
+        .iter()
+        .find_map(|l| l.trim_start().strip_prefix("expected=\""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("the expected= line");
+    line.split_whitespace().map(str::to_owned).collect()
+}
+
+/// Asserts that `sums` expects exactly the fifteen archives: each of `js-lease-server`, `js`,
+/// `js-agent`, `js-bundle` and `js-mdm` for both Linux targets, `js`, `js-agent` and `js-bundle`
+/// and the two Mac host tools for darwin, which is also what the matrix builds; and that the
+/// list is in `LC_ALL=C` order once `$VERSION` is a version, as `ls | LC_ALL=C sort` prints
+/// the files. Catches a missing or extra name (a build that stops making an archive must fail
+/// here, before attest) and an unsorted list, which would never equal the listing and would
+/// fail every real release.
+#[test]
+fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_is_sorted() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let expected = expected_assets(job(&jobs, "sums"));
+    let mut wanted: Vec<String> = Vec::new();
+    for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+        for bin in ["js-lease-server", "js", "js-agent", "js-bundle", "js-mdm"] {
+            wanted.push(format!("{bin}-$VERSION-{target}.tar.gz"));
+        }
+    }
+    for bin in [
+        "js",
+        "js-agent",
+        "js-bundle",
+        "js-mac-session",
+        "js-mac-provision",
+    ] {
+        wanted.push(format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz"));
+    }
+    assert_eq!(expected.len(), 15, "{expected:?}");
+    let mut have = expected.clone();
+    have.sort();
+    wanted.sort();
+    assert_eq!(have, wanted);
+    // What the matrix builds is what `sums` expects.
+    let mut built: Vec<String> = legs(job(&jobs, "build"))
+        .iter()
+        .flat_map(|leg| {
+            leg.builds.iter().map(|entry| {
+                let (_, bin) = entry.split_once(':').expect("package:binary");
+                format!("{bin}-$VERSION-{}.tar.gz", leg.target)
+            })
+        })
+        .collect();
+    built.sort();
+    assert_eq!(built, wanted);
+    // `ls | LC_ALL=C sort` orders the files by their bytes, with the version in the names.
+    for version in ["0.1.0", "1.2.3", "10.20.30"] {
+        let listed: Vec<String> = expected
+            .iter()
+            .map(|name| name.replace("$VERSION", version))
+            .collect();
+        let mut sorted = listed.clone();
+        sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(listed, sorted, "version {version}");
+    }
+}
+
+/// The value of a GitHub Actions condition made of `||`-joined `matrix.target == '<t>'` and
+/// `endsWith(matrix.target, '<suffix>')` terms, for `target`. Any other form is refused, so the
+/// test cannot pass on a condition it does not understand.
+fn target_condition(condition: &str, target: &str) -> bool {
+    let inner = condition
+        .strip_prefix("${{ ")
+        .and_then(|c| c.strip_suffix(" }}"))
+        .unwrap_or_else(|| panic!("not an expression: {condition}"));
+    inner.split(" || ").any(|term| {
+        if let Some(value) = term
+            .strip_prefix("matrix.target == '")
+            .and_then(|t| t.strip_suffix('\''))
+        {
+            target == value
+        } else if let Some(suffix) = term
+            .strip_prefix("endsWith(matrix.target, '")
+            .and_then(|t| t.strip_suffix("')"))
+        {
+            target.ends_with(suffix)
+        } else {
+            panic!("a term this test does not read: {term}")
+        }
+    })
+}
+
+/// The reader above, on the forms it takes and the one it refuses.
+#[test]
+fn the_condition_reader_reads_equality_suffix_and_or() {
+    let cond = "${{ matrix.target == 'a-b' || endsWith(matrix.target, '-c') }}";
+    assert!(target_condition(cond, "a-b"));
+    assert!(target_condition(cond, "x-c"));
+    assert!(!target_condition(cond, "a-bc"));
+    assert!(!target_condition(cond, "x-d"));
+    let refused =
+        std::panic::catch_unwind(|| target_condition("${{ contains(matrix.target, 'x') }}", "x"));
+    assert!(refused.is_err());
+}
+
+/// Asserts that the "Install musl tools" step installs `musl-tools` and that its condition is
+/// true for both musl targets and false for the Mac target, evaluated for each. Catches an arm64
+/// leg that builds without `musl-tools` (ring needs a C compiler for musl) and a Mac leg that
+/// would run `apt-get`.
+#[test]
+fn the_musl_tools_are_installed_for_both_musl_legs() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let build = job(&jobs, "build");
+    let install = step(build, "Install musl tools");
+    let condition = install
+        .iter()
+        .find_map(|l| l.trim_start().strip_prefix("if: "))
+        .expect("the step's condition");
+    assert!(
+        install
+            .iter()
+            .any(|l| l.trim() == "sudo apt-get install --yes --no-install-recommends musl-tools"),
+        "{install:?}"
+    );
+    for (target, installs) in [
+        ("x86_64-unknown-linux-musl", true),
+        ("aarch64-unknown-linux-musl", true),
+        ("aarch64-apple-darwin", false),
+    ] {
+        assert_eq!(
+            target_condition(condition, target),
+            installs,
+            "{target}: {condition}"
+        );
+    }
+    // Every leg is one of those three.
+    for leg in legs(build) {
+        assert!(
+            [
+                "x86_64-unknown-linux-musl",
+                "aarch64-unknown-linux-musl",
+                "aarch64-apple-darwin"
+            ]
+            .contains(&leg.target.as_str()),
+            "{leg:?}"
+        );
+    }
+}
+
+/// Whether the shell `case` pattern `pattern` (only `*` and literal text) matches `word`.
+fn glob(pattern: &str, word: &str) -> bool {
+    assert!(
+        !pattern.contains(['?', '[', '|', '"', '\'']),
+        "a pattern this test does not read: {pattern}"
+    );
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if parts.len() == 1 {
+        return word == pattern;
+    }
+    if !word.starts_with(first) || word.len() < first.len() + last.len() {
+        return false;
+    }
+    let mut rest = &word[first.len()..word.len() - last.len()];
+    if !word.ends_with(last) {
+        return false;
+    }
+    for middle in &parts[1..parts.len() - 1] {
+        match rest.find(middle) {
+            Some(at) => rest = &rest[at + middle.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// The pattern matcher above.
+#[test]
+fn the_glob_reader_matches_stars_and_literals() {
+    assert!(glob("*-linux-musl", "aarch64-unknown-linux-musl"));
+    assert!(glob("*-linux-musl", "x86_64-unknown-linux-musl"));
+    assert!(!glob("*-linux-musl", "aarch64-apple-darwin"));
+    assert!(!glob("x86_64-*-linux-musl", "aarch64-unknown-linux-musl"));
+    assert!(glob("x86_64-*-linux-musl", "x86_64-unknown-linux-musl"));
+    assert!(glob("a*b*c", "aXbYc"));
+    assert!(!glob("a*b*c", "aXcYb"));
+    assert!(!glob("ab*ba", "aba"));
+    assert!(glob("exact", "exact"));
+    assert!(!glob("exact", "exactly"));
+}
+
+/// The arms of the first `case "$TARGET" in` of `lines`: each pattern with the lines of its body.
+fn target_case(lines: &[String]) -> Vec<(String, Vec<String>)> {
+    let start = lines
+        .iter()
+        .position(|l| l.trim() == r#"case "$TARGET" in"#)
+        .expect("a case on $TARGET");
+    let indent = lines[start].len() - lines[start].trim_start().len();
+    let mut arms: Vec<(String, Vec<String>)> = Vec::new();
+    for line in &lines[start + 1..] {
+        let rest = line.trim_start();
+        let at = line.len() - rest.len();
+        if at == indent && rest == "esac" {
+            return arms;
+        }
+        if at == indent + 2 && rest.ends_with(')') {
+            arms.push((rest.trim_end_matches(')').to_owned(), Vec::new()));
+        } else if let Some((_, body)) = arms.last_mut() {
+            body.push(rest.to_owned());
+        }
+    }
+    panic!("no esac")
+}
+
+/// Asserts that in "Check the binaries" the `case` arm that `aarch64-unknown-linux-musl` falls in
+/// is the static check, the same arm as the x86_64 Linux target's: every binary of `$BUILDS` is
+/// read with `readelf -d` and one with a `NEEDED` entry fails the job. Catches a pattern
+/// narrowed to the x86_64 name, which would let a dynamically linked arm64 binary through.
+#[test]
+fn the_static_check_covers_the_arm64_linux_leg() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let check = step(job(&jobs, "build"), "Check the binaries");
+    let arms = target_case(check);
+    let matching = |target: &str| -> Vec<&(String, Vec<String>)> {
+        arms.iter()
+            .filter(|(pattern, _)| glob(pattern, target))
+            .collect()
+    };
+    let arm = matching("aarch64-unknown-linux-musl");
+    assert_eq!(arm.len(), 1, "{arms:?}");
+    assert_eq!(arm, matching("x86_64-unknown-linux-musl"));
+    let body = arm[0].1.join("\n");
+    assert!(body.contains("for entry in $BUILDS; do"), "{body}");
+    assert!(
+        body.contains(r#"if readelf -d "target/$TARGET/release/$bin" | grep -q NEEDED; then"#),
+        "{body}"
+    );
+    assert!(
+        body.contains("echo \"::error::$bin links shared libraries\"\nexit 1"),
+        "{body}"
+    );
+    // The Mac target takes the other arm, not this one.
+    let mac = matching("aarch64-apple-darwin");
+    assert_eq!(mac.len(), 1, "{arms:?}");
+    assert_ne!(mac, arm);
+    // And the version check after the case runs every binary on every leg.
+    let all = check.join("\n");
+    let esac = all.find("esac").expect("esac");
+    assert!(
+        all[esac..].contains(r#"printed="$("target/$TARGET/release/$bin" --version)""#),
+        "{all}"
+    );
+}
+
+/// The GitHub-hosted runner labels a job may run on (no self-hosted, no larger or paid runner).
+const HOSTED_RUNNERS: [&str; 3] = ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"];
+
+/// Asserts that every job's `runs-on:` is one of the hosted labels above, or `matrix.runner`
+/// with every leg's `runner:` one of them, and that no `self-hosted` label appears anywhere.
+/// Catches a self-hosted or larger-runner label, in a job or in a matrix leg.
+#[test]
+fn no_self_hosted_or_paid_runner_labels() {
+    let text = workflow();
+    assert!(!text.contains("self-hosted"));
+    for (name, lines) in jobs(&text) {
+        let runs_on = lines
+            .iter()
+            .find_map(|l| l.trim_start().strip_prefix("runs-on: "))
+            .unwrap_or_else(|| panic!("{name} has no runs-on"));
+        if runs_on == "${{ matrix.runner }}" {
+            let legs = legs(&lines);
+            assert!(!legs.is_empty(), "{name}");
+            for leg in legs {
+                assert!(
+                    HOSTED_RUNNERS.contains(&leg.runner.as_str()),
+                    "{name}: {leg:?}"
+                );
+            }
+        } else {
+            assert!(HOSTED_RUNNERS.contains(&runs_on), "{name}: {runs_on}");
+        }
+    }
 }

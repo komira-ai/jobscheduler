@@ -1,5 +1,5 @@
 <h1>Install</h1>
-<p class="lede">The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository's release workflow. There is no package repository, no container image and no published installer. The Linux binaries are static (musl, x86_64); the macOS ones are for Apple silicon and are not codesigned or notarized. There is no lease server for macOS.</p>
+<p class="lede">The lease server, the <code>js</code> client and the agent are Rust binaries built by the repository's release workflow. There is no package repository, no container image and no published installer. The Linux binaries are static (musl, x86_64 and arm64); the macOS ones are for Apple silicon and are not codesigned or notarized. There is no lease server for macOS.</p>
 
 <div class="notice notice-warn"><p><strong>The agent's Debian package is not published.</strong> The repository builds it with nfpm, checks what it contains and attests it, as a workflow artifact kept for seven days. That workflow publishes no release, no package repository and no registry. The macOS installer package of the agent, in <code>packaging/js-agent-macos</code>, is built the same way by its own workflow, which publishes nothing either. A host gets the agent from the release archive and the unit in <code>packaging/js-agent</code>, as the steps below say.</p></div>
 
@@ -10,13 +10,13 @@
     <div class="table-wrap"><table>
     <thead><tr><th>Archive</th><th>Holds</th></tr></thead>
     <tbody>
-    <tr><td><code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code></td><td>the lease server</td></tr>
-    <tr><td><code>js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the client</td></tr>
-    <tr><td><code>js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the agent</td></tr>
-    <tr><td><code>js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the tool that packs, prints and verifies darwin bundles</td></tr>
-    <tr><td><code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code></td><td>the MDM that enrolls Macs as compute hosts, set up on one Linux host</td></tr>
+    <tr><td><code>js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code></td><td>the lease server</td></tr>
+    <tr><td><code>js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code>, <code>js-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the client</td></tr>
+    <tr><td><code>js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code>, <code>js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the agent</td></tr>
+    <tr><td><code>js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-bundle-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code>, <code>js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the tool that packs, prints and verifies darwin bundles</td></tr>
+    <tr><td><code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code></td><td>the MDM that enrolls Macs as compute hosts, set up on one Linux host</td></tr>
     <tr><td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>, <code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper and the pf anchor installer a Mac node installs</td></tr>
-    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the ten archives</td></tr>
+    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives</td></tr>
     </tbody></table></div>
     <p>Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>, and holds the binary and <code>LICENSE</code>.</p>
   </li>
@@ -29,7 +29,7 @@
     --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \
     --source-ref refs/heads/main \
     --source-digest "$(git rev-parse vX.Y.Z^{commit})"</pre></div>
-    <p>For the client use <code>-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'</code>, for the agent <code>-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'</code>, and for the bundle tool <code>-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'</code>.</p>
+    <p>For the client use <code>-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'</code>, for the agent <code>-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'</code>, and for the bundle tool <code>-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'</code>. On an arm64 Linux host, write <code>aarch64-unknown-linux-musl</code> in their place, as in <code>-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'</code>.</p>
     <p class="source-note">From <code>docs/release.md</code>, "Downloading and verifying". <code>git rev-parse</code> needs a clone with the tags.</p>
   </li>
   <li>
@@ -78,7 +78,8 @@ memory_bytes = 17179869184</pre></div>
 <ul>
   <li><span class="tag tag-planned">none</span> A published package or container image of the agent, the lease server or the client.</li>
   <li><span class="tag tag-planned">none</span> A lease server for macOS.</li>
-  <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run.</li>
+  <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.</li>
+  <li><span class="tag tag-planned">none</span> A Debian package of the agent for arm64: the package is built for x86_64 only.</li>
   <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start.</li>
 </ul>
 <p class="source-note">Sources: <code>docs/release.md</code> ("What is released", "Assets" and the note on the macOS archives), the headers of <code>.github/workflows/js-agent-deb.yml</code> and <code>.github/workflows/js-agent-macos-pkg.yml</code> (the packages are not published), <code>crates/js-mdm/src/lib.rs</code> (what <code>js-mdm</code> is) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>

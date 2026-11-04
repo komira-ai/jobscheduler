@@ -233,7 +233,9 @@ impl Metadata {
 
     /// The directories (relative to the workspace root) of the crates `roots` name and of
     /// every workspace crate they depend on through normal or build dependencies. A
-    /// dev-dependency is not shipped: only tests run it.
+    /// dev-dependency is not shipped: only tests run it. A dependency declared for some
+    /// targets only (`[target.'cfg(..)'.dependencies]`) counts like any other, so the set is the
+    /// same for every target a release builds.
     pub fn shipped_dirs(&self, roots: &[String]) -> Result<BTreeSet<String>, Error> {
         let mut dirs = BTreeSet::new();
         let mut seen = BTreeSet::new();
