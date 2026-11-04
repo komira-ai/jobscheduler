@@ -745,12 +745,16 @@ mod hosts;
 #[cfg(feature = "in-process")]
 pub mod in_process;
 mod io_timeout;
+mod job_alloc;
+mod job_start;
+mod job_store;
 mod join_api;
 mod join_tokens;
 mod kinds;
 mod layered;
 mod listener;
 pub mod network;
+mod per_job;
 mod platform;
 mod pool;
 mod rate;
