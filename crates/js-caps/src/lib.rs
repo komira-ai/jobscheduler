@@ -3,9 +3,10 @@
 //! in sysfs), the ISA levels that text
 //! implies, and matching of an action's capability request against a node.
 //!
-//! - [`CpuCaps`] holds a node's architecture, every feature it reports (kernel names)
-//!   and its highest ISA level: an x86-64 psABI level ([`X86Level`]) or an Armv8
-//!   version ([`ArmVersion`]).
+//! - [`CpuCaps`] holds a node's architecture ([`Arch`]: `x86_64` or `arm64`, with
+//!   `aarch64` read as `arm64`), every feature it reports (kernel names) and its highest
+//!   ISA level: an x86-64 psABI level ([`X86Level`]) or an Armv8 version
+//!   ([`ArmVersion`]). These types are `js-types`' own, re-exported.
 //! - [`gpus_from_linux_pci`] and [`gpus_from_macos_sysctl`] count a node's GPUs, the
 //!   `gpu` capacity a request books whole and exclusively; [`gpu_cores_from_macos_ioreg`]
 //!   and [`metal_family_of_apple_chip`] describe a Mac's.
@@ -31,13 +32,12 @@
 mod cpu;
 mod gpu;
 mod host;
-mod level;
 mod macos;
 mod matching;
 mod platform;
 mod report;
 
-pub use cpu::{Arch, CpuCaps, ParseError, UnknownArch};
+pub use cpu::{CpuCaps, ParseError};
 pub use gpu::{
     GPU_KIND_NATIVE, PciFunction, gpu_cores_from_macos_ioreg, gpus_from_linux_pci,
     gpus_from_macos_sysctl, metal_family_of_apple_chip,
@@ -46,10 +46,12 @@ pub use host::{
     BUNDLE, BUNDLE_ROOT, Breach, DETECTED_KEYS, DISK_GIB, EXEC, FLAG_SET, GPU_TOOLKIT,
     HostContract, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
 };
-pub use level::{ArmVersion, IsaLevel, UnknownIsaLevel, X86Level};
 pub use matching::{
     Consumable, DEVICE_ATTRIBUTES, NodeCaps, REPORT_ONLY_KEYS, RESERVED_KEYS, Request,
     RequestError, Unmet,
 };
 pub use platform::{DAEMON_OSES, FromPlatformError, REAPI_KEYS, property_name};
 pub use report::ReportError;
+// The architecture and the ISA levels are defined in `js-types`, where a job's
+// requirements and an offer name them too; they are re-exported here unchanged.
+pub use js_types::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level};

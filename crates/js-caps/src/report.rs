@@ -3,7 +3,7 @@
 //!
 //! | Report entry | Becomes |
 //! |---|---|
-//! | `arch` (required, once) | the CPU's architecture |
+//! | `arch` (required, once) | the CPU's architecture: `x86_64` or `arm64`, and `aarch64`, which an agent built before `arm64` was the one spelling reports, read as `arm64` |
 //! | `cpu.features` (repeated) | the CPU's features; the ISA level follows from them |
 //! | `cpus`, `mem_gib`, `nvme_gib`, `gpu` (once each) | countable capacity |
 //! | `os`, `os_image`, `cpu.model`, `page_size`, `gpu.kind` (once each) | exact values |
@@ -21,7 +21,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cpu::{Arch, CpuCaps, UnknownArch};
+use js_types::{Arch, UnknownArch};
+
+use crate::cpu::CpuCaps;
 use crate::matching::{
     Consumable, IOS_DEVICE_KEY, NodeCaps, REPORT_ONLY_KEYS, is_exact_key, is_member_key,
     member_token,

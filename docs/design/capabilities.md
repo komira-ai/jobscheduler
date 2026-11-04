@@ -31,7 +31,7 @@ sender that lists `16` and `16.0` is read as listing it once.
 
 | Key | Kind | Reported as |
 |---|---|---|
-| `arch` | `text` | the CPU architecture as the merged agent reports it today (`aarch64`, `x86_64`; the merged `Platform`). A consumer that says `arm64` translates to `aarch64`; the scheduler does not alias |
+| `arch` | `text` | the CPU architecture in one spelling, `x86_64` or `arm64` (the merged `Platform`). An older agent reports `aarch64`; the scheduler reads `aarch64` as `arm64` in a request, an offer and a hello, so either spelling of a constraint matches either report |
 | `os` | `text` | `macos`, `linux` (the merged `Platform`) |
 | `os_version` | `version` | the product version where it parses to the grammar (macOS: the product version); absent otherwise |
 | `xcode` | `set_version` | the versions of the Xcode applications installed |
@@ -167,14 +167,14 @@ Worked example: an iOS test that needs Xcode 16.x and an iOS 18 simulator runtim
 | kbf property | Constraint |
 |---|---|
 | `OSFamily=darwin` | `{scope:host, key:os, op:eq, value:"macos"}` (the guest is macOS, so the host is too), and `{scope:guest, key:os, op:eq, value:"macos"}`, so the image is macOS and `min-os` below is meaningful |
-| `Arch=arm64` | `{scope:host, key:arch, op:eq, value:"aarch64"}`, and the same on the guest |
+| `Arch=arm64` | `{scope:host, key:arch, op:eq, value:"arm64"}`, and the same on the guest |
 | `sandbox=vm` | `{scope:host, key:vms, op:ge, value:1}` |
 | `min-os=15.0` | `{scope:guest, key:os_version, op:ge, value:"15.0"}` |
 | `xcode=16.x` | `{scope:guest, key:xcode, op:has_series, value:"16"}` |
 | `sim-runtime=ios-18` | `{scope:guest, key:sim.ios, op:has_series, value:"18"}` |
 
-A host with `os=macos, arch=aarch64, vms=2, base_images={mac15-x16-a, mac14-x15-a}` where `mac15-x16-a` has
-`os=macos, os_version=15.2, xcode={16.0,16.2}, sim.ios={18.0,18.2}, arch=aarch64` meets every constraint (guest `os`, `arch`, `os_version`, `xcode`, `sim.ios`); the eligible image set is `{mac15-x16-a}`,
+A host with `os=macos, arch=arm64, vms=2, base_images={mac15-x16-a, mac14-x15-a}` where `mac15-x16-a` has
+`os=macos, os_version=15.2, xcode={16.0,16.2}, sim.ios={18.0,18.2}, arch=arm64` meets every constraint (guest `os`, `arch`, `os_version`, `xcode`, `sim.ios`); the eligible image set is `{mac15-x16-a}`,
 the grant names it, and the `Start` of the VM job names it (5.14). A host holding only `mac14-x15-a` (`os=macos, os_version=14.6, xcode={15.4}`) is
 skipped: no image meets all the guest constraints, though each constraint alone is met by some image of some host. The same need run
 natively (a `host` job, off by default, 5.12) drops `sandbox=vm` and puts the three Xcode and OS constraints in `host` scope.

@@ -137,6 +137,7 @@ async fn a_launch_is_planned_for_the_head_of_the_wait_list_else_the_floor() {
         disk_bytes: None,
         os: None,
         arch: None,
+        isa_level: None,
         exec: None,
     };
     let mut rig = Rig::new("status_wanted").await;

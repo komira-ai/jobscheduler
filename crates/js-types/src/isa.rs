@@ -1,5 +1,11 @@
-//! Instruction-set levels: the x86-64 psABI microarchitecture levels and the Armv8
-//! architecture versions, each computed from a feature set in kernel names.
+//! The CPU vocabulary a request, an offer and a hello share: the architecture
+//! ([`Arch`], with [`normalise_arch`] for text that may name one this crate does not know)
+//! and the instruction-set level ([`IsaLevel`]): the x86-64 psABI microarchitecture
+//! levels and the Armv8 architecture versions, each computed from a feature set in
+//! kernel names.
+//!
+//! `arm64` is the one spelling of 64-bit Arm. `aarch64`, the name Rust and Linux give it,
+//! is accepted wherever an architecture is parsed and becomes `arm64`.
 //!
 //! Levels are ordered within a family and cumulative: a node at `x86-64-v4` also
 //! supports v1 to v3. The two families are never compared with each other.
@@ -8,12 +14,74 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
+/// The canonical name of 64-bit Arm.
+const ARM64: &str = "arm64";
+/// The name of 64-bit Arm that Rust (`std::env::consts::ARCH`) and Linux use, accepted as
+/// an alias of [`ARM64`].
+const AARCH64: &str = "aarch64";
+
+/// `arch` in the one spelling: `aarch64` becomes `arm64`, and every other text, a name
+/// this crate does not know and the empty text included, is returned as it is, so a host
+/// that reports an architecture no release knows is not turned into another one.
+#[must_use]
+pub fn normalise_arch(arch: &str) -> &str {
+    if arch == AARCH64 { ARM64 } else { arch }
+}
+
+/// A CPU architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Arch {
+    /// 64-bit x86: `x86_64`.
+    X86_64,
+    /// 64-bit Arm: `arm64` (`aarch64` is read as it).
+    Arm64,
+}
+
+impl Arch {
+    /// The canonical name: `x86_64` or `arm64`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Arm64 => ARM64,
+        }
+    }
+}
+
+impl fmt::Display for Arch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A string that names no architecture this crate knows.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown architecture {0:?}")]
+pub struct UnknownArch(pub String);
+
+impl FromStr for Arch {
+    type Err = UnknownArch;
+
+    /// `x86_64`, `arm64`, or the alias `aarch64` (read as `arm64`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match normalise_arch(s) {
+            "x86_64" => Ok(Self::X86_64),
+            ARM64 => Ok(Self::Arm64),
+            _ => Err(UnknownArch(s.to_owned())),
+        }
+    }
+}
+
 /// An x86-64 microarchitecture level, as defined by the x86-64 psABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum X86Level {
+    /// `x86-64-v1`: the baseline (CMOV, CX8, SSE2, ...).
     V1,
+    /// `x86-64-v2`: adds SSE3 to SSE4.2, POPCNT and CX16.
     V2,
+    /// `x86-64-v3`: adds AVX, AVX2, BMI1, BMI2, FMA and MOVBE.
     V3,
+    /// `x86-64-v4`: adds AVX-512 F, BW, CD, DQ and VL.
     V4,
 }
 
@@ -70,10 +138,15 @@ impl X86Level {
 /// reported by name in the feature set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArmVersion {
+    /// `armv8.0-a`.
     V8_0,
+    /// `armv8.1-a`.
     V8_1,
+    /// `armv8.2-a`.
     V8_2,
+    /// `armv8.3-a`.
     V8_3,
+    /// `armv8.4-a`.
     V8_4,
 }
 
@@ -135,7 +208,9 @@ fn highest<L: Copy>(
 /// Use [`IsaLevel::satisfies`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IsaLevel {
+    /// An x86-64 psABI level.
     X86_64(X86Level),
+    /// An Armv8 version.
     Arm64(ArmVersion),
 }
 
@@ -167,6 +242,25 @@ impl IsaLevel {
                 .map(Self::Arm64)
                 .collect(),
         }
+    }
+
+    /// The highest level a capability value states: one level name, or several joined by
+    /// `,` (`x86-64-v1,x86-64-v2,x86-64-v3`, the [`Self::with_lower`] list), with spaces
+    /// around a name ignored. `None` when the text is empty, holds a name that is not a
+    /// level, or names levels of both families: such a value states no level.
+    #[must_use]
+    pub fn highest_listed(text: &str) -> Option<Self> {
+        let mut top: Option<Self> = None;
+        for name in text.split(',') {
+            let level: Self = name.trim().parse().ok()?;
+            top = match top {
+                None => Some(level),
+                Some(seen) if seen.satisfies(level) => Some(seen),
+                Some(seen) if level.satisfies(seen) => Some(level),
+                Some(_) => return None,
+            };
+        }
+        top
     }
 
     /// The name used in reports and requests.
@@ -263,5 +357,77 @@ mod tests {
         }
         assert!("x86-64-v5".parse::<IsaLevel>().is_err());
         assert!("armv8.5-a".parse::<IsaLevel>().is_err());
+    }
+
+    /// Asserts that `aarch64` becomes `arm64` and that every other text, a name no
+    /// release knows and the empty text included, is returned unchanged. Catches a
+    /// normalisation that maps an unknown architecture to a known one, or drops it.
+    #[test]
+    fn an_unknown_arch_still_passes_through_normalise() {
+        assert_eq!(normalise_arch("aarch64"), "arm64");
+        assert_eq!(normalise_arch("arm64"), "arm64");
+        assert_eq!(normalise_arch("x86_64"), "x86_64");
+        assert_eq!(normalise_arch("sparc"), "sparc");
+        assert_eq!(normalise_arch(""), "");
+        assert_eq!(normalise_arch("AARCH64"), "AARCH64");
+    }
+
+    /// Asserts that the architecture parses from `x86_64`, `arm64` and the alias
+    /// `aarch64`, always prints in the canonical spelling, and that any other text is
+    /// refused naming the text as sent. Catches a parser that refuses the alias (a hello
+    /// from an agent that reports `aarch64` would not seat) or prints it back.
+    #[test]
+    fn the_arch_parses_its_alias_and_prints_one_spelling() {
+        assert_eq!("x86_64".parse::<Arch>(), Ok(Arch::X86_64));
+        assert_eq!("arm64".parse::<Arch>(), Ok(Arch::Arm64));
+        assert_eq!("aarch64".parse::<Arch>(), Ok(Arch::Arm64));
+        assert_eq!(Arch::Arm64.to_string(), "arm64");
+        assert_eq!(Arch::X86_64.to_string(), "x86_64");
+        for bad in ["sparc", "", "ARM64", "amd64"] {
+            assert_eq!(bad.parse::<Arch>(), Err(UnknownArch(bad.to_owned())));
+        }
+        assert_eq!(
+            UnknownArch("sparc".into()).to_string(),
+            "unknown architecture \"sparc\""
+        );
+    }
+
+    /// Asserts that a stated level is the highest of a list of one family, in any order,
+    /// with spaces and with a level repeated, and that an empty or blank text, an empty
+    /// element anywhere in the list, an unknown name or a mix of families states none. Catches a list read as its first or last entry, and a mixed list
+    /// ranked on one scale.
+    #[test]
+    fn the_highest_listed_level_is_the_top_of_one_family() {
+        let v3 = Some(IsaLevel::X86_64(X86Level::V3));
+        assert_eq!(IsaLevel::highest_listed("x86-64-v3"), v3);
+        assert_eq!(
+            IsaLevel::highest_listed("x86-64-v1,x86-64-v2,x86-64-v3"),
+            v3
+        );
+        assert_eq!(IsaLevel::highest_listed("x86-64-v3, x86-64-v1"), v3);
+        assert_eq!(
+            IsaLevel::highest_listed("armv8.0-a,armv8.2-a"),
+            Some(IsaLevel::Arm64(ArmVersion::V8_2))
+        );
+        assert_eq!(IsaLevel::highest_listed("x86-64-v3,x86-64-v3"), v3);
+        assert_eq!(
+            IsaLevel::highest_listed("armv8.2-a,armv8.2-a,armv8.0-a"),
+            Some(IsaLevel::Arm64(ArmVersion::V8_2))
+        );
+        for none in [
+            "",
+            " ",
+            " , ",
+            ",",
+            ",x86-64-v3",
+            "x86-64-v1,,x86-64-v3",
+            "armv8.0-a, ,armv8.2-a",
+            "x86-64-v9",
+            "x86-64-v3,",
+            "x86-64-v3,armv8.4-a",
+            "armv8.4-a,x86-64-v1",
+        ] {
+            assert_eq!(IsaLevel::highest_listed(none), None, "{none:?}");
+        }
     }
 }

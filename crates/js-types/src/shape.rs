@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::{DISK_GIB_KEY, MemoryPercent, Resources};
+use crate::job::{ARCH_KEY, ISA_LEVEL_KEY};
+use crate::{DISK_GIB_KEY, IsaLevel, MemoryPercent, Resources, normalise_arch};
 
 /// Typed key/value facts a host reports, or a request needs (design section 3).
 pub type Capabilities = BTreeMap<String, String>;
@@ -41,9 +42,18 @@ impl Shape {
     }
 
     /// Whether the host offers at least `wanted` and reports every key in `required`
-    /// with the same value. The one key compared as a minimum is `disk-gib`: the host's
-    /// free GiB must be at least the amount required, and a host that reports no number
-    /// (or a required amount that is not one) does not satisfy it.
+    /// with the same value. Three keys have their own comparison:
+    ///
+    /// - `disk-gib` is a minimum: the host's free GiB must be at least the amount
+    ///   required, and a host that reports no number (or a required amount that is not
+    ///   one) does not satisfy it.
+    /// - `arch` is equal in the one spelling ([`normalise_arch`]), so a host that reports
+    ///   `aarch64` serves `arch=arm64` and the reverse.
+    /// - `isa_level` is at least, within the family ([`IsaLevel::satisfies`]), when both
+    ///   values state a level ([`IsaLevel::highest_listed`]: one level, or the list of it
+    ///   and those below, as a pool's shape may name it); otherwise the two texts must be
+    ///   equal, as before levels were compared, so every pairing that satisfied before
+    ///   still does. A host that states no level satisfies no level.
     pub fn satisfies(&self, wanted: &Resources, required: &Capabilities) -> bool {
         let caps_ok = required.iter().all(|(key, value)| {
             let have = self.capabilities.get(key);
@@ -52,6 +62,14 @@ impl Shape {
                     .and_then(|have| have.parse::<u64>().ok())
                     .zip(value.parse::<u64>().ok())
                     .is_some_and(|(have, want)| want <= have),
+                ARCH_KEY => have.is_some_and(|have| normalise_arch(have) == normalise_arch(value)),
+                ISA_LEVEL_KEY => {
+                    let listed = have.map(String::as_str).and_then(IsaLevel::highest_listed);
+                    match listed.zip(IsaLevel::highest_listed(value)) {
+                        Some((have, want)) => have.satisfies(want),
+                        None => have == Some(value),
+                    }
+                }
                 _ => have == Some(value),
             }
         });
@@ -108,6 +126,88 @@ mod tests {
         assert!(!shape(&[]).satisfies(&none, &caps(&[("disk-gib", "1")])));
         assert!(!shape(&[("disk-gib", "lots")]).satisfies(&none, &caps(&[("disk-gib", "1")])));
         assert!(!host.satisfies(&none, &caps(&[("disk-gib", "lots")])));
+    }
+
+    /// Asserts that `arch` is compared in the one spelling, so a host that reports
+    /// `aarch64` (an agent built before `arm64` was canonical) serves `arch=arm64` and a
+    /// host that reports `arm64` serves `arch=aarch64`, that another architecture still
+    /// does not, and that a host that reports none serves no `arch`. Catches the plain
+    /// text equality that keeps an old agent's host from every `arm64` request.
+    #[test]
+    fn arch_is_equal_in_the_one_spelling() {
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        let host = |arch: &str| {
+            Shape::new(
+                Resources::new(8000, 100, 0, None).unwrap(),
+                caps(&[("arch", arch)]),
+            )
+        };
+        let want = |arch: &str| caps(&[("arch", arch)]);
+        assert!(host("aarch64").satisfies(&none, &want("arm64")));
+        assert!(host("arm64").satisfies(&none, &want("aarch64")));
+        assert!(host("arm64").satisfies(&none, &want("arm64")));
+        assert!(!host("aarch64").satisfies(&none, &want("x86_64")));
+        assert!(!host("x86_64").satisfies(&none, &want("arm64")));
+        assert!(host("sparc").satisfies(&none, &want("sparc")));
+        let bare = Shape::new(Resources::new(8000, 100, 0, None).unwrap(), caps(&[]));
+        assert!(!bare.satisfies(&none, &want("arm64")));
+    }
+
+    /// Asserts that `isa_level` is at least, within the family: a host at v4, or listing
+    /// v1 to v3, serves a v3 request, a host at v2 does not, an Arm host serves no x86-64
+    /// level, and a host that states no level, or a level no release knows, serves no
+    /// `isa_level` request. Catches the plain text equality that turns a v4 host away
+    /// from a v3 job.
+    #[test]
+    fn isa_level_is_at_least_within_the_family() {
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        let host = |level: &str| {
+            Shape::new(
+                Resources::new(8000, 100, 0, None).unwrap(),
+                caps(&[("isa_level", level)]),
+            )
+        };
+        let v3 = caps(&[("isa_level", "x86-64-v3")]);
+        assert!(host("x86-64-v3").satisfies(&none, &v3));
+        assert!(host("x86-64-v4").satisfies(&none, &v3));
+        assert!(host("x86-64-v1,x86-64-v2,x86-64-v3").satisfies(&none, &v3));
+        assert!(!host("x86-64-v2").satisfies(&none, &v3));
+        assert!(!host("armv8.4-a").satisfies(&none, &v3));
+        assert!(!host("fast").satisfies(&none, &v3));
+        let a82 = caps(&[("isa_level", "armv8.2-a")]);
+        assert!(host("armv8.4-a").satisfies(&none, &a82));
+        assert!(!host("armv8.0-a").satisfies(&none, &a82));
+        assert!(!host("x86-64-v4").satisfies(&none, &a82));
+        let bare = Shape::new(Resources::new(8000, 100, 0, None).unwrap(), caps(&[]));
+        assert!(!bare.satisfies(&none, &v3));
+        assert!(!host("x86-64-v4").satisfies(&none, &caps(&[("isa_level", "fast")])));
+    }
+
+    /// Asserts that every `isa_level` pairing that satisfied before levels were compared
+    /// still does: a pool floor that names the list `x86-64-v1,x86-64-v2` is met by a host
+    /// reporting that same list, or a higher level, and not by one reporting only v1; and
+    /// two equal texts that are not levels still satisfy each other, while unequal ones do
+    /// not. Catches a floor written as a list that no host can meet any more, which would
+    /// refuse every hello of a pool whose configuration was accepted before.
+    #[test]
+    fn a_floor_that_lists_levels_is_met_as_before() {
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        let host = |level: &str| {
+            Shape::new(
+                Resources::new(8000, 100, 0, None).unwrap(),
+                caps(&[("isa_level", level)]),
+            )
+        };
+        let floor = caps(&[("isa_level", "x86-64-v1,x86-64-v2")]);
+        assert!(host("x86-64-v1,x86-64-v2").satisfies(&none, &floor));
+        assert!(host("x86-64-v3").satisfies(&none, &floor));
+        assert!(!host("x86-64-v1").satisfies(&none, &floor));
+        assert!(!host("armv8.4-a").satisfies(&none, &floor));
+        let fast = caps(&[("isa_level", "fast")]);
+        assert!(host("fast").satisfies(&none, &fast));
+        assert!(!host("slow").satisfies(&none, &fast));
+        let mixed = "x86-64-v3,armv8.4-a";
+        assert!(host(mixed).satisfies(&none, &caps(&[("isa_level", mixed)])));
     }
 
     /// Asserts that cutting a shape's memory changes only the memory: cpu, gpus, the gpu

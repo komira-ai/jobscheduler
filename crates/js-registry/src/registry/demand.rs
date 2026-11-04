@@ -15,8 +15,8 @@ use super::{Registry, State};
 pub struct Waiting {
     /// The request id.
     pub id: RequestId,
-    /// What the request needs of a host: its resources, and `os` and `arch` from the
-    /// capabilities it requires.
+    /// What the request needs of a host: its resources, and `os`, `arch` (in the one
+    /// spelling), `isa_level`, `disk-gib` and `exec` from the capabilities it requires.
     pub demand: Demand,
     /// When the request was first presented; how long it has waited counts from here.
     pub since: Timestamp,

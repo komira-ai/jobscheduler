@@ -42,6 +42,7 @@ pub fn offer(id: &str, price: u64) -> Offer {
         gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
+        isa_level: None,
         exec: ExecMode::Container,
         price_cents_per_hour: Some(price),
         price_unit: PriceUnit::UsCents,
@@ -56,6 +57,7 @@ pub fn demand() -> Demand {
         disk_bytes: Some(100 << 30),
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
+        isa_level: None,
         exec: Some(ExecMode::Container),
     }
 }
