@@ -21,11 +21,14 @@ pub struct NetworkRefusal {
 ///
 /// 1. a level above the ceiling's is [`refusal::NETWORK_ABOVE_CEILING`] (`network allow-list
 ///    asked, agent ceiling is none`);
-/// 2. a declared host port the ceiling does not list is [`refusal::PORT_ABOVE_CEILING`];
-/// 3. any declared port is [`refusal::PORTS_NOT_SUPPORTED`]: the agent does not forward
-///    declared ports yet.
+/// 2. any declared port, on an agent that forwards none (its ceiling is `none`, or lists no
+///    host port), is [`refusal::PORTS_NOT_SUPPORTED`];
+/// 3. a declared host port the ceiling does not list is [`refusal::PORT_ABOVE_CEILING`];
+/// 4. any declared port of a `none` job is [`refusal::PORTS_NOT_SUPPORTED`]: a forward needs
+///    the wired namespace a `none` job does not get.
 ///
-/// A job at or under the ceiling, with no port, is admitted at the level it asked for.
+/// A job at or under the ceiling is admitted at the level it asked for, with its ports: the
+/// runtime forwards each from the host's port to the job.
 ///
 /// # Errors
 ///
@@ -40,24 +43,34 @@ pub fn admit(ceiling: &NetworkCeiling, spec: &JobSpec) -> Result<JobNetwork, Net
             ),
         });
     }
-    if let Some(port) = spec.ports.iter().find(|port| !ceiling.forwards(port.host)) {
-        let listed = match ceiling.ports.is_empty() {
-            true => "no port".to_owned(),
-            false => ceiling.ports_text(),
-        };
-        return Err(NetworkRefusal {
-            code: refusal::PORT_ABOVE_CEILING,
-            detail: format!(
-                "host port {} asked, agent ceiling forwards {listed}",
-                port.host
-            ),
-        });
+    if spec.ports.is_empty() {
+        return Ok(spec.network);
     }
-    if !spec.ports.is_empty() {
+    if ceiling.level.is_none() || ceiling.ports.is_empty() {
         return Err(NetworkRefusal {
             code: refusal::PORTS_NOT_SUPPORTED,
             detail: format!(
-                "{} declared port(s) asked, and this agent forwards no declared port yet",
+                "{} declared port(s) asked, and this agent forwards no declared port",
+                spec.ports.len()
+            ),
+        });
+    }
+    if let Some(port) = spec.ports.iter().find(|port| !ceiling.forwards(port.host)) {
+        return Err(NetworkRefusal {
+            code: refusal::PORT_ABOVE_CEILING,
+            detail: format!(
+                "host port {} asked, agent ceiling forwards {}",
+                port.host,
+                ceiling.ports_text()
+            ),
+        });
+    }
+    if spec.network.is_none() {
+        return Err(NetworkRefusal {
+            code: refusal::PORTS_NOT_SUPPORTED,
+            detail: format!(
+                "{} declared port(s) asked for a job with network none, which has no address \
+                 to forward to",
                 spec.ports.len()
             ),
         });
@@ -142,12 +155,15 @@ mod tests {
         }
     }
 
-    /// Catches ports that are run without a forward, and a port the agent does not list that
-    /// is reported as merely unsupported: a level above the ceiling is refused before its
-    /// ports are looked at; an unlisted host port is `port-above-ceiling` naming the port and
-    /// what is listed (`no port` when nothing is); a listed one is `ports-not-supported`.
+    /// Catches a job with ports admitted where nothing forwards them, and a port the agent
+    /// does not list that is reported as merely unsupported, or admitted: a level above the
+    /// ceiling is refused before its ports are looked at; on an agent that forwards no port
+    /// (the ceiling `none` even with a port listed, or a wired ceiling that lists none) any
+    /// port is `ports-not-supported`; an unlisted host port is `port-above-ceiling` naming
+    /// the port and what is listed; a `none` job with listed ports is `ports-not-supported`
+    /// (nothing wires its namespace); a wired job with listed ports is admitted at its level.
     #[test]
-    fn ports_are_refused_above_the_ceiling_first_and_then_as_not_forwarded() {
+    fn ports_are_admitted_only_where_they_are_listed_and_forwarded() {
         let none = admit(
             &ceiling(JobNetwork::None, &[]),
             &spec(JobNetwork::Open, &[80]),
@@ -165,20 +181,39 @@ mod tests {
         );
         let bare = admit(
             &ceiling(JobNetwork::Open, &[]),
-            &spec(JobNetwork::None, &[22]),
+            &spec(JobNetwork::Open, &[22]),
         );
         let bare = bare.expect_err("22");
-        assert_eq!(bare.code, refusal::PORT_ABOVE_CEILING);
+        assert_eq!(bare.code, refusal::PORTS_NOT_SUPPORTED);
         assert_eq!(
             bare.detail,
-            "host port 22 asked, agent ceiling forwards no port"
+            "1 declared port(s) asked, and this agent forwards no declared port"
         );
-        let within = admit(&listed, &spec(JobNetwork::AllowList, &[80, 8010])).expect_err("ports");
-        assert_eq!(within.code, refusal::PORTS_NOT_SUPPORTED);
-        assert!(
-            within.detail.starts_with("2 declared port(s)"),
-            "{}",
-            within.detail
+        let unwired = admit(
+            &ceiling(JobNetwork::None, &["22"]),
+            &spec(JobNetwork::None, &[22, 23]),
         );
+        let unwired = unwired.expect_err("none");
+        assert_eq!(unwired.code, refusal::PORTS_NOT_SUPPORTED);
+        assert_eq!(
+            unwired.detail,
+            "2 declared port(s) asked, and this agent forwards no declared port"
+        );
+        let quiet = admit(&listed, &spec(JobNetwork::None, &[80])).expect_err("none job");
+        assert_eq!(quiet.code, refusal::PORTS_NOT_SUPPORTED);
+        assert_eq!(
+            quiet.detail,
+            "1 declared port(s) asked for a job with network none, which has no address to \
+             forward to"
+        );
+        for level in [JobNetwork::AllowList, JobNetwork::Open] {
+            let within = admit(&listed, &spec(level, &[80, 8010]));
+            assert_eq!(within, Ok(level), "{level}");
+        }
+        let without = admit(
+            &ceiling(JobNetwork::None, &[]),
+            &spec(JobNetwork::None, &[]),
+        );
+        assert_eq!(without, Ok(JobNetwork::None));
     }
 }

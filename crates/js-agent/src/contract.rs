@@ -20,8 +20,9 @@
 //!   that reports `scratch-quota`.
 //! - `egress` is the ceiling of a container agent's jobs (`--egress`: `none`, `allow-list` or
 //!   `open`; always `none` for Docker and Podman, which refuse the other two), as
-//!   [`js_agent_wire::NetworkCeiling`] writes it. `egress-ports` (the host ports a job may
-//!   declare) is not reported until declared ports are forwarded. A server places a job that
+//!   [`js_agent_wire::NetworkCeiling`] writes it. `egress-ports` is the host ports a job may
+//!   declare and the agent forwards (`--egress-forward-port`), reported only under a wired
+//!   ceiling that lists some (forwarding needs one). A server places a job that
 //!   asks for more than `none` only on a host whose `egress` covers it; an agent from before
 //!   the key reports none, which reads as `none`.
 //! - `gpu-passthrough` is `true` for a `--runtime crun` agent given `--gpu-device`, whose
@@ -216,7 +217,7 @@ mod tests {
             &Failing,
             false,
             None,
-            (false, &config.advertised()),
+            (false, &config.ceiling()),
         );
         assert_eq!(
             warnings,
@@ -228,13 +229,15 @@ mod tests {
         hello
     }
 
-    /// Catches a container agent that does not say its ceiling, says it under another key, or
-    /// claims ports it does not forward: built from `--egress none` (the default) the hello
-    /// carries `egress=none`, from `--egress open` with forward ports `egress=open` and no
-    /// `egress-ports`, the wire's reader reads each back as written, and both hellos are
-    /// valid. The agent still holds a job to the ports it was given.
+    /// Catches a container agent that does not say its ceiling, says it under another key,
+    /// claims ports where nothing forwards them, or hides the ports it forwards: built from
+    /// `--egress none` (the default) the hello carries `egress=none` and no `egress-ports`;
+    /// from `--egress open` with forward ports `80` and `8000-8010` it carries `egress=open`
+    /// and `egress-ports=80,8000-8010`; from `--egress allow-list` with `--egress-forward-port
+    /// 8080` `egress-ports=8080`; from `--egress open` with no forward port no `egress-ports`.
+    /// The wire's reader reads each back as the agent's ceiling, and every hello is valid.
     #[test]
-    fn the_ceiling_is_advertised_in_hello() {
+    fn egress_ports_is_advertised_only_when_forwarding_is_possible() {
         let none = reported(&Config::none());
         assert_eq!(none.capabilities["egress"], "none");
         assert!(!none.capabilities.contains_key("egress-ports"));
@@ -248,28 +251,44 @@ mod tests {
         {
             use crate::egress::Flags;
             use js_types::JobNetwork;
-            let ports = ["80".to_owned(), "8000-8010".to_owned()];
             let program = crate::egress::stand_in::StandIn::new("contract-ceiling");
             let program = program.path();
-            let config = Config::from_flags(&Flags {
-                mode: Some("open"),
-                forward_ports: &ports,
-                ip: Some(&program),
-                nft: Some(&program),
-                nsenter: Some(&program),
-                ..Flags::default()
-            })
-            .expect("open");
-            let open = reported(&config);
-            assert_eq!(open.capabilities["egress"], "open");
-            assert!(
-                !open.capabilities.contains_key("egress-ports"),
-                "ports are not forwarded yet"
-            );
-            let read = NetworkCeiling::from_capabilities(&open.capabilities);
-            assert_eq!(read.map(|ceiling| ceiling.level), Ok(JobNetwork::Open));
-            assert_eq!(open.validate(), Ok(()));
-            assert_eq!(config.ceiling().ports_text(), "80,8000-8010");
+            let allow = ["192.0.2.10:443".to_owned()];
+            let config = |mode: &'static str, ports: &[String]| {
+                Config::from_flags(&Flags {
+                    mode: Some(mode),
+                    allow: &allow,
+                    forward_ports: ports,
+                    ip: Some(&program),
+                    nft: Some(&program),
+                    nsenter: Some(&program),
+                    ..Flags::default()
+                })
+                .expect("a sound configuration")
+            };
+            let cases = [
+                (
+                    "open",
+                    vec!["80".to_owned(), "8000-8010".to_owned()],
+                    Some("80,8000-8010"),
+                ),
+                ("allow-list", vec!["8080".to_owned()], Some("8080")),
+                ("open", Vec::new(), None),
+            ];
+            for (mode, ports, advertised) in cases {
+                let config = config(mode, &ports);
+                let hello = reported(&config);
+                assert_eq!(hello.capabilities["egress"], mode);
+                assert_eq!(
+                    hello.capabilities.get("egress-ports").map(String::as_str),
+                    advertised,
+                    "{mode} {ports:?}"
+                );
+                let read = NetworkCeiling::from_capabilities(&hello.capabilities);
+                assert_eq!(read, Ok(config.ceiling()), "{mode} {ports:?}");
+                assert_eq!(hello.validate(), Ok(()));
+            }
+            assert_eq!(config("open", &[]).ceiling().level, JobNetwork::Open);
         }
     }
 }

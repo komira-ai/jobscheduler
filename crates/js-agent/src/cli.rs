@@ -435,8 +435,9 @@ pub struct Cli {
     pub egress_dns: Vec<String>,
     /// A host port a job may declare (`ports`), `PORT` or `LO-HI`, each from 1 to 65535;
     /// repeatable, at most 16. A job that declares a port not listed is refused
-    /// `port-above-ceiling`. Declared ports are not forwarded yet, so a job that declares one
-    /// is refused `ports-not-supported`, and the hello does not report them. Needs
+    /// `port-above-ceiling`. Each declared port of an admitted `allow-list` or `open` job is
+    /// forwarded from the host's port to the job's (a `none` job that declares one is refused
+    /// `ports-not-supported`), and the hello reports them as `egress-ports`. Needs
     /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PORT|LO-HI")]
     pub egress_forward_port: Vec<String>,

@@ -278,9 +278,11 @@ pub struct JobSpec {
     #[serde(default, skip_serializing_if = "JobNetwork::is_none")]
     pub network: JobNetwork,
     /// The ports the job declares ([`PortMap`]): at most [`limits::MAX_PORTS`], each port
-    /// above zero, no host port twice. Left out when there are none. An agent refuses a host
-    /// port it does not list (`port-above-ceiling`), and until it forwards declared ports it
-    /// refuses a start that declares any (`ports-not-supported`). A native job declares none.
+    /// above zero, no host port twice. Left out when there are none. An agent that forwards
+    /// declared ports refuses a host port it does not list (`port-above-ceiling`) and forwards
+    /// each other one from the host's port to the job; an agent that forwards none, and any
+    /// agent for a job whose `network` is `none`, refuses a start that declares any
+    /// (`ports-not-supported`). A native job declares none.
     ///
     /// An agent that predates the field ignores it, so a server sends a start with ports only
     /// to a host whose hello lists them ([`crate::NetworkCeiling`]).
