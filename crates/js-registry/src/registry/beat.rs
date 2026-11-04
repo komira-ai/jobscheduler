@@ -9,7 +9,7 @@ use std::sync::PoisonError;
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, Outcome, Taint};
 use js_lease::Timestamp;
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_types::{HostId, LeaseId};
 
 use crate::config::PoolConfig;
