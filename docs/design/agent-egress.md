@@ -33,8 +33,11 @@ outside, while the container's init holds the job:
    comparing device and inode), moves the job end into it and enters it, both by
    `/proc/<agent pid>/fd/<n>`, never by the container's pid again. It enters it with `nsenter` and, in one `ip -batch`, raises `lo`, gives
    `eth0` no IPv6 link-local address, addresses and raises it, and adds the default route last.
-3. When the run ends the agent calls `release`: the set member and the host end go; the
-   namespace is the kernel's to free with the container's last process.
+3. For a job that declares ports, after the default route, `attach` adds the forwards
+   (below, "Declared ports"): a host port another run forwards is refused
+   (`EgressError::PortTaken`) and the whole attach undone.
+4. When the run ends the agent calls `release`: the forwards' rules, the set member and the
+   host end go; the namespace is the kernel's to free with the container's last process.
 
 The privileged part is `egress::host` in the agent process: root, in the host's initial
 network namespace, running only the `ip`, `nft` and `nsenter` programs the operator configured. It is never
@@ -57,31 +60,101 @@ distribution's rules) that accepts replies to a job, refuses new traffic to a jo
 from a job, refuses a source address that does not route back through the interface it came
 in on (`fib saddr . iif oif missing`: a job sends from its own address and no other), refuses
 `169.254.0.0/16`, accepts the configured resolvers (port 53, UDP and TCP) and
-endpoints (TCP) for an interface in the set `jobifs`, and refuses everything else from `jsv*`;
-its `input` chain refuses everything a job sends to the host itself. `ip js_crun_egress_nat`
-masquerades the pool toward anything outside it. Every rule counts and has a comment, so the
-tests can read that a refusal was the rule's doing. `Egress::check` (called before every create)
-reads both tables back and compares them, rule for rule, with what start loaded (counters,
-handles and the set's members are not compared), and checks that IPv4 forwarding is on.
+endpoints (TCP) for an interface in the set `jobifs`, under the ceiling `open` accepts IPv4 to
+any address for an interface in the set `openifs` (one rule, after every refusal and the
+allow-list's acceptances), and refuses everything else from `jsv*`; its `input` chain refuses
+everything a job sends to the host itself. After the metadata refusal one rule,
+`forward-reply` (`ct direction reply ct status dnat`), accepts what a job sends back on a
+connection that reached it through a forward; no connection a job opens is DNATed, so it
+accepts nothing a job starts. An `open` job is therefore still refused the metadata
+range, IPv6, a spoofed source, another job's address (the `inbound` rule) and the host. Under
+the ceiling `allow-list` the text has no `openifs` and no `open` rule, and is what it was before
+`open` existed. `ip js_crun_egress_nat` has an empty `prerouting` chain (a NAT hook at
+`dstnat`) for the forwards, and masquerades the pool toward anything outside it. Every rule
+counts and has a comment, so the tests can read that a refusal was the rule's doing.
+`Egress::check` (called before every create) checks that IPv4 forwarding is on, reads both
+tables back, sets apart the forwards' rules (comment `fwd-...`), and compares the rest, rule for
+rule, with what start loaded (counters, handles and the members of both sets are not compared),
+and the forwards' rules with the forwards of the runs wired now (below).
+
+### Declared ports
+
+New traffic toward a job is refused (`inbound`), and a declared port is the only exception
+(design 5.8). Each port `{host, container}` of a wired (`allow-list` or `open`) job becomes two
+rules, both commented `fwd-<host>`; the prefix `fwd-` is reserved for them
+(`egress/forward.rs`):
+
+- in `prerouting` of `ip js_crun_egress_nat`: `iifname != "jsv*" fib daddr type local tcp
+  dport <host> counter dnat to <job address>:<container>`. `fib daddr type local` leaves alone
+  a packet the host merely routes, and `iifname != "jsv*"` a packet of a job: a job that
+  connects to the host's address on a forwarded port meets the `input` refusal, so no job
+  reaches another job (or itself) through a forward;
+- at the head of `forward` of `inet js_crun_egress` (`insert rule`, so before `inbound`):
+  `oifname "<jsvN>" ip daddr <job address> tcp dport <container> ct status dnat counter
+  accept`. It names the one interface, address and port, and needs the packet to have been
+  DNATed, so traffic aimed straight at the job's address, at another of its ports or at
+  another job still meets `inbound`.
+
+`attach` adds them after the default route, all of a job's forwards in one `nft -f`
+transaction, reads both tables back and requires them to hold exactly the forwards it built;
+otherwise the attach fails (`EgressError::Rules`) and is undone. It refuses a host port another
+run of the agent forwards (`EgressError::PortTaken`) before loading anything; placement treating
+a host port as a resource of the allocation is not built yet. `release` lists each table,
+deletes the run's rules by handle and frees their ports; a rule already gone is forgiven as a
+gone veth is, and a release that leaves a rule keeps the run's address block out of use. A
+start removes both tables, so a restarted agent holds no forward. `Egress::check` requires every
+forward of a run wired now to be there, whole (its two rules, each exactly as written), its
+acceptance ahead of the other rules of `forward`, and no other rule under the prefix: a forward
+missing, left over from no run, changed or twice is `EgressError::Rules`, and the start is
+refused `egress-unchecked`.
+
+TCP only: a declared port carries no protocol. IPv4 only. Reaching a forward from the host's own
+loopback, or from another job on the same host, is not promised: a packet the host itself sends
+does not pass `prerouting`, and a job's packet to the host is refused by `input`.
 
 ## Configuration
 
-One mode, flags only: `--egress none` (the default) or `allow-list` with `--egress-allow`,
-`--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none does nothing: it runs
-no program and writes no file; the container's namespace has loopback only. An allow-list start
+The agent's flags are a ceiling, and each job asks for a level at or under it (design 5.8): a
+start's `network` is `none` (the default), `allow-list` or `open`, and it may declare `ports`.
+Flags only: `--egress none` (the default), `allow-list` or `open`, with `--egress-allow`,
+`--egress-dns`, `--egress-forward-port`, `--egress-pool`, `--egress-ip`, `--egress-nft`,
+`--egress-nsenter`. `allow-list` needs at least one `--egress-allow`; `open` needs no other flag
+(an `allow-list` job under it gets the list, and with no `--egress-allow` reaches only the
+resolvers); every other flag needs `allow-list` or `open`, and each refusal names its flag.
+`--egress-forward-port` (`PORT` or `LO-HI`, at most 16) lists the host ports a job may declare.
+
+Admission compares a start with the ceiling before anything is made (`egress::admit`, which the
+lifecycle calls with the runtime's `network_ceiling` after the mounts and before
+`Egress::check`): a level above it is refused `network-above-ceiling` (the text names the level
+and the ceiling), any declared port on an agent that forwards none (the ceiling `none`, or no
+`--egress-forward-port`) `ports-not-supported`, a declared host port the flags do not list
+`port-above-ceiling`, and a declared port of a `none` job `ports-not-supported` (a forward
+needs a wired namespace). A job is never run with less than it asked for. A Docker or Podman run
+has the ceiling `none`. The hello reports the ceiling as the capability `egress` (`none`,
+`allow-list` or `open`; `NetworkCeiling` in `js-agent-wire` writes and reads it), and
+`egress-ports`, the host ports the agent forwards (`--egress-forward-port`, under `allow-list`
+or `open` only). An agent from before the keys reports neither, which
+reads as `none`, and ignores a start's `network` and `ports`, so a server places a job that asks
+for more only on a host whose `egress` covers it.
+
+Mode none does nothing: it runs no program and writes no file; every container's namespace has
+loopback only. Under `allow-list` or `open` a `none` job is not wired either: its bundle has the
+loopback `resolv.conf` and no route wait (`Oci::create_loopback`), and its namespace keeps `lo`
+alone. A start under `allow-list` or `open`
 first binds the abstract socket `@js-agent-egress` (`egress::HOST_LOCK`) and holds it while the
 agent's egress or any run it wired lives; the kernel frees it when the process ends, however it ends. The names it
-makes and removes are the host's, not an agent's, so a second agent with an allow-list is refused
-at start (`EgressError::Held`) instead of sweeping the first one's live wiring. Then it
+makes and removes are the host's, not an agent's, so a second agent with a wired ceiling is
+refused at start (`EgressError::Held`) instead of sweeping the first one's live wiring. Then it
 removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both tables a previous
 process left (the keeper kills the containers with the agent), loads the firewall and switches
 IPv4 forwarding on. That switch is host-wide and is never switched back: other users of the host
 may rely on it by then, and the agent cannot know. The tables are named `js_crun_egress` and
-`js_crun_egress_nat`, apart from the Podman path's `js_egress`, which stays as it was. The kernel's
+`js_crun_egress_nat`; the Podman path's table `js_egress` and its flags were removed. The kernel's
 own reverse-path filter is not relied on; the firewall's `spoof` rule is, because it counts.
 
-DNS: a configured allow-list names its resolvers; the backend writes a `resolv.conf` with those and
-no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those addresses only.
+DNS: a configured ceiling names its resolvers; the backend writes a `resolv.conf` with those and
+no other (`OciConfig::resolv_conf`) for a wired job, and the firewall accepts port 53 to those
+addresses only for an `allow-list` job (an `open` job reaches them through its own rule).
 
 ## What is and is not wired
 
@@ -90,22 +163,29 @@ no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those a
   (`crates/js-agent/src/crun/net.rs`) calls them in this order: `Egress::check` before every
   create (the lifecycle's `check_egress`; a failure is `egress-unchecked` and creates nothing),
   the create, `Oci::start`, `Oci::container_pid` (asked again until `crun` names the pid, until
-  `crun run` ends, or for the init's route wait at most), `Egress::attach`, and
+  `crun run` ends, or for the init's route wait at most), `Egress::attach` with the job's level
+  (its interface goes in `jobifs` for `allow-list`, `openifs` for `open`), and
   `Attachment::release` when the runtime reads the run's end or removes the run, whichever
   comes first. A container whose pid or wiring fails is removed with its lease, and its job never
   ran (the init still waits for the route). A release that fails is logged and the removal goes
-  on. With an allow-list the backend writes the configured resolvers in every container's
-  `resolv.conf` and starts the init with `--wait-route`; mode none changes neither.
+  on, and its /30 block is not given out again until the next start sweeps the host: the sets
+  hold interface names, so a member left in `openifs` would otherwise let the next run that
+  took the name (an `allow-list` one, say) reach any address. A wired run on a runtime with no
+  egress is refused at `stage`, before its container exists. For a wired job (`allow-list` or `open`) the backend writes the configured resolvers in
+  the container's `resolv.conf` and starts the init with `--wait-route`; a `none` job, and every
+  job in mode none, gets neither and is not attached.
 - The flags are parsed and checked at start. The agent starts the egress once, after it holds
   the claims of its scratch root and host id (the start removes what an earlier agent left);
   an allow-list that cannot be set up ends the agent with status 2. The start-up sweep of the
   leases an earlier process left needs no call of its own: no `Attachment` of that process
-  exists, and the egress start has already removed its interfaces and tables. There is no job
-  field yet: the agent's `--egress` applies to every `crun` job it runs. Only `--runtime crun`
-  enforces an allow-list, so another runtime is refused one at start, and `--container-network`
-  is refused beside it. The old Podman flags (`--container-network`, `--container-egress-allow`, `--container-nft`), their
-  check and `deploy/js-agent/egress-network.sh` stay as the Podman runtime's own until that runtime
-  is removed; deleting them now would take egress away from the runtime nodes run today.
+  exists, and the egress start has already removed its interfaces and tables. Only
+  `--runtime crun` enforces a ceiling, so another runtime is refused `allow-list` and `open` at
+  start (its jobs get `none` only). Declared ports are forwarded through the DNAT rules of
+  "Declared ports". The old Podman flags (`--container-network`, `--container-egress-allow`,
+  `--container-nft`), their check and the operator script that set up the Podman network were
+  removed: a job on the container-engine fallback (Docker or Podman, `--container-bin`) gets
+  network none, and an agent started with one of those flags is refused at start with a message
+  that names the replacement.
 - The hosts must not drop forwarded packets in another chain: Docker's forward policy does. The CI
   job stops Docker; a node with Docker's firewall needs its own allowance. The farm's kernel and
   AppArmor policy are not exercised in CI.

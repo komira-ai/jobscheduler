@@ -9,8 +9,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::logs::log_args;
-use super::{DEFAULT_NETWORK, Engine, Settings};
+use super::{Engine, Settings};
 use crate::lifecycle::RunSpec;
+
+/// The network every container of the engines gets: none at all, loopback only. A job that
+/// needs a network runs on the `crun` runtime, which wires one per job (`--egress`).
+const NETWORK: &str = "none";
 
 /// Where the run's scratch directory is mounted, read-write, inside the container.
 pub const SCRATCH_TARGET: &str = "/scratch";
@@ -284,7 +288,7 @@ fn mount_value(
 }
 
 /// What every contained job gets, whatever it asked for: no capability, no privilege
-/// gain, the network the agent was configured with (none by default), a read-only root
+/// gain, no network (`--network none`: loopback only), a read-only root
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
 /// files, and limited in size: Podman does not default to `noexec`; on Podman `/var/tmp`
 /// and `/run` are such tmpfs mounts too), no core dumps, a private IPC namespace against a
@@ -296,7 +300,7 @@ fn mount_value(
 /// here: it is the run's slot's (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. A `--add-host <name>:<ip>` follows the
-/// network for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
+/// cgroup namespace for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = |dir: &str| format!("{dir}:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
@@ -309,7 +313,7 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         "--security-opt",
         &profile,
         "--network",
-        settings.network(),
+        NETWORK,
         "--read-only",
         "--tmpfs",
         &tmpfs("/tmp"),
@@ -322,12 +326,6 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     ]
     .map(str::to_owned)
     .to_vec();
-    // A job on a named network has no IPv6 at all, not even the link-local address of its
-    // veth (the egress rules drop IPv6 too; this removes it at the source). The network
-    // namespace is the container's own, so the engine takes the sysctl.
-    if settings.network() != DEFAULT_NETWORK {
-        args.extend(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"].map(str::to_owned));
-    }
     for entry in settings.add_hosts() {
         args.extend(["--add-host".to_owned(), entry.clone()]);
     }

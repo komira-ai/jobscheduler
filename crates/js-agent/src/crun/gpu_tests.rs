@@ -777,6 +777,6 @@ fn the_device_list_is_kept_with_the_crun_settings_only() {
     let crun = crun.with_gpus(passthrough.clone());
     assert_eq!(crun.crun().expect("crun settings").gpus, passthrough);
     let exe = std::env::current_exe().expect("the test binary");
-    let engine = Settings::new(&exe, None, None).expect("an engine's settings");
+    let engine = Settings::new(&exe, None).expect("an engine's settings");
     assert_eq!(engine.clone().with_gpus(passthrough), engine);
 }

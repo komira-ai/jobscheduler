@@ -37,6 +37,8 @@ fn start() -> JobStartSpec {
             gpu_indices: vec![0],
         },
         wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 
@@ -627,7 +629,7 @@ fn a_reply_names_each_job_and_each_gpu_once() {
 #[test]
 fn per_job_messages_ignore_what_they_do_not_know() {
     let mut command = serde_json::to_value(Command::JobStart(Box::new(start()))).unwrap();
-    command["network"] = json!({"mode": "from-the-future"});
+    command["sandbox"] = json!({"mode": "from-the-future"});
     command["booked"]["accelerators"] = json!(4);
     let decoded: Command = serde_json::from_value(command).unwrap();
     assert_eq!(decoded, Command::JobStart(Box::new(start())));
@@ -737,4 +739,64 @@ fn a_job_start_carries_the_run_os_and_arch_of_the_job() {
     for key in ["run", "os", "arch"] {
         assert!(plain.get(key).is_none(), "{key} is sent when absent");
     }
+}
+
+/// Proves a job start carries `network` and `ports` as a run start does: a start that asks
+/// for nothing encodes with neither key (the text of a start from before the fields), one
+/// that asks for `open` with a port encodes and decodes both, a level this version does not
+/// know is a decode error, and the ports are held to the run start's bounds naming the field.
+/// Catches a field that is always written or required, a level that fails open, and a job
+/// start whose ports skip the bounds of a run start's.
+#[test]
+fn a_job_start_carries_network_and_ports_additively() {
+    use js_types::{JobNetwork, PortMap};
+
+    let plain = serde_json::to_value(start()).unwrap();
+    assert!(plain.get("network").is_none(), "{plain}");
+    assert!(plain.get("ports").is_none(), "{plain}");
+    let back: JobStartSpec = serde_json::from_value(plain.clone()).unwrap();
+    assert_eq!((back.network, back.ports.len()), (JobNetwork::None, 0));
+
+    let mut open = start();
+    open.network = JobNetwork::Open;
+    open.ports = vec![PortMap {
+        host: 8080,
+        container: 80,
+    }];
+    assert_eq!(open.validate(), Ok(()));
+    let value = serde_json::to_value(&open).unwrap();
+    assert_eq!(value["network"], "open");
+    assert_eq!(
+        value["ports"],
+        serde_json::json!([{"host": 8080, "container": 80}])
+    );
+    let back: JobStartSpec = serde_json::from_value(value).unwrap();
+    assert_eq!(back, open);
+
+    let mut unknown = plain;
+    unknown["network"] = serde_json::json!("wide");
+    assert!(serde_json::from_value::<JobStartSpec>(unknown).is_err());
+
+    let mut zero = start();
+    zero.ports = vec![PortMap {
+        host: 0,
+        container: 80,
+    }];
+    let err = zero.validate().unwrap_err();
+    assert_eq!(
+        (err.field(), err.rule(), err.code()),
+        (
+            "ports[0].host",
+            js_agent_wire::Rule::OutOfRange,
+            "invalid-job"
+        )
+    );
+    let mut many = start();
+    many.ports = (1..=17)
+        .map(|n| PortMap {
+            host: 8000 + n,
+            container: 80,
+        })
+        .collect();
+    assert_eq!(many.validate().unwrap_err().field(), "ports");
 }

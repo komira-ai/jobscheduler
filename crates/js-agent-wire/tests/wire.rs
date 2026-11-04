@@ -60,6 +60,9 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_BUNDLE,
         refusal::BUNDLE_DIGEST_REQUIRED,
         refusal::QUOTA_UNAVAILABLE,
+        refusal::NETWORK_ABOVE_CEILING,
+        refusal::PORT_ABOVE_CEILING,
+        refusal::PORTS_NOT_SUPPORTED,
         refusal::PLATFORM_MISMATCH,
         refusal::IMAGE_UNSUPPORTED_HERE,
         refusal::RUN_UNSUPPORTED,
@@ -74,6 +77,7 @@ fn refusal_codes_snapshot() {
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \
+         network-above-ceiling port-above-ceiling ports-not-supported \
          platform-mismatch image-unsupported-here run-unsupported env-unsupported image-not-allowed"
     );
 }

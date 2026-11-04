@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use js_agent::egress::{Egress, EgressError};
+use js_types::JobNetwork;
 
 use crate::container::{ContainerHost, Network, block_on};
 use crate::sys::{
@@ -58,7 +59,9 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
         };
         let host = ContainerHost::new("tamper", network).await;
         let live = host.start(script).await;
-        let attachment = egress.attach("tamper", live.pid).expect("attach");
+        let attachment = egress
+            .attach("tamper", live.pid, JobNetwork::AllowList, &[])
+            .expect("attach");
         assert!(
             live.wait_for_line("done", Duration::from_secs(30)).await,
             "{}",
@@ -173,7 +176,9 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
     let other_host = Server::tcp(&far_host.ns, far::OTHER_HOST);
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let holder = Holder::new();
-    let attachment = egress.attach("control", holder.pid()).expect("attach");
+    let attachment = egress
+        .attach("control", holder.pid(), JobNetwork::AllowList, &[])
+        .expect("attach");
     egress.check().expect("loaded");
     assert!(matches!(tcp(&holder.ns, far::OTHER_HOST), Reach::Failed(_)));
     assert_eq!(other_host.accepted(), 0);

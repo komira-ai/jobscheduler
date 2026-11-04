@@ -67,6 +67,8 @@ pub mod words;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
+mod loopback_tests;
+#[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
 mod pin_fault_tests;
@@ -138,15 +140,17 @@ pub struct OciConfig {
     /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
     /// file of the lease directory and the last 64 KiB of it in memory.
     pub logs: LogLimits,
-    /// The `/etc/resolv.conf` every job's container gets. By default [`RESOLV_CONF`]: one
-    /// nameserver, loopback, which nothing listens on. A node whose jobs have an allow-listed
-    /// network (the agent's egress mode) names the configured resolvers here, and only them.
+    /// The `/etc/resolv.conf` of a container written with [`Oci::create`] (one whose network the
+    /// host wires). By default [`RESOLV_CONF`]: one nameserver, loopback, which nothing listens
+    /// on. A node whose jobs may have a network names the configured resolvers here, and only
+    /// them. [`Oci::create_loopback`] always writes [`RESOLV_CONF`].
     pub resolv_conf: String,
     /// With `Some(limit)` the container's init does not start the job until the container's
     /// network namespace has a default route, and gives up after `limit` (whole seconds, 1 to
     /// 3600): the host wires the namespace from outside after the container is up
     /// ([`Oci::container_pid`]) and adds the route last. By default `None`: nothing is
-    /// waited for (a namespace with loopback only).
+    /// waited for (a namespace with loopback only). It applies to [`Oci::create`];
+    /// [`Oci::create_loopback`] never waits.
     pub route_wait: Option<std::time::Duration>,
     /// Whether the backend must have the scratch directory alone ([`lock`]), as the
     /// `image-pull` verb does: it is refused ([`OciError::Locked`]) while any other backend
