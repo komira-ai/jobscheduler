@@ -251,6 +251,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
         limits: ContainerLimits::DEFAULT,
         shared: Vec::new(),
         mounts: Vec::new(),
+        devices: Vec::new(),
     };
     oci.create(&spec).await.unwrap();
     let (out_path, err_path) = (stdout_path(&lease), stderr_path(&lease));

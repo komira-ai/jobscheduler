@@ -15,6 +15,7 @@ use oci_spec::runtime::{
     UserBuilder,
 };
 
+use super::devices;
 use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
 use crate::container::{ACTION_ID, ContainerSpec};
 use crate::subids::DaemonIds;
@@ -49,8 +50,8 @@ pub(crate) const OVERLAY_OPTIONS: &str =
 /// Why a configuration could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecError {
-    /// `exec_root` or the init's path is not an absolute, normalized path (or the init's
-    /// is not inside `/dev`).
+    /// `exec_root`, the init's path or a device's path is not an absolute, normalized path
+    /// (or the init's or the device's is not inside `/dev`).
     #[error("{what} {path:?} is not an absolute path without empty, `.` or `..` parts")]
     Path {
         /// Which setting.
@@ -152,8 +153,8 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
 
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
 /// the exec-root overlay, the shared trees read-only inside it, `/tmp`, [`WRITABLE`], and
-/// the host mounts last (each a recursive bind, `nosuid` and `nodev`, read-only or
-/// read-write as asked).
+/// the host mounts last (each a bind, recursive unless the mount says not, `nosuid` and
+/// `nodev`, read-only or read-write as asked).
 fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     let shm = format!("size={}m", spec.limits.shm_mib);
     let open = ["rbind", "ro", "nosuid", "noexec", "nodev"];
@@ -232,10 +233,11 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     }
     for host in &spec.mounts {
         let access = if host.read_only { "ro" } else { "rw" };
+        let kind = if host.recursive { "rbind" } else { "bind" };
         mounts.push(bind(
             &host.source,
             &host.target,
-            &["rbind", access, "nosuid", "nodev"],
+            &[kind, access, "nosuid", "nodev"],
         ));
     }
     mounts
@@ -300,6 +302,7 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// | no new privileges                        | `process.noNewPrivileges` true                     |
 /// | `/dev/shm` size, `/tmp` size, no programs in `/tmp` | the tmpfs `size=`; `/tmp` also `noexec`  |
 /// | the run's scratch, `--mount-root`, files | `spec.mounts`: recursive binds, `nosuid`, `nodev`  |
+/// | the booked GPUs' nodes, no other device  | `linux.devices`; `resources.devices` denies all, allows each node (only with devices) |
 /// | the kernel's default OOM score           | `process.oomScoreAdj`                              |
 /// | hostname `localhost`                     | `hostname`                                         |
 /// | the input root, writes in `upper`        | an `overlay` mount at `exec_root`                  |
@@ -308,8 +311,9 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)).
 ///
 /// # Errors
-/// `spec.exec_root` or the init's path is not a normalized absolute path, or the seccomp
-/// profile cannot be resolved for the node's architecture.
+/// `spec.exec_root` or the init's path is not a normalized absolute path, a device's path
+/// is not one below `/dev`, or the seccomp profile cannot be resolved for the node's
+/// architecture.
 pub(crate) fn action_config(
     spec: &ContainerSpec,
     placement: &Placement<'_>,
@@ -318,6 +322,9 @@ pub(crate) fn action_config(
     normalized("init path", placement.init_dest, "/dev/")?;
     for host in &spec.mounts {
         normalized("mount target", &host.target, "/")?;
+    }
+    for node in &spec.devices {
+        normalized("device path", &node.path, "/dev/")?;
     }
     // All five sets empty, written out: `crun` gives a process with no `capabilities`
     // object its own default set.
@@ -365,24 +372,25 @@ pub(crate) fn action_config(
             .build(),
     );
     let unified = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
-    let resources = built(
-        LinuxResourcesBuilder::default()
-            .pids(pids)
-            .unified(unified)
-            .build(),
-    );
-    let linux = built(
-        LinuxBuilder::default()
-            .uid_mappings(uids)
-            .gid_mappings(gids)
-            .namespaces(namespaces())
-            .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
-            .resources(resources)
-            .seccomp(seccomp(placement.arch, &[])?)
-            .masked_paths(strings(&MASKED_PATHS))
-            .readonly_paths(strings(&READONLY_PATHS))
-            .build(),
-    );
+    let mut resources = LinuxResourcesBuilder::default().pids(pids).unified(unified);
+    // A container given no device gets no device section, as before devices were given.
+    let given = !spec.devices.is_empty();
+    if given {
+        resources = resources.devices(devices::rules(spec));
+    }
+    let mut linux = LinuxBuilder::default()
+        .uid_mappings(uids)
+        .gid_mappings(gids)
+        .namespaces(namespaces())
+        .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
+        .resources(built(resources.build()))
+        .seccomp(seccomp(placement.arch, &[])?)
+        .masked_paths(strings(&MASKED_PATHS))
+        .readonly_paths(strings(&READONLY_PATHS));
+    if given {
+        linux = linux.devices(devices::nodes(spec));
+    }
+    let linux = built(linux.build());
     let root = built(
         RootBuilder::default()
             .path(placement.rootfs)

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use common::{PRICE, START, cloud, launch, mins, offer, request, request_at, secs};
 use js_elastic::{
-    AcquireId, Acquired, Claim, ElasticProvider, HostRef, HostStatus, Reason, Refusal, RefusalCode,
-    Released,
+    AcquireId, Acquired, CapacityProvider, Claim, HostRef, HostStatus, Reason, Refusal,
+    RefusalCode, Released,
 };
 use js_elastic_fake::{
     Bill, Billing, Call, ElasticFake, FakeClock, Knobs, PAYLOAD_LIMIT, Step, THROTTLE_WAIT,

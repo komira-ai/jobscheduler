@@ -1,7 +1,7 @@
 //! Ownership marks, tags made from labels, and the ids.
 
 use js_elastic::{
-    Acquired, Claim, ElasticProvider, HostStatus, Reason, RefusalCode, Released, SchedulerId,
+    Acquired, CapacityProvider, Claim, HostStatus, Reason, RefusalCode, Released, SchedulerId,
 };
 use js_provider_lambdalabs::{ACQUIRE_TAG, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG};
 

@@ -31,6 +31,10 @@
 //! - **Also set:** `oom_score_adj` 0, a private cgroup namespace, `/sys/fs/cgroup`
 //!   read-only, `RLIMIT_CORE` 0 and `noNewPrivileges` (`spec`; the last is also true for a
 //!   helper container, `helper`).
+//! - **Devices:** a job's `/dev` is a tmpfs of its own (`spec`) holding `crun`'s default
+//!   nodes and none of the host's. A run that booked GPUs is given their nodes, and its
+//!   device cgroup then denies every device and allows those nodes only (`devices`); a job
+//!   given no device gets no device section.
 //!
 //! Left out, on purpose: the `net.ipv4.ping_group_range` and
 //! `net.ipv4.ip_unprivileged_port_start` sysctls (a job has loopback only) and the
