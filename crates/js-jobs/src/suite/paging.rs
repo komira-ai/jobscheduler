@@ -165,19 +165,16 @@ pub fn list_jobs_follows_rows_that_change_between_pages<B: Backend>(backend: &B)
         .place(&changed, host("host-a"), share())
         .expect("placed");
 
-    let mut pages = vec![first];
-    let mut page = rig
+    // Five rows lie past the token now (c11, c14, c16, c18, c20): one page, and the last.
+    let second = rig
         .jobs
         .list_jobs(None, Some(&token), limit(5))
         .expect("a page");
-    while let Some(next) = page.resume.clone() {
-        pages.push(page);
-        page = rig
-            .jobs
-            .list_jobs(None, Some(&next), limit(5))
-            .expect("a page");
-    }
-    pages.push(page);
+    assert_eq!(
+        second.resume, None,
+        "{name}: the page after the change is not the last"
+    );
+    let pages = [first, second];
     let listed: Vec<String> = ids(&pages).iter().map(|id| id.to_string()).collect();
     assert_eq!(
         listed,
