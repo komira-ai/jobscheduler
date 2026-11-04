@@ -103,8 +103,9 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 /// The wiring of the started container of `spec`, which `running` runs, by `egress`; none
 /// without one. The container's pid is asked for until `crun` names one (right after
 /// `Oci::start` the container may not be made yet), and the asks end without one when
-/// `crun run` has ended, or when [`ROUTE_WAIT`] has passed on `now_ms` (the container's
-/// init gives up its wait for the route then).
+/// `crun state` answers with no usable pid, when `crun run` has ended, or when [`ROUTE_WAIT`]
+/// (an allow-list's `Config::route_wait`, the only egress with a port) has passed on
+/// `now_ms`: the container's init gives up its wait for the route then.
 ///
 /// # Errors
 ///
@@ -136,6 +137,7 @@ fn pid_of(
     loop {
         let why = match oci.container_pid(spec) {
             Ok(pid) => return Ok(pid),
+            Err(why) if answered(&why) => return Err(why),
             Err(why) => why,
         };
         if running.try_end().is_some() {
@@ -150,6 +152,13 @@ fn pid_of(
         }
         std::thread::sleep(PID_PAUSE);
     }
+}
+
+/// Whether `why`, an error of `Oci::container_pid`, is `crun`'s answer that the container is
+/// there and names no usable pid (its state was read): asking again does not change that. Any
+/// other error (`crun state` failed: the container is not made yet) is asked again.
+fn answered(why: &str) -> bool {
+    why.starts_with("crun state: no pid in") || why.ends_with("is not a pid")
 }
 
 /// Takes the wiring of the container `name` down, once: it is taken out of `wired`, so a

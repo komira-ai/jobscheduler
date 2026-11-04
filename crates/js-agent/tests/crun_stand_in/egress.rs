@@ -134,6 +134,22 @@ fn nothing_left(node: &Node, run_id: &str) -> bool {
     !dirs.iter().any(|dir| held(dir))
 }
 
+/// How often the stand-in's `crun state` was asked about the run `run_id`.
+fn asks(node: &Node, run_id: &str) -> usize {
+    let suffix = format!("-{run_id}");
+    let entries = std::fs::read_dir(node.dir.path()).expect("the node");
+    let file = entries.flatten().map(|entry| entry.path()).find(|path| {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        name.is_some_and(|name| name.starts_with("asks-") && name.ends_with(&suffix))
+    });
+    file.map_or(0, |file| {
+        std::fs::read_to_string(file)
+            .expect("the asks")
+            .lines()
+            .count()
+    })
+}
+
 /// The record of an attach of the run `run_id` to the stand-in's pid.
 fn attached(call: &str, run_id: &str) -> bool {
     call.starts_with("attach js-") && call.ends_with(&format!("-{run_id} {PID}"))
@@ -277,12 +293,9 @@ fn crun_checks_egress_before_it_creates_the_container() {
 }
 
 /// Proves a container is wired after its start, with the pid `crun state` names: a staged
-/// container is not wired, its start wires it once with the stand-in's pid under the run's
-/// container name; and a container that `crun state` does not know yet at the first ask
-/// (the stand-in answers from its second ask on, as a real `crun` does once the container is
-/// made) is asked again and wired with that pid. Catches an attach before the start, with
-/// another pid (the `crun run` child's, or none), or not at all, and a start that gives up
-/// at the first ask.
+/// container is not wired, and its start wires it once with the stand-in's pid under the
+/// run's container name. Catches an attach before the start, with another pid (the
+/// `crun run` child's, or none), or not at all.
 #[test]
 fn crun_attaches_the_container_pid_after_start() {
     let node = Node::new("egress-attach");
@@ -294,19 +307,32 @@ fn crun_attaches_the_container_pid_after_start() {
         Vec::<String>::new(),
         "nothing wired before the start"
     );
+    assert_eq!(asks(&node, "r1"), 0, "no pid asked for before the start");
     runtime.start_staged(&id).expect("started");
     assert_eq!(seen.taken(), [format!("attach {} {PID}", id.0)]);
+    assert_eq!(asks(&node, "r1"), 1);
+    runtime.remove(&id).expect("removed");
+    assert_eq!(seen.taken(), [format!("release {}", id.0)]);
+    assert!(nothing_left(&node, "r1"));
+}
 
-    let late = runtime
-        .create_and_start(&node.spec("r2-late"))
-        .expect("wired at the second ask");
-    assert!(node.dir.join(format!("asked-{}", late.0)).exists());
-    assert_eq!(seen.taken(), [format!("attach {} {PID}", late.0)]);
-    for id in [&id, &late] {
-        runtime.remove(id).expect("removed");
-    }
-    assert_eq!(seen.taken().len(), 2, "each released once");
-    assert!(nothing_left(&node, "r1") && nothing_left(&node, "r2-late"));
+/// Proves the first exit of the asks for a pid: a container that `crun state` does not know
+/// for its first two asks (as a real `crun` right after its start) is asked a third time,
+/// named, and wired with that pid, once. Catches a start that gives up at the first empty
+/// answer, and one that wires before a pid is named.
+#[test]
+fn a_pid_named_after_empty_answers_is_wired() {
+    let node = Node::new("egress-pid-late");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let id = runtime
+        .create_and_start(&node.spec("r1-late"))
+        .expect("wired at the third ask");
+    assert_eq!(asks(&node, "r1-late"), 3);
+    assert_eq!(seen.taken(), [format!("attach {} {PID}", id.0)]);
+    runtime.remove(&id).expect("removed");
+    assert_eq!(seen.taken(), [format!("release {}", id.0)]);
+    assert!(nothing_left(&node, "r1-late"));
 }
 
 /// Proves a container whose network cannot be wired runs no job and leaves nothing: the
@@ -336,15 +362,41 @@ fn a_failed_attach_ends_the_container_and_runs_no_job() {
     assert!(nothing_left(&node, "r1-wired"));
 }
 
-/// Proves a container that names no pid is never wired and its lease is removed: one whose
-/// `crun run` has ended with no pid named fails at once (the asks stop when the run is
-/// over), and one that runs but that `crun state` never knows fails once the route wait
-/// has passed on the runtime's clock (here a clock that jumps a minute at each read). The
-/// port is asked nothing, and nothing of either lease is left. Catches an attach with a
-/// made-up pid, a start that waits for ever for a pid, and a lease leaked by the failure.
+/// Proves a start whose `crun state` answers with no usable pid (a state that names none, a
+/// pid out of range) fails at that answer: it is asked once, not again, the port is asked
+/// nothing, and the container (which runs until killed) is ended and removed with its lease.
+/// Catches an attach with a made-up pid, asks repeated over a definite answer, and a lease
+/// leaked by the failure.
 #[test]
 fn a_failed_container_pid_releases_nothing_and_removes_the_lease() {
     let node = Node::new("egress-no-pid");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    for (run, said) in [
+        ("r1-badpid", "crun state: no pid in "),
+        ("r2-hugepid", "crun state: pid 99999999999 is not a pid"),
+    ] {
+        let why = runtime
+            .create_and_start(&node.spec(run))
+            .map(|_| ())
+            .expect_err("no pid");
+        let text = why.to_string();
+        let wanted = format!("wire the container's network: {said}");
+        assert!(text.starts_with(&wanted), "{text}");
+        assert_eq!(asks(&node, run), 1, "{run}");
+        assert!(nothing_left(&node, run), "{run}");
+    }
+    assert_eq!(seen.taken(), Vec::<String>::new());
+    assert!(runtime.list_labelled().expect("listed").is_empty());
+}
+
+/// Proves the second exit of the asks for a pid: a container whose `crun run` has ended with
+/// no pid named fails once the run is over, instead of being asked for ever; the port is
+/// asked nothing and nothing of the lease is left. Catches a start that waits for a pid from
+/// a container that is gone.
+#[test]
+fn a_run_that_ends_before_its_pid_is_named_is_never_wired() {
+    let node = Node::new("egress-pid-ended");
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
     let why = runtime
@@ -358,16 +410,27 @@ fn a_failed_container_pid_releases_nothing_and_removes_the_lease() {
         ),
         "{text}"
     );
+    assert!(asks(&node, "r1-nopid") >= 1);
+    assert_eq!(seen.taken(), Vec::<String>::new());
     assert!(nothing_left(&node, "r1-nopid"));
-    drop(runtime);
+}
 
+/// Proves the third exit of the asks for a pid: a container that runs but that `crun state`
+/// never knows fails once the route wait has passed on the runtime's clock (here a clock
+/// that jumps a minute at each read, so the wait is over after the first ask, which is the
+/// only one); the port is asked nothing, and the container (which runs until killed) is ended
+/// and removed with its lease. Catches a start that waits for ever for a pid.
+#[test]
+fn no_pid_within_the_route_wait_is_never_wired() {
+    let node = Node::new("egress-pid-deadline");
+    let seen = Seen::new(&node);
     let hooks = Hooks {
         now_ms: ticking,
         ..impatient()
     };
     let mut runtime = open(&node, port(&seen), hooks);
     let why = runtime
-        .create_and_start(&node.spec("r2-deaf"))
+        .create_and_start(&node.spec("r1-deaf"))
         .map(|_| ())
         .expect_err("no pid in time");
     let text = why.to_string();
@@ -375,8 +438,9 @@ fn a_failed_container_pid_releases_nothing_and_removes_the_lease() {
         text.starts_with("wire the container's network: the container had no pid within 30s: "),
         "{text}"
     );
+    assert_eq!(asks(&node, "r1-deaf"), 1);
     assert_eq!(seen.taken(), Vec::<String>::new());
-    assert!(nothing_left(&node, "r2-deaf"));
+    assert!(nothing_left(&node, "r1-deaf"));
 }
 
 /// Proves the wiring of a run that ended and was never polled is released by its removal,

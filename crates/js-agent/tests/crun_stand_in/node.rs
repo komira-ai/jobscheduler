@@ -114,10 +114,11 @@ const CONFIG: &str =
 
 /// The stand-in. Its behaviour is chosen by the end of the container's name (a run id such
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
-/// and fails when the node has a file `delete-fails`. `state` names the pid [`PID`], except
-/// for a container `*-nopid` or `*-deaf` (never) and `*-late` (from its second ask on);
-/// `*-wired`, `*-late` and `*-deaf` run until they are killed and ignore SIGTERM, and
-/// `*-nopid` exits at once.
+/// and fails when the node has a file `delete-fails`. `state` notes each ask in
+/// `asks-<name>` and names the pid [`PID`], except for a container `*-nopid` or `*-deaf`
+/// (it fails: no container), `*-late` (it fails twice, then names it), `*-badpid` (a state
+/// with no pid) and `*-hugepid` (a pid out of range); those but `*-nopid` run until they are
+/// killed and ignore SIGTERM, as `*-wired` does, and `*-nopid` exits at once.
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
 DIR=@DIR@
@@ -164,7 +165,7 @@ case "$cmd" in
         echo up > "$DIR/ready-$name"
         read x < "$root/gate"
         exit 137;;
-      *-wired|*-late|*-deaf) trap '' TERM; exec sleep 600;;
+      *-wired|*-late|*-deaf|*-badpid|*-hugepid) trap '' TERM; exec sleep 600;;
       *) exit 0;;
     esac;;
   kill)
@@ -176,11 +177,14 @@ case "$cmd" in
     rmdir "$root/$name" 2>/dev/null
     exit 0;;
   state)
+    echo ask >> "$DIR/asks-$name"
     case "$name" in
       *-nopid|*-deaf) echo "no container $name" >&2; exit 1;;
+      *-badpid) echo '{"status":"running"}'; exit 0;;
+      *-hugepid) echo '{"pid":99999999999}'; exit 0;;
       *-late)
-        if [ ! -e "$DIR/asked-$name" ]; then
-          : > "$DIR/asked-$name"; echo "no container $name yet" >&2; exit 1
+        if [ "$(wc -l < "$DIR/asks-$name")" -le 2 ]; then
+          echo "no container $name yet" >&2; exit 1
         fi;;
     esac
     echo '{"pid":4321}';;
