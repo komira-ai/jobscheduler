@@ -1313,6 +1313,7 @@ dependencies = [
  "js-elastic-fake",
  "js-jobs",
  "js-lease",
+ "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
