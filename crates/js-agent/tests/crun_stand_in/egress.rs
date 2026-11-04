@@ -18,7 +18,7 @@ use js_agent::lifecycle::{
     ScratchRoot, StateRoot, Status,
 };
 use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, NetworkCeiling};
-use js_types::JobNetwork;
+use js_types::{JobNetwork, PortMap};
 
 use crate::node::{LONG, NoImages, Node, PID};
 
@@ -32,6 +32,8 @@ struct Seen {
     ledger: PathBuf,
     /// The level of each attach, in order.
     levels: Mutex<Vec<JobNetwork>>,
+    /// The declared ports of each attach, in order.
+    ports: Mutex<Vec<Vec<PortMap>>>,
     check_fails: AtomicBool,
     attach_fails: AtomicBool,
     release_fails: AtomicBool,
@@ -86,8 +88,10 @@ impl EgressPort for Port {
         run: &str,
         pid: u32,
         level: JobNetwork,
+        ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
         self.0.levels.lock().expect("levels").push(level);
+        self.0.ports.lock().expect("ports").push(ports.to_vec());
         self.0.note(format!("attach {run} {pid}"));
         match self.0.attach_fails.load(Ordering::SeqCst) {
             true => Err(EgressError::Exhausted),
@@ -964,4 +968,37 @@ fn each_run_is_wired_at_its_own_level() {
     let calls = seen.taken();
     assert_eq!(calls.iter().filter(|c| c.starts_with("attach")).count(), 2);
     assert_eq!(calls.iter().filter(|c| c.starts_with("release")).count(), 2);
+}
+
+/// Proves a run's declared ports reach the wiring: a run admitted with the ports `8080 -> 80`
+/// and `9000 -> 9001` is attached with exactly those, in its own call, and a run with none
+/// is attached with none. Catches a runtime that drops the ports between the start and the
+/// attach (the job would run with no forward, unreachable on the ports it declared).
+#[test]
+fn a_runs_declared_ports_reach_its_attach() {
+    let node = Node::new("egress-ports");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let declared = vec![
+        PortMap {
+            host: 8080,
+            container: 80,
+        },
+        PortMap {
+            host: 9000,
+            container: 9001,
+        },
+    ];
+    let spec = RunSpec {
+        ports: declared.clone(),
+        ..wired(&node, "r1-ports")
+    };
+    let forwarded = runtime.create_and_start(&spec).expect("started");
+    let bare = runtime
+        .create_and_start(&wired(&node, "r2-bare"))
+        .expect("started");
+    assert_eq!(*seen.ports.lock().expect("ports"), [declared, Vec::new()]);
+    for id in [&forwarded, &bare] {
+        runtime.remove(id).expect("removed");
+    }
 }

@@ -412,7 +412,7 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
         Some("/oci".into())
     );
     // Settings of an engine are left as they are.
-    let engine = Settings::new(Path::new("/bin/sh"), None, None).expect("an executable");
+    let engine = Settings::new(Path::new("/bin/sh"), None).expect("an executable");
     let placed = engine.clone().placed_beside(Path::new("/x/scratch"), None);
     assert!(placed.crun().is_none());
     assert_eq!(placed, engine);

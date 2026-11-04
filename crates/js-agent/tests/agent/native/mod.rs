@@ -111,6 +111,7 @@ impl Rig {
             labels: BTreeMap::new(),
             bundle: None,
             network: Default::default(),
+            ports: Vec::new(),
         }
     }
 

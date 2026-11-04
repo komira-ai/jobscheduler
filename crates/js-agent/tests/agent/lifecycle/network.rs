@@ -112,18 +112,18 @@ fn a_job_above_the_ceiling_is_refused_with_a_code_naming_it() {
     assert_eq!(h.fake.ceiling_asks(), 0, "the mounts are checked first");
 }
 
-/// Proves declared ports are carried and refused, not forwarded or dropped: under an `open`
-/// ceiling that lists `80` and `8000-8010`, a job that declares an unlisted host port is
-/// refused `port-above-ceiling` naming it (before the ports are found unsupported), one that
-/// declares only listed ports is refused `ports-not-supported`, and neither creates
-/// anything; a job above the level is `network-above-ceiling` whatever its ports. Catches a
-/// job run with its ports silently ignored, and an unlisted port reported as merely
-/// unsupported.
+/// Proves a job's declared ports are admitted only where they can be forwarded, and reach
+/// the runtime when they are: under an `open` ceiling that lists `80` and `8000-8010`, a job
+/// that declares an unlisted host port is refused `port-above-ceiling` naming it and the list;
+/// a `none` job that declares listed ports is refused `ports-not-supported` (nothing wires
+/// it); an `allow-list` job that declares only listed ports is admitted and created with its
+/// ports, as given, at its level. Under the ceiling `none` (mode none, which lists no port),
+/// and under a wired ceiling that lists none, any port is `ports-not-supported`; a job above
+/// the level is `network-above-ceiling` whatever its ports. A refused job creates nothing.
+/// Catches the refusal of every port surviving the forwarding, a job run with its ports
+/// dropped, an unlisted port admitted, and a port admitted where nothing forwards it.
 #[test]
-fn a_job_with_ports_is_refused_until_forwarding_exists() {
-    let mut h = Harness::new("net-ports");
-    h.fake
-        .set_ceiling(ceiling(JobNetwork::Open, &["80", "8000-8010"]));
+fn a_job_with_a_listed_port_is_admitted_and_forwarded() {
     let with = |run: &str, level: JobNetwork, hosts: &[u16]| {
         let mut spec = job(run);
         spec.network = level;
@@ -136,11 +136,10 @@ fn a_job_with_ports_is_refused_until_forwarding_exists() {
             .collect();
         spec
     };
+    let mut h = Harness::new("net-ports");
+    h.fake
+        .set_ceiling(ceiling(JobNetwork::Open, &["80", "8000-8010"]));
     let events = h.start(with("r1", JobNetwork::Open, &[80, 9000]));
-    assert_eq!(
-        names(&events),
-        [format!("refused r1 {}", refusal::PORT_ABOVE_CEILING)]
-    );
     assert_eq!(
         events,
         refused(
@@ -149,18 +148,52 @@ fn a_job_with_ports_is_refused_until_forwarding_exists() {
             "host port 9000 asked, agent ceiling forwards 80,8000-8010"
         )
     );
-    let events = h.start(with("r2", JobNetwork::AllowList, &[80, 8005]));
+    let events = h.start(with("r2", JobNetwork::None, &[80]));
     assert_eq!(
-        names(&events),
-        [format!("refused r2 {}", refusal::PORTS_NOT_SUPPORTED)]
+        events,
+        refused(
+            "r2",
+            refusal::PORTS_NOT_SUPPORTED,
+            "1 declared port(s) asked for a job with network none, which has no address to \
+             forward to"
+        )
     );
-    assert!(h.fake.created().is_empty(), "a job with ports was created");
+    assert!(h.fake.created().is_empty(), "a refused job was created");
+    let admitted = with("r3", JobNetwork::AllowList, &[80, 8005]);
+    assert_eq!(names(&h.start(admitted.clone())), ["started r3"]);
+    let created = h.fake.created();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].network, JobNetwork::AllowList);
+    assert_eq!(
+        created[0].ports, admitted.ports,
+        "the ports reach the runtime"
+    );
+
+    for (n, top, listed) in [
+        (0, JobNetwork::None, &[][..]),
+        (1, JobNetwork::Open, &[][..]),
+    ] {
+        let mut h = Harness::new(&format!("net-ports-unforwarded-{n}"));
+        h.fake.set_ceiling(ceiling(top, listed));
+        let events = h.start(with("r4", top, &[80]));
+        assert_eq!(
+            events,
+            refused(
+                "r4",
+                refusal::PORTS_NOT_SUPPORTED,
+                "1 declared port(s) asked, and this agent forwards no declared port"
+            ),
+            "{top}"
+        );
+        assert!(h.fake.created().is_empty());
+    }
+
     let mut h = Harness::new("net-ports-above");
     h.fake.set_ceiling(ceiling(JobNetwork::AllowList, &["80"]));
-    let events = h.start(with("r3", JobNetwork::Open, &[80]));
+    let events = h.start(with("r5", JobNetwork::Open, &[80]));
     assert_eq!(
         names(&events),
-        [format!("refused r3 {}", refusal::NETWORK_ABOVE_CEILING)]
+        [format!("refused r5 {}", refusal::NETWORK_ABOVE_CEILING)]
     );
     assert!(h.fake.created().is_empty());
 }

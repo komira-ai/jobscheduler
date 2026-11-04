@@ -117,9 +117,10 @@
 //!
 //! A `none` job has loopback only. Under `--egress allow-list` or `open` the runtime checks the
 //! firewall ([`EgressPort`]) before every create and wires a job that asked for a network after
-//! `Oci::start_supervised` (its init holds it until the route), releasing it when the run ends
-//! or goes. A runtime with such an egress adopts no run: the egress removes the wiring of a
-//! previous process when it starts, so each lease an earlier agent left is removed.
+//! `Oci::start_supervised` (its init holds it until the route), with a forward from the host
+//! for each port it declared, releasing it when the run ends or goes. A runtime with such an
+//! egress adopts no run: the egress removes the wiring of a previous process when it starts, so
+//! each lease an earlier agent left is removed.
 //!
 //! # Not here
 //!
@@ -620,7 +621,7 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
-                net: net::Net::asked(spec.network),
+                net: net::Net::asked(spec.network, spec.ports.clone()),
                 entry,
             },
         );

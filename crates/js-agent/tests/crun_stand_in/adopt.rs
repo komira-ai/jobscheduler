@@ -25,7 +25,7 @@ use js_agent_wire::{
     Command, HeartbeatReply, HeldJob, HeldState, LogTail, NetworkCeiling, Outcome,
 };
 use js_contain::oci::SupervisorId;
-use js_types::JobNetwork;
+use js_types::{JobNetwork, PortMap};
 use serde_json::{Value, json};
 
 use crate::node::{LONG, NoImages, Node, PID};
@@ -625,6 +625,7 @@ impl EgressPort for Unused {
         _run: &str,
         _pid: u32,
         _level: JobNetwork,
+        _ports: &[PortMap],
     ) -> Result<Box<dyn Wired>, EgressError> {
         Err(EgressError::Exhausted)
     }

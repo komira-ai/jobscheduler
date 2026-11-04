@@ -326,7 +326,7 @@ impl CrunRuntime {
             cgroup,
             state: State::Created,
             // Only a runtime with no egress adopts, and it admits no job with a network.
-            net: net::Net::asked(JobNetwork::None),
+            net: net::Net::asked(JobNetwork::None, Vec::new()),
             entry: entry.clone(),
         }
     }

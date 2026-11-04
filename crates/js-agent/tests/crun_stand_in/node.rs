@@ -350,6 +350,7 @@ impl Node {
             bundle: None,
             labels: BTreeMap::from([(label::RUN.to_owned(), run_id.to_owned())]),
             network: Default::default(),
+            ports: Vec::new(),
         }
     }
 

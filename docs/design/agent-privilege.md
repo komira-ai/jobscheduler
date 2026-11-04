@@ -238,8 +238,10 @@ another user could write them), which every agent sharing the store reads and lo
 
 ### Duty 6. Egress
 
-Today the agent reads the firewall back before every job (`nft -j list table`) and refuses the job
-when it is not as expected; the network and table are set up by an operator script.
+Today, with `--egress allow-list` or `open` on the `crun` runtime, the agent loads its own firewall
+tables (`inet js_crun_egress`, `ip js_crun_egress_nat`) and reads them back (`nft -j list table`)
+before every create, refusing the job when they changed. A job on the container-engine fallback gets
+network none, so there is nothing to read.
 
 - Read side: without `CAP_NET_ADMIN` a non-root user cannot read the firewall at all
   (`egress::a_non_root_agent_without_cap_net_admin_cannot_read_the_firewall`); with only
