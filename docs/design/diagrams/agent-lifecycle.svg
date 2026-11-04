@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 710" width="1420" height="710" role="img" aria-label="State machine of the host agent: unregistered, registered, preparing for a whole-host job, draining and exited, plus the service view of a lost and forgotten host.">
+<title>Agent lifecycle</title>
+<defs><marker id="agent-lifecycle-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="agent-lifecycle-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="agent-lifecycle-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1420" height="710" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Agent lifecycle: how a host joins, serves, drains and is lost</text>
+<text x="20" y="100" class="b" text-anchor="start">Enrolment</text>
+<rect x="20" y="110" width="220" height="70" rx="5" class="box-b"/>
+<text x="130.0" y="133.0" class="t-m" text-anchor="middle">install package, mint join</text>
+<text x="130.0" y="149.0" class="t-m" text-anchor="middle">token, place token file</text>
+<text x="130.0" y="165.0" class="t-m" text-anchor="middle">(manual today)</text>
+<rect x="20" y="200" width="220" height="56" rx="5" class="box-b"/>
+<text x="130.0" y="224.0" class="t-m" text-anchor="middle">elastic: scaler mints</text>
+<text x="130.0" y="240.0" class="t-m" text-anchor="middle">token, boot payload</text>
+<path d="M240,145 L290,225" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<path d="M240,228 L290,240" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<rect x="290" y="213" width="160" height="70" rx="5" class="box-o"/>
+<text x="370.0" y="252.0" class="b" text-anchor="middle">Unregistered</text>
+<rect x="760" y="200" width="190" height="96" rx="5" class="box-o"/>
+<text x="855" y="222" class="b" text-anchor="middle">Registered (serving)</text>
+<rect x="770" y="236" width="170" height="50" rx="5" class="box-rd"/>
+<text x="855.0" y="257.5" class="t-r" text-anchor="middle">tainted: takes no start;</text>
+<text x="855.0" y="272.5" class="t-r" text-anchor="middle">permanent</text>
+<path d="M450,232 L760,232" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="605" y="196" class="t-m lbl" text-anchor="middle">hello (join token or host credential)</text>
+<text x="605" y="210" class="t-m lbl" text-anchor="middle">Welcome: epoch, secret, interval, grace;</text>
+<text x="605" y="224" class="t-m lbl" text-anchor="middle">host credential written first</text>
+<path d="M760,264 L450,264" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="605" y="282" class="t-m lbl" text-anchor="middle">409 stale-epoch, unknown-host, host-lost,</text>
+<text x="605" y="296" class="t-m lbl" text-anchor="middle">or 403 session-mismatch: hello again at once</text>
+<text x="605" y="310" class="t-m lbl" text-anchor="middle">(only if last heartbeat accepted)</text>
+<path d="M305,283 L305,320 L375,320 L375,283" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="300" y="338" class="t-m lbl" text-anchor="middle">pool-full, host-live, 408, 429, 5xx:</text>
+<text x="300" y="352" class="t-m lbl" text-anchor="middle">backoff 1 s to 60 s</text>
+<path d="M810,200 L810,165 L900,165 L900,200" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="855" y="125" class="t-m lbl" text-anchor="middle">heartbeat every interval</text>
+<text x="855" y="139" class="t-m lbl" text-anchor="middle">(listed jobs, results, taint, load)</text>
+<rect x="1130" y="213" width="170" height="70" rx="5" class="box-o"/>
+<text x="1215.0" y="252.0" class="b" text-anchor="middle">Draining</text>
+<path d="M950,248 L1130,248" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="1040" y="226" class="t-m lbl" text-anchor="middle">SIGTERM: no new jobs,</text>
+<text x="1040" y="240" class="t-m lbl" text-anchor="middle">phase draining</text>
+<rect x="760" y="390" width="190" height="56" rx="5" class="box-o"/>
+<text x="855.0" y="422.0" class="b" text-anchor="middle">Preparing / Exclusive</text>
+<path d="M800,296 L800,390" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="792" y="338" class="t-m lbl" text-anchor="end">reply names</text>
+<text x="792" y="352" class="t-m lbl" text-anchor="end">whole-host job</text>
+<path d="M910,390 L910,296" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="918" y="338" class="t-m lbl" text-anchor="start">job ends:</text>
+<text x="918" y="352" class="t-m lbl" text-anchor="start">restoring, recheck</text>
+<rect x="1130" y="380" width="170" height="56" rx="5" class="box-r"/>
+<text x="1215.0" y="412.0" class="b" text-anchor="middle">Exited</text>
+<path d="M1215,283 L1215,380" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="1225" y="326" class="t-m lbl" text-anchor="start">no jobs and results acked,</text>
+<text x="1225" y="340" class="t-m lbl" text-anchor="start">or drain-wait elapsed,</text>
+<text x="1225" y="354" class="t-m lbl" text-anchor="start">then stop jobs</text>
+<path d="M435,283 L435,470 L1215,470 L1215,436" class="ln-r" marker-end="url(#agent-lifecycle-ar)"/>
+<text x="800" y="464" class="t-r lbl" text-anchor="middle">any other 4xx, 401: fatal, exit 2</text>
+<rect x="10" y="500" width="1400" height="190" rx="5" class="box-p"/>
+<text x="20" y="520" class="b" text-anchor="start">Server view</text>
+<rect x="250" y="555" width="170" height="60" rx="5" class="box-b"/>
+<text x="335.0" y="580.5" class="b" text-anchor="middle">Registered</text>
+<text x="335.0" y="597.5" class="t-m" text-anchor="middle">(server view)</text>
+<rect x="620" y="555" width="170" height="60" rx="5" class="box-g"/>
+<text x="705.0" y="580.5" class="b" text-anchor="middle">Lost</text>
+<text x="705.0" y="597.5" class="t-m" text-anchor="middle">(server view)</text>
+<rect x="1000" y="555" width="170" height="60" rx="5" class="box-g"/>
+<text x="1085.0" y="580.5" class="b" text-anchor="middle">Forgotten</text>
+<text x="1085.0" y="597.5" class="t-m" text-anchor="middle">(server view)</text>
+<path d="M420,573 L620,573" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="520" y="531" class="t-m lbl" text-anchor="middle">no heartbeat for grace (15 s):</text>
+<text x="520" y="545" class="t-m lbl" text-anchor="middle">no new job; its jobs</text>
+<text x="520" y="559" class="t-m lbl" text-anchor="middle">read Unknown</text>
+<path d="M620,600 L420,600" class="ln-d" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="520" y="630" class="t-m lbl" text-anchor="middle">heartbeat or hello heard</text>
+<path d="M790,585 L1000,585" class="ln" marker-end="url(#agent-lifecycle-ak)"/>
+<text x="895" y="557" class="t-m lbl" text-anchor="middle">no booking and</text>
+<text x="895" y="571" class="t-m lbl" text-anchor="middle">lost_retention elapsed</text>
+</svg>
