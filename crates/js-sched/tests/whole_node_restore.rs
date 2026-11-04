@@ -71,10 +71,11 @@ fn a_hard_bar_does_not_hide_the_worker_left_to_avoid() {
     assert_eq!(placed(&f.grants()), [(op, w("b"))]);
 }
 
-/// Catches: restored bars dropped, or applied only to workers registered at the restore:
-/// bars for life, until 50 s and a back-off are restored before any worker registers,
-/// read back exactly, keep `a` and `b` from the request once they register, and leave
-/// `c`, in a back-off, to be granted when it is the only worker left.
+/// Catches: restored bars dropped or applied only to workers registered at the restore,
+/// and hard bars counted as the other worker a back-off waits for: bars for life, until
+/// 50 s and a back-off are restored before any worker registers, read back exactly, keep
+/// `a` and `b` from the request once they register, and leave `c`, in a back-off, to be
+/// granted when it is the only worker the request may take.
 #[test]
 fn restored_bars_hold_and_apply_to_workers_that_register_later() {
     let mut f = farm(cfg(0, 2));

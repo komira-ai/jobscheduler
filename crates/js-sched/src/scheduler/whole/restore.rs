@@ -92,10 +92,11 @@ impl Scheduler {
     /// its queue time, its give-up count, its bars and its mark, each replacing what the
     /// scheduler has for it. A restart then neither restarts `drain_after` nor the count
     /// toward `max_reserve_attempts`, nor lifts a back-off or a bar, and a standing mark
-    /// keeps its deadline and its tail end: the next round's backfill start on the worker is
-    /// the restored tail end (or the tail now, if that ends sooner), never the start the
-    /// mark it replaces held by. The next placement round reads them as it reads its own: the mark is counted by the caps, kept while its worker is the pick,
-    /// and given up at its deadline.
+    /// keeps its deadline and its tail end: the next round's backfill start on the worker
+    /// is the restored tail end (or the tail now, if that ends sooner), never the start
+    /// the mark it replaces held by. The next placement round reads them as it reads its
+    /// own: the mark is counted by the caps, kept while its worker is the pick, and given
+    /// up at its deadline.
     ///
     /// Refused, changing nothing, without whole-node settings ([`WholeError::Off`]), for
     /// an operation it does not hold or that is not a whole-machine request, and for a mark
