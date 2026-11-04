@@ -195,6 +195,8 @@ fn beat(host: &str, results: Vec<RunResult>) -> Heartbeat {
         exclusive_refused: None,
         load: None,
         disk_gib: None,
+        jobs: Vec::new(),
+        retired_jobs: Vec::new(),
     }
 }
 

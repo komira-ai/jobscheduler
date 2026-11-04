@@ -110,6 +110,54 @@ no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those a
   job stops Docker; a node with Docker's firewall needs its own allowance. The farm's kernel and
   AppArmor policy are not exercised in CI.
 
+## Measured launch time
+
+The program `js-launch-measure` (`crates/js-agent/tests/bin/launch_measure.rs`; the method is in
+`crates/js-agent/tests/launch_measure/run.rs`) times a `crun` job's start through the agent's own
+`CrunRuntime`, with egress mode none and with an allow-list wired. The workflow
+`js-launch-measure.yml` runs it by manual dispatch only. It is a measurement, not a test: nothing
+asserts or gates on these numbers.
+
+**The interval.** It runs from the call of `CrunRuntime::start_staged` to the first byte the job
+writes, read by the program's blocking read of a FIFO it holds open. `create_and_start` is
+`CrunRuntime::stage` then `start_staged`, so this is the second half of the runtime's start entry:
+`crun run` and, for `wired`, the container's pid, `Egress::attach` (the veth, the /30, the
+firewall's set member) and the init's wait for the default route, with the resolver file the
+backend writes. Outside the interval: the lifecycle's per-start firewall check
+(`check_egress`), the stage (the lease's directories, cgroup and bundle), image pull and unpack
+(the image is in the store before the first sample), and the teardown between samples.
+
+The job is `sh -c 'echo up > /scratch/up'`. The FIFO is in the run's scratch directory, which the
+runtime binds at `/scratch`. It is not at `/work/up` because `/work` is an overlayfs, and a FIFO
+in an overlay's upper layer is a different pipe from the one the host opens: in a probe run with
+the FIFO there, no job's write ever reached the program. The allow-list names one endpoint
+(`192.0.2.10:9300`) and nothing listens there: the job opens no connection, so `wired` covers the
+wiring, not a connect.
+
+**The run.** One run of the workflow on a GitHub-hosted runner: image `ubuntu-24.04` (image
+version `20261026.354.1`), 4 CPUs (`nproc` and `std::thread::available_parallelism`), kernel
+`7.0.0-1017-azure`, `crun version 1.14.1`, the program built with the release profile. 50 measured
+samples per variant after 5 discarded, the variants alternating sample by sample; no sample
+failed. Milliseconds, one decimal place, rounded half away from zero; p90 by nearest rank:
+
+| variant | runs | failed | min | median | p90 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| none | 50 | 0 | 25.2 | 26.8 | 27.2 | 27.4 |
+| wired | 50 | 0 | 56.3 | 57.8 | 68.0 | 71.1 |
+
+wired - none (median): 31.0 ms
+
+**Measured.** The median start was 26.8 ms with egress mode none and 57.8 ms with the allow-list
+wired. The wired median is 31.0 ms longer (57.8 - 26.8 = 31.0) and 2.16 times the none median
+(57.8 / 26.8 = 2.157, rounded to two places). The wired samples spread wider: 56.3 to 71.1 ms
+(p90 68.0) against 25.2 to 27.4 ms (p90 27.2).
+
+**Inferred, not measured.** A shared hosted runner of four virtual CPUs is not a reference node,
+and these figures bound nothing about bare metal or a production host's kernel. The image was in the store
+for every sample (a warm store), so a first start that pulls is not covered. There was one run of
+the workflow, so the run-to-run spread is not known. The table does not say which step of the
+wiring takes the 31.0 ms.
+
 ## The held canary (not run here)
 
 On one production host, with the `crun` runtime and an allow-list: a job reaches its endpoint

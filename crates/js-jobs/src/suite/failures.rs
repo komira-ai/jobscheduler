@@ -66,10 +66,7 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
         (
             "an end",
             2,
-            Box::new(|| {
-                jobs.transition(&running, JobState::Running, JobState::Failed)
-                    .map(drop)
-            }),
+            Box::new(|| jobs.end_job(&running, super::exited(1)).map(drop)),
         ),
         (
             "a requeue",
@@ -78,7 +75,7 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
         ),
         (
             "a cancel",
-            1,
+            2,
             Box::new(|| jobs.request_cancel(&queued).map(drop)),
         ),
         (

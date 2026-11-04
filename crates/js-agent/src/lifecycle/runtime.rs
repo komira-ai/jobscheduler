@@ -46,6 +46,10 @@ pub mod label {
     /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
     /// as a number; absent on a container an earlier agent made.
     pub const SLOT: &str = "jobscheduler.dev/slot";
+    /// `job` on a container a job start made (its run id is the job id and its lease id the
+    /// allocation id), so a restarted agent lists it under the job keying again; absent on
+    /// a container of a run start and on one an earlier agent made.
+    pub const KEYING: &str = "jobscheduler.dev/keying";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.

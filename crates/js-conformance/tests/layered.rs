@@ -8,7 +8,7 @@ use js_conformance::{Check, Subject, Verdict, run};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::LayeredProvider;
 use js_pool_static::StaticPool;
-use js_provider::{Call, Provider};
+use js_provider::{Call, Pool};
 use js_registry::{Credential, PoolConfig, Registry};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
@@ -66,7 +66,7 @@ fn layered() -> Layered {
 }
 
 impl Subject for Layered {
-    fn provider(&mut self) -> &mut dyn Provider {
+    fn provider(&mut self) -> &mut dyn Pool {
         &mut self.provider
     }
 

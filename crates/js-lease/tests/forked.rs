@@ -10,13 +10,13 @@
 //! its own, since a held child carries a copy of every descriptor the process has open.
 
 use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
-use js_provider_fake::FakeProvider;
+use js_provider_fake::FakePool;
 use js_testkit::dir::TestDir;
 use js_testkit::forked::ForkedChild;
 use js_types::ProviderId;
 
-fn open(dir: &TestDir) -> LeaseTable<FakeProvider, ManualClock> {
-    let provider = FakeProvider::new(ProviderId::new("fake").unwrap(), Vec::new());
+fn open(dir: &TestDir) -> LeaseTable<FakePool, ManualClock> {
+    let provider = FakePool::new(ProviderId::new("fake").unwrap(), Vec::new());
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
     let ttl = std::time::Duration::from_secs(60);
     let settings = Settings::new(ttl, 2 * ttl).unwrap();

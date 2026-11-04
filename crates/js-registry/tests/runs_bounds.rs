@@ -10,7 +10,7 @@ use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Outcome,
     RunResult, Taint, refusal,
 };
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Binding, MIN_LOST_RETENTION_MS, RunRefusal, RunState, RunView};
 use support::*;
 
@@ -90,6 +90,8 @@ fn words(reply: &HeartbeatReply) -> Vec<String> {
         Command::Start(spec) => format!("start {}", spec.run_id),
         Command::Stop { run_id } => format!("stop {run_id}"),
         Command::Cancel { run_id } => format!("cancel {run_id}"),
+        Command::JobStart(spec) => format!("job_start {}", spec.job_id),
+        Command::JobStop { job_id } => format!("job_stop {job_id}"),
         Command::Unknown => "unknown".into(),
     };
     reply.commands.iter().map(word).collect()

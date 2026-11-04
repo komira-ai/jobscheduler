@@ -16,6 +16,9 @@ use crate::record::{
     AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
     Needs, may_move,
 };
+use crate::result::{JobEnd, Output, Retention};
+
+mod ending;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -66,6 +69,8 @@ pub struct JobStore<S, I = RandomIds> {
     store: Arc<S>,
     ids: I,
     schema: u32,
+    /// How long an ended job is kept: applied when a job ends.
+    retention: Retention,
 }
 
 /// `Err(error)` unless `ok`.
@@ -137,7 +142,26 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 }
             }
         };
-        Ok(JobStore { store, ids, schema })
+        Ok(JobStore {
+            store,
+            ids,
+            schema,
+            retention: Retention::DEFAULT,
+        })
+    }
+
+    /// The same job store keeping each job that ends from now on for `retention` after its
+    /// end, in place of [`Retention::DEFAULT`]. The window is applied when a job ends: a job
+    /// that ended before keeps the retention end it was given.
+    #[must_use]
+    pub fn with_retention(self, retention: Retention) -> JobStore<S, I> {
+        JobStore { retention, ..self }
+    }
+
+    /// How long a job that ends from now on is kept after its end.
+    #[must_use]
+    pub fn retention(&self) -> Retention {
+        self.retention
     }
 
     /// The schema version the store holds, which a later build may have raised.
@@ -179,6 +203,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             host: None,
             cancel_requested: false,
             cancel_requested_at: None,
+            result: None,
             retention_ends: None,
             carried: Carried::default(),
         }
@@ -313,17 +338,16 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Ok((placed, allocation))
     }
 
-    /// Moves a job from `expected` to `next`: placed to starting to running to succeeded or
-    /// failed; a start failure from the state the design names for it; any state that has
-    /// not ended to cancelled or lost. Moving to running sets `started_at`; moving to an end
-    /// sets `ended_at` and, in the same transaction, moves a booked allocation of the job to
-    /// releasing (design section 8, row 25), so the job and its allocation never disagree.
+    /// Moves a job from `expected` to `next` where `next` has not ended: placed to starting,
+    /// and starting to running, which sets `started_at`. A job ends only through
+    /// [`JobStore::end_job`], which writes its result and retention end with the end.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not in
     /// `expected`; [`JobStoreError::IllegalTransition`] for a move the design does not name
     /// (out of an end, or to queued or placed, which only [`JobStore::requeue_failed_prepare`]
-    /// and [`JobStore::place`] do); [`JobStoreError::Stale`]; as for any read and write.
+    /// and [`JobStore::place`] do) and for a move to an end, which only
+    /// [`JobStore::end_job`] makes; [`JobStoreError::Stale`]; as for any read and write.
     pub fn transition(
         &self,
         id: &JobId,
@@ -340,7 +364,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             },
         )?;
         ensure(
-            may_move(job.state, next),
+            may_move(job.state, next) & !next.is_ended(),
             JobStoreError::IllegalTransition {
                 id: id.clone(),
                 from: job.state,
@@ -348,34 +372,18 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             },
         )?;
         let now = self.store.now();
-        let ends = next.is_ended();
         let moved = JobRecord {
             state: next,
             started_at: (next == JobState::Running)
                 .then_some(now)
                 .or(job.started_at),
-            ended_at: ends.then_some(now).or(job.ended_at),
             ..job
         };
-        let mut txn = Txn::new().put(
+        let txn = Txn::new().put(
             keys::job(id),
             encode_job(&moved)?,
             Cond::Version(job_version),
         );
-        if ends
-            && let Some((allocation, version)) = self.read_allocation(id)?
-            && allocation.step == AllocationStep::Booked
-        {
-            let releasing = AllocationRecord {
-                step: AllocationStep::Releasing,
-                ..allocation
-            };
-            txn = txn.put(
-                keys::allocation(id),
-                encode_allocation(&releasing)?,
-                Cond::Version(version),
-            );
-        }
         self.commit(id, txn)?;
         Ok(moved)
     }
@@ -450,9 +458,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// The client's cancel (design section 5.3): a queued job is cancelled at once (it has no
-    /// allocation to release); a placed, starting or running job gets the cancel intent and
-    /// nothing else, the job ending when the host reports it stopped; an ended job, or one
-    /// whose cancel was already asked for, is returned as it is, unwritten.
+    /// allocation to release), ended as [`JobStore::end_job`] ends it, with a result of
+    /// reason cancelled and no exit code or output, and its retention end; a placed, starting
+    /// or running job gets the cancel intent and nothing else, the job ending when the host
+    /// reports it stopped; an ended job, or one whose cancel was already asked for, is
+    /// returned as it is, unwritten.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::Stale`]; as for any read and write.
@@ -462,23 +472,25 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             return Ok(job);
         }
         let now = self.store.now();
-        let queued = job.state == JobState::Queued;
-        let next = JobRecord {
-            state: if queued {
-                JobState::Cancelled
-            } else {
-                job.state
-            },
-            ended_at: queued.then_some(now),
+        let asked = JobRecord {
             cancel_requested: true,
             cancel_requested_at: Some(now),
             ..job
         };
-        let txn = Txn::new().put(
-            keys::job(id),
-            encode_job(&next)?,
-            Cond::Version(job_version),
-        );
+        let (txn, next) = if asked.state == JobState::Queued {
+            let cancelled = JobEnd::Cancelled {
+                exit_code: None,
+                output: Output::default(),
+            };
+            self.end_txn(asked, job_version, cancelled, now)?
+        } else {
+            let txn = Txn::new().put(
+                keys::job(id),
+                encode_job(&asked)?,
+                Cond::Version(job_version),
+            );
+            (txn, asked)
+        };
         self.commit(id, txn)?;
         Ok(next)
     }
@@ -815,6 +827,35 @@ mod tests {
         fn make_writer(&'a self) -> Lines {
             self.clone()
         }
+    }
+
+    // Catches a row a later build wrote that the retention tick passes over without a word,
+    // or deletes: the tick deletes nothing, keeps the row, and the warning names its key.
+    #[test]
+    fn a_tick_logs_each_row_it_leaves() {
+        use std::io::Write as _;
+
+        let lines = Lines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_ansi(false)
+            .finish();
+        let store = fake();
+        store
+            .txn(Txn::new().put("job/later", vec![crate::codec::FORMAT + 1], Cond::Any))
+            .expect("reachable")
+            .expect("commits");
+        let jobs = JobStore::new(Arc::clone(&store), RandomIds).expect("opens");
+        let deleted = tracing::subscriber::with_default(subscriber, || jobs.tick());
+        assert_eq!(deleted, Ok(Vec::new()));
+        assert!(store.get("job/later").expect("reads").is_some());
+        lines.clone().flush().expect("flushes");
+        let said = String::from_utf8(lines.0.lock().expect("unpoisoned").clone()).expect("text");
+        assert!(
+            said.contains("a job row a later build wrote is left to its retention")
+                & said.contains("key=job/later"),
+            "{said}"
+        );
     }
 
     // Catches a row a later build wrote that a list leaves out without a word: the warning

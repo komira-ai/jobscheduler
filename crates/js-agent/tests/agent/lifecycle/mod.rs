@@ -17,6 +17,7 @@ mod lease_dir;
 mod logs;
 mod mounts;
 mod owed;
+mod per_job;
 mod prepare;
 pub mod quota;
 mod quota_health;

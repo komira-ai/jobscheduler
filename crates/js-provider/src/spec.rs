@@ -1,7 +1,7 @@
 use js_types::{LabelError, Labels, LeaseId, Request, RequestError, RequestId, ResourceClass};
 
 /// A plain, constant code for a refusal. No central code table exists beyond this
-/// enum; a provider may add a code and may never remove a start-contract one.
+/// enum; a pool may add a code and may never remove a start-contract one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum RefusalCode {
@@ -11,13 +11,13 @@ pub enum RefusalCode {
     ReservedLabel,
     /// Start contract: a label key or value was malformed.
     InvalidLabel,
-    /// Start contract: the class is not one the provider serves.
+    /// Start contract: the class is not one the pool serves.
     UnknownClass,
     /// The request is below its class's minimum.
     BelowClassMinimum,
-    /// The provider does not serve this class.
+    /// The pool does not serve this class.
     UnsupportedClass,
-    /// No host of the provider could ever satisfy the request.
+    /// No host of the pool could ever satisfy the request.
     NoFit,
     /// A host would fit, but every fitting host is booked.
     NoCapacity,
@@ -31,11 +31,11 @@ pub enum RefusalCode {
     /// A whole-node request that used up its tries to get a host ready: it will not be
     /// placed again.
     ExclusiveNotReady,
-    /// A probe ([`js_types::Request::probe_host`]) the provider cannot place: it places no
+    /// A probe ([`js_types::Request::probe_host`]) the pool cannot place: it places no
     /// probe at all (a static pool, whose hosts are never cordoned, or a registry with no
     /// placer to judge one).
     ProbeUnsupported,
-    /// A probe whose host the provider does not hold live.
+    /// A probe whose host the pool does not hold live.
     ProbeHostUnknown,
     /// A probe whose host is not serving.
     ProbeHostNotServing,
@@ -98,10 +98,10 @@ impl From<RequestError> for RefusalCode {
     }
 }
 
-/// Everything a provider needs to start one attempt, already checked.
+/// Everything a pool needs to start one attempt, already checked.
 ///
 /// The only constructor, [`StartSpec::new`], runs the wall-time and reserved-label rules
-/// of the start contract of design 5.2 and the class checks, so a provider never sees a
+/// of the start contract of design 5.2 and the class checks, so a pool never sees a
 /// request that broke one of them. The fence and retry rules of 5.2 are not modelled yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartSpec {
@@ -113,7 +113,7 @@ pub struct StartSpec {
 }
 
 impl StartSpec {
-    /// Checks `request` against the start contract and the classes the provider
+    /// Checks `request` against the start contract and the classes the pool
     /// serves, in this order: wall time positive, labels free of reserved keys and
     /// well formed, class known, class minimum met. The first failure is the code.
     pub fn new(
@@ -139,7 +139,7 @@ impl StartSpec {
         })
     }
 
-    /// This spec carrying the id the consumer gave the request. A provider that queues
+    /// This spec carrying the id the consumer gave the request. A pool that queues
     /// reads it to tell a repeat of a request from a new one. The lease table keeps it
     /// with the lease it was acquired under, so a repeated acquire of the id finds that
     /// lease and a waiting one is presented again with the same id; a spec without one is

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_pool_static::{ConfigError, StaticPool};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_types::{ClassId, LeaseId, MemoryPercent, ProviderId, Request, ResourceClass, Resources};
 
 const GIB: u64 = 1 << 30;

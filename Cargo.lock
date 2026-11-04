@@ -1271,6 +1271,7 @@ name = "js-jobs"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "js-agent-wire",
  "js-jobs",
  "js-state",
  "js-testkit",
@@ -1310,6 +1311,7 @@ dependencies = [
  "js-caps",
  "js-elastic",
  "js-elastic-fake",
+ "js-jobs",
  "js-lease",
  "js-pool-static",
  "js-provider",

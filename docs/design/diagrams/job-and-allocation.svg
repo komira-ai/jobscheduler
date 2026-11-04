@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="1200" height="540" role="img" aria-label="A job goes queued, placed, starting, running, then ends as succeeded, failed, cancelled or lost (the container is gone and there is no result); it can also fail to start with a code, and a whole-host job whose prepare fails goes from placed back to queued. A submit that no host could ever serve is refused and records nothing. Underneath, the allocation is booked when the job is placed, releasing while the host has not yet confirmed the container is gone, and freed when it confirms or the provider says the host is absent; silence frees nothing. There is one allocation per job at a time.">
+<title>Jobs and allocations</title>
+<defs><marker id="job-and-allocation-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="job-and-allocation-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="job-and-allocation-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bd{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-od{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bld{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1200" height="540" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">A job, and the allocation the scheduler keeps for it</text>
+<text x="20" y="62" class="b" text-anchor="start">JOB: what the client submits and reads</text>
+<rect x="20" y="96" width="150" height="60" rx="5" class="box-o"/>
+<text x="95.0" y="122.0" class="b" text-anchor="middle">Queued</text>
+<text x="95.0" y="139.0" class="t-m" text-anchor="middle">waiting for a host</text>
+<rect x="215" y="96" width="150" height="60" rx="5" class="box-o"/>
+<text x="290.0" y="122.0" class="b" text-anchor="middle">Placed</text>
+<text x="290.0" y="139.0" class="t-m" text-anchor="middle">a host is booked</text>
+<rect x="410" y="96" width="150" height="60" rx="5" class="box-o"/>
+<text x="485.0" y="122.0" class="b" text-anchor="middle">Starting</text>
+<text x="485.0" y="139.0" class="t-m" text-anchor="middle">agent has the start</text>
+<rect x="605" y="96" width="150" height="60" rx="5" class="box-o"/>
+<text x="680.0" y="122.0" class="b" text-anchor="middle">Running</text>
+<text x="680.0" y="139.0" class="t-m" text-anchor="middle">container running</text>
+<path d="M170,126 L215,126" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<path d="M365,126 L410,126" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<path d="M560,126 L605,126" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<rect x="820" y="50" width="240" height="38" rx="5" class="box-b"/>
+<text x="940.0" y="73.5" class="b" text-anchor="middle">Succeeded: exit code 0</text>
+<rect x="820" y="96" width="240" height="38" rx="5" class="box-b"/>
+<text x="940.0" y="119.5" class="b" text-anchor="middle">Failed: exit code, wall limit, memory</text>
+<rect x="820" y="142" width="240" height="38" rx="5" class="box-b"/>
+<text x="940.0" y="165.5" class="b" text-anchor="middle">Cancelled: the client asked</text>
+<rect x="820" y="188" width="240" height="38" rx="5" class="box-b"/>
+<text x="940.0" y="211.5" class="b" text-anchor="middle">Lost: container gone, no result</text>
+<path d="M755,116 L820,69" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<path d="M755,122 L820,115" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<path d="M755,130 L820,161" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<path d="M755,138 L820,207" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<text x="1075" y="98" class="b" text-anchor="start">Ended</text>
+<text x="1075" y="116" class="t-m" text-anchor="start">result kept</text>
+<text x="1075" y="132" class="t-m" text-anchor="start">for the</text>
+<text x="1075" y="148" class="t-m" text-anchor="start">retention</text>
+<text x="1075" y="164" class="t-m" text-anchor="start">window</text>
+<rect x="410" y="190" width="150" height="40" rx="5" class="box-r"/>
+<text x="485.0" y="214.5" class="b" text-anchor="middle">Failed to start: a code</text>
+<path d="M485,156 L485,190" class="ln-r" marker-end="url(#job-and-allocation-ar)"/>
+<rect x="20" y="190" width="250" height="40" rx="5" class="box-rd"/>
+<text x="145.0" y="214.5" class="b" text-anchor="middle">Refused at submit: no-capable-host</text>
+<text x="20" y="250" class="t-m" text-anchor="start">a refusal is an answer, not a state:</text>
+<text x="20" y="266" class="t-m" text-anchor="start">nothing is recorded</text>
+<path d="M290,96 L290,82 L95,82 L95,96" class="ln-o" marker-end="url(#job-and-allocation-ao)"/>
+<text x="192" y="77" class="t-m lbl" text-anchor="middle">whole-host prepare failed: back to queued, the only requeue</text>
+<text x="820" y="246" class="t-m" text-anchor="start">Lost: the provider says the host is absent,</text>
+<text x="820" y="262" class="t-m" text-anchor="start">or the host came back and does not list the job.</text>
+<text x="410" y="246" class="t-m" text-anchor="start">codes: no-capacity, start-timeout,</text>
+<text x="410" y="262" class="t-m" text-anchor="start">exclusive-not-ready, or the agent's refusal</text>
+<text x="600" y="196" class="t-m" text-anchor="start">Cancel: from queued, at once;</text>
+<text x="600" y="212" class="t-m" text-anchor="start">from placed, starting or running,</text>
+<text x="600" y="228" class="t-m" text-anchor="start">when the host confirms it stopped</text>
+<text x="310" y="300" class="b" text-anchor="start">ALLOCATION: the scheduler's record that resources on one host are booked for one job</text>
+<text x="310" y="318" class="t-m" text-anchor="start">Clients never create, renew or release it.</text>
+<rect x="60" y="340" width="300" height="70" rx="5" class="box-b"/>
+<text x="210.0" y="362.5" class="b" text-anchor="middle">Booked</text>
+<text x="210.0" y="379.5" class="t-m" text-anchor="middle">created when the job is placed, committed</text>
+<text x="210.0" y="396.5" class="t-m" text-anchor="middle">before the host is told; counted by placement</text>
+<rect x="420" y="340" width="340" height="70" rx="5" class="box-b"/>
+<text x="590.0" y="362.5" class="b" text-anchor="middle">Releasing</text>
+<text x="590.0" y="379.5" class="t-m" text-anchor="middle">job ended or cancel sent; waiting for the</text>
+<text x="590.0" y="396.5" class="t-m" text-anchor="middle">host to confirm the container is gone</text>
+<rect x="820" y="340" width="300" height="70" rx="5" class="box-b"/>
+<text x="970.0" y="362.5" class="b" text-anchor="middle">Freed</text>
+<text x="970.0" y="379.5" class="t-m" text-anchor="middle">the host confirms the container is gone,</text>
+<text x="970.0" y="396.5" class="t-m" text-anchor="middle">or the provider says the host is absent</text>
+<path d="M360,375 L420,375" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<text x="390" y="367" class="t-m lbl" text-anchor="middle">ends</text>
+<path d="M760,375 L820,375" class="ln" marker-end="url(#job-and-allocation-ak)"/>
+<text x="790" y="367" class="t-m lbl" text-anchor="middle">gone</text>
+<path d="M290,156 L290,336" class="ln-o" marker-end="url(#job-and-allocation-ao)"/>
+<text x="282" y="300" class="t-m" text-anchor="end">allocation made at placement</text>
+<text x="20" y="450" class="t-m" text-anchor="start">One allocation per job at a time. Silence frees nothing. A whole-host prepare that fails frees its allocation at once: no container was made to confirm.</text>
+<text x="20" y="470" class="t-m" text-anchor="start">The job can end before its allocation is freed: the allocation is releasing until the host confirms the container is gone.</text>
+<text x="20" y="490" class="t-m" text-anchor="start">A whole-host job is a job whose resource need is the whole host; its allocation is then the whole host. Placement, tail placement and usage history count allocations.</text>
+<text x="20" y="510" class="t-m" text-anchor="start">No renewal and no time to live: the queue wait, the start timeout and the wall limit bound a job, and the host reports its jobs on every heartbeat.</text>
+</svg>

@@ -1,4 +1,7 @@
-//! The provider conformance suite for the delegated flavour (design 13.2).
+//! The conformance suite of the lease-level allocation port, [`js_provider::Pool`]
+//! (design 13.2). The words "provider" below name what implements it under test; the
+//! machine providers of `js_elastic::CapacityProvider` have their own suite,
+//! `js_elastic::conformance`.
 //!
 //! A provider is put under test by implementing [`Subject`], then calling [`run`].
 //! The suite starts leases, stops them, scripts Unknown answers and compares what the
@@ -46,7 +49,7 @@ pub mod core;
 
 use std::collections::BTreeMap;
 
-use js_provider::{Call, Provider};
+use js_provider::{Call, Pool};
 use js_types::{Capabilities, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
 pub use checks::Check;
@@ -54,7 +57,7 @@ pub use checks::Check;
 /// A provider under test, with the hooks that read its real state.
 pub trait Subject {
     /// The provider, as the scheduler would call it.
-    fn provider(&mut self) -> &mut dyn Provider;
+    fn provider(&mut self) -> &mut dyn Pool;
 
     /// The booked hosts and the lease on each, read from the provider's own state.
     fn booked(&self) -> BTreeMap<HostId, LeaseId>;

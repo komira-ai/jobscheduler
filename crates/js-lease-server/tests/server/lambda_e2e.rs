@@ -4,7 +4,7 @@
 //! test, saying the messages a real one says. Time is the test's clock and the ticks are
 //! stepped; nothing sleeps and nothing measures elapsed time.
 
-use js_provider::{Observed, Provider, StartAck, StopAck};
+use js_provider::{Observed, Pool, StartAck, StopAck};
 use js_provider_lambdalabs::{Call, TerminateEffect};
 use js_scaler::Phase;
 use js_types::{HostId, LeaseId};

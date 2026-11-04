@@ -184,9 +184,7 @@ pub fn a_row_this_build_cannot_read_refuses_every_write<B: Backend>(backend: &B)
         let writes = [
             (
                 "an end",
-                rig.jobs
-                    .transition(&placed, JobState::Placed, JobState::Lost)
-                    .map(drop),
+                rig.jobs.end_job(&placed, crate::JobEnd::Lost).map(drop),
                 &key,
             ),
             (
