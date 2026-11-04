@@ -16,8 +16,9 @@
 //!   (with no `--egress-allow` it reaches the resolvers only).
 //!
 //! `--egress-forward-port` names the host ports a job may declare (`JobSpec::ports`); it
-//! needs `allow-list` or `open`. Ports are not forwarded yet: a job that declares one is
-//! refused, and the agent does not report them.
+//! needs `allow-list` or `open`. The agent reports them (`egress-ports`) and forwards each
+//! port an admitted job declares from the host's port to the job (`super::forward`); a job
+//! that declares one it does not list is refused.
 //!
 //! The flags are the only configuration: no environment variable, no file the job can reach.
 
@@ -357,16 +358,6 @@ impl Config {
         }
     }
 
-    /// The ceiling the agent reports in its hello: the mode's level, and no host port, since
-    /// declared ports are not forwarded yet (a job that declares one is refused).
-    #[must_use]
-    pub fn advertised(&self) -> NetworkCeiling {
-        NetworkCeiling {
-            level: self.mode.level(),
-            ports: Vec::new(),
-        }
-    }
-
     /// The pool the runs' address blocks are cut from.
     #[must_use]
     pub fn pool(&self) -> Pool {
@@ -505,7 +496,6 @@ mod tests {
         assert_eq!(none.route_wait(), None);
         assert_eq!(none.resolv_conf(), None);
         assert_eq!(none.ceiling(), NetworkCeiling::default());
-        assert_eq!(none.advertised(), NetworkCeiling::default());
         let explicit = Flags {
             mode: Some("none"),
             ..Flags::default()
@@ -669,8 +659,7 @@ mod tests {
         assert_eq!(shown[..2], ["80", "8000-8010"]);
         assert_eq!(shown.len(), 16);
         assert_eq!(config.ceiling().ports, config.forward_ports());
-        assert_eq!(config.advertised().level, JobNetwork::Open);
-        assert!(config.advertised().ports.is_empty());
+        assert_eq!(config.ceiling().level, JobNetwork::Open);
         let shown: Vec<String> = config.allow().iter().map(ToString::to_string).collect();
         assert_eq!(shown, ["192.0.2.10:443"]);
 

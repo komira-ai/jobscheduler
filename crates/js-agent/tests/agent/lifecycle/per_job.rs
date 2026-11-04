@@ -454,8 +454,9 @@ fn a_job_start_with_a_run_body_is_refused_and_runs_nothing() {
 /// Proves a job start is held to the runtime's network ceiling as a run start is: under the
 /// ceiling `none` a job start that asks for `allow-list` is answered `failed_to_start` with
 /// `network-above-ceiling` and a text naming both levels, one that declares a port is refused
-/// `port-above-ceiling`, neither creates anything, and both results are listed in `jobs`; a
-/// job start at the ceiling `allow-list` that asks for it is created at that level. Catches a
+/// `ports-not-supported` (the ceiling `none` forwards no port), neither creates anything, and
+/// both results are listed in `jobs`; a job start at the ceiling `allow-list` that asks for it
+/// is created at that level. Catches a
 /// job start whose network the agent drops on the way to the shared admission (it would run
 /// with loopback only) or never compares with the ceiling.
 #[test]
@@ -483,7 +484,7 @@ fn a_job_start_is_held_to_the_network_ceiling() {
     }];
     assert_eq!(
         names(&h.apply(vec![job_start(ported)])),
-        [format!("refused j2 {}", refusal::PORT_ABOVE_CEILING)]
+        [format!("refused j2 {}", refusal::PORTS_NOT_SUPPORTED)]
     );
     assert!(
         h.fake.created().is_empty(),

@@ -167,6 +167,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         labels,
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

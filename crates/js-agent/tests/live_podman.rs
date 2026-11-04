@@ -117,6 +117,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         slot: 0,
         bundle: None,
         network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

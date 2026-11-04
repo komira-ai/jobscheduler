@@ -66,7 +66,7 @@ fn open_job_reaches_an_address_outside_the_list_but_not_metadata_or_a_neighbour(
     egress.check().expect("the firewall reads back as loaded");
     let neighbour = Holder::new();
     let wired_neighbour = egress
-        .attach("neighbour", neighbour.pid(), JobNetwork::AllowList)
+        .attach("neighbour", neighbour.pid(), JobNetwork::AllowList, &[])
         .expect("attach the neighbour");
     assert_eq!(wired_neighbour.interface(), Some("jsv0"));
     let on_neighbour = Server::tcp(&neighbour.ns, "0.0.0.0:7000".parse::<SocketAddr>().unwrap());
@@ -229,10 +229,10 @@ fn an_allow_list_job_under_an_open_ceiling_keeps_its_list() {
         let egress = Egress::start(crate::sys::open(allow, dns)).expect("start");
         let (narrow, wide) = (Holder::new(), Holder::new());
         let _narrow = egress
-            .attach("narrow", narrow.pid(), JobNetwork::AllowList)
+            .attach("narrow", narrow.pid(), JobNetwork::AllowList, &[])
             .expect("attach the allow-list run");
         let _wide = egress
-            .attach("wide", wide.pid(), JobNetwork::Open)
+            .attach("wide", wide.pid(), JobNetwork::Open, &[])
             .expect("attach the open run");
         assert_eq!(wired(), ["jsv0"]);
         assert_eq!(members("openifs"), ["jsv1"]);
