@@ -64,7 +64,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="1092.0" y="198.0" class="t-m" text-anchor="middle">tag created last</text>
 <path d="M1154,170 L1174,170" class="ln" marker-end="url(#release-update-ak)"/>
 <rect x="1174" y="120" width="124" height="100" rx="5" class="box-o"/>
-<text x="1236.0" y="150.0" class="b" text-anchor="middle">gamma</text>
+<text x="1236.0" y="150.0" class="b" text-anchor="middle">deploy</text>
 <text x="1236.0" y="166.0" class="t-m" text-anchor="middle">off unless</text>
 <text x="1236.0" y="182.0" class="t-m" text-anchor="middle">coordinator</text>
 <text x="1236.0" y="198.0" class="t-m" text-anchor="middle">configured</text>

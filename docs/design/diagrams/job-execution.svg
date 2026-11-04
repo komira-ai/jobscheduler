@@ -62,7 +62,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="220.0" y="300.5" class="t-m" text-anchor="middle">(not the heartbeat loop)</text>
 <rect x="350" y="256" width="210" height="64" rx="5" class="box-b"/>
 <text x="455.0" y="275.0" class="b" text-anchor="middle">validate</text>
-<text x="455.0" y="292.0" class="t-m" text-anchor="middle">digest-pinned image required;</text>
+<text x="455.0" y="292.0" class="t-m" text-anchor="middle">OCI image, digest-pinned;</text>
 <text x="455.0" y="309.0" class="t-m" text-anchor="middle">refusal codes</text>
 <rect x="590" y="256" width="210" height="64" rx="5" class="box-b"/>
 <text x="695.0" y="275.0" class="b" text-anchor="middle">pull image</text>
@@ -84,12 +84,13 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="140" y="468" class="t-m" text-anchor="start">seccomp pinned</text>
 <text x="140" y="490" class="t-m" text-anchor="start">cgroup = booking</text>
 <text x="140" y="512" class="t-m" text-anchor="start">scratch dir + quota</text>
-<text x="140" y="534" class="t-m" text-anchor="start">loopback only</text>
-<text x="140" y="556" class="t-m" text-anchor="start">wall clock from start</text>
+<text x="140" y="534" class="t-m" text-anchor="start">network: none | allow-list | open, per job (planned)</text>
+<text x="140" y="556" class="t-m" text-anchor="start">declared ports: one DNAT forward each (planned)</text>
+<text x="140" y="578" class="t-m" text-anchor="start">wall clock from start</text>
 <rect x="470" y="450" width="130" height="50" rx="5" class="box-o"/>
 <text x="535.0" y="479.0" class="b" text-anchor="middle">job</text>
 <path d="M600,475 L1160,475" class="ln-d" marker-end="url(#job-execution-ak)"/>
-<text x="890" y="449" class="t-m lbl" text-anchor="middle">planned: crun is loopback only today,</text><text x="890" y="465" class="t-m lbl" text-anchor="middle">so no upload; one PUT, second refused (412)</text>
+<text x="890" y="449" class="t-m lbl" text-anchor="middle">planned: needs allow-list or open network,</text><text x="890" y="465" class="t-m lbl" text-anchor="middle">not wired for crun yet; one PUT, second refused (412)</text>
 <rect x="1160" y="445" width="110" height="60" rx="5" class="box-g"/>
 <text x="1215.0" y="479.0" class="b" text-anchor="middle">Object store</text>
 <path d="M620,575 L660,575" class="ln" marker-end="url(#job-execution-ak)"/>
@@ -125,5 +126,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="635.0" y="754.5" class="t-r" text-anchor="middle">check fails: write taint marker first, then report;</text>
 <text x="635.0" y="769.5" class="t-r" text-anchor="middle">host takes no work</text>
 <rect x="120" y="810" width="700" height="34" rx="5" class="box-rd"/>
-<text x="470.0" y="831.0" class="t-r" text-anchor="middle">Not built: fence field on Start; agent self-fence on silence</text>
+<text x="470.0" y="831.0" class="t-r" text-anchor="middle">Not built: fence field on Start; agent self-fence; crun network wiring and per-job network</text>
 </svg>

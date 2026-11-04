@@ -44,12 +44,12 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="550.0" y="373.5" class="b" text-anchor="middle">4  generate sandbox profile</text>
 <text x="550.0" y="390.5" class="t-m" text-anchor="middle">typed policy, private floor last</text>
 <rect x="400" y="432" width="300" height="70" rx="5" class="box-o"/>
-<text x="550.0" y="454.0" class="b" text-anchor="middle">5  network: off / loopback / on</text>
-<text x="550.0" y="471.0" class="t-m" text-anchor="middle">on needs packet-filter anchor for uid</text>
-<text x="550.0" y="488.0" class="t-m" text-anchor="middle">range, checked before job</text>
-<rect x="400" y="528" width="300" height="56" rx="5" class="box-gd"/>
+<text x="550.0" y="454.0" class="b" text-anchor="middle">5  network level -> --native-network</text>
+<text x="550.0" y="471.0" class="t-m" text-anchor="middle">none: off. allow-list: on + anchor for uid range.</text>
+<text x="550.0" y="488.0" class="t-m" text-anchor="middle">open: new value, no anchor needed. Ports refused.</text>
+<rect x="400" y="528" width="300" height="56" rx="5" class="box-o"/>
 <text x="550.0" y="551.5" class="b" text-anchor="middle">6  spawn via disclaiming spawner</text>
-<text x="550.0" y="568.5" class="t-m" text-anchor="middle">in review</text>
+<text x="550.0" y="568.5" class="t-m" text-anchor="middle">built</text>
 <rect x="400" y="610" width="300" height="76" rx="5" class="box-o"/>
 <text x="410" y="636" class="b" text-anchor="start">run under user:</text>
 <text x="410" y="656" class="t-m" text-anchor="start">sandbox-exec, rlimits</text>
