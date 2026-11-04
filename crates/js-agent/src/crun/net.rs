@@ -5,9 +5,9 @@
 //!
 //! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create
 //! (`Runtime::check_egress`, which the lifecycle calls and answers `egress-unchecked`), the
-//! create, `Oci::start`, `Oci::container_pid`, [`EgressPort::attach`] with the job's level and
-//! declared ports, and [`Wired::release`] once the run has ended or is removed. An agent in
-//! mode none has no port, and none of this runs: its containers have loopback only, as
+//! create, `Oci::start_supervised`, `Oci::container_pid`, [`EgressPort::attach`] with the job's
+//! level and declared ports, and [`Wired::release`] once the run has ended or is removed. An
+//! agent in mode none has no port, and none of this runs: its containers have loopback only, as
 //! before. Under a ceiling
 //! a `none` job is not attached either: its bundle has the loopback resolver and no route
 //! wait ([`create`]), and its container keeps loopback only.
@@ -17,9 +17,8 @@ use std::time::Duration;
 
 use js_agent_wire::NetworkCeiling;
 use js_contain::container::ContainerSpec;
-use js_contain::oci::Oci;
 use js_contain::oci::words::{crun_words, init_words};
-use js_contain::running::Running;
+use js_contain::oci::{Oci, Supervised};
 use js_types::{JobNetwork, PortMap};
 
 use crate::egress::{Attachment, Config, Egress, EgressError, Mode, ROUTE_WAIT};
@@ -167,7 +166,7 @@ impl Net {
         &mut self,
         egress: Option<&dyn EgressPort>,
         oci: &Oci,
-        started: (&ContainerSpec, &Running),
+        started: (&ContainerSpec, &Supervised),
         now_ms: fn() -> u64,
     ) -> Result<(), RuntimeError> {
         self.wired = attach(egress, oci, started, (self.level, &self.ports), now_ms)?;
@@ -215,11 +214,11 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 /// job admitted at `level` that declared `ports`; none for a `none` job, which is not wired
 /// (and whose pid is not asked for). A wired level with no egress never gets here: the
 /// runtime refused it before it made the container ([`port_for`]). The container's pid is
-/// asked for until `crun` names one (right after `Oci::start` the container may not be made
-/// yet), and the asks end without one when
-/// `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
-/// or when [`ROUTE_WAIT`] (a wired ceiling's `Config::route_wait`) has passed on `now_ms`: the
-/// container's init gives up its wait for the route then.
+/// asked for until `crun` names one (right after `Oci::start_supervised` the container may not
+/// be made yet), and the asks end without one when `crun state` answers with no usable pid (or
+/// names one too late), when `crun run` has ended, or when [`ROUTE_WAIT`] (a wired ceiling's
+/// `Config::route_wait`) has passed on `now_ms`: the container's init gives up its wait for the
+/// route then.
 ///
 /// # Errors
 ///
@@ -229,7 +228,7 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 pub(super) fn attach(
     egress: Option<&dyn EgressPort>,
     oci: &Oci,
-    (spec, running): (&ContainerSpec, &Running),
+    (spec, running): (&ContainerSpec, &Supervised),
     (level, ports): (JobNetwork, &[PortMap]),
     now_ms: fn() -> u64,
 ) -> Result<Option<Box<dyn Wired>>, RuntimeError> {
@@ -247,7 +246,7 @@ pub(super) fn attach(
 fn pid_of(
     oci: &Oci,
     spec: &ContainerSpec,
-    running: &Running,
+    running: &Supervised,
     now_ms: fn() -> u64,
 ) -> Result<u32, String> {
     let deadline = now_ms().saturating_add(ROUTE_WAIT.as_secs().saturating_mul(1000));

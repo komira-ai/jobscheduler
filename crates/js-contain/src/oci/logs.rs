@@ -18,10 +18,13 @@
 //! 1 MiB a stream, and a ring of 64 KiB, well above the 8 KiB a run's result carries, so
 //! that whoever cuts the tail at a character boundary has bytes to spare.
 //!
-//! **A restart of the agent** keeps the files (the lease directory is not touched) and
-//! loses the rings, which exist only in the process that read the pipes. A container that
-//! outlives its agent finds the read ends of its pipes closed: its next write is an
-//! `EPIPE` (`SIGPIPE`), where a file would have taken it.
+//! **Who reads the pipes:** the process that runs the capture. A container started under a
+//! supervisor process (`supervise`) has its pipes read, its files written and its rings held
+//! by that process, which outlives the agent: a restart of the agent leaves the capture as
+//! it is, the files stay in the lease directory, and the tail reaches the agent through the
+//! exit record the supervisor writes. A container started by `Oci::start` has its pipes read
+//! by the process that started it; one that outlives that process finds the read ends of its
+//! pipes closed, and its next write is an `EPIPE` (`SIGPIPE`).
 //!
 //! **The end of the drain:** a stream ends when every write end of its pipe is closed,
 //! which is the container's exit (the agent holds its own copies of the write ends until

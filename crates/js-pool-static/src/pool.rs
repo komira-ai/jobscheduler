@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use js_provider::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_types::{HostId, LeaseId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass};
 
-use crate::book::{HostBook, SeatError};
 use crate::config::{self, ConfigError};
 
 /// A provider over a fixed list of hosts, each leased whole. See the crate docs for

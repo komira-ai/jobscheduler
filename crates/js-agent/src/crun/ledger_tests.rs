@@ -11,12 +11,20 @@ use std::path::{Path, PathBuf};
 
 use js_testkit::dir::TestDir;
 
-use super::ledger::{DIR, Entry, Ledger, Left, Read, Removed};
+use super::ledger::{
+    Booked, DIR, Entry, Ledger, Left, Phase, Read, Reason, Removed, Supervisor, SweepReport,
+};
 use crate::cli_runtime::container_name;
 use crate::lifecycle::label;
 
 fn ledger(scratch: &Path, agent: &str) -> Ledger {
     Ledger::open(scratch, agent).expect("open the ledger")
+}
+
+/// The sweep of `ledger` that takes over no lease: every lease is removed with `tear_down`.
+fn sweep_all(ledger: &Ledger, tear_down: impl FnMut(&Entry) -> Result<(), String>) -> SweepReport {
+    let swept = ledger.sweep(|_| Err::<(), _>(Reason::NeverRan), tear_down);
+    swept.expect("sweep").report
 }
 
 /// The sidecar of `agent`'s run `run`.
@@ -90,11 +98,12 @@ fn a_sweep_removes_this_agents_leases_and_sidecars() {
         ledger.record(e).expect("record");
         leases.make(&e.name);
     }
-    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep");
+    let report = sweep_all(&ledger, |e| leases.tear_down(e));
     let removed = |e: &Entry| Removed {
         run_id: e.run_id.clone(),
         name: e.name.clone(),
         labels: e.labels.clone(),
+        reason: Reason::NeverRan,
     };
     assert_eq!(report.removed, [removed(&one), removed(&two)]);
     assert_eq!(report.removed[0].labels[label::AGENT], "agent-a");
@@ -123,7 +132,7 @@ fn two_agents_on_one_store_never_sweep_each_others_leases() {
     assert_eq!(a.read(&theirs.name), Some(Read::Foreign(theirs.clone())));
     assert_eq!(b.read(&mine.name), Some(Read::Foreign(mine.clone())));
 
-    let report = a.sweep(|e| leases.tear_down(e)).expect("sweep a");
+    let report = sweep_all(&a, |e| leases.tear_down(e));
     assert_eq!(leases.asked(), std::slice::from_ref(&mine.name));
     assert_eq!(report.removed.len(), 1);
     assert_eq!(
@@ -136,7 +145,7 @@ fn two_agents_on_one_store_never_sweep_each_others_leases() {
     assert!(leases.root.join(&theirs.name).is_dir(), "b's lease went");
     assert_eq!(files(&a), [format!("{}.json", theirs.name)]);
 
-    let report = b.sweep(|e| leases.tear_down(e)).expect("sweep b");
+    let report = sweep_all(&b, |e| leases.tear_down(e));
     assert_eq!(report.removed.len(), 1);
     assert!(report.left.is_empty());
     assert!(files(&b).is_empty());
@@ -165,7 +174,7 @@ fn a_sidecar_that_is_malformed_is_left_alone_and_reported() {
     fs::write(at("js-0000000000000001-garbage.json"), "not json").expect("write");
     fs::write(
         at("js-0000000000000002-old.json"),
-        text.replace("\"version\":1", "\"version\":9"),
+        text.replace("\"version\":2", "\"version\":9"),
     )
     .expect("write");
     fs::write(
@@ -196,7 +205,7 @@ fn a_sidecar_that_is_malformed_is_left_alone_and_reported() {
     fs::write(at(".js-0000000000000007-tmp.tmp"), &text).expect("write");
     let before = files(&ledger);
 
-    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep");
+    let report = sweep_all(&ledger, |e| leases.tear_down(e));
     assert_eq!(
         leases.asked(),
         std::slice::from_ref(&good.name),
@@ -231,7 +240,7 @@ fn a_crash_between_the_sidecar_and_the_lease_is_swept() {
     ledger.record(&partly).expect("record");
     fs::create_dir_all(leases.root.join(&partly.name)).expect("a lease with a directory only");
 
-    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep");
+    let report = sweep_all(&ledger, |e| leases.tear_down(e));
     let mut asked = leases.asked();
     asked.sort();
     let mut wanted = vec![never.name.clone(), partly.name.clone()];
@@ -240,8 +249,8 @@ fn a_crash_between_the_sidecar_and_the_lease_is_swept() {
     assert_eq!(report.removed.len(), 2);
     assert!(files(&ledger).is_empty());
     assert!(!leases.root.join(&partly.name).exists());
-    let again = ledger.sweep(|e| leases.tear_down(e)).expect("sweep again");
-    assert_eq!(again, super::ledger::SweepReport::default());
+    let again = sweep_all(&ledger, |e| leases.tear_down(e));
+    assert_eq!(again, SweepReport::default());
 }
 
 /// Catches a sweep that drops the sidecar of a lease it could not remove (the leftover
@@ -256,14 +265,14 @@ fn a_lease_that_cannot_be_removed_keeps_its_sidecar_for_the_next_sweep() {
     ledger.record(&stuck).expect("record");
     leases.make(&stuck.name);
 
-    let report = ledger.sweep(|_| Err("busy".to_owned())).expect("sweep");
+    let report = sweep_all(&ledger, |_| Err("busy".to_owned()));
     assert!(report.removed.is_empty());
     assert_eq!(report.failed.len(), 1);
     assert_eq!(report.failed[0].run_id, "stuck");
     assert_eq!(report.failed[0].why, "busy");
     assert_eq!(files(&ledger), [format!("{}.json", stuck.name)]);
 
-    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep again");
+    let report = sweep_all(&ledger, |e| leases.tear_down(e));
     assert_eq!(report.removed.len(), 1);
     assert!(files(&ledger).is_empty());
     assert!(!leases.root.join(&stuck.name).exists());
@@ -351,14 +360,12 @@ fn a_sidecar_that_cannot_be_removed_is_an_error_and_a_failed_lease() {
     // The same through a sweep of a sidecar that was read as good before it was replaced.
     let two = entry("agent-a", "r2");
     ledger.record(&two).expect("record");
-    let report = ledger
-        .sweep(|e| {
-            let path = file_of(&ledger, e);
-            fs::remove_file(&path).expect("remove");
-            fs::create_dir(&path).expect("dir");
-            Ok(())
-        })
-        .expect("sweep");
+    let report = sweep_all(&ledger, |e| {
+        let path = file_of(&ledger, e);
+        fs::remove_file(&path).expect("remove");
+        fs::create_dir(&path).expect("dir");
+        Ok(())
+    });
     assert!(report.removed.is_empty(), "{report:?}");
     assert_eq!(report.failed.len(), 1, "{report:?}");
     assert!(report.failed[0].why.contains("remove the sidecar"));
@@ -421,10 +428,156 @@ fn a_sweep_removes_this_agents_temporary_files_and_only_those() {
     let odd = at(&format!(".{}-a b.tmp", &mine.name[..mine.name.len() - 3]));
     fs::write(&odd, "{").expect("write");
 
-    let report = ledger.sweep(|e| leases.tear_down(e)).expect("sweep");
+    let report = sweep_all(&ledger, |e| leases.tear_down(e));
     assert!(!at(&format!(".{}.tmp", mine.name)).exists(), "not removed");
     assert!(at(&format!(".{}.tmp", theirs.name)).exists());
     assert!(link.is_symlink() && odd.exists());
     assert_eq!(report.left.len(), 3, "{:?}", report.left);
     assert!(report.removed.is_empty() && report.failed.is_empty());
+}
+
+/// The sidecar of a run of `agent` that runs, with every field of version 2 set.
+fn full(agent: &str, run: &str) -> Entry {
+    let mut made = entry(agent, run);
+    made.allocation = Some("lease-1".to_owned());
+    made.booked = Some(Booked {
+        cpu_millis: 1500,
+        memory_bytes: 1 << 30,
+        disk_bytes: Some(4096),
+        gpus: vec![0, 3],
+        slot: 1,
+    });
+    made.wall_ms = Some(60_000);
+    made.lease_dir = Some(PathBuf::from("/leases/one"));
+    made.cgroup = Some(PathBuf::from("/cgroup/one"));
+    made.scratch = Some(PathBuf::from("/runs/r1"));
+    made.exit_record = Some(PathBuf::from("/leases/one/exit.json"));
+    made.image_digest = Some("sha256:abc".to_owned());
+    made.running(
+        1_700_000,
+        Supervisor {
+            pid: 42,
+            start: 777,
+        },
+    )
+}
+
+/// Catches a sidecar of version 2 that loses a field on the way to the disk and back (a
+/// successor would adopt a run on a record that differs from the one written): every field
+/// comes back as it was written, the state is spelled as the form says, and a sidecar made
+/// before the container started has the state `starting` and none of the fields that come
+/// with the start.
+#[test]
+fn a_version_2_sidecar_is_read_back_with_every_field() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-v2");
+    let ledger = ledger(&dir, "agent-a");
+    let started = full("agent-a", "r1");
+    ledger.record(&started).expect("record");
+    assert_eq!(
+        ledger.read(&started.name),
+        Some(Read::Mine(started.clone()))
+    );
+    let text = fs::read_to_string(file_of(&ledger, &started)).expect("read");
+    assert!(text.contains("\"version\":2"), "{text}");
+    assert!(text.contains("\"state\":\"running\""), "{text}");
+
+    let making = entry("agent-a", "r2");
+    assert_eq!(making.state, Some(Phase::Starting));
+    assert_eq!(making.version, 2);
+    ledger.record(&making).expect("record");
+    let text = fs::read_to_string(file_of(&ledger, &making)).expect("read");
+    assert!(text.contains("\"state\":\"starting\""), "{text}");
+    for absent in ["supervisor", "started_wall_ms", "booked", "lease_dir"] {
+        assert!(!text.contains(absent), "{absent} in {text}");
+    }
+}
+
+/// Catches a sidecar of version 1, which an agent from before this form wrote, being refused
+/// as malformed (the pass would leave its lease for ever, and never report it): it is read as
+/// this agent's, with none of the version 2 fields, so that the pass can remove its lease.
+#[test]
+fn a_version_1_sidecar_is_read_as_this_agents_without_the_new_fields() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-v1");
+    let ledger = ledger(&dir, "agent-a");
+    let old = entry("agent-a", "r1");
+    let body = serde_json::json!({
+        "version": 1,
+        "agent": old.agent,
+        "run_id": old.run_id,
+        "name": old.name,
+        "labels": old.labels,
+    });
+    fs::write(file_of(&ledger, &old), body.to_string()).expect("write");
+    let Some(Read::Mine(read)) = ledger.read(&old.name) else {
+        panic!("not this agent's");
+    };
+    assert_eq!(read.version, 1);
+    assert_eq!(read.state, None);
+    assert!(read.supervisor.is_none() && read.booked.is_none() && read.lease_dir.is_none());
+    assert_eq!(read.labels, old.labels);
+}
+
+/// Catches a rewrite that is not whole or not durable (a successor reading the sidecar
+/// during the start of a run would see half of it): the new sidecar replaces the old at once,
+/// no temporary file is left, a rewrite that cannot be written leaves the old sidecar as it
+/// was, and a name that is not a lease's is refused.
+#[test]
+fn a_sidecar_is_rewritten_whole_and_a_failed_rewrite_leaves_the_old_one() {
+    let dir = TestDir::under(std::env::temp_dir(), "ledger-rewrite");
+    let ledger = ledger(&dir, "agent-a");
+    let first = entry("agent-a", "r1");
+    ledger.record(&first).expect("record");
+    let running = first.running(55, Supervisor { pid: 3, start: 4 });
+    ledger.rewrite(&running).expect("rewrite");
+    assert_eq!(ledger.read(&first.name), Some(Read::Mine(running.clone())));
+    assert_eq!(files(&ledger), [format!("{}.json", first.name)]);
+
+    // A directory where the temporary file goes cannot be written over.
+    let tmp = ledger.dir().join(format!(".{}.tmp", first.name));
+    fs::create_dir(&tmp).expect("a directory");
+    let later = first.running(66, Supervisor { pid: 5, start: 6 });
+    ledger.rewrite(&later).expect_err("not written");
+    assert_eq!(ledger.read(&first.name), Some(Read::Mine(running)));
+    fs::remove_dir(&tmp).expect("remove");
+
+    let mut named = first.clone();
+    named.name = "a/b".to_owned();
+    ledger.rewrite(&named).expect_err("not a lease's name");
+    assert_eq!(files(&ledger), [format!("{}.json", first.name)]);
+}
+
+/// Catches a pass that removes a lease it was told to keep, or keeps one it removed: the
+/// lease the judge takes over stays (directory and sidecar), the value the judge made for it
+/// is handed back, and its run is in the report as adopted; the lease it refuses is removed
+/// with the reason it gave.
+#[test]
+fn a_sweep_keeps_the_leases_the_judge_takes_over_and_removes_the_rest_with_the_reason() {
+    let dir = TestDir::under(std::env::temp_dir(), "sweep-judge");
+    let ledger = ledger(&dir, "agent-a");
+    let leases = Leases::new(&dir.path().join("leases"));
+    let (keep, gone) = (entry("agent-a", "r1"), entry("agent-a", "r2"));
+    for e in [&keep, &gone] {
+        ledger.record(e).expect("record");
+        leases.make(&e.name);
+    }
+    let swept = ledger
+        .sweep(
+            |e| match e.run_id.as_str() {
+                "r1" => Ok(e.name.clone()),
+                _ => Err(Reason::Inconsistent("not so".to_owned())),
+            },
+            |e| leases.tear_down(e),
+        )
+        .expect("sweep");
+    assert_eq!(swept.adopted, std::slice::from_ref(&keep.name));
+    assert_eq!(swept.report.adopted, ["r1"]);
+    assert_eq!(swept.report.removed.len(), 1);
+    assert_eq!(swept.report.removed[0].run_id, "r2");
+    assert_eq!(
+        swept.report.removed[0].reason,
+        Reason::Inconsistent("not so".to_owned())
+    );
+    assert_eq!(leases.asked(), std::slice::from_ref(&gone.name));
+    assert!(leases.root.join(&keep.name).is_dir());
+    assert_eq!(files(&ledger), [format!("{}.json", keep.name)]);
 }

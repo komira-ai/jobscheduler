@@ -14,6 +14,7 @@ js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
 js-lease = { path = "../js-lease" }
+js-platform = { path = "../js-platform" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
@@ -43,8 +44,15 @@ ureq.workspace = true
 # The validity of the TLS certificate a reload brings (src/tls.rs).
 x509-parser.workspace = true
 
+[features]
+# The in-process server (src/in_process.rs): the test and simulation seam. In no default
+# list, and turned on by no shipped binary; this crate's own tests turn it on below.
+in-process = []
+
 [dev-dependencies]
 js-agent = { path = "../js-agent" }
+# The in-process server, for tests/in_process.rs.
+js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
 js-provider-fake = { path = "../js-provider-fake" }

@@ -1,7 +1,7 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_types::{
     Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass, Shape,
 };
@@ -55,7 +55,12 @@ pub struct PoolConfig {
     class: ResourceClass,
     shape: Shape,
     booked: Shape,
+    /// The shape a request must fit to fit the pool: `booked`, except with
+    /// [`PoolConfig::booking_whole_memory`], where it keeps the memory cut.
+    fit: Shape,
     memory_percent: MemoryPercent,
+    /// The book takes the whole memory of `shape`; the percent is the placer's rule.
+    whole_memory: bool,
     max_machines: usize,
     heartbeat_interval_ms: u64,
     grace_ms: u64,
@@ -81,8 +86,10 @@ impl PoolConfig {
             name,
             class,
             booked: shape.clone(),
+            fit: shape.clone(),
             shape,
             memory_percent: MemoryPercent::FULL,
+            whole_memory: false,
             max_machines,
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             grace_ms: DEFAULT_GRACE_MS,
@@ -189,7 +196,22 @@ impl PoolConfig {
         self
     }
 
-    /// The booked shape from the shape, the execution mode and the memory percent.
+    /// The same pool, whose book takes the whole memory of `[shape]` though the pool keeps
+    /// its memory percent: for a placer that holds every host to the percent itself
+    /// (`--placement js-sched` of the lease server). The percent still decides what fits
+    /// the pool, so a request above the share is refused `NoFit`, and the host listing
+    /// ([`crate::Registry::hosts`]) still shows each host's shape cut to it beside the
+    /// memory headroom ([`PoolConfig::memory_headroom`]); only the room the book checks,
+    /// and the capacity it lists to the lease table, are the whole memory.
+    #[must_use]
+    pub fn booking_whole_memory(mut self) -> Self {
+        self.whole_memory = true;
+        self.rebook();
+        self
+    }
+
+    /// The booked shape and the fit shape from the shape, the execution mode and the
+    /// memory percent.
     fn rebook(&mut self) {
         let mut capabilities = self.shape.capabilities().clone();
         if let Some(exec) = self.exec {
@@ -197,11 +219,15 @@ impl PoolConfig {
                 .entry(js_types::EXEC_KEY.to_owned())
                 .or_insert_with(|| exec.name().to_owned());
         }
-        let cut = self
-            .shape
-            .resources()
-            .with_memory_percent(self.memory_percent);
-        self.booked = Shape::new(cut, capabilities);
+        let resources = self.shape.resources();
+        let cut = resources.with_memory_percent(self.memory_percent);
+        let percent = match self.whole_memory {
+            true => MemoryPercent::FULL,
+            false => self.memory_percent,
+        };
+        let booked = resources.with_memory_percent(percent);
+        self.fit = Shape::new(cut, capabilities.clone());
+        self.booked = Shape::new(booked, capabilities);
     }
 
     /// The percent of its memory the pool books.
@@ -298,9 +324,16 @@ impl PoolConfig {
     }
 
     /// The shape every host of the pool is booked as: [`Self::shape`], with its memory cut
-    /// to the pool's memory percent and the pool's execution mode when it declares one.
+    /// to the pool's memory percent (not with [`Self::booking_whole_memory`]) and the pool's
+    /// execution mode when it declares one.
     pub(crate) fn booked(&self) -> &Shape {
         &self.booked
+    }
+
+    /// The shape a request must fit to fit the pool: [`Self::booked`], with its memory cut
+    /// to the percent even with [`Self::booking_whole_memory`].
+    pub(crate) fn fit(&self) -> &Shape {
+        &self.fit
     }
 
     /// Lists `host` in `book`, free, as the pool books it.

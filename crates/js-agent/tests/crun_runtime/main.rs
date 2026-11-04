@@ -2,6 +2,10 @@
 //! `crun`, as the agent runs it on a node: a root process that starts every container as a
 //! dedicated non-root job user.
 //!
+//! The container of a run is run by a supervisor process (the agent binary, in its helper
+//! mode: `subject` names it), so it outlives the runtime that started it, and a runtime opened
+//! over the same store adopts it (`adopt`, `sweep`).
+//!
 //! Every test but the scripted ones of `escape` (the rules of the quota tests' escape walk,
 //! over a tree with no file system) is `#[ignore]`: they need `crun`, `newuidmap`/`newgidmap`, a job user with a
 //! subordinate id range (`JS_JOB_USER`), cgroup v2 with a delegated unit, root, and the
@@ -14,6 +18,7 @@
 //! must have ended is waited for by the runtime.
 #![cfg(target_os = "linux")]
 
+mod adopt;
 mod escape;
 mod escape_xfs;
 mod gpu;

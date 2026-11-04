@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, ValueEnum};
 
+use crate::facts::Platform;
+
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
 /// where `--runtime crun` is wired says `docker crun`; a Mac build says `docker native` (it
@@ -293,10 +295,13 @@ pub struct Cli {
     /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
     #[arg(long, value_name = "PATH")]
     pub native_pfctl: Option<PathBuf>,
-    /// The absolute path of the `docker` or `podman` program that runs container jobs.
+    /// The absolute path of the `docker` or `podman` program that runs container jobs, with
+    /// `--runtime docker --allow-container-engine`; given without `--runtime` on Linux it is
+    /// refused, because the runtime is then `crun`, which takes no engine flag.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
-    /// inherited); without it the agent runs no container. A job that names a GPU needs
+    /// inherited); without it the agent runs no engine (a Linux agent runs `crun` unless
+    /// `--runtime none` is given). A job that names a GPU needs
     /// the NVIDIA container toolkit with Docker, and with Podman a CDI specification
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
@@ -310,15 +315,25 @@ pub struct Cli {
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
-    /// The runtime that runs jobs: `docker` (the engine program at `--container-bin`, which
-    /// may be Docker or Podman, exactly as before) or `crun` (`js-contain` drives the
-    /// distribution's `crun`, run as the `--job-user`; Linux only, and the agent must be
-    /// root). Without the flag the runtime is the engine of `--container-bin`, as before. The
-    /// packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the
-    /// Linux farm names `--runtime crun`. With `crun` the agent checks the host before it
-    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`).
-    #[arg(long, value_enum, value_name = "docker|crun")]
+    /// The runtime that runs jobs: `crun` (`js-contain` drives the distribution's `crun`, run
+    /// as the `--job-user`; Linux only, and the agent must be root) or `docker` (the engine
+    /// program at `--container-bin`, which may be Docker or Podman; it needs
+    /// `--allow-container-engine`). Without the flag a Linux agent runs `crun`, the default
+    /// Linux runtime, unless a `--native-*` flag is given; a Mac agent's runtime is the native
+    /// one of the `--native-*` flags. With `crun` the agent checks the host before it
+    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`); it never
+    /// falls back to the engine. The packaged unit of the Docker cloud hosts names
+    /// `--runtime docker --allow-container-engine`; the unit for the Linux farm names
+    /// `--runtime crun`. `none` is an agent that registers and heartbeats and starts no job;
+    /// it takes neither `--container-bin` nor a `--native-*` flag.
+    #[arg(long, value_enum, value_name = "docker|crun|none")]
     pub runtime: Option<RuntimeKind>,
+    /// Accept `--runtime docker`: the container engine at `--container-bin` runs the jobs.
+    /// The engine is a fallback for a host that cannot run `crun` and for GPU jobs: every
+    /// job it runs gets network none, and the agent says so in a warning at start. Without
+    /// the flag `--runtime docker` exits 2; the flag without `--runtime docker` exits 2.
+    #[arg(long)]
+    pub allow_container_engine: bool,
     /// The `crun` program of `--runtime crun`, by absolute path; by default
     /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
     /// distribution's AppArmor profile for `crun` (the one that allows it a user
@@ -502,7 +517,9 @@ pub struct Cli {
     /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
     /// host (every account on it) is refused at start. An image on no entry is never
     /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
-    /// runtimes do not.
+    /// runtimes do not. A Mac agent with `--bundle-store` reads it too: a start named by its
+    /// image (with a `run`) is a bundle, and its image must be on an entry or it is refused
+    /// `image-not-allowed`.
     #[arg(long, value_name = "HOST/PREFIX")]
     pub image_allow: Vec<String>,
     /// The credentials an allow-list entry sends to its registry's token realm, for a
@@ -554,15 +571,17 @@ pub struct Cli {
     /// Whether a bundle that is not in the store is fetched: `never` (the default: the
     /// operator, or the updater, puts it there first, and a job that names another is
     /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
-    /// least one registry flag): the first start that names one begins a fetch in the
-    /// background (`bundle-pending` until the bundle is held; every byte is checked against
+    /// least one `--image-allow`, `--bundle-registry-allow` or
+    /// `--bundle-registry-allow-private` entry): the first start that names one, by a
+    /// `bundle` pin or by its image, begins a fetch in the background (`bundle-pending` until the bundle is held; every byte is checked against
     /// its digest, and a fetch that fails is reported once as `bundle-fetch-failed`). Needs
     /// `--bundle-store`.
     #[arg(long, value_name = "never|missing")]
     pub bundle_pull: Option<String>,
     /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
-    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
-    /// given. May be given more than once. Needs `--bundle-store`.
+    /// (`ghcr.io/example/`); not a bare host. A job's `bundle` pin (the legacy form; an
+    /// image reference is held to `--image-allow` instead) must name one when any is given.
+    /// May be given more than once. Needs `--bundle-store`.
     #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
     pub bundle_registry_allow: Vec<String>,
     /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
@@ -607,6 +626,18 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The runtime this start runs jobs with: `--runtime` when it is given; else, on Linux and
+    /// with no `--native-*` flag, `crun`, the default Linux runtime; else none (a Mac, whose
+    /// runtime is the native one the `--native-*` flags select). Every reader of the runtime
+    /// asks this, and [`Cli::runtime`] stays the flag as given, so a refusal can say whether
+    /// the runtime was named or is the default.
+    #[must_use]
+    pub fn effective_runtime(&self, platform: &Platform) -> Option<RuntimeKind> {
+        let native = self.native_flags().into_iter().any(|(_, given)| given);
+        self.runtime
+            .or((platform.os == "linux" && !native).then_some(RuntimeKind::Crun))
+    }
+
     /// The flags of the GPUs a crun job is given, with whether each was given: an agent
     /// that does not run the crun runtime refuses them all.
     #[must_use]
@@ -732,6 +763,9 @@ pub enum RuntimeKind {
     Docker,
     /// `js-contain`'s `crun` backend, over the distribution's `crun`.
     Crun,
+    /// No runtime, spelled `none`: the agent registers and heartbeats and starts no job.
+    #[value(name = "none")]
+    NoJobs,
 }
 
 #[cfg(test)]
@@ -835,5 +869,51 @@ mod tests {
         assert_eq!(removed_flag(&nft_first), nft);
         let label_first = args(vec![attached("label"), flag("--container-egress-allow=x")]);
         assert_eq!(removed_flag(&label_first), allow);
+    }
+
+    /// Asserts the runtime a start runs, for each way it can be named: `--runtime` given is
+    /// that runtime on every platform (`none` included); with no `--runtime` a Linux start is
+    /// `crun` unless a `--native-*` flag is given, and a Mac start, or any other platform's,
+    /// has none; and the flag as given stays readable, so a refusal can tell the default from
+    /// a choice. It catches a default that is still the engine, a default on a Mac, and a
+    /// native flag that a Linux start ignores.
+    #[test]
+    fn the_runtime_is_the_flag_or_crun_on_linux() {
+        use clap::Parser as _;
+
+        use super::{Cli, RuntimeKind};
+        use crate::facts::Platform;
+
+        let on = |os: &str| Platform {
+            os: os.to_owned(),
+            arch: "x86_64".to_owned(),
+        };
+        let cli = |extra: &[&str]| {
+            let base = ["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
+            Cli::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        let native = ["--native-helper-socket", "/native/helper.sock"];
+        let rows: [(&[&str], &str, Option<RuntimeKind>); 9] = [
+            (&[], "linux", Some(RuntimeKind::Crun)),
+            (&[], "macos", None),
+            (&[], "freebsd", None),
+            (&native, "linux", None),
+            (&["--runtime", "docker"], "linux", Some(RuntimeKind::Docker)),
+            (&["--runtime", "crun"], "macos", Some(RuntimeKind::Crun)),
+            (&["--runtime", "none"], "linux", Some(RuntimeKind::NoJobs)),
+            (&["--runtime", "none"], "macos", Some(RuntimeKind::NoJobs)),
+            (
+                &["--container-bin", "/bin/sh"],
+                "linux",
+                Some(RuntimeKind::Crun),
+            ),
+        ];
+        for (extra, os, want) in rows {
+            let parsed = cli(extra);
+            assert_eq!(parsed.effective_runtime(&on(os)), want, "{extra:?} on {os}");
+        }
+        assert_eq!(cli(&[]).runtime, None);
+        assert!(!cli(&[]).allow_container_engine);
+        assert!(cli(&["--allow-container-engine"]).allow_container_engine);
     }
 }
