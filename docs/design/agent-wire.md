@@ -55,9 +55,13 @@ with empty `job_acks` and `retired_acks` (`crates/js-registry/src/runs.rs`). The
 between `MIN_HEARTBEAT_INTERVAL_MS` 250 and `MAX_HEARTBEAT_INTERVAL_MS` 3,600,000 and the grace to at most `MAX_GRACE_MS`
 86,400,000. A start rides on the reply to the host's next heartbeat and is resent on every reply until the host lists it (section
 5.7, step 3). On any 409 to a heartbeat (the server sends `stale-epoch` or `unknown-host`) or a 403 `session-mismatch`, the agent
-says hello again at once if its last heartbeat was accepted (`crates/js-agent/src/session.rs`). Other failures wait a jittered time
-between half and all of a ceiling that doubles from 1 s (`BASE`) to 60 s (`CAP`), raised to a server's `Retry-After` but never past
-`RETRY_AFTER_CAP` 120 s (`Backoff::next`, `crates/js-agent/src/backoff.rs`; the constant is in `crates/js-agent-wire/src/lib.rs`).
+says hello again at once if its last heartbeat was accepted (`verdict` in `crates/js-agent/src/session.rs`). Every other 4xx except
+403 `pool-full`, 408 and 429 is fatal: 401, 413 `body-too-large`, 400 `invalid-hello` or `invalid-heartbeat`, `unsupported-protocol`
+and the other 403s end the session and the agent exits with status 2, because the same message would be refused again (the test
+`refused_hello_is_fatal_per_code` holds each code to its outcome). The retryable answers (403 `pool-full`, 408, 429, every 5xx) and a
+server that cannot be reached wait a jittered time between half and all of a ceiling that doubles from 1 s (`BASE`) to 60 s (`CAP`),
+raised to a server's `Retry-After` but never past `RETRY_AFTER_CAP` 120 s (`Backoff::next`, `crates/js-agent/src/backoff.rs`; the
+constant is in `crates/js-agent-wire/src/lib.rs`).
 
 **Limits** (`crates/js-agent-wire/src/limits.rs` unless named):
 
@@ -75,15 +79,25 @@ between half and all of a ceiling that doubles from 1 s (`BASE`) to 60 s (`CAP`)
 | `max_connections` (`js-lease-server/src/config.rs`) | 256 | connections the server holds at once (section 11) |
 | `MAX_LIVE_RUNS`, `MAX_FINISHED_RUNS` (`js-registry/src/runs.rs`) | 256, 256 | runs per host, as built (section 11) |
 
-`MAX_HELD` and `MAX_RESULTS` allow far more than a 64 KiB body can carry; the doc of `HEARTBEAT_BODY_BUDGET` says so, and the agent
-fits its results to the body by cutting log tails (`results_budget` in `crates/js-agent/src/lifecycle/machine/tails.rs`) and listing
-at most `RETIRED_LISTED` 96 retired job ids (`crates/js-agent/src/lifecycle/machine/per_job.rs`).
+`MAX_HELD` and `MAX_RESULTS` allow far more than a 64 KiB body can carry; the doc of `HEARTBEAT_BODY_BUDGET` says so. The agent
+lists at most `RETIRED_LISTED` 96 retired job ids (`crates/js-agent/src/lifecycle/machine/per_job.rs`) and fits its results to what
+the body leaves after the other lists, a reserve of `MAX_LOAD_BYTES` and a 4 KiB envelope (`results_budget`), by halving and then
+dropping log tails (`Lifecycle::fit_log_tails` in `crates/js-agent/src/lifecycle/machine/tails.rs`). That fitting is not a
+guarantee: when no tail is left to cut it stops, whatever the size. The held list, the job list without results, and results without
+tails are never cut, so a beat whose non-tail content passes the body limit is sent anyway, refused 413 `body-too-large`, and the
+agent exits 2. Section 2 sizes where that happens.
 
 **The rule for change** (`crates/js-agent-wire/src/protocol.rs` and the crate's "Compatibility rule"): servers upgrade before
 agents. Within a major, fields are only added; a receiver ignores fields it does not know; a field a sender may leave out has a
-default on decode. An unknown enum value reads as an `Unknown` variant, except three deliberate ones: an unknown `Phase` reads as
-`Quarantined`, and an unknown `Isolation`, `os` or `arch` fails the decode of that one start, which then reads as
-`Command::Unknown`. A set of messages is added within a major by new `Command` variants, list fields absent when empty, and a hello
+default on decode. An unknown value of `Outcome`, `Ack`, `HeldState` or `Command` reads as that enum's `Unknown` variant. The other
+enums do not, each on purpose: an unknown `Phase` reads as `Quarantined` (it takes no work; test `unknown_phase_reads_quarantined`);
+an unknown exclusive-refusal code reads as `RefusalReason::SetupFailed` (`refusal_codes_round_trip_and_unknown_reads_setup_failed`);
+and an unknown `Isolation`, `os` or `arch`, and an unknown value of the run and native bodies' `NetworkLevel`, `Placement`,
+`OutputKind` or `InputRef` type (`crates/js-agent-wire/src/native.rs`, none of which has a catch-all variant), fails the decode of
+that one start, which then reads as `Command::Unknown` while the commands beside it arrive
+(`unknown_isolation_is_typed_error_not_contained` and `unknown_enum_values_leave_known_entries_intact` in `tests/decode.rs`,
+`an_unknown_confinement_value_reads_as_an_unknown_command` in `tests/native_job.rs`, `an_unknown_platform_reads_as_an_unknown_command`
+in `tests/one_job.rs`). A set of messages is added within a major by new `Command` variants, list fields absent when empty, and a hello
 capability, not by a new major, because `ProtocolRange::negotiate` would drop every agent of the older major from a server that left
 it. A change that cannot be made that way is a new major.
 
@@ -200,7 +214,10 @@ At the documented list maxima, `MAX_HELD` 4,096 held runs and `MAX_RESULTS` 4,09
 Derived. They are 1,937,499 ÷ 65,536 = 29.6 and 1,650,710 ÷ 65,536 = 25.2 times the 65,536-byte body the server reads, so **the
 body limit, not the list caps and not the encoding, is what bounds a heartbeat**. Within it, with the envelope, n held runs take
 92 + 167n bytes of JSON (93 + 166n + n − 1 commas), so (65,536 − 92) ÷ 167 = 391 fit, and 22 + 136n of protobuf, so
-(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived.
+(65,536 − 22) ÷ 136 = 481 fit (both rounded down): 481 ÷ 391 = 1.23 times as many. Derived. Past those counts the beat is over the
+limit with no tail left to cut, the server answers 413 and the agent exits 2 (section 1), in either encoding; protobuf moves the
+point, it does not remove it. The registry sends a host at most `MAX_LIVE_RUNS` 256 live runs, and 256 held runs at 128-byte ids are
+92 + 167 × 256 = 42,844 bytes of JSON, inside the limit; a host that adds results, jobs and a load to that comes nearer. Derived.
 
 Log tails are where the two differ most. JSON writes a control character that has no short escape (anything but `\b`, `\t`,
 `\n`, `\f`, `\r`, which take 2 bytes) as `\u00XX`, six bytes for one, and `tails.rs` says so; a protobuf `string` holds the raw
@@ -266,9 +283,11 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
 **(B) Protobuf messages over the same HTTP polling routes.**
 
 - *Correctness.* A `.proto` file becomes the schema and prost generates the structs. The trust-boundary checks do not go away:
-  every `validate()` (`lib.rs`: "the server and the agent must call it on every message they receive") and the three deliberate enum
-  exceptions must be kept by hand over the generated types, because proto3 enums are open (an unknown value is kept as its number)
-  and a field left at zero is indistinguishable from a field not sent. `Option<i32>` (`exit_code`) and every `Option` field would need
+  every `validate()` (`lib.rs`: "the server and the agent must call it on every message they receive") and every unknown-value rule
+  of section 1 (`Unknown` variants; `Phase` to `Quarantined`; `RefusalReason` to `SetupFailed`; an unknown `Isolation`, `os`, `arch`,
+  `NetworkLevel`, `Placement`, `OutputKind` or `InputRef` refusing its one start) must be kept by hand over the generated types,
+  because proto3 enums are open (an unknown value is kept as its number) and a field left at zero is indistinguishable from a field
+  not sent. The decode tests named in section 1 and the previous-release tests would have to pass against the protobuf mapping too. `Option<i32>` (`exit_code`) and every `Option` field would need
   `optional`, and a negative `exit_code` costs 10 bytes as `int32` unless it is `sint32`. Either the domain code moves onto the
   generated types or a hand-written mapping layer joins them to today's types; both are new code to get wrong.
 - *Compatibility.* The server reads every body as JSON today, so a new agent that sends protobuf to an older server is answered
@@ -288,7 +307,12 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   `js-client` (JSON only), and a content-type branch in both agent routes.
 - *Debuggability.* A body needs the schema to read; fixtures become binary or protobuf text format.
 - *Live update.* Server learns protobuf first and answers each request in the encoding it was sent in; agents switch only after the
-  server says it reads protobuf; both encodings are served across every rolling update until the last JSON agent is gone.
+  server says it reads protobuf; both encodings are served across every rolling update until the last JSON agent is gone. A server
+  rolled back to a release without protobuf is the hard case: an agent that already switched sends its next heartbeat in protobuf,
+  the older server reads it as JSON and answers 400 `invalid-heartbeat`, and the agent exits 2 before any welcome could renegotiate.
+  So the choice of encoding would have to be per session (reset to JSON at every hello, chosen again from each welcome), and the
+  agent would have to answer a 400 to a protobuf heartbeat by saying hello again in JSON instead of ending; or a server rollback
+  across that release would be declared unsupported. The design does not decide this (open point 8).
 
 **(C) A gRPC stream per agent (push instead of poll).**
 
@@ -296,6 +320,14 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   runs: an HTTP/2 ping is answered by the HTTP/2 stack whether or not it does, while today a heartbeat is sent only by that loop,
   which ends the session when its worker has ended or stalled (`Worker::stalled`, `session.rs`). Presence must therefore still come
   from application heartbeats inside the stream.
+- *Delivery.* Polling never relies on one reply arriving: the server resends a start on every reply until the host lists it and a
+  stop until it stops listing it (section 5.7, step 3), and the agent may drop a whole reply when its worker's queue (`QUEUE` 16 in
+  `crates/js-agent/src/worker.rs`) is full, noted as `Note::Busy`, because the next reply carries it again (`Session::accept`). A
+  stream that sends each command once would lose this: a write that succeeded before the stream broke, or a command that met a full
+  queue, does not show that the worker took it. A stream would have to keep the same rule, holding every start and stop until the
+  host's listing shows it taken and sending it again after a reconnect, and the agent would still rely on starts being idempotent on
+  the job id. Those are the compatibility cases a stream must be tested on: a break after a command is written, a command that meets
+  a full queue, and a repeated start after a reconnect.
 - *Compatibility.* A new service beside the polling routes. Old agents keep polling, so the server runs both session models for as
   long as old agents run.
 - *Size and CPU.* Message bytes as (B). The handshake per exchange goes away: one connection per agent instead of one per beat.
@@ -309,9 +341,11 @@ options A and B: HTTP request and response heads, TLS records, and the TCP and T
   256 hosts would take every slot, and clients, status pages and the hosts' own `/v1/hosts/{id}` calls queue in the kernel. Today an
   exchange holds a connection only while it runs.
 - *Debuggability.* As (B), and a stream's history is not one request and one answer.
-- *Latency.* A start or stop reaches the host when it is queued instead of on the reply to the next beat, which today is up to one
-  interval later (5 s at the default; derived from section 5.7, step 3, and `DEFAULT_HEARTBEAT_INTERVAL_MS`). The design states no
-  goal for this delay.
+- *Latency.* Today a start or stop waits for the reply to the next beat. When exchanges succeed that wait is at most one interval
+  plus the exchange (5 s at the default; derived from section 5.7, step 3, `DEFAULT_HEARTBEAT_INTERVAL_MS`, and `Session::beat_done`,
+  which waits the interval after an exchange ends); a failed exchange adds its backoff and a request may take up to `REQUEST_LIMIT`
+  10 s (`transport.rs`), so one interval is not a bound. A stream removes the polling wait; it does not promise delivery at once,
+  since transport delay, a broken stream and a full worker queue remain. The design states no goal for this delay.
 
 **What a stream would change about section 6.3 (presence and loss).** Section 6.3 makes a host lost when it misses the grace, and
 says "Nothing times out for silence alone" for jobs. With a stream, a break would be a new, earlier signal, but it must not shorten
@@ -379,6 +413,8 @@ If the decision is (A):
    against the previous release's hello fixture.
 3. Move the previous-release fixtures to the first release whose agent sends the per-job lists, so the both-direction tests cover
    per-job bodies as a released agent wrote them (`tests/fixtures/v0.1.135` predate them; open point 7).
+4. Bound what a heartbeat lists besides tails so that a beat whose non-tail content passes the body limit cannot be built (section 1:
+   it is refused 413 and the agent exits 2), in whichever encoding is kept; open point 2 asks how near real beats come.
 
 If the decision is (B), in this order:
 
@@ -394,8 +430,12 @@ If the decision is (B), in this order:
 
 If the decision is (C), in this order: (B) steps 1 and 3 for the messages; a gRPC agent service with HTTP/2 in ALPN and listener
 limits for long-lived streams; `max_connections` set above hosts plus clients; a decision on session resume across a reconnect
-(open point 6); application heartbeats kept in the stream for presence; the polling routes served until no polling agent remains,
-then deleted with their session code.
+(open point 6); application heartbeats kept in the stream for presence; commands held and resent until the host's listing shows
+them, with the tests of the delivery cases above; the polling routes served beside the stream within major 1. Deleting the polling
+routes removes the only transport of every released agent, so it is a major 2 like (B)'s step 4: the server then speaks major 2
+only, and an older agent that returns later (a host restored from an old image, say) is refused `unsupported-protocol` at its
+hello, a fatal answer, and exits 2 until it is updated. Deleted then: the polling routes, their session code in the agent and the
+server, and the JSON fixtures and frozen copies.
 
 ## 5. Open points
 
@@ -418,3 +458,7 @@ then deleted with their session code.
    `crates/js-agent/src/session.rs`.
 7. **Which release the previous-release fixtures should be.** `tests/fixtures/v0.1.135/README.md` names the release they were taken
    from; whether a release after it sends `per-job` is settled by that release's `crates/js-agent-wire/src/per_job.rs`.
+8. **Server rollback under (B).** Is a server rollback across the release that adds protobuf supported, and if so does the agent reset
+   its encoding at every hello and answer a 400 to a protobuf heartbeat by a JSON hello? Settled in `verdict` and the hello-again rule
+   of `crates/js-agent/src/session.rs`, and by the project's rollback policy for the server (section 6.6 leaves the server's update
+   path open).
