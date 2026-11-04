@@ -812,3 +812,32 @@ fn a_removal_that_cannot_end_the_supervisor_fails_and_can_be_tried_again() {
     second.remove(&id).expect("removed");
     assert_gone(&node, &id.0);
 }
+
+/// Proves a lease whose image pin cannot be removed is kept, with the step named: the lease
+/// of a run that never started, which the start-up pass could not remove (`crun delete` left
+/// the cgroup's files), is removed by its run id once the delete works, except for the pin
+/// while the pins' directory is open to others; that removal fails naming the pin, and the
+/// next succeeds once the directory is closed again. Catches a teardown that forgets a lease
+/// whose pin it could not remove. Assumes a non-root user.
+#[test]
+fn a_lease_whose_image_pin_cannot_be_removed_is_kept_and_named() {
+    let node = Node::new("adopt-pin-stuck");
+    let mut dead = node.open();
+    let _staged = dead.stage(&node.job("r1-exit", 60_000)).expect("staged");
+    let marker = node.dir.join("delete-fails");
+    std::fs::write(&marker, "").expect("switch");
+    let mut second = node.open();
+    assert_eq!(second.swept().failed.len(), 1, "{:?}", second.swept());
+    std::fs::remove_file(&marker).expect("switch off");
+    let pins_dir = node.scratch.join("oci-image-pins");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&pins_dir, mode(0o755)).expect("open");
+    let why = second
+        .remove_orphan("r1-exit")
+        .expect_err("unpin fails")
+        .to_string();
+    assert!(why.contains("remove the image's pin: "), "{why}");
+    std::fs::set_permissions(&pins_dir, mode(0o700)).expect("closed");
+    assert_eq!(second.remove_orphan("r1-exit"), Ok(true));
+    drop(dead);
+}

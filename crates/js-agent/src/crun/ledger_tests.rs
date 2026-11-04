@@ -569,7 +569,7 @@ fn a_sweep_keeps_the_leases_the_judge_takes_over_and_removes_the_rest_with_the_r
             |e| leases.tear_down(e),
         )
         .expect("sweep");
-    assert_eq!(swept.adopted, [keep.name.clone()]);
+    assert_eq!(swept.adopted, std::slice::from_ref(&keep.name));
     assert_eq!(swept.report.adopted, ["r1"]);
     assert_eq!(swept.report.removed.len(), 1);
     assert_eq!(swept.report.removed[0].run_id, "r2");

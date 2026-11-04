@@ -51,6 +51,9 @@ fn running(run: &str) -> Entry {
     entry
 }
 
+/// A field the record names, and how a test takes it away.
+type Break = (&'static str, fn(&mut Entry));
+
 /// Catches an adoption that goes on with a field of the sidecar missing (a part of the
 /// record that was never written would be read as a default): a complete sidecar gives its
 /// fields, and each field left out is refused with its name.
@@ -58,7 +61,7 @@ fn running(run: &str) -> Entry {
 fn a_running_sidecar_with_a_field_missing_is_refused_naming_it() {
     let entry = running("r1");
     fields_of(&entry).expect("every field is there");
-    let breaks: [(&str, fn(&mut Entry)); 10] = [
+    let breaks: [Break; 10] = [
         ("lease id", |entry| entry.allocation = None),
         ("booking", |entry| entry.booked = None),
         ("start", |entry| entry.started_wall_ms = None),
