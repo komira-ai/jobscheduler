@@ -77,7 +77,8 @@ async fn a_machine_that_never_says_hello_holds_the_launch_until_boot_timeout() {
 #[tokio::test]
 async fn a_request_the_restored_machine_does_not_fit_is_launched_for_at_once() {
     let mut machine = record("js-restored", Phase::Registered);
-    machine.offer.accelerator = None;
+    machine.offer.gpus = 0;
+    machine.offer.gpu_class = None;
     let rig = rig(records(vec![machine]), live());
     rig.world().waiting = vec![request("r1")];
     rig.scaler.tick().await;
