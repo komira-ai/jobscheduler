@@ -60,6 +60,7 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
         wall_ms: DAY_MS,
         network: Default::default(),
         ports: Vec::new(),
+        log_sink: None,
     }))
 }
 
