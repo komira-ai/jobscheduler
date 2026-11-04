@@ -908,6 +908,7 @@ fn configured_helper_names_are_the_only_names_in_the_helpers() {
         give: "give".to_owned(),
         whole: "--all".to_owned(),
         unpack: "unpack".to_owned(),
+        supervise: "supervise".to_owned(),
         binary: "/other/bin/host".to_owned(),
     };
     let give = helper::give_job(&modes, Path::new("/d"), "1:1", None, &[Path::new("/a")]);

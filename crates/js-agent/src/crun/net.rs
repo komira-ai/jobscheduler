@@ -5,7 +5,7 @@
 //!
 //! The order is the one [`crate::egress`] fixes: [`EgressPort::check`] before every create
 //! (`Runtime::check_egress`, which the lifecycle calls and answers `egress-unchecked`), the
-//! create, `Oci::start`, `Oci::container_pid`, [`EgressPort::attach`], and
+//! create, `Oci::start_supervised`, `Oci::container_pid`, [`EgressPort::attach`], and
 //! [`Wired::release`] once the run has ended or is removed. An agent in mode none has no
 //! port, and none of this runs: its containers have loopback only, as before.
 
@@ -13,9 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_contain::container::ContainerSpec;
-use js_contain::oci::Oci;
 use js_contain::oci::words::{crun_words, init_words};
-use js_contain::running::Running;
+use js_contain::oci::{Oci, Supervised};
 
 use crate::egress::{Attachment, Config, Egress, EgressError, Mode, ROUTE_WAIT};
 use crate::lifecycle::RuntimeError;
@@ -103,8 +102,8 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 
 /// The wiring of the started container of `spec`, which `running` runs, by `egress`; none
 /// without one. The container's pid is asked for until `crun` names one (right after
-/// `Oci::start` the container may not be made yet), and the asks end without one when
-/// `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
+/// `Oci::start_supervised` the container may not be made yet), and the asks end without one
+/// when `crun state` answers with no usable pid (or names one too late), when `crun run` has ended,
 /// or when [`ROUTE_WAIT`]
 /// (an allow-list's `Config::route_wait`, the only egress with a port) has passed on
 /// `now_ms`: the container's init gives up its wait for the route then.
@@ -116,7 +115,7 @@ pub(super) fn check(egress: Option<&dyn EgressPort>) -> Result<(), RuntimeError>
 pub(super) fn attach(
     egress: Option<&dyn EgressPort>,
     oci: &Oci,
-    (spec, running): (&ContainerSpec, &Running),
+    (spec, running): (&ContainerSpec, &Supervised),
     now_ms: fn() -> u64,
 ) -> Result<Option<Box<dyn Wired>>, RuntimeError> {
     let Some(egress) = egress else {
@@ -132,7 +131,7 @@ pub(super) fn attach(
 fn pid_of(
     oci: &Oci,
     spec: &ContainerSpec,
-    running: &Running,
+    running: &Supervised,
     now_ms: fn() -> u64,
 ) -> Result<u32, String> {
     let deadline = now_ms().saturating_add(ROUTE_WAIT.as_secs().saturating_mul(1000));

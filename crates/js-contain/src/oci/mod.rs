@@ -15,7 +15,9 @@
 //!    out (`hardening`);
 //! 4. `crun run` runs the bundle in the foreground (`crun`): its exit status is the
 //!    job's, so there is no moment at which the container is stopped but its exit
-//!    code is unknown;
+//!    code is unknown. [`Oci::start`] runs it on a thread of the caller;
+//!    [`Oci::start_supervised`] runs it in a supervisor process of its own (`supervise`)
+//!    that outlives the caller and leaves an exit record;
 //! 5. a helper container gives the directories back, the driver collects outputs from
 //!    the upper layer, and the lease is removed.
 //!
@@ -42,7 +44,8 @@
 //!
 //! **Output:** the container's stdout and stderr are pipes the agent drains for as long as
 //! the container lives, into a file a stream in the lease directory (capped) and a tail in
-//! memory (`logs`).
+//! memory (`logs`). A supervisor process keeps them for a container it runs, and hands the
+//! tail to whoever reads its exit record.
 //!
 //! **cgroups:** the container's cgroup is `<lease cgroup>/ctr`, made by `crun` in the
 //! daemon's delegated subtree with the pids limit and `memory.oom.group=1`; memory and
@@ -62,6 +65,7 @@ pub(crate) mod logs;
 pub mod mounts;
 mod pin;
 pub(crate) mod spec;
+pub mod supervise;
 pub mod words;
 
 #[cfg(test)]
@@ -85,6 +89,9 @@ pub use crun::{EnvScrub, JobDrop, RunEnd};
 pub use gc::GcReport;
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
+pub use supervise::{
+    ExitRecord, Supervised, SupervisorId, end_supervisor, exit_record_path, read_exit_record,
+};
 
 /// The resolved seccomp section for `arch` (Go's name) and a job holding `caps`, as JSON.
 /// Only the egress spike tests (`tests/egress_spike`) call this, so that they apply the

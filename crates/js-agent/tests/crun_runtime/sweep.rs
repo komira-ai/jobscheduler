@@ -6,24 +6,30 @@
 use std::fs;
 use std::time::Duration;
 
-use js_agent::crun::Left;
+use js_agent::crun::{Left, Reason};
 use js_agent::lifecycle::{Runtime as _, label};
 
-use crate::runtime_suite::{Program, Subject as _, begin, remove, spec_of, stop};
+use crate::adopt::labelled;
+use crate::runtime_suite::{Program, Subject as _, remove, spec_of, stop};
 use crate::subject::{HOST, crun_subject};
 
 const OTHER: &str = "crun-other";
 
-/// Catches a restart that leaves the lease of a dead process behind: a run that was
-/// running and one that was made and never started are both removed when a runtime opens
-/// on the store (container state, cgroup, directories and sidecar), each removal is
-/// reported with the labels the run had, the new runtime lists no container (nothing is
-/// adopted: the runs are lost), and a lease the new runtime makes is its own.
+/// Catches a restart that mishandles the leases of a dead process: a run that runs (booked as
+/// a job start books it) is adopted and its lease stays, and a lease made and never started is
+/// removed when a runtime opens on the store (container state, cgroup, directories and
+/// sidecar), reported with the labels the run had and the reason that it never ran; the new
+/// runtime lists the run that runs and no other, and a lease the new runtime makes is its own.
 #[test]
 #[ignore = "real crun: run through cargo xtask crun-tests"]
 fn a_restart_sweeps_the_leases_of_a_dead_process() {
     let mut s = crun_subject("sweep_dead");
-    let up = begin(&mut s, "r-up", Program::Hold);
+    s.prepared();
+    s.before(Program::Hold);
+    let up_spec = labelled(&mut s, "r-up", Program::Hold, 600_000);
+    let started = s.runtime().borrow_mut().create_and_start(&up_spec);
+    let up = started.expect("create and start");
+    s.after("r-up", Program::Hold);
     let spec = spec_of(&mut s, "r-made", Program::Hold);
     let made = s.unstarted(&spec);
     for id in [&up, &made] {
@@ -32,31 +38,35 @@ fn a_restart_sweeps_the_leases_of_a_dead_process() {
         assert!(s.lease_cgroup(&id.0).is_dir(), "{}", id.0);
     }
 
-    // The process dies: the container that runs is killed and its `crun run` has ended
-    // (and so has the cleanup it does as it exits) before the next process opens. A runtime
-    // of this process that is still running would race the sweep for the same files.
-    stop(&s, &up, Duration::ZERO);
-    s.settled(&up);
-
     let mut second = s.open_as(HOST);
     let swept = second.swept();
-    let mut removed: Vec<_> = swept.removed.iter().collect();
-    removed.sort_by(|a, b| a.run_id.cmp(&b.run_id));
-    let runs: Vec<_> = removed.iter().map(|r| r.run_id.as_str()).collect();
-    assert_eq!(runs, ["r-made", "r-up"], "{swept:?}");
-    assert_eq!(removed[1].name, up.0);
-    assert_eq!(removed[1].labels[label::RUN], "r-up");
-    assert_eq!(removed[1].labels[label::AGENT], HOST);
+    assert_eq!(swept.adopted, ["r-up"], "{swept:?}");
+    assert_eq!(swept.removed.len(), 1, "{swept:?}");
+    let removed = &swept.removed[0];
+    assert_eq!((removed.run_id.as_str(), &removed.name), ("r-made", &made.0));
+    assert_eq!(removed.labels[label::RUN], "r-made");
+    assert_eq!(removed.labels[label::AGENT], HOST);
+    assert_eq!(removed.reason, Reason::NeverRan);
     assert!(
         swept.failed.is_empty() && swept.left.is_empty(),
         "{swept:?}"
     );
-    for id in [&up, &made] {
-        assert!(!s.lease_dir(&id.0).exists(), "{}", id.0);
-        assert!(!s.sidecar(&id.0).exists(), "{}", id.0);
-        assert!(!s.lease_cgroup(&id.0).exists(), "{}", id.0);
-    }
-    assert!(second.list_labelled().expect("list").is_empty());
+    assert!(!s.lease_dir(&made.0).exists(), "{}", made.0);
+    assert!(!s.sidecar(&made.0).exists(), "{}", made.0);
+    assert!(!s.lease_cgroup(&made.0).exists(), "{}", made.0);
+    assert!(s.lease_dir(&up.0).is_dir() && s.sidecar(&up.0).is_file());
+    let listed: Vec<_> = second
+        .list_labelled()
+        .expect("list")
+        .into_iter()
+        .map(|found| found.id)
+        .collect();
+    assert_eq!(listed, [up.clone()]);
+
+    // The run that runs is ended through the subject's own runtime, which holds the same
+    // container.
+    stop(&s, &up, Duration::ZERO);
+    s.settled(&up);
 }
 
 /// Catches two agents on one store taking each other's leases: the runtime of agent

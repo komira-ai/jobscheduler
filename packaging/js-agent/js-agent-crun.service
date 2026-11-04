@@ -37,16 +37,22 @@
 #   --scratch-root       the runs directory inside the scratch mount, so the image store, which
 #                         the agent places beside the scratch root (<scratch>/oci), is on the
 #                         same disk as the leases; the mount itself is what the unit waits for
-#   KillMode=mixed        SIGTERM goes to the agent alone, which drains; only after
-#                         TimeoutStopSec would the rest be killed
-#   --drain-wait 3600 --stop-grace 120   a run in a crun container ends with the agent that
-#                         holds it (a graceful exit kills it; after a crash this unit's
-#                         KillMode=mixed does, as its lease cgroups are inside the unit's),
-#                         so a stop lets the running jobs finish for up to an hour
-#                         (the most --drain-wait allows) and then stops them within 120 s
+#   KillMode=process      systemd signals the agent's main process alone, on a stop and
+#                         after a crash, and never kills the rest of the unit: each crun
+#                         container runs under a supervisor process of its own (in the
+#                         agent's leaf) and in a lease cgroup under <unit>/actions, and both
+#                         outlive the agent. The next agent the unit starts (Restart=always)
+#                         adopts every container its ledger records and lists the jobs again,
+#                         so a crash does not cost a running job. A container's wall limit
+#                         runs only while an agent runs: one whose limit passed while none
+#                         did is stopped at the first step after the adoption
+#   --drain-wait 3600 --stop-grace 120   a stop (an update) still drains: the agent lets the
+#                         running jobs finish for up to an hour (the most --drain-wait
+#                         allows) and then stops them within 120 s before it exits
 #   TimeoutStopSec=3900   the longest drain (3600 + 120 s) plus the 30 s the server gets to
 #                         acknowledge the results and a margin; finite, so a hung agent is
-#                         killed and Restart=always brings it back. Raise it with either flag.
+#                         killed (its main process alone, as above: what it still ran is
+#                         adopted) and Restart=always brings it back. Raise it with either flag.
 #   ExecStart=/opt/js-agent/link/current/js-agent
 #                         the program is run through the release link, which the host updater's
 #                         js-agent hook moves from one release to the next (`cutover`, and back on
@@ -78,7 +84,7 @@ StateDirectory=js-agent
 StateDirectoryMode=0711
 ExecStartPre=+systemd-tmpfiles --create /etc/tmpfiles.d/js-agent-crun.conf
 ExecStart=/opt/js-agent/link/current/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
-KillMode=mixed
+KillMode=process
 TimeoutStopSec=3900
 Restart=always
 RestartSec=30
