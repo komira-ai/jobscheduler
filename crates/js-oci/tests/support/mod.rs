@@ -159,6 +159,8 @@ struct State {
     blobs: HashMap<String, Vec<u8>>,
     manifests: HashMap<String, (String, Vec<u8>)>,
     log: Vec<String>,
+    /// The `Accept` header of each manifest request, by request path.
+    accepts: Vec<(String, Option<String>)>,
     behaviour: Behaviour,
     /// Served over plain http: the default token realm says so.
     plain: bool,
@@ -471,11 +473,17 @@ impl Fixture {
     pub fn requests(&self) -> Vec<String> {
         self.state.lock().expect("lock").log.clone()
     }
+
+    /// The `Accept` header (if any) of every request so far, with the path it was sent to.
+    pub fn accepts(&self) -> Vec<(String, Option<String>)> {
+        self.state.lock().expect("lock").accepts.clone()
+    }
 }
 
 struct Request {
     path: String,
     authorization: Option<String>,
+    accept: Option<String>,
     host: String,
 }
 
@@ -505,6 +513,7 @@ async fn read_request<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Option
     Some(Request {
         path,
         authorization: header("authorization"),
+        accept: header("accept"),
         host: header("host").unwrap_or_default(),
     })
 }
@@ -535,6 +544,8 @@ async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         let auth = request.authorization.clone().unwrap_or_default();
         s.log
             .push(format!("{} GET {} [{auth}]", request.host, request.path));
+        s.accepts
+            .push((request.path.clone(), request.accept.clone()));
         answer(&s, &request)
     };
     match answer {
@@ -728,4 +739,23 @@ pub fn write_index(root: &Path, manifests: &[&Digest]) {
         ),
     )
     .expect("index.json");
+}
+
+/// An OCI image index that lists `entries`: each a media type, a digest, and the platform
+/// (`os`, `architecture`) it states, or none.
+pub fn index_of(entries: &[(&str, &Digest, Option<(&str, &str)>)]) -> Vec<u8> {
+    let entries: Vec<String> = entries
+        .iter()
+        .map(|(media, digest, platform)| {
+            let platform = platform
+                .map(|(os, arch)| format!(r#","platform":{{"architecture":"{arch}","os":"{os}"}}"#))
+                .unwrap_or_default();
+            format!(r#"{{"mediaType":"{media}","digest":"{digest}","size":1{platform}}}"#)
+        })
+        .collect();
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{}]}}"#,
+        entries.join(",")
+    )
+    .into_bytes()
 }

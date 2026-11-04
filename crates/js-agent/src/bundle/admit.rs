@@ -3,9 +3,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, JobSpec, refusal};
+use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, ImagePlatform, JobSpec, check_platform, refusal};
 use js_bundle::DottedVersion;
-use js_types::BundleRef;
+use js_oci::Location;
+use js_types::{Arch, BundleRef, Os};
 
 use super::host::{BundleHost, Fetch, Needs};
 use super::list::parse_digests;
@@ -13,6 +14,22 @@ use super::settings::{Pull, Settings, Trust};
 
 /// A refusal: the wire code and a local explanation.
 pub type Refusal = (&'static str, String);
+
+/// Where the name of a pin came from, which decides the registry rule it is held to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The legacy `bundle` field: held to `--bundle-registry-allow*`.
+    Bundle,
+    /// The `image` of a start with a `run`: held to `--image-allow`.
+    Image,
+}
+
+/// The platform of a Mac agent's bundles, the only one `Kind::bundle` accepts and the
+/// config check enforces: darwin on arm64.
+const MAC: ImagePlatform = ImagePlatform {
+    os: Os::Macos,
+    arch: Arch::Arm64,
+};
 
 /// The rules for a start that names a bundle, over the host they read.
 #[derive(Clone)]
@@ -40,27 +57,47 @@ impl Admission {
         Self { settings, host }
     }
 
-    /// Whether the start `spec` may go on, as far as its bundle is concerned. A start with
-    /// no bundle passes. The checks run in this order, and the first that fails is the
-    /// refusal: the digest is on the deny list; it is not on the allow list; the name is
-    /// outside every allowed registry; the store does not hold it (and `--bundle-pull never`,
-    /// or a fetch cannot begin, or has begun); the bundle needs a newer macOS; the bundle
-    /// needs an Xcode the host does not have. A list file that cannot be read refuses, so a
-    /// broken deny list never lets a digest through.
+    /// Whether the start `spec` may go on, as far as its bundle is concerned. A start that
+    /// pins a bundle (`bundle`) or names its image with a `run` (the image is the bundle's
+    /// name on a Mac) is checked; any other passes. The checks run in this order, and the
+    /// first that fails is the refusal: the name is not a pin; the digest, or the manifest an
+    /// index digest resolved to, is on the deny list; it is not on the allow list; the name is outside every allowed registry (a
+    /// `bundle` is held to `--bundle-registry-allow*`, an image to `--image-allow`, and
+    /// an image outside every entry is refused `image-not-allowed`); the start names
+    /// another platform than darwin/arm64; the store does not hold the pin (a manifest
+    /// digest, or the digest of an index that resolved to one), and `--bundle-pull never`,
+    /// or a fetch cannot begin, or has begun; the bundle needs a newer macOS; the bundle
+    /// needs an Xcode the host does not have; the program names an entrypoint the bundle
+    /// lacks. A list file that cannot be read refuses, so a broken deny list never lets a
+    /// digest through. Nothing here asks a registry anything but the fetch that `missing`
+    /// begins, after the name has passed every check.
     ///
     /// # Errors
     ///
     /// The wire code of the refusal and an explanation for the log.
     pub fn admit(&self, spec: &JobSpec) -> Result<(), Refusal> {
-        let Some(pin) = &spec.bundle else {
-            return Ok(());
+        let (name, origin) = match (&spec.bundle, &spec.native, &spec.run) {
+            (Some(pin), _, _) => (pin, Origin::Bundle),
+            (None, None, Some(_)) => (&spec.image, Origin::Image),
+            _ => return Ok(()),
         };
-        let pin = BundleRef::parse(pin)
-            .map_err(|_| no(refusal::INVALID_BUNDLE, "not a pinned bundle"))?;
+        let pin = BundleRef::parse(name).map_err(|_| match origin {
+            Origin::Bundle => no(refusal::INVALID_BUNDLE, "not a pinned bundle"),
+            Origin::Image => no(refusal::INVALID_IMAGE, "not a pinned image"),
+        })?;
         let digest = pin.digest();
         self.deny(digest)?;
         self.allow(digest)?;
-        self.registry(pin.name())?;
+        match origin {
+            Origin::Bundle => self.registry(pin.name())?,
+            Origin::Image => self.image_allowed(pin.name())?,
+        }
+        check_platform(spec, &MAC)
+            .map_err(|why| no(refusal::PLATFORM_MISMATCH, why.to_string()))?;
+        let manifest = self.host.resolve(&self.settings.store, digest);
+        if manifest != digest {
+            self.deny(&manifest)?;
+        }
         let held = self.host.held(&self.settings.store);
         let held = held.map_err(|why| {
             no(
@@ -68,10 +105,10 @@ impl Admission {
                 format!("the store cannot be listed: {why}"),
             )
         })?;
-        if !held.iter().any(|have| have == digest) {
+        if !held.iter().any(|have| *have == manifest) {
             return self.missing(pin.name(), digest);
         }
-        let needs = self.fits_host(digest)?;
+        let needs = self.fits_host(&manifest)?;
         entrypoint(spec, &needs)
     }
 
@@ -125,6 +162,28 @@ impl Admission {
         ))
     }
 
+    /// The image's name is under an `--image-allow` entry, by whole path components. A name
+    /// the registry grammar cannot parse is under none.
+    fn image_allowed(&self, name: &str) -> Result<(), Refusal> {
+        let repository = match name.rsplit_once(':') {
+            Some((before, tag)) if !tag.contains('/') => before,
+            _ => name,
+        };
+        let allowed = Location::parse(repository).is_ok_and(|location| {
+            self.settings
+                .image_allow
+                .iter()
+                .any(|entry| entry.admits(&location))
+        });
+        match allowed {
+            true => Ok(()),
+            false => Err(no(
+                refusal::IMAGE_NOT_ALLOWED,
+                "the image's name is outside every --image-allow entry",
+            )),
+        }
+    }
+
     /// The store does not hold the bundle: refuse, or begin a fetch and say so.
     ///
     /// Order requirement for a real fetcher: [`Fetch::Started`] begins a download, and the
@@ -150,7 +209,10 @@ impl Admission {
         }
         match self.host.fetch(store, name, digest) {
             Fetch::Started => Err(no(refusal::BUNDLE_PENDING, "the bundle is being fetched")),
-            Fetch::Index => Err(no(refusal::BUNDLE_INDEX, "the digest names an index")),
+            Fetch::Index => Err(no(
+                refusal::BUNDLE_INDEX,
+                "the index's darwin/arm64 entry is itself an index",
+            )),
             Fetch::Failed(why) => Err(no(refusal::BUNDLE_FETCH_FAILED, why)),
         }
     }
@@ -202,7 +264,11 @@ impl Admission {
 /// of the config before anything is created, so a job that names a program the bundle lacks
 /// is refused as a request that can never succeed (`invalid-program`) and costs no user.
 fn entrypoint(spec: &JobSpec, needs: &Needs) -> Result<(), Refusal> {
-    let program = spec.native.as_ref().map(|native| native.program.as_str());
+    let program = spec
+        .native
+        .as_ref()
+        .map(|native| native.program.as_str())
+        .or_else(|| spec.run.as_ref().map(|run| run.program.as_str()));
     match program.and_then(|program| program.strip_prefix(BUNDLE_PROGRAM_PREFIX)) {
         Some(name) if !needs.entrypoints.contains(name) => Err(no(
             refusal::INVALID_PROGRAM,

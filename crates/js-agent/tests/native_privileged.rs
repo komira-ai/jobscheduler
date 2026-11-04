@@ -17,18 +17,26 @@
 //! each test stops at its first line.
 
 use std::fs;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use clap::Parser as _;
+use js_agent::bundle::{Placer, Settings, SystemHost};
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
 use js_agent::native::{NativeConfig, NativeRuntime};
+use js_agent::{Cli, Platform};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
+use js_bundle::pack_layer;
 use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
 use js_mac_session::client::Client;
+use js_oci::{Allow, Digest};
+use js_testkit::oci_registry::{Artifact, Fixture as Registry};
+use js_treestore::Sealer;
+use serde_json::json;
 
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
@@ -82,9 +90,7 @@ fn fixture() -> &'static Fixture {
 #[cfg(target_os = "macos")]
 fn serve(fixture: &Fixture) {
     use std::os::unix::net::UnixStream;
-    use std::sync::Arc;
 
-    use clap::Parser as _;
     use js_mac_session::macos::MacHost;
     use js_mac_session::scan::ScanFolder;
     use js_mac_session::server::{self, Caller, CallerCheck};
@@ -492,4 +498,191 @@ fn a_fork_bomb_stops_at_the_process_limit_and_the_kill_still_works() {
         "a process of the user is left"
     );
     rt.remove(&id).unwrap();
+}
+
+/// The sealer of the Mac the test runs on: trees `root:wheel` with `uchg`, writable copies
+/// made by `clonefile`. The test runs as root, as the agent does.
+#[cfg(target_os = "macos")]
+fn mac_sealer() -> Arc<dyn Sealer> {
+    use js_treestore::mac::{Clonefile, Fchflags, MacSealer, Owner};
+
+    Arc::new(MacSealer::new(Owner::root(), Fchflags, Clonefile))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_sealer() -> Arc<dyn Sealer> {
+    panic!("these tests run on macOS only");
+}
+
+/// The store of a Mac agent below the fixture's directory, checked by the production
+/// start checks and opened with the Mac's sealer, reaching registries through `client`.
+/// The store directory is searchable by every user (mode 0711), as the lease users read
+/// the trees in it.
+fn mac_store(fixture: &Fixture, client: js_oci::Client) -> Arc<Placer> {
+    let (store, scratch) = (
+        fixture.root.join("bundle-store"),
+        fixture.root.join("bundle-scratch"),
+    );
+    for (path, mode) in [(&store, 0o711), (&scratch, 0o700)] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let (store, scratch) = (store.display().to_string(), scratch.display().to_string());
+    let cli = Cli::try_parse_from([
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "macs",
+        "--scratch-root",
+        &scratch,
+        "--bundle-store",
+        &store,
+        "--bundle-budget-gib",
+        "10",
+        "--bundle-trust",
+        "digest",
+    ])
+    .unwrap();
+    let mac = Platform {
+        os: "macos".to_owned(),
+        arch: "arm64".to_owned(),
+    };
+    let settings = Settings::from_cli(&cli, &mac, &SystemHost::system())
+        .unwrap()
+        .unwrap();
+    Placer::open(&settings, mac_sealer(), Arc::new(|| 1 << 40), client).unwrap()
+}
+
+/// A one-tree darwin/arm64 bundle whose entrypoint `show` records, in the directory it
+/// runs in, the uid it runs as and the path it was started from. The tree is packed from
+/// a directory below the fixture's.
+fn show_bundle(fixture: &Fixture) -> Artifact {
+    let tree = fixture.root.join("pack").join("app");
+    fs::create_dir_all(tree.join("bin")).unwrap();
+    let script = tree.join("bin").join("show");
+    fs::write(
+        &script,
+        "#!/bin/sh\n/usr/bin/id -u > uid\necho \"$0\" > self\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let packed = pack_layer(&tree).unwrap();
+    let config = json!({
+        "schema": 1,
+        "os": "darwin",
+        "architecture": "arm64",
+        "os.version": "14.0",
+        "name": "show",
+        "version": "1",
+        "layers": [{
+            "tree": "app",
+            "diff_id": packed.diff_id.as_str(),
+            "uncompressed_bytes": packed.uncompressed_bytes,
+            "entries": packed.entries,
+            "license": "MIT",
+            "source_url": "https://example.invalid/source",
+        }],
+        "env": [],
+        "system_path": false,
+        "entrypoints": {"show": {"path": "${tree:app}/bin/show"}},
+        "writable_trees": [],
+        "seatbelt": {"reads": [], "network_max": "off"},
+        "built": {"deployment_target": "14.0", "tool": "tests 1"},
+    });
+    Artifact::bundle_with_config(vec![packed.blob], &config.to_string())
+}
+
+/// An image index of two entries, a linux/amd64 manifest and the darwin/arm64 `bundle`.
+fn two_platform_index(linux: &Digest, bundle: &Artifact) -> Vec<u8> {
+    let entry = |digest: &Digest, size: usize, os: &str, arch: &str| {
+        json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": digest.to_string(),
+            "size": size,
+            "platform": {"os": os, "architecture": arch},
+        })
+    };
+    json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            entry(linux, 1, "linux", "amd64"),
+            entry(&bundle.digest, bundle.manifest.len(), "darwin", "arm64"),
+        ],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Asserts that a Mac runs a job named by an image reference that carries the digest of an
+/// image index: a registry on loopback in this process serves a two-entry index (linux/amd64
+/// and darwin/arm64) and, for the darwin entry, a one-tree bundle; the store fetches the
+/// reference by the index digest and takes the darwin/arm64 manifest from it, with no request
+/// for the Linux entry; the start names the reference as its bundle and `@bundle/show` as
+/// its program; the program runs from the store's tree as the lease user (the uid it records
+/// is the uid of the user's home, in the helper's range, not root); and the removal deletes
+/// the user and the run directory. It catches an index digest that cannot be pulled, a pull
+/// that takes the wrong platform's manifest, an entrypoint that runs as root or unconfined,
+/// and a run directory left after the removal.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_mac_runs_a_job_from_an_image_reference_by_digest() {
+    let fixture = fixture();
+    let tokio = tokio::runtime::Runtime::new().unwrap();
+    let registry = tokio.block_on(Registry::start_plain());
+    let bundle = show_bundle(fixture);
+    let linux = Artifact::image(
+        vec![b"x".to_vec()],
+        r#"{"os":"linux","architecture":"amd64"}"#,
+    );
+    let index = two_platform_index(&linux.digest, &bundle);
+    let index_digest = Digest::of(&index);
+    registry.publish(&bundle);
+    registry.publish_manifest_as(&index_digest, &index);
+
+    let allow = Allow::parse(&format!("127.0.0.1:{}/team", registry.port))
+        .unwrap()
+        .loopback()
+        .plain_http_loopback();
+    let placer = mac_store(fixture, registry.client_with(vec![allow]));
+    let name = format!("127.0.0.1:{}/team/bundle", registry.port);
+    placer
+        .ensure_registry(&name, &index_digest.to_string())
+        .unwrap();
+    let requests = registry.requests();
+    assert!(
+        requests.iter().any(|one| one.contains(bundle.digest.hex())),
+        "the darwin manifest was not fetched: {requests:?}"
+    );
+    assert!(
+        !requests.iter().any(|one| one.contains(linux.digest.hex())),
+        "the linux manifest was asked for: {requests:?}"
+    );
+
+    let mut rt = runtime(fixture).with_bundles(Arc::clone(&placer));
+    let mut run = spec(fixture, "image", "@bundle/show", &[]);
+    run.bundle = Some(format!("{name}@{index_digest}"));
+    let id = rt.create_and_start(&run).unwrap();
+    assert_eq!(settle(&mut rt, &id), exited(0));
+    let home = home_of(fixture, &id);
+    let uid = fs::metadata(&home).unwrap().uid();
+    assert!((680..=689).contains(&uid), "ran as uid {uid}");
+    let exec = home.join("exec");
+    let recorded: u32 = fs::read_to_string(exec.join("uid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        recorded, uid,
+        "the entrypoint did not run as the lease user"
+    );
+    let started_from = fs::read_to_string(exec.join("self")).unwrap();
+    assert!(
+        started_from.starts_with(&placer.root().display().to_string()),
+        "the entrypoint did not start from the store: {started_from}"
+    );
+    rt.remove(&id).unwrap();
+    assert!(!home.exists(), "the run directory is left");
 }

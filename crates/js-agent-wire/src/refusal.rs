@@ -13,8 +13,9 @@
 //! | [`INVALID_IMAGE`] | a `run` beside an empty `image` |
 //! | [`INVALID_JOB`] | a `run` beside a `native` body (field `run`) or beside job `args` (field `args`), or a start a server cannot write in the legacy forms for an older host |
 //! | [`PLATFORM_MISMATCH`] | the start's `os` or `arch` is not the platform of its image's config, or that platform is outside the set a start names |
-//! | [`IMAGE_UNSUPPORTED_HERE`] | an image start on a Mac agent, which runs legacy native bodies only |
+//! | [`IMAGE_UNSUPPORTED_HERE`] | an image start on a Mac agent that cannot run it: one without a `run`, or an agent with no bundle store |
 //! | [`RUN_UNSUPPORTED`] | a `run` on a Linux agent, which runs the image's own command only |
+//! | [`IMAGE_NOT_ALLOWED`] | an image start on a Mac agent whose image is on no `--image-allow` entry |
 
 /// A hello whose body is malformed: a bad id, list, label or shape.
 pub const INVALID_HELLO: &str = "invalid-hello";
@@ -56,16 +57,22 @@ pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
 /// `darwin`; `amd64`, `arm64`). The refusal's `field` is `os` or `arch`, or `image.os` or
 /// `image.architecture` for the image's own. Retrying cannot change it.
 pub const PLATFORM_MISMATCH: &str = "platform-mismatch";
-/// As the detail of a `failed_to_start` result: a start named by its image (`image`, with or
-/// without `run`) on a Mac agent, whose native runtime runs only the legacy `native` body
-/// and pulls no image yet. Nothing is created. It clears when the Mac agent pulls a bundle
-/// by its digest; until then a server sends a Mac host the legacy form.
+/// As the detail of a `failed_to_start` result: a start named by its image on a Mac agent
+/// that cannot run it. A Mac agent with a bundle store runs an image start that carries a
+/// `run`, by the bundle the image resolves to; it refuses one without a `run` (a bundle has
+/// no command of its own) and any image start when it has no bundle store. Nothing is
+/// created. A server sends such a Mac host the legacy form.
 pub const IMAGE_UNSUPPORTED_HERE: &str = "image-unsupported-here";
 /// As the detail of a `failed_to_start` result: a start with a `run` on an agent that runs
 /// containers, which runs an image's own command and has no consumer of `run` yet. Nothing
 /// is created; the field is refused rather than dropped, so the job never runs another
 /// command than it asked for.
 pub const RUN_UNSUPPORTED: &str = "run-unsupported";
+/// As the detail of a `failed_to_start` result: a start on a Mac agent whose image is on no
+/// `--image-allow` entry, so the agent will not fetch it. Nothing is created and no
+/// registry is asked. A Linux agent has no such code: its pull fails later, as
+/// `runtime-failed`.
+pub const IMAGE_NOT_ALLOWED: &str = "image-not-allowed";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A job with a run file that is badly named, named twice, too large, holds a NUL, or
@@ -189,7 +196,8 @@ pub const BUNDLE_REGISTRY_NOT_ALLOWED: &str = "bundle-registry-not-allowed";
 /// A start whose bundle could not be fetched or did not verify (a digest or size
 /// mismatch).
 pub const BUNDLE_FETCH_FAILED: &str = "bundle-fetch-failed";
-/// A start whose pin names an index, not a manifest.
+/// A start whose pin names an index whose darwin/arm64 entry is itself an index (one level
+/// only).
 pub const BUNDLE_INDEX: &str = "bundle-index";
 
 /// Whose fault a refused start is, which decides what a client does with it.
@@ -204,7 +212,7 @@ pub enum RefusalClass {
 }
 
 /// The refusals of a bundle start that are the farm's fault.
-const FARM_CODES: [&str; 10] = [
+const FARM_CODES: [&str; 11] = [
     BUNDLE_UNSUPPORTED,
     BUNDLE_PENDING,
     BUNDLE_NOT_HELD,
@@ -215,6 +223,7 @@ const FARM_CODES: [&str; 10] = [
     BUNDLE_DENIED,
     BUNDLE_REGISTRY_NOT_ALLOWED,
     BUNDLE_FETCH_FAILED,
+    IMAGE_NOT_ALLOWED,
 ];
 
 /// The refusals of a bundle start that are the request's fault.

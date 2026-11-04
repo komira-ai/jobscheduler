@@ -67,9 +67,13 @@
 //! is in `packaging/js-agent-macos/README.md`; `docs/design/spawn-disclaim.md` has the
 //! design.
 //!
-//! What this runtime does not do yet: run a start named by its image (`image`, with or
-//! without `run`; it is refused `image-unsupported-here` until the bundle is pulled by its
-//! digest), stage inputs or collect outputs (a start that names either is refused
+//! A start named by its image runs when it carries a `run` and the runtime holds a bundle
+//! store: the image reference is the bundle's name (the bundle pin of the legacy form), the
+//! store pulls it by digest (an index resolves to its darwin/arm64 manifest) and the `run` is
+//! the native body. A start named by its image without a `run`, or on a runtime with no
+//! store, is refused `image-unsupported-here`.
+//!
+//! What this runtime does not do yet: stage inputs or collect outputs (a start that names either is refused
 //! `native-unsupported`), adopt a run after the agent restarts (the
 //! journal ends it), stop a run softly (the helper only kills), or grant the user's
 //! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
@@ -621,14 +625,21 @@ impl Runtime for NativeRuntime {
         self.pf_in_force()
     }
 
-    /// A start named by its image would need the bundle the image resolves to, pulled by
-    /// its digest, which this runtime does not do yet: it is refused before anything is
-    /// made, with the code that says so, never as a native start it is not.
+    /// A start named by its image that reaches here is one this runtime cannot run: a
+    /// bundle has no command of its own, so a start without a `run` is refused, and so is
+    /// any image start on a runtime with no bundle store. It is refused before anything is
+    /// made, with the code that says so, never as a native start it is not. (A start with a
+    /// `run` on a runtime with a store never asks: [`Runtime::runs_image_runs`].)
     fn check_image(&self) -> Result<(), NativeRefusal> {
         Err(NativeRefusal {
             code: refusal::IMAGE_UNSUPPORTED_HERE,
-            why: "this agent runs native bodies only and pulls no image".to_owned(),
+            why: "this agent runs an image only as a bundle, with a run".to_owned(),
         })
+    }
+
+    /// With a bundle store, the image of a start with a `run` is the bundle it runs from.
+    fn runs_image_runs(&self) -> bool {
+        self.bundles.is_some()
     }
 
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {

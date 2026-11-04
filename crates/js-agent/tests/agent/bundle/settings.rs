@@ -287,9 +287,67 @@ fn the_trust_rules_refuse_what_is_unsafe() {
     let args = with(&["--bundle-pull", "missing"]);
     let why = refused(&args);
     assert!(
-        why.starts_with("--bundle-pull missing: needs --bundle-registry-allow"),
+        why.starts_with(
+            "--bundle-pull missing: needs --image-allow, --bundle-registry-allow or \
+             --bundle-registry-allow-private"
+        ),
         "{why}"
     );
+}
+
+/// `--bundle-pull missing` is accepted with an `--image-allow` entry and no bundle registry
+/// entry: a Mac whose jobs name their image fetches by that list alone. The entry is kept
+/// in the settings, as the js-oci entry it parses to, with the registry list empty, and the
+/// store's client gets it (public, with the credentials it was given) as its allow-list.
+/// It catches a pull policy that insists on a flag only the legacy `bundle` form reads.
+#[test]
+fn pull_missing_is_accepted_with_only_image_allow() {
+    let args = with(&[
+        "--bundle-pull",
+        "missing",
+        "--image-allow",
+        "ghcr.io/komira-ai/",
+    ]);
+    let settings = checked(&args).unwrap().unwrap();
+    assert_eq!(settings.pull, Pull::Missing);
+    assert!(settings.registries.is_empty());
+    let entry = js_oci::Allow::parse("ghcr.io/komira-ai/").unwrap();
+    assert_eq!(settings.image_allow, [entry.clone()]);
+    assert_eq!(settings.registry_allow().unwrap(), [entry]);
+}
+
+/// `--bundle-pull missing` with neither an `--image-allow` entry nor a bundle registry entry
+/// is refused naming all three flags, and an `--image-allow` entry that is a bare host is
+/// refused at start naming `--image-allow`, as the Linux runtime refuses it. It catches a
+/// store that would fetch from anywhere, and a bare host that would admit every account on
+/// a registry.
+#[test]
+fn pull_missing_is_refused_with_no_registry_entry_at_all() {
+    let why = refused(&with(&["--bundle-pull", "missing"]));
+    assert_eq!(
+        why,
+        "--bundle-pull missing: needs --image-allow, --bundle-registry-allow or \
+         --bundle-registry-allow-private"
+    );
+    let bare = refused(&with(&["--image-allow", "ghcr.io"]));
+    assert!(bare.starts_with("--image-allow: "), "{bare}");
+    let both = with(&[
+        "--bundle-pull",
+        "missing",
+        "--image-allow",
+        "ghcr.io/komira-ai/",
+        "--bundle-registry-allow-private",
+        "reg.internal:5000/js",
+    ]);
+    let settings = checked(&both).unwrap().unwrap();
+    let allow = settings.registry_allow().unwrap();
+    let want = [
+        js_oci::Allow::parse("reg.internal:5000/js")
+            .unwrap()
+            .private(),
+        js_oci::Allow::parse("ghcr.io/komira-ai/").unwrap(),
+    ];
+    assert_eq!(allow, want, "the bundle registries first, then the images");
 }
 
 /// A list file that cannot be read, or has a line that is not a digest, ends the start
