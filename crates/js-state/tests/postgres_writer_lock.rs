@@ -19,7 +19,9 @@ use js_testkit::dir::TestDir;
 use postgres::{Client, NoTls};
 
 fn target(database: &TestDatabase) -> WriterTarget {
-    WriterTarget::Postgres(PostgresConfig::parse(&database.url()).expect("the URL parses"))
+    WriterTarget::Postgres(Box::new(
+        PostgresConfig::parse(&database.url()).expect("the URL parses"),
+    ))
 }
 
 /// The backend that holds the writer lock in the database `admin` is connected to, read
@@ -154,8 +156,8 @@ fn lock_errors_never_contain_the_url_or_password() {
     let (port, server) = refusing_server();
     let url = format!("postgres://writer:{password}@127.0.0.1:{port}/state");
     let config = PostgresConfig::parse(&url).expect("the URL parses");
-    let refused =
-        WriterLock::acquire(&WriterTarget::Postgres(config)).expect_err("the login is refused");
+    let refused = WriterLock::acquire(&WriterTarget::Postgres(Box::new(config)))
+        .expect_err("the login is refused");
     server.join().expect("the server thread");
     assert_eq!(
         refused.to_string(),
@@ -173,8 +175,8 @@ fn lock_errors_never_contain_the_url_or_password() {
         socket.display()
     );
     let config = PostgresConfig::parse(&url).expect("the URL parses");
-    let refused =
-        WriterLock::acquire(&WriterTarget::Postgres(config)).expect_err("nothing answers");
+    let refused = WriterLock::acquire(&WriterTarget::Postgres(Box::new(config)))
+        .expect_err("nothing answers");
     assert_eq!(
         refused.to_string(),
         "the store's writer lock could not be taken: \

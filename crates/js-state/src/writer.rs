@@ -25,9 +25,10 @@ use crate::types::StoreError;
 #[derive(Clone, Debug)]
 pub enum WriterTarget {
     /// The Postgres database the configuration names (the lock covers the database, not
-    /// only the configured schema).
+    /// only the configured schema). Boxed: the configuration is many times the size of a
+    /// path.
     #[cfg(feature = "postgres")]
-    Postgres(PostgresConfig),
+    Postgres(Box<PostgresConfig>),
     /// The SQLite state file at this path (any spelling of it: the lock is beside the
     /// file's one name).
     Sqlite(PathBuf),
