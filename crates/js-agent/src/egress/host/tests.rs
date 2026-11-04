@@ -852,7 +852,6 @@ fn open() -> Config {
 /// into a refusal of the start (`egress-unchecked`) before anything is created.
 #[test]
 fn a_tampered_open_ruleset_is_refused_by_check() {
-    use crate::crun::EgressPort as _;
     let fake = Fake::new();
     fake.answer("list table inet", Ok(OPEN_INET.to_owned()));
     let egress = started(&fake, open());

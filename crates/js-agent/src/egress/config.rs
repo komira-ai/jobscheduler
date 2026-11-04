@@ -615,7 +615,8 @@ mod tests {
         assert_eq!(config.ceiling().level, JobNetwork::Open);
         assert_eq!(config.route_wait(), Some(ROUTE_WAIT));
         assert_eq!(config.resolv_conf(), None);
-        assert!(config.allow().is_empty() && config.forward_ports().is_empty());
+        assert!(config.allow().is_empty());
+        assert!(config.forward_ports().is_empty());
         assert_eq!(Mode::Open.to_string(), "open");
 
         let allow = strings(&["192.0.2.10:443"]);
