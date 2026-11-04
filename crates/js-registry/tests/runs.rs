@@ -94,6 +94,8 @@ fn words(reply: &HeartbeatReply) -> Vec<String> {
             Command::Start(spec) => format!("start {}", spec.run_id),
             Command::Stop { run_id } => format!("stop {run_id}"),
             Command::Cancel { run_id } => format!("cancel {run_id}"),
+            Command::JobStart(spec) => format!("job_start {}", spec.job_id),
+            Command::JobStop { job_id } => format!("job_stop {job_id}"),
             Command::Unknown => "unknown".into(),
         })
         .collect()

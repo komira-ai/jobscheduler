@@ -13,8 +13,9 @@
 //! has a `validate()` and the server and the agent must call it on every message they
 //! receive, before they act on any field:** [`Hello::validate`], [`Welcome::validate`]
 //! (and [`HelloReply::validate`]), [`Heartbeat::validate`], [`HeartbeatReply::validate`],
-//! [`Command::validate`] (a start is [`JobSpec::validate`]), and the parts they hold
-//! ([`HeldRun`], [`RunResult`], [`Taint`], [`ResultAck`], [`Mount`], [`Refused`]). A
+//! [`Command::validate`] (a start is [`JobSpec::validate`], a job start
+//! [`JobStartSpec::validate`]), and the parts they hold ([`HeldRun`], [`RunResult`],
+//! [`HeldJob`], [`JobResult`], [`Taint`], [`ResultAck`], [`Mount`], [`Refused`]). A
 //! validator reads no state and no clock; whether an epoch is current, a lease is held
 //! or a shape fits a pool is the caller's. [`JobSpec::fits_shape`] answers the one
 //! question of that kind a single job and a single shape can answer.
@@ -82,6 +83,16 @@
 //! sends a start that asks for more than `none`, or declares a port, only to a host whose
 //! ceiling covers it.
 //!
+//! # Two keyings in one major
+//!
+//! A start, stop and report are keyed by run and lease ([`Command::Start`], [`HeldRun`],
+//! [`RunResult`]) or by job ([`Command::JobStart`], [`Command::JobStop`], [`HeldJob`],
+//! [`JobResult`], [`JobResultAck`], and the `retired_jobs` and `retired_acks` lists; see
+//! [`per_job`]). The job messages are a message set added within major 1 and announced by
+//! the hello capability [`PER_JOB_CAPABILITY`], so one server speaks to agents of both
+//! kinds (see [`protocol`]). An agent lists what a job start began only under the job
+//! keying, so a server that knows no job ids never sees one in `held` or `results`.
+//!
 //! # Not here yet
 //!
 //! Fields of design 5.2 that a later change adds, as optional fields of the types here:
@@ -106,7 +117,8 @@
 //! a [`HelloReply`]; over HTTP the welcome is bare and a refusal is the API's
 //! `{"error", "supported"}` body, see [`HelloReply`]), [`Heartbeat`] and
 //! [`HeartbeatReply`] keep it, and a reply carries [`Command`]s down while a heartbeat
-//! carries [`RunResult`]s up until each is acknowledged and may carry a [`NodeLoad`]
+//! carries [`RunResult`]s (and [`HeldJob`]s with their [`JobResult`]s) up until each is
+//! acknowledged and may carry a [`NodeLoad`]
 //! (telemetry: a bad one is dropped, never the beat). [`refusal`] holds the codes a
 //! refusal carries.
 
@@ -125,6 +137,7 @@ pub mod limits;
 mod load;
 mod native;
 mod network;
+pub mod per_job;
 mod platform;
 pub mod protocol;
 pub mod refusal;
@@ -148,6 +161,9 @@ pub use native::{
     OutputSpec, Placement,
 };
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
+pub use per_job::{
+    BookedResources, HeldJob, JobResult, JobResultAck, JobStartSpec, PER_JOB_CAPABILITY,
+};
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
 pub use run::RunSpec;

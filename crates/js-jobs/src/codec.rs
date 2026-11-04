@@ -39,6 +39,8 @@ use crate::record::{
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 
+mod result_fields;
+
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
@@ -104,6 +106,27 @@ pub(crate) mod job_tag {
     pub const CANCEL_REQUESTED_AT: u16 = 29;
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
+    /// Why the job ended, when it has a result (u8). A row without it has no result, and
+    /// the tags up to [`RESULT_USAGE`] are read only beside it.
+    pub const RESULT_REASON: u16 = 31;
+    /// The exit code (i32).
+    pub const RESULT_EXIT_CODE: u16 = 32;
+    /// The tail of standard output (text).
+    pub const RESULT_STDOUT: u16 = 33;
+    /// The tail of standard error (text).
+    pub const RESULT_STDERR: u16 = 34;
+    /// Whether the job wrote more than the tails hold (u8, 0 or 1).
+    pub const RESULT_TRUNCATED: u16 = 35;
+    /// When the job was queued, as the result reports it (time).
+    pub const RESULT_QUEUED_AT: u16 = 36;
+    /// When it was placed, as the result reports it (time).
+    pub const RESULT_PLACED_AT: u16 = 37;
+    /// When it began running, as the result reports it (time).
+    pub const RESULT_STARTED_AT: u16 = 38;
+    /// When it ended, as the result reports it (time).
+    pub const RESULT_ENDED_AT: u16 = 39;
+    /// What it used: the CPU time (time) and then the peak memory in bytes (u64).
+    pub const RESULT_USAGE: u16 = 40;
 }
 
 /// The tags of an allocation row.
@@ -331,6 +354,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put(t::CANCEL_REQUESTED, [u8::from(job.cancel_requested)]);
     row.put_opt(t::CANCEL_REQUESTED_AT, job.cancel_requested_at.map(time));
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
+    result_fields::put_result(&mut row, job.result.as_ref());
     row.finish(&job.carried)
 }
 
@@ -819,6 +843,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let cancel_requested = fields.opt(t::CANCEL_REQUESTED, bool_of)?.unwrap_or(false);
     let cancel_requested_at = fields.opt(t::CANCEL_REQUESTED_AT, time_of)?;
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
+    let result = result_fields::take_result(&mut fields)?;
     Ok(JobRecord {
         id,
         spec,
@@ -831,6 +856,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         host,
         cancel_requested,
         cancel_requested_at,
+        result,
         retention_ends,
         carried: fields.carried(),
     })

@@ -13,6 +13,7 @@ use crate::error::{Rule, ValidationError};
 use crate::hello::Phase;
 use crate::limits;
 use crate::load::NodeLoad;
+use crate::per_job::{self, HeldJob, JobResultAck};
 use crate::refusal;
 
 /// Where a held run is in its life on the host.
@@ -251,9 +252,21 @@ pub struct Heartbeat {
     /// the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_gib: Option<u64>,
+    /// Every job the agent holds that a [`Command::JobStart`] started, keyed by job id, each
+    /// with its result once it has ended (see [`crate::per_job`]): at most
+    /// [`limits::MAX_HELD`], no job id twice. Such a job is never in `held` and its result
+    /// never in `results`. Absent means none, and a server from before the field ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<HeldJob>,
+    /// The job ids the agent retired on a [`Command::JobStop`] for a job it did not hold,
+    /// sent in every heartbeat until a reply's `retired_acks` names them: the answer that
+    /// the job is stopped and gone. At most [`limits::MAX_HELD`], none twice. Absent means
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_jobs: Vec<String>,
 }
 
-/// The server's verdict on a [`RunResult`].
+/// The server's verdict on a [`RunResult`] (and, in a [`JobResultAck`], on a job's result).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Ack {
@@ -300,6 +313,14 @@ pub struct HeartbeatReply {
     /// for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive: Option<String>,
+    /// The job results the server has dealt with, by job id; the agent then drops each
+    /// one whose verdict it knows. Absent means none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub job_acks: Vec<JobResultAck>,
+    /// The ids of the heartbeat's `retired_jobs` the server has recorded; the agent then
+    /// stops listing them. Absent means none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_acks: Vec<String>,
 }
 
 impl HeldRun {
@@ -396,13 +417,16 @@ impl fmt::Debug for Heartbeat {
             .field("exclusive_refused", &self.exclusive_refused)
             .field("load", &self.load)
             .field("disk_gib", &self.disk_gib)
+            .field("jobs", &self.jobs)
+            .field("retired_jobs", &self.retired_jobs)
             .finish()
     }
 }
 
 impl Heartbeat {
     /// Checks the heartbeat against every bound of [`crate::limits`]: the host id, the
-    /// held runs and results (no run id twice in either) and the taint. It reads no
+    /// held runs and results (no run id twice in either), the jobs and the retired job ids
+    /// (no job id twice in either) and the taint. It reads no
     /// state: whether the epoch is current and whether the host is known is the
     /// server's. The server calls it on every heartbeat before it acts on one.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -427,6 +451,8 @@ impl Heartbeat {
         if let Some(gib) = self.disk_gib {
             check::range(at.field("disk_gib"), gib, 0, limits::MAX_DISK_GIB)?;
         }
+        per_job::check_jobs(at, &self.jobs)?;
+        per_job::check_ids(at.field("retired_jobs"), &self.retired_jobs)?;
         self.check_exclusive(at)
     }
 
@@ -485,6 +511,14 @@ pub struct ReplyCheck<'a> {
     /// Whether the lease id of `exclusive` is acceptable. When this is an error the agent
     /// does not prepare and still acts on `commands`.
     pub exclusive: Result<(), ValidationError>,
+    /// Whether `job_acks` is acceptable (at most [`limits::MAX_RESULTS`], each with a good
+    /// job id, none twice). When this is an error the agent ignores `job_acks` and still
+    /// acts on `commands`.
+    pub job_acks: Result<(), ValidationError>,
+    /// Whether `retired_acks` is acceptable (at most [`limits::MAX_HELD`] good job ids,
+    /// none twice). When this is an error the agent ignores `retired_acks` and still acts
+    /// on `commands`.
+    pub retired_acks: Result<(), ValidationError>,
 }
 
 impl HeartbeatReply {
@@ -492,7 +526,8 @@ impl HeartbeatReply {
     ///
     /// Every command is checked on its own ([`Command::validate`]); a start that names a
     /// run id or a GPU index an earlier accepted start of the reply already names is
-    /// refused too, and so is every command at an index of [`limits::MAX_COMMANDS`] or
+    /// refused too (a job start likewise for its job id, and a GPU index is one whichever
+    /// kind of start named it), and so is every command at an index of [`limits::MAX_COMMANDS`] or
     /// more (the first [`limits::MAX_COMMANDS`] are still read, so a `Stop` early in a
     /// reply from a server with a higher cap is not lost). See [`ReplyCheck`] for what
     /// the agent does with the answer.
@@ -517,6 +552,8 @@ impl HeartbeatReply {
             refused,
             acks: self.check_acks(at),
             exclusive: check::opt_ident(at.field("exclusive"), self.exclusive.as_ref()),
+            job_acks: per_job::check_job_acks(at, &self.job_acks),
+            retired_acks: per_job::check_ids(at.field("retired_acks"), &self.retired_acks),
         }
     }
 
@@ -536,26 +573,32 @@ impl HeartbeatReply {
     }
 }
 
-/// The run ids and GPU indices the accepted starts of a reply name.
+/// The run ids, job ids and GPU indices the accepted starts of a reply name.
 #[derive(Default)]
 struct Taken<'a> {
     runs: BTreeSet<&'a str>,
+    jobs: BTreeSet<&'a str>,
     gpus: BTreeSet<u32>,
 }
 
 impl<'a> Taken<'a> {
-    /// Checks one command and, when it is a start, records what it names.
+    /// Checks one command and, when it is a start or a job start, records what it names.
     fn admit(&mut self, at: At, command: &'a Command) -> Result<(), ValidationError> {
         command.validate()?;
-        let Command::Start(spec) = command else {
-            return Ok(());
+        let (ids, id, gpus) = match command {
+            Command::Start(spec) => (&mut self.runs, spec.run_id.as_str(), &spec.gpu_indices),
+            Command::JobStart(spec) => (
+                &mut self.jobs,
+                spec.job_id.as_str(),
+                &spec.booked.gpu_indices,
+            ),
+            _ => return Ok(()),
         };
-        let gpu_taken = spec.gpu_indices.iter().any(|gpu| self.gpus.contains(gpu));
-        if gpu_taken || self.runs.contains(spec.run_id.as_str()) {
+        let gpu_taken = gpus.iter().any(|gpu| self.gpus.contains(gpu));
+        if gpu_taken || !ids.insert(id) {
             return Err(at.fail(Rule::Duplicate));
         }
-        self.runs.insert(spec.run_id.as_str());
-        self.gpus.extend(spec.gpu_indices.iter().copied());
+        self.gpus.extend(gpus.iter().copied());
         Ok(())
     }
 }

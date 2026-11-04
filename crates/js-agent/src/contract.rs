@@ -33,10 +33,14 @@
 //!   example, a container that runs `nvidia-smi`); the agent knows only its exit status.
 //!   With no hook, with no GPU offered, or with a hook that fails, the capability is
 //!   absent, and a pool that needs it refuses the host `host-contract`.
+//! - `per-job` is `true` for an agent that runs containers: it takes the job-keyed start
+//!   and stop and lists those jobs in `jobs` ([`js_agent_wire::PER_JOB_CAPABILITY`]), so a
+//!   server sends them only to a host that reports it. A native agent does not report it (a
+//!   job start carries an image, which it cannot run). An operator cannot set it either.
 
 use std::path::Path;
 
-use js_agent_wire::{Hello, NetworkCeiling};
+use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY};
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
     SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
@@ -88,6 +92,15 @@ pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
     Vec::new()
 }
 
+/// Says that the agent takes the job-keyed start and stop: every agent that runs containers
+/// does. A native agent does not say it: a job start carries an image, which its runtime
+/// cannot run.
+fn report_per_job(hello: &mut Hello) {
+    hello
+        .capabilities
+        .insert(PER_JOB_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+}
+
 /// Adds the capabilities of the host contract to the hello of an agent that runs
 /// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on;
 /// `gpu_passthrough` says the runtime gives jobs the GPUs they book, and `ceiling` is the most
@@ -104,6 +117,7 @@ pub(crate) fn report(
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
     ceiling.insert_into(&mut hello.capabilities);
+    report_per_job(hello);
     // This agent writes a start's run files (when it has a files root); an older one
     // would ignore them.
     if run_files {

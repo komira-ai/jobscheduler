@@ -9,6 +9,7 @@ use js_agent_wire::{
     WireShape,
 };
 
+use js_agent_wire::PER_JOB_CAPABILITY;
 use js_caps::{DETECTED_KEYS, DISK_GIB};
 use js_types::normalise_arch;
 
@@ -63,7 +64,7 @@ fn capabilities(
     let clash = given.iter().map(|(key, _)| key.as_str()).find(|key| {
         matches!(
             *key,
-            "os" | "arch" | EGRESS_CAPABILITY | EGRESS_PORTS_CAPABILITY
+            "os" | "arch" | PER_JOB_CAPABILITY | EGRESS_CAPABILITY | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)
     });
     match clash {

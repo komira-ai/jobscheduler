@@ -613,6 +613,8 @@ impl Runs {
             result_acks,
             taint_ack: false,
             exclusive: None,
+            job_acks: Vec::new(),
+            retired_acks: Vec::new(),
         }
     }
 
@@ -788,6 +790,8 @@ mod tests {
             exclusive_refused: None,
             load: None,
             disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
         }
     }
 
