@@ -254,8 +254,8 @@ pub mod detail {
     /// only to an agent that reported the `run-files` capability, so this is a fault of the
     /// sender.
     pub const FILES_UNSUPPORTED: &str = "files-unsupported";
-    /// The job is a host job and carries run files, which only a container can be given
-    /// (they are mounted read-only at `/run/js-files`). Nothing is created.
+    /// The job is a host job and carries run files, which only a contained job (a container,
+    /// or a native run's own user) can be given. Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
     /// The network the job would get is not limited as the agent was told: the `crun`
     /// runtime's firewall (`--egress`) or a Mac pool's packet filter (`--native-network on`)
@@ -282,6 +282,9 @@ pub mod code {
     pub const START_FAILED: &str = "start-failed";
     /// The runtime could not remove a container.
     pub const CONTAINER_REMOVE_FAILED: &str = "container-remove-failed";
+    /// A native run was removed (its processes and its user are gone) and one or more of
+    /// its declared outputs could not be copied. The host holds nothing of it: not a taint.
+    pub const OUTPUTS_FAILED: &str = "outputs-failed";
     /// The scratch directory could not be made or removed.
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// A labelled container could not be accounted for after a restart.
@@ -486,8 +489,8 @@ pub struct Config {
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
     pub scratch: ScratchRoot,
-    /// Where the runs' files go (on a tmpfs); none when the agent was started without a
-    /// usable `--run-files-root`, and then a start with files is refused.
+    /// Where the runs' files go (on a tmpfs, for containers); none when the agent was started
+    /// without a usable `--run-files-root`, and then a start with files is refused.
     pub files: Option<FilesRoot>,
     /// Where the taint marker is kept.
     pub state: StateRoot,
@@ -535,8 +538,8 @@ pub struct Local {
     pub scratch_abandon_limit: u32,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
-    /// `--run-files-root`, or the default under `/run` when that can be made; always none
-    /// without `--container-bin`.
+    /// `--run-files-root`, or for containers the default under `/run` when that can be
+    /// made; always none without `--container-bin` or `--native-helper-socket`.
     pub files: Option<FilesRoot>,
     /// Why the default run files root could not be used, for a warning; none when it was
     /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
@@ -738,8 +741,8 @@ impl Local {
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
         }
-        if container.is_none() && cli.run_files_root.is_some() {
-            return Err("--run-files-root: needs --container-bin".to_owned());
+        if container.is_none() && native.is_none() && cli.run_files_root.is_some() {
+            return Err("--run-files-root: needs --container-bin or --native-helper-socket".into());
         }
         if container.is_some() && state.is_none() {
             return Err(format!(
@@ -762,43 +765,32 @@ impl Local {
                 );
             }
         }
-        let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
-            (_, false) => (None, None),
-            (Some(path), true) => (Some(FilesRoot::open_with(path, layout)?), None),
-            (None, true) => match FilesRoot::open_with(default_files_root, layout) {
-                Ok(root) => (Some(root), None),
-                Err(why) => (None, Some(format!("run files unavailable: {why}"))),
-            },
-        };
-        // The files root is swept at every start (everything in it that is not an adopted
-        // run's directory is removed) and its directories are the agent's to remove, so it
-        // may not be, hold or lie in any other root of the agent: a sweep over the state
-        // root would delete the taint marker and the host credential, and a mount root
-        // that holds it would show every run's secrets to a job.
-        let overlap = files.as_ref().and_then(|root| {
-            let others = mounts
-                .paths()
-                .map(|path| ("--mount-root", path))
-                .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
-                .chain(state.iter().map(|r| ("--state-root", r.path())));
-            let mut clash = others.filter(|(_, other)| {
-                root.path().starts_with(other) || other.starts_with(root.path())
-            });
-            clash.next().map(|(flag, other)| {
-                format!(
-                    "--run-files-root: is, holds or lies in the {flag} {}: the roots must be \
-                     separate directories",
-                    other.display()
-                )
-            })
+        // A native agent's files root may also not be, hold or lie in a path its profiles
+        // deny reads of (the job could not read its files) or the homes of its users.
+        let native_paths = native.iter().flat_map(|native| {
+            let config = native.config();
+            let denies = config
+                .read_denies
+                .iter()
+                .map(|path| Path::new(path.as_str()));
+            let denies = denies.map(|path| ("path no native run may read", path));
+            denies.chain([("--native-homes", config.homes.as_path())])
         });
-        // A root the operator named is an error; the default, which they did not name, only
-        // turns run files off, so it never changes which error an unrelated flag gets.
-        let (files, files_warning) = match (overlap, cli.run_files_root.is_some()) {
-            (None, _) => (files, files_warning),
-            (Some(why), true) => return Err(why),
-            (Some(why), false) => (None, Some(format!("run files unavailable: {why}"))),
+        let others: Vec<(&str, &Path)> = mounts
+            .paths()
+            .map(|path| ("--mount-root", path))
+            .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
+            .chain(state.iter().map(|r| ("--state-root", r.path())))
+            .chain(native_paths)
+            .collect();
+        let runs = match (&container, &native) {
+            (Some(_), _) => run_files::Runs::Containers(layout),
+            (None, Some(_)) => run_files::Runs::Native,
+            (None, None) => run_files::Runs::None,
         };
+        let given = cli.run_files_root.as_deref();
+        let (files, files_warning) =
+            run_files::open_root(given, default_files_root, runs, &others)?;
         let busy: Vec<&Path> = mounts
             .paths()
             .chain(scratch.iter().map(ScratchRoot::path))
@@ -897,14 +889,15 @@ impl Local {
     /// not prove (subvolumes sharing free space have distinct device numbers), and the
     /// engine's data root and container layers are not compared.
     ///
-    /// The run files root (`--run-files-root`, or the default under `/run`) must be on a
-    /// `tmpfs`; one that is not, or cannot be looked at, stops the agent.
+    /// The run files root of a container agent (`--run-files-root`, or the default under
+    /// `/run`) must be on a `tmpfs`; one that is not, or cannot be looked at, stops the agent.
     ///
     /// # Errors
     ///
     /// The text names the flags at fault; a path that cannot be looked at is an error too.
     pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
-        if let Some(root) = &self.files {
+        // A Mac has no tmpfs: a native agent's root is wherever the operator put it.
+        if let Some(root) = self.files.as_ref().filter(|_| self.native.is_none()) {
             let on_tmpfs = files.is_tmpfs(root.path()).map_err(|why| {
                 format!("--run-files-root: cannot tell what file system it is on: {why}")
             })?;

@@ -450,10 +450,10 @@ fn opening_asks_for_the_reset_and_takes_one_that_ran_already() {
 }
 
 /// Asserts what the runtime answers a native start before anything is made: a program under
-/// a tool root passes; one outside every root is `invalid-program`; inputs, outputs and a
-/// working directory, which this runtime cannot stage, are each `native-unsupported`. It
-/// catches a program run from anywhere on the Mac and a start whose inputs would be dropped
-/// without a word.
+/// a tool root passes; one outside every root is `invalid-program`; inputs and a working
+/// directory, which this runtime cannot stage, are each `native-unsupported`; declared
+/// outputs, which it collects, pass. It catches a program run from anywhere on the Mac and
+/// a start whose inputs would be dropped without a word.
 #[test]
 fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     let rig = Rig::new("check");
@@ -484,10 +484,13 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     });
     let mut with_cwd = native("/bin/sh", &[]);
     with_cwd.cwd = "sub".to_owned();
-    for body in [with_input, with_output, with_cwd] {
+    for body in [with_input, with_cwd] {
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
+        let why = "this agent stages no inputs and runs in no subdirectory yet";
+        assert_eq!(refused.why, why);
     }
+    assert_eq!(rig.rt.check_native(&with_output), Ok(()));
 }
 
 /// Asserts that the first program of the command is `sandbox-exec`, that the program of the
