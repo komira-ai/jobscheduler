@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use js_lease::Booking;
 use js_pool_static::SeatError;
-use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
+use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 use crate::credential::Binding;
 use crate::registry::Registry;
 
-/// The [`Provider`] the lease table runs on for a pool of self-registered hosts.
+/// The [`Pool`] the lease table runs on for a pool of self-registered hosts: the
+/// allocation port that books a lease on one of them. The machine-provider view of the
+/// same hosts is [`crate::StaticCapacity`].
 ///
 /// It answers from memory and never blocks, as the table calls it under its lock. Each
 /// host is leased whole, as the static pool does, and the rules a lease follows are the
@@ -129,13 +131,9 @@ impl RegisteredProvider {
     }
 }
 
-impl Provider for RegisteredProvider {
+impl Pool for RegisteredProvider {
     fn id(&self) -> ProviderId {
         self.registry.pool_id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        Flavour::Delegated
     }
 
     fn classes(&self) -> Vec<ResourceClass> {

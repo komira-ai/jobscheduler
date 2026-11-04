@@ -8,7 +8,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::{ERROR_EDGES_MS, ProfileLives, TailCounters, WholeNodeConfig};
 use js_usage::ProfileKey;
 use support::world::*;

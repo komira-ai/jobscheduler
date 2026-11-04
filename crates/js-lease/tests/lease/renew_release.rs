@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use js_lease::{LeaseState, ReleaseOutcome, RenewError};
-use js_provider::{Call, Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
-use js_provider_fake::FakeProvider;
+use js_provider::{Call, HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
+use js_provider_fake::FakePool;
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
 use crate::support::{Scratch, T0, at, fake, fresh, host, open_with, request, secs, states};
@@ -103,15 +103,11 @@ fn stop_that_reads_back_present_does_not_free() {
 
 /// A provider whose stop claims to have stopped while reading the lease back as still
 /// present.
-struct Odd(FakeProvider);
+struct Odd(FakePool);
 
-impl Provider for Odd {
+impl Pool for Odd {
     fn id(&self) -> ProviderId {
         self.0.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.0.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {

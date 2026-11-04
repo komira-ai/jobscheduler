@@ -5,7 +5,7 @@
 mod support;
 
 use js_agent_wire::Hello;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Launchable, PoolConfig, Refusal, WholeNodeConfig};
 use js_types::{ArmVersion, IsaLevel, ProviderId, Request, Shape};
 use support::world::*;

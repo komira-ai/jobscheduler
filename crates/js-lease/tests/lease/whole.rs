@@ -4,7 +4,7 @@
 use std::fs;
 
 use js_lease::{Boot, LeaseState, LeaseTable, ManualClock, OpenError, Settings, SettingsError};
-use js_provider::{Call, Provider, StartSpec};
+use js_provider::{Call, Pool, StartSpec};
 use js_types::LeaseId;
 
 use crate::support::{
@@ -16,7 +16,7 @@ fn id() -> LeaseId {
     LeaseId::new(1, 1)
 }
 
-type PlainTable = LeaseTable<js_provider_fake::FakeProvider, ManualClock>;
+type PlainTable = LeaseTable<js_provider_fake::FakePool, ManualClock>;
 
 fn table(name: &str, settings: Settings) -> (PlainTable, ManualClock, Scratch) {
     let scratch = Scratch::new(name);
@@ -315,7 +315,7 @@ fn an_old_file_loads_as_not_whole() {
     assert!(!text.contains("whole"));
 }
 
-fn info_of(table: &LeaseTable<js_provider_fake::FakeProvider, ManualClock>) -> js_lease::LeaseInfo {
+fn info_of(table: &LeaseTable<js_provider_fake::FakePool, ManualClock>) -> js_lease::LeaseInfo {
     table.list().remove(0)
 }
 

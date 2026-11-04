@@ -14,7 +14,7 @@ use js_lease_server::{
     Ticker, channel_ticker, start_with_checks,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
-use js_provider::Provider;
+use js_provider::Pool;
 use js_testkit::dir::TestDir;
 use js_types::ProviderId;
 use serde_json::Value;
@@ -286,13 +286,9 @@ impl SharedProvider {
     }
 }
 
-impl Provider for SharedProvider {
+impl Pool for SharedProvider {
     fn id(&self) -> ProviderId {
         self.pool().id()
-    }
-
-    fn flavour(&self) -> js_provider::Flavour {
-        self.pool().flavour()
     }
 
     fn classes(&self) -> Vec<js_types::ResourceClass> {

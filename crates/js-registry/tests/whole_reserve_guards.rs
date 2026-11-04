@@ -7,7 +7,7 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};
 use support::world::*;

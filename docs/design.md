@@ -726,12 +726,12 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | jobscheduler crate | From | Notes |
 |---|---|---|
 | `js-types` (merged) | generic half of `crates/kbf-types` | `Resources` as a named vector plus the separate lease-count cap, ids, `ResourceClass`, `Shape`, labels; later farm time, `Qos`, `NodePhase`, `StateMachine`, `Effect`, control record |
-| `js-provider` (merged) | new | merged as `Provider`; becomes `Pool` and gains `CapacityProvider` at step 23 (5.5, 5.9); `StartSpec` and its rules |
+| `js-provider` (merged) | new | merged as `Provider`, now renamed `Pool` (the allocation port); `CapacityProvider` lives in `js-elastic`; `StartSpec` and its rules |
 | `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
 | `js-lease` (merged) | new | the lease table: states, TTL, reaper, lease file; gains `acquiring` and the pool name (5.9) |
-| `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md) |
+| `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md), and `StaticCapacity` is the `static` `CapacityProvider` over them |
 | `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; `LayeredProvider` (static, then registered) becomes the configured hierarchy; gains the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-proto` (merged) | new | the job service as protobuf (package `jobscheduler.v1`: jobs, hosts, pools, providers, usage) with its generated messages and gRPC client and server traits (runtime layer); no server implements it yet |
