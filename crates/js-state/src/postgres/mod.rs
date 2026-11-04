@@ -27,6 +27,9 @@
 //! connections of their own, outside the commit head, taking none of the locks above.
 //! Such a crate registers its migration with [`schema::extend`].
 //!
+//! [`WRITER_LOCK_KEY`] is the advisory lock the active writer holds on a connection of its
+//! own ([`crate::WriterLock`]), apart from the transaction-scoped lock schema changes take.
+//!
 //! [`PostgresStore::claim`] is the claim path: read committed, rows locked
 //! `FOR UPDATE SKIP LOCKED`, each claimed through the same version compare-and-set.
 //!
@@ -46,6 +49,7 @@ mod reach;
 pub mod schema;
 mod session;
 mod tx;
+pub(crate) mod writer;
 
 use std::fmt;
 use std::ops::Bound;
@@ -67,6 +71,7 @@ pub use not_up::OpenError;
 pub use reach::{Unreached, reach};
 use session::{Edge, Pool, RangeShape, Session};
 use tx::{Level, Row, Tx, micros};
+pub use writer::WRITER_LOCK_KEY;
 
 use crate::clock::{Clock, StoreTime};
 use crate::store::{Span, Store, page_of};

@@ -58,6 +58,7 @@ use crate::types::{
     Changes, Commit, CommitStats, Conflict, Revision, ScanPage, ScanRange, StoreError, Txn,
     Versioned,
 };
+use crate::writer::{Held, WriterLock};
 use writer::{Reply, Request, Shared, Writer};
 
 /// How the store groups writes.
@@ -127,6 +128,27 @@ impl SqliteStore {
         SqliteStore::open_checked(path, clock, options, &guard::filesystem_type)
     }
 
+    /// [`SqliteStore::open`] under a writer lock already taken on this file
+    /// ([`WriterLock::acquire`] with [`crate::WriterTarget::Sqlite`]). The store adopts the
+    /// held `flock` instead of taking a second one (which [`SqliteStore::open`] does, and
+    /// which is refused with [`SqliteError::Locked`] while the writer lock is held, in this
+    /// process as in any other), and keeps it until it is dropped: the file is locked from
+    /// before the open to the end of the store, with no gap a second process could take it
+    /// in. The lock is matched to the file by the file's one name, whichever spelling of
+    /// it the lock and the open were given. Bumps the epoch.
+    ///
+    /// # Errors
+    /// [`SqliteError::NotThisFilesLock`] when `lock` was taken on another state file or on a
+    /// Postgres store; otherwise as [`SqliteStore::open`]. The lock is released on any error.
+    pub fn open_locked(
+        path: &Path,
+        lock: WriterLock,
+        clock: Arc<dyn Clock>,
+        options: Options,
+    ) -> Result<SqliteStore, SqliteError> {
+        SqliteStore::opened(path, clock, options, &guard::filesystem_type, Some(lock))
+    }
+
     /// [`SqliteStore::open`] with the filesystem check's probe (the type number of a
     /// directory's filesystem) given, so a test can present a network filesystem.
     fn open_checked(
@@ -135,7 +157,18 @@ impl SqliteStore {
         options: Options,
         probe: &dyn Fn(&Path) -> io::Result<u32>,
     ) -> Result<SqliteStore, SqliteError> {
-        match SqliteStore::start(path, clock, options, probe) {
+        SqliteStore::opened(path, clock, options, probe, None)
+    }
+
+    /// Opens the store, taking the file's lock, or adopting `writer` when one is given.
+    fn opened(
+        path: &Path,
+        clock: Arc<dyn Clock>,
+        options: Options,
+        probe: &dyn Fn(&Path) -> io::Result<u32>,
+        writer: Option<WriterLock>,
+    ) -> Result<SqliteStore, SqliteError> {
+        match SqliteStore::start(path, clock, options, probe, writer) {
             Ok(store) => Ok(store),
             Err(error) => Err(error.at(path)),
         }
@@ -146,10 +179,14 @@ impl SqliteStore {
         clock: Arc<dyn Clock>,
         options: Options,
         probe: &dyn Fn(&Path) -> io::Result<u32>,
+        writer: Option<WriterLock>,
     ) -> Result<SqliteStore, SqliteError> {
         guard::refuse_network_filesystem(path, probe)?;
         guard::refuse_hard_link(path)?;
-        let (lock, _) = guard::take_lock(path)?;
+        let lock = match writer {
+            Some(writer) => adopt(path, writer)?,
+            None => guard::take_lock(path)?.0,
+        };
         let conn = Connection::open(path)?;
         schema::init(&conn)?;
         schema::configure(&conn)?;
@@ -228,6 +265,18 @@ impl SqliteStore {
 
     fn reader(&self) -> std::sync::MutexGuard<'_, Connection> {
         held(&self.reader)
+    }
+}
+
+/// The `flock` of `writer`, when it is the writer lock of the state file `path`.
+fn adopt(path: &Path, writer: WriterLock) -> Result<guard::LockFile, SqliteError> {
+    let own = guard::canonical_lock(path)?;
+    match writer.held {
+        Held::Sqlite(lock) if lock.lock_file() == own => Ok(lock.into_file()),
+        _ => Err(SqliteError::NotThisFilesLock {
+            path: path.to_owned(),
+            lock: own,
+        }),
     }
 }
 
