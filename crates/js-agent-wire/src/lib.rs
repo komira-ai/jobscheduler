@@ -97,9 +97,11 @@
 //!
 //! Fields of design 5.2 that a later change adds, as optional fields of the types here:
 //!
-//! - the start's `fence`, `booking`, `deadline`, named `assignments` beyond `gpu_indices`,
-//!   and environment by reference: the run-delivery change, which is where a start is
-//!   first sent (and where the server fills `valid_for_ms`);
+//! - the start's `booking`, `deadline`, named `assignments` beyond `gpu_indices`, and
+//!   environment by reference: the run-delivery change, which is where a start is first
+//!   sent (and where the server fills `valid_for_ms`). The fence of a job start is the
+//!   pair of its job id and allocation id, which it already carries; an agent that
+//!   enforces it says so with the hello capability [`START_FENCE_CAPABILITY`];
 //! - the sum of several jobs' limits against one shape, and checks against pool state
 //!   (the pool's shape, `max_machines`, the tainted set): the server's registry. The
 //!   credential binding is there now, in `js-registry` (`Binding`, checked by
@@ -165,6 +167,7 @@ pub use native::{
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{
     BookedResources, HeldJob, JobResult, JobResultAck, JobStartSpec, PER_JOB_CAPABILITY,
+    START_FENCE_CAPABILITY,
 };
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};

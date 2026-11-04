@@ -383,6 +383,14 @@ impl FakeRuntime {
         self.state.borrow().stops.clone()
     }
 
+    /// Whether the container of `run_id` was started and has not exited: a job's one write
+    /// to its store succeeds only then.
+    pub fn running(&self, run_id: &str) -> bool {
+        let state = self.state.borrow();
+        let mut live = state.containers.values().filter(|c| c.started);
+        live.any(|c| c.run_id == run_id && c.exit.is_none())
+    }
+
     /// Whether the container of `run_id` is gone.
     pub fn gone(&self, run_id: &str) -> bool {
         let state = self.state.borrow();

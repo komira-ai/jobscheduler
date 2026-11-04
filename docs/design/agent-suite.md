@@ -5,7 +5,8 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
 ## What exists now
 
 The suite is the `agent` module of `js-conformance`, beside the provider suite. It is wire-neutral: the scenarios speak only to the
-`AgentHarness` trait (deliver a Start with its validity bound, deliver a Cancel, acknowledge a result, end a job, answer a heartbeat,
+`AgentHarness` trait (deliver a Start with its validity bound, deliver a fenced Start naming a job and its allocation, deliver a
+Cancel, acknowledge a result, end a job, answer a heartbeat,
 drop and restore the connection, advance an injected clock, read what the agent reported). One harness per transport implements the
 trait; the scenarios do not change. Time is injected, so no scenario sleeps or asserts how long anything took. `FakeAgent` is the
 correct in-process agent; each `Defect` is the same agent missing one behaviour, and the tests assert that each scenario fails on its
@@ -18,23 +19,29 @@ broken agent and that no other scenario does.
 | `LateStartIsDropped` | a Start that waited longer than its validity is reported never started and launches nothing; one that waited exactly its validity runs; validity 0 is unbounded and runs | `RunsLateStart` |
 | `SelfFencesAfterSilence` | one tick short of the agent's own fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced; an agent with no fence fails | `NeverFences` |
 | `UnackedResultIsResent` | an unacknowledged result is repeated in every heartbeat, including the first on a new connection, and not while the link is down; an acknowledged one is not | `ForgetsUnackedResult` |
+| `RetiredFenceIsRefused` | a fenced Start repeated while its job runs launches it once; one whose fence (the job with its allocation) the agent retired, the job having ended and its result been acknowledged, launches nothing; the same job under a new allocation runs | `RunsRetiredFence`, `FenceKeyedByJobAlone` |
 
 How an adapter maps a transport (full text in the module documentation of `agent`):
 
 - Start validity is relative (`valid_for`, 0 unbounded; dropped when `waited > valid_for`). The legacy agent measures `waited` from
   receipt on the agent's clock (`valid_for_ms != 0 && waited > valid_for_ms`); the worker wire counts `valid_for_ms` from the send
   time of the heartbeat the Start names.
-- The fence window is the transport's own (the worker daemon's fence T), or none. The legacy agent has no self-fence and reads no
-  clock, so `SelfFencesAfterSilence` is a check it cannot pass today; the scenario fails with that reason.
+- The fence window is the transport's own, or none; an agent with no self-fence fails `SelfFencesAfterSilence` with that reason. The
+  js-agent's window is its silence bound (`--silence-stop`, 300 s by default).
+- A fenced Start is a job start (`job_start`, fenced by the job id with the allocation id); `start` stays a run start, so it keeps
+  its validity bound.
 - `launches` and `never_started` are derived: the legacy agent emits a skipped-stale event to read; the worker wire has none, so an
   adapter derives them from the Results and refusals that reached it and from what its job runner was asked to launch.
 
-Not yet built: no harness exists for a real transport (the legacy `js-agent` wire, or the worker wire the host agent will speak).
-The fake cancels without producing a result and does not model grace periods or a cap on retired ids.
+The js-agent adapter (`crates/js-conformance/tests/js_agent_suite.rs`) drives the agent's real lifecycle over a runtime in memory
+and a clock the suite moves, stamping the agent's contact where its session would (a delivered message is an accepted reply), and
+passes every scenario. It does not go through the session or the transport: those are covered by the agent's own tests
+(`crates/js-agent/tests/agent/jobs/silence.rs`). The fake cancels without producing a result and does not model grace periods or a
+cap on retired ids.
 
 ## Still prose
 
-Everything in the list below that is not one of the five scenarios above.
+Everything in the list below that is not one of the six scenarios above.
 
 *Agent suite:*
 

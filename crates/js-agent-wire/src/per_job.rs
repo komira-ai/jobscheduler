@@ -35,6 +35,20 @@ use crate::run::RunSpec;
 /// so a server sends them only to a host that reports it.
 pub const PER_JOB_CAPABILITY: &str = "per-job";
 
+/// The hello capability of an agent that fences its job starts. Its value is `true`. The
+/// fence of a start is the pair already on it, [`JobStartSpec::job_id`] and
+/// [`JobStartSpec::allocation_id`]; no field is added for it. An agent that reports it
+/// remembers the fences of the jobs it stopped, was told to stop or saw end (the newest of
+/// them, a bounded number), keeps them in its state root across a restart, and runs
+/// nothing for a start whose fence is among them (a stop that names no allocation retires
+/// every fence of the job). The same job id under a new allocation is a new fence and
+/// runs. Such an agent also stops every job it holds after a bounded silence of the
+/// server, and retires their fences. An agent without it promises neither: it may judge a
+/// start by its job id alone, and it runs its jobs through any silence until their wall
+/// limits. A server tells the two apart by this capability; nothing else on the wire
+/// changes.
+pub const START_FENCE_CAPABILITY: &str = "start-fence";
+
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

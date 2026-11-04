@@ -1,6 +1,6 @@
 //! What the machine keeps for each run: its [`Job`] and the stage it is in, what it books,
-//! how it ended, the run ids that must not start again, and the taints and the container
-//! spec that follow from a job.
+//! how it ended, the run ids and job fences that must not start again, and the taints and
+//! the container spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
 use crate::lifecycle::taint::{TaintState, reason};
-use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
+use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
 
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +108,14 @@ pub(super) enum Cause {
     Stopped,
     /// The wall-time limit.
     TimedOut,
+    /// The server was not heard for the silence bound (see `silence`).
+    Silenced,
+}
+
+/// The detail of the result of a job that `cause` ended: [`detail::SILENCE_STOP`] for a
+/// silence, none otherwise.
+pub(super) fn cause_detail(cause: Option<Cause>) -> Option<&'static str> {
+    (cause == Some(Cause::Silenced)).then_some(detail::SILENCE_STOP)
 }
 
 /// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
@@ -299,7 +307,8 @@ impl Job {
     /// only gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
         if !self.silent {
-            self.result = Some(self.report(Outcome::Killed, None, None));
+            let detail = cause_detail(self.cause);
+            self.result = Some(self.report(Outcome::Killed, None, detail));
             events.push(Event::ResultReady {
                 run_id: self.run_id.clone(),
             });
@@ -320,10 +329,19 @@ impl Job {
     /// Asks a running job, or one still waiting for its image, to stop; a job past its
     /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
-        if matches!(self.stage, Stage::Running(_) | Stage::Preparing(_)) {
-            self.cause.get_or_insert(Cause::Stopped);
+        self.request_stop_for(Cause::Stopped, silent);
+    }
+
+    /// Asks a running job, or one still waiting for its image, to stop for `cause` (a cause
+    /// already set stays); a job past its exit has nothing to stop. Whether it was running
+    /// or waiting.
+    pub(super) fn request_stop_for(&mut self, cause: Cause, silent: bool) -> bool {
+        let live = matches!(self.stage, Stage::Running(_) | Stage::Preparing(_));
+        if live {
+            self.cause.get_or_insert(cause);
             self.silent |= silent;
         }
+        live
     }
 }
 
@@ -332,7 +350,7 @@ impl Job {
 pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
     match (cause, exit) {
         (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
-        (Some(Cause::Stopped), _) => (Outcome::Killed, None),
+        (Some(Cause::Stopped | Cause::Silenced), _) => (Outcome::Killed, None),
         (
             None,
             Some(Exit {
@@ -346,31 +364,34 @@ pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Opt
     }
 }
 
-/// The run ids that must never start again, oldest first, each with the allocation (lease)
-/// id of the job when it is known, and a count of the ids added, which says whether the list
-/// has changed since it was last written down.
+/// The fences that must never start again, oldest first: each a run id (or job id) with
+/// the allocation (lease) id of the job when it is known, and a count of the fences added,
+/// which says whether the list has changed since it was last written down. A run start is
+/// judged by its id alone ([`Retired::contains`]); a job start by its fence
+/// ([`Retired::fenced`]), so the same job under a new allocation is new work.
 #[derive(Default)]
 pub(super) struct Retired {
     order: VecDeque<(String, Option<String>)>,
-    seen: BTreeSet<String>,
+    seen: BTreeSet<(String, Option<String>)>,
     added: u64,
 }
 
 impl Retired {
+    /// Retires every fence of `run_id`: a stop that names no allocation.
     pub(super) fn insert(&mut self, run_id: &str) {
         self.insert_with(run_id, None);
     }
 
-    /// Retires `run_id`, noting the allocation it belonged to when that is known. An id
-    /// already retired changes nothing.
+    /// Retires the fence of `run_id` under `allocation`, or every fence of `run_id` when the
+    /// allocation is not known. A fence already retired changes nothing.
     pub(super) fn insert_with(&mut self, run_id: &str, allocation: Option<&str>) {
-        if self.seen.insert(run_id.to_owned()) {
-            let allocation = allocation.map(str::to_owned);
-            self.order.push_back((run_id.to_owned(), allocation));
+        let fence = (run_id.to_owned(), allocation.map(str::to_owned));
+        if self.seen.insert(fence.clone()) {
+            self.order.push_back(fence);
             self.added += 1;
         }
         if self.order.len() > RETIRED_CAP {
-            self.order.pop_front().iter().for_each(|(old, _)| {
+            self.order.pop_front().iter().for_each(|old| {
                 self.seen.remove(old);
             });
         }
@@ -389,8 +410,19 @@ impl Retired {
             .map(|(id, allocation)| (id.as_str(), allocation.as_deref()))
     }
 
+    /// Whether any fence of `run_id` is retired: how a run start is judged.
     pub(super) fn contains(&self, run_id: &str) -> bool {
-        self.seen.contains(run_id)
+        let from: (String, Option<String>) = (run_id.to_owned(), None);
+        let first = self.seen.range(from..).next();
+        first.is_some_and(|(id, _)| id == run_id)
+    }
+
+    /// Whether the fence of `job_id` under `allocation` is retired, by itself or by a stop
+    /// of the job that named no allocation: how a job start is judged.
+    pub(super) fn fenced(&self, job_id: &str, allocation: &str) -> bool {
+        let every: (String, Option<String>) = (job_id.to_owned(), None);
+        let this = (job_id.to_owned(), Some(allocation.to_owned()));
+        self.seen.contains(&every) || self.seen.contains(&this)
     }
 }
 
