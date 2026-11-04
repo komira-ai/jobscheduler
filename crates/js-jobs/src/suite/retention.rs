@@ -313,7 +313,9 @@ pub fn retention_ends_are_raised_at_boot_after_a_long_outage<B: Backend>(backend
 
 /// The same job ended in two stores whose clocks read far apart (one of them decades past
 /// the process's real time) gets retention ends that are each store's clock plus the
-/// window, exactly, so they differ by the clocks' difference: nothing reads the system clock.
+/// window, exactly, and each lies within the hour after its own clock's setting: nothing
+/// reads the system clock. (A backend may move its clock on by its commits' cost, so the
+/// setting is a floor, not the exact end.)
 pub fn retention_uses_the_injected_clock<B: Backend>(backend: &B) {
     let name = "retention_uses_the_injected_clock";
     let early = rig(backend);
@@ -322,8 +324,7 @@ pub fn retention_uses_the_injected_clock<B: Backend>(backend: &B) {
     // About the year 2096 as seconds since the Unix epoch: decades past any real now.
     let far = Duration::from_secs(3_999_999_999);
     late.clock.advance(far);
-    let mut ends = Vec::new();
-    for rig in [&early, &late] {
+    for (rig, set) in [(&early, Duration::from_secs(1_000)), (&late, far)] {
         let id = rig.running("same");
         let at = now(rig);
         let ended = rig.jobs.end_job(&id, exited(0)).expect("ends");
@@ -332,13 +333,12 @@ pub fn retention_uses_the_injected_clock<B: Backend>(backend: &B) {
             Some(at.saturating_add(WEEK)),
             "{name}: the end is not the store's clock plus the window"
         );
-        ends.push(ended.retention_ends.map(StoreTime::as_duration));
+        let ended_at = at.as_duration();
+        assert!(
+            (ended_at >= set) & (ended_at < set + Duration::from_secs(3600)),
+            "{name}: the end at {ended_at:?} is not on the store's clock set to {set:?}"
+        );
     }
-    assert_eq!(
-        ends,
-        [Some(Duration::from_secs(1_000) + WEEK), Some(far + WEEK)],
-        "{name}: a retention end is not the exact instant of its store's clock"
-    );
 }
 
 /// The result, the retention end and the end state are one commit: when it fails, or the
@@ -751,6 +751,8 @@ where
     let id = rig.running("raced");
     rig.jobs.end_job(&id, exited(0)).expect("ends");
     rig.clock.advance(WEEK);
+    // Arms a second writer's raise at the store's clock now, before the next commit, and
+    // answers that boot.
     let raise = |rig: &Rig<B::Store>| {
         let other = rig.other();
         let inner = rig.store.inner();
@@ -764,9 +766,10 @@ where
                 .expect("reachable")
                 .expect("the other writer raises");
         });
+        boot
     };
 
-    raise(&rig);
+    let boot = raise(&rig);
     assert_eq!(
         rig.jobs.delete_swept(std::slice::from_ref(&id)),
         Err(JobStoreError::Stale { id: id.clone() }),
@@ -775,7 +778,7 @@ where
     let raised = stored(&rig.jobs, &id);
     assert_eq!(
         raised.retention_ends,
-        Some(now(&rig).saturating_add(BOOT_GRACE)),
+        Some(boot.saturating_add(BOOT_GRACE)),
         "{name}: the raise did not commit"
     );
     let before = rig.snapshot();
