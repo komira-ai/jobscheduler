@@ -100,8 +100,12 @@ where
         "{name}: the job or its allocation did not end"
     );
     assert!(
-        job.ended_at.is_some() && allocation.freed_at == job.ended_at,
-        "{name}: the end and the free do not carry the commit's time"
+        job.ended_at.is_some(),
+        "{name}: the end does not carry the commit's time"
+    );
+    assert_eq!(
+        allocation.freed_at, job.ended_at,
+        "{name}: the free does not carry the end's time"
     );
     assert_eq!(
         rig.jobs.get_job(&id).expect("reads"),

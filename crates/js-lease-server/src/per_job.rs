@@ -35,15 +35,15 @@ use js_agent_wire::{
     Outcome,
 };
 use js_jobs::{
-    AllocationRecord, AllocationStep, IdSource, JobEnd, JobId, JobRecord, JobState, JobStore,
-    JobStoreError, Output, StartFailure,
+    AllocationRecord, AllocationStep, JobEnd, JobId, JobRecord, JobState, JobStoreError, Output,
+    StartFailure,
 };
-use js_state::Store;
 use js_types::HostId;
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
 use crate::job_start::start_of;
+use crate::job_store::ServerJobs;
 
 /// The exit code a failure is recorded with when the agent reports it with none (a job
 /// stopped without a cancel, a failure the agent could not read a status for).
@@ -89,8 +89,8 @@ pub(crate) struct BeatContext<'a> {
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
 /// the agent reports again.
-pub(crate) fn serve<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+pub(crate) fn serve(
+    jobs: &ServerJobs,
     context: &BeatContext<'_>,
     listed: &[HeldJob],
     retired: &[String],
@@ -137,8 +137,8 @@ pub(crate) fn serve<S: Store, I: IdSource>(
 /// already ended, [`Ack::Stale`] for a job the store holds no live allocation of on this host
 /// (or of another allocation) and for an end the job's state cannot take. A result whose
 /// outcome this version does not know is left unanswered and changes nothing.
-fn commit_listing<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+fn commit_listing(
+    jobs: &ServerJobs,
     context: &BeatContext<'_>,
     listed: &[HeldJob],
 ) -> Result<Reported, JobStoreError> {
@@ -163,8 +163,8 @@ fn commit_listing<S: Store, I: IdSource>(
 /// result is listed, the allocation the result names): `None` for an id that is not a job id,
 /// a job the store does not know or has no allocation of, and one whose allocation is freed or
 /// on another host. Such a job is never revived and no allocation is made for it.
-fn placement_of<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+fn placement_of(
+    jobs: &ServerJobs,
     host: &HostId,
     held: &HeldJob,
 ) -> Result<Option<JobRecord>, JobStoreError> {
@@ -186,8 +186,8 @@ fn placement_of<S: Store, I: IdSource>(
 /// Commits what the host reports of `job`, which it holds: a state moves the job forward, a
 /// result ends it ([`commit_result`]). Returns the verdict on the result, if one was listed
 /// and read.
-fn report<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+fn report(
+    jobs: &ServerJobs,
     context: &BeatContext<'_>,
     job: JobRecord,
     held: &HeldJob,
@@ -210,8 +210,8 @@ fn report<S: Store, I: IdSource>(
 /// already ended is left as it is ([`Ack::Duplicate`]); an end its state cannot take is logged
 /// and changes nothing ([`Ack::Stale`]); an outcome this version does not know is left
 /// unanswered.
-fn commit_result<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+fn commit_result(
+    jobs: &ServerJobs,
     context: &BeatContext<'_>,
     job: JobRecord,
     result: &JobResult,
@@ -244,8 +244,8 @@ fn commit_result<S: Store, I: IdSource>(
 /// Moves `job` forward to `target` (starting or running) through each step it has not taken,
 /// one commit per step, and returns it as it is then. A job at or past `target`, or ended, is
 /// returned as it is: a report never moves a job backwards.
-fn advance<S: Store, I: IdSource>(
-    jobs: &JobStore<S, I>,
+fn advance(
+    jobs: &ServerJobs,
     job: JobRecord,
     target: JobState,
 ) -> Result<JobRecord, JobStoreError> {

@@ -277,14 +277,7 @@ async fn heartbeat(
     } else if refused {
         agents.save_bindings().await;
     }
-    if let Some(jobs) = &agents.jobs {
-        let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
-        if let Some(served) = serve_jobs(&agents, jobs, &heartbeat, room).await? {
-            reply.commands.extend(served.commands);
-            reply.job_acks = served.job_acks;
-            reply.retired_acks = served.retired_acks;
-        }
-    }
+    add_jobs(&agents, &heartbeat, &mut reply).await?;
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
@@ -298,6 +291,29 @@ async fn heartbeat(
         .await;
     }
     Ok(Json(reply))
+}
+
+/// Adds the per-job half of the heartbeat to `reply` when the server holds the job tables
+/// and the host reported [`PER_JOB_CAPABILITY`]; leaves it as it is otherwise. Its own
+/// function, so the heartbeat route stays the same for every test binary whatever the
+/// server holds.
+///
+/// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
+async fn add_jobs(
+    agents: &Arc<Agents>,
+    heartbeat: &Heartbeat,
+    reply: &mut HeartbeatReply,
+) -> Result<(), Refused> {
+    let Some(jobs) = &agents.jobs else {
+        return Ok(());
+    };
+    let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
+    if let Some(served) = serve_jobs(agents, jobs, heartbeat, room).await? {
+        reply.commands.extend(served.commands);
+        reply.job_acks = served.job_acks;
+        reply.retired_acks = served.retired_acks;
+    }
+    Ok(())
 }
 
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with

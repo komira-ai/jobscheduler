@@ -222,12 +222,12 @@ async fn a_late_start_after_a_cancel_does_not_run() {
     agent.take(&reply);
     let reply = rig.beat(&agent).await.unwrap();
     assert_eq!(rig.job(&id).state, JobState::Cancelled);
-    assert!(starts(&reply).iter().all(|spec| spec.job_id != "job-a"));
+    assert!(starts(&reply).is_empty());
     agent.take(&reply);
     agent.take(&first);
     assert!(!agent.holds("job-a"));
     let reply = rig.beat(&agent).await.unwrap();
-    assert!(starts(&reply).iter().all(|spec| spec.job_id != "job-a"));
+    assert!(starts(&reply).is_empty());
     assert_eq!(
         rig.states(&id),
         (JobState::Cancelled, AllocationStep::Freed)

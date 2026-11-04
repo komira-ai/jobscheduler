@@ -55,16 +55,18 @@ pub(crate) fn spec() -> JobSpec {
     }
 }
 
-/// Job tables over a fresh store that can fail a commit, for a test without a server.
-pub(crate) fn tables() -> (Arc<Interfere<Fake>>, JobStore<Interfere<Fake>>) {
+/// Job tables of the server's own type over a fresh store that can fail a commit, so a test
+/// without a server runs the same code a heartbeat does.
+pub(crate) fn tables() -> (Arc<Interfere<Fake>>, ServerJobs) {
     let store = Arc::new(Interfere::new(Fake::with_flaw(Arc::default(), Flaw::None)));
-    let jobs = JobStore::new(Arc::clone(&store), RandomIds).unwrap();
+    let dynamic: Arc<dyn Store> = store.clone();
+    let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
     (store, jobs)
 }
 
 /// Records the job `id` with `spec` and places it on `host` with `booked`; its records.
-pub(crate) fn placed<S: Store, I: js_jobs::IdSource>(
-    jobs: &JobStore<S, I>,
+pub(crate) fn placed(
+    jobs: &ServerJobs,
     id: &str,
     host: &str,
     spec: JobSpec,
@@ -108,10 +110,8 @@ pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
         4,
     );
     let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
-    let fake = Fake::with_flaw(Arc::default(), Flaw::None);
-    let store = Arc::new(Interfere::new(fake));
-    let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = Arc::new(JobStore::new(Arc::new(dynamic), RandomIds).unwrap());
+    let (store, jobs) = tables();
+    let jobs = Arc::new(jobs);
     let agents = Agents::over(registry, &shared, dir.path());
     let agents = match with_jobs {
         true => agents.with_jobs(Arc::clone(&jobs)),
