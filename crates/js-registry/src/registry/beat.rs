@@ -3,12 +3,16 @@
 //! which records the beat. Both run the same checks in the same order and compute the
 //! taint from the same [`Plan`], so the two cannot answer differently for one state.
 
-use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::sync::PoisonError;
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, Outcome, Taint};
+use js_lease::Timestamp;
+use js_pool_static::HostBook;
 use js_types::{HostId, LeaseId};
 
+use crate::config::PoolConfig;
 use crate::credential::Credential;
 use crate::refusal::Refusal;
 use crate::whole::ending::prepare_taint;
@@ -104,18 +108,17 @@ pub(super) fn parse(heartbeat: &Heartbeat) -> Result<HostId, Refusal> {
     Ok(host)
 }
 
-/// The record of `host` when `heartbeat` is admitted for it, checked in this order: the
-/// host has a session, `credential` is the one its id is bound to, the epoch is the
-/// current one, and the heartbeat carries the session secret. Changes nothing; the
-/// borrow is mutable so that [`Registry::heartbeat`] records the beat through it.
-pub(super) fn admitted<'r>(
-    records: &'r mut BTreeMap<HostId, Record>,
-    host: &HostId,
+/// `record`, the host's record if the registry holds one, when `heartbeat` is admitted
+/// for it, checked in this order: the host has a session, `credential` is the one its id
+/// is bound to, the epoch is the current one, and the heartbeat carries the session
+/// secret. Changes nothing; [`Registry::heartbeat`] passes a mutable borrow and records
+/// the beat through the one returned, [`Registry::check_heartbeat`] a shared one.
+pub(super) fn admitted<R: Deref<Target = Record>>(
+    record: Option<R>,
     heartbeat: &Heartbeat,
     credential: &Credential,
-) -> Result<&'r mut Record, Refusal> {
-    let record = records
-        .get_mut(host)
+) -> Result<R, Refusal> {
+    let record = record
         .filter(|record| record.heard.is_some())
         .ok_or(Refusal::UnknownHost)?;
     if record
@@ -138,6 +141,20 @@ pub(super) fn admitted<'r>(
     Ok(record)
 }
 
+/// Whether the housekeeping every locking call runs first ([`super::State::forget_lost`])
+/// would forget `host` at `now`: its record is out of retention, and the host book lists
+/// it with no booking. Reads only, so a check can answer as if the housekeeping had run.
+fn forgotten(
+    book: &HostBook,
+    (host, record): (&HostId, &Record),
+    now: Timestamp,
+    config: &PoolConfig,
+) -> bool {
+    let silent = record.out_of_retention(now, config.grace_ms(), config.lost_retention_ms());
+    let free = !book.booked().contains_key(host);
+    [silent, book.contains(host), free].into_iter().all(|ok| ok)
+}
+
 impl Registry {
     /// Answers what [`Registry::heartbeat`] would do with `heartbeat` from `credential`,
     /// and records nothing: refused with the same [`Refusal`] for the same reason (the
@@ -146,10 +163,12 @@ impl Registry {
     ///
     /// This does not mutate: the host's last-heard time, phase, epoch, session, held runs,
     /// load, taint and whole-node state, its booking and its binding stay as they were, and
-    /// no run is touched. Like every call it first applies the registry's time-driven
-    /// housekeeping (forgetting the hosts lost for longer than the retention with no
-    /// booking, expiring waits, sweeping idle requests), which any call would apply at the
-    /// same time, so it refuses a forgotten host as [`Registry::heartbeat`] does.
+    /// no run is touched. Unlike every other call it does not run the registry's
+    /// time-driven housekeeping (forgetting hosts lost for longer than the retention with
+    /// no booking, expiring waits, sweeping idle requests) either: it answers as if that
+    /// had run, so a host the housekeeping would forget is refused as unknown, as
+    /// [`Registry::heartbeat`] refuses it after forgetting it. The rest of the
+    /// housekeeping touches no host record, so it changes no answer here.
     ///
     /// It lets a caller make a taint durable before the registry records it: check, commit
     /// the taint, then call [`Registry::heartbeat`]. The answer holds for the registry as
@@ -163,12 +182,127 @@ impl Registry {
     ) -> Result<HeartbeatCheck, Refusal> {
         let host = parse(heartbeat)?;
         let now = self.shared.clock.now();
-        let mut state = self.lock_at(now);
-        let record = admitted(&mut state.records, &host, heartbeat, credential)?;
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let config = &self.shared.config;
+        let kept = state
+            .records
+            .get(&host)
+            .filter(|record| !forgotten(&state.book, (&host, *record), now, config));
+        let record = admitted(kept, heartbeat, credential)?;
         let taint = match record.taint {
             Some(_) => None,
             None => Plan::of(record, heartbeat).taint_after(),
         };
         Ok(HeartbeatCheck { host, taint })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use js_agent_wire::{DEFAULT_GRACE_MS, Hello, Phase, ProtocolRange, WireShape};
+    use js_lease::ManualClock;
+    use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+
+    use super::*;
+    use crate::{MIN_LOST_RETENTION_MS, SequentialSessions};
+
+    fn macos() -> BTreeMap<String, String> {
+        BTreeMap::from([("os".to_string(), "macos".to_string())])
+    }
+
+    /// A pool of one class of 4 cores and 8 GiB, forgetting a lost host after the
+    /// shortest retention.
+    fn config() -> PoolConfig {
+        let class = ResourceClass::new(ClassId::new("mac-host").unwrap(), Admission::BookAll, 0);
+        let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
+        let name = ProviderId::new("builders").unwrap();
+        PoolConfig::new(name, class, Shape::new(resources, macos()), 2)
+            .with_lost_retention(MIN_LOST_RETENTION_MS)
+            .unwrap()
+    }
+
+    fn hello() -> Hello {
+        Hello {
+            protocol: ProtocolRange { min: 1, max: 1 },
+            host_id: "a".into(),
+            pool: "builders".into(),
+            agent_version: "0.1.0".into(),
+            instance: None,
+            shape: WireShape {
+                cpu_millis: 8000,
+                memory_bytes: 16 << 30,
+                gpus: 0,
+                disk_bytes: 0,
+                gpu_class: None,
+                max_leases: None,
+            },
+            capabilities: macos(),
+            gpu_devices: Vec::new(),
+            labels: BTreeMap::new(),
+            phase: Phase::Serving,
+            held: Vec::new(),
+            accepts_host_credential: false,
+        }
+    }
+
+    fn heartbeat(session: String) -> Heartbeat {
+        Heartbeat {
+            host_id: "a".into(),
+            epoch: 1,
+            session,
+            phase: Phase::Serving,
+            held: Vec::new(),
+            results: Vec::new(),
+            taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
+            load: None,
+            disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
+        }
+    }
+
+    /// The raw state a check must leave as it is: the host records, whether the host book
+    /// lists the host, and the count of dropped reservations. Read without the
+    /// housekeeping every other call runs first.
+    fn raw(registry: &Registry, host: &HostId) -> (Vec<HostId>, bool, u64) {
+        let state = registry.shared.state.lock().unwrap();
+        let records = state.records.keys().cloned().collect();
+        (records, state.book.contains(host), state.dropped)
+    }
+
+    /// Asserts that a check with housekeeping due changes the raw state not at all: a host
+    /// lost past the retention with no booking is refused as unknown and is still held,
+    /// record and book entry, after the check; the heartbeat that follows refuses it the
+    /// same and forgets it, as it did before. It catches a check that runs the housekeeping
+    /// of the other calls on the live state.
+    #[test]
+    fn a_check_with_housekeeping_due_leaves_the_raw_state_as_it_was() {
+        let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+        let registry = Registry::with_sessions(config(), clock.clone(), SequentialSessions::new());
+        let credential = Credential::of_token("t");
+        let welcome = registry.hello(&hello(), &credential).unwrap();
+        let beat = heartbeat(welcome.session);
+        let host = HostId::new("a").unwrap();
+        let lost = Duration::from_millis(DEFAULT_GRACE_MS + MIN_LOST_RETENTION_MS + 1);
+        clock.advance(lost);
+        let before = raw(&registry, &host);
+        assert_eq!(before, (vec![host.clone()], true, 0));
+
+        let checked = registry.check_heartbeat(&beat, &credential).unwrap_err();
+        assert_eq!(checked, Refusal::UnknownHost);
+        assert_eq!(raw(&registry, &host), before);
+
+        let beaten = registry.heartbeat(&beat, &credential).unwrap_err();
+        assert_eq!(beaten, Refusal::UnknownHost);
+        assert_eq!(raw(&registry, &host), (Vec::new(), false, 0));
     }
 }

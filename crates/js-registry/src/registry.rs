@@ -218,7 +218,8 @@ struct Shared {
 /// its last hello or heartbeat, computed when asked, so nothing ticks. A lost host that
 /// holds no booking is forgotten, binding included, once it has been lost for the pool's
 /// lost-host retention ([`PoolConfig::with_lost_retention`]), also computed when asked:
-/// every call forgets such hosts first, so they stop counting toward the pool's limit.
+/// every call forgets such hosts first, so they stop counting toward the pool's limit
+/// ([`Registry::check_heartbeat`], which changes nothing, answers as if it had).
 /// A host that holds a booking is never forgotten. An awaiting host (seated after a
 /// restart, never heard) is counted from the time it was seated: once its lease has
 /// ended, it is forgotten after the grace period and the retention have passed since
@@ -309,8 +310,8 @@ impl Registry {
     }
 
     /// The registry's state as of `now`: hosts lost for longer than the retention, with
-    /// no booking, are forgotten first, so no call sees or counts one. Every call locks
-    /// through here.
+    /// no booking, are forgotten first, so no call sees or counts one. Every call but
+    /// [`Registry::check_heartbeat`] (which answers as if they were forgotten) locks here.
     fn lock_at(&self, now: Timestamp) -> MutexGuard<'_, State> {
         let mut state = self
             .shared
@@ -719,7 +720,7 @@ impl Registry {
             requests,
             ..
         } = &mut *guard;
-        let record = beat::admitted(records, &host, heartbeat, credential)?;
+        let record = beat::admitted(records.get_mut(&host), heartbeat, credential)?;
         let plan = beat::Plan::of(record, heartbeat);
         let gap = record.state(now, self.grace_ms()) == HostState::Lost;
         record.heard = Some(now);
