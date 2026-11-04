@@ -605,9 +605,9 @@
 //! what it booked and was measured to use, its queue wait and run time, why it ended, its
 //! drain and give-up outcome, its estimated against its actual end), with the registry's lock
 //! released; the record is queued in memory and written by the next tick, and kept for
-//! `--history-retention-days`. A write that fails costs the record nothing: it stays queued
-//! (up to 4096) for the next tick, is counted in [`Running::usage_counters`], and a run of
-//! failures is logged once.
+//! `--history-retention-days`. A record whose write fails stays queued for the next tick (at
+//! most 4096 wait; past that the oldest is dropped), the failure is counted in
+//! [`Running::usage_counters`], and a run of failures is logged once.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
 //! minutes and once more at shutdown, and pruned at the first tick and once a day. A

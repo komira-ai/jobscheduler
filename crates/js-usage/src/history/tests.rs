@@ -182,6 +182,15 @@ fn every_reason_and_drain_outcome_has_its_own_stable_name() {
 fn a_row_round_trips_with_every_field_present_and_absent() {
     let full = row(1_000_000);
     assert_eq!(decode(&encode(&full)), Ok(full.clone()));
+    let shared = EndedRow {
+        booked: Some(Booked {
+            whole_host: false,
+            cpu_milli: 1,
+            memory_bytes: 2,
+        }),
+        ..full.clone()
+    };
+    assert_eq!(decode(&encode(&shared)), Ok(shared));
     let bare = bare(5, "0");
     assert_eq!(decode(&encode(&bare)), Ok(bare));
     for error in [i64::MIN, -1, 0, 1, i64::MAX] {

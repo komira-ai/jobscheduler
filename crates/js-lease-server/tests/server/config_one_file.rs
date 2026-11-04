@@ -214,6 +214,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--drain-timeout", "7s"),
         key("--usage-db", "/usage.db"),
         key("--profile-store-bytes", "5"),
+        key("--history-retention-days", "5"),
         key("--job-retention", "3d"),
     ];
     rows.push((
