@@ -7,7 +7,7 @@
 mod support;
 
 use js_agent_wire::{HeldRun, HeldState};
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Busy, HostMark, HostState, HostView, RunRefusal};
 use support::world::job;
 use support::*;

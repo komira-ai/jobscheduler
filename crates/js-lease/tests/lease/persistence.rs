@@ -6,8 +6,8 @@ use js_lease::{
     AcquireError, Booking, Boot, LeaseState, LeaseTable, OpenError, ReleaseError, RenewError,
     read_bookings,
 };
-use js_provider::{Call, Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
-use js_provider_fake::FakeProvider;
+use js_provider::{Call, HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
+use js_provider_fake::FakePool;
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 use crate::support::{
@@ -307,15 +307,11 @@ fn a_second_table_over_the_same_file_is_refused() {
 
 /// A provider that reports every lease it observes on a different host from the one it
 /// started it on.
-struct Moved(FakeProvider);
+struct Moved(FakePool);
 
-impl Provider for Moved {
+impl Pool for Moved {
     fn id(&self) -> ProviderId {
         self.0.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.0.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {

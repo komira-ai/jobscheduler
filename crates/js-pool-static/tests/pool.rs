@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use js_pool_static::{ConfigError, EXAMPLE_CONFIG, SeatError, StaticPool};
-use js_provider::{Flavour, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources,
 };
@@ -38,13 +38,11 @@ fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
-/// Asserts that the pool reports its id, the delegated flavour and the one shipped
-/// class.
+/// Asserts that the pool reports its id and the one shipped class.
 #[test]
-fn identity_flavour_and_classes() {
+fn identity_and_classes() {
     let p = example();
     assert_eq!(p.id().as_str(), "pool");
-    assert_eq!(p.flavour(), Flavour::Delegated);
     assert_eq!(p.classes(), vec![ResourceClass::gpu_host()]);
 }
 

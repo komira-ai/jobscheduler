@@ -7,10 +7,8 @@ use std::fs;
 use std::time::Duration;
 
 use js_lease::{AcquireError, Boot, LeaseState, LeaseTable, ManualClock, OpenError};
-use js_provider::{
-    Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
-use js_provider_fake::FakeProvider;
+use js_provider::{Call, HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider_fake::FakePool;
 use js_types::{ClassId, LeaseId, ProviderId, Request, RequestId, ResourceClass, Resources};
 
 use crate::support::{
@@ -32,7 +30,7 @@ enum Answer {
 /// start is kept with the lease and request id it carried. With `serves` off it lists no
 /// class, as a provider that stopped serving the lease's class.
 struct Queueing {
-    fake: FakeProvider,
+    fake: FakePool,
     answer: Answer,
     serves: bool,
     waiting: BTreeSet<LeaseId>,
@@ -51,13 +49,9 @@ impl Queueing {
     }
 }
 
-impl Provider for Queueing {
+impl Pool for Queueing {
     fn id(&self) -> ProviderId {
         self.fake.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.fake.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
@@ -185,7 +179,6 @@ fn a_waiting_lease_is_presented_again_each_tick_until_placed() {
     let booked = table.provider().capacity();
     assert_eq!(booked[0].leased_to, Some(lease));
     assert_eq!(table.provider().id(), ProviderId::new("fake").unwrap());
-    assert_eq!(table.provider().flavour(), Flavour::Delegated);
 }
 
 /// Asserts that a presentation the provider refuses ends the waiting lease: the tick drops

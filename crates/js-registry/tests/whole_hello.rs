@@ -5,7 +5,7 @@ mod support;
 use std::time::Duration;
 
 use js_agent_wire::DEFAULT_GRACE_MS;
-use js_provider::{Observed, Provider, StartAck, StartSpec};
+use js_provider::{Observed, Pool, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{ProviderId, Request, ResourceClass};
 use support::*;

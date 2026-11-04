@@ -83,7 +83,7 @@ impl Registry {
     }
 
     /// Whether the whole-node request lease `lease` presented last waits for a host
-    /// (see [`js_provider::Provider::waits`]).
+    /// (see [`js_provider::Pool::waits`]).
     pub(crate) fn waits(&self, lease: &LeaseId) -> bool {
         self.lock().waiting.holds_lease(lease)
     }

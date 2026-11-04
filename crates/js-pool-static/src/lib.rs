@@ -19,7 +19,7 @@
 //!   start after the stop is refused with `LeaseEnded`, books nothing, and the lease
 //!   observes `Absent`. A stop of a lease the pool never held is remembered the same way.
 //! - **Absence (5.6).** The pool owns its state, so it knows absence exactly:
-//!   [`js_provider::Provider::observe`] answers `Present` or `Absent`, never
+//!   [`js_provider::Pool::observe`] answers `Present` or `Absent`, never
 //!   `Unknown`, and a stop frees the host at once.
 //! - **Seating.** The pool's bookings live in memory and a restart loses them.
 //!   [`StaticPool::seat`] books a named host for a named lease without a start, so a

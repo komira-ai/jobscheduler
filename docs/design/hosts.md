@@ -47,8 +47,9 @@ read as one job to a whole machine, and are changed in place:
 **What the code does today, so that this file is not read as already built.** No ucdk class is defined in this repository's code; a class
 id that a pool file does not know loads as `BookAll` (`agent_pool.rs`), so a ucdk class named there would book a whole host until step 59
 changes the ucdk admission. `vms` is not a `Dim` of `js-types` yet (`cpu_millis`, `memory_bytes`, `gpus`); it becomes one in step 59 or
-60. The provider trait in code is the delegated `Provider` (`start`, `stop`, `observe`, `capacity`); `CapacityProvider`, `acquire`,
-`events`, `launch_options`, `FirstFit`, cooldowns, the scheduler-recorded `reclaim` and `evict` taints, and the cap-time swap are design
+60. The lease-level trait in code is the allocation port `Pool` (`start`, `stop`, `observe`, `capacity`). `CapacityProvider`, with `acquire`
+and an optional `events`, is built in `js-elastic`: Lambda Labs, the fake and the registry's `StaticCapacity` implement it, and the
+lease server's scaler calls `acquire`. The scheduler's handling of `events`, `launch_options`, `FirstFit`, cooldowns, the scheduler-recorded `reclaim` and `evict` taints, and the cap-time swap are design
 (steps 59 to 64). Today's registry keeps its marks in memory only; making these taints durable is part of steps 62 and 64.
 
 What does not change: a **fresh VM for each VM run**, cloned from its base image and destroyed after the run (D29); a **whole-node lease
