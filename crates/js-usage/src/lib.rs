@@ -34,6 +34,16 @@
 //! prune. Its inputs are plain values ([`Beat`]); any server, whatever its wire form and
 //! registry, adapts its heartbeat to them.
 //!
+//! # Tail counters
+//!
+//! [`TailSink`] is where the registry keeps the counters of the tail rule beyond its own
+//! memory, and [`StoreTailSink`] keeps them in a state store under [`TAIL_PREFIX`], one
+//! row per counter, each change added to what is stored. The server gives the registry
+//! one over its usage store, so every counter is durable once written and survives a
+//! restart; a server with no usage store (usage off, or no agent registration) gives none
+//! and its counters are in memory only, starting at zero. The rows are additive: the
+//! server never resets them.
+//!
 //! # Time
 //!
 //! Three bases never mix: a node's monotonic microseconds (windows and lease minutes,
@@ -63,6 +73,7 @@ mod key;
 mod profile_store;
 mod ring;
 mod sink;
+mod tail;
 #[cfg(test)]
 mod testkit;
 
@@ -78,6 +89,10 @@ pub use profile_store::{KEY_PREFIX, KeyProfile, ProfileError, ProfileStore};
 pub use ring::{Admitted, BUCKETS, Bucket, RING_RUNS, Ring, Run, RunMinute, RunSeries};
 pub use sink::{
     KeySource, NoKeys, NoUsage, Observation, RunEnd, SinkCounters, UsageFault, UsageSink, drop_name,
+};
+pub use tail::{
+    NoTail, StoreTailSink, TAIL_BUCKETS, TAIL_PREFIX, TAIL_ROW_VERSION, TAIL_WRITE_TRIES,
+    TailDelta, TailRowError, TailSink, TailSinkCounters, TailSinkError, TailTotals,
 };
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).

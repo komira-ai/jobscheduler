@@ -325,3 +325,29 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
     assert_eq!(err.flag(), "--usage-db");
     assert!(err.reason().contains("down"), "{}", err.reason());
 }
+
+/// Asserts that the tail counts the registry hands the sink are written at a flush, that a
+/// store that cannot be written costs the stored counters only (every flush still
+/// succeeds, the counts wait and the failures are counted), and that once the store is
+/// back the counts land once. Catches: tail counts that no flush writes, counts lost or
+/// doubled across failed writes, and a failed tail write that fails the node flush.
+#[test]
+fn the_tail_counts_are_written_at_a_flush_and_wait_while_the_store_is_down() {
+    let (sink, fail) = sink();
+    let tail = sink.tail().unwrap();
+    let delta = js_usage::TailDelta {
+        backfilled: 1,
+        ..js_usage::TailDelta::default()
+    };
+    tail.add(&delta);
+    fail.store(true, Ordering::SeqCst);
+    assert!(sink.flush(100).unwrap().is_empty());
+    assert!(sink.flush(100).unwrap().is_empty());
+    assert_eq!(tail.counters().writes_failed, 2);
+    fail.store(false, Ordering::SeqCst);
+    sink.flush(100).unwrap();
+    sink.flush(100).unwrap();
+    let stored = StoreTailSink::new(sink.store.clone(), ERROR_EDGES_MS);
+    assert_eq!(stored.load().unwrap().backfilled, 1);
+    assert_eq!(tail.counters().writes_failed, 2);
+}

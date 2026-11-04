@@ -10,7 +10,7 @@ use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, ProfileLives, Registry};
 use js_types::ProviderId;
-use js_usage::{ProfileCurves, ProfileKey};
+use js_usage::{ProfileCurves, ProfileKey, TailSink};
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -33,6 +33,14 @@ fn lives_of(curves: Option<Arc<ProfileCurves>>) -> Arc<dyn ProfileLives> {
     match curves {
         Some(curves) => curves,
         None => Arc::new(NoLives),
+    }
+}
+
+/// Gives `registry` the sink its tail counters are kept in. Stored counters that cannot be
+/// read (or were bucketed by other edges) are said once; the counters then start at zero.
+fn keep_tail(registry: &Registry, tail: Arc<dyn TailSink>) {
+    if let Err(error) = registry.set_tail_sink(tail) {
+        warn!(%error, "the stored tail counters are not read; they count on from zero");
     }
 }
 
@@ -123,6 +131,10 @@ pub(crate) fn assemble(
                 .into_iter()
                 .for_each(|placer| registry.set_placer(placer));
             let usage = usage.build(clock, limits, &registry)?;
+            // The tail counters are kept in the usage store when there is one, and the
+            // registry counts on from what it holds; with none they are in memory only.
+            let tail = usage.iter().find_map(|usage| usage.tail());
+            tail.into_iter().for_each(|tail| keep_tail(&registry, tail));
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
             // the lease file keeps the start and the bound it records. A sink that keeps
@@ -341,6 +353,10 @@ mod mint_tests;
 #[cfg(test)]
 #[path = "agents_estimate_tests.rs"]
 mod estimate_tests;
+
+#[cfg(test)]
+#[path = "agents_tail_tests.rs"]
+mod tail_tests;
 
 #[cfg(test)]
 mod tests {

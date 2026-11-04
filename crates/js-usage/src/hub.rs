@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_types::{HostId, LeaseId};
 
 use crate::sink::{KeySource, RunEnd, SinkCounters, UsageFault, UsageSink};
+use crate::tail::{TailSink, TailSinkCounters};
 use crate::{
     DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
     ProfileKey, RunMinute, RunSeries,
@@ -101,6 +102,9 @@ pub struct UsageCounters {
     pub faults: u64,
     /// What the sink counted.
     pub sink: SinkCounters,
+    /// What the sink's tail sink counted ([`UsageSink::tail`]): tail counter writes that
+    /// did not land, and stored rows passed over.
+    pub tail: TailSinkCounters,
 }
 
 /// How a run whose result the server accepted ended, as far as usage is concerned.
@@ -407,13 +411,20 @@ impl UsageHub {
         self.sink.curves()
     }
 
-    /// What has been counted so far, with the sink's own counts.
+    /// What has been counted so far, with the sink's own counts and its tail sink's.
     pub fn counters(&self) -> UsageCounters {
         let counts = self.books().counts.clone();
+        let tail = self.sink.tail().map(|tail| tail.counters());
         UsageCounters {
             sink: self.sink.counters(),
+            tail: tail.unwrap_or_default(),
             ..counts
         }
+    }
+
+    /// The sink's tail sink, for the registry's tail counters ([`UsageSink::tail`]).
+    pub fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        self.sink.tail()
     }
 
     /// Counts `n` records the caller left out of a beat before the hub saw it (a host id

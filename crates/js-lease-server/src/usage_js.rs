@@ -12,6 +12,12 @@
 //! writes the days keys were last used. Reading a stored series or profile back is the
 //! read routes' part, in `usage_api`.
 //!
+//! The tail counters: the sink keeps a [`StoreTailSink`] over the same store, which it hands
+//! the registry ([`UsageSink::tail`]); the registry hands it each change once its lock is
+//! released, which only joins the counts waiting to be written, and every flush writes
+//! them. A write that fails keeps them for the next flush, is counted, and is logged once
+//! per run of failures.
+//!
 //! One mutex guards the recorder and the buffer, and is held across the store's write in
 //! a flush: readings wait for it, which is cheap (a write of at most a day of minutes
 //! per node) and never happens on an async worker, since the server calls the sink on the
@@ -19,18 +25,19 @@
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use js_registry::Registry;
+use js_registry::{ERROR_EDGES_MS, Registry};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
     KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore,
-    Recorder, RunSeries,
+    Recorder, RunSeries, StoreTailSink, TailSink,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::StartupError;
 use crate::usage::{
@@ -109,6 +116,11 @@ pub(crate) struct NodeUsage {
     store: Arc<dyn Store>,
     curves: Arc<ProfileCurves>,
     inner: Mutex<Inner>,
+    /// The registry's tail counters, in the same store.
+    tail: Arc<StoreTailSink>,
+    /// Whether the last write of the tail counters failed: a failure is logged when it
+    /// starts a run of them, and the recovery when it ends one.
+    tail_failing: AtomicBool,
 }
 
 fn fault(err: impl std::fmt::Display) -> UsageFault {
@@ -127,6 +139,7 @@ impl NodeUsage {
         let curves = Arc::new(ProfileCurves::new(Box::new(move |key| names(key))));
         let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
         Ok(Self {
+            tail: Arc::new(StoreTailSink::new(store.clone(), ERROR_EDGES_MS)),
             store,
             curves,
             inner: Mutex::new(Inner {
@@ -134,11 +147,27 @@ impl NodeUsage {
                 buffer: NodeBuffer::new(),
                 profiles,
             }),
+            tail_failing: AtomicBool::new(false),
         })
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes the tail counts that wait. A failure costs the stored counters only: the
+    /// counts wait for the next flush, the sink counts it, and the first failure of a run
+    /// of them is logged, as is the write that ends the run.
+    fn flush_tail(&self) {
+        let written = self.tail.flush();
+        let was_failing = self.tail_failing.swap(written.is_err(), Ordering::SeqCst);
+        match (written, was_failing) {
+            (Err(error), false) => {
+                warn!(%error, "cannot write the tail counters; they wait for the next flush");
+            }
+            (Ok(()), true) => info!("the tail counters are written again"),
+            (Err(_), true) | (Ok(()), false) => {}
+        }
     }
 }
 
@@ -170,6 +199,7 @@ impl UsageSink for NodeUsage {
     }
 
     fn flush(&self, now_minute: u64) -> Result<Vec<(HostId, NodeRow)>, UsageFault> {
+        self.flush_tail();
         let mut inner = self.inner();
         let due = inner.recorder.node_minutes_due(now_minute);
         for (host, row) in &due {
@@ -209,6 +239,10 @@ impl UsageSink for NodeUsage {
 
     fn curves(&self) -> Option<Arc<ProfileCurves>> {
         Some(self.curves.clone())
+    }
+
+    fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        Some(self.tail.clone())
     }
 
     fn counters(&self) -> SinkCounters {

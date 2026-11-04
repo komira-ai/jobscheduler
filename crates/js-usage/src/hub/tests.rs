@@ -22,6 +22,7 @@ struct Fake {
     panic_on_observe: AtomicBool,
     panic_on_ended: AtomicBool,
     drop_with: Mutex<Option<DropReason>>,
+    tail: Mutex<Option<Arc<dyn crate::TailSink>>>,
 }
 
 impl Fake {
@@ -104,6 +105,10 @@ impl UsageSink for Fake {
     fn prune(&self, _: u64) -> Result<(), UsageFault> {
         self.prunes.fetch_add(1, Ordering::SeqCst);
         self.down()
+    }
+
+    fn tail(&self) -> Option<Arc<dyn crate::TailSink>> {
+        self.tail.lock().unwrap().clone()
     }
 
     fn counters(&self) -> SinkCounters {
@@ -425,7 +430,35 @@ fn the_callers_notes_join_the_counts() {
     let counts = hub.counters();
     assert_eq!((counts.records_dropped, counts.faults), (6, 1));
     assert_eq!(counts.sink.minutes_deduped, 7);
+    assert_eq!(counts.tail, crate::TailSinkCounters::default());
     assert!(hub.curves().is_none());
+    assert!(hub.tail().is_none());
+}
+
+/// Asserts that the hub hands out its sink's tail sink and carries that tail sink's
+/// counts in its own. Catches: a failed tail counter write that no counter shows, and a
+/// hub that hides the tail sink from the server that wires it to the registry.
+#[test]
+fn the_tail_sinks_counts_are_in_the_hubs() {
+    let store = crate::testkit::TestStore::new();
+    crate::testkit::TestStore::set(&store.fail_txn, true);
+    let tail = Arc::new(crate::StoreTailSink::new(
+        store,
+        [0; crate::TAIL_BUCKETS - 1],
+    ));
+    let fake = Arc::new(Fake::default());
+    *fake.tail.lock().unwrap() = Some(tail.clone());
+    let hub = usage(&fake, &[]);
+    assert!(hub.tail().is_some());
+    let delta = crate::TailDelta {
+        backfilled: 1,
+        ..crate::TailDelta::default()
+    };
+    hub.tail().unwrap().add(&delta);
+    assert!(tail.flush().is_err());
+    let counts = hub.counters();
+    assert_eq!(counts.tail.writes_failed, 1);
+    assert_eq!(counts.sink.minutes_deduped, 7);
 }
 
 /// Asserts that a reading the sink drops is counted, kept per host and minute with its

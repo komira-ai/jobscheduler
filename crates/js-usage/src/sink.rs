@@ -21,7 +21,7 @@ use js_types::{HostId, LeaseId};
 
 use crate::{
     DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
-    ProfileKey, RunSeries,
+    ProfileKey, RunSeries, TailSink,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -121,6 +121,12 @@ pub trait UsageSink: Send + Sync {
         None
     }
 
+    /// The sink the registry keeps its tail counters in, over the same store; `None` for
+    /// a sink with no store to keep them in, which leaves them in the registry's memory.
+    fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        None
+    }
+
     /// What the sink has counted.
     fn counters(&self) -> SinkCounters;
 }
@@ -194,7 +200,7 @@ mod tests {
     use super::*;
 
     /// Asserts that the sink that records nothing takes every reading, returns no closed
-    /// rows, and the key source that knows nothing names no key. It catches a
+    /// rows and keeps no tail counters, and the key source that knows nothing names no key. It catches a
     /// default sink that errors (and so counts a fault on every beat) or invents rows.
     #[test]
     fn the_empty_sink_and_the_empty_key_source_do_nothing() {
@@ -231,6 +237,7 @@ mod tests {
         );
         assert_eq!(sink.key_profile(&end.key), Ok(None));
         assert!(sink.curves().is_none());
+        assert!(sink.tail().is_none());
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);
     }

@@ -24,7 +24,9 @@ use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
 use js_lease::Clock;
 use js_types::{HostId, LeaseId};
 pub use js_usage::UsageCounters;
-use js_usage::{AcceptedResult, Beat, BeatLoad, DroppedReadings, Finish, Flushed, UsageHub};
+use js_usage::{
+    AcceptedResult, Beat, BeatLoad, DroppedReadings, Finish, Flushed, TailSink, UsageHub,
+};
 use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
@@ -74,6 +76,11 @@ impl Usage {
     /// The sink's learned curves, for admission.
     pub(crate) fn curves(&self) -> Option<Arc<ProfileCurves>> {
         self.hub.curves()
+    }
+
+    /// The sink's tail sink, for the registry's tail counters.
+    pub(crate) fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        self.hub.tail()
     }
 
     /// What has been counted so far, with the sink's own counts.
