@@ -40,7 +40,10 @@ pub type Dialed = Pin<Box<dyn Future<Output = io::Result<Box<dyn Io>>> + Send>>;
 /// program ([`Dialer::tcp`]); a test hands in an in-memory stream instead. No proxy setting
 /// is read: the stream goes to the host named and nowhere else.
 #[derive(Clone)]
-pub struct Dialer(Arc<dyn Fn(&str, u16) -> Dialed + Send + Sync>);
+pub struct Dialer(Arc<Dial>);
+
+/// What a [`Dialer`] calls: the host (without brackets) and the port, to the stream.
+type Dial = dyn Fn(&str, u16) -> Dialed + Send + Sync;
 
 impl Dialer {
     /// A TCP connection to the host and port.
@@ -224,10 +227,6 @@ impl AsyncWrite for Watched {
 
 /// The length of the HTTP/2 client preface (RFC 9113, section 3.4).
 const PREFACE: usize = 24;
-
-/// The length of an HTTP/2 frame header: a 24-bit length, the type, the flags and the
-/// stream (RFC 9113, section 4.1).
-const FRAME_HEADER: usize = 9;
 
 /// The type of a `HEADERS` frame.
 const HEADERS: u8 = 0x1;

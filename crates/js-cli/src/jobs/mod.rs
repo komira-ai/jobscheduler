@@ -181,6 +181,13 @@ fn arg(flag: &'static Flag) -> Arg {
         .help(help(flag))
         .value_name(value_name(&flag.kind))
         .required(flag.required)
+        // A text value may start with a dash (`--spec.args --fast`), a number may be
+        // negative (`--spec.priority -3`).
+        .allow_hyphen_values(matches!(flag.kind, Kind::Text))
+        .allow_negative_numbers(matches!(
+            flag.kind,
+            Kind::I32 | Kind::I64 | Kind::F32 | Kind::F64
+        ))
         .action(action)
         .value_parser(parser(&flag.kind))
 }

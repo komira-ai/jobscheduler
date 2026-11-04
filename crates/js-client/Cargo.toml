@@ -31,6 +31,7 @@ webpki-roots.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 js-testkit = { path = "../js-testkit" }
+prost.workspace = true
 rcgen.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tonic = { workspace = true, features = ["transport"] }
