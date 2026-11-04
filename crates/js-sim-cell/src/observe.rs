@@ -117,6 +117,10 @@ pub enum ClientEvent {
         /// How it ended.
         how: HowEnded,
     },
+    /// The client sent the release of the item's lease. It is recorded before the
+    /// answer, so a release whose answer a fault drops is still known to have been
+    /// sent.
+    ReleaseSent,
     /// The client's release of the item's lease was answered. The client releases every
     /// lease it learned, whatever the item's terminal (a [`HowEnded::GaveUp`] item
     /// too), so an item holds its lease from [`ClientEvent::Queued`] to here.
@@ -285,9 +289,11 @@ impl Observations {
         self
     }
 
-    /// These observations with no fault active since `since`.
+    /// These observations with the last fault ended at `since`: no fault is active
+    /// now, and none has been since `since`.
     #[must_use]
     pub fn quiet_since(mut self, since: FarmTime) -> Self {
+        self.fault_active = false;
         self.quiet_since = since;
         self
     }

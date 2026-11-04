@@ -32,7 +32,7 @@ use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId};
 
 use crate::observe::{
-    AgentTruth, Ask, ClientEvent, Heard, ItemId, ItemRecord, Launch, Observations, RunId,
+    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations, RunId,
 };
 use crate::text;
 
@@ -44,12 +44,14 @@ pub enum Invariant {
     /// at the same virtual time. (c) No host runs a run of another lease while a
     /// whole-host item (as the client asked for it, not as the server lists it) holds a
     /// lease on that host. By the client's facts, a whole-host item holds its lease on a
-    /// host from the moment the client learned it was placed there until it heard a
-    /// terminal answer or its release was answered, whichever comes first (an answer to
-    /// the release lost to a fault cannot stretch the hold past the server freeing the
-    /// host). At a step that touched the server, it also holds the host while the
-    /// server's listing books that item's lease there, so a host booked after the
-    /// terminal answer is still covered. The listing is read for (c) only at such steps.
+    /// host from the moment the client learned it was placed there until the client
+    /// sent its release, or heard that the server ended the run (lost or forgotten),
+    /// whichever comes first. A run that only succeeded, failed or was cancelled keeps
+    /// the hold, since its lease stays booked until released; an answer to the release
+    /// lost to a fault cannot stretch the hold past the server freeing the host. At a
+    /// step that touched the server, the item also holds the host while the server's
+    /// listing books its lease there, so a release the server never processed is still
+    /// covered. The listing is read for (c) only at such steps.
     NoDoubleBooking,
     /// Step check. Summed over the cell's launch ledger, each run is launched at most
     /// once, across agent deaths and replacements.
@@ -239,8 +241,10 @@ pub struct Checker {
     ledger_read: usize,
     /// The first launch of each run.
     launched: BTreeMap<RunId, Launch>,
-    /// The agent each run was last seen running on.
-    runner: BTreeMap<RunId, HostId>,
+    /// The agents each run was seen running on and, when last asked, still ran it.
+    /// Usually one; more only while a run is double-booked, so a duplicate that
+    /// survives the agent first indexed is still found.
+    runner: BTreeMap<RunId, BTreeSet<HostId>>,
     /// The host each whole-host item holds, by the client's facts.
     holds: BTreeMap<ItemId, HostId>,
     /// The whole-host items holding each host, with their leases.
@@ -287,14 +291,19 @@ impl Checker {
     ///
     /// # Errors
     ///
-    /// [`NotSettled`], and no check, when a fault is active or the virtual time is less
-    /// than `settle_within` after the observations' `quiet_since`.
+    /// [`NotSettled`], and no check, when a fault is active or less than
+    /// `settle_within` of virtual time has passed since the observations'
+    /// `quiet_since`. The quiet time is compared as a duration, so a window that would
+    /// end past the last representable virtual time is never satisfied early.
     pub fn end(
         observations: &Observations,
         settle_within: Duration,
     ) -> Result<Vec<Violation>, NotSettled> {
         let settles_at = observations.quiet_since.saturating_add(settle_within);
-        if observations.fault_active || observations.at < settles_at {
+        let quiet = observations
+            .at
+            .saturating_duration_since(observations.quiet_since);
+        if observations.fault_active || quiet < settle_within {
             return Err(NotSettled {
                 at: observations.at,
                 fault_active: observations.fault_active,
@@ -407,21 +416,18 @@ impl Checker {
         };
         over_capacity(host, agent, found);
         for run in agent.running.keys() {
-            let elsewhere = |other: &&HostId| *other != host && runs(observations, other, run);
-            match self.runner.get(run).filter(elsewhere).cloned() {
-                Some(other) => {
-                    let detail = format!(
-                        "{} runs on host {} and on host {}",
-                        text::run(run),
-                        text::host(&other),
-                        text::host(host)
-                    );
-                    found.flag(Invariant::NoDoubleBooking, detail);
-                }
-                None => {
-                    self.runner.insert(run.clone(), host.clone());
-                }
+            let owners = self.runner.entry(run.clone()).or_default();
+            owners.retain(|other| other == host || runs(observations, other, run));
+            if let Some(other) = owners.iter().find(|other| *other != host) {
+                let detail = format!(
+                    "{} runs on host {} and on host {}",
+                    text::run(run),
+                    text::host(other),
+                    text::host(host)
+                );
+                found.flag(Invariant::NoDoubleBooking, detail);
             }
+            owners.insert(host.clone());
         }
     }
 
@@ -486,9 +492,11 @@ impl Found {
 
 /// `NoDoubleBooking` (a): the agent's runs need more than its capacity on some axis.
 fn over_capacity(host: &HostId, agent: &AgentTruth, found: &mut Found) {
+    // Summed in u128: a run count below 2^64 cannot overflow it, so no total is
+    // clipped to a capacity it exceeds.
     let need = agent.running.values().map(|r| text::axes(&r.resources));
-    let used = need.fold([0; 3], |sum: [u64; 3], add| {
-        std::array::from_fn(|i| sum[i].saturating_add(add[i]))
+    let used = need.fold([0; 3], |sum: [u128; 3], add| {
+        std::array::from_fn(|i| sum[i] + add[i])
     });
     let capacity = text::axes(&agent.capacity);
     let axes = text::AXES.iter().zip(used.iter().zip(capacity));
@@ -554,6 +562,9 @@ struct ItemState {
     host: Option<HostId>,
     /// Whether it heard a terminal answer.
     terminal: bool,
+    /// Whether the lease it learned last has ended on the client's side: the client
+    /// sent its release, or heard the server end the run (lost or forgotten).
+    hold_ended: bool,
 }
 
 impl ItemState {
@@ -564,9 +575,17 @@ impl ItemState {
                 ClientEvent::Queued { lease, .. } => {
                     state.lease = Some(*lease);
                     state.host = None;
+                    state.hold_ended = false;
                 }
                 ClientEvent::Placed { host } => state.host = Some(host.clone()),
+                ClientEvent::Terminal {
+                    how: HowEnded::Lost | HowEnded::Forgotten,
+                } => {
+                    state.terminal = true;
+                    state.hold_ended = true;
+                }
                 ClientEvent::Terminal { .. } => state.terminal = true,
+                ClientEvent::ReleaseSent => state.hold_ended = true,
                 ClientEvent::Released => {
                     state.lease = None;
                     state.host = None;
@@ -578,9 +597,9 @@ impl ItemState {
     }
 
     /// The host and lease a whole-host item holds now, by the client's facts: placed,
-    /// and neither terminal nor released.
+    /// with no release sent and no answer that the server ended the run.
     fn whole_hold(self, ask: &Ask) -> Option<(HostId, LeaseId)> {
-        if !ask.whole_host || self.terminal {
+        if !ask.whole_host || self.hold_ended {
             return None;
         }
         let lease = self.lease?;

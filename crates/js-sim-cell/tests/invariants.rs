@@ -15,6 +15,10 @@ use js_sim_cell::{
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
 
+// The boundary cases, a module of this test binary (not a test target of its own).
+#[path = "invariants/boundaries.rs"]
+mod boundaries;
+
 const GIB: u64 = 1 << 30;
 
 /// The quiet time every end check here waits for.
@@ -227,6 +231,7 @@ fn host_booked_at_end() -> Observations {
 /// Item 0 ended `how` and released its lease, at the end time.
 fn released(how: HowEnded) -> Observations {
     item_ended(how)
+        .with_event(ItemId(0), ms(1_050), ClientEvent::ReleaseSent)
         .with_event(ItemId(0), ms(1_100), ClientEvent::Released)
         .at(ms(END))
 }
@@ -436,6 +441,7 @@ fn a_clean_history_passes_every_invariant() {
     });
     cell.step(1_100, items(&[0]).agent(host(0)).server(), |o| {
         ack(o, 0, 0, Verdict::Accepted);
+        hear(o, 0, ClientEvent::ReleaseSent);
         hear(o, 0, ClientEvent::Released);
         unbook(o, 0, 0);
     });
@@ -445,6 +451,7 @@ fn a_clean_history_passes_every_invariant() {
     });
     cell.step(1_600, items(&[2]).agent(host(1)).server(), |o| {
         ack(o, 1, 2, Verdict::Accepted);
+        hear(o, 2, ClientEvent::ReleaseSent);
         hear(o, 2, ClientEvent::Released);
         unbook(o, 1, 2);
     });
@@ -464,11 +471,13 @@ fn a_clean_history_passes_every_invariant() {
     cell.step(2_000, items(&[5]).agent(host(2)).server(), |o| {
         o.agents.insert(host(2), AgentTruth::new(capacity()));
         hear(o, 5, ended(HowEnded::Lost));
+        hear(o, 5, ClientEvent::ReleaseSent);
         hear(o, 5, ClientEvent::Released);
         unbook(o, 2, 5);
     });
     cell.step(2_100, items(&[4]), |o| {
         hear(o, 4, ended(HowEnded::GaveUp));
+        hear(o, 4, ClientEvent::ReleaseSent);
         hear(o, 4, ClientEvent::Released);
     });
     let rest = items(&[1, 3]).agent(host(0)).agent(host(1)).server();
@@ -479,7 +488,9 @@ fn a_clean_history_passes_every_invariant() {
         hear(o, 3, ended(HowEnded::Failed));
         ack(o, 0, 1, Verdict::Accepted);
         ack(o, 1, 3, Verdict::Duplicate);
+        hear(o, 1, ClientEvent::ReleaseSent);
         hear(o, 1, ClientEvent::Released);
+        hear(o, 3, ClientEvent::ReleaseSent);
         hear(o, 3, ClientEvent::Released);
         unbook(o, 0, 1);
         unbook(o, 1, 3);
@@ -602,6 +613,7 @@ fn a_second_lease_on_a_host_after_the_whole_host_item_released_is_not_flagged() 
     none(&checker.step(&held, &everything));
     let released = held
         .with_event(ItemId(0), ms(600), ended(HowEnded::Succeeded))
+        .with_event(ItemId(0), ms(650), ClientEvent::ReleaseSent)
         .with_event(ItemId(0), ms(700), ClientEvent::Released)
         .with_agent(host(0), AgentTruth::new(capacity()))
         .at(ms(700));
@@ -613,26 +625,95 @@ fn a_second_lease_on_a_host_after_the_whole_host_item_released_is_not_flagged() 
     none(&checker.step(&next, &everything));
 }
 
-/// Asserts that a whole-host item stops holding its host, by the client's facts, at its
-/// terminal answer: when the answer to its release is lost, another lease placed on the
-/// freed host is not flagged. Asserts too that while the server's listing still books
-/// the item's lease after that terminal answer, another lease's run there is flagged.
-/// Catches a hold that waits for a release answer a fault can drop (a false failure),
-/// and a hold that ends at the terminal answer on the server's side as well.
+/// The line of host 0 running run 1 of lease 1 beside whole-host item 0's lease 0, at
+/// virtual time `at`.
+fn whole_conflict(at: u64) -> String {
+    format!(
+        "no-double-booking at {at}: host host-0 runs run \"run-1\" of lease 1.1 while \
+         whole-host item0 holds lease 1.0 there"
+    )
+}
+
+/// Asserts that a whole-host item whose run succeeded but which sent no release still
+/// holds its host by the client's facts: another lease's run there is flagged at a step
+/// that touched only the agent. Catches a hold that ends at the terminal answer, which
+/// would leave an unreleased whole-host lease unguarded between listing reads.
 #[test]
-fn a_whole_host_item_with_a_lost_release_answer_frees_its_host_at_its_terminal() {
-    let ended_unreleased = whole_host_beside_another_lease()
-        .with_event(ItemId(0), ms(400), ended(HowEnded::Succeeded))
-        .with_booking(host(0), lease(1));
-    none(&step_all(&ended_unreleased));
-    let still_listed = ended_unreleased.with_booking(host(0), lease(0));
-    assert_eq!(
-        lines(&step_all(&still_listed)),
-        [
-            "no-double-booking at 500: host host-0 runs run \"run-1\" of lease 1.1 \
-             while whole-host item0 holds lease 1.0 there"
-        ]
-    );
+fn a_whole_host_item_that_ended_without_a_release_still_holds_its_host() {
+    let mut checker = Checker::new();
+    let ended = whole_item_queued()
+        .with_event(ItemId(0), ms(250), placed(0))
+        .with_event(ItemId(0), ms(400), ended(HowEnded::Succeeded));
+    none(&checker.step(&ended, &Touched::nothing().item(ItemId(0))));
+    let beside = ended.with_agent(host(0), runs_lease_one());
+    let found = checker.step(&beside, &Touched::nothing().agent(host(0)));
+    assert_eq!(lines(&found), [whole_conflict(500)]);
+}
+
+/// Asserts that a whole-host item stops holding its host, by the client's facts, once
+/// the client sent its release (whose answer a fault dropped) or heard that the server
+/// ended the run (lost, forgotten): another lease placed on the freed host is then not
+/// flagged. Asserts too that while the server's listing still books the item's lease,
+/// another lease's run there is flagged at a step that re-read the listing. Catches a
+/// hold that waits for a release answer a fault can drop (a false failure), and one
+/// that ends on the server's side too.
+#[test]
+fn a_whole_host_item_with_a_lost_release_answer_frees_its_host() {
+    let placed_item = whole_item_queued().with_event(ItemId(0), ms(250), placed(0));
+    let ends = [
+        ClientEvent::ReleaseSent,
+        ended(HowEnded::Lost),
+        ended(HowEnded::Forgotten),
+    ];
+    for event in ends {
+        let mut checker = Checker::new();
+        let freed = placed_item
+            .clone()
+            .with_event(ItemId(0), ms(400), event)
+            .with_booking(host(0), lease(1));
+        none(&checker.step(&freed, &Touched::nothing().item(ItemId(0))));
+        let next = freed.with_agent(host(0), runs_lease_one());
+        none(&checker.step(&next, &Touched::nothing().agent(host(0))));
+        let still_listed = next.with_booking(host(0), lease(0));
+        let found = checker.step(&still_listed, &Touched::nothing().server());
+        assert_eq!(lines(&found), [whole_conflict(500)]);
+    }
+}
+
+/// Asserts that a whole-host conflict is found at the step that reveals it, even when
+/// that step touched only the item (the client learned the placement) or only the
+/// server (the listing now books the item's lease), and the conflicting agent was
+/// checked at an earlier step; and that a placement or a booking on another host is
+/// not flagged. Catches a check that looks only at the agents a step touched.
+#[test]
+fn a_whole_host_conflict_revealed_by_an_item_or_a_listing_alone_is_flagged() {
+    let busy = whole_item_queued().with_agent(host(0), runs_lease_one());
+    let first = Touched::nothing().item(ItemId(0)).agent(host(0));
+
+    let mut checker = Checker::new();
+    none(&checker.step(&busy, &first));
+    let placed_here = busy.clone().with_event(ItemId(0), ms(250), placed(0));
+    let found = checker.step(&placed_here, &Touched::nothing().item(ItemId(0)));
+    assert_eq!(lines(&found), [whole_conflict(500)]);
+
+    let mut checker = Checker::new();
+    none(&checker.step(&busy, &first));
+    let placed_there = busy.clone().with_event(ItemId(0), ms(250), placed(1));
+    none(&checker.step(&placed_there, &Touched::nothing().item(ItemId(0))));
+
+    let mut checker = Checker::new();
+    none(&checker.step(&busy, &first));
+    let listed_here = busy.clone().with_booking(host(0), lease(0));
+    let found = checker.step(&listed_here, &Touched::nothing().server());
+    assert_eq!(lines(&found), [whole_conflict(500)]);
+    let mut unlisted = listed_here;
+    unlisted.server.hosts.clear();
+    none(&checker.step(&unlisted, &Touched::nothing().server()));
+
+    let mut checker = Checker::new();
+    none(&checker.step(&busy, &first));
+    let listed_there = busy.with_booking(host(1), lease(0));
+    none(&checker.step(&listed_there, &Touched::nothing().server()));
 }
 
 /// Asserts that a run launched on two hosts is flagged as `AtMostOneLaunch`, with the
@@ -731,6 +812,7 @@ fn an_unfinished_item_that_was_not_given_up_is_flagged() {
     let given_up = unfinished_at_end()
         .with_event(ItemId(0), ms(200), queued(0))
         .with_event(ItemId(0), ms(4_000), ended(HowEnded::GaveUp))
+        .with_event(ItemId(0), ms(4_000), ClientEvent::ReleaseSent)
         .with_event(ItemId(0), ms(4_000), ClientEvent::Released);
     none(&end(&given_up));
 }

@@ -34,14 +34,15 @@ pub(crate) fn item(item: ItemId) -> String {
 }
 
 /// Three booked amounts, as [`axes`] reads them from a vector.
-pub(crate) fn load(load: [u64; 3]) -> String {
+pub(crate) fn load(load: [u128; 3]) -> String {
     let [cpu, mem, gpus] = load;
     format!("res(cpu={cpu} mem={mem} gpus={gpus})")
 }
 
-/// The booked axes of `r`, in the order [`AXES`] names them.
-pub(crate) fn axes(r: &Resources) -> [u64; 3] {
-    [r.cpu_millis(), r.memory_bytes(), r.gpus()]
+/// The booked axes of `r`, in the order [`AXES`] names them, widened so that sums of
+/// them cannot overflow.
+pub(crate) fn axes(r: &Resources) -> [u128; 3] {
+    [r.cpu_millis(), r.memory_bytes(), r.gpus()].map(u128::from)
 }
 
 /// The names of the booked axes, in the order of [`axes`].
