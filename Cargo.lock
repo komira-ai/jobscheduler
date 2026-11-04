@@ -1132,6 +1132,7 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "http-body-util",
+ "hyper",
  "js-client",
  "js-lease",
  "js-lease-server",
@@ -1156,6 +1157,7 @@ name = "js-client"
 version = "0.1.0"
 dependencies = [
  "http-body-util",
+ "hyper",
  "hyper-util",
  "js-agent-wire",
  "js-proto",
