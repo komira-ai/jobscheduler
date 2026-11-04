@@ -4,10 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use js_lease::{AcquireError, Boot, LeaseState, LeaseTable, ManualClock};
-use js_provider::{
-    Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
-use js_provider_fake::FakeProvider;
+use js_provider::{HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider_fake::FakePool;
 use js_types::{ClassId, LeaseId, ProviderId, ResourceClass, Resources};
 
 use crate::support::{
@@ -18,17 +16,13 @@ use crate::support::{
 /// A provider that removes the lease directory when it is asked to start, so the save
 /// that follows the start fails.
 struct Saboteur {
-    inner: FakeProvider,
+    inner: FakePool,
     dir: PathBuf,
 }
 
-impl Provider for Saboteur {
+impl Pool for Saboteur {
     fn id(&self) -> ProviderId {
         self.inner.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.inner.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
@@ -124,7 +118,7 @@ fn a_lease_saved_pending_before_the_start_is_resolved_after_reopen() {
 /// A provider that records what the lease file said each time it was asked to start,
 /// and can make the next save fail once it has answered.
 struct Watched {
-    inner: FakeProvider,
+    inner: FakePool,
     file: PathBuf,
     /// The file's text at each start, `None` when there was no file.
     seen: Vec<Option<String>>,
@@ -144,13 +138,9 @@ impl Watched {
     }
 }
 
-impl Provider for Watched {
+impl Pool for Watched {
     fn id(&self) -> ProviderId {
         self.inner.id()
-    }
-
-    fn flavour(&self) -> Flavour {
-        self.inner.flavour()
     }
 
     fn classes(&self) -> Vec<ResourceClass> {

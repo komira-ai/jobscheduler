@@ -2,41 +2,29 @@
 //! as option B has it (every `crun` runs as the job user, from the distribution's path, with
 //! the AppArmor restriction on), the scratch layout of a lease, a busybox root, and the
 //! agent's egress calls in the order the runtime makes them; and [`RuntimeHost`], the
-//! agent's own `CrunRuntime` over the same, which makes those calls itself.
+//! agent's own `CrunRuntime` over the same, which makes those calls itself (the shared
+//! `runtime_host` module, given this job's programs and job user and a test directory).
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
-use std::os::unix::fs::{PermissionsExt as _, lchown, symlink};
+use std::ops::{Deref, DerefMut};
+use std::os::unix::fs::{PermissionsExt as _, lchown};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, config_dir, oci_config};
 use js_agent::egress::Egress;
-use js_agent::lifecycle::{Body, RunSpec, Runtime as _};
+use js_agent::lifecycle::RunSpec;
 use js_contain::container::{ACTION_ID, ContainerLimits, ContainerSpec, Ended};
-use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
+use js_contain::oci::image::PinnedImage;
 use js_contain::oci::{Oci, OciConfig, stderr_path, stdout_path};
 use js_contain::running::Running;
 use js_contain::subids::{DaemonIds, IdFiles, user_ids};
 use js_testkit::dir::TestDir;
 
-use crate::sys::{eventually, var};
-
-#[derive(Debug)]
-struct NoImages;
-
-#[async_trait]
-impl ImageSource for NoImages {
-    async fn fetch(&self, _: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
-        Err(FetchError::Failed(
-            "the image is already in the store".to_owned(),
-        ))
-    }
-}
+use crate::runtime_host::{self, NoImages, Setup, busybox_rootfs};
+use crate::sys::var;
 
 /// Runs a future to its end on a runtime of its own, so a test can hold the lock in plain
 /// synchronous code.
@@ -70,30 +58,6 @@ pub fn world_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     mkdir(&dir, 0o755);
     dir
-}
-
-/// The applets of busybox the probes use.
-const APPLETS: [&str; 18] = [
-    "sh", "cat", "id", "grep", "nc", "ip", "sleep", "echo", "wc", "head", "tr", "sed", "ls",
-    "date", "true", "false", "nslookup", "test",
-];
-
-/// A minimal image root: busybox and the mount points the bundle names.
-fn busybox_rootfs(rootfs: &Path) {
-    for dir in [
-        "bin", "proc", "dev", "sys", "tmp", "var/tmp", "run", "root", "etc", "work",
-    ] {
-        mkdir(&rootfs.join(dir), 0o755);
-    }
-    for file in ["hosts", "hostname", "resolv.conf"] {
-        fs::write(rootfs.join("etc").join(file), "").unwrap();
-    }
-    let busybox = rootfs.join("bin/busybox");
-    fs::copy(var("JS_B_BUSYBOX"), &busybox).unwrap();
-    fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).unwrap();
-    for applet in APPLETS {
-        symlink("busybox", rootfs.join("bin").join(applet)).unwrap();
-    }
 }
 
 /// A node of containers: a backend, an image, a delegated cgroup subtree.
@@ -139,7 +103,11 @@ impl ContainerHost {
             reference: format!("local/busybox@sha256:{hex}"),
             digest: format!("sha256:{hex}"),
         };
-        busybox_rootfs(&scratch.join("oci-images").join(&hex).join("rootfs"));
+        busybox_rootfs(
+            &scratch.join("oci-images").join(&hex).join("rootfs"),
+            Path::new(&var("JS_B_BUSYBOX")),
+        )
+        .unwrap();
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup{cgroup_parent}"));
         let _ = fs::remove_dir(&cgroup);
@@ -359,168 +327,62 @@ pub fn section(stdout: &str, name: &str) -> String {
 pub const PROBE: &str =
     "p() { o=$(nc -w 2 \"$1\" \"$2\" </dev/null 2>&1); echo \"reach $1:$2 [$o]\"; }\n";
 
-/// The config of the busybox image of a [`RuntimeHost`]: a run's arguments are a script for
-/// `sh -c`.
-const IMAGE_CONFIG: &str =
-    r#"{"config":{"Entrypoint":["/bin/sh","-c"],"Env":["PATH=/bin"]},"rootfs":{"diff_ids":[]}}"#;
-
-/// The agent's `CrunRuntime` on this host, wired by an `Egress`, as the agent opens it: the
-/// agent's cgroup is a tree of this test's own (this process in its leaf `supervisor`, the
-/// leases' cgroups in `actions`), the store holds a busybox image and its kept config, and the
-/// runs' scratch directories are made below `runs`. Dropped, it removes every run it holds,
-/// moves this process back to the cgroup it came from and removes the tree, then the files;
-/// each guard is in place before the step it undoes, so a failed setup is undone too.
+/// The agent's `CrunRuntime` on this host, wired by an `Egress`, as the agent opens it
+/// (`runtime_host::RuntimeHost`), in a test directory below `/tmp`, which it removes after the
+/// runtime and its cgroup tree have gone.
 pub struct RuntimeHost {
-    pub runtime: CrunRuntime,
-    image: String,
-    // Dropped after the runtime: the process goes home and the tree goes, then the files.
-    _cgroup: OwnedCgroup,
-    work: TestDir,
-}
-
-/// A cgroup subtree a test made and moved this process into: dropped, it moves the process
-/// back to `home` and kills and removes the subtree, deepest first.
-struct OwnedCgroup {
-    dir: PathBuf,
-    home: PathBuf,
-}
-
-impl Drop for OwnedCgroup {
-    fn drop(&mut self) {
-        let _ = fs::write(
-            self.home.join("cgroup.procs"),
-            std::process::id().to_string(),
-        );
-        // A killed process leaves its cgroup a moment after the kill.
-        eventually(Duration::from_secs(10), || {
-            remove_cgroup_tree(&self.dir);
-            !self.dir.exists()
-        });
-    }
-}
-
-/// Kills what runs in the cgroup `dir` and removes it and the cgroups below it; what is busy
-/// stays.
-fn remove_cgroup_tree(dir: &Path) {
-    let _ = fs::write(dir.join("cgroup.kill"), "1");
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            remove_cgroup_tree(&entry.path());
-        }
-    }
-    let _ = fs::remove_dir(dir);
-}
-
-/// The cgroup this process is in now (cgroup version 2).
-fn own_cgroup() -> PathBuf {
-    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
-    let path = own
-        .lines()
-        .find_map(|line| line.strip_prefix("0::"))
-        .unwrap();
-    Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'))
+    // Dropped first: the runs, the process goes home and the tree goes, then the files.
+    host: runtime_host::RuntimeHost,
+    _work: TestDir,
 }
 
 impl RuntimeHost {
     /// The runtime for `label`, wired by `egress`.
     pub fn new(label: &str, egress: &Egress) -> Self {
-        let (uid, gid) = job_user();
         // Below `/tmp`, where every directory above can be searched by the job user.
         let work = TestDir::under(std::env::temp_dir(), &format!("js-r-{label}"));
         fs::set_permissions(work.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let store = work.join("store");
-        mkdir(&store, 0o711);
-        mkdir(&work.join("runs"), 0o711);
-        let hex = "d".repeat(64);
-        let rootfs = store.join("oci-images").join(&hex).join("rootfs");
-        busybox_rootfs(&rootfs);
-        // The runtime binds the run's scratch directory at `/scratch`, and `crun`, run as the
-        // job user, cannot make that mount point in a root that root made.
-        mkdir(&rootfs.join("scratch"), 0o755);
-        mkdir(&config_dir(&store), 0o755);
-        fs::write(config_dir(&store).join(format!("{hex}.json")), IMAGE_CONFIG).unwrap();
-
-        let name = format!("/js-r-{label}-{}", std::process::id());
-        let cgroup = OwnedCgroup {
-            dir: PathBuf::from(format!("/sys/fs/cgroup{name}")),
-            home: own_cgroup(),
+        let (crun, busybox) = (
+            PathBuf::from(var("JS_B_CRUN")),
+            PathBuf::from(var("JS_B_BUSYBOX")),
+        );
+        let setup = Setup {
+            crun: &crun,
+            busybox: &busybox,
+            job_user: job_user(),
+            daemon: Path::new(env!("CARGO_BIN_EXE_js-agent")),
+            leases_beside: false,
         };
-        mkdir(&cgroup.dir.join("supervisor"), 0o755);
-        fs::write(
-            cgroup.dir.join("cgroup.subtree_control"),
-            "+cpu +memory +pids",
+        let host = runtime_host::RuntimeHost::open(
+            label,
+            &format!("egress-{label}"),
+            work.path(),
+            &setup,
+            Some(egress),
         )
-        .unwrap();
-        fs::write(
-            cgroup.dir.join("supervisor/cgroup.procs"),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        mkdir(&cgroup.dir.join("actions"), 0o755);
-        fs::write(
-            cgroup.dir.join("actions/cgroup.subtree_control"),
-            "+cpu +memory +pids",
-        )
-        .unwrap();
-
-        let mut oci = oci_config(Path::new(&var("JS_B_CRUN")), (uid, gid), egress.config());
-        oci.daemon = PathBuf::from(env!("CARGO_BIN_EXE_js-agent"));
-        oci.id_tool_path = Some("/usr/bin:/bin".into());
-        let settings = CrunSettings {
-            oci,
-            scratch: store,
-            cgroups: CgroupSettings {
-                mount: PathBuf::from("/sys/fs/cgroup"),
-                root: name.clone(),
-                actions: format!("{name}/actions"),
-            },
-            host_id: format!("egress-{label}"),
-            pull_threads: 1,
-            files: None,
-            egress: Some(Arc::new(egress.clone())),
-            gpus: None,
-        };
-        let runtime = CrunRuntime::open(settings, Arc::new(NoImages))
-            .unwrap_or_else(|why| panic!("a root agent opens the runtime: {why}"));
-        Self {
-            runtime,
-            image: format!("local/busybox@sha256:{hex}"),
-            _cgroup: cgroup,
-            work,
-        }
+        .unwrap_or_else(|why| panic!("a root agent opens the runtime: {why}"));
+        Self { host, _work: work }
     }
 
     /// The run `run_id` of `script` (run by `sh -c` in the image), its scratch directory
     /// made; the job sees it at `/scratch`.
     pub fn spec(&self, run_id: &str, script: &str) -> RunSpec {
-        let scratch = self.work.join("runs").join(run_id);
-        mkdir(&scratch, 0o700);
-        RunSpec {
-            run_id: run_id.to_owned(),
-            body: Body::Container {
-                image: self.image.clone(),
-                args: vec![script.to_owned()],
-            },
-            cpu_millis: 1000,
-            memory_bytes: 256 << 20,
-            pids: None,
-            gpu_indices: Vec::new(),
-            mounts: Vec::new(),
-            scratch,
-            files: None,
-            slot: 0,
-            isolation: js_agent_wire::Isolation::Contained,
-            bundle: None,
-            labels: BTreeMap::new(),
-            network: js_types::JobNetwork::AllowList,
-        }
+        self.host
+            .spec(run_id, script)
+            .unwrap_or_else(|why| panic!("the run {run_id}: {why}"))
     }
 }
 
-impl Drop for RuntimeHost {
-    fn drop(&mut self) {
-        for found in self.runtime.list_labelled().unwrap_or_default() {
-            let _ = self.runtime.remove(&found.id);
-        }
+impl Deref for RuntimeHost {
+    type Target = runtime_host::RuntimeHost;
+
+    fn deref(&self) -> &Self::Target {
+        &self.host
+    }
+}
+
+impl DerefMut for RuntimeHost {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.host
     }
 }

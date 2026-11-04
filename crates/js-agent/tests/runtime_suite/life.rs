@@ -189,6 +189,9 @@ fn job(s: &mut dyn Subject, run_id: &str, program: Program, wall_ms: u64) -> Job
         native: None,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

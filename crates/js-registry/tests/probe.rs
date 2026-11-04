@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Phase, Taint};
 use js_pool_static::Candidate;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, ProbeHost};
 use js_types::{HostId, Request, ResourceClass};
 use support::*;

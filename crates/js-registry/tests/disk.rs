@@ -6,7 +6,7 @@ mod support;
 
 use js_agent_wire::{HeldRun, HeldState, Hello, Isolation, JobSpec, Limits, Outcome, RunResult};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::{PoolConfig, Refusal, RunRefusal};
 use js_types::{ProviderId, Resources, Shape};
 use support::*;
@@ -77,6 +77,9 @@ fn job(run: &str, disk: Option<u64>) -> JobSpec {
         valid_for_ms: 0,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

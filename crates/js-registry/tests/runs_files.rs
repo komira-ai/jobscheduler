@@ -6,7 +6,7 @@ mod support;
 
 use js_agent_wire::{Command, Hello, Isolation, JobSpec, Limits, RunFile};
 use js_caps::{FLAG_SET, RUN_FILES};
-use js_provider::Provider;
+use js_provider::Pool;
 use js_registry::RunRefusal;
 use support::*;
 
@@ -35,6 +35,9 @@ fn job_with_files(run: &str, files: Vec<RunFile>) -> JobSpec {
         valid_for_ms: 0,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

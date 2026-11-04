@@ -82,6 +82,9 @@ pub fn job() -> JobSpec {
         native: None,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use js_lease::{Boot, LeaseTable, read_bookings};
-use js_provider::Provider;
+use js_provider::Pool as _;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::adapt::{BoxedProvider, SharedClock};
+use crate::adapt::{BoxedPool, SharedClock};
 use crate::agents::assemble;
 use crate::api::{Shared, agent_router, router};
 use crate::capacity::Seated;
@@ -146,7 +146,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         scaler.listening(Some(2 * tick), &bookings);
     }
     let mut table = LeaseTable::open(
-        BoxedProvider(provider),
+        BoxedPool(provider),
         clock.clone(),
         config.settings,
         &config.state_file,

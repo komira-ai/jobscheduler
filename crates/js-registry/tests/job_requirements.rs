@@ -4,7 +4,7 @@
 mod support;
 
 use js_agent_wire::Hello;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal};
 use js_types::{ExecMode, ProviderId, Request, Shape};
 use support::*;

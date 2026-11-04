@@ -13,6 +13,13 @@ use crate::error::{Rule, ValidationError};
 use crate::limits;
 use crate::refusal;
 
+/// The capability an agent reports, as `true`, when it reads the one job definition: a
+/// start whose `image` carries a `run` and names its `os` and `arch` ([`crate::JobSpec::run`]).
+/// A server sends those fields only to a host that reported it, and every other host the
+/// legacy forms ([`crate::JobSpec::downgrade_for`]); the `bundle` capability beside it says
+/// which bundles a Mac holds ([`bundle_capability`]).
+pub const ONE_JOB_CAPABILITY: &str = "one-job";
+
 /// The read model the agent applies to a run's profile. An absent value is
 /// [`ReadModel::Open`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

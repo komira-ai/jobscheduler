@@ -1,21 +1,24 @@
-//! A job that runs a program on the host with no image: [`NativeSpec`].
+//! A job that runs a program on the host with no image: [`NativeSpec`], a legacy form.
 //!
-//! A start carries either an `image` (a container job) or a `native` body, never both. An
-//! agent that predates this body reads the empty `image` of a native start as
-//! `invalid-image` and runs nothing, so a native job cannot run as a container anywhere.
-//! Every enum here decodes only the values this version knows: an unknown one is a decode
-//! error, which inside a reply reads as [`crate::Command::Unknown`], so an agent never
-//! runs a job whose confinement it cannot read.
+//! A start carries an `image` (a container job, or with a [`crate::RunSpec`] the one job
+//! definition of both platforms) or a `native` body, never both. An agent that predates this
+//! body reads the empty `image` of a native start as `invalid-image` and runs nothing, so a
+//! native job cannot run as a container anywhere. The body is read and checked as before
+//! for this release, by the checks it shares with [`crate::RunSpec`]; a later release removes
+//! it, and a server sends it only to a host that did not report the `one-job` capability
+//! ([`crate::JobSpec::downgrade_for`]). Every enum here decodes only the values this version
+//! knows: an unknown one is a decode error, which inside a reply reads as
+//! [`crate::Command::Unknown`], so an agent never runs a job whose confinement it cannot
+//! read.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::check::{self, At};
-use crate::command::{Isolation, JobSpec, Mount};
+use crate::command::{Isolation, JobSpec};
 use crate::error::{Rule, ValidationError};
-use crate::limits;
 use crate::refusal;
+use crate::run::{self, RunSpec};
 
 /// The prefix of a program that names an entrypoint of the job's bundle.
 pub const BUNDLE_PROGRAM_PREFIX: &str = "@bundle/";
@@ -76,35 +79,13 @@ pub enum InputRef {
     },
     /// A directory below one of the agent's configured mount roots, read-only.
     Mount {
-        /// The root's name, as [`Mount::root_name`].
+        /// The root's name, as [`crate::Mount::root_name`].
         root_name: String,
-        /// The path below the root, as [`Mount::rel`].
+        /// The path below the root, as [`crate::Mount::rel`].
         rel: String,
         /// Where it appears, as for [`InputRef::Stage`].
         dest: String,
     },
-}
-
-impl InputRef {
-    fn dest(&self) -> &str {
-        match self {
-            Self::Stage { dest, .. } | Self::Mount { dest, .. } => dest,
-        }
-    }
-
-    fn check(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.inputs", refusal::INVALID_JOB);
-        rel_path(at, self.dest(), false)?;
-        match self {
-            Self::Stage { stage_id, .. } => stage_digest(at, stage_id),
-            Self::Mount { root_name, rel, .. } => Mount {
-                root_name: root_name.clone(),
-                rel: rel.clone(),
-                ro: true,
-            }
-            .validate(),
-        }
-    }
 }
 
 /// One path the agent collects when the job ends.
@@ -122,18 +103,18 @@ pub struct OutputSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeSpec {
     /// The program: an absolute path with no empty, `.` or `..` part, at most
-    /// [`limits::MAX_PROGRAM_LEN`] bytes. The agent also requires it to resolve under one
-    /// of its configured tool roots. Or `@bundle/<entrypoint>`, the name of an entrypoint
+    /// [`crate::limits::MAX_PROGRAM_LEN`] bytes. The agent also requires it to resolve
+    /// under one of its configured tool roots. Or `@bundle/<entrypoint>`, the name of an entrypoint
     /// of the job's bundle (`[A-Za-z0-9._+-]`, the first a letter or digit, at most
     /// [`BUNDLE_ENTRYPOINT_MAX`] bytes), which the agent resolves from the bundle's
     /// config; the job then has a `bundle` ([`JobSpec::bundle`]), or it is refused.
     pub program: String,
-    /// The arguments after the program: at most [`limits::MAX_ARGS`] entries, no NUL, bounded
-    /// as the `args` of a container job are. The `args` of the job itself must be empty.
+    /// The arguments after the program: at most [`crate::limits::MAX_ARGS`] entries, no
+    /// NUL, bounded as the `args` of a container job are. The `args` of the job itself must be empty.
     #[serde(default)]
     pub args: Vec<String>,
-    /// The environment, literal and not secret: at most [`limits::MAX_ENV`] entries. A name
-    /// is `[A-Za-z_][A-Za-z0-9_]*` and is not reserved
+    /// The environment, literal and not secret: at most [`crate::limits::MAX_ENV`] entries. A
+    /// name is `[A-Za-z_][A-Za-z0-9_]*` and is not reserved
     /// ([`js_types::env::env_name_reserved`]: the loader's, the sandbox's, the agent's
     /// `JS_` prefix, launchd's, the allocator's and the Objective-C runtime's prefixes, and
     /// the names the agent sets itself, `HOME` and `TMPDIR` among them); a value holds no NUL. A value
@@ -145,12 +126,12 @@ pub struct NativeSpec {
     /// the exec root itself.
     #[serde(default)]
     pub cwd: String,
-    /// What appears in the run directory: at most [`limits::MAX_INPUTS`], no two at one
-    /// `dest` and none below another's `dest`, compared without regard to case.
+    /// What appears in the run directory: at most [`crate::limits::MAX_INPUTS`], no two at
+    /// one `dest` and none below another's `dest`, compared without regard to case.
     #[serde(default)]
     pub inputs: Vec<InputRef>,
-    /// What to collect at the end: at most [`limits::MAX_OUTPUTS`], none twice, none below
-    /// or above another output or an input `dest`, compared without regard to case.
+    /// What to collect at the end: at most [`crate::limits::MAX_OUTPUTS`], none twice, none
+    /// below or above another output or an input `dest`, compared without regard to case.
     #[serde(default)]
     pub outputs: Vec<OutputSpec>,
     /// The most network the job may use. Absent means none.
@@ -159,90 +140,10 @@ pub struct NativeSpec {
 }
 
 impl NativeSpec {
-    /// Checks the body alone, without the job around it.
+    /// Checks the body alone, without the job around it: the checks of [`RunSpec`], with
+    /// the field names `native.*`.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.check_program()?;
-        check::args(At::new("native.args", refusal::INVALID_JOB), &self.args)?;
-        self.check_env()?;
-        rel_path(At::new("native.cwd", refusal::INVALID_JOB), &self.cwd, true)?;
-        self.check_inputs()?;
-        self.check_outputs()
-    }
-
-    fn check_program(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.program", refusal::INVALID_PROGRAM);
-        let program = &self.program;
-        if let Some(entrypoint) = program.strip_prefix(BUNDLE_PROGRAM_PREFIX) {
-            return check::token(at, entrypoint, BUNDLE_ENTRYPOINT_MAX, entrypoint_byte);
-        }
-        if program.is_empty() {
-            return Err(at.fail(Rule::Empty));
-        }
-        if program.len() > limits::MAX_PROGRAM_LEN {
-            return Err(at.fail(Rule::TooLong));
-        }
-        if program.chars().any(check::hidden) {
-            return Err(at.fail(Rule::BadChars));
-        }
-        let Some(below) = program.strip_prefix('/') else {
-            return Err(at.fail(Rule::Escapes));
-        };
-        if below.split('/').any(|part| part == "..") {
-            return Err(at.fail(Rule::Escapes));
-        }
-        if below.split('/').any(|part| part.is_empty() || part == ".") {
-            return Err(at.fail(Rule::Empty));
-        }
-        Ok(())
-    }
-
-    fn check_env(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.env", refusal::INVALID_ENV);
-        check::count(at, self.env.len(), limits::MAX_ENV)?;
-        let mut total = 0usize;
-        for (key, value) in &self.env {
-            env_name(at, key)?;
-            if value.len() > limits::MAX_ENV_VALUE_LEN {
-                return Err(at.fail(Rule::TooLong));
-            }
-            if value.contains('\0') {
-                return Err(at.fail(Rule::BadChars));
-            }
-            total += key.len() + value.len();
-        }
-        if total > limits::MAX_ENV_TOTAL_BYTES {
-            return Err(at.fail(Rule::TooLong));
-        }
-        Ok(())
-    }
-
-    fn check_inputs(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.inputs", refusal::INVALID_JOB);
-        check::count(at, self.inputs.len(), limits::MAX_INPUTS)?;
-        for input in &self.inputs {
-            input.check()?;
-        }
-        let dests: Vec<&str> = self.inputs.iter().map(InputRef::dest).collect();
-        disjoint(at, &dests)?;
-        Ok(())
-    }
-
-    fn check_outputs(&self) -> Result<(), ValidationError> {
-        let at = At::new("native.outputs", refusal::INVALID_JOB);
-        check::count(at, self.outputs.len(), limits::MAX_OUTPUTS)?;
-        for output in &self.outputs {
-            rel_path(at, &output.path, false)?;
-        }
-        // An output may not repeat, nest in or contain another output, or share ground
-        // with an input `dest`: the job would write into a staged input, or two collection
-        // rules would claim one path.
-        let paths = self
-            .inputs
-            .iter()
-            .map(InputRef::dest)
-            .chain(self.outputs.iter().map(|output| output.path.as_str()))
-            .collect::<Vec<_>>();
-        disjoint(at, &paths)
+        RunSpec::from(self.clone()).check(&run::NATIVE)
     }
 }
 
@@ -276,93 +177,4 @@ pub(crate) fn check_job(job: &JobSpec, native: &NativeSpec) -> Result<(), Valida
         )),
         None => Ok(()),
     }
-}
-
-/// `[A-Za-z0-9._+-]`: the bytes of an entrypoint name.
-fn entrypoint_byte(byte: u8) -> bool {
-    check::ident_byte(byte) || byte == b'+'
-}
-
-fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
-    if key.is_empty() {
-        return Err(at.fail(Rule::Empty));
-    }
-    if key.len() > limits::MAX_ENV_KEY_LEN {
-        return Err(at.fail(Rule::TooLong));
-    }
-    let lead = key.as_bytes()[0];
-    let leads = lead.is_ascii_alphabetic() || lead == b'_';
-    let inside = key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    if ![leads, inside].into_iter().all(|ok| ok) {
-        return Err(at.fail(Rule::BadChars));
-    }
-    if js_types::env::env_name_reserved(key) {
-        return Err(at.fail(Rule::Reserved));
-    }
-    Ok(())
-}
-
-/// A relative path as a mount's `rel` is, or the empty path when `allow_empty`, and ASCII
-/// only. The agent runs on case-insensitive APFS, where `A` and `a`, or `\u{e9}` composed
-/// and decomposed, are one name; ASCII keeps the overlap checks exact with a lower-case
-/// fold and needs no Unicode tables. Mount sources (`rel` of a mount input) are not
-/// compared and keep the mount rules.
-///
-/// A `..` that reaches outside through a symlink is not visible here: refusing it is the
-/// staging code's duty, when it resolves the path under the run directory.
-fn rel_path(at: At, value: &str, allow_empty: bool) -> Result<(), ValidationError> {
-    if value.is_empty() {
-        return if allow_empty {
-            Ok(())
-        } else {
-            Err(at.fail(Rule::Empty))
-        };
-    }
-    if value.len() > limits::MAX_REL_LEN {
-        return Err(at.fail(Rule::TooLong));
-    }
-    if value
-        .chars()
-        .any(|c| check::hidden(c) || !c.is_ascii() || matches!(c, ':' | ',' | '\\'))
-    {
-        return Err(at.fail(Rule::BadChars));
-    }
-    if value.starts_with('/') || value.split('/').any(|part| part == "..") {
-        return Err(at.fail(Rule::Escapes));
-    }
-    if value.split('/').any(|part| part.is_empty() || part == ".") {
-        return Err(at.fail(Rule::Empty));
-    }
-    Ok(())
-}
-
-/// `sha256:` and 64 lower case hex digits.
-fn stage_digest(at: At, value: &str) -> Result<(), ValidationError> {
-    let hex = value.strip_prefix("sha256:").unwrap_or("");
-    let shaped = hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    match shaped {
-        true => Ok(()),
-        false => Err(at.fail(Rule::BadChars)),
-    }
-}
-
-/// No two paths are equal, and none is below another, once folded to lower case.
-fn disjoint(at: At, paths: &[&str]) -> Result<(), ValidationError> {
-    let folded: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
-    let below = |inner: &str, outer: &str| {
-        inner
-            .strip_prefix(outer)
-            .is_some_and(|rest| rest.starts_with('/'))
-    };
-    for (index, one) in folded.iter().enumerate() {
-        for two in &folded[index + 1..] {
-            if one == two {
-                return Err(at.fail(Rule::Duplicate));
-            }
-            if [below(one, two), below(two, one)].contains(&true) {
-                return Err(at.fail(Rule::Inconsistent));
-            }
-        }
-    }
-    Ok(())
 }

@@ -10,7 +10,7 @@ use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Outcome,
     RunResult, Taint, refusal,
 };
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Binding, MIN_LOST_RETENTION_MS, RunRefusal, RunState, RunView};
 use support::*;
 
@@ -41,6 +41,9 @@ fn job(run: &str, valid: u64, wall: u64) -> JobSpec {
         native: None,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

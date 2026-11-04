@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
-use js_provider::{Provider, StartAck};
+use js_provider::{Pool, StartAck};
 use js_provider_lambdalabs::{Call, TerminateEffect};
 use js_scaler::{Blocked, Millis, Phase, Record, Records, StoredOffer};
 use serde_json::json;

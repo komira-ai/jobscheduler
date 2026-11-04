@@ -326,6 +326,9 @@ impl OldJobSpec {
             files: Vec::new(),
             network: Default::default(),
             ports: Vec::new(),
+            run: None,
+            os: None,
+            arch: None,
         };
         Command::Start(Box::new(spec)).validate()
     }

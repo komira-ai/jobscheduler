@@ -332,6 +332,9 @@ async fn start(
         native: body.native.map(NativeSpec::from),
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     };
     let queued = api
         .agents

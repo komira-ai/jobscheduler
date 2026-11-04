@@ -13,7 +13,7 @@ use js_agent_wire::{
     Command, ExclusiveRefusal, HeldRun, HeldState, Isolation, JobSpec, Limits, RefusalReason,
 };
 use js_lease::{Clock, Timestamp};
-use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, NotReady, PoolConfig,
     RunState, WholeNodeConfig,
@@ -505,6 +505,9 @@ fn job(run: &str) -> JobSpec {
         native: None,
         network: Default::default(),
         ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 
