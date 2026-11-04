@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 600" width="1100" height="600" role="img" aria-label="Seven ordered steps by which the service recovers after a restart with the Postgres store: take the advisory lock, read jobs and allocations, restore the reservation ledger with grace, seat hosts as awaiting, agents say hello and list their jobs, reconcile, and resume; with what survives in the store and what is rebuilt.">
+<title>Restart recovery</title>
+<defs><marker id="restart-recovery-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="restart-recovery-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker><marker id="restart-recovery-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C0392B"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-a{fill:#FD4F1D;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-g{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4}
+.box-gd{fill:#F0F0EE;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.box-r{fill:#FDECEA;stroke:#C0392B;stroke-width:1.4}
+.box-rd{fill:#FFFFFF;stroke:#C0392B;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bd{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-od{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4;stroke-dasharray:6 4}
+.box-bld{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4;stroke-dasharray:6 4}
+.box-n{fill:#E6F4EA;stroke:#2E7D32;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-r{stroke:#C0392B;fill:none;stroke-width:1.5}
+.ln-rd{stroke:#C0392B;fill:none;stroke-width:1.5;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-r{fill:#C0392B;font-size:12px}
+.t-w{fill:#FFFFFF;font-weight:600}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1100" height="600" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">Service restart: seven steps in order (Postgres store)</text>
+<rect x="30" y="50" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="74" class="b" text-anchor="middle">1  take the advisory lock</text>
+<text x="290" y="92" class="t-m" text-anchor="middle">a second process refuses to start or waits</text>
+<path d="M290,108 L290,122" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="122" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="146" class="b" text-anchor="middle">2  read the store</text>
+<text x="290" y="164" class="t-m" text-anchor="middle">jobs (queued whole-host jobs included), allocations, hosts, marks</text>
+<path d="M290,180 L290,194" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="194" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="218" class="b" text-anchor="middle">3  restore the mark ledger</text>
+<text x="290" y="236" class="t-m" text-anchor="middle">deadlines >= boot + 120 s, claim_by = boot + path_grace</text>
+<path d="M290,252 L290,266" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="266" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="290" class="b" text-anchor="middle">4  seat hosts that hold allocations as awaiting</text>
+<text x="290" y="308" class="t-m" text-anchor="middle">unobservable, unbookable, until the agent says hello</text>
+<path d="M290,324 L290,338" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="338" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="362" class="b" text-anchor="middle">5  agents: 409 unknown-host -> hello, list their jobs</text>
+<text x="290" y="380" class="t-m" text-anchor="middle">placed whole-host jobs prepare again; others by listing</text>
+<path d="M290,396 L290,410" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="410" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="434" class="b" text-anchor="middle">6  reconcile each job with its host's listing</text>
+<text x="290" y="452" class="t-m" text-anchor="middle">listed: keep; placed, unlisted: start resent; running, unlisted: lost</text>
+<path d="M290,468 L290,482" class="ln" marker-end="url(#restart-recovery-ak)"/>
+<rect x="30" y="482" width="520" height="58" rx="5" class="box-o"/>
+<text x="290" y="506" class="b" text-anchor="middle">7  resume the tick</text>
+<text x="290" y="524" class="t-m" text-anchor="middle">queue-wait and retention deadlines raised to boot + 120 s at least</text>
+<rect x="640" y="120" width="420" height="260" rx="5" class="box-b"/>
+<text x="660" y="142" class="b" text-anchor="start">survives restart (in Postgres)</text>
+<text x="660" y="172" class="" text-anchor="start">jobs and their results</text>
+<text x="660" y="208" class="" text-anchor="start">allocations</text>
+<text x="660" y="244" class="" text-anchor="start">mark ledger (queued whole-host jobs are job rows)</text>
+<text x="660" y="280" class="" text-anchor="start">host bindings, taints, join-token digests</text>
+<text x="660" y="316" class="" text-anchor="start">acquire records, usage history</text>
+<path d="M550,79 L640,150" class="ln-d" marker-end="url(#restart-recovery-ak)"/>
+<rect x="640" y="410" width="420" height="200" rx="5" class="box-r"/>
+<text x="660" y="432" class="b" text-anchor="start">rebuilt, not stored</text>
+<text x="660" y="462" class="t-r" text-anchor="start">live sessions and heartbeat times</text>
+<text x="660" y="492" class="t-r" text-anchor="start">whole-host Committed, Ready, Restoring states</text>
+<text x="660" y="522" class="t-r" text-anchor="start">unacknowledged results on the agent (resent)</text>
+<text x="660" y="552" class="t-r" text-anchor="start">tail counters (until step 3 stores them)</text>
+<path d="M550,295 L640,470" class="ln-rd" marker-end="url(#restart-recovery-ar)"/>
+</svg>
