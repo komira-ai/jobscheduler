@@ -133,14 +133,22 @@ fn grace_must_exceed_two_heartbeats() {
 }
 
 /// Asserts that the shape converts to and from `js_types::Shape` without loss, that the
-/// lease cap is not part of the resource vector, and that a GPU class that does not match
-/// the count is the conversion's error.
+/// shape's capabilities are the hello's with the validated accelerator added (the class
+/// resolved through the alias table, the count and the least device memory, as
+/// `accelerator.*` entries), that the lease cap is not part of the resource vector, and that
+/// a GPU class that does not match the count is the conversion's error.
 #[test]
 fn shape_converts_both_ways() {
     let shape = hello().to_shape().unwrap();
     let expected = Shape::new(
         Resources::new(8000, 1 << 34, 1, Some("nvidia-a100".into())).unwrap(),
-        common::map(&[("os", "macos")]),
+        common::map(&[
+            ("os", "macos"),
+            ("accelerator.vendor", "nvidia"),
+            ("accelerator.model", "nvidia-a100"),
+            ("accelerator.count", "1"),
+            ("accelerator.memory-gib", "64"),
+        ]),
     );
     assert_eq!(shape, expected);
     let mut wire = hello().shape;
