@@ -32,6 +32,11 @@ pub(super) struct Records {
     suspects: BTreeMap<HostRef, HostStatus>,
     /// The acquire ids of launches sent with no answer yet.
     unresolved: BTreeSet<String>,
+    /// For a launch with no answer, the instance found to be the one it made: one of its
+    /// acquire id that the records held, not ending, while the launch was unanswered. The
+    /// link stays when that instance ends, so the launch is not counted again; an instance
+    /// already ending when the launch was sent is an earlier one and is never linked.
+    resolved: BTreeMap<String, HostRef>,
     /// The architectures the catalog has carried.
     arches: BTreeSet<String>,
 }
@@ -59,6 +64,7 @@ impl Records {
         }
         self.held = held;
         self.suspects = suspects;
+        self.resolve();
     }
 
     /// After an acquire the launch guard holds `answered` (every instance a launch answered
@@ -80,6 +86,9 @@ impl Records {
             });
         }
         self.unresolved = unresolved.into_iter().collect();
+        let pending = &self.unresolved;
+        self.resolved.retain(|acquire, _| pending.contains(acquire));
+        self.resolve();
         for extra in extras {
             self.released(&extra.id, &extra.released);
         }
@@ -114,6 +123,19 @@ impl Records {
         self.arches.clone()
     }
 
+    /// Links each launch with no answer, not linked yet, to a held instance of its acquire
+    /// id that is not ending.
+    fn resolve(&mut self) {
+        let current = self.held.values().filter(|row| !ending(&row.status));
+        for row in current {
+            let open = self.unresolved.contains(&row.acquire);
+            let link = open.then(|| (row.acquire.clone(), row.id.clone()));
+            link.into_iter().for_each(|(acquire, id)| {
+                self.resolved.entry(acquire).or_insert(id);
+            });
+        }
+    }
+
     fn set_status(&mut self, id: &HostRef, status: &HostStatus) {
         let held = self.held.get_mut(id).into_iter();
         held.for_each(|row| row.status = status.clone());
@@ -129,23 +151,18 @@ impl Records {
 
     /// The instances supplied (held and not ending) and how many more `max_machines`
     /// allows once every instance it counts is counted once: ours and not terminated, the
-    /// suspects that are not terminated, and the launches with no answer that no held
-    /// instance that is not ending carries the acquire id of.
+    /// suspects that are not terminated, and the launches with no answer not linked to the
+    /// instance they made.
     pub(super) fn capacity(&self, max_machines: usize) -> Capacity {
         let rows = self.held.values();
         let supplied = rows.clone().filter(|row| !ending(&row.status)).count();
         let live = rows
-            .clone()
             .filter(|row| row.status != HostStatus::Terminated)
             .count();
         let suspects = self.suspects.values();
         let suspects = suspects.filter(|status| **status != HostStatus::Terminated);
-        // An instance on its way out is an earlier launch of its acquire id, not the one a
-        // launch with no answer may have made.
-        let current = rows.filter(|row| !ending(&row.status));
-        let acquires: BTreeSet<&str> = current.map(|row| row.acquire.as_str()).collect();
         let pending = self.unresolved.iter();
-        let unanswered = pending.filter(|acquire| !acquires.contains(acquire.as_str()));
+        let unanswered = pending.filter(|acquire| !self.resolved.contains_key(*acquire));
         let counted = live + suspects.count() + unanswered.count();
         Capacity {
             supplied: count(supplied),

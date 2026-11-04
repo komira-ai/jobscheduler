@@ -244,3 +244,35 @@ fn a_lost_replacement_acquire_keeps_its_place() {
     cloud.clock().advance(cloud.knobs().unknown_hold);
     assert_eq!(cloud.capacity().can_add, Some(2));
 }
+
+/// Asserts that a lost acquire that landed is the machine it made: once that machine is
+/// released, or dropped, the acquire is not counted again beside it. It catches a lost
+/// acquire that holds a second place once its own machine ends.
+#[test]
+fn a_lost_acquire_that_landed_is_not_counted_again_once_its_machine_ends() {
+    for dropped in [false, true] {
+        let cloud = with_quota(3);
+        cloud.script(Call::Acquire, &[Step::Lost { landed: true }]);
+        assert_eq!(cloud.acquire(&request("a1")), Acquired::Unknown);
+        let landed = cloud.running()[0].clone();
+        assert_eq!(
+            cloud.capacity(),
+            Capacity {
+                supplied: 1,
+                can_add: Some(2)
+            }
+        );
+        match dropped {
+            true => cloud.drop_machine(&landed),
+            false => assert!(matches!(cloud.release(&landed), Released::Terminating(_))),
+        }
+        assert_eq!(
+            cloud.capacity(),
+            Capacity {
+                supplied: 0,
+                can_add: Some(3)
+            },
+            "dropped {dropped}"
+        );
+    }
+}

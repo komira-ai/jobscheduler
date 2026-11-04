@@ -473,3 +473,32 @@ fn a_lost_replacement_launch_keeps_its_place() {
     assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
     assert_eq!(rig.provider.capacity(), capacity(0, 0));
 }
+
+/// Asserts that a launch whose answer was lost, once a list has shown the instance it
+/// made, is that instance from then on: when the instance is released, then found
+/// terminated, then gone, the launch is not counted again beside it. It catches a launch
+/// with no answer that counts again once its own instance ends.
+#[test]
+fn a_lost_launch_that_landed_is_not_counted_again_once_its_instance_ends() {
+    let rig = roomy(3);
+    rig.fake
+        .lose_response(Call::Launch, ApiError::Transport("reset".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    let landed = rig.provider.list().unwrap()[0].id.clone();
+    assert_eq!(rig.provider.capacity(), capacity(1, 2));
+    assert!(matches!(
+        rig.provider.release(&landed),
+        Released::Terminating(_)
+    ));
+    assert_eq!(rig.provider.capacity(), capacity(0, 2));
+    rig.fake
+        .set_status(&id(landed.as_str()), HostStatus::Terminated);
+    assert_eq!(
+        rig.provider.observe(&landed),
+        Observed::Present(HostStatus::Terminated)
+    );
+    assert_eq!(rig.provider.capacity(), capacity(0, 3));
+    rig.fake.remove_instance(&id(landed.as_str()));
+    assert_eq!(rig.provider.observe(&landed), Observed::Absent);
+    assert_eq!(rig.provider.capacity(), capacity(0, 3));
+}

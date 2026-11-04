@@ -103,6 +103,9 @@ struct Inner {
     next: Option<Step>,
     /// The acquires whose answer was lost, and when.
     unresolved: BTreeMap<AcquireId, u64>,
+    /// The machine a lost acquire made when it landed, by acquire id: the last lost
+    /// acquire of an id sets or clears it.
+    landed: BTreeMap<AcquireId, HostRef>,
     /// Where the notices go: one sender per event stream handed out.
     watchers: Vec<Sender<ProviderEvent>>,
 }
@@ -244,17 +247,11 @@ impl Inner {
         (ours, live.count())
     }
 
-    /// The acquires whose answer was lost and that made no machine since they were sent
-    /// (an earlier machine of the same acquire id, released or dropped, is not one): they
-    /// may still land.
+    /// The acquires whose answer was lost and whose call made no machine: they may still
+    /// land. One whose call did make a machine is that machine, whatever became of it.
     fn unanswered(&self) -> usize {
-        let made = |id: &AcquireId, since: u64| {
-            let current = |m: &&Machine| (m.launched >= since) & m.released.is_none() & !m.dropped;
-            let mut launched = self.machines.iter().filter(current);
-            launched.any(|m| m.acquire == id.as_str())
-        };
-        let lost = self.unresolved.iter();
-        lost.filter(|(id, since)| !made(id, **since)).count()
+        let lost = self.unresolved.keys();
+        lost.filter(|id| !self.landed.contains_key(*id)).count()
     }
 }
 
@@ -292,6 +289,7 @@ impl ElasticFake {
                 calls: Vec::new(),
                 next: None,
                 unresolved: BTreeMap::new(),
+                landed: BTreeMap::new(),
                 watchers: Vec::new(),
             })),
         }
@@ -588,9 +586,12 @@ impl CapacityProvider for ElasticFake {
                 Acquired::Refused(refusal(code, Reason::Api("scripted".to_owned())))
             }
             Step::Lost { landed } => {
-                if landed {
-                    let _ = state.launch(request);
-                }
+                let made = landed.then(|| state.launch(request).ok()).flatten();
+                let acquire = request.acquire.clone();
+                match made {
+                    Some(held) => state.landed.insert(acquire, held.id),
+                    None => state.landed.remove(&acquire),
+                };
                 state.unresolved.insert(request.acquire.clone(), now);
                 Acquired::Unknown
             }
