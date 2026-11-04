@@ -116,6 +116,7 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         labels,
         slot: 0,
         bundle: None,
+        network: Default::default(),
     }
 }
 

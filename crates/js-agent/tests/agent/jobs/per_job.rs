@@ -40,6 +40,8 @@ fn job_starts(jobs: &[&str]) -> HeartbeatReply {
                     gpu_indices: Vec::new(),
                 },
                 wall_ms: 60_000,
+                network: Default::default(),
+                ports: Vec::new(),
             }))
         })
         .collect();

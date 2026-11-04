@@ -35,7 +35,8 @@ const _: () = assert!(RETIRED_LISTED < RETIRED_CAP);
 const _: () = assert!(RETIRED_LISTED <= limits::MAX_HELD);
 
 /// The start a job start stands for: one contained job with no mounts and no labels of its
-/// own, bounded by what its allocation booked and by its own wall limit.
+/// own, bounded by what its allocation booked and by its own wall limit, with the network
+/// and ports it asked for, which the shared admission holds to the runtime's ceiling.
 fn run_of(spec: &JobStartSpec) -> JobSpec {
     JobSpec {
         run_id: spec.job_id.clone(),
@@ -61,6 +62,8 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
         heartbeat_seq: 0,
         valid_for_ms: 0,
         bundle: None,
+        network: spec.network,
+        ports: spec.ports.clone(),
     }
 }
 

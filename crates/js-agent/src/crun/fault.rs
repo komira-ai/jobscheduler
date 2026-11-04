@@ -17,6 +17,8 @@ pub(super) enum Fault {
     #[error("this runtime runs container jobs only")]
     Native,
     #[error("{0}")]
+    Network(String),
+    #[error("{0}")]
     Image(String),
     #[error("run id {0:?} cannot name a container")]
     Name(String),
