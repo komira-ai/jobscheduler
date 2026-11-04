@@ -65,6 +65,7 @@ const REPLIES: &str = "
 pub struct Replies<T> {
     stream: tonic::Streaming<T>,
     base: String,
+    token: String,
 }
 
 impl<T> Replies<T> {
@@ -72,7 +73,7 @@ impl<T> Replies<T> {
     /// written, so a failure is never [`JobError::NotSent`] for a reason of the network.
     pub async fn next(&mut self) -> Option<Result<T, JobError>> {
         let next = self.stream.message().await.transpose();
-        next.map(|answer| answer.map_err(|status| super::error::classify(&self.base, true, &status)))
+        next.map(|answer| answer.map_err(|status| super::error::classify(&self.base, &self.token, true, &status)))
     }
 }
 ";
@@ -91,7 +92,7 @@ fn method(surface: &Surface, rpc: &Rpc) -> String {
     let (returns, answer) = match rpc.server_streaming {
         true => (
             format!("Replies<{response}>"),
-            "answer.map(|stream| Replies { stream: stream.into_inner(), base: self.base.clone() })",
+            "answer.map(|stream| Replies { stream: stream.into_inner(), base: self.base.clone(), token: self.token.clone() })",
         ),
         false => (response, "answer.map(tonic::Response::into_inner)"),
     };
