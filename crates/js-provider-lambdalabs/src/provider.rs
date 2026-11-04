@@ -59,6 +59,9 @@ struct Launching {
     /// instance terminated or (a trusted 404) gone. A probe that finds it, or fails,
     /// holds the entry for another period.
     answered: Vec<Answered>,
+    /// What the probes of unlisted instances read, by id, since an acquire last copied
+    /// the guard into the records.
+    probed: Vec<(HostRef, Observed)>,
 }
 
 /// An instance a launch answered with that no list has shown as ours yet.
@@ -208,14 +211,21 @@ impl LambdaProvider {
     /// instance a launch answered with that no list has shown as ours (the extras of a
     /// launch included), and the acquire ids of the launches with no answer. The extras the
     /// answer released are noted as their release read them back.
-    fn remember(&self, gate: &Launching, answer: &Acquired) {
+    ///
+    /// What the guard's probes of unlisted instances read is noted after it, so an instance
+    /// a probe found gone or terminated is not left supplied.
+    fn remember(&self, gate: &mut Launching, answer: &Acquired) {
         let extras = match answer {
             Acquired::Accepted { extras, .. } => extras.as_slice(),
             _ => &[],
         };
         let held = gate.answered.iter().map(|launched| launched.held.clone());
         let unresolved = gate.unknown.keys().cloned();
-        self.records().guarded(held, unresolved, extras);
+        let mut records = self.records();
+        records.guarded(held, unresolved, extras);
+        for (id, observed) in gate.probed.drain(..) {
+            records.observed(&id, &observed);
+        }
     }
 
     /// Where `demand` can launch, best first (see the module docs of the choice): empty
@@ -410,8 +420,9 @@ impl LambdaProvider {
                 .any(|row| Owner::acquire_of(row) == Some(acquire.as_str()));
             !seen && now.saturating_sub(*sent) < hold
         });
+        let probed = &mut gate.probed;
         gate.answered
-            .retain_mut(|launched| self.still_held(launched, rows, now));
+            .retain_mut(|launched| self.still_held(launched, rows, now, probed));
     }
 
     /// Whether the answered instance still counts. A list row of its id that is ours ends
@@ -419,7 +430,14 @@ impl LambdaProvider {
     /// is filtered out of the live set). When the hold has run out the instance is read
     /// by id: found and not terminated, or any error, keeps it for another hold; only
     /// a terminated reading or a 404 that [`Self::trust_absent`] accepts ends it.
-    fn still_held(&self, launched: &mut Answered, rows: &[Instance], now: Duration) -> bool {
+    /// What a probe reads is added to `probed`, for the records.
+    fn still_held(
+        &self,
+        launched: &mut Answered,
+        rows: &[Instance],
+        now: Duration,
+        probed: &mut Vec<(HostRef, Observed)>,
+    ) -> bool {
         let listed_ours = rows
             .iter()
             .any(|row| row.id == launched.id && self.owner.claim(row) == Claim::Ours);
@@ -430,14 +448,20 @@ impl LambdaProvider {
             return true;
         }
         let id = &launched.id;
-        let keep = match self.api.get_instance(id) {
-            Ok(found) => found.status != HostStatus::Terminated,
-            Err(error) if self.trust_absent(&error) => false,
+        let observed = match self.api.get_instance(id) {
+            Ok(found) => Observed::Present(found.status),
+            Err(error) if self.trust_absent(&error) => Observed::Absent,
             Err(error) => {
                 tracing::warn!(%error, %id, "the probe of an unlisted instance failed; still counting it");
-                true
+                Observed::Unknown
             }
         };
+        let ended = matches!(
+            observed,
+            Observed::Absent | Observed::Present(HostStatus::Terminated)
+        );
+        probed.push((launched.held.id.clone(), observed));
+        let keep = !ended;
         if keep {
             tracing::warn!(%id, "an answered instance is still not listed as ours; still counting it");
             launched.due = now + self.config.unknown_hold;
@@ -751,7 +775,7 @@ impl CapacityProvider for LambdaProvider {
         }
         let mut gate = self.launching();
         let answer = self.launch_locked(&mut gate, request, &launch);
-        self.remember(&gate, &answer);
+        self.remember(&mut gate, &answer);
         answer
     }
 

@@ -222,3 +222,25 @@ fn a_hello_for_another_schedulers_machine_is_not_matched() {
     assert_eq!(cloud.verify_instance(&hello(&name, None)), None);
     assert_eq!(cloud.verify_instance(&hello(&name, Some(&theirs))), None);
 }
+
+/// Asserts that a lost acquire under the id of a machine released before it holds its
+/// place until its hold runs out: the released machine is not the one it may make. It
+/// catches a lost acquire matched to an earlier machine of its id, which would show room
+/// the lost launch may still take.
+#[test]
+fn a_lost_replacement_acquire_keeps_its_place() {
+    let cloud = with_quota(2);
+    let first = launch(&cloud, "a1");
+    assert!(matches!(cloud.release(&first), Released::Terminating(_)));
+    cloud.script(Call::Acquire, &[Step::Lost { landed: false }]);
+    assert_eq!(cloud.acquire(&request("a1")), Acquired::Unknown);
+    assert_eq!(
+        cloud.capacity(),
+        Capacity {
+            supplied: 0,
+            can_add: Some(1)
+        }
+    );
+    cloud.clock().advance(cloud.knobs().unknown_hold);
+    assert_eq!(cloud.capacity().can_add, Some(2));
+}

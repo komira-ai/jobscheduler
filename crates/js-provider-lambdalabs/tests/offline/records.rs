@@ -421,3 +421,55 @@ fn capacity_and_hello_matching_answer_while_a_request_is_in_flight() {
         Some(launched)
     );
 }
+
+/// Asserts that what the launch guard's own probe of an unlisted instance reads reaches
+/// the records: once the hold has run out, an instance the probe finds gone, and one it
+/// finds terminated (its tags gone, so no list shows it as ours), are no longer supplied
+/// and match no hello. It catches records that keep supplying an instance only the guard
+/// knows is gone.
+#[test]
+fn what_the_guards_probe_reads_reaches_the_records() {
+    let rig = roomy(4);
+    let past_the_hold = Duration::from_secs(11 * 60);
+    let gone = accepted(&rig.provider.acquire(&ask("a1")));
+    rig.fake.remove_instance(&id(gone.as_str()));
+    rig.provider.list().unwrap();
+    assert_eq!(rig.provider.capacity(), capacity(1, 3));
+    rig.clock.advance(past_the_hold);
+    accepted(&rig.provider.acquire(&ask("a2")));
+    assert_eq!(rig.provider.capacity(), capacity(1, 3));
+    assert_eq!(
+        rig.provider.verify_instance(&hello(&name_of("a1"), None)),
+        None
+    );
+
+    let ended = accepted(&rig.provider.acquire(&ask("a3")));
+    rig.fake.update_instance(&id(ended.as_str()), &|instance| {
+        instance.tags.clear();
+        instance.status = HostStatus::Terminated;
+    });
+    rig.clock.advance(past_the_hold);
+    accepted(&rig.provider.acquire(&ask("a4")));
+    assert_eq!(rig.provider.capacity(), capacity(2, 2));
+    assert_eq!(
+        rig.provider.verify_instance(&hello(&name_of("a3"), None)),
+        None
+    );
+}
+
+/// Asserts that a launch with no answer under the acquire id of an instance released
+/// before it holds its place: the terminating instance is not the one the lost launch may
+/// have made. It catches a lost launch matched to an earlier instance of its acquire id.
+#[test]
+fn a_lost_replacement_launch_keeps_its_place() {
+    let rig = roomy(2);
+    let first = accepted(&rig.provider.acquire(&ask("a1")));
+    assert!(matches!(
+        rig.provider.release(&first),
+        Released::Terminating(_)
+    ));
+    rig.fake
+        .fail_next(Call::Launch, ApiError::Transport("timed out".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    assert_eq!(rig.provider.capacity(), capacity(0, 0));
+}

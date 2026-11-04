@@ -244,10 +244,17 @@ impl Inner {
         (ours, live.count())
     }
 
-    /// The acquires whose answer was lost and that made no machine: they may still land.
+    /// The acquires whose answer was lost and that made no machine since they were sent
+    /// (an earlier machine of the same acquire id, released or dropped, is not one): they
+    /// may still land.
     fn unanswered(&self) -> usize {
-        let made = |id: &AcquireId| self.machines.iter().any(|m| m.acquire == id.as_str());
-        self.unresolved.keys().filter(|id| !made(*id)).count()
+        let made = |id: &AcquireId, since: u64| {
+            let current = |m: &&Machine| (m.launched >= since) & m.released.is_none() & !m.dropped;
+            let mut launched = self.machines.iter().filter(current);
+            launched.any(|m| m.acquire == id.as_str())
+        };
+        let lost = self.unresolved.iter();
+        lost.filter(|(id, since)| !made(id, **since)).count()
     }
 }
 

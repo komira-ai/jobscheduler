@@ -130,7 +130,7 @@ impl Records {
     /// The instances supplied (held and not ending) and how many more `max_machines`
     /// allows once every instance it counts is counted once: ours and not terminated, the
     /// suspects that are not terminated, and the launches with no answer that no held
-    /// instance carries the acquire id of.
+    /// instance that is not ending carries the acquire id of.
     pub(super) fn capacity(&self, max_machines: usize) -> Capacity {
         let rows = self.held.values();
         let supplied = rows.clone().filter(|row| !ending(&row.status)).count();
@@ -140,7 +140,10 @@ impl Records {
             .count();
         let suspects = self.suspects.values();
         let suspects = suspects.filter(|status| **status != HostStatus::Terminated);
-        let acquires: BTreeSet<&str> = rows.map(|row| row.acquire.as_str()).collect();
+        // An instance on its way out is an earlier launch of its acquire id, not the one a
+        // launch with no answer may have made.
+        let current = rows.filter(|row| !ending(&row.status));
+        let acquires: BTreeSet<&str> = current.map(|row| row.acquire.as_str()).collect();
         let pending = self.unresolved.iter();
         let unanswered = pending.filter(|acquire| !acquires.contains(acquire.as_str()));
         let counted = live + suspects.count() + unanswered.count();
