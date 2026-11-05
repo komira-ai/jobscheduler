@@ -95,13 +95,21 @@ fn admitted(token: &Token, headers: &HeaderMap) -> bool {
         .is_some_and(|given| token.matches(given.as_bytes()))
 }
 
-/// The answer to a request that does not present the token: `UNAUTHENTICATED` to a gRPC
-/// request, 401 with an empty body to any other.
+/// The answer to a request that does not present the token, with an empty body of the
+/// service's body type: the head of [`refusal_head`].
 fn refusal<R: Default>(headers: &HeaderMap) -> Response<R> {
+    let (head, ()) = refusal_head(headers).into_parts();
+    Response::from_parts(head, R::default())
+}
+
+/// The head of the answer to a request that does not present the token: `UNAUTHENTICATED`
+/// to a gRPC request, 401 to any other. It is not generic over the body, so each of its
+/// two answers is one piece of code whichever transport the layer guards.
+fn refusal_head(headers: &HeaderMap) -> Response<()> {
     if is_grpc(headers) {
         Status::unauthenticated("").into_http()
     } else {
-        let mut response = Response::new(R::default());
+        let mut response = Response::new(());
         *response.status_mut() = StatusCode::UNAUTHORIZED;
         response
     }

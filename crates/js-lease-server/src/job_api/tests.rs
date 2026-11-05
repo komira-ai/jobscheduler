@@ -374,7 +374,9 @@ async fn the_same_token_opens_both_transports() {
 /// the same order, and that, over the fake store and over SQLite, every one of them answers
 /// `UNIMPLEMENTED` over gRPC with the stubs' own message (not the generated default's, so a
 /// method added to the proto that reaches no stub of [`JobApi`] fails here) and 501
-/// `unimplemented` over the gateway, both transports calling one [`JobApi`].
+/// `unimplemented` over the gateway, both transports calling one [`JobApi`]. The production
+/// builders `grpc` and `gateway` also refuse a request without the token
+/// (`UNAUTHENTICATED`, 401), as the recording tests show for the generic ones.
 #[tokio::test]
 async fn every_call_answers_unimplemented() {
     let methods = methods();
@@ -392,7 +394,14 @@ async fn every_call_answers_unimplemented() {
                 "{method}"
             );
         }
+        assert_eq!(
+            call(&channel, &methods[0], None).await.code(),
+            Code::Unauthenticated
+        );
         let router = gateway(api, token());
+        for (status, body) in send_all(&router, None).await {
+            assert_eq!((status, body), (StatusCode::UNAUTHORIZED, Bytes::new()));
+        }
         let answers = send_all(&router, Some(value(&authorization))).await;
         for (method, answer) in methods.iter().zip(answers) {
             assert_eq!(
