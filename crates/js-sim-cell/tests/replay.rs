@@ -23,9 +23,16 @@
 //! agents' side of the whole-host handshake, the client's whole-host path or the server's
 //! whole-host decisions under any placement moves a hash; the replay test runs one of its
 //! seeds twice under each placement.
+//!
+//! And one scenario with real agents, family `real_agent`: the agreement family's world
+//! without faults (`cell/real_agents.rs`, six real agents, about 1,200 agent requests a
+//! seed) over [`REAL_SEEDS`] seeds, so a change to a decision of the real agent lifecycle
+//! as the cell runs it, or a source of nondeterminism in it, moves a hash.
 
 #[path = "cell/lossy_wire.rs"]
 mod lossy_wire;
+#[path = "cell/real_agents.rs"]
+mod real_agents;
 #[path = "cell/support.rs"]
 mod support;
 #[path = "cell/whole_host.rs"]
@@ -41,7 +48,8 @@ use js_sim::golden::GoldenFile;
 use js_sim::{Chance, Faults, TraceHash};
 use js_sim_cell::replay::REPORT_LINES;
 use js_sim_cell::{
-    Cell, Failure, FailureReport, Invariant, Observations, ServerSpec, Setup, Shape, Violation, run,
+    Cell, Failure, FailureReport, Invariant, Observations, ServerSpec, Setup, Shape, Side,
+    Violation, run,
 };
 
 use crate::support::{lease, ms, scratch, start_run};
@@ -82,6 +90,11 @@ const SMOKE_FAMILY: &str = "smoke";
 /// and the family they are kept under.
 const WHOLE_SEEDS: u64 = 2;
 const WHOLE_FAMILY: &str = "whole_host";
+
+/// How many seeds of the scenario with real agents the golden file pins, and the family
+/// they are kept under.
+const REAL_SEEDS: u64 = 2;
+const REAL_FAMILY: &str = "real_agent";
 
 /// The server of the scenario.
 fn spec() -> ServerSpec {
@@ -146,10 +159,12 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// Asserts that one seed run twice in one process gives one hash, and that a run that
 /// keeps its trace lines gives the same hash as one that keeps only the hash; and that the
 /// run did what the scenario asks (the lease's run launched once, its agent listed live at
-/// the end), so the hash covers a run that reached the server. Asserts too that one seed
-/// of the whole-host scenario run twice gives one hash under each placement. Catches a handler path that
-/// reads a clock, iterates a hashed collection to decide an outcome, or lets a random value
-/// reach the trace; and a trace whose lines depend on whether they are kept.
+/// the end), so the hash covers a run that reached the server. The same for a seed of the
+/// scenario with real agents, run twice, whose items all succeed, and for one seed of the
+/// whole-host scenario run twice under each placement. Catches a handler path that reads a
+/// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
+/// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
+/// whose lines depend on whether they are kept.
 #[test]
 fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(spec().heartbeat_interval(), INTERVAL);
@@ -174,6 +189,20 @@ fn a_seed_replays_to_the_same_trace_hash() {
         let again = scenario.run_seeds(1).runs[0].hash;
         assert_eq!(once, again, "{}", whole_host::spelled(*placement));
     }
+
+    let real = real_agents::without_faults(Side::Real);
+    let once = real.run_seeds(1).runs.remove(0);
+    let again = real.run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes.len(), real_agents::RUNS as usize);
+    let succeeded = Some(js_sim_cell::HowEnded::Succeeded);
+    assert!(
+        once.outcomes
+            .values()
+            .all(|item| item.terminal == succeeded),
+        "{:?}",
+        once.outcomes
+    );
 }
 
 /// Asserts that two seeds give two hashes. Catches a seed that never reaches the bus or
@@ -207,6 +236,13 @@ fn smoke_runs() -> Vec<(String, TraceHash)> {
     passed.runs.iter().map(each).collect()
 }
 
+/// The hash of each pinned seed of the scenario with real agents, which must pass.
+fn real_runs() -> Vec<(String, TraceHash)> {
+    let passed = real_agents::without_faults(Side::Real).run_seeds(REAL_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| (format!("without_faults/seed-{}", run.seed), run.hash);
+    passed.runs.iter().map(each).collect()
+}
+
 fn golden_runs() -> Vec<(String, TraceHash)> {
     let each = |seed| (format!("{SCENARIO}/seed-{seed}"), hash(seed));
     (0..SEEDS).map(each).collect()
@@ -229,12 +265,22 @@ fn the_smoke_scenario_matches_the_golden_file() {
     golden_of(SMOKE_FAMILY).assert_matches(&smoke_runs());
 }
 
+/// Asserts that the hashes of the pinned seeds of the scenario with real agents equal the
+/// golden file's (family `real_agent`). Catches any change to a decision of the real agent
+/// lifecycle or the real agent node, or to the trace text, and a run with real agents that
+/// differs between processes.
+#[test]
+fn the_real_agent_scenario_matches_the_golden_file() {
+    golden_of(REAL_FAMILY).assert_matches(&real_runs());
+}
+
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
     golden().regenerate(&golden_runs()).unwrap();
     golden_of(SMOKE_FAMILY).regenerate(&smoke_runs()).unwrap();
     golden_of(WHOLE_FAMILY).regenerate(&whole_runs()).unwrap();
+    golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
 }
 
 /// The hash of each pinned seed of the whole-host scenario under each placement, which

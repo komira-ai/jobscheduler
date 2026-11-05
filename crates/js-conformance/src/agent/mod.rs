@@ -58,8 +58,16 @@
 //!   harness and from what the job runner was asked to launch.
 //! - **Results repeat.** An unacknowledged result is repeated in every heartbeat, so
 //!   `heartbeat` makes the agent send one and `results_sent` counts every transmission.
+//!
+//! # The real agent in one process
+//!
+//! [`memory`] is a container runtime that lives in memory, with the clock the lifecycle
+//! reads: the real agent lifecycle of `js-agent` runs on it in one process, against the
+//! registry in this crate's `tests/real_agent.rs` and as the real agent node of the
+//! simulated cell (`js-sim-cell`).
 
 mod fake;
+pub mod memory;
 mod scenarios;
 
 use std::collections::{BTreeMap, BTreeSet};

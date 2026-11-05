@@ -248,6 +248,9 @@ pub struct AllocationRecord {
     pub host: HostId,
     /// What it books.
     pub booked: Booked,
+    /// The host ports the job declared, sorted ascending, each once. They are booked with the
+    /// allocation and held until it is freed; a row written before this field holds none.
+    pub host_ports: Vec<u16>,
     /// Where it is.
     pub step: AllocationStep,
     /// When it was made, by the store's clock.

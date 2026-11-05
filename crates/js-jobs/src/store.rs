@@ -1,5 +1,6 @@
 //! [`JobStore`]: the job and allocation tables over a state [`Store`].
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -281,12 +282,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Err(JobStoreError::IdSpaceExhausted { tries: MINT_TRIES })
     }
 
-    /// Places a queued job (design section 5.3, step 5): in one transaction the job becomes
-    /// placed on `host`, and its allocation is written as booked with a newly minted
-    /// allocation id. The job must still be queued at the version read, and its allocation
-    /// row must still be absent, or freed (a requeued job's earlier allocation, which the new
-    /// one overwrites), at the version read. The new allocation id differs from the freed
-    /// row's: a source that repeats it is drawn again, at most [`MINT_TRIES`] times.
+    /// Places a queued job (design section 5.3, step 5): in one transaction the job becomes placed
+    /// on `host`, and its allocation is written as booked with a newly minted allocation id,
+    /// holding the host ports the job declares (sorted, each once). The job must still be queued at
+    /// the version read, and its allocation row must still be absent, or freed (a requeued job's
+    /// earlier allocation, which the new one overwrites), at the version read. The new allocation
+    /// id differs from the freed row's: a source that repeats it is drawn again, at most
+    /// [`MINT_TRIES`] times.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
@@ -324,11 +326,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         };
         let allocation_id = self.fresh_allocation_id(earlier_id)?;
         let now = self.store.now();
+        let host_ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
         let allocation = AllocationRecord {
             job: id.clone(),
             allocation_id,
             host: host.clone(),
             booked,
+            host_ports: host_ports.into_iter().collect(),
             step: AllocationStep::Booked,
             created_at: now,
             freed_at: None,

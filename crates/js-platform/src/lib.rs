@@ -368,6 +368,8 @@ mod tests {
             arch: arch.map(str::to_owned),
             isa_level: None,
             exec: None,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         }
     }
 

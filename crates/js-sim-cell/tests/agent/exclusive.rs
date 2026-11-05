@@ -84,8 +84,8 @@ fn the_agent_node_prepares_reports_ready_and_restores_through_its_heartbeats() {
 }
 
 /// A silent agent is told of lease `1-1` by answer 1, which also carries a start of that
-/// lease: the start is written into the ledger and not launched (a preparing agent takes
-/// no start). Answer 2's `exclusive` fails the wire's check: it is counted and changes
+/// lease (and a cancel of a run it never ran, which still reaches it): the start is
+/// written into the ledger and not launched (a preparing agent takes no start). Answer 2's `exclusive` fails the wire's check: it is counted and changes
 /// nothing, so heartbeat 3 still says `preparing`. Answer 3 names no lease (`restoring`
 /// at heartbeat 4), and answer 4 ends the session: the agent says hello again at once,
 /// announcing `restoring`. Catches a preparing agent that launches a start, an agent that
@@ -95,7 +95,13 @@ fn the_agent_node_prepares_reports_ready_and_restores_through_its_heartbeats() {
 fn a_preparing_agent_launches_no_start_and_a_bad_exclusive_is_counted_and_ignored() {
     let bad = BeatAnswer::Reply(json!({ "exclusive": "not an id!" }));
     let script = Script::plain()
-        .beat(1, exclusive(json!([start("r1", LONG_RUN_MS, 1, 0)])))
+        .beat(
+            1,
+            exclusive(json!([
+                start("r1", LONG_RUN_MS, 1, 0),
+                { "type": "cancel", "run_id": "r8" },
+            ])),
+        )
         .beat(2, bad)
         .beat(
             4,
