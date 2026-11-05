@@ -34,6 +34,13 @@
 //! prune. Its inputs are plain values ([`Beat`]); any server, whatever its wire form and
 //! registry, adapts its heartbeat to them.
 //!
+//! # Allocation history
+//!
+//! [`EndedHistory`] keeps one row per ended allocation ([`EndedRow`]) under
+//! [`ENDED_PREFIX`], in time order, for the history retention window. An [`AllocationLog`]
+//! takes each row from whatever ended the allocation without blocking it; the hub is the log
+//! a server runs, and writes the rows through the sink.
+//!
 //! # Time
 //!
 //! Three bases never mix: a node's monotonic microseconds (windows and lease minutes,
@@ -58,6 +65,7 @@ mod codec;
 mod convert;
 mod curves;
 mod fit;
+mod history;
 mod hub;
 mod key;
 mod profile_store;
@@ -69,9 +77,15 @@ mod testkit;
 pub use codec::{ROW_VERSION, RowError};
 pub use curves::{KeyMap, ProfileCurves, STALE_DAYS};
 pub use fit::{DILATE_MINUTES, Fit, MIN_RUNS_FOR_CURVE, fit, p90};
+pub use history::{
+    AllocationId, AllocationLog, BadAllocationId, Booked, DrainOutcome, ENDED_ID_PREFIX,
+    ENDED_PREFIX, ENDED_ROW_VERSION, EndedHistory, EndedRead, EndedReason, EndedRow, EndedRowError,
+    MAX_ALLOCATION_ID_LEN, NoLog, Used, ended_id_key, ended_key,
+};
 pub use hub::{
     AcceptedResult, Beat, BeatLoad, DroppedReadings, FLUSH_EVERY_MINUTES, Finish, Flushed,
-    GRACE_BEATS, MAX_TRACKS, TRACK_IDLE_MINUTES, Ticked, UsageCounters, UsageHub,
+    GRACE_BEATS, HistoryWritten, MAX_PENDING_ENDED, MAX_TRACKS, TRACK_IDLE_MINUTES, Ticked,
+    UsageCounters, UsageHub,
 };
 pub use key::{BadKey, MAX_KEY_LEN, ProfileKey};
 pub use profile_store::{KEY_PREFIX, KeyProfile, ProfileError, ProfileStore};

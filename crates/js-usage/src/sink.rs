@@ -20,8 +20,8 @@ use std::sync::Arc;
 use js_types::{HostId, LeaseId};
 
 use crate::{
-    DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
-    ProfileKey, RunSeries,
+    DropReason, EndedRow, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed,
+    ProfileCurves, ProfileKey, RunSeries,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -119,6 +119,24 @@ pub trait UsageSink: Send + Sync {
     /// that learns none.
     fn curves(&self) -> Option<Arc<ProfileCurves>> {
         None
+    }
+
+    /// Keeps the record of an allocation that ended ([`crate::EndedHistory::put`]). A row
+    /// kept already is not written again. A sink that keeps no history keeps nothing.
+    fn allocation_ended(&self, _row: &EndedRow) -> Result<(), UsageFault> {
+        Ok(())
+    }
+
+    /// At most `limit` records of the allocations that ended from `from_ms` to `to_ms`
+    /// (milliseconds since the Unix epoch) inclusive, oldest end first; a row this build
+    /// does not read is left out. Empty for a sink that keeps no history.
+    fn ended_rows(
+        &self,
+        _from_ms: u64,
+        _to_ms: u64,
+        _limit: NonZeroUsize,
+    ) -> Result<Vec<EndedRow>, UsageFault> {
+        Ok(Vec::new())
     }
 
     /// What the sink has counted.
@@ -231,6 +249,12 @@ mod tests {
         );
         assert_eq!(sink.key_profile(&end.key), Ok(None));
         assert!(sink.curves().is_none());
+        let row = crate::history::tests::row(5);
+        assert_eq!(sink.allocation_ended(&row), Ok(()));
+        assert_eq!(
+            sink.ended_rows(0, u64::MAX, NonZeroUsize::MIN),
+            Ok(Vec::new())
+        );
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);
     }
