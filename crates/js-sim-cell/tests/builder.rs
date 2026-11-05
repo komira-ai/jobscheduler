@@ -354,6 +354,43 @@ fn work_that_needs_its_own_resources_is_leased_and_run_with_them() {
         .run_seeds(1);
 }
 
+/// Asserts that the lease front sends an item's own resources: the lease asks for the
+/// work's cpu, memory, GPUs and GPU class, with its give-up time as wall limit and ttl,
+/// and the run is limited to the work's cpu and memory, holds GPU indices `0..gpus` and
+/// runs `sim-run` for the work's duration in milliseconds. Catches a front that sends the
+/// default share, or the default give-up time, in place of what the work asks for.
+#[test]
+fn the_lease_front_sends_the_works_own_resources_in_the_lease_and_the_run() {
+    let needs = Resources::new(500, 512, 2, Some("nvidia-h100".to_owned())).expect("resources");
+    let work = Work::run_for(RUN).needs(needs).give_up_after(secs(900));
+    let mut front = front_with(&work);
+    let mut port = Scripted {
+        answers: vec![granted("1-1"), queued("run-1"), run_state("queued")].into(),
+        calls: Vec::new(),
+        bodies: Vec::new(),
+    };
+    front.poll(FarmTime::default(), &mut port);
+    assert!(port.answers.is_empty());
+    let lease = &port.bodies[0];
+    let resources = json!({
+        "cpu_millis": 500, "memory_bytes": 512, "gpus": 2, "gpu_class": "nvidia-h100",
+    });
+    assert_eq!(lease["resources"], resources, "{lease}");
+    assert_eq!(lease["max_wall_seconds"], 900, "{lease}");
+    assert_eq!(lease["ttl_seconds"], 900, "{lease}");
+    assert_eq!(lease["class"], "gpu-host", "{lease}");
+    let run = &port.bodies[1];
+    assert_eq!(
+        run["limits"],
+        json!({ "cpu_millis": 500, "memory_bytes": 512 }),
+        "{run}"
+    );
+    assert_eq!(run["gpu_indices"], json!([0, 1]), "{run}");
+    assert_eq!(run["image"], js_sim_cell::SIM_RUN_IMAGE, "{run}");
+    assert_eq!(run["args"], json!([RUN.as_millis().to_string()]), "{run}");
+    assert_eq!(port.bodies[2], Value::Null, "a read has no body");
+}
+
 /// Asserts that with every message of the agent wire dropped, the client's acquire, its
 /// run, its give-up and its release still reach the server and are answered: the item
 /// learns its lease and run, is given up when no start can reach the host, and its
@@ -416,6 +453,8 @@ fn a_client_call_is_never_dropped_by_the_bus_faults() {
 struct Scripted {
     answers: VecDeque<(u16, Value)>,
     calls: Vec<String>,
+    /// The body of each call as JSON (`Null` when it has none).
+    bodies: Vec<Value>,
 }
 
 impl ClientPort for Scripted {
@@ -427,6 +466,14 @@ impl ClientPort for Scripted {
         );
         self.calls
             .push(format!("{} {}", request.method(), request.uri()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        let bytes = runtime
+            .block_on(axum::body::to_bytes(request.into_body(), usize::MAX))
+            .expect("a body");
+        self.bodies
+            .push(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
         let (status, body) = self.answers.pop_front().expect("an answer for every call");
         Response::builder()
             .status(status)
@@ -450,6 +497,7 @@ fn poll(
     let mut port = Scripted {
         answers: answers.into(),
         calls: Vec::new(),
+        bodies: Vec::new(),
     };
     let heard = front.poll(FarmTime::from_millis(at), &mut port);
     assert!(

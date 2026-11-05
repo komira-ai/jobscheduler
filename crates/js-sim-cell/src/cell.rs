@@ -358,8 +358,9 @@ impl Cell {
         self.violation.clone().map_or(Ok(()), Err)
     }
 
-    /// Makes `front` the cell's client, in place of the one it has; items submitted
-    /// before stay with the old one, so a scenario sets its front before it submits.
+    /// Makes `front` the cell's client, in place of the one it has. The old front is
+    /// dropped with every item it held: an item submitted before is never polled again
+    /// and never ends, so a scenario sets its front before it submits anything.
     pub fn set_front(&mut self, front: Box<dyn Front>) {
         self.client.front = front;
     }
