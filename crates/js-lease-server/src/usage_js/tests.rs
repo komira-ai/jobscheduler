@@ -404,3 +404,32 @@ fn a_store_that_refuses_writes_fails_the_history_write_and_prune() {
     sink.prune(day_90 + 1).unwrap();
     assert!(sink.ended_rows(0, u64::MAX, all).unwrap().is_empty());
 }
+
+/// Asserts that a page of the history is read from the store the records were written to:
+/// two of three records on the first page with the cursor of the second, and the third
+/// after it with no cursor. It catches a sink that answers the empty page a sink without
+/// history answers.
+#[test]
+fn a_page_of_the_history_is_read_from_the_store() {
+    let (sink, _) = sink();
+    for n in 1..=3 {
+        sink.allocation_ended(&ended_row(n, n * 10)).unwrap();
+    }
+    let query = js_usage::EndedQuery {
+        after: None,
+        from_ms: 0,
+        before_ms: None,
+        host: None,
+        id: None,
+        limit: NonZeroUsize::new(2).unwrap(),
+    };
+    let first = sink.ended_rows_after(&query).unwrap();
+    assert_eq!(ids(Ok(first.rows.clone())), ["1-1", "1-2"]);
+    let next = js_usage::EndedQuery {
+        after: first.next,
+        ..query
+    };
+    let second = sink.ended_rows_after(&next).unwrap();
+    assert_eq!(ids(Ok(second.rows)), ["1-3"]);
+    assert_eq!(second.next, None);
+}

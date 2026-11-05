@@ -15,7 +15,8 @@
 //! [`v1::job_service_server::JobServiceServer`]. A method a server does not implement
 //! answers `UNIMPLEMENTED`. The crate neither listens nor connects: a caller brings the
 //! transport. The lease server's job service (`js-lease-server`, `src/job_api/`)
-//! implements it, every call answering `UNIMPLEMENTED` so far, and nothing serves it yet.
+//! implements it: the calls of a group it does not serve yet answer `UNIMPLEMENTED`, and
+//! nothing mounts it yet.
 //!
 //! Each method of the service carries a `google.api.http` option, its route under the
 //! HTTP/JSON gateway (crate `js-api-gateway`, which generates its routes from them). The two

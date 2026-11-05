@@ -653,3 +653,238 @@ fn a_row_rewritten_between_the_scan_and_its_delete_is_kept() {
     let index = store.get(&ended_id_key(&rows[1].id)).unwrap();
     assert_eq!(index.map(|held| held.value), Some(key.into_bytes()));
 }
+
+/// A row named `id`, ending at `end`, booked on `host` when one is given.
+fn on_host(end: u64, id: &str, host: Option<&str>) -> EndedRow {
+    EndedRow {
+        host: host.map(|name| HostId::new(name).unwrap()),
+        ..bare(end, id)
+    }
+}
+
+/// The query of every row, `limit` to a page, after `after`.
+fn query(after: Option<EndedKey>, limit: usize) -> EndedQuery {
+    EndedQuery {
+        after,
+        from_ms: 0,
+        before_ms: None,
+        host: None,
+        id: None,
+        limit: NonZeroUsize::new(limit).unwrap(),
+    }
+}
+
+/// The `(end, id)` of each row of `page`.
+fn named(page: &EndedPage) -> Vec<(u64, &str)> {
+    let rows = page.rows.iter();
+    rows.map(|row| (row.actual_end, row.id.as_str())).collect()
+}
+
+/// The key of the row named `id` that ended at `end`.
+fn key_of(end: u64, id: &str) -> EndedKey {
+    EndedKey {
+        ended_at_ms: end,
+        id: AllocationId::parse(id).unwrap(),
+    }
+}
+
+/// Asserts that each page starts strictly after the cursor the page before it gave, also
+/// when the cursor is one of two rows of the same end, that the last page gives no cursor,
+/// and that a row written between two pages behind the cursor is not read while one ahead
+/// of it is. It catches a cursor read as included (a row twice), a cursor that skips the
+/// other rows of its end, and a last page that still points to a next.
+#[test]
+fn ended_rows_after_resumes_exactly_after_the_cursor() {
+    on_both("ended-page-cursor", |store| {
+        let rows = [
+            bare(10, "a"),
+            bare(20, "a"),
+            bare(20, "b"),
+            bare(30, "a"),
+            bare(40, "a"),
+        ];
+        put_all(store, &rows);
+        let history = EndedHistory::new(store);
+        let first = history.page(&query(None, 2)).unwrap();
+        assert_eq!(named(&first), [(10, "a"), (20, "a")]);
+        assert_eq!(first.next, Some(key_of(20, "a")));
+        put_all(store, &[bare(15, "z"), bare(35, "z")]);
+        let second = history.page(&query(first.next, 2)).unwrap();
+        assert_eq!(named(&second), [(20, "b"), (30, "a")]);
+        assert_eq!(second.next, Some(key_of(30, "a")));
+        let last = history.page(&query(second.next, 2)).unwrap();
+        assert_eq!(named(&last), [(35, "z"), (40, "a")]);
+        assert_eq!(last.next, None);
+        let after_all = history.page(&query(Some(key_of(40, "a")), 2)).unwrap();
+        assert_eq!(after_all, EndedPage::default());
+    });
+}
+
+/// Asserts that a page holds the rows that ended at or after `from_ms` and before
+/// `before_ms`, that a cursor before `from_ms` reads from `from_ms`, and that with no
+/// `before_ms` the row of the last millisecond is read. It catches an included upper end,
+/// an excluded lower one, and a cursor that drags the window back.
+#[test]
+fn a_page_is_the_half_open_window_of_ends() {
+    on_both("ended-page-window", |store| {
+        put_all(
+            store,
+            &[
+                bare(19, "a"),
+                bare(20, "a"),
+                bare(39, "a"),
+                bare(40, "a"),
+                bare(u64::MAX, "a"),
+            ],
+        );
+        let history = EndedHistory::new(store);
+        let window = EndedQuery {
+            from_ms: 20,
+            before_ms: Some(40),
+            ..query(None, 10)
+        };
+        let page = history.page(&window).unwrap();
+        assert_eq!(named(&page), [(20, "a"), (39, "a")]);
+        let behind = EndedQuery {
+            after: Some(key_of(5, "a")),
+            ..window.clone()
+        };
+        assert_eq!(history.page(&behind).unwrap(), page);
+        let open = EndedQuery {
+            from_ms: 40,
+            ..query(None, 10)
+        };
+        let page = history.page(&open).unwrap();
+        assert_eq!(named(&page), [(40, "a"), (u64::MAX, "a")]);
+        let empty = EndedQuery {
+            before_ms: Some(20),
+            ..window
+        };
+        assert_eq!(history.page(&empty).unwrap(), EndedPage::default());
+    });
+}
+
+/// Asserts that the host and allocation filters are applied before the limit counts: of
+/// seven rows, the two of one host fill a page of two with no next page, the rows with no
+/// host are left out of a host's listing, and an allocation's filter returns its one row.
+/// It catches a filter applied to a page after the limit cut it (a short or empty page
+/// with a next cursor).
+#[test]
+fn the_filters_apply_before_the_limit() {
+    on_both("ended-page-filters", |store| {
+        let rows = [
+            on_host(1, "a", Some("h1")),
+            on_host(2, "b", None),
+            on_host(3, "c", Some("h1")),
+            on_host(4, "d", Some("h2")),
+            on_host(5, "e", Some("h1")),
+            on_host(6, "f", None),
+            on_host(7, "g", Some("h2")),
+        ];
+        put_all(store, &rows);
+        let history = EndedHistory::new(store);
+        let h2 = EndedQuery {
+            host: Some(HostId::new("h2").unwrap()),
+            ..query(None, 2)
+        };
+        let page = history.page(&h2).unwrap();
+        assert_eq!(named(&page), [(4, "d"), (7, "g")]);
+        assert_eq!(page.next, None);
+        let h1 = EndedQuery {
+            host: Some(HostId::new("h1").unwrap()),
+            ..query(None, 2)
+        };
+        let page = history.page(&h1).unwrap();
+        assert_eq!(named(&page), [(1, "a"), (3, "c")]);
+        assert_eq!(page.next, Some(key_of(3, "c")));
+        let one = EndedQuery {
+            id: Some(AllocationId::parse("f").unwrap()),
+            ..query(None, 2)
+        };
+        let page = history.page(&one).unwrap();
+        assert_eq!(named(&page), [(6, "f")]);
+        assert_eq!(page.next, None);
+        let both = EndedQuery {
+            host: Some(HostId::new("h1").unwrap()),
+            ..one
+        };
+        assert_eq!(history.page(&both).unwrap(), EndedPage::default());
+    });
+}
+
+/// Asserts that a page reads on past a scan page of rows (more than 256), and stops at the
+/// first scan page when that already fills it, that rows this build does not read, or under
+/// a key their own end and id do not give, are left out and do not use up the limit, and
+/// that a page that ends exactly at the last row gives no cursor. It catches a page cut at the first scan page and unreadable rows counted.
+#[test]
+fn a_page_reads_past_scan_pages_and_unreadable_rows() {
+    on_both("ended-page-scan", |store| {
+        let id = AllocationId::parse("x").unwrap();
+        put_raw(store, ended_key(0, &id), vec![9]);
+        put_raw(store, ended_key(500, &id), encode(&bare(600, "x")));
+        put_all(store, &many(300));
+        let history = EndedHistory::new(store);
+        let page = history.page(&query(None, 280)).unwrap();
+        assert_eq!(page.rows.len(), 280);
+        assert_eq!(page.rows[0].actual_end, 1);
+        assert_eq!(page.next, Some(key_of(280, "r280")));
+        let rest = history.page(&query(page.next, 280)).unwrap();
+        assert_eq!(rest.rows.len(), 20);
+        assert_eq!(rest.next, None);
+        let whole = history.page(&query(None, 300)).unwrap();
+        assert_eq!((whole.rows.len(), whole.next), (300, None));
+        let short = history.page(&query(None, 10)).unwrap();
+        assert_eq!(short.rows.len(), 10);
+        assert_eq!(short.next, Some(key_of(10, "r10")));
+        let resumed = history.page(&query(short.next, 1)).unwrap();
+        assert_eq!(named(&resumed), [(11, "r11")]);
+    });
+}
+
+/// Catches: a failed scan, on the first scan page or a later one, read as a shorter page
+/// rather than reported.
+#[test]
+fn a_scan_that_fails_fails_the_page() {
+    let store = Hooked::new();
+    put_all(&store, &many(300));
+    let history = EndedHistory::new(&store);
+    for scan in [1, 2] {
+        store.fail_scan(scan);
+        let failed = history.page(&query(None, 1_000));
+        assert!(matches!(failed, Err(UsageError::Store(_))), "scan {scan}");
+    }
+    assert_eq!(history.page(&query(None, 1_000)).unwrap().rows.len(), 300);
+}
+
+/// Asserts that a key's text is the row's store key without its prefix, that it reads
+/// back as the same key, and that every text no key has is refused: no `/`, an end of
+/// other than 20 digits, a sign or other non-digit, an end past `u64::MAX`, and an id
+/// that is not one. It catches a cursor a client can bend (a signed or short end that
+/// reads as another key) and a text that panics.
+#[test]
+fn a_key_reads_back_from_its_text_and_other_text_is_refused() {
+    let key = key_of(1_234, "7-123");
+    assert_eq!(key.text(), "00000000000000001234/7-123");
+    assert_eq!(
+        format!("{ENDED_PREFIX}{}", key.text()),
+        ended_key(1_234, &key.id)
+    );
+    assert_eq!(EndedKey::parse(&key.text()), Some(key));
+    let last = key_of(u64::MAX, "a");
+    assert_eq!(EndedKey::parse(&last.text()), Some(last));
+    assert_eq!(EndedKey::of(&bare(5, "b")), key_of(5, "b"));
+    for text in [
+        "",
+        "00000000000000001234",
+        "0000000000000001234/a",
+        "000000000000000001234/a",
+        "+0000000000000001234/a",
+        "0000000000000000123x/a",
+        "99999999999999999999/a",
+        "00000000000000001234/",
+        "00000000000000001234/A",
+        "00000000000000001234/a/b",
+    ] {
+        assert_eq!(EndedKey::parse(text), None, "{text:?}");
+    }
+}
