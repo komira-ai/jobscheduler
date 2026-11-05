@@ -9,6 +9,11 @@
 //!   what a read of one machine by id found ([`Observed`]), which of its launches an
 //!   agent's first [`Hello`] comes from, and, if it sends any, its notices
 //!   ([`EventStream`] of [`ProviderEvent`]).
+//! - [`CatalogCache`] is what a scheduler remembers of one provider's catalog: the last
+//!   catalog that came whole, read as [`Catalog`], with when to fetch it again and an
+//!   invalidation for a refusal that says it is out of date. [`Cooldowns`] holds the offers
+//!   cooling down, by [`OfferKey`] (provider, instance type, zone). Time enters both as an
+//!   [`Instant`]; neither reads a clock or calls a provider.
 //! - [`ReadHandle`] is a provider seen through its reads only: code that holds one cannot
 //!   acquire or release, which is how a pool in plan mode is kept from spending.
 //! - [`Offer`] is what one launchable thing would give, and [`Offer::fit`] says whether
@@ -28,7 +33,7 @@
 //!   provider's crate writes. A new provider crate enables the feature in its
 //!   `[dev-dependencies]` and adds one test file that calls it. A provider that cannot
 //!   launch runs `conformance::run_all_registered` over a `conformance::RegisteredRig`
-//!   instead.
+//!   instead. `conformance::block_on` awaits a provider's future on the calling thread.
 //!
 //! Nothing here does I/O or reads a clock; the lease-level `Pool` of `js-provider` (the
 //! scheduler's allocation port) is a different trait.
@@ -37,6 +42,7 @@
 
 mod answer;
 mod boot;
+mod cache;
 mod caps;
 #[cfg(feature = "conformance")]
 pub mod conformance;
@@ -45,6 +51,8 @@ mod offer;
 mod provider;
 mod read;
 mod secret;
+#[cfg(any(test, feature = "conformance"))]
+mod wait;
 
 pub use answer::{
     Acquired, Claim, Extra, Held, HostStatus, Observed, Reason, Refusal, RefusalCode, Released,
@@ -53,11 +61,13 @@ pub use boot::{
     Artifact, BootPlan, BootStep, CONTAINER_BIN, ENGINE_OPT_IN, RUNTIME, SCRATCH_ROOT, STATE_ROOT,
     SlotName,
 };
+pub use cache::{Catalog, CatalogCache, Cooldowns, Instant, OfferKey, Recorded};
 pub use caps::{Capacity, ProviderCaps};
 pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};
 pub use offer::{Demand, Dimension, Offer, PriceUnit};
 pub use provider::{
-    AcquireRequest, CapacityProvider, CheckResult, EventStream, ProviderError, ProviderEvent,
+    AcquireRequest, CapacityProvider, CatalogFuture, CheckResult, EventStream, ProviderError,
+    ProviderEvent,
 };
 pub use read::ReadHandle;
 pub use secret::{BootPayload, Secret};

@@ -17,9 +17,9 @@ use js_elastic::conformance::{
     registered_verify_instance_matches_only_a_bound_instance, run_all_registered,
 };
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Claim, Held, Hello, HostRef,
-    HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal, RefusalCode,
-    Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Claim, Held,
+    Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal,
+    RefusalCode, Released,
 };
 use js_types::ProviderId;
 
@@ -113,11 +113,12 @@ impl CapacityProvider for Registered {
         }
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        match self.has(Flaw::CatalogFails) {
+    fn catalog(&self) -> CatalogFuture<'_> {
+        let answer = match self.has(Flaw::CatalogFails) {
             true => Err(ProviderError::new("no catalog")),
             false => Ok(Vec::new()),
-        }
+        };
+        Box::pin(std::future::ready(answer))
     }
 
     fn capacity(&self) -> Capacity {

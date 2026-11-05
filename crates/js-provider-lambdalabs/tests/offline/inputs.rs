@@ -360,9 +360,7 @@ fn a_scheduler_id_too_long_to_name_a_key_makes_none_and_still_uses_the_only_key(
 #[test]
 fn the_catalog_and_the_launch_keep_to_the_configured_regions() {
     let rig = rig(live(5).regions(&["region-a"]).unwrap());
-    let zones: Vec<String> = rig
-        .provider
-        .catalog()
+    let zones: Vec<String> = crate::rig::catalog(&rig.provider)
         .unwrap()
         .into_iter()
         .filter_map(|offer| offer.zone)

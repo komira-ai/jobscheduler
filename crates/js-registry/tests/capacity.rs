@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, InstanceIdentity, Taint};
-use js_elastic::conformance::{REGISTERED_CASES, RegisteredRig, run_all_registered};
+use js_elastic::conformance::{REGISTERED_CASES, RegisteredRig, block_on, run_all_registered};
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, Claim, Hello,
     HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, Reason, Refusal,
@@ -281,7 +281,7 @@ fn static_provider_reports_hosts_supplied_and_nothing_to_launch() {
     let static_hosts = provider(&fx);
     assert_eq!(static_hosts.id().as_str(), "builders");
     assert!(!static_hosts.can_launch());
-    assert_eq!(static_hosts.catalog(), Ok(Vec::new()));
+    assert_eq!(block_on(static_hosts.catalog()), Ok(Vec::new()));
     assert_eq!(static_hosts.list(), Ok(Vec::new()));
     assert_eq!(static_hosts.capabilities(), ProviderCaps::default());
     let none = Capacity {

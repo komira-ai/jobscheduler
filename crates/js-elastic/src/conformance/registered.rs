@@ -15,7 +15,7 @@
 
 use js_types::ExecMode;
 
-use super::{acquire_id, refusal_of};
+use super::{acquire_id, block_on, refusal_of};
 use crate::answer::{Observed, RefusalCode, Released};
 use crate::caps::{Capacity, ProviderCaps};
 use crate::ids::{Hello, HostName, HostRef, SchedulerId};
@@ -322,7 +322,7 @@ pub fn registered_catalog_is_empty_and_capabilities_follow_the_machines(
         "{CASE}: with no machine there is no capability"
     );
     assert_eq!(
-        rig.provider().catalog(),
+        block_on(rig.provider().catalog()),
         Ok(Vec::new()),
         "{CASE}: the catalog is an empty answer, not an error"
     );
@@ -340,7 +340,7 @@ pub fn registered_catalog_is_empty_and_capabilities_follow_the_machines(
         "{CASE}: the architectures are the one the machine reported"
     );
     assert_eq!(
-        rig.provider().catalog(),
+        block_on(rig.provider().catalog()),
         Ok(Vec::new()),
         "{CASE}: with a machine the catalog is still empty"
     );

@@ -14,29 +14,37 @@ use js_registry::Registry;
 use js_sched::admission_ever::{Admission, PoolLimits, can_ever_serve};
 use js_types::Requirements;
 
-use crate::admit;
+use crate::adapt::SharedClock;
+use crate::admit::{self, Launching};
+use crate::catalogs::{Cached, Catalogs};
 
-/// The `default` platform: its machine providers, first to last, and the host table of its
-/// `static` provider, whose hosts register themselves.
+/// The `default` platform: its machine providers, first to last, the host table of its
+/// `static` provider, whose hosts register themselves, and the cache of its launching
+/// providers' catalogs.
 pub struct DefaultPlatform {
     id: PlatformId,
     providers: Vec<Arc<dyn CapacityProvider>>,
     hosts: Option<Registry>,
+    cached: Cached,
 }
 
 impl DefaultPlatform {
     /// The platform `id` over `providers`, in the order its resolved platform names its
     /// machine providers, and `hosts`, the host table of its `static` machine provider when
-    /// it names one.
+    /// it names one. Its launching providers' catalogs are read from `catalogs` at the time
+    /// of `clock`; a provider `catalogs` has not fetched may offer.
     pub fn new(
         id: PlatformId,
         providers: Vec<Arc<dyn CapacityProvider>>,
         hosts: Option<Registry>,
+        catalogs: Arc<Catalogs>,
+        clock: SharedClock,
     ) -> Self {
         Self {
             id,
             providers,
             hosts,
+            cached: Cached::new(catalogs, clock),
         }
     }
 }
@@ -57,16 +65,23 @@ impl ContainerPlatform for DefaultPlatform {
     /// Whether anything of the platform could ever serve `r`: admission's own decision
     /// ([`js_sched::admission_ever::can_ever_serve`], design 5.6, step 2) over the hosts of
     /// its host table, as the lease route reads them, and its machine providers, each
-    /// catalog read once (one that cannot be read may offer). The platform is built without
-    /// a pool, so it applies no pool limit and bounds no provider's share.
+    /// catalog as the cache holds it (one never fetched may offer); no provider is called.
+    /// The platform is built without a pool, so it applies no pool limit and bounds no
+    /// provider's share.
     fn can_ever_serve(&self, r: &Requirements) -> bool {
         let hosts = self.hosts.as_ref().map(Registry::hosts).unwrap_or_default();
         let hosts: Vec<_> = hosts.iter().map(admit::registered).collect();
+        let now = self.cached.now();
         let providers: Vec<_> = self
             .providers
             .iter()
             .map(|provider| {
-                admit::provider_view(provider.as_ref(), u32::MAX, PoolLimits::default())
+                let one = Launching {
+                    provider: Arc::clone(provider),
+                    share: u32::MAX,
+                    limits: PoolLimits::default(),
+                };
+                admit::provider_view(&one, self.cached.catalogs(), now)
             })
             .collect();
         can_ever_serve(r, &hosts, &providers) != Admission::Refuse

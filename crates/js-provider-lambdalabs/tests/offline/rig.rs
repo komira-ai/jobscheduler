@@ -5,14 +5,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, BootPayload, HostName, HostRef, HostStatus, Offer, PriceUnit,
-    SchedulerId,
+    AcquireId, AcquireRequest, BootPayload, CapacityProvider, HostName, HostRef, HostStatus, Offer,
+    PriceUnit, ProviderError, SchedulerId,
 };
 use js_provider_lambdalabs::{
     Architecture, ElasticConfig, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
     LambdaProvider, ManualClock, OptionTable, Region, Tag,
 };
 use js_types::{ExecMode, Model, accelerator_of};
+
+/// The provider's catalog, awaited on a runtime of its own: the catalog runs its blocking
+/// call on tokio's blocking pool, which needs a runtime.
+pub fn catalog(provider: &LambdaProvider) -> Result<Vec<Offer>, ProviderError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(provider.catalog())
+}
 
 pub const SCHEDULER: &str = "sched-one";
 pub const KEY: &str = "fixture-key";

@@ -177,7 +177,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Once;
 
-    use js_elastic::{AcquireId, AcquireRequest, Artifact, BootStep, HostStatus, PriceUnit};
+    use js_elastic::{
+        AcquireId, AcquireRequest, Artifact, BootStep, CatalogFuture, HostStatus, PriceUnit,
+    };
     use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
     use js_types::{ExecMode, Model, ResourceClass, Resources, Shape, accelerator_of};
@@ -202,8 +204,10 @@ mod tests {
             js_elastic::ProviderCaps::default()
         }
 
-        fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-            Err(ProviderError::new("the catalog is not read here"))
+        fn catalog(&self) -> CatalogFuture<'_> {
+            Box::pin(std::future::ready(Err(ProviderError::new(
+                "the catalog is not read here",
+            ))))
         }
 
         fn capacity(&self) -> js_elastic::Capacity {
@@ -343,8 +347,8 @@ mod tests {
     /// no host in a new registry, a pool not yet checked with no offers, the provider's
     /// list, release, acquire, unresolved acquire ids and by-id read as the provider answers
     /// them. It catches a method wired to the wrong call.
-    #[test]
-    fn the_reads_and_the_providers_calls_pass_through() {
+    #[tokio::test]
+    async fn the_reads_and_the_providers_calls_pass_through() {
         let (live, _dir) = live("pass");
         let acquire = AcquireId::new("a1").unwrap();
         let plan = AcquirePlan {
@@ -363,7 +367,7 @@ mod tests {
         assert!(!live.leased("js-nobody"));
         assert_eq!(live.checks(), (Health::Checking, Vec::new()));
         assert!(
-            live.provider.catalog().is_err(),
+            live.provider.catalog().await.is_err(),
             "the checks read the catalog"
         );
         assert_eq!(live.list(), Ok(Vec::new()));
