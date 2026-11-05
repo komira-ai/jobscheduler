@@ -139,8 +139,9 @@ when the table is absent) with any other key present is refused, naming the key.
 file is owner-only like every other key file (mode 0600 or 0400, owned by the service user), holding exactly
 `{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
-repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). Nothing uses the table
-yet: no credential is minted and no log is read.
+repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
+server mints each uploading host's credential with the mint key, delivers and renews it in heartbeat replies, and puts each job's sink
+in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
 section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64

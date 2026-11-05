@@ -1,20 +1,30 @@
 //! A server with the job tables over a store that can fail a commit, hosts registered with or
 //! without the `per-job` capability, and a fake of an agent that speaks the per-job messages,
 //! for the tests of the heartbeat's per-job half. Nothing here waits on time: the registry's
-//! clock and the store's clock are manual and never move.
+//! clock and the store's clock are manual and move only when a test advances them.
+//!
+//! A server with a log sink ([`logging_rig`]) mints its host credentials with js-logmint's
+//! fake minter over js-logstore's fake store, both on the server's clock; its hosts say hello
+//! through the route ([`Rig::join`]), and the fake agent can report `log-upload` and the
+//! credential it holds.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use js_agent_wire::{
-    Command, HeldJob, HeldState, JobResult, JobStartSpec, LogTail, Outcome, Phase,
+    Command, DEFAULT_HEARTBEAT_INTERVAL_MS, HeldJob, HeldState, JobResult, JobStartSpec, LogGrant,
+    LogGrantState, LogTail, Outcome, Phase,
 };
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
     JobStore, Needs, NetworkPolicy, NewJob, RandomIds,
 };
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Clock as _, ManualClock, Timestamp};
+use js_logmint::fake::FakeMinter;
+use js_logmint::{Bucket, LogPrefix};
+use js_logstore::fake::FakeStore;
+use js_logstore::{Endpoint, Store as LogStore};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
@@ -24,6 +34,7 @@ use serde_json::json;
 
 use super::*;
 use crate::adapt::SharedClock;
+use crate::logs::{Scope, SinkTemplate, StoreClock};
 
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
@@ -90,17 +101,144 @@ pub(crate) struct Rig {
     pub(crate) jobs: Arc<ServerJobs>,
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
+    /// The clock of the registry and of the log credentials.
+    pub(crate) clock: ManualClock,
     who: Credential,
     sessions: BTreeMap<String, (u64, String)>,
     _dir: TestDir,
 }
 
+/// When every test server starts, in milliseconds since the epoch.
+pub(crate) const START_MS: u64 = 5_000_000;
+
+/// The store a log sink names, as the agent and the server see it.
+pub(crate) const LOG_ENDPOINT: &str = "https://objects.example";
+
+/// The region of [`LOG_ENDPOINT`].
+pub(crate) const LOG_REGION: &str = "us-east-1";
+
+/// The bucket of the log sink.
+pub(crate) const LOG_BUCKET: &str = "logs";
+
+/// The log prefix of the sink: one the prefix `a/bc/` is outside of.
+pub(crate) const LOG_PREFIX: &str = "a/b";
+
+/// How long a host credential is asked to live.
+pub(crate) const LOG_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A server named `name`, holding the job tables when `with_jobs`.
 pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
+    build(name, with_jobs, None, None, None)
+}
+
+/// A server named `name` that holds the job tables and minting through a fake minter, whose
+/// hosts are lost after `grace_ms` of silence; the fake minter and the server's grants.
+pub(crate) fn logging_rig(name: &str, grace_ms: u64) -> (Rig, Logs) {
+    logging_over(name, grace_ms, None, START_MS)
+}
+
+/// [`logging_rig`] over the job tables of `tables` (a store a server ran on before) when
+/// given, with its clock at `now_ms`: a server rebuilt on the same store, with a new registry
+/// and nothing of the log credentials held before.
+pub(crate) fn logging_over(
+    name: &str,
+    grace_ms: u64,
+    tables: Option<&Rig>,
+    now_ms: u64,
+) -> (Rig, Logs) {
+    let clock = ManualClock::new(Timestamp::from_millis(now_ms));
+    let shared = SharedClock::new(clock.clone());
+    let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
+    let store = FakeStore::new(endpoint.clone(), Arc::new(StoreClock(shared.clone())));
+    let minter = Arc::new(FakeMinter::new(store));
+    let grants = grants_over(
+        endpoint,
+        Arc::clone(&minter) as Arc<dyn js_logmint::Minter>,
+        &shared,
+    );
+    let tables = tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs)));
+    let timing = Some((clock, grace_ms));
+    let rig = build(name, true, timing, Some(Arc::clone(&grants)), tables);
+    let logs = Logs {
+        minter,
+        grants,
+        clock: shared,
+    };
+    (rig, logs)
+}
+
+/// The grants of a sink at `endpoint` under [`LOG_PREFIX`], minting with `minter` on `clock`.
+pub(crate) fn grants_over(
+    endpoint: Endpoint,
+    minter: Arc<dyn js_logmint::Minter>,
+    clock: &SharedClock,
+) -> Arc<LogGrants> {
+    let prefix = LogPrefix::new(LOG_PREFIX).unwrap();
+    let template = SinkTemplate {
+        endpoint,
+        prefix: prefix.clone(),
+    };
+    let scope = Scope {
+        bucket: Bucket::new(LOG_BUCKET).unwrap(),
+        prefix,
+        ttl: LOG_TTL,
+    };
+    Arc::new(LogGrants::new(template, scope, minter, clock.clone()))
+}
+
+/// The log side of a [`logging_rig`].
+pub(crate) struct Logs {
+    /// The fake minter, which counts the mints per host and can fail or hold them.
+    pub(crate) minter: Arc<FakeMinter>,
+    /// The grants the server holds.
+    pub(crate) grants: Arc<LogGrants>,
+    /// The server's clock.
+    clock: SharedClock,
+}
+
+impl Logs {
+    /// Waits until no mint is running; never for a time.
+    pub(crate) async fn settle(&self) {
+        let grants = Arc::clone(&self.grants);
+        blocking(move || grants.settle()).await;
+    }
+
+    /// Waits until `n` mints are held by the blocked minter.
+    pub(crate) async fn held(&self, n: usize) {
+        let minter = Arc::clone(&self.minter);
+        blocking(move || minter.wait_for_held(n)).await;
+    }
+
+    /// A client of the fake store signing with `grant`, as the agent signs its uploads.
+    pub(crate) fn client(&self, grant: &LogGrant) -> LogStore<FakeStore, StoreClock> {
+        let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
+        let credential = js_logstore::Credential {
+            access_key_id: grant.access_key_id.clone(),
+            secret_access_key: grant.secret_access_key.clone(),
+            session_token: grant.session_token.clone(),
+            expires_at: std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(grant.expires_at_ms),
+        };
+        let clock = StoreClock(self.clock.clone());
+        LogStore::new(self.minter.store().clone(), clock, endpoint, credential)
+    }
+}
+
+/// The store under a server's job tables, and the tables.
+type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
+
+/// A server named `name`: with the job tables when `with_jobs` (`tables` when given, fresh
+/// ones otherwise), on `timing`'s clock and grace when given (a fixed clock and the pool's
+/// grace otherwise), and minting with `logs`.
+fn build(
+    name: &str,
+    with_jobs: bool,
+    timing: Option<(ManualClock, u64)>,
+    logs: Option<Arc<LogGrants>>,
+    tables: Option<Tables>,
+) -> Rig {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
-    let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
-    let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
     let shape = Shape::new(resources, BTreeMap::new());
     let pool = PoolConfig::new(
@@ -109,19 +247,35 @@ pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
         shape,
         4,
     );
-    let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
-    let (store, jobs) = tables();
-    let jobs = Arc::new(jobs);
+    let (clock, pool) = match timing {
+        Some((clock, grace_ms)) => {
+            let timed = pool.with_timing(DEFAULT_HEARTBEAT_INTERVAL_MS, grace_ms);
+            (clock, timed.unwrap())
+        }
+        None => (ManualClock::new(Timestamp::from_millis(START_MS)), pool),
+    };
+    let shared = SharedClock::new(clock.clone());
+    let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+    let fresh = || {
+        let (store, jobs) = self::tables();
+        (store, Arc::new(jobs))
+    };
+    let (store, jobs) = tables.unwrap_or_else(fresh);
     let agents = Agents::over(registry, &shared, dir.path());
     let agents = match with_jobs {
         true => agents.with_jobs(Arc::clone(&jobs)),
         false => agents,
+    };
+    let agents = match logs {
+        Some(logs) => agents.with_logs(logs),
+        None => agents,
     };
     let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
         agents: Arc::new(agents),
         jobs,
         store,
+        clock,
         who,
         sessions: BTreeMap::new(),
         _dir: dir,
@@ -129,12 +283,62 @@ pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
 }
 
 impl Rig {
+    /// Says hello for `host` through the route, as an agent that reports the `per-job`
+    /// capability and, when `uploads`, the `log-upload` capability.
+    pub(crate) async fn join(&mut self, host: &str, uploads: bool) {
+        let mut capabilities = json!({ "per-job": "true" });
+        if uploads {
+            capabilities["log-upload"] = json!("true");
+        }
+        let hello = json!({
+            "host_id": host,
+            "pool": "burst",
+            "agent_version": "0.1.0",
+            "shape": {
+                "cpu_millis": 8000,
+                "memory_bytes": 17179869184u64,
+                "gpus": 1,
+                "gpu_class": "nvidia-a100",
+            },
+            "capabilities": capabilities,
+            "phase": "serving",
+        });
+        let body = Bytes::from(serde_json::to_vec(&hello).unwrap());
+        let welcome = serve_hello(&self.agents, self.who.clone(), None, Ok(body), &|| ()).await;
+        let Json(welcome) = welcome.unwrap();
+        self.sessions
+            .insert(host.to_owned(), (welcome.epoch, welcome.session));
+    }
+
+    /// Registers `host` past the route, as [`Rig::register`] does, as an agent that reports
+    /// the `per-job` and `log-upload` capabilities: a host whose hello the registry holds and
+    /// whose hello the log side never saw.
+    pub(crate) fn register_uploading(&mut self, host: &str) {
+        self.register_with(host, json!({ "per-job": "true", "log-upload": "true" }));
+    }
+
+    /// The directory the server's files are kept in.
+    pub(crate) fn dir(&self) -> &Path {
+        self._dir.path()
+    }
+
+    /// Moves the clock on by `millis`.
+    pub(crate) fn advance(&self, millis: u64) {
+        let now = self.clock.now().millis();
+        self.clock.set(Timestamp::from_millis(now + millis));
+    }
+
     /// Registers `host`, whose agent reports the `per-job` capability when `per_job`.
     pub(crate) fn register(&mut self, host: &str, per_job: bool) {
         let capabilities = match per_job {
             true => json!({ "per-job": "true" }),
             false => json!({}),
         };
+        self.register_with(host, capabilities);
+    }
+
+    /// Registers `host`, whose agent reports `capabilities`, past the route.
+    fn register_with(&mut self, host: &str, capabilities: serde_json::Value) {
         let hello: Hello = serde_json::from_value(json!({
             "host_id": host,
             "pool": "burst",
@@ -171,7 +375,7 @@ impl Rig {
             disk_gib: None,
             jobs: agent.listing(),
             retired_jobs: agent.retired.iter().cloned().collect(),
-            log_grant_state: None,
+            log_grant_state: agent.log_state(),
         };
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
         let agents = State(Arc::clone(&self.agents));
@@ -217,6 +421,10 @@ struct Held {
 /// does not hold retires the id, listed until the server acknowledges it; an acknowledged
 /// result is dropped with its container at once, and the id is fenced, so a start that
 /// arrives later is not run. It makes a container only when told to run a job.
+///
+/// An agent that uploads ([`FakeAgent::uploading`]) reports in each heartbeat the expiry of
+/// the log credential it holds and whether it asks for a new one, takes the `log_grant` of a
+/// reply it takes, and starts out holding none and asking.
 pub(crate) struct FakeAgent {
     pub(crate) host: String,
     held: BTreeMap<String, Held>,
@@ -224,6 +432,12 @@ pub(crate) struct FakeAgent {
     fenced: BTreeSet<String>,
     /// The jobs it made a container for, in order.
     pub(crate) launched: Vec<String>,
+    /// Whether it reports `log_grant_state`.
+    uploads: bool,
+    /// The log credential it holds.
+    pub(crate) grant: Option<LogGrant>,
+    /// Whether it asks for a new credential.
+    pub(crate) stale: bool,
 }
 
 impl FakeAgent {
@@ -235,7 +449,29 @@ impl FakeAgent {
             retired: BTreeSet::new(),
             fenced: BTreeSet::new(),
             launched: Vec::new(),
+            uploads: false,
+            grant: None,
+            stale: false,
         }
+    }
+
+    /// The agent of `host` that uploads live logs: it holds no credential yet and asks for
+    /// one, as a freshly started agent does.
+    pub(crate) fn uploading(host: &str) -> Self {
+        Self {
+            uploads: true,
+            stale: true,
+            ..Self::new(host)
+        }
+    }
+
+    /// What its next heartbeat reports of its log credential: nothing for an agent that does
+    /// not upload.
+    pub(crate) fn log_state(&self) -> Option<LogGrantState> {
+        self.uploads.then(|| LogGrantState {
+            stale: self.stale,
+            until_ms: self.grant.as_ref().map(|grant| grant.expires_at_ms),
+        })
     }
 
     /// The job listing of its next heartbeat.
@@ -284,6 +520,10 @@ impl FakeAgent {
         for id in &reply.retired_acks {
             self.retired.remove(id);
         }
+        if let Some(grant) = &reply.log_grant {
+            self.grant = Some(grant.clone());
+            self.stale = false;
+        }
     }
 
     /// Lists `id` as held under `allocation_id` in `state`, whatever the server said: a job
@@ -308,6 +548,15 @@ impl FakeAgent {
         let held = self.held.get_mut(id).unwrap();
         held.state = HeldState::ExitedUnacked;
         held.result = Some(result(id, &held.allocation_id, outcome, exit_code));
+    }
+
+    /// The held job `id` ends with a clean exit whose result reports `logs`.
+    pub(crate) fn end_with_logs(&mut self, id: &str, logs: js_agent_wire::LogReport) {
+        let held = self.held.get_mut(id).unwrap();
+        held.state = HeldState::ExitedUnacked;
+        let mut ended = result(id, &held.allocation_id, Outcome::Succeeded, Some(0));
+        ended.logs = Some(logs);
+        held.result = Some(ended);
     }
 }
 

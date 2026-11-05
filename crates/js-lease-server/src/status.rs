@@ -9,6 +9,11 @@
 //! secret to leak: the plan of the next launch is the masked render of a plan that has
 //! no secret in it, and the checks' reasons are messages written to be shown.
 //!
+//! With `[logs] sink = "object_store"` both also show the counters of the host credentials
+//! of live logs (`logs`: mints that succeeded and failed since the start, the hosts holding a
+//! credential and those whose last mint failed); they hold no credential, and without a sink
+//! the field is left out, so the reply is as it was before it.
+//!
 //! The machines, the figures of what they cost, the orphans and the last launch are the
 //! scaler's records for the pool (what its last tick left), so they are empty for a pool
 //! that has launched nothing, and in `plan` mode. A record holds no secret: it names a
@@ -16,7 +21,7 @@
 //! shown: the scaler does not give out since when a host has been quiet.
 
 use std::fmt::Write;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
@@ -28,6 +33,7 @@ use serde::Serialize;
 use crate::adapt::SharedClock;
 use crate::checks::{Checked, State, Verdict};
 use crate::hosts::MemoryView;
+use crate::logs::{LogCounters, LogGrants};
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 use crate::scaler::Scaler;
 
@@ -38,6 +44,7 @@ pub(crate) struct Status {
     scaler: Option<Scaler>,
     warnings: Vec<String>,
     clock: SharedClock,
+    logs: Option<Arc<LogGrants>>,
 }
 
 /// The reply of `GET /v1/pools`.
@@ -46,6 +53,9 @@ pub(crate) struct PoolsView {
     pub(crate) pools: Vec<PoolView>,
     /// `server: warning: ...` lines, such as a listener on every interface.
     pub(crate) warnings: Vec<String>,
+    /// The counters of the host credentials of live logs; left out without a sink.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) logs: Option<LogCounters>,
 }
 
 /// One pool.
@@ -259,7 +269,14 @@ impl Status {
             scaler,
             warnings,
             clock,
+            logs: None,
         }
+    }
+
+    /// The same status, showing the counters of the host credentials of `logs`.
+    #[must_use]
+    pub(crate) fn with_logs(self, logs: Option<Arc<LogGrants>>) -> Self {
+        Self { logs, ..self }
     }
 
     /// The status now.
@@ -268,6 +285,7 @@ impl Status {
         PoolsView {
             pools,
             warnings: self.warnings.clone(),
+            logs: self.logs.as_ref().map(|logs| logs.counters()),
         }
     }
 
@@ -383,8 +401,26 @@ pub(crate) fn page(view: &PoolsView, at: Timestamp) -> String {
     for pool in &view.pools {
         pool_section(&mut out, pool);
     }
+    if let Some(logs) = &view.logs {
+        logs_section(&mut out, logs);
+    }
     out.push_str("</body></html>\n");
     out
+}
+
+/// The counters of the host credentials of live logs.
+fn logs_section(out: &mut String, logs: &LogCounters) {
+    out.push_str("<h2>Live logs</h2>\n<table>\n");
+    row(out, "credentials minted", &logs.minted.to_string());
+    row(out, "mints failed", &logs.failed.to_string());
+    let held = logs.hosts_with_credential.to_string();
+    row(out, "hosts with a credential", &held);
+    row(
+        out,
+        "hosts whose last mint failed",
+        &logs.hosts_failing.to_string(),
+    );
+    out.push_str("</table>\n");
 }
 
 /// One row of a pool's table.

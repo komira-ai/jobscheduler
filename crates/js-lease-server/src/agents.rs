@@ -23,6 +23,7 @@ use crate::error::StartupError;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
+use crate::logs::{self, LogGrants};
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
@@ -76,6 +77,10 @@ pub(crate) struct Agents {
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
     unclean: Mutex<BTreeSet<HostId>>,
+    /// The host credentials and job sinks of live logs, with `sink = "object_store"`
+    /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
+    /// under it or under the registry's.
+    pub(crate) logs: Option<Arc<LogGrants>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
@@ -94,14 +99,17 @@ pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
 ///
 /// Without agent flags this is the source `--pool-config` names, untouched. With them it
 /// is a [`LayeredSource`] over that source (if given) and a registry on `clock`, seeded
-/// with the bindings the previous run persisted.
+/// with the bindings the previous run persisted. The agent side mints the host credentials
+/// of live logs with `logs` ([`crate::logs`]); without agent flags no host reports, and
+/// `logs` is dropped.
 pub(crate) fn assemble(
     hosts: Hosts,
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
+    logs: Option<Arc<LogGrants>>,
 ) -> Result<Assembled, StartupError> {
-    assemble_placed(hosts, usage, clock, state_file).map(|(assembled, _)| assembled)
+    assemble_placed(hosts, usage, clock, state_file, logs).map(|(assembled, _)| assembled)
 }
 
 /// [`assemble`], with the placer the registry was given under `--placement js-sched`.
@@ -110,6 +118,7 @@ pub(crate) fn assemble_placed(
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
+    logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
         Hosts::Static(source) => Ok(((source, None), None)),
@@ -177,6 +186,7 @@ pub(crate) fn assemble_placed(
                 usage,
                 jobs: None,
                 unclean: Mutex::default(),
+                logs,
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
@@ -218,6 +228,7 @@ impl Agents {
             usage: None,
             jobs: None,
             unclean: Mutex::default(),
+            logs: None,
         }
     }
 
@@ -226,6 +237,16 @@ impl Agents {
     pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
         Self {
             jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// This agent side minting the host credentials of live logs with `logs`, for a test of
+    /// the heartbeat's log grant and the start's sink.
+    #[cfg(test)]
+    pub(crate) fn with_logs(self, logs: Arc<LogGrants>) -> Self {
+        Self {
+            logs: Some(logs),
             ..self
         }
     }
@@ -370,7 +391,9 @@ impl Agents {
     /// hello limits of those that left the file, and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits. The usage side, when there is one, is ticked last.
+    /// force, and their limits. The usage side, when there is one, is ticked next, and the
+    /// host credentials of live logs last ([`LogGrants::tick`]: the departed hosts' are
+    /// forgotten, the renewals and the retries queued and started, off this task).
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
         match blocking(move || this.tokens.reload()).await {
@@ -383,6 +406,9 @@ impl Agents {
         self.save_bindings().await;
         if let Some(usage) = &self.usage {
             usage.tick().await;
+        }
+        if let Some(grants) = &self.logs {
+            grants.tick(&logs::uploading_hosts(&self.registry));
         }
     }
 

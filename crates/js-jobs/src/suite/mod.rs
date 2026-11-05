@@ -29,6 +29,7 @@ mod failures;
 mod hosts;
 mod idempotency;
 mod lifecycle;
+mod logs;
 mod paging;
 mod placement;
 mod races;
@@ -41,6 +42,7 @@ pub use failures::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use lifecycle::*;
+pub use logs::*;
 pub use paging::*;
 pub use placement::*;
 pub use races::*;
@@ -111,6 +113,7 @@ where
     the_tick_deletes_in_batches_and_leaves_what_it_cannot_read(backend);
     a_failed_sweep_or_raise_changes_nothing(backend);
     a_sweep_that_loses_to_a_raise_is_stale(backend);
+    the_log_lengths_are_kept_with_the_result_and_swept_with_it(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -188,6 +191,7 @@ macro_rules! job_store_tests {
             the_tick_deletes_in_batches_and_leaves_what_it_cannot_read,
             a_failed_sweep_or_raise_changes_nothing,
             a_sweep_that_loses_to_a_raise_is_stale,
+            the_log_lengths_are_kept_with_the_result_and_swept_with_it,
         );
     };
 }
@@ -374,6 +378,7 @@ pub(crate) fn output() -> Output {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
         }),
+        logs: None,
     }
 }
 

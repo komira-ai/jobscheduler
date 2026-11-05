@@ -337,7 +337,7 @@ const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live"
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -362,7 +362,8 @@ impl<'a> MakeWriter<'a> for Lines {
 }
 
 impl Lines {
-    fn take(&self) -> String {
+    /// The lines written since the last take.
+    pub(crate) fn take(&self) -> String {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8(std::mem::take(&mut *held)).unwrap()
     }

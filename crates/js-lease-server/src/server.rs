@@ -242,11 +242,13 @@ pub(crate) fn prepare(
         monotonic,
         alerts,
         alert_repeat,
+        logs,
         ..
     } = config;
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(hosts, usage, clock, &state_file)?;
+    let logs = crate::logs::from_config(&logs, clock);
+    let (source, agents) = assemble(hosts, usage, clock, &state_file, logs)?;
     let launching = elastic.iter().map(|plan| Launching {
         provider: Arc::clone(&plan.provider),
         share: plan.share,
@@ -337,6 +339,7 @@ pub(crate) fn open(
         admit,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
     }
@@ -366,7 +369,8 @@ pub(crate) fn open(
         warn!("{warning}");
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let status =
+        Status::new(pool, registry, scaler.clone(), warnings, clock.clone()).with_logs(logs);
     let status = serves_status.then(|| Arc::new(status));
     let shared = Arc::new(
         Shared::new(table, token, agents)

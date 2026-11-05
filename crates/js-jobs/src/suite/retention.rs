@@ -75,6 +75,7 @@ pub fn a_result_is_readable_until_the_retention_end_and_not_after<B: Backend>(ba
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
         }),
+        logs: None,
     };
     assert_eq!(
         (ended.state, ended.result.clone(), ended.retention_ends),
@@ -423,6 +424,7 @@ pub fn an_overlong_tail_is_cut_on_a_character_boundary<B: Backend>(backend: &B) 
             stderr: stderr.clone(),
             truncated: false,
             usage: None,
+            logs: None,
         },
     };
     let ended = rig.jobs.end_job(&id, end).expect("ends");

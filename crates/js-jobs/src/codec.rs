@@ -107,7 +107,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] are read only beside it.
+    /// the tags up to [`RESULT_LOGS`] are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -127,6 +127,9 @@ pub(crate) mod job_tag {
     pub const RESULT_ENDED_AT: u16 = 39;
     /// What it used: the CPU time (time) and then the peak memory in bytes (u64).
     pub const RESULT_USAGE: u16 = 40;
+    /// The lengths of its output streams: standard output's bytes, standard error's, then the
+    /// bytes each dropped (four u64).
+    pub const RESULT_LOGS: u16 = 41;
 }
 
 /// The tags of an allocation row.

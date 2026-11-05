@@ -135,7 +135,7 @@ impl AccessKey {
     /// The key from the bytes of a key file: a JSON object with exactly `access_key_id` (1 to
     /// 128 ASCII letters and digits) and `secret_access_key` (1 to 1024 printable ASCII bytes).
     /// `None` for anything else; the reason never quotes the file.
-    fn parse(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         let value: Value = serde_json::from_slice(bytes).ok()?;
         let object = value.as_object().filter(|object| object.len() == 2)?;
         let id = object.get("access_key_id")?.as_str()?;

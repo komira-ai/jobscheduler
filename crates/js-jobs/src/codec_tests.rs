@@ -8,7 +8,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, Labels};
 
 use super::*;
-use crate::result::{JobResult, JobTiming, ResourceUsage, ResultReason};
+use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::suite::{full_spec, whole_host_spec};
 
 fn at(secs: u64) -> StoreTime {
@@ -32,6 +32,12 @@ fn full_result() -> JobResult {
         usage: Some(ResourceUsage {
             cpu_time: Duration::from_secs(7),
             peak_memory_bytes: 4096,
+        }),
+        logs: Some(LogLengths {
+            stdout_bytes: 2_621_440,
+            stderr_bytes: 100,
+            stdout_dropped: 1,
+            stderr_dropped: 2,
         }),
     }
 }
@@ -153,6 +159,7 @@ fn a_record_reads_back_as_written() {
                 ended_at: at(2),
             },
             usage: None,
+            logs: None,
         }),
         ..bare_job()
     };
@@ -397,6 +404,13 @@ fn the_layout_is_pinned_byte_for_byte() {
         (38, seconds(3)),
         (39, seconds(4)),
         (40, [seconds(7), 4096u64.to_be_bytes().to_vec()].concat()),
+        (
+            41,
+            [2_621_440u64, 100, 1, 2]
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .collect(),
+        ),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -437,7 +451,7 @@ fn the_layout_is_pinned_byte_for_byte() {
     );
     assert_eq!(field_of(&bare, 24), None, "None is not written");
     assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
-    for tag in 31..=40 {
+    for tag in 31..=41 {
         assert_eq!(
             field_of(&bare, tag),
             None,
@@ -526,6 +540,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_PLACED_AT,
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
+        job_tag::RESULT_LOGS,
     ] {
         row = without(&row, tag);
     }
@@ -543,12 +558,13 @@ fn a_field_the_row_lacks_reads_as_its_default() {
                 ..full_result().timing
             },
             usage: None,
+            logs: None,
             ..full_result()
         })
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in 31..=40 {
+    for tag in 31..=41 {
         before_results = without(&before_results, tag);
     }
     assert_eq!(
@@ -814,6 +830,20 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             .concat(),
             BadValue {
                 tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            t::RESULT_LOGS,
+            vec![0; 31],
+            BadLength {
+                tag: t::RESULT_LOGS,
+            },
+        ),
+        (
+            t::RESULT_LOGS,
+            vec![0; 33],
+            BadLength {
+                tag: t::RESULT_LOGS,
             },
         ),
     ];
