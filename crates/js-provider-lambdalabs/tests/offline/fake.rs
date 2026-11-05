@@ -12,7 +12,7 @@ fn instance(id: &str, status: HostStatus) -> Instance {
         name: None,
         status,
         region: "region-a".to_owned(),
-        instance_type: "gpu_1x_sample".to_owned(),
+        instance_type: "gpu_1x_h100_sxm5".to_owned(),
         ip: None,
         private_ip: None,
         hostname: None,
@@ -140,7 +140,7 @@ fn every_call_is_recorded_failed_ones_included() {
 fn launch_request(name: &str, region: &str) -> js_provider_lambdalabs::LaunchRequest {
     js_provider_lambdalabs::LaunchRequest {
         region: region.to_owned(),
-        instance_type: "gpu_1x_sample".to_owned(),
+        instance_type: "gpu_1x_h100_sxm5".to_owned(),
         ssh_key: "key".to_owned(),
         name: name.to_owned(),
         tags: Vec::new(),
@@ -152,7 +152,7 @@ fn launch_request(name: &str, region: &str) -> js_provider_lambdalabs::LaunchReq
 #[test]
 fn a_launch_starts_a_booting_instance_with_the_name_and_tags_asked_for() {
     let fake = FakeLambda::new();
-    fake.set_offers(vec![offer("gpu_1x_sample")]);
+    fake.set_offers(vec![offer("gpu_1x_h100_sxm5")]);
     let mut request = launch_request("box", "region-a");
     request.tags = vec![js_provider_lambdalabs::Tag {
         key: "k".to_owned(),
@@ -169,7 +169,7 @@ fn a_launch_starts_a_booting_instance_with_the_name_and_tags_asked_for() {
 #[test]
 fn a_launch_the_real_api_would_refuse_fails_here_too() {
     let fake = FakeLambda::new();
-    fake.set_offers(vec![offer("gpu_1x_sample")]);
+    fake.set_offers(vec![offer("gpu_1x_h100_sxm5")]);
     let code = |request| match fake.launch(&request).unwrap_err() {
         ApiError::Api { status, code, .. } => (status, code),
         other => panic!("{other:?}"),
@@ -271,7 +271,7 @@ fn a_key_is_made_once_per_name() {
 #[test]
 fn a_launch_may_attach_only_rulesets_the_region_holds_and_the_log_hides_the_user_data() {
     let fake = FakeLambda::new();
-    fake.set_offers(vec![offer("gpu_1x_sample")]);
+    fake.set_offers(vec![offer("gpu_1x_h100_sxm5")]);
     let here = fake.add_firewall_ruleset("js-x-noinbound", "region-a", 0);
     let there = fake.add_firewall_ruleset("js-x-noinbound", "region-b", 0);
     for unknown in ["nope".to_owned(), there] {

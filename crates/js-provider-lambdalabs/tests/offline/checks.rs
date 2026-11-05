@@ -7,7 +7,9 @@ use std::num::NonZeroUsize;
 use js_elastic::{CapacityProvider, CheckResult, SchedulerId};
 use js_provider_lambdalabs::{ApiError, Call, ElasticConfig, ErrorCode, FakeLambda};
 
-use crate::rig::{Rig, SCHEDULER, TABLE, config, rig, rig_with};
+use js_provider_lambdalabs::Architecture;
+
+use crate::rig::{self, Rig, SCHEDULER, TABLE, config, offer, rig, rig_with, warnings};
 
 const RULESET: &str = "js-sched-one-noinbound";
 
@@ -66,27 +68,48 @@ fn a_ready_account_passes_every_check() {
 }
 
 /// Asserts that a `types` row that names no type of the catalog (a typo) is named with
-/// the design's words, that a row whose GPU count the catalog contradicts is named too,
-/// that a good row is not, and that a failed catalog call fails the check with the error.
-/// It catches a typo that passes, a message without the row's name, and a good row blamed.
+/// the design's words, that a row the API offers and the catalog table does not know is
+/// named, that a row whose GPU count in the API's catalog contradicts the table is named
+/// too, that a good row is not, and that a failed catalog call fails the check with the
+/// error. It catches a typo that passes, a message without the row's name, and a good row
+/// blamed.
 #[test]
 fn a_typod_types_row_is_named() {
-    let table = format!(
-        "{TABLE}\n[[option]]\ninstance_type = \"gpu_9x_x\"\ngpu_class = \"nvidia-sample\"\ngpus = 9\n"
-    );
+    let table = format!("{TABLE}\n[[option]]\ninstance_type = \"gpu_9x_x\"\n");
     let rig = rig_with(config(5), &table);
     assert_eq!(
         named(&rig.provider.checks(), "types"),
         failed("types", "catalog: gpu_9x_x is not offered")
     );
 
-    let table = TABLE.replace("gpus = 8", "gpus = 4");
+    let table = format!("{TABLE}\n[[option]]\ninstance_type = \"gpu_1x_rtx6000\"\n");
     let rig = rig_with(config(5), &table);
+    let mut types = rig::offers();
+    types.push(offer(
+        "gpu_1x_rtx6000",
+        50,
+        1,
+        Architecture::X86_64,
+        &["region-a"],
+    ));
+    rig.fake.set_offers(types);
     assert_eq!(
         named(&rig.provider.checks(), "types"),
         failed(
             "types",
-            "catalog: gpu_8x_example has 8 gpus in the catalog, not 4"
+            "catalog: gpu_1x_rtx6000 is not in the catalog table"
+        )
+    );
+
+    let rig = rig_with(config(5), TABLE);
+    let mut types = rig::offers();
+    types[1].gpus = 4;
+    rig.fake.set_offers(types);
+    assert_eq!(
+        named(&rig.provider.checks(), "types"),
+        failed(
+            "types",
+            "catalog: gpu_8x_h100_sxm5 has 4 gpus in the catalog, not 8"
         )
     );
 
@@ -236,49 +259,19 @@ fn a_pass_of_checks_on_an_empty_account_only_reads() {
     )));
 }
 
-/// A writer into a buffer the test reads back.
-#[derive(Clone, Default)]
-struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for Lines {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self {
-        self.clone()
-    }
-}
-
 /// Asserts that the catalog leaves a typo'd `types` row out with a log line that names the
 /// row, as the design says ("skipped with a log line"), and still returns the offers of
 /// the good rows. It catches a row dropped without a trace.
 #[test]
 fn a_types_row_the_catalog_drops_is_logged_by_name() {
-    let table = format!(
-        "{TABLE}\n[[option]]\ninstance_type = \"gpu_9x_x\"\ngpu_class = \"nvidia-sample\"\ngpus = 9\n"
-    );
+    let table = format!("{TABLE}\n[[option]]\ninstance_type = \"gpu_9x_x\"\n");
     let rig = rig_with(config(5), &table);
-    let lines = Lines::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(lines.clone())
-        .finish();
-    let offers = tracing::subscriber::with_default(subscriber, || rig.provider.catalog().unwrap());
+    let (offers, text) = warnings(|| rig.provider.catalog().unwrap());
     assert_eq!(offers.len(), 3);
-    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("a types row is skipped"), "{text}");
-    assert!(text.contains("gpu_9x_x is not offered"), "{text}");
+    assert!(
+        text.contains("an instance type of the allow list is skipped: gpu_9x_x is not offered"),
+        "{text}"
+    );
 }
 
 /// Asserts that a scheduler id too long to name a key or a ruleset fails both checks with

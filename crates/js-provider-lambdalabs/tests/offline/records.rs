@@ -292,7 +292,7 @@ fn the_capabilities_hold_when_nothing_is_available_and_the_catalog_fails() {
     let caps = rig.provider.capabilities();
     let mut types = rig.fake.calls().len();
     let none = crate::rig::offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         js_provider_lambdalabs::Architecture::X86_64,

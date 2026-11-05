@@ -95,8 +95,10 @@ agent   = { x86_64 = { url = "https://<host>/js-agent", sha256 = "<64 lower-case
 network = { kind = "tailscale", oauth_client_file = "<path>", tag = "tag:js-agent",
             binary = { url = "https://<host>/tailscale.tgz", sha256 = "<64 lower-case hex>" } }
 provider = { kind = "lambdalabs", api_key_file = "<path>",
-             types = [{ name = "<instance type>", gpu = "<gpu class>", gpus = 1 }] }
+             types = [{ name = "<instance type>" }] }
              # optional in provider: regions, ssh_key, api_url
+             # the GPU facts of each type come from js-provider-lambdalabs; a row's old
+             # gpu and gpus fields are ignored with a warning
 ```
 
 The reader refuses an unknown key, a `launch` other than `plan` or `live`, a day cap below the hour cap,
@@ -148,8 +150,8 @@ For the pool in `/v1/pools` (`pools[]`), look at:
 - `provider_checks` has three entries, `types`, `ssh_key` and `firewall`, each `ok: true`. A `note` is
   not a failure: `ssh_key` may say a launch will create a key, `firewall` may say
   `js-<scheduler id>-noinbound will be created in <regions>`. The checks only list; they create nothing.
-  A `types` row that matches no catalog entry, or whose GPU count differs, fails with
-  `catalog: ...`; a ruleset of our name that holds rules fails with
+  A `types` row whose type Lambda does not offer, or that the provider's catalog table does not know, or
+  whose GPU count in Lambda's catalog differs from the table's, fails with `catalog: ...`; a ruleset of our name that holds rules fails with
   `firewall: the ruleset <name> holds <n> rules; it must hold none`.
 - The top-level `warnings` is empty (no `server: warning: binds all interfaces`).
 - `instances.n` is 0, `instances.max` is 1; `blocked` is null (it is `unavailable` whenever `state` is not
@@ -251,10 +253,11 @@ the Lambda console during the run, and the decisions of "Must land" that are not
 
    ```sh
    js --server https://js.example.ts.net:<port> --token-file <client token> --ca-cert <pem> \
-      lease acquire --class whole-node --gpus 1 --gpu-class <class from types> --max-wall 30m
+      lease acquire --class whole-node --gpus 1 --gpu-class <gpu model> --max-wall 30m
    ```
 
-   Use the class and `gpu` spelling from the pool's `types` row. The answer is 202 `pending`: the machine
+   Use the GPU model of the pool's instance type: its family (`nvidia-a10` for `gpu_1x_a10`), as the
+   provider's catalog table (`crates/js-provider-lambdalabs/src/catalog.rs`) gives it. The answer is 202 `pending`: the machine
    does not exist yet. (`acquire` waits `--wait-pending`, 60 s by default, for a start to settle; a boot
    takes longer, so poll `lease list`.)
 4. Watch `/v1/pools` every 10 s. `machines[].state` goes `booting`, then `registered` (the record

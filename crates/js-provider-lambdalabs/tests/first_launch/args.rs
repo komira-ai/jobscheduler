@@ -13,7 +13,7 @@ fn a_dry_run_launches_nothing_and_prints_the_plan_with_its_hash() {
     let (status, out) = rig.exec(&rig.args(&[]));
     assert_eq!(status, 0, "{out}");
     for needle in [
-        "instance type: gpu_1x_cheap",
+        "instance type: gpu_1x_a10",
         "region: region-a",
         "price: 75 cents per hour (from the API)",
         "boot deadline: 900 s",
@@ -34,28 +34,40 @@ fn a_dry_run_launches_nothing_and_prints_the_plan_with_its_hash() {
     assert_eq!(rig.connected.borrow().as_slice(), [BASE]);
 }
 
+/// Asserts that the dry run passes over a cheaper arm64 type, a type with no capacity and
+/// a cheaper GPU type the catalog table does not know, and picks the cheapest x86_64 type
+/// the table knows. Catches a runner that offers a type whose GPU facts are not in code.
 #[test]
 fn the_cheaper_arm_type_and_the_type_without_capacity_are_passed_over() {
     let rig = Rig::new();
     let (_, out) = rig.exec(&rig.args(&[]));
     assert!(
-        !out.contains("gpu_1x_arm") && !out.contains("gpu_1x_nocap"),
+        !out.contains("gpu_1x_h100_sxm5")
+            && !out.contains("gpu_1x_h100_pcie")
+            && !out.contains("gpu_1x_rtx6000"),
         "{out}"
     );
+    assert!(out.contains("instance type: gpu_1x_a10\n"), "{out}");
 }
 
 #[test]
 fn flags_name_the_type_and_the_region_and_appear_in_the_plan_and_its_hash() {
     let rig = Rig::new();
     let plain = rig.hash(&[]);
-    let (status, out) = rig.exec(&rig.args(&["--instance-type", "gpu_8x_big"]));
+    let (status, out) = rig.exec(&rig.args(&["--instance-type", "gpu_8x_h100_sxm5"]));
     assert_eq!(status, 0, "{out}");
-    assert!(out.contains("instance type: gpu_8x_big") && out.contains("choice: named by flag"));
+    assert!(
+        out.contains("instance type: gpu_8x_h100_sxm5") && out.contains("choice: named by flag")
+    );
     assert_ne!(hash_of(&out), plain);
     let (_, out) = rig.exec(&rig.args(&["--region", "region-b"]));
     assert!(out.contains("region: region-b"), "{out}");
-    let (status, out) =
-        rig.exec(&rig.args(&["--instance-type", "gpu_8x_big", "--region", "region-b"]));
+    let (status, out) = rig.exec(&rig.args(&[
+        "--instance-type",
+        "gpu_8x_h100_sxm5",
+        "--region",
+        "region-b",
+    ]));
     assert_eq!(status, 1, "{out}");
     assert!(out.contains("error: no x86_64 GPU instance type with capacity fits the flags"));
 }
@@ -105,7 +117,7 @@ fn a_dry_run_with_a_state_file_in_place_is_still_a_dry_run() {
 fn the_plan_is_refused_when_no_type_fits_or_the_api_gives_no_price_or_no_types() {
     let rig = Rig::new();
     rig.fake.set_offers(vec![offer(
-        "gpu_1x_a",
+        "gpu_1x_a10",
         0,
         1,
         js_provider_lambdalabs::Architecture::X86_64,
@@ -119,7 +131,7 @@ fn the_plan_is_refused_when_no_type_fits_or_the_api_gives_no_price_or_no_types()
     assert_eq!(status, 1);
     assert!(out.contains("no usable GPU instance type"), "{out}");
     rig.fake.set_offers(vec![offer(
-        "gpu_1x_a",
+        "gpu_1x_a10",
         5,
         1,
         js_provider_lambdalabs::Architecture::X86_64,

@@ -37,7 +37,8 @@ pub use accel::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
     ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ALIASES, APPLE_M, AccelError,
     Accelerator, AcceleratorMiss, AcceleratorNeed, Alias, FAMILIES, Family, FormFactor,
-    Interconnect, MAX_MEMORY_GIB, Model, Resolved, Variant, Vendor, accelerator_of, vendor_of,
+    Interconnect, MAX_MEMORY_GIB, Model, NVIDIA_A10, NVIDIA_A100, NVIDIA_B200, NVIDIA_H100,
+    NVIDIA_RTX_A6000, Resolved, Variant, Vendor, accelerator_of, vendor_of,
 };
 pub use class::{Admission, ClassError, ResourceClass};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};

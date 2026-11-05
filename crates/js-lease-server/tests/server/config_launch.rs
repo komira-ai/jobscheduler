@@ -299,7 +299,7 @@ fn lambda(scratch: &Scratch, key: &std::path::Path, types: &str, more: &str) -> 
     PoolText::elastic(scratch).set("provider", &provider)
 }
 
-const A10: &str = "[{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }]";
+const A10: &str = "[{ name = \"gpu_1x_a10\" }]";
 
 /// Reads `text` with the kinds the server ships.
 fn shipped(scratch: &Scratch, text: &str) -> Result<Config, js_lease_server::StartupError> {
@@ -310,8 +310,8 @@ fn shipped(scratch: &Scratch, text: &str) -> Result<Config, js_lease_server::Sta
 /// Asserts the `lambdalabs` kind as shipped, read through the server's owner-only reader:
 /// the design's pool builds in `plan` (with an `api_url` on the loopback interface, and no
 /// call made); a key file others can read is refused naming the pool, the field and the
-/// mode, never the key; a table the kind refuses (a type listed twice, a second GPU class)
-/// is refused naming the row; and `launch = "live"` builds the provider too. It catches a
+/// mode, never the key; a table the kind refuses (a type listed twice, types of two GPU
+/// models) is refused naming the row; and `launch = "live"` builds the provider too. It catches a
 /// kind that reads its key file other than through the reader, and one the server does not
 /// register.
 #[test]
@@ -342,8 +342,7 @@ fn the_lambdalabs_kind_is_read_as_shipped() {
     assert!(!said.contains(secret), "{said}");
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let twice = "[{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }, \
-                 { name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 2 }]";
+    let twice = "[{ name = \"gpu_1x_a10\" }, { name = \"gpu_1x_a10\" }]";
     let said = shipped(
         &scratch,
         &file(
@@ -355,7 +354,7 @@ fn the_lambdalabs_kind_is_read_as_shipped() {
         said.err().unwrap().to_string(),
         "pool \"gpu\": provider.types[2].name: \"gpu_1x_a10\" is listed twice"
     );
-    let classes = "[{ name = \"a\", gpu = \"nvidia-a10\", gpus = 1 }, { name = \"b\", gpu = \"nvidia-h100\", gpus = 1 }]";
+    let classes = "[{ name = \"gpu_1x_a10\" }, { name = \"gpu_1x_h100_pcie\" }]";
     let said = shipped(
         &scratch,
         &file(
@@ -365,6 +364,6 @@ fn the_lambdalabs_kind_is_read_as_shipped() {
     );
     assert_eq!(
         said.err().unwrap().to_string(),
-        "pool \"gpu\": provider.types[2].gpu: a pool has one gpu class; \"nvidia-a10\" is the class of types[1], not \"nvidia-h100\""
+        "pool \"gpu\": provider.types[2].name: a pool has one gpu model; types[1] (\"gpu_1x_a10\") has \"nvidia-a10\", \"gpu_1x_h100_pcie\" has \"nvidia-h100\""
     );
 }

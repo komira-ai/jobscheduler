@@ -23,7 +23,8 @@ impl LambdaProvider {
         ]
     }
 
-    /// Each `types` row names a type of the catalog with the GPU count the row gives.
+    /// Each `types` row names a type Lambda offers and the crate's catalog table knows, and
+    /// Lambda gives it the table's GPU count.
     fn types_check(&self, types: &Result<Vec<InstanceTypeOffer>, ApiError>) -> CheckResult {
         let faults = match types {
             Ok(types) => select::row_faults(&self.options, types),

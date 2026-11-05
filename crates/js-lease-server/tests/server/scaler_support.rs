@@ -119,8 +119,6 @@ impl CapacityProvider for PanicOnList {
 const OPTIONS: &str = r#"
 [[option]]
 instance_type = "gpu_1x_a100"
-gpu_class = "nvidia-a100"
-gpus = 1
 "#;
 
 /// The agent the bootstrap downloads.
@@ -327,6 +325,9 @@ pub fn hello_body_of(name: &str) -> Value {
     let mut body = hello_body(name);
     body["instance"] = json!({ "provider": "burst", "instance_id": name });
     body["shape"]["memory_bytes"] = json!(64u64 << 30);
+    // The class the agent of a `gpu_1x_a100` machine reads from `nvidia-smi`: the 40 GB
+    // PCIe variant the provider's catalog table offers for that type.
+    body["shape"]["gpu_class"] = json!("nvidia-a100-pcie-40gb");
     body
 }
 

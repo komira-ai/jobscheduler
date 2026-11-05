@@ -55,7 +55,7 @@ fn the_default_launch_interval_is_the_apis_twelve_seconds() {
 
     let fake = Arc::new(FakeLambda::new());
     fake.set_offers(vec![offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         Architecture::X86_64,

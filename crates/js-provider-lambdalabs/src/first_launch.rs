@@ -6,8 +6,9 @@
 //! sleep into [`run`]. Nothing here makes an HTTP request of its own.
 //!
 //! - A dry run (the default) reads the instance types, picks the cheapest x86_64 GPU
-//!   type with capacity (or the one named by flag), prints the plan with the price the
-//!   API gave and the limits, and stops. The plan ends in a hash of its text.
+//!   type with capacity among those the crate's catalog table knows (or the one named by
+//!   flag), prints the plan with the price the API gave and the limits, and stops. The
+//!   plan ends in a hash of its text.
 //! - `--go --plan-hash H` launches only when the plan read now hashes to `H`; a price,
 //!   capacity or flag that changed since the dry run gives a different hash and a refusal.
 //! - `--go` first lists the instances; one carrying this runner's ownership marks, whole
@@ -82,8 +83,6 @@ const STOP_CHECK_FAILED: &str = "the run did not reach active; the instance is t
 /// Why a run stopped because the operator or the system asked it to (a signal, in the
 /// example).
 const INTERRUPTED: &str = "interrupted: a stop was requested (SIGINT, SIGTERM or SIGHUP)";
-/// The class every row of the generated table carries: the runner asks for any GPU.
-const ANY_GPU: &str = "any";
 
 /// Waiting, as the runner needs it.
 pub trait Sleeper {
@@ -227,17 +226,15 @@ impl Runner<'_, '_> {
         1
     }
 
-    /// A provider that may use the instance types of `rows` (name and GPU count), with
-    /// room for one machine.
-    fn build(&mut self, rows: &[(String, u32)], key_name: &str) -> Result<LambdaProvider, i32> {
+    /// A provider that may use the instance types `names`, with room for one machine.
+    /// The rows it writes name the type alone: the GPU facts come from the crate's
+    /// catalog table, which offers only the GPU types it knows.
+    fn build(&mut self, names: &[String], key_name: &str) -> Result<LambdaProvider, i32> {
         // One row at a time, so that a type name the table would refuse (the API's
-        // naming is not ours to trust) only drops that type; the later row of a name
-        // seen twice replaces the earlier one.
+        // naming is not ours to trust) only drops that type; a name seen twice is one row.
         let mut valid = BTreeMap::new();
-        for (name, gpus) in rows {
-            let row = format!(
-                "[[option]]\ninstance_type = {name:?}\ngpu_class = \"{ANY_GPU}\"\ngpus = {gpus}\n"
-            );
+        for name in names {
+            let row = allow_list_row(name);
             if OptionTable::parse(&row).is_ok() {
                 valid.insert(name.clone(), row);
             }
@@ -283,11 +280,10 @@ impl Runner<'_, '_> {
                 ));
             }
         };
-        let rows: Vec<(String, u32)> = offers.iter().map(|o| (o.name.clone(), o.gpus)).collect();
-        let provider = self.build(&rows, &key_name)?;
-        // Every row of the generated table is a GPU type of the one class `any`, so asking
-        // for no resources at all still picks only among GPU types; the agent is released
-        // for x86_64 only.
+        let names: Vec<String> = offers.iter().map(|o| o.name.clone()).collect();
+        let provider = self.build(&names, &key_name)?;
+        // The catalog table offers only the GPU types it knows, so asking for no resources
+        // at all still picks only among GPU types; the agent is released for x86_64 only.
         let want = Demand {
             resources: Resources::default(),
             disk_bytes: None,
@@ -665,8 +661,8 @@ impl Runner<'_, '_> {
                 return self.fail(why, "fix the state file path and paste back this output.");
             }
         };
-        let rows = [(state.instance_type.clone(), 1)];
-        let provider = match self.build(&rows, &state.key_name) {
+        let names = [state.instance_type.clone()];
+        let provider = match self.build(&names, &state.key_name) {
             Ok(built) => built,
             Err(status) => return status,
         };
@@ -702,6 +698,11 @@ impl Runner<'_, '_> {
     }
 }
 
+/// The `[[option]]` row that allows the instance type `name`: the name alone.
+fn allow_list_row(name: &str) -> String {
+    format!("[[option]]\ninstance_type = {name:?}\n")
+}
+
 fn matching(held: &[Held], acquire: &AcquireId) -> Vec<HostRef> {
     held.iter()
         .filter(|h| h.acquire == acquire.as_str())
@@ -721,5 +722,18 @@ mod tests {
         assert_eq!(owner_id().as_str(), OWNER);
         let acquire = acquire_id("0123456789abcdef");
         assert_eq!(acquire.as_str(), "first-launch-0123456789abcdef");
+    }
+
+    /// Asserts that the row the runner writes for an instance type is the name alone, in
+    /// the allow-list shape, and that it parses as that one row. Catches a runner that
+    /// still writes GPU facts into the rows.
+    #[test]
+    fn first_launch_writes_name_only_rows() {
+        let row = allow_list_row("gpu_1x_a10");
+        assert_eq!(row, "[[option]]\ninstance_type = \"gpu_1x_a10\"\n");
+        assert!(!row.contains("gpu_class") && !row.contains("gpus"), "{row}");
+        let table = OptionTable::parse(&row).unwrap();
+        assert_eq!(table.rows().len(), 1);
+        assert_eq!(table.rows()[0].instance_type, "gpu_1x_a10");
     }
 }

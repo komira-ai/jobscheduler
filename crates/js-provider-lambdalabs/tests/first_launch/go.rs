@@ -31,7 +31,7 @@ fn go_without_a_plan_hash_or_with_another_launches_nothing() {
 #[test]
 fn a_hash_of_a_plan_with_other_flags_is_refused() {
     let rig = Rig::new();
-    let hash = rig.hash(&["--instance-type", "gpu_8x_big"]);
+    let hash = rig.hash(&["--instance-type", "gpu_8x_h100_sxm5"]);
     let (status, _) = rig.exec(&rig.args(&["--go", "--plan-hash", &hash]));
     assert_eq!(status, 1);
     assert_eq!(rig.fake.count(Call::Launch), 0);
