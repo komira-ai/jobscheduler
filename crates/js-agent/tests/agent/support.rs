@@ -667,7 +667,7 @@ pub fn run_on(
 /// no `--container-bin` and no `--native-*` flag (a verb, which comes first, gets nothing). A
 /// Linux agent given no `--runtime` runs `crun`, its default; the tests written for the agent
 /// that runs no job name that agent with `--runtime none`, and the tests of the default start
-/// through [`run_defaulted`] or [`run_on_defaulted`], which add nothing.
+/// through `run_defaulted` (built on Linux only) or [`run_on_defaulted`], which add nothing.
 pub fn no_job_runtime(args: &[&str]) -> &'static [&'static str] {
     let start = args.first().is_some_and(|first| first.starts_with("--"));
     let names = args.iter().any(|arg| {
@@ -718,6 +718,7 @@ pub fn run_on_defaulted(
 }
 
 /// [`run`] with `args` exactly as given, as [`run_on_defaulted`].
+#[cfg(target_os = "linux")]
 pub fn run_defaulted(
     args: &[&str],
     host: &Host,

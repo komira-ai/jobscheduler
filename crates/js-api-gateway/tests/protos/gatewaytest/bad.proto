@@ -1,0 +1,255 @@
+// Services whose options the gateway does not serve: each fails annotation::routes with
+// the fault its name says. The tests of js-api-gateway expect each error by its text.
+
+syntax = "proto3";
+
+package gatewaytest;
+
+import "google/api/annotations.proto";
+import "gatewaytest/good.proto";
+import "jobscheduler/v1/service.proto";
+import "google/protobuf/empty.proto";
+
+// Put.
+service Put {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { put: "/v1/things" };
+  }
+}
+
+// Delete.
+service Delete {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { delete: "/v1/things/{id}" };
+  }
+}
+
+// Patch.
+service Patch {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { patch: "/v1/things" };
+  }
+}
+
+// Custom.
+service Custom {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { custom: { kind: "HEAD" path: "/v1/things" } };
+  }
+}
+
+// NoMethod.
+service NoMethod {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { body: "*" };
+  }
+}
+
+// Additional.
+service Additional {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" additional_bindings: { get: "/v1/stuff" } };
+  }
+}
+
+// ResponseBody.
+service ResponseBody {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" response_body: "count" };
+  }
+}
+
+// BodyOnGet.
+service BodyOnGet {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" body: "*" };
+  }
+}
+
+// NamedBody.
+service NamedBody {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/things" body: "inner" };
+  }
+}
+
+// OutsideV1.
+service OutsideV1 {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v2/things" };
+  }
+}
+
+// EmptySegment.
+service EmptySegment {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1//things" };
+  }
+}
+
+// BadVariable.
+service BadVariable {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{Id}" };
+  }
+}
+
+// BadLiteral.
+service BadLiteral {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/Big" };
+  }
+}
+
+// VerbAfterLiteral.
+service VerbAfterLiteral {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/things:act" body: "*" };
+  }
+}
+
+// BadVerb.
+service BadVerb {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/things/{id}:Act" body: "*" };
+  }
+}
+
+// Leases.
+service Leases {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/leases/{id}" };
+  }
+}
+
+// Agent.
+service Agent {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/agent/hello" body: "*" };
+  }
+}
+
+// VariableResource.
+service VariableResource {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/{id}" };
+  }
+}
+
+// UnknownVariable.
+service UnknownVariable {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{nope}" };
+  }
+}
+
+// NotAString.
+service NotAString {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{count}" };
+  }
+}
+
+// RepeatedString.
+service RepeatedString {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{tags}" };
+  }
+}
+
+// RepeatedVariable.
+service RepeatedVariable {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{id}/{id}" };
+  }
+}
+
+// BadStatus.
+service BadStatus {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" };
+    option (jobscheduler.v1.http_success_status) = 204;
+  }
+}
+
+// No method at all.
+service Empty {}
+
+// Methods, none with a route.
+service Unannotated {
+  // The one method.
+  rpc Call(Req) returns (Resp);
+}
+
+// A client stream.
+service ClientStream {
+  // The one method.
+  rpc Call(stream Req) returns (Resp) {
+    option (google.api.http) = { post: "/v1/things" body: "*" };
+  }
+}
+
+// A server stream.
+service ServerStream {
+  // The one method.
+  rpc Call(Req) returns (stream Resp) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A request of another package.
+service Foreign {
+  // The one method.
+  rpc Call(google.protobuf.Empty) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A response nested in another message.
+service Nested {
+  // The one method.
+  rpc Call(Req) returns (Holder.Inside) {
+    option (google.api.http) = { get: "/v1/things" };
+  }
+}
+
+// A message that holds the nested response.
+message Holder {
+  // The nested response.
+  message Inside {}
+}
+
+// Two methods on one method and path shape.
+service Duplicate {
+  // The first.
+  rpc First(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{id}" };
+  }
+  // The second, with another variable name.
+  rpc Second(Req) returns (Resp) {
+    option (google.api.http) = { get: "/v1/things/{other_id}" };
+  }
+}
