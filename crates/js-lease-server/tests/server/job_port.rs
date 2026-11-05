@@ -104,7 +104,6 @@ async fn negotiated(addr: SocketAddr, trusted: &str) -> Option<Vec<u8>> {
 async fn get_job(client: &mut JobServiceClient<Channel>, token: Option<&str>) -> Status {
     let mut call = tonic::Request::new(GetJobRequest {
         job_id: "job-1".to_owned(),
-        ..GetJobRequest::default()
     });
     if let Some(token) = token {
         let value: MetadataValue<Ascii> = format!("Bearer {token}").parse().unwrap();
