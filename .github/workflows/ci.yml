@@ -743,9 +743,8 @@ jobs:
         run: |
           cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --show-missing-lines | grep -E "Uncovered|js-lease-server/src/wire" || true
           cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --text --show-instantiations --output-path target/coverage/report.txt || true
-          sed 's/\x1b\[[0-9;]*m//g' target/coverage/report.txt > target/coverage/report.plain.txt || true
-          grep -n 'js-lease-server/src/wire' target/coverage/report.plain.txt | head -20 || true
-          awk '/js-lease-server\/src\/wire(\.rs|\/accel\.rs):/{f=1; print; next} /^\/.*\.rs:/{f=0} f' target/coverage/report.plain.txt | grep -n -B3 -A1 -E '^ *[0-9]+\| *0\||\^0' | head -200 || true
+          cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --json --output-path target/coverage/export.json || true
+          jq -c '.data[0].functions[] | select(any(.filenames[]; test("js-lease-server/src/wire"))) | {name, filenames, zero: [.regions[] | select(.[4] == 0)]} | select(.zero | length > 0)' target/coverage/export.json | head -40 || true
       - name: Per-crate table and ratchet
         run: cargo "+$COVERAGE_TOOLCHAIN" run -p js-coverage --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --baseline coverage-baseline --write-baseline target/coverage/coverage-baseline.measured --summary-file "$GITHUB_STEP_SUMMARY" --run-id "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --artifact coverage
       # A pull request may not raise any count above the base branch's file, and a new
