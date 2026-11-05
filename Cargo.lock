@@ -1613,6 +1613,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-sim-cell"
+version = "0.1.0"
+dependencies = [
+ "js-sim",
+ "js-types",
+]
+
+[[package]]
 name = "js-sizing"
 version = "0.1.0"
 
