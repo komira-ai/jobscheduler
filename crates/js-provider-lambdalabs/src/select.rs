@@ -113,6 +113,9 @@ pub(crate) fn offers(
                 price_cents_per_hour: Some(kind.price_cents_per_hour),
                 price_unit: PriceUnit::UsCents,
                 available: true,
+                purchase: Some(js_elastic::Purchase::OnDemand),
+                quota: None,
+                block: None,
             })
         })
         .collect()

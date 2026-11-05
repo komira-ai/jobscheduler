@@ -2,7 +2,7 @@
 
 use js_elastic::{
     AcquireId, Acquired, CapacityProvider, Claim, Demand, Held, HostRef, HostStatus, Offer,
-    ProviderError, Released,
+    ProviderError, Purchase, Released,
 };
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, SCHEDULER_TAG, TerminateEffect,
@@ -504,6 +504,21 @@ fn the_catalog_has_one_offer_per_region_with_capacity_and_the_facts_of_the_type(
     assert_eq!(offers[0], crate::rig::candidate("region-a"));
     assert_eq!(offers[2].accelerator.as_ref().map(|a| a.count), Some(8));
     assert_eq!(offers[2].price_cents_per_hour, Some(1200));
+}
+
+/// Asserts that every offer of the Lambda catalog states that it is bought on demand, has
+/// no quota (Lambda reports none) and no reserved block. Catches the new offer fields left
+/// unfilled by the existing provider.
+#[test]
+fn lambda_offers_still_state_on_demand_and_no_quota() {
+    let rig = rig(live(5));
+    let offers = rig.provider.catalog().unwrap();
+    assert_eq!(offers.len(), 3);
+    for offer in &offers {
+        assert_eq!(offer.purchase, Some(Purchase::OnDemand), "{}", offer.id);
+        assert_eq!(offer.quota, None, "{}", offer.id);
+        assert_eq!(offer.block, None, "{}", offer.id);
+    }
 }
 
 #[test]

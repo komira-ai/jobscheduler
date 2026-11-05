@@ -200,6 +200,9 @@ mod tests {
             price_cents_per_hour: None,
             price_unit: crate::offer::PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         };
         assert_eq!(handle.catalog(), Ok(Vec::new()));
         assert!(handle.checks().is_empty());

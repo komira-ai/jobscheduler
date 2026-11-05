@@ -44,6 +44,9 @@ pub fn offer(price: Option<u64>) -> Offer {
         price_cents_per_hour: price,
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

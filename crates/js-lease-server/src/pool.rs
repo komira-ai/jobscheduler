@@ -418,6 +418,9 @@ mod tests {
             price_cents_per_hour: Some(10),
             price_unit: js_elastic::PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         }
     }
 

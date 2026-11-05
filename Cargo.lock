@@ -1579,6 +1579,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-provider-ec2"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-elastic",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "js-provider-fake"
 version = "0.1.0"
 dependencies = [

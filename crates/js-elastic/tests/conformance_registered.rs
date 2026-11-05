@@ -289,6 +289,9 @@ fn offer() -> Offer {
         price_cents_per_hour: None,
         price_unit: js_elastic::PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

@@ -12,6 +12,13 @@ an order.
 | `static` | **For testing only.** The operator lists hosts in the configuration; used by tests and by the single-host stepping stone (below). A production deployment declares none. | Never. |
 | `aws`, later `gcp`, `azure`, `k8s`, `vsphere`, `proxmox` | Elastic providers: `acquire` boots a host, a machine that runs `js-agent` and many jobs at once, and that agent registers itself. | Yes: boots and terminates. |
 
+Provider crates in code today:
+
+| Crate | Kind | State |
+|---|---|---|
+| `js-provider-lambdalabs` | Lambda Labs | Implements `CapacityProvider`: catalog, acquire, list, release. |
+| `js-provider-ec2` | AWS EC2 | Catalog only: `Ec2Catalog::catalog` reads instance types, zone offerings, on-demand, spot and Capacity Block prices and vCPU quotas through a read-only port (`Ec2Api`, with an in-memory fake) and translates them into offers in code. It has no network client and does not implement `CapacityProvider` yet. |
+
 A deployment always has a `default` provider. If the file declares none, one named `default` exists with no deny file. A pool admits
 registering hosts only when it has a `join_token_file` (registration.md); without one it has no registered hosts of its own, and only
 machines an elastic provider launched can join it.

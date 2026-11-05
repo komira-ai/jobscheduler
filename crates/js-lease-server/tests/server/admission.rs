@@ -156,6 +156,9 @@ fn a100(available: bool) -> Offer {
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,
         available,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

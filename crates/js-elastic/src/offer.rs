@@ -12,6 +12,53 @@ pub enum PriceUnit {
     UsCents,
 }
 
+/// How the machine of an offer is bought. The pick policy orders offers of one provider
+/// by the provider's configured `purchase` list after price, accelerators and spare
+/// size; nothing else reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Purchase {
+    /// Paid by the hour at the provider's list price, kept until released.
+    OnDemand,
+    /// Spare capacity at a varying price, which the provider may reclaim.
+    Spot,
+    /// A block of machines reserved for a fixed time at a price paid up front; the offer's
+    /// [`Offer::block`] holds the terms.
+    CapacityBlock,
+    /// Capacity the account has reserved ahead.
+    Reserved,
+    /// A way of buying this release does not name, as the provider spells it.
+    Other(String),
+}
+
+/// A provider account's limit on the vCPUs of running machines, for the group of machine
+/// types and the purchase option an offer belongs to, as the provider reported it. It is
+/// information: nothing removes, delays or marks an offer because of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quota {
+    /// The most vCPUs the account may run.
+    pub vcpus_limit: u32,
+    /// The vCPUs running now, when the provider says; `None`: not reported.
+    pub vcpus_in_use: Option<u32>,
+}
+
+/// The terms of a reserved block of machines that an offer of
+/// [`Purchase::CapacityBlock`] would buy. The price of the offer is the block's upfront
+/// price spread over its machines and hours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockTerms {
+    /// The provider's id of the offering, which a purchase names.
+    pub offering: String,
+    /// When the block starts, in seconds since the Unix epoch (UTC).
+    pub start_unix_seconds: u64,
+    /// How long the block lasts, in minutes.
+    pub duration_minutes: u64,
+    /// The price of the whole block, paid up front, in US cents (rounded up).
+    pub upfront_cents: u64,
+    /// How many machines the block holds.
+    pub instances: u32,
+}
+
 /// The dimension of a [`Demand`] that an [`Offer`] fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dimension {
@@ -93,6 +140,15 @@ pub struct Offer {
     pub price_unit: PriceUnit,
     /// Whether the catalog has capacity for it now.
     pub available: bool,
+    /// How the machine is bought. `None`: the provider does not say.
+    pub purchase: Option<Purchase>,
+    /// The account's vCPU limit for this offer's machine group and purchase option, as
+    /// information only. `None`: not known (the provider has none, the account has no
+    /// entry, or the read failed).
+    pub quota: Option<Quota>,
+    /// The terms of the reserved block an offer of [`Purchase::CapacityBlock`] buys;
+    /// `None` for every other offer.
+    pub block: Option<BlockTerms>,
 }
 
 impl Offer {
@@ -209,6 +265,9 @@ mod tests {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         }
     }
 
