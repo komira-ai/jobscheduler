@@ -10,6 +10,9 @@ use js_jobs::{DeclaredPort, JobSpec, JobState, NetworkPolicy};
 use js_lease::ManualClock;
 use js_registry::Credential;
 use js_sched::ceiling::BeyondCeiling;
+// The job's network level, named `Level` here as in `job_start.rs`: the server's own
+// `network` module is the only place that path may be named.
+use js_types::JobNetwork as Level;
 
 use super::tests::{
     NONE, booked, clock, finish, host, pass, placer_on, queue, queue_spec, run_to_exit, sized,
@@ -39,7 +42,7 @@ fn open_with(names: &[&str], ceiling: &NetworkCeiling) -> BTreeMap<HostId, Netwo
 
 /// The hosts `names`, each at the level allow-list and forwarding the host port `port`.
 fn forwarding(names: &[&str], port: u16) -> BTreeMap<HostId, NetworkCeiling> {
-    open_with(names, &ceiling(JobNetwork::AllowList, &[port]))
+    open_with(names, &ceiling(Level::AllowList, &[port]))
 }
 
 /// One pass of `placer` over `jobs` on `open`: the jobs it placed.
@@ -126,11 +129,11 @@ fn a_host_whose_ceiling_lacks_the_port_is_not_capable() {
     let (_store, jobs) = tables();
     placed(&jobs, "job-load", "host-b", sized(4), booked(4));
     queue_spec(&jobs, "job-p", ported(&[8080]), 0);
-    let other = ceiling(JobNetwork::AllowList, &[9000]);
+    let other = ceiling(Level::AllowList, &[9000]);
     let alone = open_with(&["host-a"], &other);
     assert_eq!(pass_with(&placer, &jobs, &alone), NONE);
     assert_eq!(state(&jobs, "job-p"), JobState::Queued);
-    let refused = within_ceiling(&other, JobNetwork::AllowList, &[8080]);
+    let refused = within_ceiling(&other, Level::AllowList, &[8080]);
     assert_eq!(refused, Err(BeyondCeiling::Port(8080)));
     assert!(refused.unwrap_err().to_string().contains("8080"));
 
@@ -177,7 +180,7 @@ fn portless_placements(ceiling: &NetworkCeiling) -> Vec<(String, String)> {
 #[test]
 fn a_job_with_no_ports_is_unaffected() {
     let none = portless_placements(&NetworkCeiling::default());
-    let wide = ceiling(JobNetwork::Open, &[]);
+    let wide = ceiling(Level::Open, &[]);
     let wide = NetworkCeiling {
         ports: vec![PortRange::new(1, 65535).unwrap()],
         ..wide
@@ -314,7 +317,7 @@ fn whole_host_granted(placer: &SchedPlacer, template: &JobRecord, host_name: &st
         .recover(JOB_TERM, operation, operation.0, Vec::new());
     let wall = Duration::from_secs(60);
     let granted = engine.place_one((operation, request), (wall, charge), only, now);
-    for (lease, _) in &granted {
+    if let Some((lease, _)) = &granted {
         engine.release(Placed {
             lease: *lease,
             operation,
@@ -372,7 +375,7 @@ fn served_with(name: &str, ports: &[u16]) -> (Arc<Agents>, ManualClock, js_testk
 /// `h1` says hello advertising allow-list and the host `ports`.
 fn say_hello(agents: &Agents, ports: &[u16]) {
     let mut hello = hello_of("h1", 16_000, 32 * GIB);
-    ceiling(JobNetwork::AllowList, ports).insert_into(&mut hello.capabilities);
+    ceiling(Level::AllowList, ports).insert_into(&mut hello.capabilities);
     let credential = Credential::of_token(JOIN);
     agents.registry.hello(&hello, &credential).unwrap();
 }
@@ -414,10 +417,10 @@ fn a_host_whose_network_ceiling_is_below_the_job_level_is_not_capable() {
     };
     queue_spec(&jobs, "job-a", open_job, 0);
     let mut hosts = open_with(&["host-a"], &NetworkCeiling::default());
-    hosts.extend(open_with(&["host-b"], &ceiling(JobNetwork::AllowList, &[])));
+    hosts.extend(open_with(&["host-b"], &ceiling(Level::AllowList, &[])));
     assert_eq!(pass_with(&placer, &jobs, &hosts), NONE);
     assert_eq!(state(&jobs, "job-a"), JobState::Queued);
-    hosts.extend(open_with(&["host-c"], &ceiling(JobNetwork::Open, &[])));
+    hosts.extend(open_with(&["host-c"], &ceiling(Level::Open, &[])));
     assert_eq!(pass_with(&placer, &jobs, &hosts), ["job-a"]);
     assert_eq!(on(&jobs, "job-a"), "host-c");
 }
