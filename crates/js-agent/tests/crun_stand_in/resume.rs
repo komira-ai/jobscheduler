@@ -333,6 +333,9 @@ fn a_running_job_adopted_with_its_record_goes_on_uploading() {
     assert_eq!(objects[&prefix("r1-hold").final_key(Stream::Stdout)], whole);
 }
 
+/// What a test puts in a lease directory in place of a good record.
+type Plant = Box<dyn Fn(&Path)>;
+
 /// Proves a record the restarted agent cannot trust stops nothing: a record that is not JSON,
 /// one of version 2, one of another job's prefix and a link in place of the file are each
 /// ignored with one warning, and the run is adopted and runs as it would without one, with no
@@ -352,7 +355,7 @@ fn a_bad_record_does_not_stop_the_adoption() {
             },
         })
     };
-    let kinds: [(&str, Box<dyn Fn(&Path)>); 4] = [
+    let kinds: [(&str, Plant); 4] = [
         (
             "not-json",
             Box::new(|lease: &Path| std::fs::write(lease.join(RECORD), "{").expect("written")),

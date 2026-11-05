@@ -124,19 +124,7 @@ pub(super) fn read(
         Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(why) => return Err(format!("it cannot be opened: {why}")),
     };
-    let meta = file.metadata().map_err(|why| why.to_string())?;
-    if !meta.is_file() {
-        return Err("it is not a regular file".to_owned());
-    }
-    if meta.uid() != owner {
-        return Err(format!(
-            "it is owned by user {}, not the agent's",
-            meta.uid()
-        ));
-    }
-    let mut body = Vec::new();
-    let taken = file.take(RECORD_MAX).read_to_end(&mut body);
-    taken.map_err(|why| why.to_string())?;
+    let body = load(file, owner).map_err(|why| why.to_string())?;
     let form: Form =
         serde_json::from_slice(&body).map_err(|why| format!("it is not a record: {why}"))?;
     if form.version != VERSION {
@@ -158,6 +146,24 @@ pub(super) fn read(
         ));
     }
     Ok(Some((sink, record.streams)))
+}
+
+/// The bytes of the opened record `file`, which must be a regular file owned by `owner`; at
+/// most [`RECORD_MAX`] of them.
+fn load(file: std::fs::File, owner: u32) -> io::Result<Vec<u8>> {
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::other("it is not a regular file"));
+    }
+    if meta.uid() != owner {
+        return Err(io::Error::other(format!(
+            "it is owned by user {}, not the agent's",
+            meta.uid()
+        )));
+    }
+    let mut body = Vec::new();
+    file.take(RECORD_MAX).read_to_end(&mut body)?;
+    Ok(body)
 }
 
 /// Writes `body` whole as the record of the lease directory `dir`: a new file, never one that
