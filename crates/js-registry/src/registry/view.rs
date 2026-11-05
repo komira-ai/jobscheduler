@@ -1,8 +1,11 @@
 //! The listing's view of the hosts ([`Registry::hosts`], [`Registry::snapshot`]): what each
-//! host is, read from the parts of the registry's state that say it.
+//! host is, read from the parts of the registry's state that say it; and what the leases on
+//! each host book there ([`Registry::held`]).
+
+use std::collections::BTreeMap;
 
 use js_lease::Timestamp;
-use js_provider::HostBook;
+use js_provider::{Held, HostBook};
 use js_types::HostId;
 
 use super::record::Record;
@@ -11,6 +14,17 @@ use crate::runs::Runs;
 use crate::whole::reserve::Marks;
 
 impl Registry {
+    /// The leases booked on each host the registry holds, by host in id order, each host's
+    /// in the order they were booked, with what each books there: its own resources, or the
+    /// whole shape for a lease that books the whole host. A host with no lease is left out.
+    /// It is what a listing of the hosts shows as booked on them; it books nothing.
+    pub fn held(&self) -> BTreeMap<HostId, Vec<Held>> {
+        let state = self.lock();
+        let hosts = state.book.candidates().into_iter();
+        let booked = hosts.filter(|host| !host.leases.is_empty());
+        booked.map(|host| (host.host, host.leases)).collect()
+    }
+
     pub(super) fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let view = self.viewer((&state.book, &state.runs, &state.marks), now);
         state

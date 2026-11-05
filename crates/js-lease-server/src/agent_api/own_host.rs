@@ -1,8 +1,8 @@
 //! The routes a host calls about itself, with the credential it was admitted with:
 //!
 //! - `POST /v1/hosts/{id}:cordon`: cordon the host for `lease_secs` seconds (an optional
-//!   JSON body `{"lease_secs": n}`; [`DEFAULT_CORDON`] when absent). A repeat renews and
-//!   never shortens. The server cuts the length to [`MAX_CORDON`].
+//!   JSON body `{"lease_secs": n}`; [`cordon::DEFAULT_CORDON`] when absent). A repeat renews
+//!   and never shortens. The server cuts the length to [`cordon::MAX_CORDON`].
 //! - `POST /v1/hosts/{id}:uncordon`: lift the cordon; 200 whether or not there was one.
 //! - `GET /v1/hosts/{id}`: the host's state, as the agent's update hook waits on it.
 //!
@@ -18,13 +18,13 @@
 //! A caller therefore uncordons only a cordon it placed, and takes `already_cordoned:
 //! false` in the reply of its cordon as the proof that it placed it. There is no
 //! server-side total cap: a caller that dies leaves its cordon to lapse within its last
-//! `lease_secs`, at most [`MAX_CORDON`].
+//! `lease_secs`, at most [`cordon::MAX_CORDON`].
 //!
 //! A cordon is written to the agent state file before it is acknowledged: when that fails
 //! the answer is 503 `cordon-unsaved`, the cordon holds on this server all the same, and
 //! the same call repeated is the retry. Until a save succeeds a server restart loses that
 //! cordon, or brings back one that an unsaved uncordon lifted (for at most the
-//! [`MAX_CORDON`] it was asked for). Every call, the read too, checks the credential
+//! [`cordon::MAX_CORDON`] it was asked for). Every call, the read too, checks the credential
 //! with `JoinTokens::serves`, which renews the host credential and may write the join
 //! token file; a failed write is logged and does not fail the call.
 
@@ -44,21 +44,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{OneTime, Refused, decode, read};
 use crate::agents::Agents;
+use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
 use crate::hosts::{mark_text, state_text};
 use crate::join_tokens::JoinRefusal;
 
-/// The length of a cordon asked for without one.
-pub(crate) const DEFAULT_CORDON: Duration = Duration::from_secs(5 * 60);
-
-/// The longest a cordon is set for by one request; a longer one asked for is cut to it. A
-/// requester that needs a cordon for longer renews it.
-pub(crate) const MAX_CORDON: Duration = Duration::from_secs(60 * 60);
-
 /// The pool token, or no one-time token or credential, names no host.
 const HOST_CREDENTIAL_REQUIRED: &str = "host-credential-required";
-const INVALID_CORDON: &str = "invalid-cordon";
-const CORDON_UNSAVED: &str = "cordon-unsaved";
-const UNKNOWN_HOST: &str = "unknown-host";
 const NOT_FOUND: &str = "not-found";
 
 /// The body of a cordon request.
@@ -194,17 +185,14 @@ async fn saved(agents: &Arc<Agents>) -> Result<(), Refused> {
     }
 }
 
-/// The length of the cordon a body asks for, cut to [`MAX_CORDON`].
+/// The length of the cordon a body asks for, as [`cordon::length`] gives it.
 fn lease_of(body: &[u8]) -> Result<Duration, Refused> {
     let request: CordonRequest = match body.is_empty() {
         true => CordonRequest::default(),
         false => decode(body, INVALID_CORDON)?,
     };
-    let secs = request.lease_secs.unwrap_or(DEFAULT_CORDON.as_secs());
-    match secs {
-        0 => Err(Refused::new(StatusCode::BAD_REQUEST, INVALID_CORDON)),
-        secs => Ok(Duration::from_secs(secs).min(MAX_CORDON)),
-    }
+    cordon::length(request.lease_secs)
+        .ok_or_else(|| Refused::new(StatusCode::BAD_REQUEST, INVALID_CORDON))
 }
 
 /// `GET /v1/hosts/{id}`.

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use js_types::{HostId, LeaseId};
 
 use crate::{
-    DropReason, EndedRow, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed,
-    ProfileCurves, ProfileKey, RunSeries,
+    DropReason, EndedPage, EndedQuery, EndedRow, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute,
+    Observed, ProfileCurves, ProfileKey, RunSeries,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -137,6 +137,14 @@ pub trait UsageSink: Send + Sync {
         _limit: NonZeroUsize,
     ) -> Result<Vec<EndedRow>, UsageFault> {
         Ok(Vec::new())
+    }
+
+    /// One page of the records of the allocations that ended, as `query` asks for it
+    /// ([`crate::EndedHistory::page`]): the rows after its cursor, in its window and past its
+    /// filters, oldest end first, with the cursor of the next page. It writes nothing. An
+    /// empty page for a sink that keeps no history.
+    fn ended_rows_after(&self, _query: &EndedQuery) -> Result<EndedPage, UsageFault> {
+        Ok(EndedPage::default())
     }
 
     /// What the sink has counted.
@@ -255,6 +263,15 @@ mod tests {
             sink.ended_rows(0, u64::MAX, NonZeroUsize::MIN),
             Ok(Vec::new())
         );
+        let query = EndedQuery {
+            after: None,
+            from_ms: 0,
+            before_ms: None,
+            host: None,
+            id: None,
+            limit: NonZeroUsize::MIN,
+        };
+        assert_eq!(sink.ended_rows_after(&query), Ok(EndedPage::default()));
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);
     }
