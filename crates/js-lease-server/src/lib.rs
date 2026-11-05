@@ -283,9 +283,11 @@
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
 //! below), and `path_grace` is how long a whole-node request of the pool waits once no host
-//! could serve it (the registry's `regain_grace` for that pool). Nothing enforces the rest
-//! yet: the job lifecycle ticks (design 6.1) will enforce `max_queue_wait` and
-//! `start_timeout`, and the pick of an offer (design 5.6, pass 2) the limits.
+//! could serve it (the registry's `regain_grace` for that pool). The job pass of the tick
+//! (design 6.1) ends a queued job of the job tables past the pool's `max_queue_wait` as
+//! `no-capacity`, and a placed or starting one past its `start_timeout` as `start-timeout`
+//! (a joined pool takes the defaults). Nothing enforces the limits yet: the pick of an offer
+//! (design 5.6, pass 2) will.
 //! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
 //! of a file, and [`Resolved::describe`] prints them.
 //!
@@ -799,6 +801,9 @@ mod job_alloc;
     )
 )]
 mod job_api;
+mod job_expiry;
+mod job_loss;
+mod job_pass;
 mod job_start;
 mod job_store;
 mod join_api;

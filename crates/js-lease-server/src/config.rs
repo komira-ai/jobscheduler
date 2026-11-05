@@ -16,7 +16,7 @@ use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_registry::{Credential, WholeNodeConfig};
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -27,18 +27,20 @@ use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
-use crate::job_store::JobStoreSetup;
+use crate::job_expiry::JobLimits;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
+mod agent_setup;
 mod cpu_slack;
 mod listen;
 mod placement;
 mod resolve;
 mod retention;
+pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
@@ -445,29 +447,6 @@ pub(crate) enum Hosts {
     },
 }
 
-/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
-/// decided.
-pub(crate) struct AgentSetup {
-    pub(crate) tokens: AgentTokens,
-    pub(crate) pool: PoolConfig,
-    /// The one provider the mint route accepts, when the configuration names it.
-    pub(crate) mint_provider: Option<String>,
-    pub(crate) hello_limit: HelloLimit,
-    /// `--require-host-credential`.
-    pub(crate) require_host_credential: bool,
-    /// `--placement`.
-    pub(crate) placement: Placement,
-    /// `--estimate-feed`.
-    pub(crate) estimate_feed: bool,
-    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
-    pub(crate) cpu_slack: CpuSlack,
-    /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
-    /// and the one up to which `--placement js-sched` trusts it for backfill.
-    pub(crate) max_lease_wall: Option<Duration>,
-    /// The job store's setup when the job service is on; the agent side then opens it.
-    pub(crate) jobs: Option<JobStoreSetup>,
-}
-
 impl Config {
     /// Checks `cli`: the ttls are consistent, a listen address that is not loopback has
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
@@ -570,6 +549,7 @@ impl Config {
                     pool,
                     tokens,
                     mint_provider,
+                    job_limits,
                 } = *registering;
                 server.agents.placement().check(&pool, "server.placement")?;
                 let given = server.agents.cpu_slack();
@@ -589,6 +569,7 @@ impl Config {
                     estimate_feed: server.agents.estimate_feed(),
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
+                    job_limits,
                     jobs: server.agents.job_store(server.job_retention),
                 });
                 (
@@ -899,6 +880,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     estimate_feed: cli.estimate_feed,
                     cpu_slack,
                     max_lease_wall: None,
+                    job_limits: JobLimits::default(),
                     jobs: listen::job_store(cli),
                 }),
             })

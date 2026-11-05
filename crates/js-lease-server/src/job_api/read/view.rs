@@ -10,8 +10,8 @@
 //! - A file's contents are secret: every file is named, with empty contents.
 //! - The record keeps capabilities among its constraints that the message has no field for;
 //!   they are not shown.
-//! - The host silence of a job (`host_silent_since_ms`) is not read from the record and is
-//!   left absent.
+//! - The host silence of a job (`host_silent_since_ms`) is not in the record: it is left
+//!   absent here, and the read calls set it from the registry (`read.rs`, "Host silence").
 
 use std::time::Duration;
 

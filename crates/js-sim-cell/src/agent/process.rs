@@ -32,7 +32,7 @@ use super::real::RealAgent;
 use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
 use crate::counters::Counter;
-use crate::ledger::Completion;
+use crate::ledger::{Acked, Completion};
 use crate::observe::{
     AgentTruth, Launch, ReadyReport, RunId, Running, StartSeen, StopCommand, StopSeen, Verdict,
 };
@@ -207,6 +207,9 @@ struct Book {
     stopped: BTreeSet<String>,
     /// Every run whose result was sent at least once.
     reported: BTreeSet<String>,
+    /// Every run a hello or heartbeat of the process listed as held: what the server can
+    /// have seen listed.
+    listed: BTreeSet<String>,
     completed: BTreeMap<RunId, FarmTime>,
     acknowledged: BTreeMap<RunId, Verdict>,
 }
@@ -376,7 +379,7 @@ impl Process {
             gpu_devices: Vec::new(),
             labels: spec.labels.clone(),
             phase: self.exclusive.phase(),
-            held: self.agent.held(),
+            held: self.list(),
             accepts_host_credential: false,
         };
         // A wire type always encodes; were it not to, the empty body would be refused.
@@ -409,7 +412,7 @@ impl Process {
         self.beats_sent.insert(session.seq, io.now);
         let results = self.agent.results(&self.book.runs);
         self.book.count_resent(&results, io);
-        let held = self.agent.held();
+        let held = self.list();
         let (ready, refused) = self.exclusive.report(io.prepare, held.is_empty(), io.now);
         if let Some(lease) = &ready {
             io.ledger.reported_ready(ReadyReport {
@@ -441,6 +444,21 @@ impl Process {
         let body = serde_json::to_string(&beat).unwrap_or_default();
         let id = io.call(Route::Heartbeat, &spec.join_token, body);
         session.unanswered.insert(id, false);
+    }
+
+    /// What a hello or heartbeat lists as held ([`Behind::held`]), noted as listed.
+    fn list(&mut self) -> Vec<HeldRun> {
+        let held = self.agent.held();
+        let names = held.iter().map(|run| run.run_id.clone());
+        self.book.listed.extend(names);
+        held
+    }
+
+    /// Whether the process runs a run that no hello or heartbeat it sent listed, so the
+    /// server cannot have seen it listed.
+    pub(super) fn runs_unlisted(&self) -> bool {
+        let running = self.agent.running();
+        running.iter().any(|run| !self.book.listed.contains(run))
     }
 
     fn reconnect(&mut self) {
@@ -487,7 +505,12 @@ impl Process {
     fn beat_answered(&mut self, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
             200 => self.act(&answer.body, &spec.capacity, io),
-            409 => self.session_lost(spec, io),
+            409 => {
+                if is_code(&answer.body, refusal::UNKNOWN_HOST) {
+                    io.bump(Counter::UnknownHost);
+                }
+                self.session_lost(spec, io);
+            }
             403 if is_code(&answer.body, refusal::SESSION_MISMATCH) => self.session_lost(spec, io),
             _ => {}
         }
@@ -516,6 +539,9 @@ impl Process {
         let check = reply.validate();
         if !check.refused.is_empty() || check.acks.is_err() || check.exclusive.is_err() {
             io.bump(Counter::ReplyInvalid);
+        }
+        if check.acks.is_ok() {
+            note_verdicts(&reply.result_acks, io);
         }
         if check.exclusive.is_ok() {
             self.exclusive.told(reply.exclusive.as_deref(), io.now);
@@ -772,6 +798,24 @@ fn fake_start(
     }
     if after.launches.get(run) != before.launches.get(run) {
         book.launched(job, info, io);
+    }
+}
+
+/// Writes every verdict of `acks` this version can read into the cell's ledger, whether
+/// or not the agent still holds the result.
+fn note_verdicts(acks: &[ResultAck], io: &mut Io) {
+    let read = acks.iter().filter_map(|ack| {
+        let verdict = verdict(ack.ack)?;
+        Some(Acked {
+            run: RunId::new(ack.run_id.clone()),
+            host: io.host.clone(),
+            verdict,
+            at: io.now,
+        })
+    });
+    let read: Vec<Acked> = read.collect();
+    for acked in read {
+        io.ledger.acked(acked);
     }
 }
 

@@ -1,6 +1,6 @@
-//! What must always be true of the cell: the five properties of "exactly once, nothing
-//! double-booked", the four of a whole host held, drained and served (`whole.rs`), and the
-//! [`Checker`] that tests them.
+//! What must always be true of the cell: the seven properties of "exactly once, nothing
+//! double-booked, nothing lost", the four of a whole host held, drained and served
+//! (`whole.rs`), and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -17,12 +17,13 @@
 //! that item's own events; for each ledger entry appended since the last step, one
 //! lookup; for each ready report, start and stop appended since the last step, one
 //! lookup; and otherwise only the indices it keeps (which agent runs each run, which run
-//! was launched, which whole-host item holds which host, which item each run and lease
-//! belongs to, which host reported ready for which lease), each lookup logarithmic. An
+//! was launched, which whole-host item holds which host, how many events of each item it
+//! has read, which item each run and lease belongs to, which host reported ready for
+//! which lease), each lookup logarithmic. An
 //! agent, item or host the step did not touch is not re-read, so a fact that is wrong
 //! there is caught at the step that touches it, not before. A step that touched the
-//! server reads the whole listing, at a cost in the hosts and bookings it lists, and the
-//! hosts whole-host items hold; the
+//! server reads the whole listing, at a cost in the hosts and bookings it lists and the
+//! hosts whole-host items hold, and keeps the host each lease was first booked on; the
 //! cell re-reads the listing at every client call and once per virtual second, not
 //! at every step. Only the end check scans everything.
 
@@ -40,6 +41,7 @@ use crate::observe::{
 };
 use crate::text;
 
+mod results;
 mod whole;
 
 /// One property the cell must keep.
@@ -57,7 +59,11 @@ pub enum Invariant {
     /// lost to a fault cannot stretch the hold past the server freeing the host. At a
     /// step that touched the server, the item also holds the host while the server's
     /// listing books its lease there, so a release the server never processed is still
-    /// covered. The listing is read for (c) only at such steps.
+    /// covered. The listing is read for (c) only at such steps. (d) By the server's
+    /// listing, at a step that read it, a lease is booked on one host only, the host it
+    /// was first seen booked on: a lease is held on the host it was on, or dropped,
+    /// across a restart of the server too. (e) The listing names each host once: a host
+    /// that says hello again is seated once.
     NoDoubleBooking,
     /// Step check. Summed over the cell's launch ledger, each run is launched at most
     /// once, across agent deaths and replacements.
@@ -65,6 +71,15 @@ pub enum Invariant {
     /// Step check. Once an item has a terminal answer it has no other terminal answer
     /// and no `Started`: it reaches terminal once.
     OneTerminalAnswer,
+    /// Step check. A host the server lists as lost takes no new lease: at every client
+    /// call that reports an item placed on a host ([`ClientEvent::Placed`]), the
+    /// server's listing, read at that call, does not show that host lost; and at every
+    /// step that reads the listing, a lease it shows booked for the first time is not on
+    /// a host the same listing shows lost. The cell reads
+    /// the listing after each poll of the client, at the virtual time of its calls, and a
+    /// host turns lost only as virtual time passes, so the listing read is the one the
+    /// call met.
+    NoLeaseOnALostHost,
     /// End check, evaluated after the scenario's `settle_within` of virtual time in
     /// which no fault was active. Every submitted item is terminal (a client `GaveUp`
     /// counts), no lease is held by the client (it learned one and its release was not
@@ -80,6 +95,17 @@ pub enum Invariant {
     /// at every step because a booking legitimately precedes its start by a heartbeat
     /// and a run legitimately outlives its release by one.
     BookingsMatchAgents,
+    /// End check, evaluated with [`Invariant::SettlesWhenQuiet`], from facts the cell
+    /// owns only (its ledger of completions and verdicts, the processes it killed, and
+    /// what the client heard); the server's word for what it recorded is never read.
+    /// (a) No run's result was accepted twice: no two [`crate::Verdict::Accepted`] for
+    /// one run among the verdicts the agents read. (b) Every run an agent completed ends
+    /// as `Succeeded` for its client, unless the client had a terminal answer before the
+    /// completion (it gave up, or heard the run end otherwise, so its release may make
+    /// the result stale) or the agent's process was killed between the completion and
+    /// the first verdict it read on the result after it. (c) No client has `Succeeded`
+    /// for a run that no agent completed. A run no item queued is not judged.
+    NoResultLost,
     /// Step check. A whole-host item holds its host, by the client's facts, as in
     /// [`Invariant::NoDoubleBooking`] (c) (placed there, until it sent its release or
     /// heard the server end its run). While it does, no other whole-host item holds the
@@ -109,12 +135,14 @@ pub enum Invariant {
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 9] = [
+    pub const ALL: [Invariant; 11] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
         Invariant::SettlesWhenQuiet,
         Invariant::BookingsMatchAgents,
+        Invariant::NoLeaseOnALostHost,
+        Invariant::NoResultLost,
         Invariant::WholeHostIsExclusive,
         Invariant::HeldMeansReady,
         Invariant::DrainKillsNothing,
@@ -130,6 +158,8 @@ impl Invariant {
             Invariant::OneTerminalAnswer => "one-terminal-answer",
             Invariant::SettlesWhenQuiet => "settles-when-quiet",
             Invariant::BookingsMatchAgents => "bookings-match-agents",
+            Invariant::NoLeaseOnALostHost => "no-lease-on-a-lost-host",
+            Invariant::NoResultLost => "no-result-lost",
             Invariant::WholeHostIsExclusive => "whole-host-is-exclusive",
             Invariant::HeldMeansReady => "held-means-ready",
             Invariant::DrainKillsNothing => "drain-kills-nothing",
@@ -144,11 +174,14 @@ impl Invariant {
             Invariant::NoDoubleBooking
             | Invariant::AtMostOneLaunch
             | Invariant::OneTerminalAnswer
+            | Invariant::NoLeaseOnALostHost
             | Invariant::WholeHostIsExclusive
             | Invariant::HeldMeansReady
             | Invariant::DrainKillsNothing
             | Invariant::MarkedHostsServeNoOrdinaryStart => Checked::EveryStep,
-            Invariant::SettlesWhenQuiet | Invariant::BookingsMatchAgents => Checked::AtEnd,
+            Invariant::SettlesWhenQuiet
+            | Invariant::BookingsMatchAgents
+            | Invariant::NoResultLost => Checked::AtEnd,
         }
     }
 }
@@ -293,6 +326,10 @@ pub struct Checker {
     held: BTreeMap<HostId, BTreeMap<ItemId, LeaseId>>,
     /// The leases of whole-host items, with their items.
     whole: BTreeMap<LeaseId, ItemId>,
+    /// How many of each item's events were read.
+    events_read: BTreeMap<ItemId, usize>,
+    /// The host each lease was first seen booked on, by the server's listing.
+    booked_on: BTreeMap<LeaseId, HostId>,
     /// How many ready reports, starts and stops were read.
     ready_read: usize,
     starts_read: usize,
@@ -322,6 +359,10 @@ impl Checker {
         for (item, record) in items.filter_map(|i| observations.items.get_key_value(i)) {
             self.read_item(*item, record, &mut found);
             self.whole_item(*item, record, &mut found);
+            self.read_placed(observations, *item, record, &mut found);
+        }
+        if touched.server {
+            self.read_listing(observations, &mut found);
         }
         for host in &touched.agents {
             self.read_agent(observations, host, &mut found);
@@ -408,6 +449,7 @@ impl Checker {
                 }
             }
         }
+        results::check(observations, &mut found);
         Ok(found.list)
     }
 
@@ -465,6 +507,65 @@ impl Checker {
                 .or_default()
                 .insert(item, lease);
             self.holds.insert(item, host);
+        }
+    }
+
+    /// `NoLeaseOnALostHost` for one touched item: each event heard since the item was
+    /// last read that places it on a host the listing of this step shows lost.
+    fn read_placed(
+        &mut self,
+        observations: &Observations,
+        item: ItemId,
+        record: &ItemRecord,
+        found: &mut Found,
+    ) {
+        let read = self.events_read.insert(item, record.heard.len());
+        for heard in record.heard.iter().skip(read.unwrap_or(0)) {
+            let ClientEvent::Placed { host } = &heard.event else {
+                continue;
+            };
+            let listed = observations.server.hosts.get(host);
+            if listed.is_some_and(|listed| listed.lost) {
+                let detail = format!(
+                    "{} was placed on host {} at {} while the server lists it lost",
+                    text::item(item),
+                    text::host(host),
+                    time(heard.at)
+                );
+                found.flag(Invariant::NoLeaseOnALostHost, detail);
+            }
+        }
+    }
+
+    /// `NoDoubleBooking` (d) and (e) over the whole listing: each lease on the host it
+    /// was first booked on, and each host named once; and `NoLeaseOnALostHost` for a
+    /// lease first seen booked on a host the listing shows lost.
+    fn read_listing(&mut self, observations: &Observations, found: &mut Found) {
+        for (host, listed) in &observations.server.hosts {
+            for lease in &listed.leases {
+                if !self.booked_on.contains_key(lease) && listed.lost {
+                    let detail = format!(
+                        "lease {} is booked on host {} while the server lists it lost",
+                        text::lease(*lease),
+                        text::host(host)
+                    );
+                    found.flag(Invariant::NoLeaseOnALostHost, detail);
+                }
+                let first = self.booked_on.entry(*lease).or_insert_with(|| host.clone());
+                if first != host {
+                    let detail = format!(
+                        "lease {} is booked on host {}, and was booked on host {} first",
+                        text::lease(*lease),
+                        text::host(host),
+                        text::host(first)
+                    );
+                    found.flag(Invariant::NoDoubleBooking, detail);
+                }
+            }
+        }
+        for host in &observations.server.repeated {
+            let detail = format!("host {} is listed twice", text::host(host));
+            found.flag(Invariant::NoDoubleBooking, detail);
         }
     }
 

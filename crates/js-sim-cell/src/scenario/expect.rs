@@ -1,14 +1,19 @@
 //! What a scenario may state beyond the invariants: a small closed set, judged once per
 //! seed after the end check.
 
+use std::time::Duration;
+
 use js_agent_wire::Phase;
 use js_registry::{HostState, HostView};
 use js_types::HostId;
+use js_types::sched::FarmTime;
 
 use crate::bus::agent_name;
 use crate::cell::Cell;
 use crate::observe::{ClientEvent, HowEnded, ItemRecord};
 use crate::server::ServerNode;
+
+use super::launched_on;
 
 /// How the server's listing shows a host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +45,7 @@ enum Wanted {
     Host(usize, HostIs),
     HeldAndReleased(usize),
     EveryHostServing,
+    Launched(Vec<usize>, FarmTime),
 }
 
 impl Expect {
@@ -74,6 +80,15 @@ impl Expect {
     #[must_use]
     pub fn every_host_serving() -> Self {
         Self(Wanted::EveryHostServing)
+    }
+
+    /// Every agent of `agents` (by index, `h000` is 0) launched at least one run at or
+    /// after `after` from the start, by the cell's launch ledger: those hosts took work
+    /// then.
+    #[must_use]
+    pub fn launched_on(agents: &[usize], after: Duration) -> Self {
+        let at = FarmTime::default().saturating_add(after);
+        Self(Wanted::Launched(agents.to_vec(), at))
     }
 
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
@@ -115,6 +130,10 @@ impl Expect {
                 let serving = hosts.iter().filter(|host| serving(host)).count();
                 let name = "every-host-serving".to_owned();
                 (name, cell.agent_count().to_string(), serving.to_string())
+            }
+            Wanted::Launched(agents, after) => {
+                let [name, wanted, got] = launched_on::judged(agents, *after, cell.ledger());
+                (name, wanted, got)
             }
         };
         (wanted != got).then(|| format!("{name}: wanted {wanted}, got {got}"))

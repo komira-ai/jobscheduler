@@ -16,9 +16,11 @@ mod agent_refuses_prepare;
 mod agent_silent_on_prepare;
 mod cancel_work;
 mod kill_agents;
+mod kill_agents_for_good;
 mod partition_agents;
 mod replace_agents;
 mod request_whole_host;
+mod restart_server;
 mod set_bus_faults;
 mod submit_work;
 
@@ -27,9 +29,11 @@ pub use agent_refuses_prepare::{AgentRefusesPrepare, agent_refuses_prepare};
 pub use agent_silent_on_prepare::{AgentSilentOnPrepare, agent_silent_on_prepare};
 pub use cancel_work::{CancelWork, cancel_work};
 pub use kill_agents::{KillAgents, kill_agents};
+pub use kill_agents_for_good::{KillAgentsForGood, kill_agents_for_good};
 pub use partition_agents::{PartitionAgents, partition_agents};
 pub use replace_agents::{ReplaceAgents, replace_agents};
 pub use request_whole_host::{RequestWholeHost, request_whole_host};
+pub use restart_server::{RestartServer, restart_server};
 pub use set_bus_faults::{SetBusFaults, set_bus_faults};
 pub use submit_work::{SubmitWork, submit_work};
 

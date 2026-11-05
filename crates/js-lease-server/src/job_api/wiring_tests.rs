@@ -94,6 +94,10 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
         .expect("the service sees the job");
     assert_eq!(seen.id, id);
     assert_eq!(api.clock.now(), Timestamp::from_millis(NOW_MS));
+    assert!(
+        api.read.silence.is_some(),
+        "GetJob would show no host silence"
+    );
 }
 
 /// Asserts that no job service is built from a server that holds no job store: one whose

@@ -7,17 +7,19 @@
 //! - each agent process: what it runs now, what it completed and which results the
 //!   server acknowledged ([`AgentTruth`]), its ground truth, not what it reported;
 //! - the cell's launch ledger ([`Launch`]): one entry per run an agent process
-//!   launched. The ledger is the cell's, not the agent's, so an agent that dies and is
-//!   replaced cannot reset it. Beside the launches it keeps what the agents sent and were
-//!   sent for the whole-host handshake: each ready report sent ([`ReadyReport`]), each
-//!   start delivered ([`StartSeen`]) and each stop or cancel that reached a running run
-//!   ([`StopSeen`]);
+//!   launched, with the runs that ended on their own ([`Completion`]) and the verdicts the
+//!   agents read on their results ([`Acked`]). The ledger is the cell's, not the agent's,
+//!   so an agent that dies and is replaced cannot reset it; the cell adds the agent
+//!   processes it killed ([`Killed`]). Beside them the ledger keeps what the agents sent
+//!   and were sent for the whole-host handshake: each ready report sent
+//!   ([`ReadyReport`]), each start delivered ([`StartSeen`]) and each stop or cancel that
+//!   reached a running run ([`StopSeen`]);
 //! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
 //!   fills it from the registry's host views, never through the JSON route.
 //!
 //! Some facts are carried for invariants that later parts add and no check here reads
-//! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`],
-//! [`ServerHost::lost`] and [`ServerHost::set_aside`].
+//! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`]
+//! and [`ServerHost::set_aside`].
 //!
 //! [`Observations`] gathers them, with whether a fault is active and the items the client
 //! asked to cancel ([`Observations::cancels`]). Its builder
@@ -26,10 +28,13 @@
 //! build their histories with it.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::time::Duration;
 
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
+
+use crate::ledger::{Acked, Completion};
 
 /// One unit of work the client driver submits, numbered from zero in the order it
 /// submits them.
@@ -230,6 +235,15 @@ pub struct Launch {
     pub at: FarmTime,
 }
 
+/// One agent process the cell killed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Killed {
+    /// The host whose process was killed.
+    pub host: HostId,
+    /// When.
+    pub at: FarmTime,
+}
+
 /// A heartbeat in which an agent process reported its host ready for an exclusive
 /// (whole-host) lease: what the agent sent, whether or not the server heard it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,8 +317,7 @@ pub struct StopSeen {
 /// One host as the server lists it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerHost {
-    /// Whether the server holds the host lost (silent past its grace). No check reads
-    /// it yet.
+    /// Whether the server holds the host lost (silent past its grace).
     pub lost: bool,
     /// The leases booked on the host, in the order they were booked.
     pub leases: Vec<LeaseId>,
@@ -328,6 +341,28 @@ pub struct ServerHost {
 pub struct ServerView {
     /// Every host the server lists.
     pub hosts: BTreeMap<HostId, ServerHost>,
+    /// Each host the listing named again after it had named it, once per time again,
+    /// in the order the listing named them. Empty for a listing that names every host
+    /// once.
+    pub repeated: Vec<HostId>,
+}
+
+impl ServerView {
+    /// The view of a listing that names `listed` hosts in that order: the first entry
+    /// of a host is its entry, and each later one is noted in [`ServerView::repeated`].
+    #[must_use]
+    pub fn from_listing(listed: impl IntoIterator<Item = (HostId, ServerHost)>) -> Self {
+        let mut view = Self::default();
+        for (host, entry) in listed {
+            match view.hosts.entry(host) {
+                Entry::Occupied(named) => view.repeated.push(named.key().clone()),
+                Entry::Vacant(free) => {
+                    free.insert(entry);
+                }
+            }
+        }
+        view
+    }
 }
 
 /// Everything the cell observes at one virtual time.
@@ -346,6 +381,13 @@ pub struct Observations {
     pub agents: BTreeMap<HostId, AgentTruth>,
     /// The cell's launch ledger, oldest first; entries are only ever appended.
     pub ledger: Vec<Launch>,
+    /// The runs that ended on their own, from the cell's ledger, oldest first.
+    pub completions: Vec<Completion>,
+    /// The verdicts the agents read on their results, from the cell's ledger, oldest
+    /// first.
+    pub verdicts: Vec<Acked>,
+    /// The agent processes the cell killed, oldest first.
+    pub kills: Vec<Killed>,
     /// The server's list of hosts.
     pub server: ServerView,
     /// Every ready report an agent process sent, oldest first; only ever appended.
@@ -465,6 +507,49 @@ impl Observations {
         listed.set_aside = true;
         listed.reserved_for = Some(request.to_owned());
         listed.tail_end = tail_end;
+        self
+    }
+
+    /// These observations with `run` ended on its own on `host` at `at` appended to the
+    /// ledger's completions.
+    #[must_use]
+    pub fn with_completion(mut self, run: RunId, host: HostId, at: FarmTime) -> Self {
+        self.completions.push(Completion { run, host, at });
+        self
+    }
+
+    /// These observations with the agent of `host` reading `verdict` on `run`'s result
+    /// at `at`, appended to the ledger's verdicts.
+    #[must_use]
+    pub fn with_verdict(
+        mut self,
+        run: RunId,
+        host: HostId,
+        verdict: Verdict,
+        at: FarmTime,
+    ) -> Self {
+        let acked = Acked {
+            run,
+            host,
+            verdict,
+            at,
+        };
+        self.verdicts.push(acked);
+        self
+    }
+
+    /// These observations with the agent process of `host` killed at `at`.
+    #[must_use]
+    pub fn with_kill(mut self, host: HostId, at: FarmTime) -> Self {
+        self.kills.push(Killed { host, at });
+        self
+    }
+
+    /// These observations with the server listing `host` as lost, or live, keeping
+    /// what it books there.
+    #[must_use]
+    pub fn with_lost(mut self, host: HostId, lost: bool) -> Self {
+        self.server.hosts.entry(host).or_default().lost = lost;
         self
     }
 
