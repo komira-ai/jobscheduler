@@ -10,15 +10,17 @@
 //! build does not read is skipped by [`EndedHistory::range`], not fatal.
 //!
 //! The row is the first form of the allocation record of the design (section 10.1, "Usage
-//! history"): today the registry writes one when a lease's booking ends (a stop, or a
-//! whole-node prepare that failed), and
-//! the engine that will own allocations writes the same row, under the same key, when it frees
-//! one.
+//! history"): the registry writes one when a lease's booking ends (a stop, or a whole-node
+//! prepare that failed), and the lease server writes the same row, under the same key, when
+//! it frees a job's allocation. That writer takes the two rows from [`ended_writes`] and puts
+//! them in the transaction that frees the allocation, so the free and its record commit
+//! together; an allocation already freed is not freed again, so it is recorded once.
 //!
-//! The writer is an [`AllocationLog`]. The registry hands it a row after its own lock is
-//! released, on the thread that ended the lease, so a log never blocks: [`crate::UsageHub`],
-//! the log a server runs, adds what it measured of the lease and queues the row, and its tick
-//! writes the queue through [`crate::UsageSink::allocation_ended`] where blocking is allowed.
+//! The writer of a lease's row is an [`AllocationLog`]. The registry hands it a row after its own
+//! lock is released, on the thread that ended the lease, so a log never blocks:
+//! [`crate::UsageHub`], the log a server runs, adds what it measured of the lease and queues the
+//! row, and its tick writes the queue through [`crate::UsageSink::allocation_ended`] where blocking
+//! is allowed.
 //!
 //! **One row per allocation.** Beside each row, `usage/ended-id/<id>` holds the row's key,
 //! and both are written in one transaction only if both are absent. An allocation recorded
@@ -280,6 +282,19 @@ pub fn ended_id_key(id: &AllocationId) -> String {
     format!("{ENDED_ID_PREFIX}{id}")
 }
 
+/// The two rows that record `row`, as `(key, value)`: its index entry
+/// ([`ended_id_key`], whose value is the row's key) and the row itself ([`ended_key`]). They
+/// are what [`EndedHistory::put`] writes, for a writer that records the end in the same
+/// transaction as the change that ended the allocation.
+#[must_use]
+pub fn ended_writes(row: &EndedRow) -> [(String, Vec<u8>); 2] {
+    let key = ended_key(row.actual_end, &row.id);
+    [
+        (ended_id_key(&row.id), key.clone().into_bytes()),
+        (key, encode(row)),
+    ]
+}
+
 /// Where the record of each ended allocation goes.
 ///
 /// [`AllocationLog::ended`] is called on the thread that ended the allocation, after the
@@ -327,11 +342,11 @@ impl<'a> EndedHistory<'a> {
     /// # Errors
     /// [`UsageError::Store`] when the store fails; nothing is written.
     pub fn put(&self, row: &EndedRow) -> Result<bool, UsageError> {
-        let key = ended_key(row.actual_end, &row.id);
-        let index = ended_id_key(&row.id);
-        let txn = Txn::new()
-            .put(index, key.clone().into_bytes(), Cond::Absent)
-            .put(key, encode(row), Cond::Absent);
+        let txn = ended_writes(row)
+            .into_iter()
+            .fold(Txn::new(), |txn, (key, value)| {
+                txn.put(key, value, Cond::Absent)
+            });
         Ok(self.store.txn(txn)?.is_ok())
     }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use js_client::jobs::Dialer;
 use rustix::process::Signal;
 
 use crate::failure::Failure;
@@ -169,16 +170,25 @@ pub struct Services {
     pub(crate) waiter: Arc<dyn Waiter>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
+    /// How the job commands open their connection: TCP unless a test hands in another.
+    pub(crate) dialer: Dialer,
 }
 
 impl Services {
-    /// Services over this waiter, clock and signal source.
+    /// Services over this waiter, clock and signal source; the job commands dial TCP.
     pub fn new(waiter: Arc<dyn Waiter>, clock: Arc<dyn Clock>, signals: SignalSource) -> Self {
         Self {
             waiter,
             clock,
             signals,
+            dialer: Dialer::tcp(),
         }
+    }
+
+    /// These services with the job commands opening their connection through `dialer`.
+    #[must_use]
+    pub fn with_dialer(self, dialer: Dialer) -> Self {
+        Self { dialer, ..self }
     }
 
     /// The program's own: a sleeping thread, the system clock and tokio's signal

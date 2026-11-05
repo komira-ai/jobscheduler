@@ -134,6 +134,7 @@ impl From<NativeBody> for NativeSpec {
             inputs: Vec::new(),
             outputs: Vec::new(),
             network: body.network,
+            ports: Vec::new(),
         }
     }
 }

@@ -73,9 +73,10 @@ proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 # The job service's messages (js-proto): prost encodes and decodes them, and prost-types
 # holds the descriptor set the crate's tests read the schema from.
 prost = "0.14.4"
-# The HTTP/JSON gateway (js-api-gateway): reads the `google.api.http` option of each method from
-# the job service's descriptor set, and with its `serde` feature maps the messages to and from
-# JSON by the proto3 JSON mapping, so no message is mapped by hand.
+# The job service's messages by its descriptor set: the HTTP/JSON gateway (js-api-gateway) reads
+# the `google.api.http` option of each method and maps messages to and from proto3 JSON
+# (`serde`); the job commands of js-cli build a request from flags and print an answer (`serde`,
+# and `text-format` for the text of a value). Members add the features they use.
 prost-reflect = "0.16.5"
 prost-types = "0.14.4"
 # js-proto's build script compiles the `.proto` files with protox, a pure-Rust compiler, so

@@ -32,6 +32,8 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-bundle = { path = "../js-bundle" }
 js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
+# The live-log store client (src/logs).
+js-logstore = { path = "../js-logstore" }
 js-mac-pool = { path = "../js-mac-pool" }
 js-mac-provision = { path = "../js-mac-provision" }
 js-mac-session = { path = "../js-mac-session" }
@@ -65,6 +67,8 @@ js-contain = { path = "../js-contain" }
 [dev-dependencies]
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
+# The in-memory log store the uploader's tests put to (src/logs, tests/crun_stand_in).
+js-logstore = { path = "../js-logstore", features = ["fake"] }
 js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }

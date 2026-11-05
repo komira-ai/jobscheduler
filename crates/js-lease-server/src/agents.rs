@@ -74,6 +74,10 @@ pub(crate) struct Agents {
     /// jobs, and its job listing is committed ([`crate::per_job`]); without them, and for any
     /// other host, the reply is the lease and run reply alone.
     pub(crate) jobs: Option<Arc<ServerJobs>>,
+    /// The registry's placer under `--placement js-sched`, which also places the queued jobs
+    /// when the job tables are held ([`Agents::place_jobs`]); `None` under the registry's
+    /// placement, which places no job.
+    pub(crate) placer: Option<Arc<SchedPlacer>>,
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
     unclean: Mutex<BTreeSet<HostId>>,
@@ -183,6 +187,7 @@ pub(crate) fn assemble_placed(
                 errors: AtomicU64::new(0),
                 usage,
                 jobs,
+                placer: placer.clone(),
                 unclean: Mutex::default(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
@@ -224,6 +229,7 @@ impl Agents {
             errors: AtomicU64::new(0),
             usage: None,
             jobs: None,
+            placer: None,
             unclean: Mutex::default(),
         }
     }
@@ -233,6 +239,16 @@ impl Agents {
     pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
         Self {
             jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// This agent side placing with `placer` (`--placement js-sched`), for a test of the
+    /// heartbeat's pass over the queued jobs. The registry must already hold it.
+    #[cfg(test)]
+    pub(crate) fn with_placer(self, placer: Arc<SchedPlacer>) -> Self {
+        Self {
+            placer: Some(placer),
             ..self
         }
     }

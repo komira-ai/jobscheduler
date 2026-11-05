@@ -10,6 +10,7 @@ use std::path::Path;
 
 use super::{Cli, TlsFiles};
 use crate::error::StartupError;
+use crate::job_store::JobStoreSetup;
 
 /// How the flags name the two TLS settings in a refusal.
 const FLAG_PAIR: &str = "--tls-cert and --tls-key";
@@ -34,6 +35,20 @@ pub(crate) fn clear_text(addr: SocketAddr, tls: bool, pair: &str) -> Option<Stri
             "{addr} is not a loopback address, so {pair} are required: a bearer token never crosses a network in clear"
         )
     })
+}
+
+/// Where `--job-listen` serves the job service, named by the flag; `None` when it is off.
+pub(super) fn job_listen(cli: &Cli) -> Option<JobListen> {
+    let flag = "--job-listen";
+    cli.job_listen.map(|addr| JobListen { addr, flag })
+}
+
+/// The job store's setup when `--job-listen` turns the job service on: named by the flag,
+/// keeping an ended job for `--job-retention`.
+pub(super) fn job_store(cli: &Cli) -> Option<JobStoreSetup> {
+    let flag = "--job-listen";
+    let retention = cli.job_retention;
+    cli.job_listen.map(|_| JobStoreSetup { flag, retention })
 }
 
 /// The TLS files of `--tls-cert` and `--tls-key`, both or neither, and the refusal of the

@@ -62,8 +62,8 @@
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs, with `--runtime docker --allow-container-engine` (on Linux without `--runtime` it is refused, since the runtime is then `crun`, which takes no engine flag); never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on `--runtime crun`, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit and the silence bound (`--silence-stop`) are enforced only while an agent runs (the helper holds no deadline of a run's own, so a native run is unbounded while no agent runs); the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
 //! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
-//! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every job that asks for the network it checks again and refuses the job (`egress-unchecked`) if it is not; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
-//! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise |
+//! | `--native-network <level>` | the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every run of the Mac); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-helper-socket` |
+//! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
 //! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
@@ -87,6 +87,7 @@
 //! | `--runtime <docker\|crun\|none>` | what runs a job: `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only), which is the default Linux runtime: a Linux agent given no `--runtime` and no `--native-*` flag runs `crun`; or `docker` (the engine program of `--container-bin`, Docker or Podman), which needs `--allow-container-engine`; or `none`, an agent that registers and heartbeats and starts no job, which takes neither `--container-bin` nor a `--native-*` flag. A Mac agent given no `--runtime` runs native jobs (`--native-helper-socket`), or none without it. The packaged unit of the Docker cloud hosts names `--runtime docker --allow-container-engine`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun`, named or the default, the agent checks the host before it registers and exits 2 naming every piece that is missing, and never runs the engine instead (a start that named no `--runtime` is also told that crun is the default, of docs/runbooks/crun-host-setup.md, and of the opt-in to the engine): `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
 //! | `--allow-container-engine` | accept `--runtime docker`: the engine at `--container-bin` runs the jobs, a fallback for a host that cannot run `crun` and for GPU jobs; every job it runs gets network none, and the agent prints one warning at start that says so. `--runtime docker` without it exits 2 (`--runtime docker: needs --allow-container-engine`), and it without `--runtime docker` exits 2 (`--allow-container-engine: needs --runtime docker`). When the fallback is dropped is an open question of the design (question 7 of komira-ai/jobscheduler#648) |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
+//! | `--log-file-cap <bytes>` | the bytes of each stream of a `--runtime crun` job with a live-log sink that the capture keeps in its file (default 67108864, 64 MiB; from 1 MiB to 1 GiB): the file is the local backlog the agent uploads from while the store is down, and bytes past it are a gap in the job's live logs (`docs/design/live-logs.md`); a job without a sink keeps the capture's 1 MiB. With `--runtime crun` the agent reports the capability `log-upload`, holds the host's upload credential from the heartbeat replies in memory only, and reports what it holds in each heartbeat (`log_grant_state`) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
 //! | `--gpu-mount <src>:<dst>` | a host directory a `crun` GPU job is given read-only (`nosuid,nodev`, not recursive), such as the driver's libraries; repeatable; both absolute, the source a directory not below `/proc`, `/sys` or `/dev`, the destination not at or below those, `/scratch` or a place the runtime mounts itself (`/work`, `/root`, `/tmp`, `/var/tmp`, `/run`, the `/etc` name files), nor hold one of them (`/etc`, `/var`), nor at or below another's. A file source is refused: binding a file where the image has none would leave a file in the image's root that every job of that image shares. A GPU job whose image has a link or a file on the way to the destination, or whose driver directory is gone, is refused when it starts, naming the flag. Needs `--gpu-device` |
@@ -265,6 +266,7 @@ pub mod image;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+pub mod logs;
 pub mod native;
 pub mod own_host;
 pub mod quota;
@@ -447,6 +449,7 @@ fn runtime_flags(
                 }
                 let settings =
                     Settings::for_crun(ready.crun, &ready.job_user, ready.job_ids, image_allow);
+                let settings = settings.with_log_file_cap(cli.log_file_cap);
                 Ok(Some(settings.with_gpus(passthrough)))
             }
             #[cfg(not(target_os = "linux"))]
@@ -786,20 +789,28 @@ fn execute(
         .is_some_and(|plan| plan.gpus.is_some());
     #[cfg(not(target_os = "linux"))]
     let passthrough = false;
-    let reported = match (local.container.is_some(), local.native.is_some()) {
+    // A crun agent uploads live logs: it says so, and its session fills the host's credential
+    // from the replies and reports what it holds.
+    let log_grant = local
+        .container
+        .as_ref()
+        .and_then(Settings::crun)
+        .map(|plan| Arc::clone(&plan.logs.grant));
+    let reported = match (local.container.is_some(), local.native.as_ref()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
             toolkit.as_ref(),
             commands,
             local.files.is_some(),
             default_gib,
-            (passthrough, &local.egress.ceiling()),
+            (passthrough, &local.egress.ceiling(), log_grant.is_some()),
         )),
-        (false, true) => Some(contract::report_native(
+        (false, Some(native)) => Some(contract::report_native(
             &mut offer.hello,
             local.files.is_some(),
+            native.config().network,
         )),
-        (false, false) => None,
+        (false, None) => None,
     };
     if let Some(found) = reported {
         found.iter().for_each(|warning| {
@@ -878,6 +889,9 @@ fn execute(
     }
     if let Some(gauge) = &gauge {
         session = session.with_disk(gauge);
+    }
+    if let Some(grant) = log_grant {
+        session = session.with_log_grant(grant);
     }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

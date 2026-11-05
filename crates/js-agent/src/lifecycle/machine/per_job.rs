@@ -13,13 +13,15 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    HeldJob, Isolation, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, RunResult, limits,
+    HeldJob, Isolation, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, LogReport,
+    RunResult, limits,
 };
 
 use super::Lifecycle;
 use super::RETIRED_CAP;
-use super::job::Keyed;
-use crate::lifecycle::Event;
+use super::job::{Given, Keyed};
+use crate::lifecycle::{Event, code};
+use crate::logs::Sink;
 
 /// The most retired job ids a heartbeat lists in `retired_jobs`. Each is at most
 /// [`limits::MAX_ID_LEN`] bytes, so the list weighs at most a quarter of the heartbeat body
@@ -66,8 +68,9 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
     }
 }
 
-/// The result of a job keyed by job id, as its listing carries it.
-pub(super) fn job_result(result: &RunResult) -> JobResult {
+/// The result of a job keyed by job id, as its listing carries it, with what the capture saw
+/// of its streams (`logs`) when the runtime uploaded them.
+pub(super) fn job_result(result: &RunResult, logs: Option<LogReport>) -> JobResult {
     JobResult {
         job_id: result.run_id.clone(),
         allocation_id: result.lease_id.clone(),
@@ -75,7 +78,7 @@ pub(super) fn job_result(result: &RunResult) -> JobResult {
         exit_code: result.exit_code,
         detail: result.detail.clone(),
         log_tail: result.log_tail.clone(),
-        logs: None,
+        logs,
     }
 }
 
@@ -85,7 +88,9 @@ impl Lifecycle {
     /// (the job id with the allocation id) is retired is skipped (`Skip::FenceRetired`); the
     /// same job under a new allocation is new work. The job's environment goes to the
     /// runtime by name in order ([`RunSpec::env`](crate::lifecycle::RunSpec::env)); whether
-    /// the runtime can carry it is the runtime's to say, never the lifecycle's.
+    /// the runtime can carry it is the runtime's to say, never the lifecycle's. So does its
+    /// live-log sink once checked ([`Sink::of_start`]); a sink that fails the check costs the
+    /// job its live logs and one note ([`code::LOG_SINK_IGNORED`]), and nothing else.
     pub(super) fn start_job(
         &mut self,
         spec: &JobStartSpec,
@@ -94,8 +99,17 @@ impl Lifecycle {
     ) {
         let run = run_of(spec);
         if self.may_start((&run, Keyed::Job), received, events) {
-            let env: Vec<(String, String)> = spec.env.clone().into_iter().collect();
-            self.admit_and_start((&run, Keyed::Job), &env, received, events);
+            let sink = Sink::of_start(spec);
+            let given = Given {
+                env: spec.env.clone().into_iter().collect(),
+                log_sink: sink.clone().ok().flatten(),
+            };
+            self.admit_and_start((&run, Keyed::Job), &given, received, events);
+            // The start always leaves its job last, running or refused.
+            if let Err(why) = sink {
+                let job = self.jobs.last_mut().into_iter();
+                job.for_each(|job| job.note(code::LOG_SINK_IGNORED, why.clone(), events));
+            }
         }
     }
 
@@ -151,7 +165,10 @@ impl Lifecycle {
             .map(|job| HeldJob {
                 job_id: job.run_id.clone(),
                 state: job.held_state(),
-                result: job.result.as_ref().map(job_result),
+                result: job
+                    .result
+                    .as_ref()
+                    .map(|result| job_result(result, job.logs)),
             })
             .collect()
     }

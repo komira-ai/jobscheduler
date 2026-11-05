@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js_agent::native::{NativeFlags, NativeSettings, PfFlags, ProvisionError};
-use js_mac_pool::seatbelt::{Net, ReadModel};
+use js_agent::native::{Ceiling, NativeFlags, NativeSettings, PfFlags, ProvisionError};
+use js_mac_pool::seatbelt::ReadModel;
 
 use crate::support::Scratch;
 
@@ -94,7 +94,7 @@ fn good_flags_configure_the_runtime() {
     assert_eq!(settings.socket(), socket);
     let config = settings.config();
     assert_eq!(config.homes, fs::canonicalize(&homes).unwrap());
-    assert_eq!(config.net, Net::Off);
+    assert_eq!(config.network, Ceiling::Off);
     let roots: Vec<&str> = config
         .tool_roots
         .iter()
@@ -119,7 +119,7 @@ fn good_flags_configure_the_runtime() {
     let settings = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal"))
         .unwrap()
         .unwrap();
-    assert_eq!(settings.config().net, Net::Loopback);
+    assert_eq!(settings.config().network, Ceiling::Loopback);
     assert_eq!(settings.config().tool_roots, tools);
     assert!(settings.config().egress.is_none(), "no check below on");
     let mut given = flags(Some(socket), Some(&homes), Some("on"), &[]);
@@ -127,7 +127,7 @@ fn good_flags_configure_the_runtime() {
     let settings = NativeSettings::from_flags(&given, &[], Path::new("/srv/journal"))
         .unwrap()
         .unwrap();
-    assert_eq!(settings.config().net, Net::On);
+    assert_eq!(settings.config().network, Ceiling::On);
     assert!(
         settings.config().egress.is_some(),
         "a cap of on has its check"
@@ -158,7 +158,7 @@ fn the_default_home_directory_is_users() {
 }
 
 /// Asserts the refusals, each naming its flag: a relative socket, home directory or tool
-/// root, a home directory that does not exist, a network level that is none of the three,
+/// root, a home directory that does not exist, a network level that is none of the four,
 /// and an agent path a profile cannot name. It catches a flag that is accepted and fails
 /// when the first job starts.
 #[test]
@@ -184,7 +184,7 @@ fn bad_flags_are_refused_by_name() {
         ),
         (
             flags(Some(socket), Some(&homes), Some("wide"), &[]),
-            "--native-network: \"wide\" is not off, loopback or on",
+            "--native-network: \"wide\" is not off, loopback, on or open",
         ),
         (
             flags(Some(socket), Some(&homes), None, &relative),
@@ -384,17 +384,9 @@ fn a_cap_of_on_needs_the_pool_and_a_policy_that_is_valid() {
     assert_eq!(on(all), Ok(()));
 }
 
-/// Asserts that a pf flag with a cap below `on` is refused, named, for each of the six, and
-/// that the same flags with `on` are accepted. It catches a flag that is ignored because the
-/// cap makes it moot, where the operator believes a limit is in force.
-#[test]
-fn a_pf_flag_needs_a_cap_of_on() {
-    let socket = Path::new("/run/js/helper");
-    let dir = Scratch::new("native-set-pf-off");
-    let homes = dir.path("homes");
-    fs::create_dir(&homes).unwrap();
-    let endpoints = ["192.0.2.10:443".to_owned()];
-    let each = [
+/// Each pf flag alone, by its name: `endpoints` is the one endpoint the last one gives.
+fn each_pf_flag(endpoints: &[String]) -> [(&'static str, PfFlags<'_>); 6] {
+    [
         (
             "--native-pfctl",
             PfFlags {
@@ -433,11 +425,24 @@ fn a_pf_flag_needs_a_cap_of_on() {
         (
             "--native-pf-endpoint",
             PfFlags {
-                endpoints: &endpoints,
+                endpoints,
                 ..PfFlags::default()
             },
         ),
-    ];
+    ]
+}
+
+/// Asserts that a pf flag with a cap below `on` is refused, named, for each of the six, and
+/// that the same flags with `on` are accepted. It catches a flag that is ignored because the
+/// cap makes it moot, where the operator believes a limit is in force.
+#[test]
+fn a_pf_flag_needs_a_cap_of_on() {
+    let socket = Path::new("/run/js/helper");
+    let dir = Scratch::new("native-set-pf-off");
+    let homes = dir.path("homes");
+    fs::create_dir(&homes).unwrap();
+    let endpoints = ["192.0.2.10:443".to_owned()];
+    let each = each_pf_flag(&endpoints);
     for network in [None, Some("off"), Some("loopback")] {
         for (flag, pf) in each {
             let mut given = flags(Some(socket), Some(&homes), network, &[]);
@@ -488,4 +493,91 @@ fn the_check_the_flags_make_asks_the_pfctl_they_name() {
         verdict("/nonexistent/pfctl"),
         Err(ProvisionError::Run { .. })
     ));
+}
+
+/// The settings of `network` with the pf flags `pf`, over a home directory that exists.
+fn with_network(dir: &Scratch, network: &str, pf: PfFlags<'_>) -> Result<NativeSettings, String> {
+    let homes = dir.path("homes");
+    fs::create_dir_all(&homes).unwrap();
+    let mut given = flags(
+        Some(Path::new("/run/js/helper")),
+        Some(&homes),
+        Some(network),
+        &[],
+    );
+    given.pf = pf;
+    NativeSettings::from_flags(&given, &[], Path::new("/srv/journal")).map(|found| found.unwrap())
+}
+
+/// Asserts that `open` is a ceiling of its own: accepted without any pf flag, it hands the
+/// runtime the ceiling `open` and no pf check (nothing filters its jobs). Catches `open`
+/// refused as an unknown value, read as `on` (which would demand the anchor), or given a
+/// check it would then ask before jobs.
+#[test]
+fn native_network_accepts_open() {
+    let dir = Scratch::new("native-set-open");
+    let settings = with_network(&dir, "open", PfFlags::default()).unwrap();
+    assert_eq!(settings.config().network, Ceiling::Open);
+    assert!(settings.config().egress.is_none(), "open has no check");
+}
+
+/// Asserts that a value that is none of the four is refused naming the flag, the value and
+/// all four values, by exact text, for a word close to one of them and for an empty one.
+/// Catches an unknown word read as a known level (a typo of `off` that opens the network).
+#[test]
+fn native_network_rejects_unknown() {
+    let dir = Scratch::new("native-set-unknown");
+    for word in ["opened", "", "ON", "allow-list"] {
+        let Err(why) = with_network(&dir, word, PfFlags::default()) else {
+            panic!("{word:?} is not a ceiling");
+        };
+        assert_eq!(
+            why,
+            format!("--native-network: {word:?} is not off, loopback, on or open"),
+        );
+    }
+}
+
+/// Asserts that each pf flag beside `--native-network open` stops the agent at start, naming
+/// the flag and `--native-network open` by exact text, and that the same flag beside `on`
+/// (with the pool's uids) is accepted. Catches an operator who sets a filter with `open` and
+/// believes it is in force, while the agent never checks it.
+#[test]
+fn open_with_pf_flags_is_a_startup_error() {
+    let dir = Scratch::new("native-set-open-pf");
+    let endpoints = ["192.0.2.10:443".to_owned()];
+    for (flag, pf) in each_pf_flag(&endpoints) {
+        let Err(why) = with_network(&dir, "open", pf) else {
+            panic!("{flag} with open");
+        };
+        assert_eq!(
+            why,
+            format!(
+                "{flag}: not valid with --native-network open, which sets no packet filter \
+                 (the pf flags limit the network of --native-network on)"
+            )
+        );
+        let on = PfFlags {
+            uid_start: Some(600),
+            uid_count: Some(10),
+            ..pf
+        };
+        assert!(with_network(&dir, "on", on).is_ok(), "{flag} with on");
+    }
+}
+
+/// Asserts the gate of `on` is unchanged by `open`: `on` with no pf flag is refused at start
+/// for the pool's uids, as before. Catches an `on` that now starts with nothing to check
+/// because `open` needs none.
+#[test]
+fn on_without_pf_flags_still_fails_to_open() {
+    let dir = Scratch::new("native-set-on-bare");
+    let Err(why) = with_network(&dir, "on", PfFlags::default()) else {
+        panic!("on needs the pool's uids");
+    };
+    assert_eq!(
+        why,
+        "--native-pf-uid-start: required with --native-network on: the uids of the pool whose \
+         egress the pf anchor limits"
+    );
 }

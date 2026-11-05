@@ -216,8 +216,9 @@ fn roots(https: bool, ca_cert: Option<&Path>) -> Result<RootCerts, ClientError> 
     Ok(RootCerts::Specific(Arc::new(certs)))
 }
 
-/// The certificates in a PEM file; a file without one is refused.
-fn pem_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, ClientError> {
+/// The certificates in a PEM file; a file without one is refused. The job client reads
+/// `--ca-cert` through this too.
+pub(crate) fn pem_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, ClientError> {
     let refuse = |why: String| ClientError::flag("--ca-cert", format!("{}: {why}", path.display()));
     let found = CertificateDer::pem_file_iter(path)
         .and_then(|found| found.collect::<Result<Vec<_>, _>>())

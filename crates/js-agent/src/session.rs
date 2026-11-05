@@ -102,6 +102,13 @@
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
 //!
+//! # Live logs
+//!
+//! A session given the host's credential cell ([`Session::with_log_grant`], an agent that
+//! uploads live logs) puts each reply's `log_grant` that passes its check into the cell, where
+//! every uploader of the host reads it, and reports what the cell holds in every heartbeat
+//! (`log_grant_state`). Without one it sends no state and ignores a grant.
+//!
 //! # Free disk
 //!
 //! A session given a [`DiskGauge`] ([`Session::with_disk`]) asks it before each heartbeat and puts the
@@ -140,6 +147,7 @@ use crate::credential::CredentialStore;
 use crate::disk::DiskGauge;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
+use crate::logs::HostGrant;
 use crate::transport::{Answer, Transport};
 use crate::usage::Outbox;
 use crate::worker::{Delivery, Snapshot, Worker};
@@ -500,6 +508,8 @@ pub struct Session<'a> {
     told: Option<u64>,
     /// The free disk the heartbeat in flight carries.
     saying: Option<u64>,
+    /// The host's live-log credential, when the agent uploads live logs.
+    log_grant: Option<Arc<HostGrant>>,
 }
 
 impl<'a> Session<'a> {
@@ -526,6 +536,17 @@ impl<'a> Session<'a> {
             disk: None,
             told: None,
             saying: None,
+            log_grant: None,
+        }
+    }
+
+    /// The same session filling `cell` with the live-log credential of the replies and
+    /// reporting what it holds (see the module documentation).
+    #[must_use]
+    pub fn with_log_grant(self, cell: Arc<HostGrant>) -> Self {
+        Self {
+            log_grant: Some(cell),
+            ..self
         }
     }
 
@@ -739,7 +760,7 @@ impl<'a> Session<'a> {
             disk_gib: self.saying,
             jobs: jobs.jobs,
             retired_jobs: jobs.retired_jobs,
-            log_grant_state: None,
+            log_grant_state: self.log_grant.as_ref().map(|cell| cell.state()),
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -876,6 +897,7 @@ impl<'a> Session<'a> {
                     hold.follow(lease.as_deref())
                 });
                 let refused = self.hold.as_mut().and_then(Hold::take_note);
+                self.keep_log_grant(&reply);
                 let accepted = self.accept(reply);
                 Step::Wait {
                     after: interval,
@@ -884,6 +906,15 @@ impl<'a> Session<'a> {
             }
             Err(_) => self.retry("heartbeat", Reason::Unusable(refusal::INVALID_REPLY), None),
         }
+    }
+
+    /// Puts the live-log credential `reply` carries into the cell, when the session has one
+    /// and the grant passed its check; a bad grant is ignored and the cell keeps what it held.
+    fn keep_log_grant(&self, reply: &HeartbeatReply) {
+        let checked = reply.log_grant.as_ref();
+        let checked = checked.filter(|_| reply.validate().log_grant.is_ok());
+        let pairs = self.log_grant.iter().zip(checked);
+        pairs.for_each(|(cell, grant)| cell.replace(grant));
     }
 
     /// What a decoded reply does: handed to the worker, or counted as ignored when there

@@ -40,9 +40,14 @@
 //! enforces) ends, with a minute to spare, by then ([`js_sched::Scheduler::with_backfill`]).
 //! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
+//! The same engine places the queued jobs when the server holds the job tables
+//! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is
+//! placed only where both leave room.
+//!
 //! Locks: the placer's mutex is taken only inside a call the registry makes under its own
 //! lock (registry, then placer), and the placer never calls the registry, so the order is
-//! fixed.
+//! fixed. A pass over the queued jobs ([`super::engine::jobs`]) takes its own lock, then the
+//! engine's, and reads the registry before either.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -66,6 +71,9 @@ pub(crate) struct SchedPlacer {
     settings: Settings,
     clock: SharedClock,
     engine: Mutex<Engine>,
+    /// Held for each pass over the queued jobs, so two passes never decide at once
+    /// ([`super::engine::jobs`]); taken before the engine's lock, never under it.
+    passes: Mutex<()>,
     unmappable: AtomicU64,
     declined: AtomicU64,
     resynced: AtomicU64,
@@ -92,6 +100,7 @@ impl SchedPlacer {
         Self {
             settings,
             engine: Mutex::new(Engine::build(settings, &[], now)),
+            passes: Mutex::new(()),
             clock,
             unmappable: AtomicU64::new(0),
             declined: AtomicU64::new(0),
@@ -101,11 +110,16 @@ impl SchedPlacer {
         }
     }
 
-    fn engine(&self) -> MutexGuard<'_, Engine> {
+    pub(super) fn engine(&self) -> MutexGuard<'_, Engine> {
         self.engine.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn now(&self) -> FarmTime {
+    /// The lock of one pass over the queued jobs.
+    pub(super) fn pass(&self) -> MutexGuard<'_, ()> {
+        self.passes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn now(&self) -> FarmTime {
         farm_time(&self.clock)
     }
 

@@ -110,6 +110,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     ticker: T,
     checks: C,
 ) -> Result<Running, StartupError> {
+    let logs = config.logs().sink();
     let (prepared, listeners) = prepare(config, &clock)?;
     let tls = listeners
         .tls
@@ -140,6 +141,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
             provider = %table.provider().id(),
             hosts = table.provider().capacity().len(),
             tls = served_tls,
+            logs = %logs,
             "listening"
         );
     })?;

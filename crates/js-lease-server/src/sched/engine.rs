@@ -30,6 +30,12 @@
 //! registry forgets (lost past its retention, or given back) is forgotten by the engine
 //! too, worker and all ([`Engine::host_gone`]).
 //!
+//! The engine also holds the job allocations of the job table, beside the registry's leases
+//! ([`jobs`]): a pass over the queued jobs brings them to the table and places queued jobs.
+//! A heartbeat lists them as running, a rebuild carries them over, and a host the registry
+//! forgets is kept while it holds one, so the room a lease is offered is what the host's
+//! shape leaves after both.
+//!
 //! The engine is given no learned curves: each lease is charged what it books, and each
 //! host by its load readings when it has fresh ones.
 
@@ -52,6 +58,9 @@ use js_types::{HostId, LeaseId, Shape};
 
 use super::map::{self, MapError};
 
+#[path = "jobs.rs"]
+pub(crate) mod jobs;
+
 /// The term the engine grants leases in. A lease it places is numbered `TERM-<seq>`, with
 /// the sequence of the registry's lease, so the tie-break between equal hosts (a hash of
 /// the lease and the host) varies by lease as it does in the registry. A lease it takes
@@ -72,7 +81,7 @@ pub(crate) struct Settings {
 /// The scheduler form of a host: its capacity and the capabilities its node report gives.
 pub(crate) type Node = (js_types::sched::Resources, NodeCaps);
 
-/// A lease of the registry the engine holds.
+/// A lease of the registry, or a job's allocation, the engine holds.
 #[derive(Debug, Clone, Copy)]
 struct Placed {
     /// The engine's lease.
@@ -102,6 +111,10 @@ pub(crate) struct Engine {
     /// load ([`Engine::rebuild`]). The three newest: the scheduler charges a host by the
     /// larger of its last two windows, and two windows take three readings.
     readings: BTreeMap<HostId, Vec<(FarmTime, NodeLoad)>>,
+    /// The job allocations the engine holds, each with its host and what it books
+    /// ([`jobs`]): the live allocations of the job table, and the placements of the pass
+    /// under way until their commit answers.
+    jobs: BTreeMap<js_jobs::JobId, jobs::JobHold>,
 }
 
 /// How many readings of a host are kept for a rebuild: two windows, the most the
@@ -141,6 +154,7 @@ impl Engine {
             now,
             taken: u64::try_from(holds.len()).unwrap_or(u64::MAX),
             readings: BTreeMap::new(),
+            jobs: BTreeMap::new(),
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -169,6 +183,8 @@ impl Engine {
         replay.sort_by_key(|(at, _, _)| *at);
         let start = replay.first().map_or(now, |(at, _, _)| (*at).min(now));
         let mut engine = Self::build(settings, every, start);
+        // The job allocations are not in the registry's books: they are carried over.
+        engine.take_jobs(&self.jobs);
         for (at, host, load) in replay {
             engine.heard(host, Some(load), at);
         }
@@ -182,9 +198,11 @@ impl Engine {
     }
 
     /// `host` is no longer listed by the registry: it is forgotten, worker and all, unless
-    /// the engine still holds a lease there (it then waits for the next rebuild).
+    /// the engine still holds a lease there (it then waits for the next rebuild) or a job's
+    /// allocation (which only its host's confirmation or the provider's absence frees).
     pub(crate) fn host_gone(&mut self, host: &HostId) {
-        if self.on.get(host).is_some_and(|leases| !leases.is_empty()) {
+        let leased = self.on.get(host).is_some_and(|leases| !leases.is_empty());
+        if leased | self.holds_jobs_on(host) {
             return;
         }
         let _ = self.sched.forget_worker(&map::worker(host));
@@ -252,11 +270,11 @@ impl Engine {
         self.readings.remove(host);
     }
 
-    /// A heartbeat of `host` the registry accepted, with the reading it brought. The
-    /// heartbeat lists every lease the engine holds there as running, so none is given up
-    /// for a beat; the reading's leases are named as the engine numbers them, and a lease
-    /// the engine does not hold is left out of it. The scheduler takes no heartbeat of a
-    /// host that is no worker of it.
+    /// A heartbeat of `host` the registry accepted, with the reading it brought. The heartbeat
+    /// lists every lease and job allocation the engine holds there as running, so none is given up
+    /// for a beat; the reading's leases are named as the engine numbers them, and a lease the
+    /// engine does not hold is left out of it. The scheduler takes no heartbeat of a host that is
+    /// no worker of it.
     pub(crate) fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
         let here = self.on.get(host);
         let ours = |lease: &SchedLeaseId| {
@@ -267,6 +285,7 @@ impl Engine {
         let running = here
             .into_iter()
             .flat_map(|leases| leases.values().map(|placed| placed.lease))
+            .chain(self.job_leases_on(host))
             .collect();
         let translated = load.map(|load| NodeLoad {
             covered: load.covered.iter().filter_map(ours).collect(),
@@ -307,6 +326,11 @@ impl Engine {
             return;
         };
         self.back.remove(&placed.lease);
+        self.release(placed);
+    }
+
+    /// Lets go of what `placed` holds in the scheduler: its booking and its operation.
+    fn release(&mut self, placed: Placed) {
         let queued = self.sched.unplace(placed.lease).unwrap_or(placed.operation);
         let _ = self.sched.forget_queued(queued);
     }
@@ -400,8 +424,6 @@ impl Engine {
         let lease = spec.lease();
         self.sched
             .recover(TERM, operation, lease.sequence(), Vec::new());
-        // The lease table ends the lease at its wall time: the end backfill reads.
-        self.sched.set_max_wall(operation, spec.request().max_wall);
         let resources = &spec.request().resources;
         let charge = Prediction {
             cpu_millis: resources.cpu_millis(),
@@ -410,18 +432,13 @@ impl Engine {
             life_minutes: 1,
         };
         let only = open.iter().map(|c| map::worker(&c.host)).collect();
-        let submit = Event::Submit {
-            waiter: WaiterId(operation.0),
-            request,
-        };
-        self.feed(now, submit);
-        self.sched.set_cost(operation, charge);
-        self.sched.place_only_on(operation, only);
-        self.feed(now, Event::Tick);
-        let granted = match self.sched.state(operation) {
-            Some(OpState::Leased { lease, worker, .. }) => Some((*lease, worker.clone())),
-            _ => None,
-        };
+        // The lease table ends the lease at its wall time: the end backfill reads.
+        let granted = self.place_one(
+            (operation, request),
+            (spec.request().max_wall, charge),
+            only,
+            now,
+        );
         let at = granted.and_then(|(granted, worker)| {
             let on = open.iter().position(|c| map::worker(&c.host) == worker);
             on.map(|at| (at, granted))
@@ -442,6 +459,32 @@ impl Engine {
             self.feed(now, Event::Uncordon { worker: pin });
         }
         Ok(at.map(|(index, _)| index))
+    }
+
+    /// Submits `request` as `operation`, which ends at the latest `max_wall` after it starts
+    /// and is charged `charge`, held to the workers `only`, and runs one placement round:
+    /// the lease and the worker it was placed on, or `None` when it was placed nowhere (it
+    /// is then still queued, and the caller forgets it).
+    fn place_one(
+        &mut self,
+        (operation, request): (OperationId, Request),
+        (max_wall, charge): (std::time::Duration, Prediction),
+        only: BTreeSet<js_types::sched::WorkerId>,
+        now: FarmTime,
+    ) -> Option<(SchedLeaseId, js_types::sched::WorkerId)> {
+        self.sched.set_max_wall(operation, max_wall);
+        let submit = Event::Submit {
+            waiter: WaiterId(operation.0),
+            request,
+        };
+        self.feed(now, submit);
+        self.sched.set_cost(operation, charge);
+        self.sched.place_only_on(operation, only);
+        self.feed(now, Event::Tick);
+        match self.sched.state(operation) {
+            Some(OpState::Leased { lease, worker, .. }) => Some((*lease, worker.clone())),
+            _ => None,
+        }
     }
 
     /// Holds the hosts of `marked` outside the engine, each until the end of its tail as
@@ -487,17 +530,30 @@ impl Engine {
 /// The recovered operation that stands for the lease `held` on `host`, numbered as
 /// `placed` says: charged its CPU and memory as it books them.
 fn recovered(placed: Placed, host: &HostId, held: &js_provider::Held) -> Recovered {
-    let number = placed.operation.0;
+    let key = WorkKey::new("held", held.lease.to_string());
     let booked = map::booking(&held.resources);
+    recovered_as(placed, host, key, (booked, held.whole))
+}
+
+/// The recovered operation named `key` that stands for a booking of `booked` on `host`, the
+/// whole host when `whole`, numbered as `placed` says: charged its CPU and memory as it books
+/// them.
+fn recovered_as(
+    placed: Placed,
+    host: &HostId,
+    key: WorkKey,
+    (booked, whole): (js_types::sched::Resources, bool),
+) -> Recovered {
+    let number = placed.operation.0;
     let request = Request {
-        key: WorkKey::new("held", held.lease.to_string()),
+        key,
         qos: Qos::Batch,
         kind: LeaseKind::Action,
         resources: booked,
         needs: js_caps::Request::default(),
         hermetic: false,
         do_not_cache: true,
-        whole_worker: held.whole,
+        whole_worker: whole,
         pin: None,
     };
     let cost = LeaseCost {

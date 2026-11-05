@@ -77,6 +77,7 @@ fn native() -> NativeSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: NetworkLevel::Off,
+        ports: Vec::new(),
     }
 }
 
@@ -118,4 +119,104 @@ fn a_start_with_both_would_run_as_a_container_on_an_old_agent() {
     assert_eq!(old_validate(&old), Ok(()));
     let new: js_agent_wire::JobSpec = serde_json::from_value(wire).unwrap();
     assert_eq!(new.validate().unwrap_err().code(), refusal::INVALID_IMAGE);
+}
+
+/// The native body of an agent from before `open`, as far as its network: the level had
+/// three values, and every enum of the wire decodes only the values it names. Frozen: it
+/// stands for agents already deployed and must not follow `NetworkLevel`.
+mod before_open {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum NetworkLevel {
+        Off,
+        Loopback,
+        On,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct NativeSpec {
+        pub program: String,
+        #[serde(default = "off")]
+        pub network: NetworkLevel,
+    }
+
+    fn off() -> NetworkLevel {
+        NetworkLevel::Off
+    }
+
+    /// A start as that agent decoded it, as far as the native body.
+    #[derive(Debug, Deserialize)]
+    pub struct Start {
+        pub native: NativeSpec,
+    }
+}
+
+/// Proves that every level a native body can ask for is written as its own word and reads
+/// back as itself: `off`, `loopback`, `on` and the new `open`, which is not written as `on`.
+/// Catches `open` aliased to `on` on the wire (an agent would run an open job behind the
+/// filter, or a filtered one without it) and a level that is written one way and read another.
+#[test]
+fn open_level_round_trips() {
+    let levels = [
+        (NetworkLevel::Off, "off"),
+        (NetworkLevel::Loopback, "loopback"),
+        (NetworkLevel::On, "on"),
+        (NetworkLevel::Open, "open"),
+    ];
+    for (level, word) in levels {
+        let mut body = native();
+        body.network = level;
+        let wire = serde_json::to_value(&body).unwrap();
+        assert_eq!(wire["network"], json!(word), "{level:?}");
+        let back: NativeSpec = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.network, level, "{word}");
+    }
+}
+
+/// Proves that an agent from before `open` refuses a start that asks for it rather than run
+/// it at another level: its decoder fails on the word (and a reply that carries such a start
+/// reads it as a command it does not know, which runs nothing, as this version reads any
+/// level it does not know), while the levels it knew still decode as before. Catches an
+/// `open` that an old agent would read as `on`, `off` or a default, and so run with no
+/// network or behind a filter the job did not ask for.
+#[test]
+fn old_agent_reads_open_as_invalid() {
+    let mut start = native_job();
+    start["type"] = json!("start");
+    start["native"]["network"] = json!("on");
+    let on: before_open::Start = serde_json::from_value(start.clone()).unwrap();
+    assert_eq!(on.native.network, before_open::NetworkLevel::On);
+    assert_eq!(on.native.program, "/usr/bin/clang");
+
+    let mut body = native();
+    body.network = NetworkLevel::Open;
+    start["native"] = serde_json::to_value(&body).unwrap();
+    assert_eq!(start["native"]["network"], json!("open"));
+    let old = serde_json::from_value::<before_open::Start>(start.clone());
+    assert!(old.is_err(), "an old agent decodes no open start: {old:?}");
+
+    let mut unknown = start.clone();
+    unknown["native"]["network"] = json!("wide");
+    let stop = json!({"type": "stop", "run_id": "r"});
+    let reply: js_agent_wire::HeartbeatReply =
+        serde_json::from_value(json!({"commands": [unknown, stop]})).unwrap();
+    assert_eq!(
+        reply.commands,
+        vec![
+            js_agent_wire::Command::Unknown,
+            js_agent_wire::Command::Stop { run_id: "r".into() }
+        ]
+    );
+    let reply: js_agent_wire::HeartbeatReply =
+        serde_json::from_value(json!({"commands": [start]})).unwrap();
+    assert!(
+        matches!(
+            reply.commands.as_slice(),
+            [js_agent_wire::Command::Start(_)]
+        ),
+        "this version reads open: {:?}",
+        reply.commands
+    );
 }

@@ -1,5 +1,6 @@
 //! What `js` prints: one line of text, or one JSON object, per fact.
 
+use prost_reflect::DynamicMessage;
 use serde_json::{Value, json};
 
 use crate::api::{Entry, Lease, Queued};
@@ -67,6 +68,23 @@ impl Render {
         match self.json {
             true => line(body),
             false => lines.collect(),
+        }
+    }
+
+    /// An answer of a job command: its proto3 JSON on one line, or its text lines.
+    pub(crate) fn answer(&self, message: &DynamicMessage) -> String {
+        match self.json {
+            true => format!("{}\n", serde_json::to_string(message).unwrap_or_default()),
+            false => crate::jobs::text_lines(message),
+        }
+    }
+
+    /// The id `js` drew for a job command's retry key, printed on stderr before the request
+    /// is sent: `js: job id <id>`, or `{"id": <id>}`.
+    pub(crate) fn drawn(&self, group: &str, id: &str) -> String {
+        match self.json {
+            true => line(&json!({ "id": id })),
+            false => format!("js: {group} id {id}\n"),
         }
     }
 

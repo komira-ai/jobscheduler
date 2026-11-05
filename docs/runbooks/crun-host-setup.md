@@ -126,6 +126,15 @@ its fields, its directories and control group are where the agent puts them (not
 either `exit.json` is there or `crun state` names the container's first process in the lease's
 control group and the supervisor still runs.
 
+A job whose logs go to an object store also has `logs-upload.json` in its lease directory, mode
+0600, the agent's: the progress record of its upload. It names where the logs go (the store, the
+bucket and the job's prefix; no credential, which the agent holds in memory only) and, for each
+stream, how far the store has it. A restarted agent goes on with the upload from it, and uploads
+what the job wrote while no agent ran; a job that ended meanwhile gets its final logs written. A
+record that is a link, not the agent's own file, of another version than 1, or of another job, is
+ignored with a warning, and the job is adopted without live logs: its output stays on the host.
+The record goes with the lease directory.
+
 Results the server has not acknowledged, and the job ids the agent must not run again, are kept in
 the state root: one file per held result in `held/`, and `retired.json` (job id and allocation id
 pairs, the newest 4096). A file there that cannot be read is dropped and logged as a finding; it

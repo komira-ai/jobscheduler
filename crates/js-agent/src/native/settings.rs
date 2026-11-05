@@ -4,10 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel, SANDBOX_EXEC};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel, SANDBOX_EXEC};
 use js_mac_session::proto::Limits;
 
 use super::NativeConfig;
+use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
 
@@ -70,7 +71,8 @@ impl NativeSettings {
     ///
     /// The text names the flag at fault: a native flag without the socket, a path that is
     /// not absolute, a home directory that cannot be opened, a network level that is none of
-    /// `off`, `loopback` and `on`, or a root a profile cannot name.
+    /// `off`, `loopback`, `on` and `open`, a `--native-pf-*` flag beside `open` (or beside any
+    /// value but `on`), or a root a profile cannot name.
     pub fn from_flags(
         flags: &NativeFlags<'_>,
         denied: &[&Path],
@@ -102,18 +104,19 @@ impl NativeSettings {
         let canonical = fs::canonicalize(homes);
         let homes =
             canonical.map_err(|why| format!("--native-homes: {}: {why}", homes.display()))?;
-        let network_on = flags.network == Some("on");
-        let egress = PfPolicy::from_flags(&flags.pf, network_on)?;
-        let net = match flags.network.unwrap_or("off") {
-            "off" => Net::Off,
-            "loopback" => Net::Loopback,
-            "on" => Net::On,
-            other => {
-                return Err(format!(
-                    "--native-network: {other:?} is not off, loopback or on"
-                ));
-            }
-        };
+        let given = flags.network.unwrap_or(Ceiling::Off.name());
+        let network = Ceiling::parse(given).ok_or_else(|| {
+            format!("--native-network: {given:?} is not off, loopback, on or open")
+        })?;
+        // `open` filters nothing, so a pf flag beside it is a mistake: refused by name rather
+        // than read as asking for a filter the agent would not check.
+        if let (Ceiling::Open, Some(flag)) = (network, flags.pf.first_given()) {
+            return Err(format!(
+                "{flag}: not valid with --native-network open, which sets no packet filter \
+                 (the pf flags limit the network of --native-network on)"
+            ));
+        }
+        let egress = PfPolicy::from_flags(&flags.pf, network == Ceiling::On)?;
         let tool_roots: Vec<PathBuf> = match flags.tool_roots {
             [] => DEFAULT_TOOL_ROOTS
                 .iter()
@@ -162,7 +165,7 @@ impl NativeSettings {
             socket: socket.to_path_buf(),
             config: NativeConfig {
                 homes,
-                net,
+                network,
                 tool_roots,
                 read_denies,
                 read_model: ReadModel::Open,

@@ -36,6 +36,10 @@
 //! - `site-changed --event <name> --base <ref> --paths <file> --github-output <file>`
 //!   ([`site_changed`]): whether the site steps of the `lint` job run, from the event and the
 //!   files a pull request changes against the entries of `site/ci-paths`.
+//! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
+//!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
+//!   service's descriptor set into the two checked-in files; `--check` fails naming a file that
+//!   is not current (docs/job-surface.md).
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
@@ -56,6 +60,7 @@ pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
 pub mod fetch;
+pub mod job_surface;
 pub mod layering;
 pub mod macpkg;
 pub mod pkg;
@@ -95,6 +100,9 @@ pub enum Error {
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
+    /// The job surface could not be generated, or the checked-in files are not current.
+    #[error(transparent)]
+    JobSurface(#[from] job_surface::GenError),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -197,6 +205,9 @@ enum Verb {
     /// Whether the site steps of the `lint` job run: always off a pull request, and on one when a
     /// changed file matches `site/ci-paths` (writes `run=true` or `run=false`).
     SiteChanged(site_changed::Args),
+    /// Render the job commands of js and the job client's methods from the job service's
+    /// descriptor set, or with `--check` fail when the checked-in files differ.
+    GenJobSurface(job_surface::Args),
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -297,6 +308,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             })?)
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
+        Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,

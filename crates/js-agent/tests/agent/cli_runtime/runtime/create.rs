@@ -464,6 +464,7 @@ fn refused_jobs_reach_the_runtime_not_at_all() {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: js_agent_wire::NetworkLevel::Off,
+        ports: Vec::new(),
     });
     let said = [host, bad_mount, bad_label, bad_name, native]
         .map(|job| rt.create_and_start(&job).unwrap_err());

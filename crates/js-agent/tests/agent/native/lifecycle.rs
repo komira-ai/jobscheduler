@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
 use js_agent::lifecycle::{Config, Event, Lifecycle};
-use js_agent::native::{Enforcer, HandOver, NativeChecks};
+use js_agent::native::{Ceiling, Enforcer, HandOver, NativeChecks};
 use js_agent_wire::{
     BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
     refusal,
 };
-use js_mac_pool::seatbelt::{AbsPath, Net};
+use js_mac_pool::seatbelt::AbsPath;
 use js_oci::{Allow, Digest};
 use js_types::{Arch, Os};
 use serde_json::json;
@@ -712,7 +712,7 @@ fn an_image_run_that_asks_for_the_network_is_checked_against_the_anchor() {
         true,
         |_, _| {},
         move |config| {
-            config.net = Net::On;
+            config.network = Ceiling::On;
             config.egress = Some(enforcer);
         },
     );

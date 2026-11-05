@@ -11,7 +11,7 @@ use js_agent::lifecycle::{
     CheckFinding, CheckHook, Clock, Exit, Finished, Found, NativeRefusal, Prepared, RunHandle,
     RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
-use js_agent_wire::{LogTail, NetworkCeiling};
+use js_agent_wire::{LogReport, LogTail, NetworkCeiling};
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -68,6 +68,8 @@ struct State {
     places: bool,
     /// The log tail `log_tail` answers for the container of a run.
     tails: BTreeMap<String, LogTail>,
+    /// What `logs_report` answers for a run, by run id.
+    reports: BTreeMap<String, LogReport>,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
@@ -184,6 +186,14 @@ impl FakeRuntime {
             .borrow_mut()
             .tails
             .insert(run_id.to_owned(), tail);
+    }
+
+    /// The capture of `run_id` saw `report` of its streams: `logs_report` answers it.
+    pub fn report_logs(&self, run_id: &str, report: LogReport) {
+        self.state
+            .borrow_mut()
+            .reports
+            .insert(run_id.to_owned(), report);
     }
 
     /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
@@ -525,6 +535,12 @@ impl Runtime for FakeRuntime {
             }
         });
         Ok(())
+    }
+
+    fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
+        let state = self.state.borrow();
+        let run = state.containers.get(&id.0).map(|c| c.run_id.clone());
+        run.and_then(|run| state.reports.get(&run).copied())
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {

@@ -31,6 +31,7 @@ fn bundled(run_id: &str) -> JobSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: js_agent_wire::NetworkLevel::Off,
+        ports: Vec::new(),
     });
     spec.bundle = Some(format!("toolchain@{}", digest('a')));
     spec

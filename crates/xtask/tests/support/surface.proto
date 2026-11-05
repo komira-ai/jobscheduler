@@ -1,0 +1,135 @@
+// The definition the generator's tests render (tests/job_surface.rs): three calls whose
+// requests use every kind of field the generated commands map. A test only; nothing serves it.
+
+syntax = "proto3";
+
+package jobsurface.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// How a thing looks.
+enum Shade {
+  // Not given.
+  SHADE_UNSPECIFIED = 0;
+  // Pale.
+  SHADE_LIGHT = 1;
+  // Nearly black.
+  SHADE_DARK_GREY = 2;
+}
+
+// Calls on things.
+service ThingService {
+  // Puts a thing on the shelf, with its tags and labels.
+  //
+  // A thing already there is replaced.
+  rpc PutThing(PutThingRequest) returns (PutThingResponse);
+  // Watches the things on the shelf: one event per change, until the server ends the
+  // stream.
+  rpc WatchThings(WatchThingsRequest) returns (stream ThingEvent) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // Shapes a thing: its size and its shade.
+  rpc ShapeThing(ShapeThingRequest) returns (ShapeThingResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+// The request of PutThing: many singular scalars, so none is its subject.
+message PutThingRequest {
+  // The thing's name.
+  string name = 1;
+  // Its tags, in order.
+  repeated string tags = 2;
+  // Its labels, by key.
+  map<string, string> labels = 3;
+  // How many of it.
+  uint32 count = 4;
+  // Whether it breaks.
+  optional bool fragile = 5;
+  // Its weight in grams.
+  sint64 grams = 6;
+  // How long it keeps, in seconds.
+  uint64 keep_seconds = 7;
+  // Its photo.
+  bytes photo = 8;
+  // Its parts.
+  repeated Part parts = 9;
+  // Its serial number.
+  fixed64 serial = 10;
+  // Its price.
+  double price = 11;
+  // Whether it is on show.
+  bool shown = 12;
+  // When it was made: a well-known type, read from a file.
+  google.protobuf.Timestamp made = 13;
+  // A mark with nothing in it: only its presence says something.
+  Mark mark = 14;
+  bool loud = 15; // Whether it squeaks (a trailing comment only).
+}
+
+// A mark: a message without fields.
+message Mark {}
+
+// One part of a thing.
+message Part {
+  // The part's name.
+  string name = 1;
+}
+
+// The answer of PutThing.
+message PutThingResponse {
+  // The thing's id.
+  string id = 1;
+}
+
+// The request of WatchThings: two singular scalars, so neither is its subject.
+message WatchThingsRequest {
+  // Only things of these shades.
+  repeated Shade shades = 1;
+  // The most events, 0 for no limit.
+  int32 limit = 2;
+  // Only things scoring at least this.
+  float min_score = 3;
+}
+
+// One change of a thing.
+message ThingEvent {
+  // The thing.
+  string thing_id = 1;
+  // Its shade now.
+  Shade shade = 2;
+}
+
+// The request of ShapeThing: one singular scalar, its subject, so its flag is required.
+message ShapeThingRequest {
+  // The thing to shape.
+  string thing_id = 1;
+  // Its new size.
+  Size size = 2;
+  // Its new shade.
+  Shade shade = 3;
+  // The shade of each side, by side number.
+  map<uint32, Shade> sides = 4;
+  // Notes on the shaping, by author.
+  map<string, Part> notes = 5;
+  // How to shape it.
+  oneof how {
+    // By hand, with this tool.
+    string tool = 6;
+    // By a machine.
+    Part machine = 7;
+  }
+}
+
+// A size, which may hold the size inside it.
+message Size {
+  // The width.
+  double width = 1;
+  // The height.
+  float height = 2;
+  // The size of what is inside.
+  Size inner = 3;
+}
+
+// The answer of ShapeThing.
+message ShapeThingResponse {}
