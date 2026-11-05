@@ -13,7 +13,7 @@
 //!   acquire or release, which is how a pool in plan mode is kept from spending.
 //! - [`Offer`] is what one launchable thing would give, and [`Offer::fit`] says whether
 //!   it serves a [`Demand`] (an alias of `js_types::Requirements`), naming the
-//!   [`Dimension`] it fails.
+//!   [`Dimension`] it fails; [`Purchase`] is how a machine from an offer is bought.
 //! - [`Acquired`], [`Released`] and [`Held`] are the answers. A release that answers
 //!   [`Released::Unknown`] means "not known": callers must retry it, never read it as
 //!   "gone".
@@ -55,7 +55,7 @@ pub use boot::{
 };
 pub use caps::{Capacity, ProviderCaps};
 pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};
-pub use offer::{Demand, Dimension, Offer, PriceUnit};
+pub use offer::{Demand, Dimension, Offer, PriceUnit, Purchase};
 pub use provider::{
     AcquireRequest, CapacityProvider, CheckResult, EventStream, ProviderError, ProviderEvent,
 };

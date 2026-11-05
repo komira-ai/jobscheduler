@@ -238,6 +238,7 @@ mod tests {
             price_cents_per_hour: None,
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
         }
     }
 
