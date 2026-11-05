@@ -1344,6 +1344,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-logstore"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "js-logstore",
+ "rustls",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "time",
+ "ureq",
+]
+
+[[package]]
 name = "js-mac-pool"
 version = "0.1.0"
 dependencies = [
