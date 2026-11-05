@@ -117,7 +117,7 @@ impl Engine {
     /// Whether the engine holds a job allocation on `host` that holds one of the host ports
     /// `ports`.
     fn port_held_on(&self, host: &HostId, ports: &[u16]) -> bool {
-        let here = self.jobs.values().filter(|hold| hold.host == *host);
+        let mut here = self.jobs.values().filter(|hold| hold.host == *host);
         here.any(|hold| hold.host_ports.iter().any(|port| ports.contains(port)))
     }
 
