@@ -204,7 +204,7 @@ fn read_object_store(
     let path_style = s.boolean("path_style")?.unwrap_or(false);
     let endpoint = Endpoint::parse(&store_url, &region, bucket.as_str(), path_style)
         .map_err(|err| s.fail("endpoint", &err.to_string()))?;
-    let read_key = read_key(s, "read_key_file", files)?;
+    let read = read_key(s, "read_key_file", files)?;
     let credentials = s.string("credentials")?;
     if credentials.is_some_and(|kind| kind != "sts") {
         let reason = "must be sts: no other way of minting a host credential is built";
@@ -228,7 +228,7 @@ fn read_object_store(
         bucket,
         prefix,
         endpoint,
-        read_key,
+        read_key: read,
         minting: Minting::Sts {
             endpoint: sts_endpoint,
             role_arn,
