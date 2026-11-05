@@ -4,9 +4,10 @@
 //! (the HTTP/JSON routes of `js-api-gateway`). Both call the same [`JobApi`].
 //!
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
-//! file of its group serves it. The server builds the service from its state in one place,
-//! [`from_server`], and serves both transports on the port of `--job-listen` through
-//! [`port`] (`wiring.rs`).
+//! file of its group serves it; the fleet group's calls do until its context is given the
+//! server's handles (`fleet::Ctx::served`). The server builds the service from its state in
+//! one place, [`from_server`], and serves both transports on the port of `--job-listen`
+//! through [`port`] (`wiring.rs`).
 //!
 //! # One file per call group
 //!
@@ -35,7 +36,9 @@
 //!
 //! The job service reads no provider catalog and holds no handle on the lease table or the
 //! registry: the server takes the table before the registry, and a call that held either
-//! while reading the store would add a third lock to that order.
+//! while reading the store would add a third lock to that order. The fleet group reaches
+//! them only through the narrow traits of its context (`fleet::Hosts`), whose calls take and
+//! drop each lock in that order and return before the group reads the job tables.
 
 use std::sync::Arc;
 

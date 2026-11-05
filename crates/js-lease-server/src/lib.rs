@@ -774,6 +774,7 @@ mod brake_api;
 mod capacity;
 mod checks;
 mod config;
+mod cordon;
 mod error;
 mod file;
 mod file_checks;
