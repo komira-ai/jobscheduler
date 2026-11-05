@@ -747,3 +747,36 @@ fn the_server_spec_writes_the_whole_node_keys_it_is_given() {
     );
     assert!(cell.is_ok(), "the server takes the keys");
 }
+
+/// Asserts that `Expect::no_reservations` names the reservation it finds, on the real
+/// server: two whole-host items on one host, so the second waits while the first holds
+/// the host and is set aside the host once the first is released. At the first tenth of a
+/// second the registry holds that reservation, the statement fails naming the host and
+/// the request, `[h000 for sim-item-1]`. Catches a statement met while a host is set aside,
+/// and one that reports what it got without the host or the request.
+#[test]
+fn no_reservations_names_the_reservation_it_finds() {
+    let dir = scratch("no-reservations");
+    let mut cell = Cell::new(Setup::new(5), whole_pool(1), dir, Faults::default()).expect("starts");
+    cell.add_agent().expect("an agent name is a host id");
+    cell.submit(&Work::whole_host(secs(10)));
+    let second = cell.submit(&Work::whole_host(secs(10)));
+    let expect = Expect::no_reservations();
+    let wanted = format!(
+        "no-reservations: wanted [], got [h000 for {REQUEST_PREFIX}{}]",
+        second.0
+    );
+    let mut found = None;
+    for tenth in 1..=1_800 {
+        cell.run_until(ms(tenth * 100)).expect("no invariant fails");
+        let held = cell
+            .server()
+            .and_then(|s| s.registry())
+            .map(|r| r.reservations());
+        if held.is_some_and(|held| !held.is_empty()) {
+            found = expect.unmet(&mut cell);
+            break;
+        }
+    }
+    assert_eq!(found, Some(wanted));
+}

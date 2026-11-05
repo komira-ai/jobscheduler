@@ -662,6 +662,9 @@ fn release_of_a_pending_whole_node_lease_drops_the_reservation() {
     }
 }
 
+/// A moved scenario in a world, with its agents answering a prepare as told.
+type MovedScenario = fn(World, Answering) -> Scenario;
+
 /// Asserts that each moved scenario keeps the sensitivity of the test it replaced: its
 /// old-world case, under every placement, run with agents that answer the prepare the
 /// wrong way (the three silent-prepare scenarios with agents that report ready, the
@@ -670,7 +673,7 @@ fn release_of_a_pending_whole_node_lease_drops_the_reservation() {
 /// server decides.
 #[test]
 fn the_old_world_case_fails_when_the_decision_is_wrong() {
-    let defective: [(&str, fn(World, Answering) -> Scenario, Answering); 4] = [
+    let defective: [(&str, MovedScenario, Answering); 4] = [
         ("silent_retry", silent_retry, Answering::Ready),
         ("backoff", backoff, Answering::Ready),
         ("terminal", terminal, Answering::Ready),
