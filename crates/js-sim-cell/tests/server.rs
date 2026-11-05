@@ -189,6 +189,8 @@ fn a_host_the_server_has_forgotten_is_answered_unknown_host_and_says_hello_again
 fn a_lease_and_a_run_made_through_the_client_router_are_started_once_and_their_result_is_acknowledged()
  {
     let mut cell = cell("run", pool(RUN_HOSTS), RUN_HOSTS, Faults::default());
+    // Scripted past the horizon, so the loop meets an action later than its end and
+    // leaves it unrun: the last assertion shows the agent was never killed.
     cell.at(ms(10 * RUN_HORIZON_MS), |cell| cell.kill(0));
     run_to(&mut cell, 10_000);
     let lease = lease(&mut cell).expect("a lease is granted");
