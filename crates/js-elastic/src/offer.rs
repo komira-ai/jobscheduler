@@ -213,6 +213,8 @@ mod tests {
             arch: Some("x86_64".to_owned()),
             isa_level: None,
             exec: Some(ExecMode::Container),
+            network: Default::default(),
+            host_ports: Vec::new(),
         }
     }
 
@@ -228,6 +230,8 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
         let mut small = demand();

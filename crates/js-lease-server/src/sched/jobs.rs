@@ -149,13 +149,7 @@ impl Engine {
     /// Records that the engine holds the allocation of `job` on `host` as `placed`, booking
     /// `booked` (what it books of the host and its host ports), and holds its operation to
     /// no host.
-    fn hold_job(
-        &mut self,
-        job: &JobId,
-        host: &HostId,
-        booked: (Booked, Vec<u16>),
-        placed: Placed,
-    ) {
+    fn hold_job(&mut self, job: &JobId, host: &HostId, booked: (Booked, Vec<u16>), placed: Placed) {
         let (booked, host_ports) = booked;
         self.sched.place_only_on(placed.operation, BTreeSet::new());
         let hold = JobHold {
@@ -254,16 +248,14 @@ impl Engine {
         let usable: Vec<BTreeSet<&HostId>> = walkers
             .iter()
             .map(|walker| {
-                let fits = |(host, ((_, caps), ceiling)): &(
-                    &HostId,
-                    &(super::Node, &NetworkCeiling),
-                )| {
-                    let capacity = self.sched.capacity(&map::worker(host));
-                    let covered = within_ceiling(ceiling, walker.network, &walker.host_ports);
-                    capacity.is_some_and(|capacity| {
-                        walker.request.runnable_on(caps, &capacity) & covered.is_ok()
-                    })
-                };
+                let fits =
+                    |(host, ((_, caps), ceiling)): &(&HostId, &(super::Node, &NetworkCeiling))| {
+                        let capacity = self.sched.capacity(&map::worker(host));
+                        let covered = within_ceiling(ceiling, walker.network, &walker.host_ports);
+                        capacity.is_some_and(|capacity| {
+                            walker.request.runnable_on(caps, &capacity) & covered.is_ok()
+                        })
+                    };
                 nodes.iter().filter(fits).map(|(host, _)| host).collect()
             })
             .collect();

@@ -416,7 +416,12 @@ fn job_booking(allocation: &AllocationRecord, whole: &wire::Shape) -> wire::Host
         memory_bytes,
         disk_bytes,
         gpus,
-        host_ports: allocation.host_ports.iter().copied().map(u32::from).collect(),
+        host_ports: allocation
+            .host_ports
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect(),
     }
 }
 

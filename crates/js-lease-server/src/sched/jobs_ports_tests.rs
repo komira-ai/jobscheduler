@@ -355,10 +355,7 @@ fn a_whole_host_job_conflicts_with_every_port_holder() {
 
 /// The server's agent side under `--placement js-sched` with the job tables, on a clock the
 /// test moves, and `h1` registered with a hello advertising allow-list and the host `ports`.
-fn served_with(
-    name: &str,
-    ports: &[u16],
-) -> (Arc<Agents>, ManualClock, js_testkit::dir::TestDir) {
+fn served_with(name: &str, ports: &[u16]) -> (Arc<Agents>, ManualClock, js_testkit::dir::TestDir) {
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let moving = clock();

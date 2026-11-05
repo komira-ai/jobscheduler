@@ -915,7 +915,9 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
             accelerators: fields.opt(t::ACCELERATORS, u64_of)?.unwrap_or(0),
         }
     };
-    let host_ports = fields.opt(t::HOST_PORTS, host_ports_of)?.unwrap_or_default();
+    let host_ports = fields
+        .opt(t::HOST_PORTS, host_ports_of)?
+        .unwrap_or_default();
     let step = fields.need(t::STEP, step_of)?;
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;

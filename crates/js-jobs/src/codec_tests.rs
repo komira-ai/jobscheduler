@@ -932,7 +932,10 @@ fn an_allocation_row_from_before_host_ports_reads_as_holding_none() {
         host_ports: vec![80],
         ..allocation(shape())
     });
-    assert_eq!(decode_allocation(&without(&row, 13)), Ok(allocation(shape())));
+    assert_eq!(
+        decode_allocation(&without(&row, 13)),
+        Ok(allocation(shape()))
+    );
 }
 
 // Catches host ports that are read from a value that is not a whole number of ports, or that
