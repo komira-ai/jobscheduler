@@ -3,6 +3,8 @@ A generic job and compute scheduler: capacity providers that acquire, renew and 
 
 The design is in `docs/design.md` (it arrives with the design pull request). The code is a Cargo workspace of crates under `crates/`, built with the toolchain pinned in `rust-toolchain.toml`. Build with `cargo build --workspace --locked` and test with `cargo test --workspace --locked`; CI also requires `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and per-crate line and branch coverage: `crates/js-coverage` compares each crate with its line in `coverage-baseline` (zero uncovered lines and branches to start), so a change must cover the code it adds.
 
+Scheduler behaviour is also tested without hosts in a whole-cell simulation, the real lease server under a deterministic kernel with many fake agents (`cargo test -p js-sim-cell --test smoke`); how to run, write and read its scenarios is in `docs/simulation.md`.
+
 The rules every change follows, with their ids, are in `AGENTS.md`.
 
 ## Layers
