@@ -23,11 +23,10 @@
 //!
 //! The pass holds each queue-wait and start deadline to at least the job's deadline floor,
 //! which [`js_jobs::JobStore::raise_at_boot`] raises, with the retention ends, to the boot plus
-//! 120 s in one transaction: run before the first tick, it keeps an outage longer than a queue
-//! wait, a start timeout or a retention window from failing a queued job, ending a start or
-//! deleting a result at the first tick. No start path of the server opens the job tables yet
-//! (only tests attach them to the agent side), so nothing calls it at boot today; the start
-//! step that opens them calls it before the first tick.
+//! 120 s in one transaction when the server opens the job store, before its first tick
+//! ([`crate::job_store::open`]): an outage longer than a queue wait, a start timeout or a
+//! retention window fails no queued job, ends no start and deletes no result at the first
+//! tick.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

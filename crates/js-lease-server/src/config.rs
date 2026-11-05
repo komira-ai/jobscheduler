@@ -36,11 +36,13 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod listen;
 mod placement;
 mod resolve;
 mod retention;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 
@@ -68,6 +70,11 @@ pub struct Cli {
     /// --tls-key: a bearer token never crosses a network in clear.
     #[arg(long, default_value = "127.0.0.1:7300")]
     pub listen: SocketAddr,
+    /// Serves the job service (gRPC and its HTTP/JSON gateway, one port, the bearer token)
+    /// here, and opens the job store, which per-job heartbeats then update. Off unless given.
+    /// Off the loopback it needs --tls-cert and --tls-key. Needs --agent-pool-config.
+    #[arg(long)]
+    pub job_listen: Option<SocketAddr>,
     /// The lease file.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
@@ -398,6 +405,8 @@ pub struct Config {
     /// A listener the caller bound, served in place of binding `listen`.
     pub(crate) bound: Option<std::net::TcpListener>,
     pub(crate) agent_listen: Option<SocketAddr>,
+    /// Where the job service is served (`--job-listen`, `server.job_listen`); off when `None`.
+    pub(crate) job_listen: Option<JobListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -454,7 +463,7 @@ impl Config {
         flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
             .map_err(|err| StartupError::new("--default-ttl", err))?;
-        let tls = tls_files(&cli)?;
+        let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
         let limits = Limits::from(&cli);
@@ -475,6 +484,7 @@ impl Config {
             listen_flag: "--listen",
             bound: None,
             agent_listen: None,
+            job_listen: listen::job_listen(&cli),
             advertise_url: None,
             warnings,
             status,
@@ -560,6 +570,7 @@ impl Config {
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
+                    jobs: server.agents.job_store(server.job_retention),
                 });
                 (
                     Hosts::Layered {
@@ -590,6 +601,7 @@ impl Config {
             listen_flag: "server.listen",
             bound: None,
             agent_listen: server.agent_listen,
+            job_listen: server.agents.job_listen(),
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -632,6 +644,11 @@ impl Config {
     /// The address the agent routes alone are served on, when the file gives one.
     pub fn agent_listen(&self) -> Option<SocketAddr> {
         self.agent_listen
+    }
+
+    /// The address the job service is served on, when the flag or the file gives one.
+    pub fn job_listen(&self) -> Option<SocketAddr> {
+        self.job_listen.map(|job| job.addr)
     }
 
     /// The URL agents are told to dial, when the file gives one.
@@ -864,6 +881,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     cpu_slack,
                     max_lease_wall: None,
                     job_limits: JobLimits::default(),
+                    jobs: listen::job_store(cli),
                 }),
             })
         }
@@ -871,30 +889,6 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
             "--agent-pool-config",
             "required with --agent-token-file",
         )),
-    }
-}
-
-fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {
-    let both = |cert: &Path, key: &Path| TlsFiles {
-        cert: cert.to_path_buf(),
-        key: key.to_path_buf(),
-    };
-    let files = match (&cli.tls_cert, &cli.tls_key) {
-        (Some(cert), Some(key)) => Some(both(cert, key)),
-        (None, None) => None,
-        (Some(_), None) => return Err(StartupError::new("--tls-key", "required with --tls-cert")),
-        (None, Some(_)) => return Err(StartupError::new("--tls-cert", "required with --tls-key")),
-    };
-    let clear = files.is_none() & !cli.listen.ip().is_loopback();
-    match clear {
-        true => Err(StartupError::new(
-            "--listen",
-            format!(
-                "{} is not a loopback address, so --tls-cert and --tls-key are required: a bearer token never crosses a network in clear",
-                cli.listen
-            ),
-        )),
-        false => Ok(files),
     }
 }
 

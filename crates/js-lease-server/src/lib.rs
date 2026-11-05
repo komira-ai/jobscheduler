@@ -37,6 +37,7 @@
 //! | flag | meaning |
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
+//! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
@@ -62,11 +63,11 @@
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
-//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
-//! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed` and
-//! `--cpu-slack` need `--agent-pool-config`, and are refused without it.
+//! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
+//! `--cpu-slack` and `--job-listen` need `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -109,6 +110,8 @@
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
 //! # job_retention ("7d"): the flag's name, default and rules
+//! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
+//! # tls_cert and tls_key); refused unless a pool registers agents
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
 //! # scaler is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every
@@ -311,6 +314,28 @@
 //! token is a 401 with an empty body. Bodies are JSON, at most 64 KiB. Errors are
 //! `{"error": "<code>"}` (a 400 adds `"reason"`, which says what kind of fault it was and
 //! where the parser stopped, and never repeats a value of the request).
+//!
+//! # The job service
+//!
+//! With `--job-listen` (`server.job_listen`) the job service (`jobscheduler.v1.JobService`,
+//! crate `js-proto`) is served on a port of its own, off by default. One listener speaks
+//! HTTP/1.1 and HTTP/2 on it, whichever the client starts with: a request whose content type
+//! is `application/grpc` (with any suffix) goes to the gRPC service, every other request to
+//! its HTTP/JSON gateway (`js-api-gateway`, routes under `/v1/`, listed in
+//! `docs/http-gateway.md`). Both are behind one check of the bearer token of `--token-file`:
+//! without it a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
+//! request 401 with an empty body. Every call answers `UNIMPLEMENTED` (over HTTP, 501
+//! `{"error":"unimplemented"}`) until it is served. The port has the connection cap and the
+//! timeouts of the other listeners, and stops with them. The lease routes are not served on
+//! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
+//! routes than the lease server's of those names, so the two cannot share a port while both
+//! exist.
+//!
+//! The job store is a SQLite file beside the lease file, `<state file>.jobs`, owner-only: the
+//! single-node development backend. It moves into the shared store with the server's other
+//! state. The server opens it once and holds that one handle: the job service and the
+//! per-job heartbeat both read it. Without `--job-listen` no store is opened and no file is
+//! made.
 //!
 //! # Who may do what
 //!
@@ -772,7 +797,7 @@ mod job_alloc;
     not(test),
     expect(
         dead_code,
-        reason = "the job service listener mounts the job service; until it lands only tests do"
+        reason = "the calls read the service's fields and the group builders, once each group is served; until then only tests do"
     )
 )]
 mod job_api;

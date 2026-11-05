@@ -16,12 +16,40 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
-| `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+| `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+| `--job-listen` | `server.job_listen`, off unless given: the address the job service is served on (see "The job service's port" below); off the loopback it needs `server.tls_cert` and `server.tls_key`, the same pair as `server.listen`; refused unless a pool registers agents |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
+
+### The job service's port
+
+`--job-listen <addr>` (`server.job_listen`) serves the job service (`jobscheduler.v1.JobService`) on a port of its own. It is off
+by default: without it the server binds no other port, opens no job store and behaves as before. On, one listener speaks HTTP/1.1
+and HTTP/2 on that port: a request whose content type is `application/grpc` goes to the gRPC service, every other request to the
+HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind the one bearer token of `--token-file`; a request without
+it is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one TLS
+setup and one connection cap for the service, whichever client calls it.
+
+- **TLS.** The rule of `--listen`: an address off the loopback is refused at start without `--tls-cert` and `--tls-key` (the same two
+  flags, not new ones), with a message naming `--job-listen` and saying that a bearer token never crosses a network in clear. With
+  them the port speaks TLS over the same certificate and key, reloaded with the others on SIGHUP, and offers HTTP/2 (`h2`) and
+  HTTP/1.1.
+- **Limits.** The port has the connection cap and timeouts of the other listeners, and stops with them. An address in use is refused
+  at start naming the flag.
+- **Agents.** The flag needs `--agent-pool-config` (the key, a pool that registers agents): the job store is held by the agent side,
+  and jobs run on hosts that register.
+- **The job store.** Turning the port on opens the job store: today a SQLite file beside the lease file, `<state file>.jobs`, owned
+  by the server's user and owner-only (mode 0600), with SQLite's own files beside it. It is the single-node development backend: the
+  file moves into the shared store when the server's state does. A file that cannot be made owner-only or opened as a state store
+  is refused at start naming `--job-listen`. With the store open, the heartbeat of an agent that reports the `per-job` capability is
+  also served from it: its job listing is committed and it is told the starts and stops of its jobs. Without `--job-listen` such a
+  heartbeat gets the lease and run reply alone, as before.
+- **Not shared with `--listen`.** The lease routes stay on `--listen` and the job routes are not served there: the gateway's
+  `/v1/hosts` and `/v1/pools` are other routes than the lease server's of the same names, so the two cannot share a port while the
+  lease API exists.
 
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
