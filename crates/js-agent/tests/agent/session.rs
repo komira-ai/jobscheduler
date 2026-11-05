@@ -755,3 +755,56 @@ fn a_jitter_that_overshoots_cannot_stretch_a_wait() {
     let mut session = Session::new(hello("h1"), &mut transport, Box::leak(Box::new(Wild)));
     assert_eq!(wait(&session.tick()), Duration::from_secs(1));
 }
+
+/// A reply that accepts a heartbeat and carries `grant` as its `log_grant`.
+fn beat_with_grant(grant: Value) -> Reply {
+    reply(
+        200,
+        json!({ "commands": [], "result_acks": [], "taint_ack": false, "log_grant": grant }),
+    )
+}
+
+/// Asserts that a session given the host's live-log credential cell reports what the cell
+/// holds in every heartbeat and takes each reply's grant that passes its check: stale with no
+/// `until_ms` before any grant, then the grant's expiry and not stale, unchanged by a later
+/// grant that fails its check; no heartbeat carries the secret. A session without a cell
+/// sends no `log_grant_state` and ignores a grant. It catches a grant left untaken, a bad one
+/// taken, a state sent by an agent that does not upload, and a secret that leaves the agent.
+#[test]
+fn the_heartbeat_reports_the_hosts_log_credential_and_takes_a_replys_grant() {
+    let start = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let clock = std::sync::Arc::new(js_logstore::ManualClock::new(start));
+    let cell = std::sync::Arc::new(js_agent::logs::HostGrant::new(clock));
+    let until = 1_800_003_600_000_u64;
+    let grant = json!({
+        "access_key_id": "LOGKEY0001",
+        "secret_access_key": "log-secret-value",
+        "session_token": "log-session-token",
+        "expires_at_ms": until,
+    });
+    let bad = json!({ "access_key_id": "", "secret_access_key": "x", "expires_at_ms": 7 });
+    let (mut transport, sent) = script(vec![
+        welcome(1),
+        beat_with_grant(grant.clone()),
+        beat_with_grant(bad),
+        beat_ok(),
+    ]);
+    let mut session =
+        Session::new(hello("h1"), &mut transport, lowest()).with_log_grant(cell.clone());
+    ticks(&mut session, 4);
+    let states: Vec<Value> = sent.borrow()[1..]
+        .iter()
+        .map(|(_, body)| body["log_grant_state"].clone())
+        .collect();
+    let held = json!({ "stale": false, "until_ms": until });
+    assert_eq!(states, [json!({ "stale": true }), held.clone(), held]);
+    let text = Value::Array(sent.borrow().iter().map(|(_, b)| b.clone()).collect()).to_string();
+    assert!(!text.contains("log-secret-value") && !text.contains("log-session-token"));
+
+    let (mut transport, sent) = script(vec![welcome(1), beat_with_grant(grant), beat_ok()]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    ticks(&mut session, 3);
+    for (_, body) in &sent.borrow()[1..] {
+        assert!(body.get("log_grant_state").is_none(), "{body}");
+    }
+}

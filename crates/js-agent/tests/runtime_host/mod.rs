@@ -307,6 +307,7 @@ impl RuntimeHost {
             labels: BTreeMap::new(),
             network: self.network,
             ports: Vec::new(),
+            log_sink: None,
         })
     }
 }
