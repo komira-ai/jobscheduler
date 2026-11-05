@@ -87,7 +87,7 @@ pub type Row = (String, Vec<u8>);
 
 /// What gives the rows written beside a free ([`JobStore::free_with`],
 /// [`JobStore::end_and_free_with`]), from the allocation as it is freed.
-pub type Beside = dyn Fn(&AllocationRecord) -> Vec<Row>;
+pub type Beside<'a> = dyn Fn(&AllocationRecord) -> Vec<Row> + 'a;
 
 /// `txn` with a put of each of `rows`, whatever its key holds.
 fn with_rows(txn: Txn, rows: Vec<Row>) -> Txn {
@@ -565,7 +565,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         &self,
         id: &JobId,
         reason: EndReason,
-        beside: &Beside,
+        beside: &Beside<'_>,
     ) -> Result<AllocationRecord, JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         if allocation.step == AllocationStep::Freed {
