@@ -44,8 +44,9 @@ const NEGATIVE_RUN: Duration = Duration::from_secs(600);
 
 /// Proves the whole-host path over twenty hosts under every placement the server accepts
 /// (`Placement::value_variants()`): fifty whole-node requests are each held once and
-/// released, and every host is serving at the end (design section 8, rows 11 and 12; the
-/// scenario's own doc says what turns it red).
+/// released, and every host is serving at the end (design section 5.4 as built, through
+/// the wait list of section 8, rows 11 and 12, pinning neither; the scenario's own doc
+/// says what turns it red).
 #[test]
 fn fifty_whole_host_requests_over_twenty_hosts_are_each_held_once_and_released() {
     for placement in Placement::value_variants() {

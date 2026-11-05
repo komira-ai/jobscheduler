@@ -36,8 +36,9 @@ pub fn spelled(placement: Placement) -> String {
     value.map_or_else(String::new, |value| value.get_name().to_owned())
 }
 
-/// Proves the whole-host path end to end over many hosts (design section 5.4 as built,
-/// and section 8, rows 11 and 12): fifty whole-node requests, each under a request id of
+/// Proves the whole-host path end to end over many hosts (design section 5.4 as built; it
+/// runs through the wait list of section 8, rows 11 and 12, and pins neither): fifty
+/// whole-node requests, each under a request id of
 /// its own, on twenty hosts whose agents prepare at once. Thirty of them wait on the
 /// server's wait list while the first twenty hold their hosts, are presented again at
 /// every tick, and are each committed on a host once it is quiet; every agent is told to

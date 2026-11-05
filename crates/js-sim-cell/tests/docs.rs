@@ -332,19 +332,19 @@ fn the_check_fails_on_a_page_missing_an_invariant() {
     );
 }
 
-/// Asserts that the check, over a crate with one more family (`tests/whole_host.rs`) than
+/// Asserts that the check, over a crate with one more family (`tests/new_family.rs`) than
 /// the page names, fails naming that family and nothing else. Catches a family merged
 /// without its line on the page.
 #[test]
 fn the_check_fails_on_a_page_missing_a_family() {
     let mut krate = this_crate();
     let file = "#[test]\nfn f() {}\n".to_owned();
-    krate.files.insert("tests/whole_host.rs".to_owned(), file);
+    krate.files.insert("tests/new_family.rs".to_owned(), file);
     krate.families = krate.files.keys().filter_map(|p| family(p)).collect();
-    assert!(krate.families.iter().any(|f| f == "whole_host"));
+    assert!(krate.families.iter().any(|f| f == "new_family"));
     assert_eq!(
         check(&page(), &krate),
-        ["family whole_host (tests/whole_host.rs) is not named on the page"]
+        ["family new_family (tests/new_family.rs) is not named on the page"]
     );
 }
 
@@ -418,11 +418,11 @@ fn the_check_fails_on_a_row_naming_a_missing_file_or_a_short_row() {
     let moved = replaced(
         &page,
         "`tests/broken_agent.rs` | The server sends",
-        "`tests/whole_host.rs` | The server sends",
+        "`tests/no_such_family.rs` | The server sends",
     );
     assert_eq!(
         check(&moved, &this_crate()),
-        ["row 31 names tests/whole_host.rs, which is not a test file of the crate"]
+        ["row 31 names tests/no_such_family.rs, which is not a test file of the crate"]
     );
     let short = format!("x\n{ROWS}\n\n| row | scenario |\n|---|---|\n| 12 | `x` |\n");
     assert_eq!(
