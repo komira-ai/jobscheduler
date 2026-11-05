@@ -99,3 +99,19 @@ pub fn trace_msg(msg: &Msg) -> String {
         Msg::Reply { id, status, .. } => format!("answer #{} {status}", id.0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches: agents named by anything but their index in three digits, from zero, which
+    /// would give two agents one name or break the order the cell adds them in.
+    #[test]
+    fn agents_are_named_by_their_index_in_three_digits() {
+        assert_eq!(agent_name(0), NodeId::new("h000"));
+        assert_eq!(agent_name(1), NodeId::new("h001"));
+        assert_eq!(agent_name(42), NodeId::new("h042"));
+        assert_eq!(agent_name(999), NodeId::new("h999"));
+        assert!(agent_name(9) < agent_name(10));
+    }
+}

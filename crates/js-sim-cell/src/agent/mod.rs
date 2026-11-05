@@ -2,9 +2,12 @@
 //! real wire of `js-agent-wire`, as a [`js_sim::Node`] the kernel can run by the hundred.
 //!
 //! [`AgentNode`] builds the hello and heartbeat bodies a real agent builds, checks every
-//! answer with the wire's own `validate()` before it acts on any field (an answer that
-//! fails is ignored and counted, [`Counter::ReplyInvalid`]), and turns every command into
-//! the [`FakeAgent`] call that models it:
+//! answer with the wire's own `validate()` before it acts on any field, and turns every
+//! command into the [`FakeAgent`] call that models it. The check is by part, as the wire's
+//! `ReplyCheck` says. A body that does not decode, and a welcome that fails its check, are
+//! ignored whole. A heartbeat reply's refused commands are skipped, and so are its
+//! acknowledgements when they fail their check. The valid commands beside them still
+//! apply. Each such answer counts once in [`Counter::ReplyInvalid`].
 //!
 //! | what arrives | the call |
 //! |---|---|
