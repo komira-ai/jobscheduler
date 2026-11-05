@@ -11,7 +11,14 @@
 //! Size: [`HOSTS`] agents over [`HORIZON_MS`] at [`INTERVAL`] make about
 //! `HOSTS * HORIZON_MS / INTERVAL` = 480 heartbeats a seed, with the hellos besides; the
 //! golden test runs [`SEEDS`] seeds.
+//!
+//! The golden file also pins one smoke scenario, family `smoke`: the lossy agent wire
+//! (`cell/lossy_wire.rs`, about 8,400 agent requests a seed) over [`SMOKE_SEEDS`] seeds, so
+//! a change to any decision of the client driver, the scenario builder or the server as
+//! the smoke family drives it moves a hash.
 
+#[path = "cell/lossy_wire.rs"]
+mod lossy_wire;
 #[path = "cell/support.rs"]
 mod support;
 
@@ -55,6 +62,11 @@ const HEAL_AT_MS: u64 = 70_000;
 
 /// The check a test makes fail.
 const FAIL_AT_CHECK: u64 = 100;
+
+/// How many seeds of the smoke scenario the golden file pins, and the family they are
+/// kept under.
+const SMOKE_SEEDS: u64 = 4;
+const SMOKE_FAMILY: &str = "smoke";
 
 /// The server of the scenario.
 fn spec() -> ServerSpec {
@@ -150,11 +162,27 @@ fn different_seeds_make_different_traces() {
 }
 
 fn golden() -> GoldenFile {
+    golden_of("js-sim-cell")
+}
+
+/// The lines of `family` in the golden file.
+fn golden_of(family: &str) -> GoldenFile {
     GoldenFile::new(
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/trace-hashes.txt"),
-        "js-sim-cell",
+        family,
         "cargo test -p js-sim-cell --test replay -- --ignored regenerate_golden_hashes",
     )
+}
+
+/// The hash of each pinned seed of the smoke scenario, which must pass.
+fn smoke_runs() -> Vec<(String, TraceHash)> {
+    let scenario = lossy_wire::a_lossy_agent_wire_settles_every_run();
+    let passed = scenario.run_seeds(SMOKE_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!("a_lossy_agent_wire_settles_every_run/seed-{}", run.seed);
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
 }
 
 fn golden_runs() -> Vec<(String, TraceHash)> {
@@ -170,10 +198,20 @@ fn pinned_seeds_match_the_golden_file() {
     golden().assert_matches(&golden_runs());
 }
 
+/// Asserts that the hashes of the pinned seeds of the lossy-wire smoke scenario equal the
+/// golden file's (family `smoke`). Catches any change to a decision of the client driver,
+/// of the scenario builder or of the server under it, or to the trace text, and a
+/// scenario whose run differs between processes.
+#[test]
+fn the_smoke_scenario_matches_the_golden_file() {
+    golden_of(SMOKE_FAMILY).assert_matches(&smoke_runs());
+}
+
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
     golden().regenerate(&golden_runs()).unwrap();
+    golden_of(SMOKE_FAMILY).regenerate(&smoke_runs()).unwrap();
 }
 
 /// Asserts that a run stopped by a violation reports the scenario, the seed, the trace

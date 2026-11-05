@@ -100,6 +100,7 @@ use js_conformance::agent::{AgentHarness, FakeAgent};
 
 mod process;
 
+pub(crate) use process::lease_id;
 use process::{Answer, Process};
 
 /// The image of a run that ends by itself: its first argument is how long it runs, in

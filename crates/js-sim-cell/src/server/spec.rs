@@ -22,6 +22,9 @@ pub const CLIENT_TOKEN: &str = "sim-cell-client-token-0123456789-abcdef";
 /// The join token every agent of a cell says hello with.
 pub const JOIN_TOKEN: &str = "sim-cell-join-token-0123456789-abcdefgh";
 
+/// The class of the cell's one pool: what a lease asks for by name.
+pub const POOL_CLASS: &str = "gpu-host";
+
 /// What the pool books for every host, and what each of the cell's agents offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -168,10 +171,11 @@ impl ServerSpec {
             .iter()
             .map(|(k, v)| format!("{} = {}\n", quoted(k), quoted(v)));
         format!(
-            "name = {}\nclass = \"gpu-host\"\nmax_machines = {}\nheartbeat_interval = \"{}ms\"\n\
+            "name = {}\nclass = {}\nmax_machines = {}\nheartbeat_interval = \"{}ms\"\n\
              grace = \"{}ms\"\nlost_retention = \"{}ms\"\n\n[shape]\ncpu_millis = {}\n\
              memory_bytes = {}\ngpus = {}\n{}\n[capabilities]\n{}",
             quoted(&self.pool),
+            quoted(POOL_CLASS),
             self.hosts,
             self.interval.as_millis(),
             self.grace.as_millis(),

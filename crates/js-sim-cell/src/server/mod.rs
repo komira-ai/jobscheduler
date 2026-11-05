@@ -40,7 +40,7 @@ use crate::observe::{ServerHost, ServerView};
 
 mod spec;
 
-pub use spec::{CLIENT_TOKEN, JOIN_TOKEN, ServerSpec, Shape};
+pub use spec::{CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape};
 
 /// The wall time, in milliseconds since the Unix epoch, that virtual time zero stands
 /// for: 2027-01-01 00:00 UTC. Every clock of the cell counts from it.

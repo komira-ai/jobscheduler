@@ -1,8 +1,8 @@
-//! The whole-cell simulation of this repository, to be built in parts: the real lease
-//! server under the [`js_sim`] kernel, many fake agents and a client driver, with
-//! properties checked after every step.
+//! The whole-cell simulation of this repository, built in parts: the real lease server
+//! under the [`js_sim`] kernel, many fake agents and a client driver, with properties
+//! checked after every step, and a builder in which a scenario reads top to bottom.
 //!
-//! It holds no client driver yet. What it holds:
+//! What it holds:
 //!
 //! - [`observe`]: the facts. What the client driver heard about each unit of work and
 //!   what it asked for ([`ClientEvent`], [`Ask`]), the ground truth of each agent
@@ -20,10 +20,21 @@
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock.
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
+//! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
+//!   asks for, and when the client gives up on it.
+//! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
+//!   server and reports what it hears as [`ClientEvent`]s; [`LeaseFront`] does it as `js
+//!   run` does today. The client is not a bus node: the run loop polls it at exact virtual
+//!   times and its calls are never dropped.
 //! - [`cell`]: the run loop ([`Cell`]), which steps the kernel, runs the actions scripted
-//!   at virtual times and checks the invariants after every step, with the changes a
-//!   scenario makes (agents added, killed and replaced, partitions, faults on the bus,
-//!   client calls).
+//!   at virtual times, polls the client and checks the invariants after every step, with
+//!   the changes a scenario makes (agents added, killed and replaced, partitions, faults
+//!   on the bus, client calls, items submitted and cancelled), and the end of a scenario
+//!   with its end check ([`Cell::settle`]).
+//! - [`actions`]: what a scenario does at a virtual time, one [`Action`] per file.
+//! - [`scenario`]: the builder ([`Scenario`]): the world, the work, the actions, what is
+//!   expected ([`Expect`]) and the witnesses that show the situation happened, run over
+//!   seeds.
 //! - [`replay`]: a seed run to its end, run again with its trace kept when it fails, and the
 //!   [`FailureReport`] that names the scenario, the seed, the trace hash, the violation
 //!   and the last trace lines.
@@ -41,22 +52,28 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod actions;
 pub mod agent;
 pub mod bus;
 pub mod cell;
 mod counters;
+pub mod front;
 pub mod invariant;
 mod ledger;
 mod node;
 pub mod observe;
 pub mod replay;
+pub mod scenario;
 pub mod server;
 mod text;
+pub mod work;
 
+pub use actions::Action;
 pub use agent::{AgentNode, AgentSpec, SIM_RUN_IMAGE};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
+pub use front::{ClientPort, Front, FrontFactory, LeaseFront};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use ledger::{Completion, Ledger};
 pub use node::CellNode;
@@ -64,5 +81,7 @@ pub use observe::{
     AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations, RunId,
     Running, ServerHost, ServerView, Verdict,
 };
-pub use replay::{Failure, FailureReport, run};
+pub use replay::{Failure, FailureReport, drive, run};
+pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
 pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape};
+pub use work::Work;

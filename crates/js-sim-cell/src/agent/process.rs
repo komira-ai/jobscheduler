@@ -83,7 +83,7 @@ impl RunInfo {
 }
 
 /// The lease `text` names in the server's form, `<term>-<sequence>`.
-fn lease_id(text: &str) -> Option<LeaseId> {
+pub(crate) fn lease_id(text: &str) -> Option<LeaseId> {
     text.split_once('-')
         .and_then(|(term, seq)| term.parse::<u64>().ok().zip(seq.parse::<u64>().ok()))
         .map(|(term, seq)| LeaseId::new(term, seq))

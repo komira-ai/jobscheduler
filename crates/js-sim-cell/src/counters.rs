@@ -64,6 +64,13 @@ impl Counters {
     pub(crate) fn bump(&mut self, counter: Counter) {
         *self.0.entry(counter).or_insert(0) += 1;
     }
+
+    /// Adds every count of `other` to this one's.
+    pub(crate) fn absorb(&mut self, other: &Counters) {
+        for (counter, count) in other.iter() {
+            *self.0.entry(counter).or_insert(0) += count;
+        }
+    }
 }
 
 #[cfg(test)]
