@@ -784,8 +784,9 @@ mod tests {
     }
 
     /// Asserts the failures of a table that does not match the job service: a message the
-    /// descriptor set lacks and a request that does not decode, each saying what as a
-    /// failure on the program's side (`server`, exit 1); and a random source that fails.
+    /// descriptor set lacks, a request and an answer that do not decode, each saying what as
+    /// a failure on the program's side (`server`, exit 1), next to an answer that does and
+    /// prints; and a random source that fails.
     #[test]
     fn a_stale_table_and_a_failed_draw_are_named() {
         let stale = "the job command table does not match the job service";
@@ -821,6 +822,20 @@ mod tests {
                 .unwrap_or_default()
                 .starts_with(&format!("{stale} (jobscheduler.v1.GetJobResponse: "))
         );
+        let answer = js_proto::v1::GetJobResponse {
+            job: Some(js_proto::v1::Job {
+                id: "j-1".to_owned(),
+                ..js_proto::v1::Job::default()
+            }),
+        };
+        let printed = print(
+            &response,
+            &answer.encode_to_vec(),
+            Render::new(false),
+            &mut out,
+        );
+        assert!(printed.is_ok());
+        assert_eq!(String::from_utf8_lossy(&out), "job.id: j-1\n");
         let failed = fresh_id(Err(getrandom::Error::UNSUPPORTED))
             .err()
             .map(|f| f.to_string());
