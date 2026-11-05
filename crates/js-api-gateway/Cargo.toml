@@ -1,0 +1,39 @@
+[package]
+name = "js-api-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { workspace = true, features = ["json"] }
+http-body-util.workspace = true
+js-proto = { path = "../js-proto" }
+percent-encoding.workspace = true
+prost.workspace = true
+prost-reflect = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tonic.workspace = true
+
+# The build script reads the routes from js-proto's descriptor set with the same module the
+# library's tests check (src/annotation.rs), so it needs that module's dependencies.
+[build-dependencies]
+heck.workspace = true
+js-proto = { path = "../js-proto" }
+prost.workspace = true
+prost-reflect.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+heck.workspace = true
+prost-types.workspace = true
+protox.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

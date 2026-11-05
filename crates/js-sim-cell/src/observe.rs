@@ -1,0 +1,345 @@
+//! What the cell observes, at one virtual time.
+//!
+//! Four sources, each kept apart so an invariant says which it reads:
+//!
+//! - the client driver: for each unit of work (an item, numbered from zero), what it
+//!   asked for ([`Ask`]) and every answer it heard, in order ([`ClientEvent`]);
+//! - each agent process: what it runs now, what it completed and which results the
+//!   server acknowledged ([`AgentTruth`]), its ground truth, not what it reported;
+//! - the cell's launch ledger ([`Launch`]): one entry per run an agent process
+//!   launched. The ledger is the cell's, not the agent's, so an agent that dies and is
+//!   replaced cannot reset it;
+//! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
+//!   fills it from the registry's host views, never through the JSON route.
+//!
+//! Some facts are carried for invariants that later parts add and no check here reads
+//! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`],
+//! [`ServerHost::lost`] and [`ServerHost::set_aside`].
+//!
+//! [`Observations`] gathers them, with whether a fault is active. Its builder
+//! ([`Observations::quiet`], [`Observations::with_agent`], [`Observations::with_event`]
+//! and the rest) is public test support: the negative tests of every invariant family
+//! build their histories with it.
+
+use std::collections::BTreeMap;
+
+use js_types::sched::FarmTime;
+use js_types::{HostId, LeaseId, Resources};
+
+/// One unit of work the client driver submits, numbered from zero in the order it
+/// submits them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ItemId(pub u32);
+
+/// A run's id, as the start that launches it names it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RunId(String);
+
+impl RunId {
+    /// The run named `id`.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The id as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// How an item ended, as the client heard it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HowEnded {
+    /// The run exited with status zero.
+    Succeeded,
+    /// The run failed (a nonzero exit, a limit, or no start).
+    Failed,
+    /// The run was cancelled at the client's request.
+    Cancelled,
+    /// The server answered that the run is lost: its host went away under it.
+    Lost,
+    /// The server answered that the run is gone (`410 run-forgotten`).
+    Forgotten,
+    /// The client gave up: its bound ([`Ask::gives_up_at`]) passed and it released the
+    /// lease. The only terminal the client chooses rather than hears.
+    GaveUp,
+}
+
+impl HowEnded {
+    /// Every way an item ends.
+    pub const ALL: [HowEnded; 6] = [
+        HowEnded::Succeeded,
+        HowEnded::Failed,
+        HowEnded::Cancelled,
+        HowEnded::Lost,
+        HowEnded::Forgotten,
+        HowEnded::GaveUp,
+    ];
+
+    /// A stable kebab-case name, as a violation writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            HowEnded::Succeeded => "succeeded",
+            HowEnded::Failed => "failed",
+            HowEnded::Cancelled => "cancelled",
+            HowEnded::Lost => "lost",
+            HowEnded::Forgotten => "forgotten",
+            HowEnded::GaveUp => "gave-up",
+        }
+    }
+}
+
+/// What the client driver reports about one item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientEvent {
+    /// The client submitted the item.
+    Submitted,
+    /// The client learned the ids the server gave the item: its lease and its run. An
+    /// item is queued once: one item is one lease.
+    Queued {
+        /// The item's lease.
+        lease: LeaseId,
+        /// The item's run.
+        run: RunId,
+    },
+    /// The client learned the host the item was placed on.
+    Placed {
+        /// The host.
+        host: HostId,
+    },
+    /// The client learned the run started.
+    Started,
+    /// The item reached a terminal answer.
+    Terminal {
+        /// How it ended.
+        how: HowEnded,
+    },
+    /// The client sent the release of the item's lease. It is recorded before the
+    /// answer, so a release whose answer a fault drops is still known to have been
+    /// sent.
+    ReleaseSent,
+    /// The client's release of the item's lease was answered. The client releases every
+    /// lease it learned, whatever the item's terminal (a [`HowEnded::GaveUp`] item
+    /// too), so an item holds its lease from [`ClientEvent::Queued`] to here.
+    Released,
+}
+
+/// What the client asked for an item, so no check takes the server's word for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// Whether the item wants a whole host.
+    pub whole_host: bool,
+    /// The resources it asked for.
+    pub resources: Resources,
+    /// The virtual time at which the client gives up on it. No check reads it yet.
+    pub gives_up_at: FarmTime,
+}
+
+/// One event the client heard, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heard {
+    /// When the client heard it.
+    pub at: FarmTime,
+    /// What it heard.
+    pub event: ClientEvent,
+}
+
+/// Everything the client driver holds about one item.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemRecord {
+    /// What the client asked for.
+    pub ask: Ask,
+    /// What it heard, in the order it heard it.
+    pub heard: Vec<Heard>,
+}
+
+/// A run an agent runs now, as the start that launched it named it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Running {
+    /// The lease the run belongs to.
+    pub lease: LeaseId,
+    /// The resources the run holds on the host.
+    pub resources: Resources,
+}
+
+/// The server's verdict on a result an agent reported (the wire's acknowledgement).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The result was recorded.
+    Accepted,
+    /// The result was recorded earlier.
+    Duplicate,
+    /// The lease has moved on, or the server holds no record of the run.
+    Stale,
+    /// The server holds no such lease.
+    UnknownLease,
+    /// The result does not match the lease it names.
+    Mismatch,
+}
+
+/// The ground truth of one agent process: what it holds, not what it reported.
+///
+/// An agent that dies loses all of it; its replacement starts from
+/// [`AgentTruth::new`]. The cell's [`Launch`] ledger is what survives.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentTruth {
+    /// What the host can hold.
+    pub capacity: Resources,
+    /// The runs it runs now.
+    pub running: BTreeMap<RunId, Running>,
+    /// The runs it completed, with the virtual time each ended. No check reads it yet.
+    pub completed: BTreeMap<RunId, FarmTime>,
+    /// The results the server acknowledged, with its verdict. No check reads it yet.
+    pub acknowledged: BTreeMap<RunId, Verdict>,
+}
+
+impl AgentTruth {
+    /// A fresh agent process on a host of `capacity`, running nothing.
+    #[must_use]
+    pub fn new(capacity: Resources) -> Self {
+        Self {
+            capacity,
+            ..Self::default()
+        }
+    }
+
+    /// This agent, also running `run` of `lease` with `resources`.
+    #[must_use]
+    pub fn with_run(mut self, run: RunId, lease: LeaseId, resources: Resources) -> Self {
+        self.running.insert(run, Running { lease, resources });
+        self
+    }
+}
+
+/// One launch of a run by an agent process, in the cell's ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    /// The run launched.
+    pub run: RunId,
+    /// The host whose agent launched it.
+    pub host: HostId,
+    /// When.
+    pub at: FarmTime,
+}
+
+/// One host as the server lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerHost {
+    /// Whether the server holds the host lost (silent past its grace). No check reads
+    /// it yet.
+    pub lost: bool,
+    /// The leases booked on the host, in the order they were booked.
+    pub leases: Vec<LeaseId>,
+    /// Whether the host is set aside (reserved, held whole, draining or releasing). No
+    /// check reads it yet.
+    pub set_aside: bool,
+}
+
+/// The server's own list of hosts, as the cell last read it from the registry.
+///
+/// The cell re-reads it at every client call and once per virtual second, not at
+/// every step, so between two reads it can lag what the server holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerView {
+    /// Every host the server lists.
+    pub hosts: BTreeMap<HostId, ServerHost>,
+}
+
+/// Everything the cell observes at one virtual time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Observations {
+    /// The virtual time.
+    pub at: FarmTime,
+    /// Whether a fault (a partition, a dropped message, a killed process) is active.
+    pub fault_active: bool,
+    /// Since when no fault has been active: the end of the last fault, or the start of
+    /// the run if there was none.
+    pub quiet_since: FarmTime,
+    /// The client driver's record of each item it submitted.
+    pub items: BTreeMap<ItemId, ItemRecord>,
+    /// The agent process of each host that has one now.
+    pub agents: BTreeMap<HostId, AgentTruth>,
+    /// The cell's launch ledger, oldest first; entries are only ever appended.
+    pub ledger: Vec<Launch>,
+    /// The server's list of hosts.
+    pub server: ServerView,
+}
+
+impl Observations {
+    /// Nothing observed, at virtual time zero, with no fault ever active.
+    #[must_use]
+    pub fn quiet() -> Self {
+        Self::default()
+    }
+
+    /// These observations at virtual time `at`.
+    #[must_use]
+    pub fn at(mut self, at: FarmTime) -> Self {
+        self.at = at;
+        self
+    }
+
+    /// These observations with a fault active now.
+    #[must_use]
+    pub fn with_fault(mut self) -> Self {
+        self.fault_active = true;
+        self
+    }
+
+    /// These observations with the last fault ended at `since`: no fault is active
+    /// now, and none has been since `since`.
+    #[must_use]
+    pub fn quiet_since(mut self, since: FarmTime) -> Self {
+        self.fault_active = false;
+        self.quiet_since = since;
+        self
+    }
+
+    /// These observations with `truth` as the agent process of `host`, in place of any
+    /// earlier one.
+    #[must_use]
+    pub fn with_agent(mut self, host: HostId, truth: AgentTruth) -> Self {
+        self.agents.insert(host, truth);
+        self
+    }
+
+    /// These observations with `item` asking for `ask`, keeping what it heard.
+    #[must_use]
+    pub fn with_item(mut self, item: ItemId, ask: Ask) -> Self {
+        self.items.entry(item).or_default().ask = ask;
+        self
+    }
+
+    /// These observations with the client hearing `event` about `item` at `at`, after
+    /// everything it heard before. An item not yet recorded is recorded with the
+    /// default [`Ask`]: a share of no resources, given up at time zero.
+    #[must_use]
+    pub fn with_event(mut self, item: ItemId, at: FarmTime, event: ClientEvent) -> Self {
+        let heard = Heard { at, event };
+        self.items.entry(item).or_default().heard.push(heard);
+        self
+    }
+
+    /// These observations with `run` launched on `host` at `at` appended to the ledger.
+    #[must_use]
+    pub fn with_launch(mut self, run: RunId, host: HostId, at: FarmTime) -> Self {
+        self.ledger.push(Launch { run, host, at });
+        self
+    }
+
+    /// These observations with the server listing `lease` as booked on `host`, after
+    /// the leases it lists there already.
+    #[must_use]
+    pub fn with_booking(mut self, host: HostId, lease: LeaseId) -> Self {
+        self.server
+            .hosts
+            .entry(host)
+            .or_default()
+            .leases
+            .push(lease);
+        self
+    }
+}

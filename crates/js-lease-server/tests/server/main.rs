@@ -25,6 +25,7 @@ mod config_file;
 mod config_joined;
 mod config_launch;
 mod config_lifetime;
+mod config_logs;
 mod config_one_file;
 mod config_platform;
 mod config_pool_refusals;

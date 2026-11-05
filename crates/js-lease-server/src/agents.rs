@@ -148,6 +148,10 @@ pub(crate) fn assemble_placed(
                 .iter()
                 .for_each(|placer| registry.set_placer(placer.clone()));
             let usage = usage.build(clock, limits, &registry)?;
+            // Each lease booking that ends leaves its record in the usage store's history.
+            usage
+                .iter()
+                .for_each(|usage| registry.set_allocation_log(usage.log()));
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
             // the lease file keeps the start and the bound it records. A sink that keeps

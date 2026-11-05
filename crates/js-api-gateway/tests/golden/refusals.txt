@@ -1,0 +1,9 @@
+# The answer to a refused submit, by refusal code: `<RefusalCode value> = <HTTP status>
+# <error code> [<field>]`. Every value of the definition has a line; a row changes only with
+# the error table of the crate documentation (tests/gateway.rs,
+# refusal_to_status_table_matches_golden).
+REFUSAL_CODE_UNSPECIFIED = 500 internal
+REFUSAL_CODE_JOB_ID_CONFLICT = 409 job-id-conflict
+REFUSAL_CODE_NO_CAPABLE_HOST = 422 no-capable-host
+REFUSAL_CODE_WALL_TIME_NOT_POSITIVE = 400 wall-time-not-positive spec.wallLimitSeconds
+REFUSAL_CODE_WALL_TIME_ABOVE_CEILING = 400 wall-time-above-ceiling spec.wallLimitSeconds

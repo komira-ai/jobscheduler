@@ -9,7 +9,10 @@
 //! - the name of a cloud's API host anywhere but the one place a provider keeps its default
 //!   address. The standard prefix of a protobuf type URL holds such a name but is never
 //!   reached, so in the files listed in [`TYPE_URL_FILES`], and only there, that prefix is
-//!   taken out before the scan and the rest of the file is scanned as any other;
+//!   taken out before the scan and the rest of the file is scanned as any other. Likewise the
+//!   published Signature Version 4 test vectors sign requests to two documentation hosts of a
+//!   cloud, which the signatures depend on and nothing connects to: in [`SIGNING_VECTOR_FILE`],
+//!   and only there, those two exact hosts are taken out before the scan;
 //! - the name of a purchase API (the path or method that makes a machine) anywhere but in
 //!   the provider crate that guards it;
 //! - the names of the provider's raw API types outside that crate, because holding
@@ -56,6 +59,19 @@ const TYPE_URL_FILES: [&str; 2] = [
     "crates/js-proto/src/refusal.rs",
     "crates/js-proto/tests/golden/refusal_status.hex",
 ];
+
+/// The file of the object-store client's tests that holds the published Signature Version 4
+/// vectors, by exact path. Their requests name [`signing_vector_hosts`], which the published
+/// signatures are computed over; nothing sends a request to them.
+const SIGNING_VECTOR_FILE: &str = "crates/js-logstore/tests/logstore/vectors.rs";
+
+/// The two hosts of the published vectors: the generic suite's and the S3 documentation's.
+fn signing_vector_hosts() -> [String; 2] {
+    [
+        joined(&["example.", "amazon", "aws.com"]),
+        joined(&["examplebucket.s3.", "amazon", "aws.com"]),
+    ]
+}
 
 /// The standard prefix of a protobuf type URL: `type.` and Google's API domain, then `/`.
 fn type_url_prefix() -> String {
@@ -121,10 +137,15 @@ fn names(text: &str, needle: &str) -> bool {
 }
 
 /// The text of `file` the rules are matched against: the whole text, but for a file of
-/// [`TYPE_URL_FILES`] (by exact path), the text without the type-URL prefix.
+/// [`TYPE_URL_FILES`] (by exact path), the text without the type-URL prefix, and for
+/// [`SIGNING_VECTOR_FILE`] (by exact path), the text without the vectors' two hosts. The
+/// longer host is taken out first, so that the shorter one cannot leave part of it behind.
 fn scanned_text(file: &File) -> String {
     if TYPE_URL_FILES.contains(&file.path.as_str()) {
         file.text.replace(&type_url_prefix(), "")
+    } else if file.path == SIGNING_VECTOR_FILE {
+        let [suite, s3] = signing_vector_hosts();
+        file.text.replace(&s3, "").replace(&suite, "")
     } else {
         file.text.clone()
     }
@@ -261,8 +282,33 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
         ),
         file(TYPE_URL_FILES[0], &type_url),
         file(TYPE_URL_FILES[1], &type_url),
+        file(SIGNING_VECTOR_FILE, &signing_vector_hosts().join("\n")),
     ];
     assert_eq!(violations(&guarded, &rules), Vec::<String>::new());
+
+    // The signing-vector exception takes out the two hosts and nothing else, in that file
+    // only: another host of the same cloud there is still named, and so are the two hosts
+    // in any other file.
+    let vector_hosts = signing_vector_hosts().join("\n");
+    let other_host = joined(&["https://s3.", "amazon", "aws.com"]);
+    let vector_misses = [
+        file(
+            SIGNING_VECTOR_FILE,
+            &format!("{vector_hosts}\n{other_host}"),
+        ),
+        file("crates/js-logstore/tests/logstore/signer.rs", &vector_hosts),
+        file("crates/js-logstore/src/client.rs", &vector_hosts),
+    ];
+    let found = violations(&vector_misses, &rules);
+    assert_eq!(found.len(), 3, "{found:#?}");
+    for (at, path) in found.iter().zip([
+        "crates/js-logstore/tests/logstore/vectors.rs ",
+        "crates/js-logstore/tests/logstore/signer.rs ",
+        "crates/js-logstore/src/client.rs ",
+    ]) {
+        assert!(at.starts_with(path), "{at}");
+        assert!(at.contains("host"), "{at}");
+    }
 
     // The type-URL exception takes out the prefix and nothing else, in the listed files
     // only: an API address, or another cloud's host, in such a file is still named, and so

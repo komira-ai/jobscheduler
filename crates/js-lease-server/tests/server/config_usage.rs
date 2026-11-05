@@ -1,6 +1,7 @@
-//! The usage settings in the configuration file: `server.usage_db`, `server.usage_off` and
-//! `server.profile_store_bytes`, under the names, defaults and rules of the flags
-//! `--usage-db`, `--usage-off` and `--profile-store-bytes`.
+//! The usage settings in the configuration file: `server.usage_db`, `server.usage_off`,
+//! `server.profile_store_bytes` and `server.history_retention_days`, under the names,
+//! defaults and rules of the flags `--usage-db`, `--usage-off`, `--profile-store-bytes` and
+//! `--history-retention-days`.
 
 use std::path::Path;
 
@@ -17,14 +18,16 @@ fn loaded(name: &str, lines: &str) -> (Scratch, Result<js_lease_server::Config, 
 }
 
 /// Asserts the defaults of a file with no usage key: usage on, in `usage.db` beside the
-/// lease file, with a budget of 256 MiB, as with no usage flag. It catches a default
-/// that lands in the working directory or a budget of zero.
+/// lease file, with a budget of 256 MiB and a history kept 90 days, as with no usage flag.
+/// It catches a default that lands in the working directory, a budget of zero, and a
+/// history kept for another time.
 #[test]
 fn a_file_without_usage_keys_has_the_flags_defaults() {
     let (scratch, config) = loaded("usage_file_defaults", "");
     let config = config.unwrap();
     assert_eq!(config.usage_db(), Some(scratch.path("usage.db").as_path()));
     assert_eq!(config.profile_store_bytes(), 268_435_456);
+    assert_eq!(config.history_retention_days(), 90);
 }
 
 /// Asserts that the keys set usage as the flags did: a given path is kept, the budget is
@@ -32,10 +35,12 @@ fn a_file_without_usage_keys_has_the_flags_defaults() {
 /// drops, and an off switch that leaves the file named.
 #[test]
 fn the_usage_keys_set_usage_as_the_flags_do() {
-    let lines = "usage_db = \"/var/lib/js/u.db\"\nprofile_store_bytes = 1";
+    let lines =
+        "usage_db = \"/var/lib/js/u.db\"\nprofile_store_bytes = 1\nhistory_retention_days = 1";
     let config = loaded("usage_file_given", lines).1.unwrap();
     assert_eq!(config.usage_db(), Some(Path::new("/var/lib/js/u.db")));
     assert_eq!(config.profile_store_bytes(), 1);
+    assert_eq!(config.history_retention_days(), 1);
 
     let config = loaded("usage_file_off", "usage_off = true").1.unwrap();
     assert_eq!(config.usage_db(), None);
@@ -65,6 +70,14 @@ fn the_usage_keys_are_refused_with_the_flags_rules() {
         (
             "profile_store_bytes = \"lots\"".to_owned(),
             "server.profile_store_bytes: must be an integer".to_owned(),
+        ),
+        (
+            "history_retention_days = 0".to_owned(),
+            format!("server.history_retention_days: must be from 1 to {max}"),
+        ),
+        (
+            "history_retention_days = \"90d\"".to_owned(),
+            "server.history_retention_days: must be an integer".to_owned(),
         ),
         (
             "usage_off = \"yes\"".to_owned(),

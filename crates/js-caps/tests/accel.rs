@@ -101,13 +101,26 @@ fn spelt_families(text: &str) -> Vec<String> {
     found
 }
 
+/// The files `text` (a source in `dir`) declares as test-only modules: a `#[path = ".."]`
+/// on the line after a `#[cfg(test)]`.
+fn test_modules(text: &str, dir: &Path) -> Vec<PathBuf> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    lines
+        .windows(2)
+        .filter(|pair| pair[0] == "#[cfg(test)]")
+        .filter_map(|pair| pair[1].strip_prefix("#[path = \"")?.strip_suffix("\"]"))
+        .map(|file| dir.join(file))
+        .collect()
+}
+
 /// Asserts that no production source of the workspace spells a canonical family as a
 /// string literal, except the table itself in `js-types/src/accel.rs`: a provider or the
 /// agent that needs a family names it through the table, and translates its own source
 /// spellings to one. Test code is not scanned (files named `*_tests.rs`, files in a `tests`
-/// directory of a crate's `src`, which hold its test modules, and a file's lines from its
-/// first `#[cfg(test)]`), nor `xtask`, whose site demo records the text a user
-/// types. Checks the scan itself on a line that spells a family, so an empty scan cannot
+/// directory of a crate's `src`, which hold its test modules, files a `#[cfg(test)]`
+/// `#[path]` declares, and a file's lines from its first `#[cfg(test)]`), nor `xtask`, whose
+/// site demo records the text a user types, nor `js-sim-cell`, a simulation harness whose
+/// hosts are sample data. Checks the scan itself on a line that spells a family, so an empty scan cannot
 /// pass by reading nothing. Catches a provider or the agent defining a family of its own.
 #[test]
 fn no_canonical_name_is_defined_outside_js_caps() {
@@ -121,7 +134,10 @@ fn no_canonical_name_is_defined_outside_js_caps() {
     let mut members: Vec<PathBuf> = fs::read_dir(&crates)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.file_name().is_some_and(|name| name != "xtask"))
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != "xtask" && name != "js-sim-cell")
+        })
         .collect();
     members.sort();
     for member in members {
@@ -131,12 +147,30 @@ fn no_canonical_name_is_defined_outside_js_caps() {
         }
     }
     assert!(files.len() > 100, "the scan reads the workspace's sources");
+    let declared = "#[cfg(test)]\n#[path = \"a_rig.rs\"]\nmod rig;\n#[path = \"b.rs\"]\nmod b;\n";
+    assert_eq!(
+        test_modules(declared, Path::new("src")),
+        [Path::new("src").join("a_rig.rs")]
+    );
+    let test_only: Vec<PathBuf> = files
+        .iter()
+        .flat_map(|file| {
+            let dir = file.parent().unwrap();
+            test_modules(&fs::read_to_string(file).unwrap(), dir)
+        })
+        .collect();
     let table = Path::new("js-types").join("src").join("accel.rs");
     let mut spelt = Vec::new();
     for file in files {
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
         let in_tests = file.components().any(|part| part.as_os_str() == "tests");
-        if file.ends_with(&table) || name.ends_with("_tests.rs") || in_tests {
+        let skipped = [
+            file.ends_with(&table),
+            name.ends_with("_tests.rs"),
+            in_tests,
+            test_only.contains(&file),
+        ];
+        if skipped.into_iter().any(|skip| skip) {
             continue;
         }
         for line in spelt_families(&fs::read_to_string(&file).unwrap()) {

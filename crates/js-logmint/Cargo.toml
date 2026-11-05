@@ -1,0 +1,30 @@
+[package]
+name = "js-logmint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The `fake` module: a minter that issues credentials from js-logstore's fake store with the
+# session policy `policy()` builds, and that a test can script. Test support: the crate's own
+# tests turn it on through the `[dev-dependencies]` entry below, and a crate that mints turns
+# it on in its own `[dev-dependencies]` entry for js-logmint.
+fake = ["js-logstore/fake"]
+
+[dependencies]
+js-logstore = { path = "../js-logstore" }
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# tests/ see only the features turned on, so the fake minter and the fake store come in
+# through these entries.
+js-logmint = { path = ".", features = ["fake"] }
+js-logstore = { path = "../js-logstore", features = ["fake"] }
+
+[lints]
+workspace = true

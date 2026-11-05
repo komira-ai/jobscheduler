@@ -306,9 +306,9 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      - run: cargo clippy -p js-state -p js-jobs --features js-state/postgres,js-jobs/postgres --all-targets --locked -- -D warnings
+      - run: cargo clippy -p js-state -p js-jobs -p js-usage --features js-state/postgres,js-jobs/postgres,js-usage/postgres --all-targets --locked -- -D warnings
       # The write-rate measurement (tests/postgres_write_rate.rs) is read by a person, not a gate.
-      - run: cargo test -p js-state -p js-jobs --features js-state/postgres,js-jobs/postgres --locked -- --include-ignored --skip the_write_rate_of_one_two_and_three_frontends
+      - run: cargo test -p js-state -p js-jobs -p js-usage --features js-state/postgres,js-jobs/postgres,js-usage/postgres --locked -- --include-ignored --skip the_write_rate_of_one_two_and_three_frontends
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
