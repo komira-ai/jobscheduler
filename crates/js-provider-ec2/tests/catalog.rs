@@ -283,7 +283,7 @@ fn an_offer_states_the_type_in_the_vocabulary() {
         .unwrap();
     assert_eq!(a100.zone.as_deref(), Some(ZONES[0]));
     assert_eq!(a100.cpu_millis, 96_000);
-    assert_eq!(a100.memory_bytes, 96 * 4096 << 20);
+    assert_eq!(a100.memory_bytes, (96 * 4096) << 20);
     assert_eq!(a100.disk_bytes, 8_000_000_000_000);
     let accelerator = a100.accelerator.as_ref().unwrap();
     assert_eq!(accelerator.model.as_str(), "nvidia-a100");

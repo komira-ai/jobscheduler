@@ -143,7 +143,7 @@ impl FakeEc2 {
         let scripted = state.next.get_mut(&action).and_then(VecDeque::pop_front);
         match scripted.or_else(|| state.always.get(&action).cloned()) {
             Some(error) => Err(error),
-            None => Ok(answer(&*state)),
+            None => Ok(answer(&state)),
         }
     }
 }

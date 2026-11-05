@@ -12,9 +12,8 @@ pub enum PriceUnit {
     UsCents,
 }
 
-/// How the machine of an offer is bought. The pick policy orders offers of one provider
-/// by the provider's configured `purchase` list after price, accelerators and spare
-/// size; nothing else reads it.
+/// How the machine of an offer is bought, as the provider states it. [`Offer::fit`] does
+/// not read it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Purchase {
