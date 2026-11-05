@@ -95,14 +95,29 @@ pub(crate) struct Rig {
     _dir: TestDir,
 }
 
-/// A server named `name`, holding the job tables when `with_jobs`.
+/// A server named `name`, holding the job tables when `with_jobs`, placing with the
+/// registry's own placement (so no queued job is placed).
 pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
+    rig_of(name, with_jobs, false)
+}
+
+/// A server named `name` holding the job tables and placing with `js-sched`
+/// (`--placement js-sched`), so its heartbeats run the pass over the queued jobs. Its hosts
+/// report an `arch`, which the scheduler needs to describe them.
+pub(crate) fn placing_rig(name: &str) -> Rig {
+    rig_of(name, true, true)
+}
+
+/// A server named `name`, holding the job tables when `with_jobs` and placing with
+/// `js-sched` when `placing`.
+fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
     let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
-    let shape = Shape::new(resources, BTreeMap::new());
+    let arch = placing.then(|| ("arch".to_owned(), "x86_64".to_owned()));
+    let shape = Shape::new(resources, arch.into_iter().collect());
     let pool = PoolConfig::new(
         ProviderId::new("burst").unwrap(),
         ResourceClass::gpu_host(),
@@ -110,12 +125,26 @@ pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
         4,
     );
     let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
+    let placer = placing.then(|| {
+        let settings = crate::sched::engine::Settings::default();
+        Arc::new(crate::sched::place::SchedPlacer::new(
+            settings,
+            shared.clone(),
+        ))
+    });
+    for placer in &placer {
+        registry.set_placer(placer.clone());
+    }
     let (store, jobs) = tables();
     let jobs = Arc::new(jobs);
     let agents = Agents::over(registry, &shared, dir.path());
     let agents = match with_jobs {
         true => agents.with_jobs(Arc::clone(&jobs)),
         false => agents,
+    };
+    let agents = match placer {
+        Some(placer) => agents.with_placer(placer),
+        None => agents,
     };
     let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
@@ -132,8 +161,8 @@ impl Rig {
     /// Registers `host`, whose agent reports the `per-job` capability when `per_job`.
     pub(crate) fn register(&mut self, host: &str, per_job: bool) {
         let capabilities = match per_job {
-            true => json!({ "per-job": "true" }),
-            false => json!({}),
+            true => json!({ "per-job": "true", "arch": "x86_64" }),
+            false => json!({ "arch": "x86_64" }),
         };
         let hello: Hello = serde_json::from_value(json!({
             "host_id": host,
