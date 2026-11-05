@@ -369,6 +369,7 @@ fn a_request_outside_a_providers_capabilities_does_not_count() {
         resources: Resources::new(1000, GIB, 0, None).unwrap(),
         os: None,
         arch: None,
+        accelerator: None,
         ..wanted()
     };
     let bare = ProviderView {

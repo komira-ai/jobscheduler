@@ -103,6 +103,16 @@
 //! directory was removed (and before the finals were written) finds no record: the chunks stay
 //! and the reader reads those.
 
+// The upload's progress record and its resume after a restart are used by the `crun`
+// runtime, which is built on Linux only; a macOS build has the rest of the module.
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "the crun runtime that records and resumes an upload is Linux only"
+    )
+)]
+
 mod chunker;
 mod grant;
 mod record;

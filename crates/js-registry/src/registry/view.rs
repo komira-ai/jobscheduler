@@ -6,12 +6,24 @@ use std::collections::BTreeMap;
 
 use js_lease::Timestamp;
 use js_provider::{Held, HostBook};
-use js_types::HostId;
+use js_types::{HostId, Shape};
 
 use super::record::Record;
 use super::{HostMark, HostState, HostView, Registry, State};
+use crate::config::placement_shape;
 use crate::runs::Runs;
 use crate::whole::reserve::Marks;
+
+impl HostView {
+    /// The shape the registry places the host on: the pool's booked [`Self::shape`], with
+    /// the `accelerator.*` capabilities of the host's validated [`Self::claim`] in place of
+    /// the pool's, so its real family, variant facts and measured memory are matched while
+    /// the pool's numbers stay the booking limits. Admission reads a host's facts from it.
+    #[must_use]
+    pub fn placement_shape(&self) -> Shape {
+        placement_shape(&self.shape, self.claim.as_ref())
+    }
+}
 
 impl Registry {
     /// The leases booked on each host the registry holds, by host in id order, each host's

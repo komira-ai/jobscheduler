@@ -102,7 +102,9 @@ impl AcquireBody {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
         let probe_host = self.probe_host.as_deref().map(HostId::new).transpose();
-        let probe_host = probe_host.map_err(|_| ApiError::bad_request(PROBE_HOST_INVALID))?;
+        let Ok(probe_host) = probe_host else {
+            return Err(ApiError::bad_request(PROBE_HOST_INVALID));
+        };
         let ResourcesBody {
             cpu_millis,
             memory_bytes,
@@ -112,8 +114,9 @@ impl AcquireBody {
             accelerator,
         } = self.resources;
         let object = accelerator.map(AcceleratorRequest::from);
-        check_stated(&self.capabilities, gpus, gpu_class.as_deref())
-            .map_err(ApiError::bad_request)?;
+        if let Err(why) = check_stated(&self.capabilities, gpus, gpu_class.as_deref()) {
+            return Err(ApiError::bad_request(why));
+        }
         let need = request_need(gpus, gpu_class.as_deref(), object.as_ref())
             .map_err(ApiError::bad_request)?;
         let resources = Resources::new(cpu_millis, memory_bytes, need.gpus, need.gpu_class)
