@@ -106,6 +106,7 @@ fn request(acquire: &str) -> AcquireRequest {
             price_cents_per_hour: None,
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
         },
         lifetime: None,
         labels: Vec::new(),

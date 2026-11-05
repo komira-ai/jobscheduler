@@ -208,6 +208,7 @@ fn ask() -> AcquireRequest {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
         },
         labels: Vec::new(),
         payload: BootPayload::new(String::new()),

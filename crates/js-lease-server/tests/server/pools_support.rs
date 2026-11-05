@@ -68,6 +68,7 @@ pub fn offer(id: &str, gpus: u32, class: Option<&str>, price: Option<u64>, ok: b
         price_cents_per_hour: price,
         price_unit: PriceUnit::UsCents,
         available: ok,
+        purchase: None,
     }
 }
 
