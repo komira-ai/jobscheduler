@@ -300,20 +300,13 @@ impl RunLogs {
             .map(|logs| logs.file_cap)
     }
 
-    /// Starts the uploader of a run that has started, whose lease directory is `lease`. A run
-    /// without a sink starts none; one that cannot be started is logged, and the run goes on
-    /// without live logs.
+    /// Starts the uploader of a run that has started, over its capture files `stdout` and
+    /// `stderr`. A run without a sink starts none; one that cannot be started is logged, and the
+    /// run goes on without live logs.
     pub fn start(&mut self, logs: Option<&LiveLogs>, (stdout, stderr): (&Path, &Path)) {
-        let (Some(logs), Some(sink)) = (logs, self.sink.take()) else {
-            return;
-        };
-        match Uploader::start(&sink, (stdout, stderr), logs) {
-            Ok(uploader) => self.uploader = Some(uploader),
-            Err(why) => tracing::warn!(
-                prefix = sink.prefix().as_str(),
-                "live logs: the uploader did not start: {why}"
-            ),
-        }
+        self.uploader = logs
+            .zip(self.sink.take())
+            .and_then(|(logs, sink)| Uploader::start_or_warn(&sink, (stdout, stderr), logs));
     }
 
     /// The run has ended with `totals` (stdout, stderr) bytes printed: the uploader is told

@@ -76,9 +76,9 @@ impl Uploader {
                     }
                 }));
                 if ran.is_err() {
-                    tracing::warn!(
-                        prefix = prefix.as_str(),
-                        "live logs: the uploader stopped on a panic; this job's upload ends here"
+                    warn(
+                        &prefix,
+                        "the uploader stopped on a panic; this job's upload ends here",
                     );
                 }
                 sleeper.ended();
@@ -91,6 +91,23 @@ impl Uploader {
             thread: Some(thread),
             finished: AtomicBool::new(false),
         })
+    }
+
+    /// [`Uploader::start`], or `None` with one warning naming the job's prefix and why.
+    #[must_use]
+    pub fn start_or_warn(
+        sink: &Sink,
+        (stdout, stderr): (&Path, &Path),
+        logs: &LiveLogs,
+    ) -> Option<Self> {
+        Self::start(sink, (stdout, stderr), logs)
+            .map_err(|why| {
+                warn(
+                    sink.prefix().as_str(),
+                    &format!("the uploader did not start: {why}"),
+                )
+            })
+            .ok()
     }
 
     /// Tells the thread that the job has ended with `totals` (stdout, stderr) bytes printed,
@@ -138,6 +155,11 @@ impl Drop for Uploader {
             self.post(Message::Dropped);
         }
     }
+}
+
+/// Logs `what` as a warning about the live logs of the job whose prefix is `prefix`.
+fn warn(prefix: &str, what: &str) {
+    tracing::warn!(prefix, "live logs: {what}");
 }
 
 /// The message the mailbox holds, taken.
