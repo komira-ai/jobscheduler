@@ -119,7 +119,7 @@ pub(crate) trait History: Send + Sync {
 }
 
 /// A shared handle that is equal only to a clone of itself.
-struct Handle<T: ?Sized>(Arc<T>);
+pub(super) struct Handle<T: ?Sized>(pub(super) Arc<T>);
 
 impl<T: ?Sized> Clone for Handle<T> {
     fn clone(&self) -> Self {
@@ -190,6 +190,14 @@ impl JobApi {
     #[must_use]
     pub fn with_fleet(self, fleet: Ctx) -> JobApi {
         JobApi { fleet, ..self }
+    }
+}
+
+/// The registry's silence of a host, for the read calls ([`super::read::Silence`]): it takes
+/// and drops the registry's lock, after the read calls have read the store.
+impl super::read::Silence for js_registry::Registry {
+    fn silent_since(&self, host: &js_types::HostId) -> Option<u64> {
+        js_registry::Registry::silent_since(self, host).map(|at| at.millis())
     }
 }
 

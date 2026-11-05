@@ -44,11 +44,18 @@
 //! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is
 //! placed only where both leave room.
 //!
+//! A host the registry removes is told to the engine and also recorded for the job pass of
+//! the tick, which reads it absent and settles the job allocations left on it
+//! ([`SchedPlacer::gone`]); a host the engine holds a job allocation on is never forgotten for
+//! silence ([`Placer::holds_work_on`]).
+//!
 //! Locks: the placer's mutex is taken only inside a call the registry makes under its own
 //! lock (registry, then placer), and the placer never calls the registry, so the order is
 //! fixed. A pass over the queued jobs ([`super::engine::jobs`]) takes its own lock, then the
-//! engine's, and reads the registry before either.
+//! engine's, and reads the registry before either. The record of removed hosts has a lock of
+//! its own, a leaf.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -77,6 +84,12 @@ pub(crate) struct SchedPlacer {
     unmappable: AtomicU64,
     declined: AtomicU64,
     resynced: AtomicU64,
+    /// The hosts the registry removed (given back after the provider read them gone), each
+    /// with the number of its removal, until the job pass has settled the job allocations
+    /// left on them ([`SchedPlacer::gone`]). Its lock is a leaf.
+    gone: Mutex<BTreeMap<HostId, u64>>,
+    /// How many removals were recorded.
+    removals: AtomicU64,
     /// How many engines this placer built, counted for the tests that hold it to one.
     #[cfg(test)]
     built: AtomicU64,
@@ -105,6 +118,8 @@ impl SchedPlacer {
             unmappable: AtomicU64::new(0),
             declined: AtomicU64::new(0),
             resynced: AtomicU64::new(0),
+            gone: Mutex::default(),
+            removals: AtomicU64::new(0),
             #[cfg(test)]
             built: AtomicU64::new(1),
         }
@@ -121,6 +136,24 @@ impl SchedPlacer {
 
     pub(super) fn now(&self) -> FarmTime {
         farm_time(&self.clock)
+    }
+
+    fn removed(&self) -> MutexGuard<'_, BTreeMap<HostId, u64>> {
+        self.gone.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The hosts the registry removed that the job pass has not settled yet, each with the
+    /// number of its removal: the provider reads each of them absent (design section 6.3).
+    /// A host that says hello again is taken off at its hello.
+    pub(crate) fn gone(&self) -> BTreeMap<HostId, u64> {
+        self.removed().clone()
+    }
+
+    /// Takes off each of `settled`, removals the job pass has settled (every job allocation on
+    /// the host freed), unless the host was removed again since.
+    pub(crate) fn settle_gone(&self, settled: &BTreeMap<HostId, u64>) {
+        self.removed()
+            .retain(|host, removal| settled.get(host) != Some(&*removal));
     }
 
     /// The fallbacks so far.
@@ -294,6 +327,7 @@ impl Placer for SchedPlacer {
     }
 
     fn host_up(&self, host: &HostId, shape: &Shape) {
+        self.removed().remove(host);
         let now = self.now();
         self.engine().host_up(host, shape, now);
     }
@@ -307,8 +341,18 @@ impl Placer for SchedPlacer {
         self.engine().ended(lease);
     }
 
+    /// Recorded for the job pass ([`SchedPlacer::gone`]) as well as told to the engine: a
+    /// removed host's job allocations are freed only by the pass, never here.
     fn host_gone(&self, host: &HostId) {
         self.engine().host_gone(host);
+        let removal = self.removals.fetch_add(1, Ordering::Relaxed);
+        self.removed().insert(host.clone(), removal);
+    }
+
+    /// A host the engine holds a job allocation on is not forgotten for silence: only its
+    /// confirmation or the provider's absence frees that allocation (design section 6.3).
+    fn holds_work_on(&self, host: &HostId) -> bool {
+        self.engine().holds_jobs_on(host)
     }
 }
 

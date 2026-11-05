@@ -4,8 +4,9 @@
 //! ([`Freed::HostConfirmed`]) or the provider reads the host absent
 //! ([`Freed::ProviderAbsent`]). A host that is only silent frees nothing: unknown is not
 //! absent. Every path that frees is in this module: [`free_allocation`], which records why
-//! in the allocation's row from the job's end, and [`answer_retired`], which ends a cancelled
-//! job and frees its allocation in the same commit.
+//! in the allocation's row from the job's end, [`answer_retired`], which ends a cancelled
+//! job and frees its allocation in the same commit, and [`lose_on_absent`], which ends a job
+//! whose host the provider read absent as lost and frees its allocation in the same commit.
 //!
 //! Each free also records the allocation in the usage history ([`history`]): the row of
 //! `usage/ended/<ended-at>/<job id>` and its index entry, written by
@@ -30,13 +31,6 @@ pub(crate) enum Freed {
     /// cleanup checks ran clean, so the agent dropped it from its listing.
     HostConfirmed,
     /// The provider read the host absent.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the host-absence tick frees with it; until that lands only tests name it"
-        )
-    )]
     ProviderAbsent,
 }
 
@@ -112,6 +106,32 @@ pub(crate) fn answer_retired<S: Store, I: IdSource>(
         store.end_and_free_with(id, cancelled, EndReason::Cancelled, &beside)?;
     }
     Ok(())
+}
+
+/// Answers the provider reading the host of the job `id`'s live allocation absent (design
+/// section 6.3, section 8 rows 28, 41 and 42): a job that has not ended becomes lost and its
+/// allocation is freed for [`Freed::ProviderAbsent`] in one commit, with the allocation's usage
+/// history row, whatever the job's cancel intent (lost wins: no host report exists, and the
+/// record keeps the intent). A job that has ended, or whose row was deleted at its retention
+/// end, keeps what it has and only its allocation is freed ([`free_allocation`]). Returns the
+/// job this call made lost, if it made one.
+///
+/// # Errors
+/// As [`JobStore::end_and_free`] and [`free_allocation`].
+pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
+    store: &JobStore<S, I>,
+    id: &JobId,
+) -> Result<Option<JobRecord>, JobStoreError> {
+    let live = store.get_job(id)?.filter(|job| !job.state.is_ended());
+    let Some(job) = live else {
+        free_allocation(store, id, Freed::ProviderAbsent)?;
+        return Ok(None);
+    };
+    let beside = |freed: &AllocationRecord| history(Some(&job), freed);
+    let reason = EndReason::HostAbsent;
+    let (lost, _) = store.end_and_free_with(id, JobEnd::Lost, reason, &beside)?;
+    // A job another writer ended between the read and the commit keeps that end.
+    Ok(Some(lost).filter(|job| job.state == JobState::Lost))
 }
 
 /// The usage history rows of `freed`, the allocation of `job` (`None` for a job whose row

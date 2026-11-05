@@ -1,7 +1,8 @@
 //! A server with the job tables over a store that can fail a commit, hosts registered with or
 //! without the `per-job` capability, and a fake of an agent that speaks the per-job messages,
-//! for the tests of the heartbeat's per-job half. Nothing here waits on time: the registry's
-//! clock and the store's clock are manual and never move.
+//! for the tests of the heartbeat's per-job half and of the job pass. Nothing here waits on
+//! time: the registry's clock and the store's clock are manual, and move only in a rig made by
+//! [`clocked_rig`], where they are one clock a test moves ([`Rig::advance`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -12,18 +13,19 @@ use js_agent_wire::{
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
-    JobStore, Needs, NetworkPolicy, NewJob, RandomIds,
+    JobStore, Needs, NetworkPolicy, NewJob, RandomIds, Retention,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
-use js_state::Store;
 use js_state::fake::{Fake, Flaw};
+use js_state::{ManualClock as StoreClock, Store};
 use js_testkit::dir::TestDir;
 use js_types::{ImageDigestRef, Labels, ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 
 use super::*;
 use crate::adapt::SharedClock;
+use crate::job_expiry::JobLimits;
 
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
@@ -58,10 +60,32 @@ pub(crate) fn spec() -> JobSpec {
 /// Job tables of the server's own type over a fresh store that can fail a commit, so a test
 /// without a server runs the same code a heartbeat does.
 pub(crate) fn tables() -> (Arc<Interfere<Fake>>, ServerJobs) {
-    let store = Arc::new(Interfere::new(Fake::with_flaw(Arc::default(), Flaw::None)));
+    tables_on(Arc::default(), Retention::DEFAULT)
+}
+
+/// [`tables`] over a store whose clock is `clock`, keeping each ended job for `retention`.
+pub(crate) fn tables_on(
+    clock: Arc<StoreClock>,
+    retention: Retention,
+) -> (Arc<Interfere<Fake>>, ServerJobs) {
+    let store = Arc::new(Interfere::new(Fake::with_flaw(clock, Flaw::None)));
     let dynamic: Arc<dyn Store> = store.clone();
     let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
-    (store, jobs)
+    (store, jobs.with_retention(retention))
+}
+
+/// When a rig's clock starts: the registry's reading, in milliseconds.
+pub(crate) const START_MS: u64 = 5_000_000;
+
+/// The store's manual clock read as the server's clock: both count from the Unix epoch, so a
+/// rig made by [`clocked_rig`] has one time for the registry, the server and the store.
+pub(crate) struct OneClock(pub(crate) Arc<StoreClock>);
+
+impl js_lease::Clock for OneClock {
+    fn now(&self) -> Timestamp {
+        let since = js_state::Clock::now(&*self.0).as_duration();
+        Timestamp::from_millis(u64::try_from(since.as_millis()).unwrap())
+    }
 }
 
 /// Records the job `id` with `spec` and places it on `host` with `booked`; its records.
@@ -86,6 +110,11 @@ pub(crate) fn placed(
 /// The server under test and the store under it.
 pub(crate) struct Rig {
     pub(crate) agents: Arc<Agents>,
+    /// The store's clock; in a rig made by [`clocked_rig`], also the registry's and the
+    /// server's.
+    pub(crate) clock: Arc<StoreClock>,
+    /// The server's clock.
+    pub(crate) shared: SharedClock,
     /// The job tables the server holds (also when the server is not given them).
     pub(crate) jobs: Arc<ServerJobs>,
     /// The store under the job tables, which fails the commit it is told to.
@@ -111,10 +140,46 @@ pub(crate) fn placing_rig(name: &str) -> Rig {
 /// A server named `name`, holding the job tables when `with_jobs` and placing with
 /// `js-sched` when `placing`.
 fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
+    let clock = ManualClock::new(Timestamp::from_millis(START_MS));
+    let kept = (JobLimits::default(), Retention::DEFAULT);
+    rig_on(
+        name,
+        (with_jobs, placing),
+        kept,
+        (Arc::default(), SharedClock::new(clock)),
+    )
+}
+
+/// A server named `name` holding the job tables and its jobs to `limits`, placing with
+/// `js-sched` when `placing`, whose registry, server and store read one manual clock, at
+/// [`START_MS`] until the test moves it ([`Rig::advance`]).
+pub(crate) fn clocked_rig(name: &str, placing: bool, limits: JobLimits) -> Rig {
+    clocked_rig_keeping(name, placing, (limits, Retention::DEFAULT))
+}
+
+/// [`clocked_rig`], its jobs held to `limits` and each ended job kept for `retention`.
+pub(crate) fn clocked_rig_keeping(
+    name: &str,
+    placing: bool,
+    (limits, retention): (JobLimits, Retention),
+) -> Rig {
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(std::time::Duration::from_millis(START_MS));
+    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
+    rig_on(name, (true, placing), (limits, retention), (clock, shared))
+}
+
+/// A server named `name` (`(with_jobs, placing)` as [`rig_of`]) holding its jobs to the limits
+/// of `kept` and keeping each ended job for its retention, on the server clock `shared`, its
+/// store on `clock`.
+fn rig_on(
+    name: &str,
+    (with_jobs, placing): (bool, bool),
+    (limits, retention): (JobLimits, Retention),
+    (clock, shared): (Arc<StoreClock>, SharedClock),
+) -> Rig {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
-    let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
-    let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
     let arch = placing.then(|| ("arch".to_owned(), "x86_64".to_owned()));
     let shape = Shape::new(resources, arch.into_iter().collect());
@@ -124,7 +189,7 @@ fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
         shape,
         4,
     );
-    let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
+    let registry = Registry::with_sessions(pool, shared.clone(), SequentialSessions::new());
     let placer = placing.then(|| {
         let settings = crate::sched::engine::Settings::default();
         Arc::new(crate::sched::place::SchedPlacer::new(
@@ -135,9 +200,9 @@ fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
     placer
         .iter()
         .for_each(|placer| registry.set_placer(placer.clone()));
-    let (store, jobs) = tables();
+    let (store, jobs) = tables_on(Arc::clone(&clock), retention);
     let jobs = Arc::new(jobs);
-    let agents = Agents::over(registry, &shared, dir.path());
+    let agents = Agents::over(registry, &shared, dir.path()).with_job_limits(limits);
     let agents = match with_jobs {
         true => agents.with_jobs(Arc::clone(&jobs)),
         false => agents,
@@ -149,6 +214,8 @@ fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
     let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
         agents: Arc::new(agents),
+        clock,
+        shared,
         jobs,
         store,
         who,
@@ -231,6 +298,19 @@ impl Rig {
     /// How many transactions the store has committed.
     pub(crate) fn commits(&self) -> u64 {
         self.store.commit_stats().txns
+    }
+
+    /// Moves the rig's clock by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        self.clock.advance(by);
+    }
+
+    /// The job half of one tick of the server, in its order ([`crate::api::Shared::tick`]):
+    /// the job pass, the registry's advance, and the pass over the queued jobs.
+    pub(crate) fn tick(&self) {
+        self.agents.job_pass();
+        self.agents.registry.advance();
+        self.agents.place_jobs();
     }
 }
 

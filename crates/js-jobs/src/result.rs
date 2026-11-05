@@ -283,6 +283,24 @@ pub fn sweep<'a>(jobs: impl IntoIterator<Item = &'a JobRecord>, now: StoreTime) 
         .collect()
 }
 
+/// `job` with its deadline floor raised to `boot` plus [`BOOT_GRACE`], when it waits to be
+/// placed or to start (queued, placed or starting) and its floor is earlier or unset; `None`
+/// for a job in any other state, and for one whose floor is at least that late. The raise is
+/// a maximum, never the stored floor plus the grace, so boots in a loop do not stretch a
+/// wait. Nothing else changes.
+pub(crate) fn floored_at_boot(job: &JobRecord, boot: StoreTime) -> Option<JobRecord> {
+    let floor = boot.saturating_add(BOOT_GRACE);
+    let waits = matches!(
+        job.state,
+        JobState::Queued | JobState::Placed | JobState::Starting
+    );
+    let lower = job.deadline_floor.is_none_or(|stored| stored < floor);
+    (waits & lower).then(|| JobRecord {
+        deadline_floor: Some(floor),
+        ..job.clone()
+    })
+}
+
 /// `job` with its retention end raised to `boot` plus [`BOOT_GRACE`], when it has one that
 /// is earlier; `None` when it has none or one at least that late. Nothing else changes.
 pub(crate) fn raised_at_boot(job: &JobRecord, boot: StoreTime) -> Option<JobRecord> {
@@ -318,6 +336,7 @@ mod tests {
             cancel_requested_at: None,
             result: None,
             retention_ends,
+            deadline_floor: None,
             carried: crate::codec::Carried::default(),
         }
     }
@@ -542,5 +561,42 @@ mod tests {
         assert_eq!(raised_at_boot(&later, boot), None);
         let live = job("live", JobState::Queued, None);
         assert_eq!(raised_at_boot(&live, boot), None);
+    }
+
+    // Catches a floor added to the stored one (stretching a wait on every boot), a floor
+    // that lowers a later one, and a floor on a job that waits for nothing: running, ended.
+    #[test]
+    fn a_floor_at_boot_is_the_boot_plus_the_grace_for_a_waiting_job_only() {
+        let boot = at(1000);
+        let floored = |state, floor| JobRecord {
+            deadline_floor: floor,
+            ..job("j", state, None)
+        };
+        for state in [JobState::Queued, JobState::Placed, JobState::Starting] {
+            assert_eq!(
+                floored_at_boot(&floored(state, None), boot),
+                Some(floored(state, Some(at(1120)))),
+                "{state:?}"
+            );
+            assert_eq!(
+                floored_at_boot(&floored(state, Some(at(1119))), boot),
+                Some(floored(state, Some(at(1120)))),
+                "{state:?}: an earlier floor is raised to the boot plus the grace, not past it"
+            );
+            assert_eq!(floored_at_boot(&floored(state, Some(at(1120))), boot), None);
+            assert_eq!(floored_at_boot(&floored(state, Some(at(9000))), boot), None);
+        }
+        for state in [
+            JobState::Running,
+            JobState::Succeeded,
+            JobState::Lost,
+            JobState::FailedToStart(StartFailure::NoCapacity),
+        ] {
+            assert_eq!(
+                floored_at_boot(&floored(state, None), boot),
+                None,
+                "{state:?}"
+            );
+        }
     }
 }

@@ -223,6 +223,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             cancel_requested_at: None,
             result: None,
             retention_ends: None,
+            deadline_floor: None,
             carried: Carried::default(),
         }
     }
