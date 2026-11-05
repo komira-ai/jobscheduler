@@ -68,7 +68,7 @@ pub fn differences(
     let items: BTreeSet<&ItemId> = fake.keys().chain(real.keys()).collect();
     let differ = items
         .into_iter()
-        .filter(|item| terminal(fake, *item) != terminal(real, *item));
+        .filter(|item| terminal(fake, item) != terminal(real, item));
     differ.copied().collect()
 }
 
