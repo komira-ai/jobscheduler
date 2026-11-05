@@ -75,6 +75,9 @@ tower = { workspace = true, features = ["util"] }
 # The job service's tests: a tonic client over an in-memory stream, a call of any method by
 # name, and the method names from js-proto's descriptor set (src/job_api/tests.rs).
 prost-types.workspace = true
+# The read calls' tests decode the gateway's JSON by the proto3 JSON mapping, to compare it
+# with the gRPC answer (src/job_api/read_tests.rs).
+prost-reflect = { workspace = true, features = ["serde"] }
 tonic = { workspace = true, features = ["transport"] }
 tonic-prost.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }

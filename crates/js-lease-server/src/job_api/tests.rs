@@ -50,7 +50,7 @@ use crate::config::{Token, parse_token};
 use crate::job_store::ServerJobs;
 
 /// The token the services under test are built with.
-const TOKEN: &str = "job-api-test-token-0123456789abcdef";
+pub(super) const TOKEN: &str = "job-api-test-token-0123456789abcdef";
 
 /// The `Authorization` values that present no token or another one, with the reason each
 /// is refused: no header at all is the `None` case of the tests. Together they cover each
@@ -81,7 +81,11 @@ const REFUSED: [(&str, &str); 6] = [
 ];
 
 /// The gRPC service the methods are paths of.
-const SERVICE: &str = "jobscheduler.v1.JobService";
+pub(super) const SERVICE: &str = "jobscheduler.v1.JobService";
+
+/// The methods a group serves (`read.rs`): they answer what the call answers, not
+/// `UNIMPLEMENTED`.
+const SERVED: [&str; 4] = ["GetJob", "ListJobs", "GetResult", "GetLogs"];
 
 /// The time the services' clock reads, in milliseconds since the Unix epoch.
 const NOW_MS: u64 = 1_800_000_000_000;
@@ -89,7 +93,7 @@ const NOW_MS: u64 = 1_800_000_000_000;
 /// The body the gateway answers a call the service does not implement with.
 const UNIMPLEMENTED_BODY: &str = r#"{"error":"unimplemented"}"#;
 
-fn token() -> Token {
+pub(super) fn token() -> Token {
     parse_token(TOKEN.as_bytes()).expect("the test token is a valid token")
 }
 
@@ -118,7 +122,7 @@ fn over_sqlite(dir: &TestDir) -> Arc<ServerJobs> {
 
 /// An empty directory of the test's own under the target directory, removed when the
 /// guard is dropped.
-fn scratch(name: &str) -> TestDir {
+pub(super) fn scratch(name: &str) -> TestDir {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/job_api");
     TestDir::under(root, name)
 }
@@ -166,7 +170,7 @@ impl Service<Uri> for InMemory {
 /// A channel to `service`, served on a task of this runtime over an in-memory stream. The
 /// endpoint's URI names no host that exists and is never resolved: the connector ignores
 /// it.
-async fn connect<T: JobService>(service: Bearer<JobServiceServer<T>>) -> Channel {
+pub(super) async fn connect<T: JobService>(service: Bearer<JobServiceServer<T>>) -> Channel {
     let (client_end, server_end) = tokio::io::duplex(64 * 1024);
     let server = Server::builder()
         .serve_with_incoming(service, tokio_stream::once(Ok::<_, io::Error>(server_end)));
@@ -177,10 +181,10 @@ async fn connect<T: JobService>(service: Bearer<JobServiceServer<T>>) -> Channel
         .expect("the in-memory channel connects")
 }
 
-/// The status of the gRPC call of `method` with an empty request, sent with `authorization`
-/// as its metadata of that name (none when `None`). Every call of the skeleton fails, so
-/// the status is its answer.
-async fn call(channel: &Channel, method: &str, authorization: Option<&str>) -> Status {
+/// The answer of the gRPC call of `method` with an empty request, sent with `authorization`
+/// as its metadata of that name (none when `None`): `Ok` when the call succeeded (whatever
+/// its response), else its status.
+async fn call(channel: &Channel, method: &str, authorization: Option<&str>) -> Result<(), Status> {
     let mut grpc = Grpc::new(channel.clone());
     grpc.ready().await.expect("the channel is ready");
     let path = PathAndQuery::try_from(format!("/{SERVICE}/{method}")).expect("the path parses");
@@ -191,7 +195,7 @@ async fn call(channel: &Channel, method: &str, authorization: Option<&str>) -> S
     }
     grpc.unary::<(), (), _>(request, path, ProstCodec::default())
         .await
-        .expect_err("no call of the skeleton succeeds")
+        .map(|_| ())
 }
 
 /// The status and body of the gateway's answer to each of its routes, in the order of
@@ -319,7 +323,9 @@ async fn an_unauthenticated_request_runs_no_handler() {
     cases.extend(REFUSED.iter().map(|(text, _)| Some(*text)));
     for authorization in cases {
         for method in methods() {
-            let status = call(&channel, &method, authorization).await;
+            let status = call(&channel, &method, authorization)
+                .await
+                .expect_err("a refused request fails");
             assert_eq!(
                 (status.code(), status.message()),
                 (Code::Unauthenticated, ""),
@@ -345,8 +351,10 @@ async fn an_unauthenticated_request_runs_no_handler() {
 
 /// Asserts that the token both services were built with, presented as `Bearer <token>` and as
 /// `bearer <token>` (the scheme is matched without regard to case), takes every method over
-/// gRPC and every route of the gateway to the recording service, which counts each call once.
-/// Catches a transport that reads a token of its own or refuses the right one.
+/// gRPC and every route of the gateway to the recording service, which counts each call once:
+/// a call not served yet answers `UNIMPLEMENTED` (501), and a served one answers neither that
+/// nor `UNAUTHENTICATED` (401). Catches a transport that reads a token of its own or refuses
+/// the right one.
 #[tokio::test]
 async fn the_same_token_opens_both_transports() {
     let recording = Recording::new();
@@ -357,13 +365,29 @@ async fn the_same_token_opens_both_transports() {
     for scheme in ["Bearer", "bearer"] {
         let authorization = format!("{scheme} {TOKEN}");
         for method in &methods {
-            let status = call(&channel, method, Some(&authorization)).await;
-            assert_eq!(status.code(), Code::Unimplemented, "{method}");
+            let code = call(&channel, method, Some(&authorization))
+                .await
+                .map_or_else(|status| status.code(), |()| Code::Ok);
+            match SERVED.contains(&method.as_str()) {
+                true => assert!(
+                    ![Code::Unimplemented, Code::Unauthenticated].contains(&code),
+                    "{method}: {code:?}"
+                ),
+                false => assert_eq!(code, Code::Unimplemented, "{method}"),
+            }
         }
         expected += methods.len();
         assert_eq!(recording.calls(), expected);
-        for (status, _) in send_all(&router, Some(value(&authorization))).await {
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        let answers = send_all(&router, Some(value(&authorization))).await;
+        for (route, (status, _)) in js_api_gateway::ROUTES.iter().zip(answers) {
+            match SERVED.contains(&route.rpc.name()) {
+                true => assert!(
+                    ![StatusCode::NOT_IMPLEMENTED, StatusCode::UNAUTHORIZED].contains(&status),
+                    "{}: {status}",
+                    route.template
+                ),
+                false => assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{}", route.template),
+            }
         }
         expected += js_api_gateway::ROUTES.len();
         assert_eq!(recording.calls(), expected);
@@ -371,14 +395,15 @@ async fn the_same_token_opens_both_transports() {
 }
 
 /// Asserts that the methods of the service definition are the gateway's routes, one each in
-/// the same order, and that, over the fake store and over SQLite, every one of them answers
-/// `UNIMPLEMENTED` over gRPC with the stubs' own message (not the generated default's, so a
-/// method added to the proto that reaches no stub of [`JobApi`] fails here) and 501
-/// `unimplemented` over the gateway, both transports calling one [`JobApi`]. The production
+/// the same order, and that, over the fake store and over SQLite, every one of them that no
+/// group serves yet (all but [`SERVED`]) answers `UNIMPLEMENTED` over gRPC with the stubs' own
+/// message (not the generated default's, so a method added to the proto that reaches no stub
+/// of [`JobApi`] fails here) and 501 `unimplemented` over the gateway, both transports calling
+/// one [`JobApi`]. The served calls have tests of their own (`read_tests.rs`). The production
 /// builders `grpc` and `gateway` also refuse a request without the token
 /// (`UNAUTHENTICATED`, 401), as the recording tests show for the generic ones.
 #[tokio::test]
-async fn every_call_answers_unimplemented() {
+async fn every_unserved_call_answers_unimplemented() {
     let methods = methods();
     assert_eq!(methods, routed());
     let dir = scratch("every_call");
@@ -386,16 +411,25 @@ async fn every_call_answers_unimplemented() {
         let api = Arc::new(JobApi::new(jobs, clock()));
         let channel = connect(grpc(api.clone(), token())).await;
         let authorization = format!("Bearer {TOKEN}");
-        for method in &methods {
-            let status = call(&channel, method, Some(&authorization)).await;
+        let unserved = || {
+            methods
+                .iter()
+                .filter(|method| !SERVED.contains(&method.as_str()))
+        };
+        assert_eq!(unserved().count(), methods.len() - SERVED.len());
+        for method in unserved() {
+            let status = call(&channel, method, Some(&authorization))
+                .await
+                .expect_err("a call not served yet fails");
             assert_eq!(
                 (status.code(), status.message()),
                 (Code::Unimplemented, UNIMPLEMENTED),
                 "{method}"
             );
         }
+        let refused = call(&channel, &methods[0], None).await;
         assert_eq!(
-            call(&channel, &methods[0], None).await.code(),
+            refused.expect_err("no token, no call").code(),
             Code::Unauthenticated
         );
         let router = gateway(api, token());
@@ -403,7 +437,8 @@ async fn every_call_answers_unimplemented() {
             assert_eq!((status, body), (StatusCode::UNAUTHORIZED, Bytes::new()));
         }
         let answers = send_all(&router, Some(value(&authorization))).await;
-        for (method, answer) in methods.iter().zip(answers) {
+        let answers = methods.iter().zip(answers);
+        for (method, answer) in answers.filter(|(method, _)| !SERVED.contains(&method.as_str())) {
             assert_eq!(
                 answer,
                 (
@@ -433,8 +468,12 @@ fn a_group_context_is_replaced_without_touching_the_others() {
             &fleet::Ctx::default()
         )
     );
-    let api = api.with_read(read::Ctx { mark: 1 });
-    assert_eq!(api.read, read::Ctx { mark: 1 });
+    let marked = |mark| read::Ctx {
+        mark,
+        ..read::Ctx::default()
+    };
+    let api = api.with_read(marked(1));
+    assert_eq!(api.read, marked(1));
     assert_eq!(
         (&api.submit, &api.cancel, &api.fleet),
         (
@@ -447,7 +486,7 @@ fn a_group_context_is_replaced_without_touching_the_others() {
         .with_submit(submit::Ctx { mark: 2 })
         .with_cancel(cancel::Ctx { mark: 3 })
         .with_fleet(fleet::Ctx { mark: 4 })
-        .with_read(read::Ctx { mark: 5 });
+        .with_read(marked(5));
     assert_eq!(
         (
             api.read.mark,
