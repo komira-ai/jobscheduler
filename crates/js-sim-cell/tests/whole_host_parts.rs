@@ -349,3 +349,62 @@ fn the_server_spec_passes_the_placement_the_class_and_an_arch() {
     assert_eq!(virtual_time(EPOCH_MS + 5_000), ms(5_000));
     assert_eq!(virtual_time(0), ms(0));
 }
+
+/// Asserts what the server's view (`ServerNode::view`) takes from the registry's
+/// reservations, on the real server: two whole-host requests on one host, so the second
+/// waits while the first holds the host and is set aside the host once the first is
+/// released. Every tenth of a second the view lists each reserved host with the request
+/// it is set aside for and the end of its tail on the cell's virtual clock, exactly as
+/// `Registry::reservations` says at that moment, and the second request is seen set
+/// aside at least once. Catches a view that drops the request or the tail, or converts
+/// the tail from the wall clock off by the cell's epoch.
+#[test]
+fn the_server_view_lists_each_reservation_with_its_request_and_tail() {
+    let dir = scratch("whole-view");
+    let mut cell = Cell::new(Setup::new(5), whole_pool(1), dir, Faults::default()).expect("starts");
+    cell.add_agent().expect("an agent name is a host id");
+    cell.submit(&Work::whole_host(secs(10)));
+    let second = cell.submit(&Work::whole_host(secs(10)));
+    let mut seen = Vec::new();
+    for tenth in 1..=1_800 {
+        cell.run_until(ms(tenth * 100)).expect("no invariant fails");
+        let server = cell.server().expect("the cell has a server");
+        let view = server.view();
+        let registry = server
+            .registry()
+            .expect("the cell's server registers hosts");
+        for reservation in registry.reservations() {
+            let listed = &view.hosts[&reservation.host];
+            let request = reservation.request.to_string();
+            assert_eq!(listed.reserved_for.as_deref(), Some(request.as_str()));
+            assert_eq!(listed.tail_end, reservation.tail_end.map(virtual_time));
+            seen.push(request);
+        }
+    }
+    let waited = format!("{REQUEST_PREFIX}{}", second.0);
+    assert!(seen.contains(&waited), "set aside: {seen:?}");
+}
+
+/// Asserts that `Cell::cancel_item` records, in the observations, the item and the
+/// virtual time the client first asked to cancel it: a second ask later keeps the first
+/// time. Catches a cancel the cell never records (every `drain-kills-nothing` check would
+/// then read the client as never having asked) and one recorded at its latest ask.
+#[test]
+fn a_client_cancel_is_recorded_at_the_time_it_was_first_asked() {
+    let dir = scratch("cancel-record");
+    let mut cell = Cell::new(Setup::new(2), whole_pool(1), dir, Faults::default()).expect("starts");
+    cell.add_agent().expect("an agent name is a host id");
+    let item = cell.submit(&Work::whole_host(secs(600)));
+    assert!(cell.observations().cancels.is_empty());
+    cell.run_until(ms(3_000)).expect("no invariant fails");
+    cell.cancel_item(item);
+    cell.run_until(ms(7_000)).expect("no invariant fails");
+    cell.cancel_item(item);
+    let cancels: Vec<(ItemId, FarmTime)> = cell
+        .observations()
+        .cancels
+        .iter()
+        .map(|(item, at)| (*item, *at))
+        .collect();
+    assert_eq!(cancels, [(item, ms(3_000))]);
+}
