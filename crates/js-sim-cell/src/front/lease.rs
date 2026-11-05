@@ -71,11 +71,12 @@
 //! given its run and then read and released as above, and the `Placed { host }` its
 //! queued run reports is the grant. A lease the list no longer shows (its prepare failed)
 //! is acquired again under the same request id, which is the request's next try. The
-//! acquire's answers differ from the table above in one row:
+//! acquire's answers differ from the table above in two rows:
 //!
 //! | call | answer | event, and what follows |
 //! |---|---|---|
-//! | `POST /v1/leases` (whole host) | 409 `no-capacity` (the wait list is full, or no host is free for a request without an id), `lease-ended` (the last try's lease is still being released) or `no-capable-host` (no host of the pool can serve it as the pool stands: none has said hello yet, or every one is tainted) | none; acquired again at the next poll |
+//! | `POST /v1/leases` (whole host) | 202 (`pending`) | `Pending { lease }`, the try's lease; the lease list is read at the next poll |
+//! | | 409 `no-capacity` (the wait list is full, or no host is free for a request without an id), `lease-ended` (the last try's lease is still being released) or `no-capable-host` (no host of the pool can serve it as the pool stands: none has said hello yet, or every one is tainted) | none; acquired again at the next poll |
 //! | | any other 409 (`exclusive-not-ready` after the last failed prepare, `no-fit`, ...) | `Terminal(Failed)` |
 //!
 //! # Answers
@@ -331,7 +332,12 @@ impl Item {
                 let host = text(&answer["host"]);
                 self.stage = Stage::Held { lease, host };
             }
-            202 => self.stage = Stage::Pending(lease),
+            202 => {
+                let pending = lease_id(&lease).filter(|_| self.whole);
+                poll.heard
+                    .extend(pending.map(|lease| ClientEvent::Pending { lease }));
+                self.stage = Stage::Pending(lease);
+            }
             409 if !self.whole => {
                 poll.full.insert(key);
             }

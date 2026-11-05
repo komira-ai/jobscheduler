@@ -12,9 +12,10 @@
 //!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
 //!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
 //!   process, the processes it killed ([`Killed`]), and the server's list of hosts
-//!   ([`ServerView`]), gathered at one virtual time into [`Observations`]. The ledger
-//!   also keeps what the agents sent and were sent for the whole-host handshake
-//!   ([`ReadyReport`], [`StartSeen`], [`StopSeen`]).
+//!   ([`ServerView`]), with each booking it showed and for how long ([`Booking`]),
+//!   gathered at one virtual time into [`Observations`]. The ledger also keeps what the
+//!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
+//!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
 //!   step and once at the end, and the one-line [`Violation`] it reports. Eleven
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
@@ -67,7 +68,9 @@
 //!   whole-node request's record ([`RecordFact`]), the wait list and the reservations. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
 //!   family (`tests/faults.rs`) runs agents that die and return or never return,
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
-//!   restart of the server and a forgotten host, each over sixteen seeds.
+//!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
+//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
+//!   path, and the ways its handshake fails, under every value of `--placement`.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
@@ -116,7 +119,7 @@ pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation}
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
+    AgentTruth, Ask, Booking, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
     Observations, ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand,
     StopSeen, Verdict,
 };

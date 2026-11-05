@@ -724,12 +724,12 @@ impl Cell {
             .and_then(CellNode::as_agent)
     }
 
-    /// Reads the server's listing into the observations, writing each host whose entry
-    /// changed into the trace.
+    /// Reads the server's listing into the observations, with the bookings it starts and
+    /// ends, writing each host whose entry changed into the trace.
     fn reread(&mut self) {
         let now = self.sim.now();
         let view = self.server().map(ServerNode::view).unwrap_or_default();
-        let old = std::mem::take(&mut self.observations.server);
+        let old = &self.observations.server;
         let changed = view
             .hosts
             .iter()
@@ -758,7 +758,7 @@ impl Cell {
                 first.or_insert_with(|| host.clone());
             }
         }
-        self.observations.server = view;
+        self.observations.read_listing(view, now);
         self.listed_at = Some(now);
     }
 

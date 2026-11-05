@@ -2,10 +2,12 @@
 //! the lease front's whole-host path (its acquire under a request id, under a given one or
 //! under none, its wait and its refusals, driven through a scripted client port, the
 //! answers it keeps, and its grant after the agent's ready report on the real server), the
-//! actions that set how agents answer a prepare and that request whole hosts, the
-//! whole-host expectations (those on a raw answer and on the server as it stands when they
-//! are judged, at the end or at a virtual time), and what the server spec adds for them
-//! (the whole-node class and keys, the placement and its architecture).
+//! actions that set how agents answer a prepare, request whole hosts and cancel a request
+//! once a host is set aside for it, the whole-host expectations (those on a raw answer and
+//! on the server as it stands when they are judged, at the end or at a virtual time, and
+//! those over a request's tries), `Scenario::under`, the list of refusal reasons the
+//! refusal scenario runs over, and what the server spec adds for them (the whole-node
+//! class and keys, the placement and its architecture).
 //!
 //! Sizes: one or two hosts beating every 5 s for at most 1,900 s of virtual time, under
 //! 800 agent requests a seed; the scripted front runs no server at all.
@@ -23,8 +25,8 @@ use js_lease_server::Placement;
 use js_registry::Exclusion;
 use js_sim::Faults;
 use js_sim_cell::actions::{
-    agent_prepare_delay, agent_refuses_prepare, agent_silent_on_prepare, agents,
-    request_whole_host, submit_work,
+    REFUSAL_REASONS, agent_prepare_delay, agent_refuses_prepare, agent_silent_on_prepare, agents,
+    cancel_when_set_aside, request_whole_host, submit_work,
 };
 use js_sim_cell::server::{ARCH, ARCH_KEY, virtual_time};
 use js_sim_cell::{
@@ -124,6 +126,13 @@ fn pending(id: &str) -> (u16, Value) {
     (202, json!({ "id": id, "state": "pending" }))
 }
 
+/// What the client hears of a whole-host try answered pending under lease `1-<n>`.
+fn tried(sequence: u64) -> ClientEvent {
+    ClientEvent::Pending {
+        lease: LeaseId::new(1, sequence),
+    }
+}
+
 fn listed(leases: Value) -> (u16, Value) {
     (200, json!({ "leases": leases }))
 }
@@ -134,7 +143,8 @@ fn refused(code: &str) -> (u16, Value) {
 
 /// Asserts the whole-host path of the lease front. Through a scripted port: the acquire
 /// asks for the class `whole-node` under the request id `sim-item-<n>`, is answered 202
-/// pending, the lease list is read while the lease is pending (no event), and once it is
+/// pending (`Pending` with the try's lease), the lease list is read while the lease is
+/// pending (no event), and once it is
 /// held its run is queued and `Queued` then `Placed` (the grant) are heard. On the real
 /// server, with an agent that takes 20 s to prepare: the item's lease is granted only
 /// after the agent's ready report for exactly that lease, and the report comes at least
@@ -145,7 +155,7 @@ fn refused(code: &str) -> (u16, Value) {
 fn a_whole_host_item_is_acquired_with_a_request_id_and_held_only_after_ready() {
     let mut front = whole_front(3);
     let (heard, calls, bodies) = poll(&mut front, 0, vec![pending("1-1")]);
-    assert!(heard.is_empty());
+    assert_eq!(heard, [tried(1)]);
     assert_eq!(calls, ["POST /v1/leases"]);
     assert_eq!(bodies[0]["class"], "whole-node");
     assert_eq!(bodies[0]["request_id"], format!("{REQUEST_PREFIX}3"));
@@ -204,7 +214,7 @@ fn a_whole_host_item_is_acquired_with_a_request_id_and_held_only_after_ready() {
 /// again at the next poll under the same request id, with no event; any other 409
 /// (`exclusive-not-ready`, `no-fit`) ends the item `Failed` with nothing to release; and
 /// a pending lease the list no longer shows (its prepare failed) is acquired again at
-/// once, under the same request id. Catches a whole-host item that gives up on a wait
+/// once, under the same request id, the new try's lease heard as `Pending`. Catches a whole-host item that gives up on a wait
 /// the server asked for, one that waits forever on a refusal that is final, and a retry
 /// under another request id (a second request).
 #[test]
@@ -215,7 +225,7 @@ fn a_whole_host_acquire_waits_on_a_refusal_to_wait_and_fails_on_any_other() {
         assert!(heard.is_empty(), "{code}");
         assert_eq!(front.next_poll(), Some(ms(5_000)), "{code}");
         let (heard, _, again) = poll(&mut front, 5_000, vec![pending("1-1")]);
-        assert!(heard.is_empty(), "{code}");
+        assert_eq!(heard, [tried(1)], "{code}");
         assert_eq!(again[0]["request_id"], first[0]["request_id"], "{code}");
     }
     for code in ["exclusive-not-ready", "no-fit"] {
@@ -232,7 +242,7 @@ fn a_whole_host_acquire_waits_on_a_refusal_to_wait_and_fails_on_any_other() {
     poll(&mut front, 0, vec![pending("1-1")]);
     let gone = listed(json!([]));
     let (heard, calls, bodies) = poll(&mut front, 5_000, vec![gone, pending("1-2")]);
-    assert!(heard.is_empty());
+    assert_eq!(heard, [tried(2)]);
     assert_eq!(calls, ["GET /v1/leases", "POST /v1/leases"]);
     assert_eq!(bodies[1]["request_id"], format!("{REQUEST_PREFIX}7"));
 }
@@ -439,7 +449,7 @@ fn a_whole_host_item_is_asked_for_under_no_request_id_or_a_given_one() {
         refused("no-capacity"),
     ];
     let (heard, _, bodies) = poll(&mut front, 0, answers);
-    assert!(heard.is_empty());
+    assert_eq!(heard, [tried(1)]);
     assert_eq!(bodies[0]["class"], "whole-node");
     assert_eq!(bodies[0].get("request_id"), None);
     assert_eq!(bodies[1]["class"], "whole-node");
@@ -779,4 +789,168 @@ fn no_reservations_names_the_reservation_it_finds() {
         }
     }
     assert_eq!(found, Some(wanted));
+}
+
+/// Asserts that the server started on a whole-node pool with `prepare_timeout`,
+/// `reserve_backoff` and `max_replace` set holds those values, each in its own unit, and
+/// that a pool of the ordinary class with one of them is refused. Catches a value read in
+/// another unit (a 60 s deadline taken as 60 ms or 60 min), and a spec whose keys the
+/// server never reads.
+#[test]
+fn the_server_holds_the_whole_node_keys_and_an_ordinary_pool_refuses_them() {
+    let spec = whole_pool(1)
+        .prepare_timeout(secs(60))
+        .reserve_backoff(secs(90))
+        .max_replace(2);
+    let cell = Cell::new(
+        Setup::new(1),
+        spec,
+        scratch("whole-keys-held"),
+        Faults::default(),
+    );
+    let cell = cell.expect("the server takes the keys");
+    let server = cell.server().expect("the cell has a server");
+    let registry = server.registry().expect("the server registers hosts");
+    let whole = registry.whole_node().cloned().expect("a whole-node pool");
+    assert_eq!(whole.prepare_timeout_ms, 60_000);
+    assert_eq!(whole.reserve_backoff_ms, 90_000);
+    assert_eq!(whole.max_replace, 2);
+    let ordinary = ServerSpec::registered_pool("burst", Shape::gpu_host(), 1).max_replace(2);
+    let refused = Cell::new(
+        Setup::new(1),
+        ordinary,
+        scratch("whole-keys-ordinary"),
+        Faults::default(),
+    );
+    assert!(
+        refused.is_err(),
+        "an ordinary pool refuses a whole-node key"
+    );
+}
+
+/// Asserts `Scenario::under`: under each placement the scenario's name is followed by
+/// the placement as the server spells it, which a failure names, and the scenario runs
+/// on that server. Catches two placements' runs under one name (a failure would not say
+/// which placement failed) and a placement that never reaches the server (`js-sched`
+/// refuses a pool without the architecture `under` gives it).
+#[test]
+fn a_scenario_under_a_placement_is_named_for_it_and_runs_on_it() {
+    for placement in Placement::value_variants() {
+        let failure = Scenario::new("named")
+            .scratch(env!("CARGO_TARGET_TMPDIR"))
+            .server(whole_pool(1))
+            .under(*placement)
+            .hosts("burst", 1)
+            .work(1, Work::whole_host(secs(10)))
+            .expect(Expect::held_and_released(2))
+            .settle_within(secs(300))
+            .try_run_seeds(1);
+        match failure {
+            Err(ScenarioFailure::Unmet {
+                scenario, detail, ..
+            }) => {
+                assert_eq!(scenario, format!("named-{}", spelled(*placement)));
+                assert_eq!(detail, "held-and-released: wanted 2, got 1");
+            }
+            other => panic!("not an unmet expectation: {other:?}"),
+        }
+    }
+}
+
+/// Asserts the new whole-host expectations on the real server, met and failing: one
+/// host, one whole-host request held at its first try. Met: one try, no item held after
+/// a failed try asked for none, no failed host to keep off, the grant after the runs on
+/// its host, every host serving but none. Failing, each naming what it wanted and got:
+/// two tries, one item held after a failed try, the host out of service, and a grant to
+/// an item never submitted. Catches an expectation that is met by any run (a vacuous
+/// one), and one whose statement says another thing than it judges.
+#[test]
+fn the_whole_host_expectations_are_met_and_fail_on_the_real_server() {
+    let base = || {
+        Scenario::new("whole_host_expectations")
+            .scratch(env!("CARGO_TARGET_TMPDIR"))
+            .server(whole_pool(1))
+            .hosts("burst", 1)
+            .work(1, Work::whole_host(secs(10)))
+            .settle_within(secs(300))
+    };
+    base()
+        .expect(Expect::tries(ItemId(0), 1))
+        .expect(Expect::held_after_a_failed_try(0))
+        .expect(Expect::kept_off_a_failed_host(secs(300)))
+        .expect(Expect::held_after_the_runs_on_its_host(ItemId(0)))
+        .expect(Expect::serving_but(&[]))
+        .run_seeds(1);
+    let unmet = [
+        (Expect::tries(ItemId(0), 2), "tries(item0): wanted 2, got 1"),
+        (
+            Expect::held_after_a_failed_try(1),
+            "held-after-a-failed-try: wanted 1 or more, got 0",
+        ),
+        (
+            Expect::serving_but(&[0]),
+            "hosts-not-serving: wanted [h000], got []",
+        ),
+        (
+            Expect::held_after_the_runs_on_its_host(ItemId(4)),
+            "held-after-the-runs-on-its-host(item4): wanted [], got not held",
+        ),
+    ];
+    for (expect, wanted) in unmet {
+        match base().expect(expect).try_run_seeds(1) {
+            Err(ScenarioFailure::Unmet { detail, .. }) => assert_eq!(detail, wanted),
+            other => panic!("not an unmet expectation: {other:?}"),
+        }
+    }
+}
+
+/// Asserts `cancel_when_set_aside` where no host is ever set aside for the item: one
+/// host, one whole-host request held at its first try (an acquire that finds a quiet
+/// host is committed at once, with no mark), looked at once (within zero) and for ten
+/// seconds; it cancels nothing, and the item succeeds. The scenario of a cancel while
+/// marked (`whole_host_faults`) shows it cancelling. Catches an action that cancels
+/// whether or not the item is set aside, and one that never stops looking.
+#[test]
+fn cancel_when_set_aside_cancels_nothing_that_is_never_set_aside() {
+    for within in [Duration::ZERO, secs(10)] {
+        Scenario::new("cancel_when_set_aside_cancels_nothing_that_is_never_set_aside")
+            .scratch(env!("CARGO_TARGET_TMPDIR"))
+            .server(whole_pool(1))
+            .hosts("burst", 1)
+            .work(1, Work::whole_host(secs(10)))
+            .at(Duration::ZERO, cancel_when_set_aside(ItemId(0), within))
+            .expect(Expect::terminal_count(1, HowEnded::Succeeded))
+            .settle_within(secs(300))
+            .run_seeds(1);
+    }
+}
+
+/// Every variant of `RefusalReason`, in the order the wire lists them, built by a match
+/// with an arm per variant and no wildcard: a variant the wire gains does not compile
+/// here until it is chained in, and is then missing from `REFUSAL_REASONS` until it is
+/// added there.
+fn every_refusal_reason() -> Vec<RefusalReason> {
+    let after = |reason: Option<RefusalReason>| match reason {
+        None => Some(RefusalReason::NotQuiet),
+        Some(RefusalReason::NotQuiet) => Some(RefusalReason::NoiseOverBound),
+        Some(RefusalReason::NoiseOverBound) => Some(RefusalReason::SetupFailed),
+        Some(RefusalReason::SetupFailed) => Some(RefusalReason::HostUnsafe),
+        Some(RefusalReason::HostUnsafe) => Some(RefusalReason::Unsupported),
+        Some(RefusalReason::Unsupported) => None,
+    };
+    std::iter::successors(after(None), |reason| after(Some(*reason))).collect()
+}
+
+/// Asserts that `REFUSAL_REASONS`, which the refusal scenario of the whole-host fault
+/// family runs over, holds every variant of `RefusalReason`, each once, with its own wire
+/// code. Catches a reason the wire gains that the scenario does not cover, and a list
+/// that holds one reason twice.
+#[test]
+fn the_refusal_scenario_covers_every_reason_the_wire_has() {
+    assert_eq!(REFUSAL_REASONS.to_vec(), every_refusal_reason());
+    let codes: std::collections::BTreeSet<String> = REFUSAL_REASONS
+        .iter()
+        .map(|reason| String::from(*reason))
+        .collect();
+    assert_eq!(codes.len(), REFUSAL_REASONS.len());
 }

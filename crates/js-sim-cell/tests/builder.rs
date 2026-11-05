@@ -420,6 +420,7 @@ fn a_client_call_is_never_dropped_by_the_bus_faults() {
         .iter()
         .map(|event| match event {
             ClientEvent::Submitted => "submitted",
+            ClientEvent::Pending { .. } => "pending",
             ClientEvent::Queued { .. } => "queued",
             ClientEvent::Placed { .. } => "placed",
             ClientEvent::Started => "started",
