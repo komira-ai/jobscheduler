@@ -34,13 +34,14 @@ impl Lifecycle {
                 let waiting = (**waiting).clone();
                 let Waiting {
                     spec,
+                    env,
                     mounts,
                     slot,
                     booked,
                     lease_end_ms,
                     ..
                 } = waiting;
-                let started = self.begin((&spec, keyed), mounts, slot, booked, events);
+                let started = self.begin((&spec, keyed), &env, mounts, slot, booked, events);
                 let at = (Some(index), lease_end_ms);
                 self.settle((&spec, keyed), started, (slot, booked), at, events);
             }

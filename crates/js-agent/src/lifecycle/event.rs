@@ -21,8 +21,13 @@ pub struct Finding {
 pub enum Skip {
     /// It reached the agent after its validity window.
     Stale,
-    /// The run was finished, or stopped, earlier.
+    /// The run was finished, or stopped, earlier: a run start whose run id is retired.
     Retired,
+    /// The fence of this job start (its job id with its allocation id) is retired: the job
+    /// ended, was stopped or cancelled, was stopped for a silence of the server, or a stop
+    /// that named no allocation retired every fence of the job. Nothing is made or booked.
+    /// The same job under another allocation is another fence.
+    FenceRetired,
     /// The agent already holds as many runs as a heartbeat can list, so it took on no
     /// more; the server may send the start again once results are acknowledged.
     Full,

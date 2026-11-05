@@ -1,0 +1,32 @@
+[package]
+name = "js-logstore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The `fake` module: an in-memory object store that checks every request's signature and the
+# session policy of the credential it was issued with. Test support: the crate's own tests turn
+# it on through the `[dev-dependencies]` entry below, and a crate that talks to the store turns
+# it on in its own `[dev-dependencies]` entry for js-logstore.
+fake = []
+
+[dependencies]
+hmac.workspace = true
+# The crypto provider of the TLS client (ureq is built without one).
+rustls.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+# tests/ see only the features turned on, so the fake store comes in through this entry.
+js-logstore = { path = ".", features = ["fake"] }
+
+[lints]
+workspace = true

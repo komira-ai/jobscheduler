@@ -32,6 +32,7 @@ fn start(job_id: &str) -> JobStartSpec {
         wall_ms: 60_000,
         network: Default::default(),
         ports: Vec::new(),
+        log_sink: None,
     }
 }
 
@@ -86,7 +87,7 @@ fn a_repeated_start_does_not_run_the_job_twice() {
     ack_job(&mut h, "j1", "ACCEPTED");
     assert!(listed(&h).is_empty());
     let events = h.apply(vec![job_start(start("j1"))]);
-    assert_eq!(names(&events), ["skipped j1 Retired"]);
+    assert_eq!(names(&events), ["skipped j1 FenceRetired"]);
     assert_eq!(h.fake.created().len(), 1);
     assert!(listed(&h).is_empty());
 }
@@ -107,7 +108,7 @@ fn a_stop_for_an_unlisted_job_retires_the_id() {
     h.life.apply(&reply_json(&json!({ "taint_ack": false })));
     assert_eq!(h.life.retired_jobs(), ["j9"]);
     let events = h.apply(vec![job_start(start("j9"))]);
-    assert_eq!(names(&events), ["skipped j9 Retired"]);
+    assert_eq!(names(&events), ["skipped j9 FenceRetired"]);
     assert!(h.fake.created().is_empty());
     assert!(listed(&h).is_empty());
     h.life
@@ -384,7 +385,7 @@ fn the_retired_job_list_keeps_the_newest_ids() {
     assert_eq!(retired[0], "j1");
     assert_eq!(retired[RETIRED_LISTED - 1], format!("j{RETIRED_LISTED}"));
     let events = h.apply(vec![job_start(start("j0"))]);
-    assert_eq!(names(&events), ["skipped j0 Retired"]);
+    assert_eq!(names(&events), ["skipped j0 FenceRetired"]);
     h.apply(vec![job_stop("j0")]);
     let retired = h.life.retired_jobs();
     assert_eq!(retired.len(), RETIRED_LISTED);
@@ -393,14 +394,68 @@ fn the_retired_job_list_keeps_the_newest_ids() {
     assert!(h.fake.created().is_empty());
 }
 
-/// Asserts that a job start that names an environment is answered `failed_to_start` with
-/// `env-unsupported` in the job's listing and creates nothing (no container, no scratch
-/// directory, no booking), that the same start delivered again adds no second result, and
-/// that a start with an empty environment beside it runs. It catches a job run without the
-/// environment it names, which this agent's runtimes cannot set yet.
+/// The image of a job start whose pull the fake runtime holds pending.
+const COLD: &str = "registry.example/cold:1@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// Asserts that a job start that names an environment runs: its container is created once
+/// and carries the environment by name in order, and no `failed_to_start` result is
+/// listed; a job start that first waits for its image to be pulled carries it as well when
+/// its container is made; a run start beside them carries none. It catches the
+/// `env-unsupported` refusal left in the lifecycle, an environment dropped on the way to
+/// the runtime (at once, or kept for a start that waits), and one put on a run start.
 #[test]
-fn a_job_start_with_an_environment_is_refused_and_runs_nothing() {
+fn a_job_start_with_env_no_longer_fails_to_start_with_env_unsupported() {
     let mut h = Harness::new("job-env");
+    let mut ready = start("j1");
+    ready.env.insert("B".to_owned(), "two words".to_owned());
+    ready.env.insert("A".to_owned(), "1".to_owned());
+    let mut waits = ready.clone();
+    waits.job_id = "j2".to_owned();
+    waits.allocation_id = "alloc-j2".to_owned();
+    waits.image = COLD.to_owned();
+    h.fake.pull_pending(COLD);
+    let events = h.apply(vec![job_start(ready), job_start(waits)]);
+    assert_eq!(names(&events), ["started j1"]);
+    assert_eq!(names(&h.start(job("r1"))), ["started r1"]);
+    h.fake.pull_done(COLD);
+    assert_eq!(names(&h.life.step()), ["started j2"]);
+
+    let want = vec![
+        ("A".to_owned(), "1".to_owned()),
+        ("B".to_owned(), "two words".to_owned()),
+    ];
+    let created: Vec<(String, Vec<(String, String)>)> = h
+        .fake
+        .created()
+        .into_iter()
+        .map(|run| (run.run_id, run.env))
+        .collect();
+    assert_eq!(
+        created,
+        [
+            ("j1".to_owned(), want.clone()),
+            ("r1".to_owned(), Vec::new()),
+            ("j2".to_owned(), want),
+        ]
+    );
+    for job_id in ["j1", "j2"] {
+        let held = listing(&h, job_id);
+        assert_eq!(held.state, HeldState::Running, "{job_id}");
+        assert_eq!(held.result, None, "{job_id}");
+    }
+    assert!(h.life.results().is_empty());
+}
+
+/// Asserts that on a runtime that carries no job start's environment (as the Mac one) a
+/// job start that names one is answered `failed_to_start` with `env-unsupported` in the
+/// job's listing and creates nothing (no container, no scratch directory, no booking), that
+/// the same start delivered again adds no second result, and that a start with an empty
+/// environment beside it runs. It catches a job run without the environment it names, and a
+/// runtime's refusal the lifecycle does not ask for.
+#[test]
+fn a_runtime_that_cannot_carry_env_refuses_the_job_start_and_creates_nothing() {
+    let mut h = Harness::new("job-env-refused");
+    h.fake.refuse_env();
     let mut spec = start("j1");
     spec.env.insert("LANG".to_owned(), "C".to_owned());
     let events = h.apply(vec![job_start(spec.clone()), job_start(start("j2"))]);

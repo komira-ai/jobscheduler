@@ -270,11 +270,14 @@
 //! provider before `static` is refused, and a pool's platforms must reach exactly one
 //! machine provider that launches. `max_queue_wait`, `start_timeout` and `path_grace` (each
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
-//! of the pool's platforms; unknown keys are refused) are read and checked, and nothing
-//! enforces them yet: the job lifecycle ticks (design 6.1) will enforce the first two,
-//! whole-host jobs and admission (design 5.6) `path_grace`, and the pick of an offer (design
-//! 5.6, pass 2) the limits. [`Config::resolve_file`] answers the [`Resolved`] machine
-//! providers, platforms and pools of a file, and [`Resolved::describe`] prints them.
+//! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
+//! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
+//! below), and `path_grace` is how long a whole-node request of the pool waits once no host
+//! could serve it (the registry's `regain_grace` for that pool). Nothing enforces the rest
+//! yet: the job lifecycle ticks (design 6.1) will enforce `max_queue_wait` and
+//! `start_timeout`, and the pick of an offer (design 5.6, pass 2) the limits.
+//! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
+//! of a file, and [`Resolved::describe`] prints them.
 //!
 //! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
 //! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
@@ -314,7 +317,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -402,6 +405,31 @@
 //! retries is placed afresh, on a fresh host choice, as a new request; it does not get
 //! the refusal again. `no-capable-host` says no host of the pool could ever serve the
 //! request, as the pool stands.
+//!
+//! # Admission
+//!
+//! Every `POST /v1/leases` that does not repeat the `request_id` of a lease the table holds,
+//! and that keeps the start contract (a request that breaks it keeps its 422), is first
+//! admitted (design 5.6, step 2): it is accepted when a capable host exists, else
+//! when a launching machine provider of the pool may offer a machine for it, and otherwise
+//! refused at once with 409 `no-capable-host`, before anything is recorded: no lease id is
+//! taken, the lease file is not written, nothing is reserved and nothing waits, so the same
+//! request (or `request_id`) sent again after a host registers is admitted afresh. A host
+//! is capable when what the pool books of it holds the request and it reports the `os`,
+//! `arch`, `disk-gib`, `isa_level` and `exec` the request requires, as placement compares
+//! them, and it is neither tainted nor being released (leaving the pool): a busy, silent,
+//! cordoned or drain-marked host is capable, and so is one whose agent announced it is
+//! stopping, so a request that only has to wait is never refused for it. A provider may
+//! offer when the request is inside its capabilities and its catalog has an offer that fits
+//! the request
+//! (availability now is not asked) and the pool's `provider_limits` (an allowed instance
+//! type, at most the maximum price, an unpriced offer never under a price limit), with a
+//! share of machines above zero; a catalog that cannot be read may offer. The catalog is
+//! read once per admission, and only when no host is capable, with the table's lock let go.
+//! An admitted request is then started as before, so the start's own answers (`no-fit`,
+//! `no-capacity`, `unsupported-class` and the rest) are unchanged for it. This code was
+//! already in the documented 409 list, so a client needs no change: older servers answer it
+//! for some whole-node requests.
 //!
 //! The table sits behind one async mutex, taken for the table call alone and never held
 //! across an await. A table call is synchronous: it writes and syncs the lease file and
@@ -708,6 +736,7 @@
 //! renewed certificate is served while the whole-host reservations in memory stay.
 
 mod adapt;
+mod admit;
 mod agent_api;
 mod agent_pool;
 mod agent_state;
@@ -728,12 +757,16 @@ mod hosts;
 #[cfg(feature = "in-process")]
 pub mod in_process;
 mod io_timeout;
+mod job_alloc;
+mod job_start;
+mod job_store;
 mod join_api;
 mod join_tokens;
 mod kinds;
 mod layered;
 mod listener;
 pub mod network;
+mod per_job;
 mod platform;
 mod pool;
 mod rate;

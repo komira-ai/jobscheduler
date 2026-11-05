@@ -1,16 +1,17 @@
 //! The arguments of `create`, built without a shell and without I/O.
 //!
 //! [`limits_to_args`] turns a job's limits and mounts into flags, [`hardening_args`] adds
-//! what every contained job gets, and [`label_args`] the labels. Every value is one argv
-//! entry, so nothing a job names is split, expanded or read as an option by anything but
-//! the runtime's own flag parser; the image and the command line come after `--`.
+//! what every contained job gets, [`label_args`] the labels and [`env_args`] the job's
+//! environment. Every value is one argv entry, so nothing a job names is split, expanded
+//! or read as an option by anything but the runtime's own flag parser; the image and the
+//! command line come after `--`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::logs::log_args;
 use super::{Engine, Settings};
-use crate::lifecycle::RunSpec;
+use crate::lifecycle::{RunSpec, check_run_env};
 
 /// The network every container of the engines gets: none at all, loopback only. A job that
 /// needs a network runs on the `crun` runtime, which wires one per job (`--egress`).
@@ -63,6 +64,11 @@ pub enum ArgsError {
     /// A CPU, memory or process limit of 0, which the engines read as "no limit".
     #[error("a limit of 0 means no limit to the engine: cpu, memory and pids must be above zero")]
     ZeroLimit,
+    /// A job environment the wire's check refuses ([`check_run_env`]): a name the grammar
+    /// refuses or the agent reserves, a NUL, a name given twice, or one over a bound. The
+    /// text names the rule, never a name or a value.
+    #[error("the job's environment is refused: {0}")]
+    Env(String),
 }
 
 /// A bind mount of a container: the host path, the path inside, and whether it is
@@ -357,6 +363,23 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
 /// [`Settings::slot_user`]), so two runs held at once never share a user.
 pub(super) fn user_args(settings: &Settings, slot: u32) -> Vec<String> {
     vec!["--user".to_owned(), settings.slot_user(slot)]
+}
+
+/// One `--env NAME=VALUE` pair for each variable of the job's environment, in the order
+/// given ([`RunSpec::env`] is by name): `--env` and `NAME=VALUE` are two argv entries, and a
+/// value is passed as it is, whatever it holds (`=`, a leading `-`, a newline, a space),
+/// never through a shell nor joined to the flag. The engine sets the image's `Env` first
+/// and each `--env` over it, so a name in both takes the job's value. An empty environment
+/// adds nothing.
+///
+/// # Errors
+///
+/// An environment [`check_run_env`] refuses ([`ArgsError::Env`]). The wire refuses it
+/// already; this is the check of a run that reaches the runtime without it.
+pub fn env_args(env: &[(String, String)]) -> Result<Vec<String>, ArgsError> {
+    check_run_env(env).map_err(|why| ArgsError::Env(why.to_string()))?;
+    let pair = |(name, value): &(String, String)| ["--env".to_owned(), format!("{name}={value}")];
+    Ok(env.iter().flat_map(pair).collect())
 }
 
 /// One `--label key=value` for each label, in key order.

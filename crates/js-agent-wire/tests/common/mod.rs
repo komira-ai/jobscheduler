@@ -121,6 +121,7 @@ pub fn heartbeat() -> Heartbeat {
         disk_gib: None,
         jobs: Vec::new(),
         retired_jobs: Vec::new(),
+        log_grant_state: None,
     }
 }
 

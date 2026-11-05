@@ -57,6 +57,10 @@ This reading is the teardown's only. A domain wrongly read as gone there is caug
 
 A step that fails leaves the lease live in the helper's ledger: the uid is quarantined. A live lease's uid is never handed to another lease. The ledger is a file and survives a restart. A boot reset that cannot end the user fails and keeps it. The refusal names the step, and the helper logs that the uid is held. The native runtime keeps the lease in its journal and repeats the delete at the next start. The uid is free again only once a delete completes.
 
+## While no agent runs
+
+The helper holds no deadline of a run's own: its `run` verb takes the program, its environment and the file-size and process limits, and nothing ends the process but `kill-uid`. A native run's wall limit and the agent's silence bound (`--silence-stop`, which stops every run the agent holds once it has not heard the server for the bound) are counted by the agent and enforced through `kill-uid`, at once, with no grace. So while the agent is down, has stopped or is restarting, a native run goes on with no bound; the next agent to start ends it from its journal (kill, then delete), as does the rescue of an agent whose worker died. A deadline the helper enforces by itself is a change to the helper that has not been made.
+
 ## The isolation test's `no-path` verdict
 
 A launch agent kind (`user/<uid>`, `gui/<uid>`) is covered without being seeded only when all of these hold. Otherwise it is not exercised and the test cannot pass.

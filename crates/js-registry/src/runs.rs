@@ -629,6 +629,7 @@ impl Runs {
             exclusive: None,
             job_acks: Vec::new(),
             retired_acks: Vec::new(),
+            log_grant: None,
         }
     }
 
@@ -806,6 +807,7 @@ mod tests {
             disk_gib: None,
             jobs: Vec::new(),
             retired_jobs: Vec::new(),
+            log_grant_state: None,
         }
     }
 

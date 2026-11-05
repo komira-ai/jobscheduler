@@ -41,6 +41,11 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   (`JobResultAck`) and `retired_acks`.
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
   `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`). A tag this version does not know reads as `Command::Unknown`.
+- The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire` and filled by no agent or server yet: `JobStartSpec.log_sink` (where to upload one job's logs;
+  no secret), `HeartbeatReply.log_grant` (the host's upload credential), the heartbeat's `log_grant_state` (`stale`, `until_ms`) and
+  `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
+  server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as
+  absent, so a log field never refuses a start or a heartbeat.
 
 The per-job messages ride in major 1 beside the lease and run messages. An agent announces them with the hello capability
 `per-job` (`PER_JOB_CAPABILITY`), and the wire crate's rule is that a server sends `job_start` and `job_stop` only to an agent that
@@ -49,6 +54,15 @@ reported it; an agent lists a job a job start began only under `jobs`, never in 
 and carries out both commands. The server side is not: the lease server on main sends no `job_start` or `job_stop` and answers
 with empty `job_acks` and `retired_acks` (`crates/js-registry/src/runs.rs`). The capabilities
 `one-job` (`ONE_JOB_CAPABILITY`) and `run-files` gate start fields an older agent would silently ignore.
+
+The fence of a job start is the pair it already carries, `job_id` with `allocation_id`; no field is added for it, and no existing
+body encodes differently (`crates/js-agent-wire/tests/start_fence.rs`). An agent that enforces it reports the hello capability
+`start-fence` (`START_FENCE_CAPABILITY`), beside `per-job`: it skips a job start whose fence it retired (a job that ended, was
+stopped or cancelled, or that it stopped after a silence of the server; a `job_stop` for a job it does not hold names no
+allocation and retires every fence of the job), keeps the retired fences in its state root across a restart, takes the same job
+under a new allocation, and stops every job it holds once it has not heard the server for its silence bound (`--silence-stop`,
+300 s by default, reported `killed` with the detail `silence-stop`). A server that does not see the capability can expect neither.
+A run start is fenced by its run id alone, as before.
 
 **Cadence.** The welcome sets the heartbeat interval and the grace; the defaults are `DEFAULT_HEARTBEAT_INTERVAL_MS` 5,000 and
 `DEFAULT_GRACE_MS` 15,000, and a grace must exceed two intervals (`grace_covers_heartbeats`). `Welcome::validate` holds the interval
@@ -224,6 +238,24 @@ Log tails are where the two differ most. JSON writes a control character that ha
 byte. In the worst case two streams of 8 KiB of such characters are 2×8,192×6 = 98,304 bytes of JSON, more than the whole body (the
 agent cuts them to fit, `results_budget`), and 2×(1+2+8,192) = 16,390 bytes of protobuf for the two strings, 1+3+16,390 = 16,394 with
 the `LogTail` sub-message around them. Derived.
+
+### The live-log fields
+
+The fields of [live-logs.md](live-logs.md), section 7, in the compact JSON `serde_json` writes, each at its bounds (a `u64` at its 20
+digits), with the comma that joins it to the message. Derived, and measured by the wire's tests
+(`a_reply_with_a_maximum_credential_fits_the_reply_bound`, `a_heartbeat_with_log_fields_stays_inside_the_totals_the_existing_test_fixes`).
+
+- `logs` in a result, `,"logs":{"stdout_bytes":N,"stderr_bytes":N,"stdout_dropped":N,"stderr_dropped":N}`: 1 + 7 + 1 + (15 + 20) +
+  1 + (15 + 20) + 1 + (17 + 20) + 1 + (17 + 20) + 1 = **157** bytes per result.
+- `log_grant_state` in a heartbeat, `,"log_grant_state":{"stale":false,"until_ms":N}`: 1 + 18 + 1 + 13 + 1 + (11 + 20) + 1 = **66**
+  bytes per beat.
+- `log_grant` in a reply, with `access_key_id` and `secret_access_key` at 128 bytes and `session_token` at 4,096:
+  1 + 12 + 1 + (16 + 130) + 1 + (20 + 130) + 1 + (16 + 4,098) + 1 + (16 + 20) + 1 = **4,464** bytes, under the 1 MiB `REPLY_LIMIT`.
+- `log_sink` in a start, with `endpoint` at 512 bytes, `region` 64, `bucket` 63 and `prefix` 577:
+  1 + 11 + 1 + (11 + 514) + 1 + (9 + 66) + 1 + (9 + 65) + 1 + (9 + 579) + 1 + (13 + 5) + 1 = **1,298** bytes.
+
+The heartbeat's 65,536-byte body is what these press on: 8 results with `logs` add 8 × 157 = 1,256 bytes, and a beat carries one
+`log_grant_state`; the agent's `results_budget` is to count both before it fits log tails (Planned, with the fields).
 
 ### Summary
 

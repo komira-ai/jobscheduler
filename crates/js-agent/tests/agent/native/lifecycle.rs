@@ -7,9 +7,12 @@ use std::fs;
 use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Placer, Registry, Settings};
-use js_agent::lifecycle::{Event, Lifecycle};
-use js_agent::native::{Enforcer, NativeChecks};
-use js_agent_wire::{Command, InputRef, JobSpec, NetworkLevel, Outcome, RunFile, RunSpec};
+use js_agent::lifecycle::{Config, Event, Lifecycle};
+use js_agent::native::{Enforcer, HandOver, NativeChecks};
+use js_agent_wire::{
+    BookedResources, Command, InputRef, JobSpec, JobStartSpec, NetworkLevel, Outcome, RunSpec,
+    refusal,
+};
 use js_mac_pool::seatbelt::{AbsPath, Net};
 use js_oci::{Allow, Digest};
 use js_types::{Arch, Os};
@@ -76,8 +79,31 @@ impl Native {
         adjust: impl FnOnce(&mut NativeConfig),
         gated: bool,
     ) -> Self {
+        Self::made(name, bundles, adjust, gated, |_| {}, None)
+    }
+
+    /// A lifecycle whose configuration `life` has changed (its files root is `files` in the
+    /// test's directory, the agent's), over a runtime that gives a run's files to its user
+    /// through `hand_over` when one is given and with `lchown` otherwise.
+    pub(super) fn with_files(
+        name: &str,
+        life: impl FnOnce(&mut Config),
+        hand_over: Option<HandOver>,
+    ) -> Self {
+        Self::made(name, None, |_: &mut NativeConfig| {}, true, life, hand_over)
+    }
+
+    fn made(
+        name: &str,
+        bundles: Option<(Arc<Placer>, Admission)>,
+        adjust: impl FnOnce(&mut NativeConfig),
+        gated: bool,
+        life: impl FnOnce(&mut Config),
+        hand_over: Option<HandOver>,
+    ) -> Self {
         let dir = Scratch::new(&format!("native-life-{name}"));
         let mut config = config_in(&dir, false);
+        life(&mut config);
         let fake = FakeHelper::start(&dir);
         let mut runtime_config = super::config(&fake);
         runtime_config.read_denies = vec![canonical(&dir, "state"), canonical(&dir, "scratch")];
@@ -87,6 +113,9 @@ impl Native {
             false => NativeRuntime::open_ungated(fake.client(), runtime_config, TERM),
         };
         let mut runtime = opened.unwrap();
+        if let Some(hand_over) = hand_over {
+            runtime = runtime.with_hand_over(hand_over);
+        }
         if let Some((store, admission)) = bundles {
             config.bundle = Some(admission);
             runtime = runtime.with_bundles(store);
@@ -128,7 +157,7 @@ impl Native {
         panic!("the lifecycle never got there: the fake helper never reported the end");
     }
 
-    fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
+    pub(super) fn scratch_of(&self, run_id: &str) -> std::path::PathBuf {
         fs::canonicalize(self.dir.path("scratch"))
             .unwrap()
             .join(run_id)
@@ -247,23 +276,93 @@ fn an_image_start_on_the_native_path_is_refused_with_a_typed_code() {
     }
 }
 
+/// A job start of `job_id`, named by its image, with the environment `env`.
+fn job_start(job_id: &str, env: &[(&str, &str)]) -> Command {
+    Command::JobStart(Box::new(job_start_spec(job_id, env)))
+}
+
+/// The body of [`job_start`].
+fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
+    JobStartSpec {
+        job_id: job_id.to_owned(),
+        allocation_id: format!("alloc-{job_id}"),
+        image: crate::lifecycle::job(job_id).image,
+        command: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
+        env: env
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        files: Vec::new(),
+        booked: BookedResources {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 30,
+            disk_bytes: None,
+            gpu_indices: Vec::new(),
+        },
+        wall_ms: 60_000,
+        network: Default::default(),
+        ports: Vec::new(),
+        log_sink: None,
+    }
+}
+
+/// Asserts that a job start with an environment on the native runtime is answered
+/// `failed_to_start` with `env-unsupported`, before the image is looked at, and makes
+/// nothing (the helper sees no user, no scratch directory, the booking intact); and that
+/// the same start without an environment is answered for its image instead
+/// (`image-unsupported-here`). It catches the native path running a job without the
+/// environment it names, and the environment refusal lost behind the image's.
+#[test]
+fn the_native_runtime_still_answers_env_unsupported() {
+    let mut h = Native::new("job-env");
+    let events = h.apply(vec![job_start("j1", &[("A", "1")]), job_start("j2", &[])]);
+    assert_eq!(
+        events,
+        [
+            format!("refused j1 {}", refusal::ENV_UNSUPPORTED),
+            format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE),
+        ]
+    );
+    assert_eq!(h.fake.verbs(), ["boot-reset"]);
+    assert!(!h.scratch_of("j1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    let details: Vec<(String, Option<String>)> = h
+        .life
+        .held_jobs()
+        .into_iter()
+        .map(|job| {
+            let result = job.result.expect("a result");
+            assert_eq!(result.outcome, Outcome::FailedToStart);
+            (job.job_id, result.detail)
+        })
+        .collect();
+    assert_eq!(
+        details,
+        [
+            ("j1".to_owned(), Some(refusal::ENV_UNSUPPORTED.to_owned())),
+            (
+                "j2".to_owned(),
+                Some(refusal::IMAGE_UNSUPPORTED_HERE.to_owned())
+            ),
+        ]
+    );
+}
+
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
-/// the server reads: a program outside the tool roots (`invalid-program`), inputs, a
-/// working directory and outputs it cannot stage (`native-unsupported`), and run files,
-/// which only a container is given (`files-need-container`). Nothing is made: the helper
+/// the server reads: a program outside the tool roots (`invalid-program`), and inputs and
+/// a working directory it cannot stage (`native-unsupported`). Nothing is made: the helper
 /// sees no user, the scratch directory is not made and the booking is intact. It catches a
-/// refused start that still costs a user, and a job whose inputs or files are dropped
-/// without a word.
+/// refused start that still costs a user, and a job whose inputs are dropped without a
+/// word. (Outputs and run files are served: `native/outputs.rs` and `native/files.rs`.)
 #[test]
 fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
     let input = InputRef::Mount {
         root_name: "data".to_owned(),
         rel: "x".to_owned(),
         dest: "in".to_owned(),
-    };
-    let outputs = js_agent_wire::OutputSpec {
-        path: "out".to_owned(),
-        kind: js_agent_wire::OutputKind::File,
     };
     let table: Vec<(&str, JobSpec)> = vec![
         ("invalid-program", job("r1", "/opt/tool/run")),
@@ -274,20 +373,7 @@ fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
         }),
         ("native-unsupported", {
             let mut spec = job("r1", "/bin/sh");
-            spec.native.as_mut().unwrap().outputs.push(outputs);
-            spec
-        }),
-        ("native-unsupported", {
-            let mut spec = job("r1", "/bin/sh");
             spec.native.as_mut().unwrap().cwd = "sub".to_owned();
-            spec
-        }),
-        ("files-need-container", {
-            let mut spec = job("r1", "/bin/sh");
-            spec.files = vec![RunFile {
-                name: "token".to_owned(),
-                contents: "secret".to_owned(),
-            }];
             spec
         }),
     ];
@@ -567,13 +653,12 @@ fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
 /// A start named by its image that this runtime cannot run is refused with the code that says
 /// why before its bundle is fetched, though the registry would serve it and the image is
 /// allowed: an image with no `run` (`image-unsupported-here`, a bundle has no command of its
-/// own), a `run` that stages inputs, collects outputs or names a working directory
-/// (`native-unsupported`), and a `run` with run files (`files-need-container`). The registry
-/// sees no request and no user is made. It catches an image start that begins a download for
+/// own), and a `run` that stages inputs or names a working directory (`native-unsupported`).
+/// The registry sees no request and no user is made. It catches an image start that begins a download for
 /// a job that can never run, and one answered with the wrong code.
 #[test]
 fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched() {
-    let table: [SpecCase; 5] = [
+    let table: [SpecCase; 3] = [
         ("image-unsupported-here", |spec| spec.run = None),
         ("native-unsupported", |spec| {
             spec.run.as_mut().unwrap().cwd = "sub".to_owned();
@@ -585,22 +670,6 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
                 dest: "in".to_owned(),
             });
         }),
-        ("native-unsupported", |spec| {
-            spec.run
-                .as_mut()
-                .unwrap()
-                .outputs
-                .push(js_agent_wire::OutputSpec {
-                    path: "out".to_owned(),
-                    kind: js_agent_wire::OutputKind::File,
-                });
-        }),
-        ("files-need-container", |spec| {
-            spec.files = vec![RunFile {
-                name: "token".to_owned(),
-                contents: "secret".to_owned(),
-            }];
-        }),
     ];
     for (n, (code, shape)) in table.into_iter().enumerate() {
         let mut s = imaged(&format!("cannot{n}"));
@@ -610,6 +679,25 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
         assert!(s.served.fx.requests().is_empty(), "{code}");
         s.made_no_user();
     }
+}
+
+/// Asserts that a job start with a `run` and an environment, on a Mac runtime that runs
+/// image starts (it holds a bundle store), is still refused `env-unsupported` before its
+/// bundle is fetched or a user is made: the native runtime does not carry a job start's
+/// environment, and the job must not run without it. It catches the job's environment
+/// dropped on the one path where a job start reaches the native runtime.
+#[test]
+fn an_image_job_start_with_env_is_refused_env_unsupported_before_its_bundle_is_fetched() {
+    let mut s = imaged("job-env");
+    let mut spec = job_start_spec("j1", &[("A", "1")]);
+    spec.image = s.image();
+    spec.run = Some(RunSpec::from(native("@bundle/tool", &[])));
+    spec.os = Some(Os::Macos);
+    spec.arch = Some(Arch::Arm64);
+    let events = s.h.apply(vec![Command::JobStart(Box::new(spec))]);
+    assert_eq!(events, [format!("refused j1 {}", refusal::ENV_UNSUPPORTED)]);
+    assert!(s.served.fx.requests().is_empty());
+    s.made_no_user();
 }
 
 /// An image run that asks for the network is held to the packet-filter check as a native

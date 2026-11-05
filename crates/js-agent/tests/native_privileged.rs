@@ -199,6 +199,7 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
             outputs: Vec::new(),
             network: NetworkLevel::Off,
         }),
+        env: Vec::new(),
         cpu_millis: 1000,
         memory_bytes: 1 << 30,
         pids: None,

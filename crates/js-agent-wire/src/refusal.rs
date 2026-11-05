@@ -49,9 +49,11 @@ pub const INVALID_PROGRAM: &str = "invalid-program";
 /// A native job, or a job start, whose environment has a bad name or value, too many
 /// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
-/// A job start with a non-empty `env`, answered `failed_to_start` by an agent whose
-/// runtimes cannot yet set a container's environment; nothing runs. Temporary: the change
-/// that passes the environment into the runtimes (`js-agent-job-env-runtimes`) removes it.
+/// As the detail of a `failed_to_start` result: a job start with a non-empty `env` on an
+/// agent whose runtime does not carry a job start's environment, today the macOS native
+/// runtime; nothing runs. Before the container runtimes set a job's environment, every
+/// agent answered it so. No container agent of this release or later sends it. Kept, as
+/// every code is: a deployed peer may still match on it.
 pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
@@ -148,6 +150,15 @@ pub const HOST_LISTED: &str = "host-listed";
 pub const RATE_LIMITED: &str = "rate-limited";
 /// A request body over the transport's cap, refused before it is read in full.
 pub const BODY_TOO_LARGE: &str = "body-too-large";
+/// A job start's `log_sink` that fails [`crate::JobStartSpec::log_sink_checked`]: an
+/// endpoint, region, bucket or prefix out of its form, or a prefix that is not the job's
+/// own. The refusal's `field` names the part. It never refuses the start: the server sends
+/// no sink instead, and an agent starts the job without live logs.
+pub const INVALID_LOG_SINK: &str = "invalid-log-sink";
+/// A reply's `log_grant` with an empty, over-long or malformed field, or an expiry of zero
+/// ([`crate::ReplyCheck::log_grant`]). The refusal's `field` names it. The agent ignores
+/// the credential and acts on the rest of the reply.
+pub const INVALID_LOG_CREDENTIAL: &str = "invalid-log-credential";
 
 /// A whole-node lease request that failed after the host could not be prepared within the
 /// allowed number of replacements; its detail names the last reason code and detail the

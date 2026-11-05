@@ -86,7 +86,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// How long a queued job whose last capable path went away stays queued before it ends as
 /// `no-capable-host`, unless the pool says.
-const PATH_GRACE: Duration = Duration::from_secs(15);
+pub(super) const PATH_GRACE: Duration = Duration::from_secs(15);
 
 /// A machine provider: one `[[machine_provider]]` table, or one the loader made for a pool
 /// that names its provider directly.
@@ -126,8 +126,8 @@ pub struct ResolvedPlatform {
     pub machine_providers: Vec<String>,
 }
 
-/// The settings of a pool about how long a job may wait. Read and checked at start;
-/// nothing enforces them yet.
+/// The settings of a pool about how long a job may wait. Read and checked at start; only
+/// `path_grace` is enforced yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PoolSettings {
@@ -138,8 +138,8 @@ pub struct PoolSettings {
     /// (default 15m). Not enforced yet: the job lifecycle ticks of design 6.1 will.
     pub start_timeout: Duration,
     /// How long a queued job whose last capable path went away stays queued before it ends
-    /// as `no-capable-host` (default 15s). Not enforced yet: whole-host jobs in the engine
-    /// and admission (design 5.6) will.
+    /// as `no-capable-host` (default 15s): the registry's `regain_grace` for the pool's
+    /// whole-node requests, which are the requests that wait.
     pub path_grace: Duration,
 }
 

@@ -175,9 +175,15 @@ pub struct Cli {
     /// agent refuses to start when it is not. A reboot clears it, which is fine: a run does
     /// not survive a reboot. A tmpfs can be swapped to disk when the host has swap, so run hosts
     /// that handle these secrets with swap off or encrypted. It may not be, hold or lie in
-    /// the state, scratch or a mount root. Needs `--container-bin`. Without the flag `/run/js-agent/files` is used when it can be
+    /// the state, scratch or a mount root. Needs `--container-bin` or
+    /// `--native-helper-socket`. Without the flag `/run/js-agent/files` is used when it can be
     /// made; when it cannot, the agent runs without run files and does not report the
-    /// `run-files` capability.
+    /// `run-files` capability. With `--native-helper-socket` (a Mac, which has no tmpfs) the
+    /// root is used only when this flag is given and is not checked for a tmpfs: the files are
+    /// on disk unless the flag points at a RAM-backed volume. Each run's directory is given to
+    /// the run's user (`0500`, files `0400`) before its program starts and is named by
+    /// `JS_FILES_DIR`; the root may not be, hold or lie in the homes of the native users or a
+    /// path native runs may not read.
     #[arg(long, value_name = "PATH")]
     pub run_files_root: Option<PathBuf>,
     /// The directory the agent keeps its taint marker and its host credential in: it must be
@@ -544,6 +550,15 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+    /// How many seconds the agent goes on running its jobs when it hears nothing from the
+    /// server (no welcome and no accepted heartbeat reply): then it stops every job it
+    /// holds, as a stop from the server would (the stop grace, then the kill), and reports
+    /// each `killed` with the detail `silence-stop`. By default 300; from 1 to 7200; it must
+    /// be above the stop grace plus the server's default grace of 15 seconds, and a welcome
+    /// whose grace plus the stop grace is not below it ends the agent. There is no value
+    /// that turns the stop off. Needs `--container-bin` or `--native-helper-socket`.
+    #[arg(long, value_name = "SECONDS")]
+    pub silence_stop: Option<u64>,
 
     /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
     /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
