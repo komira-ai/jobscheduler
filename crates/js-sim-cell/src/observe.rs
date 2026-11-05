@@ -8,7 +8,10 @@
 //!   server acknowledged ([`AgentTruth`]), its ground truth, not what it reported;
 //! - the cell's launch ledger ([`Launch`]): one entry per run an agent process
 //!   launched. The ledger is the cell's, not the agent's, so an agent that dies and is
-//!   replaced cannot reset it;
+//!   replaced cannot reset it. Beside the launches it keeps what the agents sent and were
+//!   sent for the whole-host handshake: each ready report sent ([`ReadyReport`]), each
+//!   start delivered ([`StartSeen`]) and each stop or cancel that reached a running run
+//!   ([`StopSeen`]);
 //! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
 //!   fills it from the registry's host views, never through the JSON route.
 //!
@@ -16,12 +19,14 @@
 //! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`],
 //! [`ServerHost::lost`] and [`ServerHost::set_aside`].
 //!
-//! [`Observations`] gathers them, with whether a fault is active. Its builder
-//! ([`Observations::quiet`], [`Observations::with_agent`], [`Observations::with_event`]
-//! and the rest) is public test support: the negative tests of every invariant family
+//! [`Observations`] gathers them, with whether a fault is active and the items the client
+//! asked to cancel ([`Observations::cancels`]). Its builder
+//! ([`Observations::quiet`], [`Observations::with_agent`], [`Observations::with_event`],
+//! [`Observations::with_ready`] and the rest) is public test support: the negative tests of every invariant family
 //! build their histories with it.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
@@ -225,6 +230,76 @@ pub struct Launch {
     pub at: FarmTime,
 }
 
+/// A heartbeat in which an agent process reported its host ready for an exclusive
+/// (whole-host) lease: what the agent sent, whether or not the server heard it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyReport {
+    /// The host whose agent sent it.
+    pub host: HostId,
+    /// The lease the report named, as the agent wrote it (the server writes a lease id
+    /// `<term>-<sequence>`).
+    pub lease: String,
+    /// When the heartbeat was sent.
+    pub at: FarmTime,
+}
+
+/// A start an agent process was sent, whether or not it launched the run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartSeen {
+    /// The host whose agent it reached.
+    pub host: HostId,
+    /// The run it starts.
+    pub run: RunId,
+    /// The lease the run belongs to.
+    pub lease: LeaseId,
+    /// When it reached the agent.
+    pub at: FarmTime,
+    /// When the agent sent the heartbeat the start names, the one the server had taken
+    /// when it queued the run (the hello that opened the session for a number the agent
+    /// never sent): no later than the server's time when it queued the run.
+    pub asked_at: FarmTime,
+    /// The run's wall limit, as the start sets it.
+    pub wall: Duration,
+}
+
+/// How the server told an agent to end a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StopCommand {
+    /// The wire's `stop`.
+    Stop,
+    /// The wire's `cancel`.
+    Cancel,
+}
+
+impl StopCommand {
+    /// A stable kebab-case name, as a violation writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            StopCommand::Stop => "stop",
+            StopCommand::Cancel => "cancel",
+        }
+    }
+}
+
+/// A stop or a cancel that reached a run the agent process was running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopSeen {
+    /// The host whose agent it reached.
+    pub host: HostId,
+    /// The run it ended.
+    pub run: RunId,
+    /// The lease the run belongs to.
+    pub lease: LeaseId,
+    /// When it reached the agent.
+    pub at: FarmTime,
+    /// Which command it was.
+    pub command: StopCommand,
+    /// When the run's own wall limit ran out: its launch plus the wall limit of its
+    /// start.
+    pub wall_ends_at: FarmTime,
+}
+
 /// One host as the server lists it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerHost {
@@ -236,6 +311,13 @@ pub struct ServerHost {
     /// Whether the host is set aside (reserved, held whole, draining or releasing). No
     /// check reads it yet.
     pub set_aside: bool,
+    /// The whole-host request a reservation sets the host aside for, while the server
+    /// holds one for it (the listing's `reserved_for`).
+    pub reserved_for: Option<String>,
+    /// The end of the host's tail when the reservation was made, on the cell's virtual
+    /// clock; `None` without a reservation, or for one whose tail the server does not
+    /// know.
+    pub tail_end: Option<FarmTime>,
 }
 
 /// The server's own list of hosts, as the cell last read it from the registry.
@@ -266,6 +348,15 @@ pub struct Observations {
     pub ledger: Vec<Launch>,
     /// The server's list of hosts.
     pub server: ServerView,
+    /// Every ready report an agent process sent, oldest first; only ever appended.
+    pub ready: Vec<ReadyReport>,
+    /// Every start that reached an agent process, oldest first; only ever appended.
+    pub starts: Vec<StartSeen>,
+    /// Every stop or cancel that reached a running run, oldest first; only ever
+    /// appended.
+    pub stops: Vec<StopSeen>,
+    /// The items the client asked to cancel, with when it first asked.
+    pub cancels: BTreeMap<ItemId, FarmTime>,
 }
 
 impl Observations {
@@ -327,6 +418,53 @@ impl Observations {
     #[must_use]
     pub fn with_launch(mut self, run: RunId, host: HostId, at: FarmTime) -> Self {
         self.ledger.push(Launch { run, host, at });
+        self
+    }
+
+    /// These observations with the agent of `host` having sent a ready report for
+    /// `lease` at `at`, after the reports before.
+    #[must_use]
+    pub fn with_ready(mut self, host: HostId, lease: &str, at: FarmTime) -> Self {
+        let lease = lease.to_owned();
+        self.ready.push(ReadyReport { host, lease, at });
+        self
+    }
+
+    /// These observations with `start` delivered, after the starts before.
+    #[must_use]
+    pub fn with_start(mut self, start: StartSeen) -> Self {
+        self.starts.push(start);
+        self
+    }
+
+    /// These observations with `stop` delivered to a running run, after the stops before.
+    #[must_use]
+    pub fn with_stop(mut self, stop: StopSeen) -> Self {
+        self.stops.push(stop);
+        self
+    }
+
+    /// These observations with the client having asked to cancel `item` at `at`, unless
+    /// it asked earlier.
+    #[must_use]
+    pub fn with_cancel(mut self, item: ItemId, at: FarmTime) -> Self {
+        self.cancels.entry(item).or_insert(at);
+        self
+    }
+
+    /// These observations with the server listing `host` as set aside for the whole-host
+    /// request `request`, its tail ending at `tail_end`.
+    #[must_use]
+    pub fn with_reservation(
+        mut self,
+        host: HostId,
+        request: &str,
+        tail_end: Option<FarmTime>,
+    ) -> Self {
+        let listed = self.server.hosts.entry(host).or_default();
+        listed.set_aside = true;
+        listed.reserved_for = Some(request.to_owned());
+        listed.tail_end = tail_end;
         self
     }
 

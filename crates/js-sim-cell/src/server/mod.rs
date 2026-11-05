@@ -31,6 +31,7 @@ use js_lease_server::{SharedClock, StartupError};
 use js_registry::{HostState, HostView, Registry};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
+use js_types::HostId;
 use js_types::sched::{Effect, FarmTime, StateMachine};
 use tokio::runtime::Runtime;
 use tower::ServiceExt;
@@ -40,7 +41,9 @@ use crate::observe::{ServerHost, ServerView};
 
 mod spec;
 
-pub use spec::{CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape};
+pub use spec::{
+    ARCH, ARCH_KEY, CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS,
+};
 
 /// The wall time, in milliseconds since the Unix epoch, that virtual time zero stands
 /// for: 2027-01-01 00:00 UTC. Every clock of the cell counts from it.
@@ -50,6 +53,13 @@ pub const EPOCH_MS: u64 = 1_798_761_600_000;
 #[must_use]
 pub fn wall_time(at: FarmTime) -> Timestamp {
     Timestamp::from_millis(EPOCH_MS.saturating_add(at.as_millis()))
+}
+
+/// The virtual time wall time `millis` (on the server's clock) stands for; a wall time
+/// before [`EPOCH_MS`] reads as virtual time zero.
+#[must_use]
+pub fn virtual_time(millis: u64) -> FarmTime {
+    FarmTime::from_millis(millis.saturating_sub(EPOCH_MS))
 }
 
 /// A kind of call the server answered: who called, on which route, and the status.
@@ -132,14 +142,24 @@ impl ServerNode {
             .unwrap_or_default()
     }
 
-    /// The registry's listing as the cell observes it.
+    /// The registry's listing as the cell observes it, with the request each reserved
+    /// host is set aside for and the end of its tail ([`Registry::reservations`]).
     #[must_use]
     pub fn view(&self) -> ServerView {
+        let reservations = self.registry().map(|r| r.reservations());
+        let tails: BTreeMap<HostId, Option<u64>> = reservations
+            .unwrap_or_default()
+            .into_iter()
+            .map(|reservation| (reservation.host, reservation.tail_end))
+            .collect();
         let hosts = self.hosts().into_iter().map(|host| {
+            let tail_end = tails.get(&host.id).copied().flatten();
             let listed = ServerHost {
                 lost: host.state == HostState::Lost,
                 leases: host.leases,
                 set_aside: host.mark.is_some(),
+                reserved_for: host.reserved_for.map(|request| request.to_string()),
+                tail_end: tail_end.map(virtual_time),
             };
             (host.id, listed)
         });

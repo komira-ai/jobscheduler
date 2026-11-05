@@ -12,8 +12,8 @@
 //! then. The client is polled at most once per virtual millisecond. After every step,
 //! every poll and every action that changed something it builds what changed into the
 //! [`Observations`] (the agent the step fed, the events the client heard, the ledger
-//! entries appended, the server's listing once per virtual second and at every client
-//! call or poll) and calls [`Checker::step`]. It stops at the end time or at the first
+//! entries appended, the whole-host facts the agents wrote, the server's listing once per
+//! virtual second and at every client call or poll) and calls [`Checker::step`]. It stops at the end time or at the first
 //! [`Violation`], which every later call returns again.
 //!
 //! [`Cell::settle`] ends a scenario: it runs every scripted action, the ones actions
@@ -45,7 +45,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentNode, AgentSpec};
+use crate::agent::{AgentNode, AgentSpec, Prepare};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::Counters;
 use crate::front::{ClientPort, Front, LeaseFront};
@@ -387,9 +387,11 @@ impl Cell {
         item
     }
 
-    /// Asks the client to cancel `item`, now.
+    /// Asks the client to cancel `item`, now; the observations keep when the client
+    /// first asked ([`Observations::cancels`]).
     pub fn cancel_item(&mut self, item: ItemId) {
         let now = self.sim.now();
+        self.observations.cancels.entry(item).or_insert(now);
         self.client.front.cancel(item, now);
         self.record(format!("client {} cancel", text::item(item)));
     }
@@ -431,6 +433,14 @@ impl Cell {
             self.faulted.killed.insert(host.clone());
             self.fault_changed();
             self.check(Touched::nothing().agent(host));
+        }
+    }
+
+    /// Makes agent `index` answer a prepare as `prepare` says, from its next heartbeat on
+    /// ([`AgentNode::set_prepare`]).
+    pub fn set_prepare(&mut self, index: usize, prepare: Prepare) {
+        if let Some(agent) = self.agent_mut(index) {
+            agent.set_prepare(prepare);
         }
     }
 
@@ -680,6 +690,12 @@ impl Cell {
             self.record(format!("launch {}", launch.host));
         }
         self.observations.ledger.extend(launches);
+        let seen = &self.observations;
+        let counts = [seen.ready.len(), seen.starts.len(), seen.stops.len()];
+        let (ready, starts, stops) = self.ledger.whole_after(counts);
+        self.observations.ready.extend(ready);
+        self.observations.starts.extend(starts);
+        self.observations.stops.extend(stops);
         self.checks += 1;
         let found = self
             .checker

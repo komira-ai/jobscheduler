@@ -5,18 +5,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{
-    Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, JobSpec, Outcome, Phase,
+    Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, JobSpec, Outcome,
     ProtocolRange, RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
 };
 use js_conformance::agent::{AgentHarness, FakeAgent};
 use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
 
+use super::exclusive::Exclusive;
 use super::{AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
 use crate::counters::Counter;
 use crate::ledger::Completion;
-use crate::observe::{AgentTruth, Launch, RunId, Running, Verdict};
+use crate::observe::{
+    AgentTruth, Launch, ReadyReport, RunId, Running, StartSeen, StopCommand, StopSeen, Verdict,
+};
 
 /// The agent version every hello names.
 const AGENT_VERSION: &str = "0.0.0-sim";
@@ -59,6 +62,10 @@ struct RunInfo {
     lease_text: String,
     lease: LeaseId,
     resources: Resources,
+    /// The run's wall limit, as its start set it.
+    wall: Duration,
+    /// When that limit runs out: set at the launch.
+    wall_ends_at: FarmTime,
 }
 
 impl RunInfo {
@@ -78,6 +85,8 @@ impl RunInfo {
                 lease_text: job.lease_id.clone(),
                 lease,
                 resources,
+                wall: Duration::from_millis(job.limits.wall_ms),
+                wall_ends_at: FarmTime::default(),
             })
     }
 }
@@ -136,6 +145,8 @@ pub(super) struct Process {
     acknowledged: BTreeMap<RunId, Verdict>,
     /// Whether the agent was told its connection dropped and not yet that it is back.
     disconnected: bool,
+    /// Where the process is in the exclusive handshake.
+    exclusive: Exclusive,
 }
 
 impl Process {
@@ -155,6 +166,7 @@ impl Process {
             completed: BTreeMap::new(),
             acknowledged: BTreeMap::new(),
             disconnected: false,
+            exclusive: Exclusive::default(),
         }
     }
 
@@ -226,7 +238,7 @@ impl Process {
             capabilities: spec.capabilities.clone(),
             gpu_devices: Vec::new(),
             labels: spec.labels.clone(),
-            phase: Phase::Serving,
+            phase: self.exclusive.phase(),
             held: self.held(),
             accepts_host_credential: false,
         };
@@ -250,16 +262,25 @@ impl Process {
     fn beat(&mut self, session: &mut Session, spec: &AgentSpec, io: &mut Io) {
         session.seq += 1;
         self.beats_sent.insert(session.seq, io.now);
+        let quiet = self.held().is_empty();
+        let (ready, refused) = self.exclusive.report(io.prepare, quiet, io.now);
+        if let Some(lease) = &ready {
+            io.ledger.reported_ready(ReadyReport {
+                host: io.host.clone(),
+                lease: lease.clone(),
+                at: io.now,
+            });
+        }
         let beat = Heartbeat {
             host_id: spec.host.as_str().to_owned(),
             epoch: session.epoch,
             session: session.secret.clone(),
-            phase: Phase::Serving,
+            phase: self.exclusive.phase(),
             held: self.held(),
             results: self.results(io),
             taint: None,
-            exclusive_ready: None,
-            exclusive_refused: None,
+            exclusive_ready: ready,
+            exclusive_refused: refused,
             load: None,
             disk_gib: None,
             jobs: Vec::new(),
@@ -384,10 +405,13 @@ impl Process {
             return io.bump(Counter::ReplyInvalid);
         };
         let check = reply.validate();
-        if !check.refused.is_empty() || check.acks.is_err() {
+        if !check.refused.is_empty() || check.acks.is_err() || check.exclusive.is_err() {
             io.bump(Counter::ReplyInvalid);
         }
         self.agent.contact();
+        if check.exclusive.is_ok() {
+            self.exclusive.told(reply.exclusive.as_deref(), io.now);
+        }
         for command in &check.commands {
             self.command(command, capacity, io);
         }
@@ -401,7 +425,8 @@ impl Process {
     fn command(&mut self, command: &Command, capacity: &Resources, io: &mut Io) {
         match command {
             Command::Start(job) => self.start(job, capacity, io),
-            Command::Stop { run_id } | Command::Cancel { run_id } => self.stop(run_id),
+            Command::Stop { run_id } => self.stop(run_id, StopCommand::Stop, io),
+            Command::Cancel { run_id } => self.stop(run_id, StopCommand::Cancel, io),
             _ => {}
         }
     }
@@ -411,18 +436,29 @@ impl Process {
             return io.bump(Counter::ReplyInvalid);
         };
         let run = job.run_id.as_str();
-        let before = self.agent.observed();
-        if self.stopped.contains(run) {
-            io.bump(Counter::StartAfterStop);
-        } else if before.launches.contains_key(run) {
-            io.bump(Counter::StartRepeated);
-        }
         let since = self
             .beats_sent
             .get(&job.heartbeat_seq)
             .or_else(|| self.beats_sent.get(&0))
             .copied()
             .unwrap_or(io.now);
+        io.ledger.start_seen(StartSeen {
+            host: io.host.clone(),
+            run: RunId::new(run),
+            lease: info.lease,
+            at: io.now,
+            asked_at: since,
+            wall: info.wall,
+        });
+        if !self.exclusive.takes_starts() {
+            return;
+        }
+        let before = self.agent.observed();
+        if self.stopped.contains(run) {
+            io.bump(Counter::StartAfterStop);
+        } else if before.launches.contains_key(run) {
+            io.bump(Counter::StartRepeated);
+        }
         let waited = io.now.as_millis().saturating_sub(since.as_millis());
         self.agent.start(run, job.valid_for_ms, waited);
         let after = self.agent.observed();
@@ -434,7 +470,8 @@ impl Process {
         }
     }
 
-    fn launched(&mut self, job: &JobSpec, info: RunInfo, io: &mut Io) {
+    fn launched(&mut self, job: &JobSpec, mut info: RunInfo, io: &mut Io) {
+        info.wall_ends_at = io.now.saturating_add(info.wall);
         let run = RunId::new(job.run_id.clone());
         io.ledger.launched(Launch {
             run,
@@ -448,7 +485,19 @@ impl Process {
         self.runs.insert(job.run_id.clone(), info);
     }
 
-    fn stop(&mut self, run: &str) {
+    /// A stop or cancel of `run` arrived: the ledger notes it when the run is running.
+    fn stop(&mut self, run: &str, command: StopCommand, io: &mut Io) {
+        let running = self.agent.observed().running.contains(run);
+        if let Some(info) = self.runs.get(run).filter(|_| running) {
+            io.ledger.stop_seen(StopSeen {
+                host: io.host.clone(),
+                run: RunId::new(run),
+                lease: info.lease,
+                at: io.now,
+                command,
+                wall_ends_at: info.wall_ends_at,
+            });
+        }
         self.stopped.insert(run.to_owned());
         self.agent.cancel(run);
     }

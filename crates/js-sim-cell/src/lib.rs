@@ -10,18 +10,29 @@
 //!   any agent process, and the server's list of hosts ([`ServerView`]), gathered at one
 //!   virtual time into [`Observations`].
 //! - [`invariant`]: the oracle. The five properties of "exactly once, nothing
-//!   double-booked" ([`Invariant`]), the [`Checker`] that tests them after each step and
-//!   once at the end, and the one-line [`Violation`] it reports.
+//!   double-booked" ([`Invariant`]), the four of a whole host
+//!   ([`Invariant::WholeHostIsExclusive`]: no host is held by two whole-host leases or
+//!   booked beside one; [`Invariant::HeldMeansReady`]: a whole-host lease is granted only
+//!   after its host's agent reported ready for exactly that lease;
+//!   [`Invariant::DrainKillsNothing`]: a host drained for a reservation has no run
+//!   stopped that its client did not ask to stop;
+//!   [`Invariant::MarkedHostsServeNoOrdinaryStart`]: a host set aside for a whole-host
+//!   request is sent no ordinary start but backfill inside its tail), the [`Checker`]
+//!   that tests them after each step and once at the end, and the one-line [`Violation`]
+//!   it reports.
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), the conformance suite's in-process agent
 //!   behind the real wire, which writes what it launches and completes into the cell's
-//!   [`Ledger`] and counts what happened to it ([`Counters`]).
+//!   [`Ledger`] and counts what happened to it ([`Counters`]), and its side of the
+//!   whole-host handshake, which prepares, reports ready, refuses or stays silent as its
+//!   [`Prepare`] switch says.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock.
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
-//!   asks for, and when the client gives up on it.
+//!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
+//!   it.
 //! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
 //!   server and reports what it hears as [`ClientEvent`]s; [`LeaseFront`] does it as `js
 //!   run` does today. The client is not a bus node: the run loop polls it at exact virtual
@@ -69,19 +80,19 @@ mod text;
 pub mod work;
 
 pub use actions::Action;
-pub use agent::{AgentNode, AgentSpec, SIM_RUN_IMAGE};
+pub use agent::{AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
-pub use front::{ClientPort, Front, FrontFactory, LeaseFront};
+pub use front::{ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use ledger::{Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations, RunId,
-    Running, ServerHost, ServerView, Verdict,
+    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations,
+    ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand, StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
-pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape};
+pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
 pub use work::Work;

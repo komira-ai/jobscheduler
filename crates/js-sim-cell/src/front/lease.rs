@@ -55,6 +55,24 @@
 //! and waits for the run to end. The give-up time is checked at the start of each poll of
 //! an item that has no terminal answer. Every lease the item learned is released whatever
 //! its terminal, a pending one too.
+//!
+//! # Whole-host items
+//!
+//! An item of [`Work::whole_host`] takes a second path through the same stages. Its
+//! acquire asks for the class [`WHOLE_CLASS`] under a request id of its own,
+//! `sim-item-<n>` ([`REQUEST_PREFIX`] and the item's number), so the server queues it
+//! while no host is free and presents it again on its own at every tick: the client only
+//! reads the lease list until the lease is held. A whole-node lease is always answered
+//! 202 and listed `pending` until the host's agent reported ready for it; a held lease is
+//! given its run and then read and released as above, and the `Placed { host }` its
+//! queued run reports is the grant. A lease the list no longer shows (its prepare failed)
+//! is acquired again under the same request id, which is the request's next try. The
+//! acquire's answers differ from the table above in one row:
+//!
+//! | call | answer | event, and what follows |
+//! |---|---|---|
+//! | `POST /v1/leases` (whole host) | 409 `no-capacity` (the wait list is full), `lease-ended` (the last try's lease is still being released) or `no-capable-host` (no host of the pool can serve it as the pool stands: none has said hello yet, or every one is tainted) | none; acquired again at the next poll |
+//! | | any other 409 (`exclusive-not-ready` after the last failed prepare, `no-fit`, ...) | `Terminal(Failed)` |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -70,12 +88,15 @@ use super::{ClientPort, Front, FrontFactory};
 use crate::SIM_RUN_IMAGE;
 use crate::agent::lease_id;
 use crate::observe::{ClientEvent, HowEnded, ItemId, RunId};
-use crate::server::{CLIENT_TOKEN, POOL_CLASS, ServerSpec};
+use crate::server::{CLIENT_TOKEN, POOL_CLASS, ServerSpec, WHOLE_CLASS};
 use crate::work::Work;
 
 /// How often the front polls while any item holds or waits for a lease: the server's
 /// tick, at which it settles pending leases, as `js` polls a pending lease.
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
+
+/// What the request id of a whole-host item starts with; the item's number follows.
+pub const REQUEST_PREFIX: &str = "sim-item-";
 
 /// Where an item is.
 enum Stage {
@@ -96,6 +117,8 @@ enum Stage {
 /// One item the front holds.
 struct Item {
     work: Work,
+    /// The request id of a whole-host item; `None` for any other.
+    request: Option<String>,
     gives_up_at: FarmTime,
     stage: Stage,
     /// The client asked to cancel the item.
@@ -144,6 +167,17 @@ impl Poll<'_> {
 /// `value` as text, empty when it is not a string.
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
+}
+
+/// Whether a 409 to a whole-host acquire says to acquire again later: the wait list is
+/// full, the request's last lease is still being released, or no host of the pool can
+/// serve it as the pool stands (none has said hello yet, or every one is tainted).
+fn waits(answer: &Value) -> bool {
+    let code = answer["error"].as_str();
+    matches!(
+        code,
+        Some("no-capacity" | "lease-ended" | "no-capable-host")
+    )
 }
 
 /// How a run that ended with `outcome` ended, as the client hears it.
@@ -216,7 +250,7 @@ impl Item {
     fn acquire(&mut self, poll: &mut Poll<'_>) {
         let resources = self.work.resources();
         let wall = self.work.gives_up_after().as_secs().max(1);
-        let body = json!({
+        let mut body = json!({
             "class": poll.class,
             "resources": {
                 "cpu_millis": resources.cpu_millis(),
@@ -229,6 +263,10 @@ impl Item {
             "ttl_seconds": wall,
             "labels": { "team": "infra" },
         });
+        if let Some(request) = &self.request {
+            body["class"] = json!(WHOLE_CLASS);
+            body["request_id"] = json!(request);
+        }
         let key = body.to_string();
         if poll.full.contains(&key) {
             return;
@@ -241,9 +279,10 @@ impl Item {
                 self.stage = Stage::Held { lease, host };
             }
             202 => self.stage = Stage::Pending(lease),
-            409 => {
+            409 if self.request.is_none() => {
                 poll.full.insert(key);
             }
+            409 if waits(&answer) => {}
             _ => self.end(HowEnded::Failed, poll),
         }
     }
@@ -396,8 +435,10 @@ impl LeaseFront {
 
 impl Front for LeaseFront {
     fn submit(&mut self, item: ItemId, work: &Work, now: FarmTime) {
+        let request = work.wants_whole_host();
         let held = Item {
             work: work.clone(),
+            request: request.then(|| format!("{REQUEST_PREFIX}{}", item.0)),
             gives_up_at: work.ask(now).gives_up_at,
             stage: Stage::Asking,
             cancel: false,

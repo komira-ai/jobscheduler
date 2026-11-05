@@ -76,6 +76,15 @@
 //! while it has no process). The cell's [`Ledger`] and the node's [`Counters`] are kept
 //! outside the process, so neither is reset by a replacement.
 //!
+//! # The whole-host handshake
+//!
+//! The process answers a reply that names an `exclusive` lease as `exclusive.rs` says:
+//! it prepares, reports ready, refuses or stays silent as the node's [`Prepare`] switch
+//! says ([`AgentNode::set_prepare`]), and restores once the lease ends. The switch is the
+//! node's, so a replacement process keeps it. The cell's [`Ledger`] records every ready
+//! report the process sends, every start that reaches it (launched or not) and every
+//! stop or cancel that reaches a run it is running.
+//!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
 
@@ -98,8 +107,10 @@ use js_agent_wire::RETRY_AFTER_CAP;
 #[cfg(doc)]
 use js_conformance::agent::{AgentHarness, FakeAgent};
 
+mod exclusive;
 mod process;
 
+pub use exclusive::Prepare;
 pub(crate) use process::lease_id;
 use process::{Answer, Process};
 
@@ -156,6 +167,7 @@ impl AgentNode {
             tick: None,
             counters: Counters::default(),
             ledger,
+            prepare: Prepare::default(),
         };
         Self {
             process: Some(Process::new(&spec)),
@@ -200,6 +212,18 @@ impl AgentNode {
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.io.counters
+    }
+
+    /// Makes the agent answer a prepare as `prepare` says, from its next heartbeat on,
+    /// in this process and any that replaces it.
+    pub fn set_prepare(&mut self, prepare: Prepare) {
+        self.io.prepare = prepare;
+    }
+
+    /// How the agent answers a prepare.
+    #[must_use]
+    pub fn prepare(&self) -> Prepare {
+        self.io.prepare
     }
 
     /// The node's tick: the process says hello or sends a heartbeat, and the next tick is
@@ -271,8 +295,8 @@ impl Node for AgentNode {
 }
 
 /// What a process uses of its node and leaves behind when it dies: the clock of the input
-/// being applied, the outputs, the numbering of calls and timers, the counters and the
-/// ledger.
+/// being applied, the outputs, the numbering of calls and timers, the counters, the
+/// ledger and the prepare switch.
 struct Io {
     now: FarmTime,
     host: HostId,
@@ -284,6 +308,7 @@ struct Io {
     tick: Option<u64>,
     counters: Counters,
     ledger: Ledger,
+    prepare: Prepare,
 }
 
 impl Io {
