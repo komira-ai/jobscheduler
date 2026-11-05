@@ -8,7 +8,7 @@ use js_state::conformance::Backend;
 use js_state::{Store, StoreError};
 
 use super::{full_spec, host, job_id, rig};
-use crate::codec::FORMAT;
+use crate::codec::{DecodeError, FORMAT};
 use crate::interfere::INJECTED;
 use crate::{AllocationRecord, AllocationStep, EndReason, JobStoreError, NewJob, keys};
 
@@ -59,8 +59,13 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
         "{name}: a failed read is not an error"
     );
     rig.put_raw("job/q-bad", vec![FORMAT, 0]);
-    assert!(
-        matches!(rig.jobs.queued(), Err(JobStoreError::Corrupt { key, .. }) if key == "job/q-bad"),
+    let corrupt = JobStoreError::Corrupt {
+        key: "job/q-bad".to_owned(),
+        why: DecodeError::Truncated,
+    };
+    assert_eq!(
+        rig.jobs.queued().err(),
+        Some(corrupt),
         "{name}: a row that does not parse is not an error"
     );
 }
@@ -134,10 +139,8 @@ pub fn a_free_with_rows_beside_it_is_one_commit<B: Backend>(backend: &B) {
     let id = rig.placed("w-free");
     rig.store.fail_next();
     assert_eq!(
-        rig.jobs
-            .free_with(&id, EndReason::Exited, &beside)
-            .map(|allocation| allocation.step),
-        Err(injected()),
+        rig.jobs.free_with(&id, EndReason::Exited, &beside).err(),
+        Some(injected()),
         "{name}: a failed commit is not an error"
     );
     assert_eq!(
