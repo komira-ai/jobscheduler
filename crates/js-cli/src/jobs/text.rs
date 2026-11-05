@@ -8,7 +8,7 @@
 //! `truncated: true` line when a stream was cut. Control characters are left out of what
 //! the server sent, except the line breaks and tabs of a log tail.
 
-use prost_reflect::{DynamicMessage, Kind, MapKey, Value};
+use prost_reflect::{DynamicMessage, Kind, MapKey, ReflectMessage, Value};
 
 /// The lines of `message`.
 pub(crate) fn lines(message: &DynamicMessage) -> String {

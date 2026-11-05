@@ -232,7 +232,7 @@ pub fn read(set: &FileDescriptorSet) -> Result<Surface, GenError> {
         })
     })?;
     let full = format!("{}.{}", file.package(), service.name());
-    let keys = RETRY_KEYS.iter().filter(|entry| entry.service == full);
+    let mut keys = RETRY_KEYS.iter().filter(|entry| entry.service == full);
     keys.try_for_each(|entry| attach(&mut rpcs, entry))?;
     Ok(Surface {
         package: file.package().to_owned(),
