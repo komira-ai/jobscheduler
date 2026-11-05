@@ -75,6 +75,7 @@ pub(super) fn job_result(result: &RunResult) -> JobResult {
         exit_code: result.exit_code,
         detail: result.detail.clone(),
         log_tail: result.log_tail.clone(),
+        logs: None,
     }
 }
 

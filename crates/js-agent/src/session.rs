@@ -739,6 +739,7 @@ impl<'a> Session<'a> {
             disk_gib: self.saying,
             jobs: jobs.jobs,
             retired_jobs: jobs.retired_jobs,
+            log_grant_state: None,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())

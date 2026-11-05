@@ -31,6 +31,7 @@ fn reply(commands: Vec<Command>) -> HeartbeatReply {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        log_grant: None,
     }
 }
 

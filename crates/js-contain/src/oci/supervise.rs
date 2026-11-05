@@ -569,7 +569,9 @@ fn give_up(mut child: Child) {
 
 impl Oci {
     /// Starts the container of `spec` under a supervisor process (`<daemon> <modes.supervise>
-    /// <crun> <lease dir> <name> <file cap> <tail bytes> <drain grace ms>`), run with the job
+    /// <crun> <lease dir> <name> <file cap> <tail bytes> <drain grace ms>`, the file cap being
+    /// `file_cap`, or the runtime's [`LogLimits::file_cap`] when it is `None`, and the tail and
+    /// the grace the runtime's), run with the job
     /// drop and the environment scrub every `crun` gets, stdin null, stdout a pipe used once
     /// for the ready word, stderr null, in a process group of its own. Returns once the
     /// supervisor wrote its ready word (it has made the init report and the capture files); a
@@ -581,7 +583,11 @@ impl Oci {
     /// # Errors
     /// An exit record is already in the lease directory, or the supervisor could not be
     /// started or did not answer (the lease directory has the files of an earlier start, say).
-    pub fn start_supervised(&self, spec: &ContainerSpec) -> Result<Supervised, String> {
+    pub fn start_supervised(
+        &self,
+        spec: &ContainerSpec,
+        file_cap: Option<u64>,
+    ) -> Result<Supervised, String> {
         let record = exit_record_path(&spec.dir);
         if record.symlink_metadata().is_ok() {
             return Err(format!(
@@ -589,15 +595,16 @@ impl Oci {
                 record.display()
             ));
         }
+        let limits = self.run_logs(file_cap);
         let mut command = Command::new(&self.daemon);
         command
             .arg(&self.modes.supervise)
             .arg(self.crun.program())
             .arg(&spec.dir)
             .arg(&spec.name)
-            .arg(self.logs.file_cap.to_string())
-            .arg(self.logs.tail.to_string())
-            .arg(self.logs.drain_grace.as_millis().to_string());
+            .arg(limits.file_cap.to_string())
+            .arg(limits.tail.to_string())
+            .arg(limits.drain_grace.as_millis().to_string());
         self.crun.prepare(&mut command);
         let supervised = Supervised::spawn(command, spec.dir.clone(), READY, READY_WAIT)?;
         note_supervisor(&spec.dir, supervised.id());

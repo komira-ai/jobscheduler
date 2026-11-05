@@ -110,16 +110,21 @@ impl Node {
 
     /// The container `lease-1-2` of this node.
     fn spec(&self) -> ContainerSpec {
-        let lease = self.dir.join("scratch/lease-1-2");
+        self.spec_of("lease-1-2")
+    }
+
+    /// The container `name` of this node, in a lease directory of its own.
+    fn spec_of(&self, name: &str) -> ContainerSpec {
+        let lease = self.dir.join("scratch").join(name);
         ContainerSpec {
-            name: "lease-1-2".to_owned(),
+            name: name.to_owned(),
             image: format!("registry.example/library/tool@sha256:{}", "a".repeat(64)),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             input_root: lease.join("root"),
             upper: lease.join("upper"),
             overlay_work: lease.join("work"),
             dir: lease,
-            cgroup_parent: "/js.slice/actions/lease-1-2".to_owned(),
+            cgroup_parent: format!("/js.slice/actions/{name}"),
             exec_root: "/job/root".to_owned(),
             working_directory: String::new(),
             env: Vec::new(),
@@ -146,7 +151,7 @@ impl Node {
 /// Runs the container of `spec` to its end and says how it ended.
 async fn run(oci: &Oci, spec: &ContainerSpec) -> Result<Ended, String> {
     oci.create(spec).await.expect("bundle");
-    let mut running = oci.start(spec).expect("started");
+    let mut running = oci.start(spec, None).expect("started");
     running.wait().await;
     oci.ended(spec, &running).await
 }
@@ -209,7 +214,7 @@ async fn a_container_that_did_not_run_is_told_by_the_words_of_crun_and_the_init(
     let spec = node.spec();
     let oci = node.oci();
     oci.create(&spec).await.expect("bundle");
-    let mut running = oci.start(&spec).expect("started");
+    let mut running = oci.start(&spec, None).expect("started");
     running.wait().await;
     // The init writes its report to the file `start` made, once the container is going.
     std::fs::write(
@@ -536,7 +541,7 @@ async fn the_output_of_a_container_is_kept_apart_in_files_and_the_tail() {
         ..LogLimits::default()
     });
     oci.create(&spec).await.expect("bundle");
-    let mut running = oci.start(&spec).expect("started");
+    let mut running = oci.start(&spec, None).expect("started");
     running.wait().await;
     assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
     assert_eq!(
@@ -568,7 +573,7 @@ async fn a_container_that_prints_more_than_the_cap_exits_and_leaves_a_bounded_lo
     };
     let oci = node.oci_keeping(limits);
     oci.create(&spec).await.expect("bundle");
-    let mut running = oci.start(&spec).expect("started");
+    let mut running = oci.start(&spec, None).expect("started");
     running.wait().await;
     assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(4)));
     let file = std::fs::read(stdout_path(&spec.dir)).expect("stdout");
@@ -592,9 +597,77 @@ async fn a_log_file_that_cannot_be_made_is_a_start_error_naming_it() {
     let oci = node.oci();
     oci.create(&spec).await.expect("bundle");
     std::fs::create_dir(stdout_path(&spec.dir)).expect("a directory in the way");
-    let why = oci.start(&spec).expect_err("no file");
+    let why = oci.start(&spec, None).expect_err("no file");
     assert!(
         why.contains(&stdout_path(&spec.dir).display().to_string()),
         "{why}"
     );
+}
+
+/// What one run printed: 17 bytes to each stream.
+const PRINTS: &str = "run-out 0123456789abcdef\nrun-err fedcba9876543210";
+
+/// Runs the container `name` of `node` on `oci` with the file cap `cap` and gives what its
+/// two files hold and its tail.
+async fn capped(
+    node: &Node,
+    oci: &Oci,
+    name: &str,
+    cap: Option<u64>,
+) -> (String, String, js_contain::oci::LogTail) {
+    let spec = node.spec_of(name);
+    oci.create(&spec).await.expect("bundle");
+    let mut running = oci.start(&spec, cap).expect("started");
+    running.wait().await;
+    assert_eq!(oci.ended(&spec, &running).await, Ok(Ended::Exited(0)));
+    let read = |path: PathBuf| std::fs::read_to_string(path).expect("file");
+    (
+        read(stdout_path(&spec.dir)),
+        read(stderr_path(&spec.dir)),
+        running.tail(),
+    )
+}
+
+/// Catches a file cap that is the runtime's whatever the start says, one that is the
+/// smaller of the two, and one that leaks from one run into the next: two runs on one
+/// runtime whose own cap is 7 bytes, one given 5 and one given 64, each keep exactly their
+/// own cap's bytes of each stream (all 17 when the cap is above them) and say whether the
+/// file was cut, while the ring holds the whole of each stream as it did.
+#[tokio::test]
+async fn the_file_cap_is_per_run() {
+    let node = Node::new("per-run-cap", PRINTS);
+    let oci = node.oci_keeping(LogLimits {
+        file_cap: 7,
+        ..LogLimits::default()
+    });
+    let (out, err, tail) = capped(&node, &oci, "lease-1-5", Some(5)).await;
+    assert_eq!((out.as_str(), err.as_str()), ("01234", "fedcb"));
+    assert!(tail.stdout.file_cut && tail.stderr.file_cut);
+    assert_eq!(tail.stdout.bytes, b"0123456789abcdef\n");
+    assert_eq!(tail.stderr.bytes, b"fedcba9876543210\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (17, 17));
+
+    let (out, err, tail) = capped(&node, &oci, "lease-1-64", Some(64)).await;
+    assert_eq!(
+        (out.as_str(), err.as_str()),
+        ("0123456789abcdef\n", "fedcba9876543210\n")
+    );
+    assert!(!tail.stdout.file_cut && !tail.stderr.file_cut);
+    assert_eq!(tail.stdout.bytes, b"0123456789abcdef\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (17, 17));
+}
+
+/// Catches a run without a cap of its own that keeps no file bound, or a bound other than
+/// the runtime's: with `None` the files hold the runtime's 7 bytes of each stream.
+#[tokio::test]
+async fn a_run_without_a_cap_uses_the_runtimes() {
+    let node = Node::new("runtime-cap", PRINTS);
+    let oci = node.oci_keeping(LogLimits {
+        file_cap: 7,
+        ..LogLimits::default()
+    });
+    let (out, err, tail) = capped(&node, &oci, "lease-1-2", None).await;
+    assert_eq!((out.as_str(), err.as_str()), ("0123456", "fedcba9"));
+    assert!(tail.stdout.file_cut && tail.stderr.file_cut);
+    assert_eq!((tail.stdout.total, tail.stderr.total), (17, 17));
 }
