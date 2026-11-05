@@ -18,6 +18,9 @@ use js_types::{HostId, LeaseId, Resources};
 // The boundary cases, a module of this test binary (not a test target of its own).
 #[path = "invariants/boundaries.rs"]
 mod boundaries;
+// The invariants of the fault family, a module of this test binary too.
+#[path = "invariants/faults.rs"]
+mod faults;
 
 const GIB: u64 = 1 << 30;
 
@@ -186,16 +189,20 @@ fn launched_again_by_a_replacement() -> Observations {
         .with_launch(run(0), host(0), ms(500))
 }
 
-/// Item 0 through to its first terminal answer, `how`, at virtual time 1000.
+/// Item 0 through to its first terminal answer, `how`, at virtual time 1000; its run
+/// completed at 900 when it succeeded.
 fn item_ended(how: HowEnded) -> Observations {
-    Observations::quiet()
+    let observations = Observations::quiet()
         .at(ms(1_500))
         .with_item(ItemId(0), share(1_000))
         .with_event(ItemId(0), ms(100), ClientEvent::Submitted)
         .with_event(ItemId(0), ms(200), queued(0))
         .with_event(ItemId(0), ms(300), placed(0))
         .with_event(ItemId(0), ms(400), ClientEvent::Started)
-        .with_event(ItemId(0), ms(1_000), ended(how))
+        .with_event(ItemId(0), ms(1_000), ended(how));
+    let done = (how == HowEnded::Succeeded).then(|| (run(0), host(0), ms(900)));
+    done.into_iter()
+        .fold(observations, |o, (r, h, at)| o.with_completion(r, h, at))
 }
 
 /// Item 0 succeeded, then heard it was lost.
@@ -284,6 +291,12 @@ const NEGATIVE_CASES: &[NegativeCase] = &[
     (Invariant::SettlesWhenQuiet, host_booked_at_end),
     (Invariant::BookingsMatchAgents, booking_no_agent_holds),
     (Invariant::BookingsMatchAgents, run_nothing_books),
+    (Invariant::NoDoubleBooking, faults::lease_on_two_hosts),
+    (Invariant::NoDoubleBooking, faults::host_listed_twice),
+    (Invariant::NoLeaseOnALostHost, faults::placed_on_a_lost_host),
+    (Invariant::NoResultLost, faults::lost_result),
+    (Invariant::NoResultLost, faults::result_accepted_twice),
+    (Invariant::NoResultLost, faults::success_never_produced),
 ];
 
 /// What a case of the table is flagged for: the step check over everything, and the end
@@ -340,12 +353,13 @@ fn start(o: &mut Observations, h: u64, n: u64) {
     o.ledger.push(launch);
 }
 
-/// Host `h`'s agent completes run `n`.
+/// Host `h`'s agent completes run `n`, and the ledger records the completion.
 fn finish(o: &mut Observations, h: u64, n: u64) {
     let at = o.at;
     let agent = o.agents.get_mut(&host(h)).expect("agent");
     agent.running.remove(&run(n));
     agent.completed.insert(run(n), at);
+    *o = std::mem::take(o).with_completion(run(n), host(h), at);
 }
 
 /// The server acknowledges run `n`'s result on host `h`.
@@ -483,7 +497,9 @@ fn a_clean_history_passes_every_invariant() {
     let rest = items(&[1, 3]).agent(host(0)).agent(host(1)).server();
     cell.step(2_500, rest, |o| {
         finish(o, 0, 1);
-        finish(o, 1, 3);
+        // Item 3's run fails: it ends with no completion.
+        let failing = o.agents.get_mut(&host(1)).expect("agent");
+        failing.running.remove(&run(3));
         hear(o, 1, ended(HowEnded::Succeeded));
         hear(o, 3, ended(HowEnded::Failed));
         ack(o, 0, 1, Verdict::Accepted);
@@ -963,6 +979,8 @@ fn names_are_stable_and_distinct() {
             ("one-terminal-answer", Checked::EveryStep),
             ("settles-when-quiet", Checked::AtEnd),
             ("bookings-match-agents", Checked::AtEnd),
+            ("no-lease-on-a-lost-host", Checked::EveryStep),
+            ("no-result-lost", Checked::AtEnd),
         ]
     );
     let ends: Vec<&str> = HowEnded::ALL.iter().map(|h| h.name()).collect();

@@ -21,11 +21,18 @@
 //! without faults (`cell/real_agents.rs`, six real agents, about 1,200 agent requests a
 //! seed) over [`REAL_SEEDS`] seeds, so a change to a decision of the real agent lifecycle
 //! as the cell runs it, or a source of nondeterminism in it, moves a hash.
+//!
+//! And one fault scenario, family `faults`: the restart of the server with runs in flight
+//! (`cell/server_restart.rs`, about 3,840 agent requests a seed) over [`FAULTS_SEEDS`]
+//! seeds, so a restart, which drops the server and opens its lease file again, is shown
+//! to replay from its seed.
 
 #[path = "cell/lossy_wire.rs"]
 mod lossy_wire;
 #[path = "cell/real_agents.rs"]
 mod real_agents;
+#[path = "cell/server_restart.rs"]
+mod server_restart;
 #[path = "cell/support.rs"]
 mod support;
 
@@ -80,6 +87,11 @@ const SMOKE_FAMILY: &str = "smoke";
 /// they are kept under.
 const REAL_SEEDS: u64 = 2;
 const REAL_FAMILY: &str = "real_agent";
+
+/// How many seeds of the fault scenario the golden file pins, and the family they are
+/// kept under.
+const FAULTS_SEEDS: u64 = 4;
+const FAULTS_FAMILY: &str = "faults";
 
 /// The server of the scenario.
 fn spec() -> ServerSpec {
@@ -148,7 +160,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// scenario with real agents, run twice, whose items all succeed. Catches a handler path
 /// that reads a clock, iterates a hashed collection to decide an outcome, or lets a random
 /// value reach the trace (in the server, the fake agent node or the real agent lifecycle);
-/// and a trace whose lines depend on whether they are kept.
+/// and a trace whose lines depend on whether they are kept. Also that a seed of the fault
+/// scenario of a server restart, run twice, gives one hash.
 #[test]
 fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(spec().heartbeat_interval(), INTERVAL);
@@ -181,6 +194,10 @@ fn a_seed_replays_to_the_same_trace_hash() {
         "{:?}",
         once.outcomes
     );
+
+    let restart = server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing;
+    let once = restart().run_seeds(1).runs[0].hash;
+    assert_eq!(restart().run_seeds(1).runs[0].hash, once);
 }
 
 /// Asserts that two seeds give two hashes. Catches a seed that never reaches the bus or
@@ -221,17 +238,36 @@ fn real_runs() -> Vec<(String, TraceHash)> {
     passed.runs.iter().map(each).collect()
 }
 
+/// The hash of each pinned seed of the fault scenario, which must pass.
+fn faults_runs() -> Vec<(String, TraceHash)> {
+    let scenario =
+        server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing();
+    let passed = scenario.run_seeds(FAULTS_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!(
+            "a_restart_of_the_server_with_runs_in_flight_double_books_nothing/seed-{}",
+            run.seed
+        );
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
 fn golden_runs() -> Vec<(String, TraceHash)> {
     let each = |seed| (format!("{SCENARIO}/seed-{seed}"), hash(seed));
     (0..SEEDS).map(each).collect()
 }
 
-/// Asserts that the hashes of the pinned seeds equal the golden file's. Catches any change
-/// to a decision of the server or the agents, or to the trace text, and, because the file
-/// was written by another process, a run that differs between processes.
+/// Asserts that the hashes of the pinned seeds equal the golden file's, those of the
+/// replay scenario and those of the fault scenario of a server restart (family
+/// `faults`). Catches any change to a decision of the server or the agents, or to the
+/// trace text, a restart whose run depends on anything but its seed (the files it opens
+/// again, the order it reads them in), and, because the file was written by another
+/// process, a run that differs between processes.
 #[test]
 fn pinned_seeds_match_the_golden_file() {
     golden().assert_matches(&golden_runs());
+    golden_of(FAULTS_FAMILY).assert_matches(&faults_runs());
 }
 
 /// Asserts that the hashes of the pinned seeds of the lossy-wire smoke scenario equal the
@@ -258,6 +294,7 @@ fn regenerate_golden_hashes() {
     golden().regenerate(&golden_runs()).unwrap();
     golden_of(SMOKE_FAMILY).regenerate(&smoke_runs()).unwrap();
     golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
+    golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
 }
 
 /// Asserts that a run stopped by a violation reports the scenario, the seed, the trace

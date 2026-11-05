@@ -9,21 +9,30 @@
 //!
 //! - [`observe`]: the facts. What the client driver heard about each unit of work and
 //!   what it asked for ([`ClientEvent`], [`Ask`]), the ground truth of each agent
-//!   process ([`AgentTruth`]), the cell's own launch ledger ([`Launch`]), which outlives
-//!   any agent process, and the server's list of hosts ([`ServerView`]), gathered at one
-//!   virtual time into [`Observations`].
-//! - [`invariant`]: the oracle. The five properties of "exactly once, nothing
-//!   double-booked" ([`Invariant`]), the [`Checker`] that tests them after each step and
-//!   once at the end, and the one-line [`Violation`] it reports.
+//!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
+//!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
+//!   process, the processes it killed ([`Killed`]), and the server's list of hosts
+//!   ([`ServerView`]), gathered at one virtual time into [`Observations`].
+//! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
+//!   step and once at the end, and the one-line [`Violation`] it reports. Seven
+//!   properties: no host booked past what it holds, no lease on two hosts and no host
+//!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
+//!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
+//!   ([`Invariant::OneTerminalAnswer`]); no new lease on a host the server lists as lost
+//!   ([`Invariant::NoLeaseOnALostHost`]); everything settled once quiet
+//!   ([`Invariant::SettlesWhenQuiet`]); no booking without a run and no run without a
+//!   booking at the end ([`Invariant::BookingsMatchAgents`]); and no result lost or
+//!   recorded twice ([`Invariant::NoResultLost`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
-//!   launches and completes into the cell's [`Ledger`] and counts what happened to it
+//!   launches and completes, and the verdicts it reads, into the cell's [`Ledger`] and counts what happened to it
 //!   ([`Counters`]). Its agent is one of two kinds ([`AgentKind`]): the conformance
 //!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
 //!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
-//!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock.
+//!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
+//!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]).
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
 //!   asks for, and when the client gives up on it.
@@ -33,13 +42,17 @@
 //!   times and its calls are never dropped.
 //! - [`cell`]: the run loop ([`Cell`]), which steps the kernel, runs the actions scripted
 //!   at virtual times, polls the client and checks the invariants after every step, with
-//!   the changes a scenario makes (agents added, killed and replaced, partitions, faults
-//!   on the bus, client calls, items submitted and cancelled), and the end of a scenario
-//!   with its end check ([`Cell::settle`]).
+//!   the changes a scenario makes (agents added, killed, killed for good and replaced,
+//!   partitions, faults on the bus, a restart of the server, client calls, items
+//!   submitted and cancelled), and the end of a scenario with its end check
+//!   ([`Cell::settle`]).
 //! - [`actions`]: what a scenario does at a virtual time, one [`Action`] per file.
 //! - [`scenario`]: the builder ([`Scenario`]): the world, the work, the actions, what is
 //!   expected ([`Expect`]) and the witnesses that show the situation happened, run over
-//!   seeds.
+//!   seeds. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
+//!   family (`tests/faults.rs`) runs agents that die and return or never return,
+//!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
+//!   restart of the server and a forgotten host, each over sixteen seeds.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
@@ -85,11 +98,11 @@ pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
 pub use front::{ClientPort, Front, FrontFactory, LeaseFront};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
-pub use ledger::{Completion, Ledger};
+pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations, RunId,
-    Running, ServerHost, ServerView, Verdict,
+    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
+    Observations, RunId, Running, ServerHost, ServerView, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};

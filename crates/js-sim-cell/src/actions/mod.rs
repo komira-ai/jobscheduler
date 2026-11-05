@@ -13,15 +13,19 @@ use crate::observe::ItemId;
 
 mod cancel_work;
 mod kill_agents;
+mod kill_agents_for_good;
 mod partition_agents;
 mod replace_agents;
+mod restart_server;
 mod set_bus_faults;
 mod submit_work;
 
 pub use cancel_work::{CancelWork, cancel_work};
 pub use kill_agents::{KillAgents, kill_agents};
+pub use kill_agents_for_good::{KillAgentsForGood, kill_agents_for_good};
 pub use partition_agents::{PartitionAgents, partition_agents};
 pub use replace_agents::{ReplaceAgents, replace_agents};
+pub use restart_server::{RestartServer, restart_server};
 pub use set_bus_faults::{SetBusFaults, set_bus_faults};
 pub use submit_work::{SubmitWork, submit_work};
 

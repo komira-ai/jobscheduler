@@ -20,10 +20,17 @@
 //! script too, then the cell for the time it is given, and makes the end check
 //! ([`Checker::end`]).
 //!
+//! A killed agent process is a fault until it is replaced ([`Cell::kill`]); one killed
+//! for good ([`Cell::kill_for_good`]) is a host gone, not a fault. A restart of the
+//! server ([`Cell::restart_server`]) is a moment, not a fault; a restart the server
+//! refuses leaves it down and is kept for [`Cell::take_refused`], which is how the run of
+//! a seed reports it.
+//!
 //! # The trace
 //!
 //! The cell writes a trace of its own, family `js-sim-cell`, beside the kernel's: what
-//! the kernel does not see (a process killed or replaced, the bus's faults changed, a
+//! the kernel does not see (a process killed, killed for good or replaced, the server
+//! restarted or its restart refused, the bus's faults changed, a
 //! client call and its status, an item submitted or cancelled and each event the client
 //! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
 //! changes, each launch in the ledger, and the violation that stopped the run. A line
@@ -48,12 +55,12 @@ use js_types::{HostId, IdError, Resources};
 
 use crate::agent::{AgentKind, AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
-use crate::counters::Counters;
+use crate::counters::{Counter, Counters};
 use crate::front::{ClientPort, Front, LeaseFront};
 use crate::invariant::{Checker, Invariant, Touched, Violation};
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
-use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Observations};
+use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
 use crate::text;
 use crate::work::Work;
@@ -174,6 +181,8 @@ pub struct Cell {
     listed_at: Option<FarmTime>,
     faulted: Faulted,
     violation: Option<Violation>,
+    /// The first restart the server refused, until it is taken.
+    refused: Option<StartupError>,
     trace: Trace,
     /// Both traces as one, when lines are kept, and how many kernel lines it holds.
     merged: Option<Vec<String>>,
@@ -233,6 +242,7 @@ impl Cell {
             listed_at: None,
             faulted: Faulted::default(),
             violation: None,
+            refused: None,
             trace,
             merged,
             kernel_lines: 0,
@@ -444,9 +454,28 @@ impl Cell {
         if let Some(host) = killed {
             self.record(format!("kill {host}"));
             self.observations.agents.remove(&host);
+            let at = self.sim.now();
+            let kill = Killed {
+                host: host.clone(),
+                at,
+            };
+            self.observations.kills.push(kill);
             self.faulted.killed.insert(host.clone());
             self.fault_changed();
             self.check(Touched::nothing().agent(host));
+        }
+    }
+
+    /// Kills the process of agent `index` for good, as [`Cell::kill`] does, with its host
+    /// gone rather than faulted: it is never replaced, so the quiet the end check waits
+    /// for starts now, as if the host had been taken out of the cell.
+    pub fn kill_for_good(&mut self, index: usize) {
+        self.kill(index);
+        let host = self.agent(index).map(|agent| agent.host().clone());
+        if let Some(host) = host {
+            self.record(format!("gone {host}"));
+            self.faulted.killed.remove(&host);
+            self.fault_changed();
         }
     }
 
@@ -482,6 +511,48 @@ impl Cell {
     /// Ends the partition in force, now.
     pub fn heal(&mut self) {
         self.partition(&[]);
+    }
+
+    /// Bumps [`Counter::CutWithUnlistedRun`] of agent `index` when its process runs a run
+    /// that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
+    /// cut of the agent notes as it starts.
+    pub(crate) fn note_cut(&mut self, index: usize) {
+        let agent = self.agent_mut(index).filter(|agent| agent.runs_unlisted());
+        if let Some(agent) = agent {
+            agent.count(Counter::CutWithUnlistedRun);
+        }
+    }
+
+    /// Stops the server and starts it again over the same directory with `--boot
+    /// resume`, on the same clock ([`ServerNode::restart`]), keeping the agents and the
+    /// client; the cell then reads the listing again and checks. A restart the server
+    /// refuses leaves it down and is kept, the first one only, for
+    /// [`Cell::take_refused`].
+    pub fn restart_server(&mut self) {
+        let spec = self.spec.clone();
+        self.restart_server_with(&spec);
+    }
+
+    /// Restarts the server as [`Cell::restart_server`] does, with the flags `spec`
+    /// describes in place of the cell's (an operator who restarts the server with a
+    /// changed configuration). The cell's own spec, which the agents and the client were
+    /// made for, stays as it is.
+    pub fn restart_server_with(&mut self, spec: &ServerSpec) {
+        let server = self.sim.nodes_mut().find_map(|(_, n)| n.as_server_mut());
+        match server.map(|server| server.restart(spec)) {
+            Some(Err(error)) => {
+                self.record(format!("restart refused {}", error.flag()));
+                self.refused = self.refused.take().or(Some(error));
+            }
+            _ => self.record("restart server".to_owned()),
+        }
+        self.reread();
+        self.check(Touched::nothing().server());
+    }
+
+    /// The first restart the server refused, taken, so it is returned once.
+    pub fn take_refused(&mut self) -> Option<StartupError> {
+        self.refused.take()
     }
 
     /// Replaces the faults of the bus: a message sent from now on takes `faults`.
@@ -696,6 +767,12 @@ impl Cell {
             self.record(format!("launch {}", launch.host));
         }
         self.observations.ledger.extend(launches);
+        let ended = self.observations.completions.len();
+        let completions = self.ledger.completions_after(ended);
+        self.observations.completions.extend(completions);
+        let judged = self.observations.verdicts.len();
+        let verdicts = self.ledger.verdicts_after(judged);
+        self.observations.verdicts.extend(verdicts);
         self.checks += 1;
         let found = self
             .checker
