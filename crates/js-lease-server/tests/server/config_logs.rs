@@ -251,6 +251,18 @@ fn a_logs_table_is_checked_key_by_key() {
             "logs.path_style: must be true or false".to_owned(),
         ),
         (
+            good.clone().set("endpoint", "5"),
+            "logs.endpoint: must be a string".to_owned(),
+        ),
+        (
+            good.clone().set("credentials", "5"),
+            "logs.credentials: must be a string".to_owned(),
+        ),
+        (
+            good.clone().set("sts_endpoint", "5"),
+            "logs.sts_endpoint: must be a string".to_owned(),
+        ),
+        (
             good.clone().without("read_key_file"),
             "logs.read_key_file: required".to_owned(),
         ),

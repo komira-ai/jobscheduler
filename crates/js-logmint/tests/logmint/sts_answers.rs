@@ -176,6 +176,8 @@ fn a_successful_answer_is_read_strictly() {
         credentials(&fields_of.replace("minted-secret", "minted secret")),
         credentials(&fields_of.replace("minted-token", "minted&amp;token")),
         credentials(&fields_of.replace("minted-token", "")),
+        format!("<AssumeRoleResponse><Credentials>{fields_of}</AssumeRoleResponse>"),
+        credentials(&fields_of.replace("</AccessKeyId>", "")),
     ];
     for name in [
         "AccessKeyId",

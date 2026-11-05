@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use super::{Action, FakeStore, Policy, State, answer, percent_decode, rfc3339, split_url, xml};
 use crate::credential::Credential;
@@ -59,20 +59,18 @@ impl Policy {
     pub fn from_session_policy(text: &str, bucket: &str) -> Option<Self> {
         let document: Value = serde_json::from_str(text).ok()?;
         let document = exactly(&document, &["Statement", "Version"])?;
-        document.get("Version")?.as_str()?;
-        let statement = match document.get("Statement")?.as_array()?.as_slice() {
+        document["Version"].as_str()?;
+        let statement = match document["Statement"].as_array()?.as_slice() {
             [only] => exactly(only, &["Action", "Effect", "Resource"])?,
             _ => return None,
         };
-        let allow = statement.get("Effect")?.as_str()? == "Allow";
-        let actions = statement
-            .get("Action")?
+        let allow = statement["Effect"].as_str()? == "Allow";
+        let actions = statement["Action"]
             .as_array()?
             .iter()
             .map(|action| action_of(action.as_str()?))
             .collect::<Option<Vec<Action>>>()?;
-        let prefix = statement
-            .get("Resource")?
+        let prefix = statement["Resource"]
             .as_str()?
             .strip_prefix(S3_ARN)?
             .strip_prefix(bucket)?
@@ -138,11 +136,11 @@ impl FakeStore {
     }
 }
 
-/// `value` as an object with exactly the keys `keys`.
-fn exactly<'v>(value: &'v Value, keys: &[&str]) -> Option<&'v Map<String, Value>> {
-    value
-        .as_object()
-        .filter(|map| map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key)))
+/// `value` when it is an object with exactly the keys `keys`.
+fn exactly<'v>(value: &'v Value, keys: &[&str]) -> Option<&'v Value> {
+    let map = value.as_object()?;
+    let exact = map.len() == keys.len() && keys.iter().all(|key| map.contains_key(*key));
+    exact.then_some(value)
 }
 
 /// The action a policy names `name`.

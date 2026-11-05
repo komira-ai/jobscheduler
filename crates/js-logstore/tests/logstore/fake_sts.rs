@@ -242,6 +242,7 @@ fn an_assume_role_call_is_refused_in_order() {
         b"Action".to_vec(),
         b"Action=AssumeRole&Version".to_vec(),
         b"Action=%zz".to_vec(),
+        b"%zz=AssumeRole".to_vec(),
         b"Action=\xff".to_vec(),
         Vec::new(),
     ] {
