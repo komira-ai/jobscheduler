@@ -418,6 +418,7 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    pub(crate) logs: file::LogsConfig,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -510,6 +511,7 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            logs: file::LogsConfig::None,
         })
     }
 
@@ -538,6 +540,7 @@ impl Config {
             hosts,
             mut warnings,
             unrunnable,
+            logs,
             ..
         } = file::load(path, &load)?;
         if let Some(refusal) = unrunnable {
@@ -621,6 +624,7 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            logs,
         })
     }
 

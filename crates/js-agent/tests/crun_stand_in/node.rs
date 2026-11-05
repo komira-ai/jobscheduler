@@ -122,7 +122,8 @@ const CONFIG: &str =
 /// with a `crun` error in its log. `*-stuckcg` runs as `*-wired` does after it left a cgroup `left`, with a
 /// file in it, below its lease's cgroup (so that the lease's cgroup cannot be removed until
 /// the test removes it); its `state` names the pid only once that is there. `*-sayexit` writes
-/// a word to each stream and exits 5; `delete` also clears the `cgroup.procs` that
+/// a word to each stream and exits 5; `*-big` makes its container's cgroup and writes 10 MiB
+/// to each stream; `delete` also clears the `cgroup.procs` that
 /// [`Node::place`] writes in the `ctr` cgroup below the lease's (and nothing else there).
 const CRUN: &str = r#"#!/bin/sh
 MOUNT=@MOUNT@
@@ -148,6 +149,11 @@ case "$cmd" in
     case "$name" in
       *-exit) exit 3;;
       *-say) echo to-stdout; echo to-stderr >&2; exit 0;;
+      *-big)
+        mkdir -p "$cg/ctr"
+        head -c 10485760 /dev/zero
+        head -c 10485760 /dev/zero >&2
+        exit 0;;
       *-sayexit) echo to-stdout; echo to-stderr >&2; exit 5;;
       *-fail) echo '{"level":"error","msg":"cgroup: no"}' >> "$log"; exit 1;;
       *-oom) printf 'low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n' > "$cg/memory.events"; exit 137;;
@@ -352,6 +358,7 @@ impl Node {
             labels: BTreeMap::from([(label::RUN.to_owned(), run_id.to_owned())]),
             network: Default::default(),
             ports: Vec::new(),
+            log_sink: None,
         }
     }
 

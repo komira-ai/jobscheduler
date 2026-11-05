@@ -26,7 +26,9 @@ use js_agent_wire::{
 
 pub use self::exclusive::{Quiet, Restored};
 use self::held::Records;
-use self::job::{Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
+use self::job::{
+    Given, Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec,
+};
 pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
@@ -683,7 +685,7 @@ impl Lifecycle {
     /// Starts the run `spec` names, or the job a job start names (`keyed`; see `per_job`).
     fn start(&mut self, (spec, keyed): (&JobSpec, Keyed), received: u64, events: &mut Vec<Event>) {
         if self.may_start((spec, keyed), received, events) {
-            self.admit_and_start((spec, keyed), &[], received, events);
+            self.admit_and_start((spec, keyed), &Given::default(), received, events);
         }
     }
 
@@ -745,12 +747,13 @@ impl Lifecycle {
     }
 
     /// Admits a start [`Lifecycle::may_start`] let through and starts it, or refuses it.
-    /// `env` is the environment of a job start (empty for a run start), which the run's
-    /// container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)).
+    /// `given` is what a job start gives its run (nothing for a run start): the environment
+    /// its container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)) and its
+    /// live-log sink.
     fn admit_and_start(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
-        env: &[(String, String)],
+        given: &Given,
         received: u64,
         events: &mut Vec<Event>,
     ) {
@@ -759,7 +762,7 @@ impl Lifecycle {
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec, env)
+            .admit(spec, &given.env)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
@@ -809,7 +812,7 @@ impl Lifecycle {
                 };
                 let waiting = Waiting {
                     spec: spec.clone(),
-                    env: env.to_vec(),
+                    given: given.clone(),
                     mounts,
                     slot,
                     booked,
@@ -822,7 +825,7 @@ impl Lifecycle {
                 self.jobs.push(job);
             }
             Prepared::Ready => {
-                let started = self.begin((spec, keyed), env, mounts, slot, booked, events);
+                let started = self.begin((spec, keyed), given, mounts, slot, booked, events);
                 let at = (None, u64::MAX);
                 self.settle((spec, keyed), started, (slot, booked), at, events);
             }
@@ -839,7 +842,7 @@ impl Lifecycle {
     fn begin(
         &mut self,
         (spec, keyed): (&JobSpec, Keyed),
-        env: &[(String, String)],
+        given: &Given,
         mounts: Vec<ResolvedMount>,
         slot: u32,
         booked: u64,
@@ -887,7 +890,7 @@ impl Lifecycle {
         });
         started.and_then(|(scratch, files)| {
             let made = (mounts, scratch, files);
-            let run = run_spec((spec, keyed), env, made, slot, booked);
+            let run = run_spec((spec, keyed), given, made, slot, booked);
             self.runtime
                 .create_and_start(&run)
                 .map_err(|why| runtime_failure(&why))

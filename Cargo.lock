@@ -1027,6 +1027,7 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-logstore",
  "js-mac-pool",
  "js-mac-provision",
  "js-mac-session",
@@ -1349,6 +1350,8 @@ dependencies = [
  "js-jobs",
  "js-lease",
  "js-lease-server",
+ "js-logmint",
+ "js-logstore",
  "js-platform",
  "js-pool-static",
  "js-proto",
@@ -1381,6 +1384,17 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "x509-parser",
+]
+
+[[package]]
+name = "js-logmint"
+version = "0.1.0"
+dependencies = [
+ "js-logmint",
+ "js-logstore",
+ "serde_json",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

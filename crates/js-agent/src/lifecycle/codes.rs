@@ -37,6 +37,10 @@ pub mod code {
     /// The runtime could not read the log of a job that exited; its result goes without a
     /// tail.
     pub const LOGS_FAILED: &str = "logs-failed";
+    /// A job start's live-log sink failed its check: the job runs without live logs (no
+    /// uploader, no `logs` in its result), and is otherwise as a start without one. The
+    /// message names the field and the rule it broke, never a value.
+    pub const LOG_SINK_IGNORED: &str = "log-sink-ignored";
     /// The runtime could not tell whether a container has exited.
     pub const POLL_FAILED: &str = "poll-failed";
     /// The runtime could not stop a container.
