@@ -368,7 +368,7 @@ fn host(entry: HostEntry, mut live: Live, leases: &LeasesOn) -> wire::Host {
     let shape = shape(&entry.shape);
     live.sort_by_key(|(allocation, _)| allocation.created_at);
     let jobs = live.iter();
-    let jobs = jobs.map(|(allocation, job)| job_booking(allocation, job.as_ref(), &shape));
+    let jobs = jobs.map(|(allocation, _)| job_booking(allocation, &shape));
     let mut booked: Vec<wire::HostBooking> = jobs.collect();
     let held = leases.get(&entry.id).into_iter().flatten();
     booked.extend(held.map(lease_booking));
@@ -393,14 +393,9 @@ fn gpus_of(gpus: u64) -> u32 {
     u32::try_from(gpus).unwrap_or(u32::MAX)
 }
 
-/// What `allocation` books, for the job `job` (its declared host ports), on a host whose
-/// whole shape is `whole` (what a whole-host allocation books).
-fn job_booking(
-    allocation: &AllocationRecord,
-    job: Option<&JobRecord>,
-    whole: &wire::Shape,
-) -> wire::HostBooking {
-    let ports = job.map(|job| job.spec.ports.iter().map(|port| u32::from(port.host)));
+/// What `allocation` books, with the host ports it holds, on a host whose whole shape is
+/// `whole` (what a whole-host allocation books).
+fn job_booking(allocation: &AllocationRecord, whole: &wire::Shape) -> wire::HostBooking {
     let (cpu_millis, memory_bytes, disk_bytes, gpus) = match allocation.booked {
         Booked::Shape {
             cpu_millis,
@@ -421,7 +416,7 @@ fn job_booking(
         memory_bytes,
         disk_bytes,
         gpus,
-        host_ports: ports.into_iter().flatten().collect(),
+        host_ports: allocation.host_ports.iter().copied().map(u32::from).collect(),
     }
 }
 

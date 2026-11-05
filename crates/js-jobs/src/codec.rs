@@ -155,6 +155,8 @@ pub(crate) mod alloc_tag {
     pub const FREED_AT: u16 = 11;
     /// Why it was freed (u8).
     pub const END_REASON: u16 = 12;
+    /// The host ports it holds (2 bytes each, ascending, each once); absent when it holds none.
+    pub const HOST_PORTS: u16 = 13;
 }
 
 /// The fields of a row this build does not know, by tag, as the row held them.
@@ -382,6 +384,16 @@ pub(crate) fn encode_allocation(allocation: &AllocationRecord) -> Result<Vec<u8>
             row.put(t::ACCELERATORS, accelerators.to_be_bytes());
         }
     }
+    if !allocation.host_ports.is_empty() {
+        row.put(
+            t::HOST_PORTS,
+            allocation
+                .host_ports
+                .iter()
+                .flat_map(|port| port.to_be_bytes())
+                .collect::<Vec<u8>>(),
+        );
+    }
     row.put(t::STEP, [step_code(allocation.step)]);
     row.put(t::CREATED_AT, time(allocation.created_at));
     row.put_opt(t::FREED_AT, allocation.freed_at.map(time));
@@ -605,6 +617,27 @@ fn ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<DeclaredPort>, DecodeError> 
             container: u16::from_be_bytes([port[2], port[3]]),
         })
         .collect())
+}
+
+/// The host ports of an allocation row: 2 bytes each, each above the one before it, so none is
+/// zero and none repeats.
+fn host_ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<u16>, DecodeError> {
+    let chunks = value.chunks_exact(2);
+    chunks
+        .remainder()
+        .is_empty()
+        .then_some(())
+        .ok_or(DecodeError::BadLength { tag })?;
+    let ports: Vec<u16> = chunks
+        .map(|port| u16::from_be_bytes([port[0], port[1]]))
+        .collect();
+    let ascending = ports
+        .iter()
+        .zip(std::iter::once(&0).chain(ports.iter()))
+        .all(|(port, before)| port > before);
+    ascending
+        .then_some(ports)
+        .ok_or(DecodeError::BadValue { tag })
 }
 
 /// The reserved label keys a row may hold.
@@ -882,6 +915,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
             accelerators: fields.opt(t::ACCELERATORS, u64_of)?.unwrap_or(0),
         }
     };
+    let host_ports = fields.opt(t::HOST_PORTS, host_ports_of)?.unwrap_or_default();
     let step = fields.need(t::STEP, step_of)?;
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
@@ -891,6 +925,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         allocation_id,
         host,
         booked,
+        host_ports,
         step,
         created_at,
         freed_at,

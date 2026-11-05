@@ -216,6 +216,11 @@ pub struct Requirements {
     pub isa_level: Option<IsaLevel>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
+    /// The network level the job asks for. A lease request asks for none.
+    pub network: JobNetwork,
+    /// The host ports the job declares, sorted ascending, each once. A lease request
+    /// declares none.
+    pub host_ports: Vec<u16>,
 }
 
 /// Why a request's `disk-gib`, `exec` or `isa_level` capability is not a requirement.
@@ -257,6 +262,8 @@ impl Requirements {
             arch: arch_of(request),
             isa_level: None,
             exec: None,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         })
     }
 
@@ -300,6 +307,8 @@ impl Requirements {
             arch: arch_of(request),
             isa_level,
             exec,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         })
     }
 
@@ -451,6 +460,8 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         };
         assert_eq!(read(&[]), Ok(none.clone()));
         for arch in ["x86_64", "arm64"] {
@@ -518,6 +529,8 @@ mod tests {
                 arch: Some("arm64".to_owned()),
                 isa_level: None,
                 exec: None,
+                network: JobNetwork::None,
+                host_ports: Vec::new(),
             };
             assert_eq!(lenient, want, "{refusal}");
         }
