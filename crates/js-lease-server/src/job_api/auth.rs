@@ -117,7 +117,7 @@ fn refusal_head(headers: &HeaderMap) -> Response<()> {
 
 /// Whether `headers` are those of a gRPC request: its content type starts with
 /// `application/grpc`.
-fn is_grpc(headers: &HeaderMap) -> bool {
+pub(super) fn is_grpc(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
         .is_some_and(|value| value.as_bytes().starts_with(GRPC_CONTENT_TYPE))

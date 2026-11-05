@@ -20,7 +20,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
-use crate::job_store::ServerJobs;
+use crate::job_store::{self, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
@@ -68,7 +68,8 @@ pub(crate) struct Agents {
     /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
     /// call has returned.
     pub(crate) usage: Option<Arc<Usage>>,
-    /// The job and allocation tables, when the job service is on. With them, each heartbeat of
+    /// The job and allocation tables, when the job service is on (`--job-listen`): the one
+    /// handle of the server, which the job service holds too. With them, each heartbeat of
     /// a host that reports the `per-job` capability is also served the starts and stops of its
     /// jobs, and its job listing is committed ([`crate::per_job`]); without them, and for any
     /// other host, the reply is the lease and run reply alone.
@@ -127,6 +128,7 @@ pub(crate) fn assemble_placed(
                 estimate_feed,
                 cpu_slack,
                 max_lease_wall,
+                jobs,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -164,6 +166,11 @@ pub(crate) fn assemble_placed(
                 registry.restore_tainted(host, binding.clone());
             }
             let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
+            // The one job store of the server, when the job service is on.
+            let jobs = match jobs {
+                Some(setup) => Some(job_store::open(state_file, setup)?),
+                None => None,
+            };
             let agents = Agents {
                 registry,
                 tokens,
@@ -175,7 +182,7 @@ pub(crate) fn assemble_placed(
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
                 usage,
-                jobs: None,
+                jobs,
                 unclean: Mutex::default(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))

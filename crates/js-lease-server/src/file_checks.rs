@@ -7,8 +7,12 @@ use std::net::IpAddr;
 
 use hyper::Uri;
 
+use crate::config::clear_text;
 use crate::error::StartupError;
 use crate::file::{ElasticPlan, Launch, Server};
+
+/// How the configuration file names the two TLS settings in a refusal.
+const KEY_PAIR: &str = "server.tls_cert and server.tls_key";
 
 /// What the listeners and the advertised address must be, given whether a pool launches
 /// hosts; the warnings the server shows.
@@ -39,15 +43,13 @@ pub(crate) fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<Stri
     if let Some(agent) = server.agent_listen {
         listeners.push(("server.agent_listen", agent));
     }
+    if let Some(job) = server.agents.job_listen() {
+        listeners.push((job.flag, job.addr));
+    }
     let mut warnings = Vec::new();
     for (key, addr) in listeners {
-        if server.tls.is_none() & !addr.ip().is_loopback() {
-            return Err(StartupError::at(
-                key,
-                format!(
-                    "{addr} is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear"
-                ),
-            ));
+        if let Some(reason) = clear_text(addr, server.tls.is_some(), KEY_PAIR) {
+            return Err(StartupError::at(key, reason));
         }
         if addr.ip().is_unspecified() {
             // The status pages are on `server.listen` alone.

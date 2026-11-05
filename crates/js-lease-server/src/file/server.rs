@@ -10,10 +10,11 @@ use js_lease::Settings;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, JOB_RETENTION_MUST, Limits, Placement, TlsFiles, Token,
+    BootMode, CpuSlack, JOB_RETENTION_MUST, JobListen, Limits, Placement, TlsFiles, Token,
     parse_job_retention, parse_token,
 };
 use crate::error::StartupError;
+use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
 use crate::usage_setup::{DEFAULT_HISTORY_RETENTION_DAYS, DEFAULT_PROFILE_STORE_BYTES};
 
@@ -55,6 +56,7 @@ const SERVER_KEYS: &[&str] = &[
     "max_spend_per_month_total",
     "max_spend_since_go_total",
     "job_retention",
+    "job_listen",
 ];
 
 /// What the `[server]` table says.
@@ -101,7 +103,8 @@ pub(crate) struct UsageKeys {
 }
 
 /// The keys of `[server]` that belong to agent registration, as the file gave them. They
-/// mean something only with a pool that registers agents.
+/// mean something only with a pool that registers agents. The job service is one of them:
+/// its store is held by the agent side, and its jobs run on hosts that register.
 pub(crate) struct AgentKeys {
     burst: Option<u32>,
     interval: Option<Duration>,
@@ -109,6 +112,7 @@ pub(crate) struct AgentKeys {
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
+    job_listen: Option<SocketAddr>,
 }
 
 impl AgentKeys {
@@ -124,6 +128,7 @@ impl AgentKeys {
             ("placement", self.placement.is_some()),
             ("estimate_feed", self.estimate_feed.is_some()),
             ("cpu_slack", self.cpu_slack.is_some()),
+            ("job_listen", self.job_listen.is_some()),
         ];
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
@@ -158,6 +163,19 @@ impl AgentKeys {
     /// absent one means ([`Placement::slack`]).
     pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
         self.cpu_slack
+    }
+
+    /// Where the job service is served, when the file turns it on.
+    pub(crate) fn job_listen(&self) -> Option<JobListen> {
+        let flag = "server.job_listen";
+        self.job_listen.map(|addr| JobListen { addr, flag })
+    }
+
+    /// The job store's setup when the file turns the job service on: named by its key, and
+    /// keeping an ended job for `retention`.
+    pub(crate) fn job_store(&self, retention: Retention) -> Option<JobStoreSetup> {
+        let flag = "server.job_listen";
+        self.job_listen.map(|_| JobStoreSetup { flag, retention })
     }
 }
 
@@ -211,6 +229,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
+        job_listen: s.address("job_listen")?,
     };
     let usage = read_usage(&mut s)?;
     // The rule of `--estimate-feed`: with usage off there is nothing to estimate from.

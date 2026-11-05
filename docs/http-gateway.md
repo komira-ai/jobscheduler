@@ -21,7 +21,9 @@ other authentication: `GET /v1/hosts`, `GET` and `POST /v1/hosts/{target}` (whic
 The gateway's router holds `/v1/hosts`, `/v1/pools` and `/v1/usage` and every path below each
 (`/v1/hosts/{*rest}` and so on), so the two routers cannot be merged as they are: axum refuses
 the overlapping routes. The server that mounts the gateway beside the lease routes has to
-decide which one answers those paths; the gateway is not mounted anywhere yet.
+decide which one answers those paths. The lease server therefore does not mount the gateway beside its lease routes: it serves
+the gateway and the gRPC service together on a port of their own, `--job-listen`, behind its one bearer token
+([configuration.md](design/configuration.md)).
 
 ## Routes
 
@@ -155,7 +157,7 @@ with one bearer layer in front of both. A request that does not present
 answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The token is the one the
 lease routes take, compared by the same code.
 
-Nothing mounts the two transports yet, so no port serves them. Every call answers
+Both transports are served on the port of `--job-listen` (off by default). Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
 directory serves it:
 

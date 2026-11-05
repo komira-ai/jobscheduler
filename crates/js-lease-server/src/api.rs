@@ -136,6 +136,11 @@ impl Shared {
         self.agents.as_ref().map(|agents| agents.registry.clone())
     }
 
+    /// The agent side; `None` without agent flags.
+    pub(crate) fn agents(&self) -> Option<&Arc<Agents>> {
+        self.agents.as_ref()
+    }
+
     /// The usage side; `None` without agents or with `--usage-off`.
     pub(crate) fn usage(&self) -> Option<&Arc<Usage>> {
         self.agents

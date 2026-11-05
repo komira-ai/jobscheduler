@@ -19,9 +19,10 @@ use crate::agents::{Agents, assemble};
 use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::checks::Checker;
-use crate::config::{Config, Limits, TlsFiles, Token};
+use crate::config::{Config, JobListen, Limits, TlsFiles, Token};
 use crate::error::StartupError;
-use crate::listener::{Slots, serve};
+use crate::job_api;
+use crate::listener::{Slots, serve, serve_both};
 use crate::pool::{Pool, Setup};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
@@ -35,7 +36,8 @@ use crate::util::or_pending;
 /// it the orderly way (requests in flight finish, one last tick).
 pub struct Running {
     addr: SocketAddr,
-    agent: Option<AgentPort>,
+    agent: Option<Port>,
+    job: Option<Port>,
     state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
@@ -47,11 +49,20 @@ pub struct Running {
     tls: Option<tls::Tls>,
 }
 
-/// The listener that serves the agent routes alone (`server.agent_listen`).
-struct AgentPort {
+/// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
+/// or the job service (`--job-listen`).
+struct Port {
     addr: SocketAddr,
     stop: oneshot::Sender<()>,
     serving: JoinHandle<()>,
+}
+
+impl Port {
+    /// Tells the listener to stop; the task to await for its drain.
+    fn stop(self) -> JoinHandle<()> {
+        let _ = self.stop.send(());
+        self.serving
+    }
 }
 
 /// Binds `addr`, or takes over `bound` (a listener the caller bound) when there is one,
@@ -111,6 +122,12 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         Some(agent) => Some(bind(agent, "server.agent_listen", None).await?),
         None => None,
     };
+    let job_listener = match listeners.job_listen {
+        Some(job) => Some(bind(job.addr, job.flag, None).await?),
+        None => None,
+    };
+    let job_acceptor = tls.as_ref().map(tls::Tls::job_acceptor);
+    let token = prepared.token.clone();
     let served_tls = acceptor.is_some();
     let Opened {
         shared,
@@ -144,12 +161,28 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         let app = agent_router(&shared);
         let serving = serve(listener, acceptor, app, limits, slots, stopped);
         info!(%addr, "listening for agents");
-        AgentPort {
+        Port {
             addr,
             stop,
             serving: tokio::spawn(serving),
         }
     });
+    // The job service, when it is on: the server holds its one job store exactly when
+    // `--job-listen` is given, so the listener and the service are there together.
+    let job = job_listener
+        .zip(job_api::from_server(&shared))
+        .map(|((listener, addr), api)| {
+            let (stop, stopped) = oneshot::channel::<()>();
+            let slots = Arc::new(Slots::new(limits.max_connections));
+            let app = job_api::port(api, token);
+            let serving = serve_both(listener, job_acceptor, app, limits, slots, stopped);
+            info!(%addr, tls = served_tls, "listening for the job service");
+            Port {
+                addr,
+                stop,
+                serving: tokio::spawn(serving),
+            }
+        });
     let ticking = Ticking(tokio::spawn(tick_loop(
         shared.clone(),
         ticker,
@@ -159,6 +192,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     Ok(Running {
         addr,
         agent,
+        job,
         state_file,
         shared,
         stop,
@@ -177,6 +211,7 @@ pub(crate) struct Listeners {
     listen_flag: &'static str,
     bound: Option<std::net::TcpListener>,
     agent_listen: Option<SocketAddr>,
+    job_listen: Option<JobListen>,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -223,6 +258,7 @@ pub(crate) fn prepare(
         listen_flag,
         bound,
         agent_listen,
+        job_listen,
         advertise_url,
         warnings,
         status,
@@ -302,6 +338,7 @@ pub(crate) fn prepare(
         listen_flag,
         bound,
         agent_listen,
+        job_listen,
         tls,
         limits,
     };
@@ -510,6 +547,12 @@ impl Running {
         self.agent.as_ref().map(|agent| agent.addr)
     }
 
+    /// The address the job service is served on (`--job-listen`), with the port the system
+    /// chose for port 0; `None` when the job service is off.
+    pub fn job_addr(&self) -> Option<SocketAddr> {
+        self.job.as_ref().map(|job| job.addr)
+    }
+
     /// A handle on the agent registry (the same registry the routes and the tick use),
     /// for reading what it records, such as [`js_registry::Registry::request_record`];
     /// `None` without agent flags.
@@ -574,16 +617,12 @@ impl Running {
     /// that says nothing would hide it. The cause is in the error and in the log.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
-        let agent = self.agent.take().map(|agent| {
-            let _ = agent.stop.send(());
-            agent.serving
-        });
-        let served = self.serving.await.map_err(io::Error::other);
-        let agent_served = match agent {
-            Some(serving) => serving.await.map_err(io::Error::other),
-            None => Ok(()),
-        };
-        let served = served.and(agent_served);
+        let ports = [self.agent.take(), self.job.take()];
+        let others: Vec<JoinHandle<()>> = ports.into_iter().flatten().map(Port::stop).collect();
+        let mut served = self.serving.await.map_err(io::Error::other);
+        for serving in others {
+            served = served.and(serving.await.map_err(io::Error::other));
+        }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;

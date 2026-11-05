@@ -28,8 +28,10 @@ js-types = { path = "../js-types" }
 js-usage = { path = "../js-usage" }
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
-hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["service", "tokio"] }
+# The lease and agent listeners speak HTTP/1.1; the job service's speaks HTTP/1.1 and HTTP/2
+# on one port (src/listener.rs, `serve_both`).
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["http1", "http2", "server", "server-auto", "service", "tokio"] }
 rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 serde.workspace = true
