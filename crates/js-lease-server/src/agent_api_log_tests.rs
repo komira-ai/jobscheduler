@@ -177,7 +177,7 @@ async fn one_credential_serves_every_job_on_a_host() {
     let reply_b = rig.beat(&b).await.unwrap();
     for (reply, jobs) in [
         (&reply_a, &["job-1", "job-2", "job-3"][..]),
-        (&reply_b, &["job-4"]),
+        (&reply_b, &["job-4"][..]),
     ] {
         assert_eq!(starts(reply).len(), jobs.len());
         for job in jobs {

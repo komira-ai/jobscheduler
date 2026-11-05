@@ -135,7 +135,7 @@ fn serving_of(name: &str, pool: &str, extra: &[&str]) -> Served {
     let config = config_of(dir.path(), pool, extra);
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1_000_000)));
     let (_source, agents) =
-        assemble(config.hosts, config.usage, &clock, &config.state_file).unwrap();
+        assemble(config.hosts, config.usage, &clock, &config.state_file, None).unwrap();
     let agents = agents.unwrap();
     let credential = Credential::of_token(JOIN);
     for host in ["h1", "h2"] {
