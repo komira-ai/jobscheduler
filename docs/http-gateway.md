@@ -157,7 +157,8 @@ lease routes take, compared by the same code.
 
 Nothing mounts the two transports yet, so no port serves them. Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it (the fleet calls, until the server gives their group its handles):
+directory serves it (the fleet calls, until the server gives their group its handles); the
+read calls are served (below):
 
 | calls | file |
 |---|---|
@@ -165,6 +166,53 @@ directory serves it (the fleet calls, until the server gives their group its han
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
 | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
+
+### Serving the read calls
+
+`GetJob`, `ListJobs`, `GetResult` and `GetLogs` are served from the job tables (`read.rs`).
+They read the store and nothing else: no call changes any state, none takes a lock of the
+server, and the only time they read is the service's clock, to tell an ended job past its
+retention end.
+
+| case | gRPC | gateway |
+|---|---|---|
+| a `job_id` that is not a job id | `INVALID_ARGUMENT`, `field: jobId` | 400 `invalid-argument`, `field` `jobId` |
+| no job with the id: never submitted, or swept after its retention window | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| `GetResult` or `GetLogs` of a job past its retention end and not yet swept | `NOT_FOUND`, `expired` | 410 `expired` |
+| `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
+| a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
+| a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+
+**`GetJob`** answers the job: its spec as submitted (a file's contents left empty), its state
+and start failure, its host once placed, whether a cancel was asked for, and its times
+(queued, placed, started, ended). The host silence is not set yet.
+
+**The `expired` window.** An ended job keeps its record and result until its retention end
+(the end plus the server's retention window, seven days by default). From that instant
+`GetResult` and `GetLogs` answer `expired`, until the sweep, which runs on the server's tick,
+deletes the row; then every call answers `unknown-job`, as for a job that never existed (no
+tombstone is kept). `GetJob` and `ListJobs` show the job until it is swept.
+
+**`GetResult`** of an ended job answers its stored result: the state it ended in, the exit
+code, the reason, the last 8 KiB of standard output and of standard error with whether either
+was cut, the times and the resource usage the agent reported. A job that ended without a
+result (lost, or failed to start) answers its state and times alone.
+
+**`GetLogs` without a stream** answers the job's state and the result's tails: for an ended
+job the same tails as `GetResult` (at most 8 KiB a stream, with `truncated`), and for a job
+that has not ended (queued, placed, starting or running) empty tails and `truncated` false,
+never an error. Live output is read with a stream.
+
+**`ListJobs`** keeps the jobs in any of the `states` (a state this server does not know
+matches none), carrying every one of the `labels` with the same value, and queued in the
+half-open window from `queuedAfterMs` (in) to `queuedBeforeMs` (out). Jobs come in the order
+of their ids. A page holds 100 jobs when the request asks for 0, and at most 1000: a larger
+`pageSize` is cut to 1000, not refused. A call reads the table 1000 rows at a time and stops
+when its page is full, at the end of the table, or after 10,000 rows; so a page is short only
+at the end of the table, where it carries no `nextPageToken`, or at that bound, where it
+carries one even if it holds few jobs or none. The page token resumes after the last job or
+row the page read; a job submitted between pages appears on a later page if its id sorts
+after the token, and no job is listed twice.
 
 ### The fleet calls
 

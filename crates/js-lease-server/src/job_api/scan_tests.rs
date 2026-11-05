@@ -1,24 +1,31 @@
 //! Source checks of `job_api`, read from the crate's own source tree: the presented token is
-//! compared in one place, and the job service reads no clock of its own and names no
-//! provider. Each check is also run on a text that breaks it, so it is shown to fail.
+//! compared in one place, the job service reads no clock of its own and names no provider,
+//! and the read calls take no lock. Each check is also run on a text that breaks it, so it is
+//! shown to fail.
 
 use std::fs;
 use std::path::Path;
 
-/// The sources of `job_api` that are not tests (every `.rs` file of the directory whose name
-/// does not end in `tests.rs`), as (file name, text), by file name.
+/// The sources of `job_api` that are not tests (every `.rs` file of the directory and of its
+/// subdirectories whose name does not end in `tests.rs`), as (path under the directory,
+/// text), by path.
 fn sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/job_api");
-    let mut sources: Vec<(String, String)> = fs::read_dir(&dir)
-        .expect("the module's directory reads")
-        .map(|entry| entry.expect("the directory entry reads").path())
-        .filter(|path| !path.to_string_lossy().ends_with("tests.rs"))
-        .map(|path| {
-            let name = path.file_name().expect("a file has a name");
-            let text = fs::read_to_string(&path).expect("the source reads");
-            (name.to_string_lossy().into_owned(), text)
-        })
-        .collect();
+    let mut sources = Vec::new();
+    let mut dirs = vec![dir.clone()];
+    while let Some(next) = dirs.pop() {
+        for entry in fs::read_dir(next).expect("the module's directory reads") {
+            let path = entry.expect("the directory entry reads").path();
+            let name = path.strip_prefix(&dir).expect("under the directory");
+            let name = name.to_string_lossy().into_owned();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if !name.ends_with("tests.rs") {
+                let text = fs::read_to_string(&path).expect("the source reads");
+                sources.push((name, text));
+            }
+        }
+    }
     sources.sort();
     sources
 }
@@ -118,4 +125,39 @@ fn the_job_api_reads_no_clock_and_names_no_provider() {
     let text = "let t = SystemTime::now(); let i = Instant::now(); \
                 fn p(c: &dyn CapacityProvider, e: &dyn ElasticProvider) {}";
     assert_eq!(forbidden(text), FORBIDDEN);
+}
+
+/// What the read calls must not name: a lock, or the lease table or the registry that the
+/// server guards with one.
+const LOCKS: [&str; 5] = ["Mutex", "RwLock", ".lock(", "Registry", "LeaseTable"];
+
+/// The words of [`LOCKS`] that `source` holds.
+fn locks(source: &str) -> Vec<&'static str> {
+    LOCKS
+        .into_iter()
+        .filter(|word| source.contains(word))
+        .collect()
+}
+
+/// Asserts that the read calls (`read.rs` and `read/view.rs`, both found among the sources)
+/// name no lock, no lease table and no registry, so none of them holds a lock of the server
+/// across a read of the store; and that the check finds each word in a text that uses it.
+#[test]
+fn the_read_calls_take_no_lock() {
+    let sources = sources();
+    let read: Vec<&(String, String)> = sources
+        .iter()
+        .filter(|(name, _)| name == "read.rs" || name == "read/view.rs")
+        .collect();
+    assert_eq!(
+        read.len(),
+        2,
+        "{:?}",
+        sources.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    for (name, text) in read {
+        assert_eq!(locks(text), Vec::<&str>::new(), "{name}");
+    }
+    let text = "let t: Mutex<LeaseTable<P, C>> = x; let r: RwLock<Registry> = y; t.lock();";
+    assert_eq!(locks(text), LOCKS);
 }
