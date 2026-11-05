@@ -591,7 +591,7 @@ mod tests {
         };
         let slots = Arc::new(Slots::new(limits.max_connections));
         let (stop, stopped) = oneshot::channel();
-        let client = tokio::spawn(async move {
+        let call = tokio::spawn(async move {
             let channel = Endpoint::from_shared(format!("http://{addr}"))
                 .unwrap()
                 .connect()
@@ -599,15 +599,14 @@ mod tests {
                 .unwrap();
             let mut grpc = Grpc::new(channel);
             grpc.ready().await.unwrap();
-            let call = tokio::spawn(async move {
-                let path = PathAndQuery::from_static("/hold");
-                let request = tonic::Request::new(());
-                grpc.unary::<(), (), _>(request, path, ProstCodec::default())
-                    .await
-            });
+            let path = PathAndQuery::from_static("/hold");
+            let request = tonic::Request::new(());
+            grpc.unary::<(), (), _>(request, path, ProstCodec::default())
+                .await
+        });
+        let stopper = tokio::spawn(async move {
             entered.notified().await;
             let _ = stop.send(());
-            call
         });
         let bound = Duration::from_secs(30);
         let ended = serve_both(listener, None, app, limits, slots.clone(), stopped);
@@ -623,7 +622,7 @@ mod tests {
             slots.gate.available_permits(),
             usize::from(limits.max_connections)
         );
-        let call = client.await.unwrap();
+        stopper.await.unwrap();
         assert!(call.await.unwrap().is_err());
     }
 }
