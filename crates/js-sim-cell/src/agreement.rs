@@ -152,12 +152,9 @@ impl fmt::Display for Disagreement {
                     writeln!(f, "  item {}: fake {fake}, real {real}", item.0)?;
                 }
                 for (side, lines) in [(Side::Fake, fake_lines), (Side::Real, real_lines)] {
-                    writeln!(
-                        f,
-                        "last {} trace lines, {} agents:",
-                        lines.len(),
-                        side.name()
-                    )?;
+                    let heading =
+                        format!("last {} trace lines, {} agents:", lines.len(), side.name());
+                    writeln!(f, "{heading}")?;
                     for line in lines {
                         writeln!(f, "  {line}")?;
                     }

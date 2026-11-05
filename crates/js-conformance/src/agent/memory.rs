@@ -223,6 +223,7 @@ mod tests {
         assert_eq!(listed[0].labels[label::RUN], "a");
         assert_eq!((listed[0].running_ms, listed[0].never_started), (0, false));
 
+        assert!(!runtime.exit("zz", 0), "no container of that run");
         assert!(runtime.exit("a", 3));
         assert_eq!(runtime.poll(&a).unwrap(), exited(3));
         runtime.stop(&b, Duration::ZERO).unwrap();
