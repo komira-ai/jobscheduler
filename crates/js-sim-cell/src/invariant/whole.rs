@@ -48,7 +48,7 @@ impl Checker {
             if let (ClientEvent::Placed { host }, Some(lease)) = (&heard.event, lease) {
                 let key = (host.clone(), lease.to_string());
                 let reported = self.ready.get(&key);
-                if !reported.is_some_and(|at| *at <= heard.at) {
+                if reported.is_none_or(|at| *at > heard.at) {
                     let detail = format!(
                         "whole-host {} was granted lease {} on host {} at {} before the \
                          host's agent reported ready for that lease",
