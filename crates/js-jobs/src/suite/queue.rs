@@ -54,8 +54,8 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
     );
     rig.store.fail_read_after(0);
     assert_eq!(
-        rig.jobs.queued().map(|jobs| jobs.len()),
-        Err(injected()),
+        rig.jobs.queued().err(),
+        Some(injected()),
         "{name}: a failed read is not an error"
     );
     rig.put_raw("job/q-bad", vec![FORMAT, 0]);
@@ -112,8 +112,8 @@ pub fn live_allocations_lists_every_booked_or_releasing_allocation<B: Backend>(b
     );
     rig.store.fail_read_after(0);
     assert_eq!(
-        rig.jobs.live_allocations().map(|live| live.len()),
-        Err(injected()),
+        rig.jobs.live_allocations().err(),
+        Some(injected()),
         "{name}: a failed read is not an error"
     );
     rig.put_raw(&keys::allocation(&job_id("l-bad")), vec![FORMAT, 0]);
