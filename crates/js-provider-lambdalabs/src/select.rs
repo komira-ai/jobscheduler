@@ -183,6 +183,8 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         }
     }
 

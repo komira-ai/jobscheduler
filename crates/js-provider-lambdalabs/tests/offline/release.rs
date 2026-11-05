@@ -312,6 +312,8 @@ fn request(gpus: u64) -> Demand {
         arch: Some("x86_64".to_owned()),
         isa_level: None,
         exec: None,
+        network: Default::default(),
+        host_ports: Vec::new(),
     }
 }
 

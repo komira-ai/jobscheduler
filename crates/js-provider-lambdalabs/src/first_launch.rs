@@ -295,6 +295,8 @@ impl Runner<'_, '_> {
             arch: Some("x86_64".to_owned()),
             isa_level: None,
             exec: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,

@@ -304,6 +304,25 @@ fn the_ceiling_is_advertised_in_hello() {
     assert_eq!(widest_hello.validate(), Ok(()));
 }
 
+/// Proves a hello as an agent from before the egress keys sends it (its text names neither
+/// key) validates, and that its capabilities read as the default ceiling: level `none`, no
+/// port forwarded. Catches a reader that gives such a host a network or a port, which would
+/// place a job there that the agent would run with less than it asked for.
+#[test]
+fn an_old_hello_reads_as_ceiling_none() {
+    let text = serde_json::to_string(&hello()).unwrap();
+    assert!(!text.contains(EGRESS_CAPABILITY));
+    assert!(!text.contains(EGRESS_PORTS_CAPABILITY));
+    let old: Hello = serde_json::from_str(&text).unwrap();
+    assert_eq!(old.validate(), Ok(()));
+    let read = NetworkCeiling::from_capabilities(&old.capabilities);
+    assert_eq!(read, Ok(NetworkCeiling::default()));
+    let read = read.unwrap();
+    assert!(!read.forwards(8080));
+    assert!(!read.allows(JobNetwork::AllowList));
+    assert!(read.allows(JobNetwork::None));
+}
+
 fn check_hello(pairs: &[(&str, &str)]) -> js_agent_wire::ValidationError {
     broken(
         &hello(),

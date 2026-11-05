@@ -28,12 +28,12 @@ use crate::sched::engine_rig::{GIB, T0, hello_of, pool, rig, share_of};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
 
 /// The host `name`.
-fn host(name: &str) -> HostId {
+pub(super) fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
 /// A host of 8 cores and 16 GiB, with an `arch`.
-fn shape() -> Shape {
+pub(super) fn shape() -> Shape {
     let caps = [("arch".to_owned(), "x86_64".to_owned())];
     Shape::new(
         Resources::new(8000, 16 * GIB, 0, None).unwrap(),
@@ -42,12 +42,12 @@ fn shape() -> Shape {
 }
 
 /// A clock at [`T0`].
-fn clock() -> ManualClock {
+pub(super) fn clock() -> ManualClock {
     ManualClock::new(Timestamp::from_millis(T0))
 }
 
 /// A placer on `clock` whose engine was told of `hosts` saying hello, each of [`shape`].
-fn placer_on(clock: &ManualClock, hosts: &[&str]) -> SchedPlacer {
+pub(super) fn placer_on(clock: &ManualClock, hosts: &[&str]) -> SchedPlacer {
     let placer = SchedPlacer::new(Settings::default(), SharedClock::new(clock.clone()));
     for name in hosts {
         placer.host_up(&host(name), &shape());
@@ -55,13 +55,16 @@ fn placer_on(clock: &ManualClock, hosts: &[&str]) -> SchedPlacer {
     placer
 }
 
-/// The hosts `names`.
-fn open(names: &[&str]) -> BTreeSet<HostId> {
-    names.iter().map(|name| host(name)).collect()
+/// The hosts `names`, each advertising no network and no port.
+pub(super) fn open(names: &[&str]) -> BTreeMap<HostId, NetworkCeiling> {
+    names
+        .iter()
+        .map(|name| (host(name), NetworkCeiling::default()))
+        .collect()
 }
 
 /// A job asking for one core and `gib` GiB.
-fn sized(gib: u64) -> JobSpec {
+pub(super) fn sized(gib: u64) -> JobSpec {
     JobSpec {
         needs: Needs::Shape(Resources::new(1000, gib * GIB, 0, None).unwrap()),
         ..spec()
@@ -69,7 +72,7 @@ fn sized(gib: u64) -> JobSpec {
 }
 
 /// A booking of one core and `gib` GiB.
-fn booked(gib: u64) -> Booked {
+pub(super) fn booked(gib: u64) -> Booked {
     Booked::Shape {
         cpu_millis: 1000,
         memory_bytes: gib * GIB,
@@ -79,7 +82,7 @@ fn booked(gib: u64) -> Booked {
 }
 
 /// Records the job `id`, queued with `spec` at `priority`.
-fn queue_spec(jobs: &ServerJobs, id: &str, spec: JobSpec, priority: i32) -> JobId {
+pub(super) fn queue_spec(jobs: &ServerJobs, id: &str, spec: JobSpec, priority: i32) -> JobId {
     let new = NewJob {
         id: Some(JobId::parse(id).unwrap()),
         spec,
@@ -89,18 +92,18 @@ fn queue_spec(jobs: &ServerJobs, id: &str, spec: JobSpec, priority: i32) -> JobI
 }
 
 /// Records the job `id`, queued asking for `gib` GiB at `priority`.
-fn queue(jobs: &ServerJobs, id: &str, gib: u64, priority: i32) -> JobId {
+pub(super) fn queue(jobs: &ServerJobs, id: &str, gib: u64, priority: i32) -> JobId {
     queue_spec(jobs, id, sized(gib), priority)
 }
 
 /// The state of the job `id`.
-fn state(jobs: &ServerJobs, id: &str) -> JobState {
+pub(super) fn state(jobs: &ServerJobs, id: &str) -> JobState {
     let id = JobId::parse(id).unwrap();
     jobs.get_job(&id).unwrap().unwrap().state
 }
 
 /// Runs the placed job `id` to its exit.
-fn run_to_exit(jobs: &ServerJobs, id: &JobId) {
+pub(super) fn run_to_exit(jobs: &ServerJobs, id: &JobId) {
     jobs.transition(id, JobState::Placed, JobState::Starting)
         .unwrap();
     jobs.transition(id, JobState::Starting, JobState::Running)
@@ -113,19 +116,19 @@ fn run_to_exit(jobs: &ServerJobs, id: &JobId) {
 }
 
 /// Runs the placed job `id` to its exit and frees its allocation on its host's confirmation.
-fn finish(jobs: &ServerJobs, id: &JobId) {
+pub(super) fn finish(jobs: &ServerJobs, id: &JobId) {
     run_to_exit(jobs, id);
     free_allocation(jobs, id, Freed::HostConfirmed).unwrap();
 }
 
 /// One pass of `placer` over `jobs` on the hosts `names`: the jobs it placed.
-fn pass(placer: &SchedPlacer, jobs: &ServerJobs, names: &[&str]) -> Vec<String> {
+pub(super) fn pass(placer: &SchedPlacer, jobs: &ServerJobs, names: &[&str]) -> Vec<String> {
     let placed = placer.place_jobs(jobs, &open(names), &NoStarts).unwrap();
     placed.iter().map(ToString::to_string).collect()
 }
 
 /// No job placed.
-const NONE: [&str; 0] = [];
+pub(super) const NONE: [&str; 0] = [];
 
 /// Asserts that when the only host frees, the front job that fits it gets it and the job
 /// behind it stays queued, though it alone would have fitted the room left before the host
@@ -554,7 +557,7 @@ fn a_pass_that_cannot_read_the_tables_places_nothing() {
 
 /// The agent side of a server under `--placement js-sched` holding job tables over a store
 /// that can fail, with `h1` registered, and the store and directory it runs on.
-fn served(name: &str) -> (Arc<Agents>, Arc<Interfere<Fake>>, js_testkit::dir::TestDir) {
+pub(super) fn served(name: &str) -> (Arc<Agents>, Arc<Interfere<Fake>>, js_testkit::dir::TestDir) {
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let shared = SharedClock::new(clock());
