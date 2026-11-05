@@ -25,6 +25,19 @@ impl Registry {
         booked.map(|host| (host.host, host.leases)).collect()
     }
 
+    /// Since when `host` has been silent past the grace (design section 6.3): the instant
+    /// the grace ran out after it was last heard (for a host not heard since the registry was
+    /// seated, after it was seated); `None` while it is heard within the grace, and for a host
+    /// the registry does not hold. It changes no host's record and ends no work; like every
+    /// locking call it first runs the housekeeping, which forgets the hosts lost past the
+    /// retention that hold nothing.
+    pub fn silent_since(&self, host: &HostId) -> Option<Timestamp> {
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
+        let record = state.records.get(host)?;
+        record.silent_since(now, self.grace_ms())
+    }
+
     pub(super) fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let view = self.viewer((&state.book, &state.runs, &state.marks), now);
         state

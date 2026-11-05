@@ -20,6 +20,10 @@
 //! [`SWEEP_BATCH`] rows to a transaction; [`JobStore::raise_deadlines_at_boot`] raises every
 //! stored retention end to at least the boot plus [`BOOT_GRACE`] before the first tick, so an
 //! outage longer than the window deletes no result before a client could read it.
+//! [`JobStore::raise_at_boot`] commits that raise, and in the same transaction gives every
+//! queued, placed or starting job a deadline floor ([`JobRecord::deadline_floor`]) of at least
+//! the boot plus [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout
+//! may end it, so an outage longer than either fails no job at the first tick.
 //!
 //! # Keys
 //!
@@ -65,6 +69,7 @@
 //! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
 //! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
+//! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, at its version, or nothing when none is |
 //!
 //! Two reads serve the placement engine: [`JobStore::queued`], every queued job in queue
 //! order ([`queue_order`]: the higher priority first, then the earlier submit, then the job

@@ -334,6 +334,7 @@ pub(super) fn read(table: toml::Table, client: &Token) -> Result<Read, StartupEr
         pool,
         tokens,
         mint_provider: Some(joined.name.clone()),
+        job_limits: crate::job_expiry::JobLimits::default(),
     };
     Ok(Read {
         name: joined.name,

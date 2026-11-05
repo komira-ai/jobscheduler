@@ -1,7 +1,7 @@
 //! The registering side of the server: the registry, the join tokens, the hello limit
 //! and the file of bindings, and how they are put together at start.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,6 +20,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
@@ -80,7 +81,18 @@ pub(crate) struct Agents {
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
     unclean: Mutex<BTreeSet<HostId>>,
+    /// The pool's `max_queue_wait` and `start_timeout`, which the job pass of the tick
+    /// enforces ([`Agents::job_pass`]).
+    pub(crate) job_limits: JobLimits,
+    /// For each host, the session whose job listing was last committed: a listing of another
+    /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
+    listed_sessions: Mutex<BTreeMap<HostId, Session>>,
 }
+
+/// A host's session as the job side tells one from another: the epoch of its hello and when
+/// the hello was taken, in milliseconds (a host removed and admitted again starts its epochs
+/// over, at a later hello).
+pub(crate) type Session = (u64, Option<u64>);
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
 /// `suffix` added to its name.
@@ -131,6 +143,7 @@ pub(crate) fn assemble_placed(
                 estimate_feed,
                 cpu_slack,
                 max_lease_wall,
+                job_limits,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -182,6 +195,8 @@ pub(crate) fn assemble_placed(
                 jobs: None,
                 placer: placer.clone(),
                 unclean: Mutex::default(),
+                job_limits,
+                listed_sessions: Mutex::default(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
@@ -224,6 +239,8 @@ impl Agents {
             jobs: None,
             placer: None,
             unclean: Mutex::default(),
+            job_limits: JobLimits::default(),
+            listed_sessions: Mutex::default(),
         }
     }
 
@@ -234,6 +251,34 @@ impl Agents {
             jobs: Some(jobs),
             ..self
         }
+    }
+
+    /// This agent side holding its jobs to `limits`, for a test of the job pass.
+    #[cfg(test)]
+    pub(crate) fn with_job_limits(self, limits: JobLimits) -> Self {
+        Self {
+            job_limits: limits,
+            ..self
+        }
+    }
+
+    /// Whether a job listing of `host` in `session` is the first since the host's hello: no
+    /// listing of that session has been committed ([`Agents::listed`]).
+    pub(crate) fn first_listing(&self, host: &HostId, session: Session) -> bool {
+        let listed = self
+            .listed_sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        listed.get(host) != Some(&session)
+    }
+
+    /// Records that a job listing of `host` in `session` was committed.
+    pub(crate) fn listed(&self, host: &HostId, session: Session) {
+        let mut listed = self
+            .listed_sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        listed.insert(host.clone(), session);
     }
 
     /// This agent side placing with `placer` (`--placement js-sched`), for a test of the

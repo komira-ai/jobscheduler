@@ -82,7 +82,7 @@ struct Walker {
 
 impl Engine {
     /// Whether the engine holds a job allocation on `host`.
-    pub(super) fn holds_jobs_on(&self, host: &HostId) -> bool {
+    pub(crate) fn holds_jobs_on(&self, host: &HostId) -> bool {
         self.jobs.values().any(|hold| hold.host == *host)
     }
 

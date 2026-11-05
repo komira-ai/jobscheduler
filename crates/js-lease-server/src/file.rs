@@ -33,6 +33,7 @@ use crate::capacity::CapacitySource;
 use crate::config::Token;
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
+use crate::job_expiry::JobLimits;
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
 
@@ -277,6 +278,9 @@ pub(crate) struct Registering {
     /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
     /// elastic pool's launches are minted for under the provider kind's name.
     pub(crate) mint_provider: Option<String>,
+    /// The pool's `max_queue_wait` and `start_timeout`: an elastic pool's settings, and the
+    /// defaults for a joined pool, which has no keys for them.
+    pub(crate) job_limits: JobLimits,
 }
 
 impl Registering {
@@ -673,6 +677,7 @@ fn read_pool(
                 path_grace: settings.path_grace,
             };
             let mut registering = elastic.finish(built, client)?;
+            registering.job_limits = JobLimits::of(&settings);
             let reach = match reach {
                 Some(reach) => reach,
                 None => resolved.shorthand(&name, &kind, &p.map),
@@ -862,6 +867,7 @@ impl Elastic<'_> {
             pool,
             tokens,
             mint_provider: None,
+            job_limits: JobLimits::default(),
         })
     }
 }

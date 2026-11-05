@@ -119,7 +119,7 @@ pub(crate) trait History: Send + Sync {
 }
 
 /// A shared handle that is equal only to a clone of itself.
-struct Handle<T: ?Sized>(Arc<T>);
+pub(super) struct Handle<T: ?Sized>(pub(super) Arc<T>);
 
 impl<T: ?Sized> Clone for Handle<T> {
     fn clone(&self) -> Self {

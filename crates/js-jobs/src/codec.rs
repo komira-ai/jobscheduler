@@ -127,6 +127,8 @@ pub(crate) mod job_tag {
     pub const RESULT_ENDED_AT: u16 = 39;
     /// What it used: the CPU time (time) and then the peak memory in bytes (u64).
     pub const RESULT_USAGE: u16 = 40;
+    /// The earliest instant a time limit may end the job (time).
+    pub const DEADLINE_FLOOR: u16 = 41;
 }
 
 /// The tags of an allocation row.
@@ -355,6 +357,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put_opt(t::CANCEL_REQUESTED_AT, job.cancel_requested_at.map(time));
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
     result_fields::put_result(&mut row, job.result.as_ref());
+    row.put_opt(t::DEADLINE_FLOOR, job.deadline_floor.map(time));
     row.finish(&job.carried)
 }
 
@@ -844,6 +847,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let cancel_requested_at = fields.opt(t::CANCEL_REQUESTED_AT, time_of)?;
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
+    let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     Ok(JobRecord {
         id,
         spec,
@@ -858,6 +862,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         cancel_requested_at,
         result,
         retention_ends,
+        deadline_floor,
         carried: fields.carried(),
     })
 }

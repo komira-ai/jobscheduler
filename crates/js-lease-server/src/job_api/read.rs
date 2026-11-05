@@ -20,6 +20,15 @@
 //! A swept job has no tombstone: it is the same unknown job as one that never existed.
 //! `GetJob` and `ListJobs` show a job until it is swept, its retention end passed or not.
 //!
+//! # Host silence
+//!
+//! `GetJob` and `ListJobs` show, for a job that has not ended and has a host, since when that
+//! host has missed its grace (`host_silent_since_ms`, design section 6.3), as the context's
+//! [`Silence`] source says (the registry's, [`Ctx::with_silence`]); the field is absent while
+//! the host is heard, for a job with no host or one that has ended, and without a source. It is
+//! read at each call and drops the moment the host is heard again. No clock turns silence into
+//! a change of the job's state.
+//!
 //! # `GetLogs` without a stream
 //!
 //! The request names the job only. The answer is the job's state and the tails of its
@@ -50,6 +59,7 @@
 //! listed twice.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use js_jobs::{JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
 use js_lease::Clock;
@@ -58,9 +68,11 @@ use js_proto::v1::{
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
 use js_state::{ResumeToken, StoreTime};
+use js_types::HostId;
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
+use super::fleet::Handle;
 use crate::job_store::ServerJobs;
 
 pub(crate) mod view;
@@ -84,13 +96,29 @@ const JOB_ID_FIELD: &str = "jobId";
 /// The field a bad page token is named by: `page_token`, by its JSON name.
 const PAGE_TOKEN_FIELD: &str = "pageToken";
 
-/// The state of the read group: how a listing reads the table.
+/// Since when a host has been silent past its grace (design section 6.3), as the read calls
+/// show it.
+pub(crate) trait Silence: Send + Sync {
+    /// The instant `host` missed its grace, in milliseconds since the Unix epoch; `None` while
+    /// the host is heard within it, and for a host no one holds.
+    fn silent_since(&self, host: &HostId) -> Option<u64>;
+}
+
+impl Silence for js_registry::Registry {
+    fn silent_since(&self, host: &HostId) -> Option<u64> {
+        js_registry::Registry::silent_since(self, host).map(|at| at.millis())
+    }
+}
+
+/// The state of the read group: how a listing reads the table, and where host silence is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ctx {
     /// The most rows one read of the table returns: [`SCAN_WINDOW`].
     pub(super) scan_window: NonZeroUsize,
     /// The most rows one `ListJobs` call reads: [`SCAN_BOUND`].
     pub(super) scan_bound: NonZeroUsize,
+    /// Where a job's host silence is read; `None` shows none.
+    pub(super) silence: Option<Handle<dyn Silence>>,
     /// A value only tests set, so that a test can tell a context it gave from the default.
     #[cfg(test)]
     pub(super) mark: u32,
@@ -101,9 +129,35 @@ impl Default for Ctx {
         Ctx {
             scan_window: SCAN_WINDOW,
             scan_bound: SCAN_BOUND,
+            silence: None,
             #[cfg(test)]
             mark: 0,
         }
+    }
+}
+
+impl Ctx {
+    /// The same context reading a job's host silence from `silence`.
+    #[must_use]
+    pub(crate) fn with_silence(self, silence: Arc<dyn Silence>) -> Ctx {
+        Ctx {
+            silence: Some(Handle(silence)),
+            ..self
+        }
+    }
+}
+
+/// `job` as the read calls show it: its record, with the silence of its host when it has not
+/// ended and has one, as `ctx` reads it.
+fn shown(ctx: &Ctx, job: &JobRecord) -> v1::Job {
+    let holding = job.host.as_ref().filter(|_| !job.state.is_ended());
+    let source = ctx.silence.as_ref();
+    let silent = holding
+        .zip(source)
+        .and_then(|(host, source)| source.0.silent_since(host));
+    v1::Job {
+        host_silent_since_ms: silent,
+        ..view::job(job)
     }
 }
 
@@ -188,7 +242,7 @@ pub(super) async fn get_job(
 ) -> Result<Response<GetJobResponse>, Status> {
     let job = Reads(&api.jobs).job(&request.into_inner().job_id)?;
     Ok(Response::new(GetJobResponse {
-        job: Some(view::job(&job)),
+        job: Some(shown(&api.read, &job)),
     }))
 }
 
@@ -326,7 +380,7 @@ pub(super) async fn list_jobs(
     };
     let (jobs, next) = list(&api.read, Reads(&api.jobs), &filter, resume, size)?;
     Ok(Response::new(ListJobsResponse {
-        jobs: jobs.iter().map(view::job).collect(),
+        jobs: jobs.iter().map(|job| shown(&api.read, job)).collect(),
         next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),
     }))
 }

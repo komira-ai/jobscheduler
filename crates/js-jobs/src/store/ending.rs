@@ -1,5 +1,6 @@
 //! Ending a job with its result and retention end, deleting the jobs past their retention
-//! end, and raising retention ends at boot (design sections 3.2, 6.1 and 6.7). Only job rows
+//! end, and raising retention ends and deadline floors at boot (design sections 3.2, 6.1 and
+//! 6.7). Only job rows
 //! are read, written or deleted here, apart from the release of a booked allocation in the
 //! transaction that ends its job; allocation rows are history, kept as long as the placement
 //! estimates need them (design question 14), and no retention deletes them.
@@ -12,7 +13,7 @@ use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{AllocationRecord, AllocationStep, JobRecord, may_move};
-use crate::result::{JobEnd, SWEEP_BATCH, ended, past_retention, raised_at_boot};
+use crate::result::{JobEnd, SWEEP_BATCH, ended, floored_at_boot, past_retention, raised_at_boot};
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Ends the job `id` as `end` says (design section 3.2): in one transaction the job takes
@@ -185,5 +186,41 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             }
         }
         Ok(txn)
+    }
+
+    /// The boot of a server (design section 6.7, step 7), committed in one transaction before
+    /// the first tick: each stored retention end is raised as
+    /// [`JobStore::raise_deadlines_at_boot`] raises it, and each job that waits to be placed or
+    /// to start (queued, placed or starting) gets a deadline floor of at least `boot` plus
+    /// [`BOOT_GRACE`](crate::BOOT_GRACE), the earliest instant its queue wait or its start
+    /// timeout may end it. A floor is raised to that instant, never by it, so boots in a loop
+    /// do not stretch a wait, and a later floor is kept. Only an ended job has a retention end
+    /// and only a waiting one gets a floor, so no row is put twice. A row a later build wrote
+    /// is left as it is. Returns how many rows it wrote; with none it commits nothing.
+    ///
+    /// # Errors
+    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] (naming
+    /// the first job written) when a row changed between its read and the commit, and nothing
+    /// is written; [`JobStoreError::Store`].
+    pub fn raise_at_boot(&self, boot: StoreTime) -> Result<usize, JobStoreError> {
+        let mut txn = Txn::new();
+        let mut first: Option<JobId> = None;
+        for (key, row) in self.store.scan_prefix(keys::JOB)? {
+            let job = match job_at(&key, &row.value) {
+                Ok(job) => job,
+                Err(JobStoreError::UnknownRow { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            let raised = raised_at_boot(&job, boot).or_else(|| floored_at_boot(&job, boot));
+            if let Some(raised) = raised {
+                first.get_or_insert_with(|| raised.id.clone());
+                txn = txn.put(key, encode_job(&raised)?, Cond::Version(row.version));
+            }
+        }
+        let written = txn.ops().len();
+        if let Some(first) = first {
+            self.commit(&first, txn)?;
+        }
+        Ok(written)
     }
 }

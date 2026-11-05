@@ -104,6 +104,7 @@ where
     restart_keeps_results(backend);
     a_result_survives_the_end_of_its_allocation(backend);
     retention_ends_are_raised_at_boot_after_a_long_outage(backend);
+    a_boot_raises_floors_and_retention_ends_in_one_commit(backend);
     retention_uses_the_injected_clock(backend);
     the_result_and_the_state_change_commit_together(backend);
     an_overlong_tail_is_cut_on_a_character_boundary(backend);
@@ -184,6 +185,7 @@ macro_rules! job_store_tests {
             restart_keeps_results,
             a_result_survives_the_end_of_its_allocation,
             retention_ends_are_raised_at_boot_after_a_long_outage,
+            a_boot_raises_floors_and_retention_ends_in_one_commit,
             retention_uses_the_injected_clock,
             the_result_and_the_state_change_commit_together,
             an_overlong_tail_is_cut_on_a_character_boundary,

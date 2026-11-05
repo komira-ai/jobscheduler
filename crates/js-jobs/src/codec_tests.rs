@@ -52,6 +52,7 @@ fn full_job() -> JobRecord {
         cancel_requested_at: Some(at(5)),
         result: Some(full_result()),
         retention_ends: Some(at(6)),
+        deadline_floor: Some(at(7)),
         carried: Carried::default(),
     }
 }
@@ -81,6 +82,7 @@ fn bare_job() -> JobRecord {
         cancel_requested_at: None,
         result: None,
         retention_ends: None,
+        deadline_floor: None,
         carried: Carried::default(),
     }
 }
@@ -397,6 +399,7 @@ fn the_layout_is_pinned_byte_for_byte() {
         (38, seconds(3)),
         (39, seconds(4)),
         (40, [seconds(7), 4096u64.to_be_bytes().to_vec()].concat()),
+        (41, seconds(7)),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -526,10 +529,12 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_PLACED_AT,
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
+        job_tag::DEADLINE_FLOOR,
     ] {
         row = without(&row, tag);
     }
     let job = decode_job(&row).expect("reads");
+    assert_eq!(job.deadline_floor, None, "a row before floors has none");
     assert_eq!(
         job.result,
         Some(JobResult {
