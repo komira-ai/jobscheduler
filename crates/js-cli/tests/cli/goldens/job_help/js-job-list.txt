@@ -33,7 +33,7 @@ Options:
       --states <NAME>
           Only jobs in one of these states. Empty: every state. Repeat for more.
           
-          [possible values: queued, placed, starting, running, succeeded, failed, cancelled, lost, failed-to-start]
+          [possible values: unspecified, queued, placed, starting, running, succeeded, failed, cancelled, lost, failed-to-start]
 
   -h, --help
           Print help (see a summary with '-h')

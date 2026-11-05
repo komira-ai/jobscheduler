@@ -82,7 +82,7 @@ impl Fake {
         let fake = self.clone();
         Dialer::new(move |_host, _port| {
             on_dial();
-            let (client, server) = tokio::io::duplex(1 << 16);
+            let (client, server) = relayed(&fake.tasks);
             let task = tokio::spawn(serve(fake.clone(), server));
             fake.tasks.lock().unwrap().push(task.abort_handle());
             Box::pin(async move { Ok(Box::new(client) as Box<dyn Io>) })
@@ -111,6 +111,19 @@ pub fn refusing() -> Dialer {
             ))
         })
     })
+}
+
+/// The client's and the server's ends of one connection, joined by a relay task listed in
+/// `tasks`: aborting the relay drops both ends, so the client sees the connection close
+/// (the server's own tasks, which tonic spawns per connection, would keep it open).
+fn relayed(tasks: &Mutex<Vec<AbortHandle>>) -> (DuplexStream, DuplexStream) {
+    let (client, mut near) = tokio::io::duplex(1 << 16);
+    let (mut far, server) = tokio::io::duplex(1 << 16);
+    let relay = tokio::spawn(async move {
+        let _ = tokio::io::copy_bidirectional(&mut near, &mut far).await;
+    });
+    tasks.lock().unwrap().push(relay.abort_handle());
+    (client, server)
 }
 
 /// Serves one connection.

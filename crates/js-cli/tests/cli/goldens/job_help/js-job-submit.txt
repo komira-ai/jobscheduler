@@ -30,7 +30,7 @@ Options:
       --spec.constraints.exec <NAME>
           The mode the host runs jobs in. Unspecified: either.
           
-          [possible values: container, sandbox-exec]
+          [possible values: unspecified, container, sandbox-exec]
 
       --spec.constraints.os <TEXT>
           The operating system: linux or macos. Empty: any.
@@ -68,7 +68,7 @@ Options:
       --spec.network <NAME>
           What the job may reach over the network. Unspecified: none.
           
-          [possible values: none, allow-list, open]
+          [possible values: unspecified, none, allow-list, open]
 
       --spec.ports-file <PATH>
           The host ports forwarded to the job. Empty: none, and no inbound path to the job. Read from a file holding the field's value in proto3 JSON.

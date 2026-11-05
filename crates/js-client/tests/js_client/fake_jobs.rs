@@ -93,7 +93,7 @@ impl Fake {
     pub fn dialer(&self, tls: Option<Arc<rustls::ServerConfig>>) -> Dialer {
         let fake = self.clone();
         Dialer::new(move |host, port| {
-            let (client, server) = tokio::io::duplex(1 << 16);
+            let (client, server) = relayed(&fake.tasks);
             fake.dials.lock().unwrap().push((host.to_owned(), port));
             let task = tokio::spawn(serve(fake.clone(), server, tls.clone()));
             fake.tasks.lock().unwrap().push(task.abort_handle());
@@ -123,6 +123,19 @@ pub fn refusing() -> Dialer {
             ))
         })
     })
+}
+
+/// The client's and the server's ends of one connection, joined by a relay task listed in
+/// `tasks`: aborting the relay drops both ends, so the client sees the connection close
+/// (the server's own tasks, which tonic spawns per connection, would keep it open).
+fn relayed(tasks: &Mutex<Vec<AbortHandle>>) -> (DuplexStream, DuplexStream) {
+    let (client, mut near) = tokio::io::duplex(1 << 16);
+    let (mut far, server) = tokio::io::duplex(1 << 16);
+    let relay = tokio::spawn(async move {
+        let _ = tokio::io::copy_bidirectional(&mut near, &mut far).await;
+    });
+    tasks.lock().unwrap().push(relay.abort_handle());
+    (client, server)
 }
 
 /// Serves one connection.

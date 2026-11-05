@@ -262,7 +262,7 @@ fn an_unknown_enum_name_is_usage_exit_2() {
     assert_eq!(got.code, 2, "{}", got.err);
     assert!(
         got.err
-            .contains("[possible values: queued, placed, starting, running"),
+            .contains("[possible values: unspecified, queued, placed, starting, running"),
         "{}",
         got.err
     );
