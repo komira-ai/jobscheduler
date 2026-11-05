@@ -4,10 +4,10 @@
 //! (the HTTP/JSON routes of `js-api-gateway`). Both call the same [`JobApi`].
 //!
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
-//! file of its group serves it; the fleet group's calls do until its context is given the
-//! server's handles (`fleet::Ctx::served`). The server builds the service from its state in
-//! one place, [`from_server`], and serves both transports on the port of `--job-listen`
-//! through [`port`] (`wiring.rs`).
+//! file of its group serves it; the read group (`read.rs`) is served, and the fleet group's
+//! calls answer it until its context is given the server's handles (`fleet::Ctx::served`).
+//! The server builds the service from its state in one place, [`from_server`], and serves
+//! both transports on the port of `--job-listen` through [`port`] (`wiring.rs`).
 //!
 //! # One file per call group
 //!
@@ -70,6 +70,12 @@ mod wiring;
 pub(crate) use auth::{Bearer, BearerLayer};
 pub(crate) use wiring::{from_server, port};
 
+#[cfg(test)]
+mod read_list_tests;
+#[cfg(test)]
+mod read_tests;
+#[cfg(test)]
+mod read_view_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]

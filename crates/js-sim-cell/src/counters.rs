@@ -64,6 +64,22 @@ impl Counters {
     pub(crate) fn bump(&mut self, counter: Counter) {
         *self.0.entry(counter).or_insert(0) += 1;
     }
+
+    /// The counts of `all` added together.
+    pub(crate) fn sum<'a>(all: impl IntoIterator<Item = &'a Counters>) -> Counters {
+        let mut total = Counters::default();
+        for counters in all {
+            total.absorb(counters);
+        }
+        total
+    }
+
+    /// Adds every count of `other` to this one's.
+    pub(crate) fn absorb(&mut self, other: &Counters) {
+        for (counter, count) in other.iter() {
+            *self.0.entry(counter).or_insert(0) += count;
+        }
+    }
 }
 
 #[cfg(test)]

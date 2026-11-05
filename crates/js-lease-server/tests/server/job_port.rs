@@ -1,7 +1,8 @@
 //! The job service's port (`--job-listen`) over real sockets on 127.0.0.1, port 0: gRPC and
 //! the HTTP/JSON gateway on the one port, the bearer token in front of both, the lease
 //! routes kept apart from it, TLS, and the stop. Every call of the job service answers
-//! `UNIMPLEMENTED` until it is served, which is what these tests reach.
+//! `UNIMPLEMENTED` until it is served; `GetJob` is served from the server's job store, and
+//! these tests ask it for a job that does not exist, which the store answers `unknown-job`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,13 +28,13 @@ use crate::job_listen::job_args;
 use crate::support::{Harness, Scratch, TOKEN, guard, request};
 use crate::tls::{connector, test_identity, tls_request};
 
-/// The gateway's answer to a call the service does not serve yet.
-const UNIMPLEMENTED_BODY: &str = r#"{"error":"unimplemented"}"#;
+/// The gateway's answer to `GetJob` of a job the store does not hold.
+const UNKNOWN_JOB_BODY: &str = r#"{"error":"unknown-job"}"#;
 
 /// A token that is not the server's.
 const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 
-/// A gateway route of the job service: `GetJob`.
+/// A gateway route of the job service: `GetJob` of `job-1`, which no test submits.
 const GET_JOB: &str = "/v1/jobs/job-1";
 
 /// A server with agent registration on and the job service on a loopback port.
@@ -97,10 +98,14 @@ async fn negotiated(addr: SocketAddr, trusted: &str) -> Option<Vec<u8>> {
     stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec)
 }
 
-/// The status of a `GetJob` call over `client`, with `token` as its bearer token (none
-/// when `None`). No call of the job service succeeds yet, so the status is its answer.
+/// The status of a `GetJob` call of `job-1` over `client`, with `token` as its bearer token
+/// (none when `None`). No test submits that job, so the call fails and the status is its
+/// answer.
 async fn get_job(client: &mut JobServiceClient<Channel>, token: Option<&str>) -> Status {
-    let mut call = tonic::Request::new(GetJobRequest::default());
+    let mut call = tonic::Request::new(GetJobRequest {
+        job_id: "job-1".to_owned(),
+        ..GetJobRequest::default()
+    });
     if let Some(token) = token {
         let value: MetadataValue<Ascii> = format!("Bearer {token}").parse().unwrap();
         call.metadata_mut().insert("authorization", value);
@@ -108,12 +113,12 @@ async fn get_job(client: &mut JobServiceClient<Channel>, token: Option<&str>) ->
     client
         .get_job(call)
         .await
-        .expect_err("no call of the job service is served yet")
+        .expect_err("no test submits job-1")
 }
 
 /// Asserts that one address serves both transports: a tonic client's `GetJob` (HTTP/2)
 /// reaches the gRPC service and an HTTP/1.1 `GET /v1/jobs/{id}` reaches the gateway, both
-/// answering their stub's `UNIMPLEMENTED`; that the job port is not the lease port and
+/// answering `unknown-job` from the server's job store; that the job port is not the lease port and
 /// serves no lease route (`/v1/leases` and `/healthz` are 404 there); and that the lease
 /// port serves no job route and still serves its own. It catches a listener that routes
 /// one of the two protocols nowhere, or that mixes the two route tables.
@@ -126,26 +131,25 @@ async fn the_listener_serves_grpc_and_json_on_one_port() {
     let status = get_job(&mut client(job).await, Some(TOKEN)).await;
     assert_eq!(
         (status.code(), status.message()),
-        (Code::Unimplemented, "unimplemented")
+        (Code::NotFound, "unknown-job")
     );
     let reply = request(job, "GET", GET_JOB, Some(TOKEN), None).await;
-    assert_eq!(
-        (reply.status, reply.body.as_str()),
-        (501, UNIMPLEMENTED_BODY)
-    );
+    assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
 
     for path in ["/v1/leases", "/healthz"] {
         let reply = request(job, "GET", path, Some(TOKEN), None).await;
         assert_eq!(reply.status, 404, "{path}");
     }
-    assert_eq!(h.call("GET", GET_JOB, None).await.status, 404);
+    let lease_port = h.call("GET", GET_JOB, None).await;
+    assert_eq!(lease_port.status, 404);
+    assert_ne!(lease_port.body, UNKNOWN_JOB_BODY);
     assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
 }
 
 /// Asserts that the token is checked on both protocols through the real listener: with no
 /// token, and with a wrong one, a gRPC call is answered `UNAUTHENTICATED` with an empty
 /// message and an HTTP request 401 with an empty body; with the token they reach the
-/// stub's `UNIMPLEMENTED` and 501. It catches a listener whose routing passes either
+/// job store's `unknown-job` (`NOT_FOUND`, 404). It catches a listener whose routing passes either
 /// transport around the bearer layer.
 #[tokio::test]
 async fn the_listener_enforces_the_token_on_both_protocols() {
@@ -169,9 +173,9 @@ async fn the_listener_enforces_the_token_on_both_protocols() {
         );
     }
     let status = get_job(&mut grpc, Some(TOKEN)).await;
-    assert_eq!(status.code(), Code::Unimplemented);
+    assert_eq!(status.code(), Code::NotFound);
     let reply = request(job, "GET", GET_JOB, Some(TOKEN), None).await;
-    assert_eq!(reply.status, 501);
+    assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
 }
 
 /// Asserts that without `--job-listen` the server is as it was: it serves no job port (no
@@ -205,7 +209,7 @@ async fn the_listener_stops_with_the_server() {
     open.write_all(head.as_bytes()).await.unwrap();
     let mut seen = Vec::new();
     guard(async {
-        while !seen.ends_with(UNIMPLEMENTED_BODY.as_bytes()) {
+        while !seen.ends_with(UNKNOWN_JOB_BODY.as_bytes()) {
             let mut chunk = [0u8; 1024];
             let read = open.read(&mut chunk).await.unwrap();
             assert_ne!(read, 0, "the connection closed before its answer");
@@ -213,7 +217,7 @@ async fn the_listener_stops_with_the_server() {
         }
     })
     .await;
-    assert!(seen.starts_with(b"HTTP/1.1 501"), "{seen:?}");
+    assert!(seen.starts_with(b"HTTP/1.1 404"), "{seen:?}");
 
     let Harness { running, .. } = h;
     running.shutdown().await.unwrap();
@@ -252,12 +256,9 @@ async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
         Some(b"http/1.1".to_vec())
     );
     let status = get_job(&mut tls_client(job, &cert).await, Some(TOKEN)).await;
-    assert_eq!(status.code(), Code::Unimplemented);
+    assert_eq!(status.code(), Code::NotFound);
     let reply = tls_request(job, &connector(&cert), "GET", GET_JOB, Some(TOKEN), None).await;
-    assert_eq!(
-        (reply.status, reply.body.as_str()),
-        (501, UNIMPLEMENTED_BODY)
-    );
+    assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
     assert_eq!(
         request(job, "GET", GET_JOB, Some(TOKEN), None).await.status,
         0
@@ -268,7 +269,7 @@ async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
     h.scratch.write("test-only-key.pem", &renewed_key, 0o600);
     h.running.reload_tls().unwrap();
     let reply = tls_request(job, &connector(&renewed), "GET", GET_JOB, Some(TOKEN), None).await;
-    assert_eq!(reply.status, 501);
+    assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
     let status = get_job(&mut tls_client(job, &renewed).await, Some(TOKEN)).await;
-    assert_eq!(status.code(), Code::Unimplemented);
+    assert_eq!(status.code(), Code::NotFound);
 }

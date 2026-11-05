@@ -1,0 +1,389 @@
+//! The scenario builder: a scenario is data plus one call, read top to bottom.
+//!
+//! ```text
+//! Scenario::new("a_hundred_hosts_settle_four_hundred_runs")
+//!     .scratch(env!("CARGO_TARGET_TMPDIR"))
+//!     .server(ServerSpec::registered_pool("burst", Shape::gpu_host(), 100).heartbeat(secs(30), secs(90)))
+//!     .hosts("burst", 100)
+//!     .work(400, Work::run_for(secs(300)).give_up_after(secs(1800)))
+//!     .at(secs(60), partition_agents(agents(0..10), secs(30)))
+//!     .expect(Expect::all_items_terminal())
+//!     .settle_within(secs(3600))
+//!     .run_seeds(4)
+//! ```
+//!
+//! A scenario states its world (the server, the hosts, the bus's faults at the start, the
+//! client's [`FrontFactory`]), what happens and when ([`Scenario::work`] at time zero,
+//! [`Action`]s at virtual times), and what it expects beyond the invariants ([`Expect`],
+//! and [`Scenario::witness`]). Every invariant of [`crate::Invariant::ALL`] is checked in
+//! every scenario: the step invariants after every step, the end invariants once
+//! [`Scenario::settle_within`] after the last action ([`Cell::settle`]).
+//!
+//! [`Scenario::run_seeds`] runs seeds `0..n` in order, each in a cell of its own built
+//! from the same data, and stops at the first failure: a violation, reported by
+//! [`crate::FailureReport`] (the scenario, the seed, the trace hash, the invariant and the
+//! last forty trace lines); an [`Expect`] a seed does not meet; or, once every seed has
+//! run, a witness no seed satisfied.
+//!
+//! A witness is how a scenario shows that the situation it is about happened: a predicate
+//! over the [`Counters`] of all a seed's agents added together, which at least one seed
+//! must satisfy. A negative case (an agent that lacks a behaviour) is not vacuous when its
+//! correct twin's witness holds.
+
+use std::fmt;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
+
+use js_conformance::agent::Defect;
+use js_lease_server::StartupError;
+use js_sim::text::list;
+use js_sim::{Faults, TraceHash};
+use js_testkit::dir::TestDir;
+use js_types::sched::FarmTime;
+
+use crate::actions::{Action, submit_work};
+use crate::cell::{Cell, Setup};
+use crate::counters::{Counter, Counters};
+use crate::front::{FrontFactory, LeaseFront};
+use crate::replay::{self, Failure, FailureReport};
+use crate::server::{ServerSpec, Shape};
+use crate::work::Work;
+
+mod expect;
+
+pub use expect::{Expect, HostIs};
+
+/// How long a scenario runs after its last action unless [`Scenario::settle_within`]
+/// says otherwise.
+pub const DEFAULT_SETTLE: Duration = Duration::from_secs(600);
+
+/// Hosts of one kind the scenario adds, in order.
+#[derive(Clone)]
+struct Hosts {
+    pool: String,
+    count: usize,
+    defect: Option<Defect>,
+}
+
+/// A named predicate over a seed's counters.
+#[derive(Clone)]
+struct Witness {
+    name: String,
+    holds: Rc<dyn Fn(&Counters) -> bool>,
+}
+
+/// A scenario: its world, what happens and when, and what it expects.
+#[derive(Clone)]
+pub struct Scenario {
+    name: String,
+    scratch: Option<PathBuf>,
+    server: ServerSpec,
+    hosts: Vec<Hosts>,
+    bus: Faults,
+    actions: Vec<(FarmTime, Rc<dyn Action>)>,
+    expects: Vec<Expect>,
+    witnesses: Vec<Witness>,
+    settle_within: Duration,
+    front: FrontFactory,
+}
+
+/// One seed that passed.
+#[derive(Clone, Debug)]
+pub struct SeedRun {
+    /// The seed.
+    pub seed: u64,
+    /// The hash of its run.
+    pub hash: TraceHash,
+    /// Its agents' counts added together.
+    pub counters: Counters,
+}
+
+/// Every seed of a scenario passed: the runs, in seed order.
+#[derive(Clone, Debug)]
+pub struct Passed {
+    /// The seeds that ran, in order.
+    pub runs: Vec<SeedRun>,
+}
+
+/// Why a scenario failed.
+#[derive(Debug)]
+pub enum ScenarioFailure {
+    /// A seed's cell did not start.
+    Start {
+        /// The scenario.
+        scenario: String,
+        /// The seed.
+        seed: u64,
+        /// What the server, or the builder, refused.
+        error: StartupError,
+    },
+    /// A seed broke an invariant.
+    Violated(Box<FailureReport>),
+    /// A seed did not meet an [`Expect`].
+    Unmet {
+        /// The scenario.
+        scenario: String,
+        /// The seed.
+        seed: u64,
+        /// The statement, what it wanted and what it got.
+        detail: String,
+    },
+    /// No seed satisfied a witness.
+    Unwitnessed {
+        /// The scenario.
+        scenario: String,
+        /// The witness's name.
+        witness: String,
+        /// How many seeds ran.
+        seeds: u64,
+        /// What the agents counted, added over every seed.
+        counted: Counters,
+    },
+}
+
+/// One heading line, and for a violation the whole [`FailureReport`].
+impl fmt::Display for ScenarioFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScenarioFailure::Start {
+                scenario,
+                seed,
+                error,
+            } => write!(f, "scenario {scenario} seed {seed} did not start: {error}"),
+            ScenarioFailure::Violated(report) => write!(f, "{report}"),
+            ScenarioFailure::Unmet {
+                scenario,
+                seed,
+                detail,
+            } => write!(f, "scenario {scenario} seed {seed} failed expect {detail}"),
+            ScenarioFailure::Unwitnessed {
+                scenario,
+                witness,
+                seeds,
+                counted,
+            } => {
+                let counts = list(&Counter::ALL, |c| {
+                    format!("{}={}", c.name(), counted.get(*c))
+                });
+                write!(
+                    f,
+                    "scenario {scenario}: witness {witness} held in none of {seeds} seeds; \
+                     counted over them {counts}"
+                )
+            }
+        }
+    }
+}
+
+impl Scenario {
+    /// A scenario named `name`, with no server, host, work or action yet: a server of no
+    /// hosts, which refuses to start, until [`Scenario::server`].
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            scratch: None,
+            server: ServerSpec::registered_pool("pool", Shape::gpu_host(), 0),
+            hosts: Vec::new(),
+            bus: Faults::default(),
+            actions: Vec::new(),
+            expects: Vec::new(),
+            witnesses: Vec::new(),
+            settle_within: DEFAULT_SETTLE,
+            front: LeaseFront::factory(),
+        }
+    }
+
+    /// This scenario, keeping each seed's server files in a directory of its own under
+    /// `root` (a test passes `env!("CARGO_TARGET_TMPDIR")`), removed when the seed ends.
+    #[must_use]
+    pub fn scratch(mut self, root: impl Into<PathBuf>) -> Self {
+        self.scratch = Some(root.into());
+        self
+    }
+
+    /// This scenario, running the server `spec` describes.
+    #[must_use]
+    pub fn server(mut self, spec: ServerSpec) -> Self {
+        self.server = spec;
+        self
+    }
+
+    /// This scenario, with `count` more hosts of `pool` with correct agents.
+    #[must_use]
+    pub fn hosts(self, pool: &str, count: usize) -> Self {
+        self.add_hosts(pool, count, None)
+    }
+
+    /// This scenario, with `count` more hosts of `pool` whose agents lack `defect`.
+    #[must_use]
+    pub fn broken_hosts(self, pool: &str, count: usize, defect: Defect) -> Self {
+        self.add_hosts(pool, count, Some(defect))
+    }
+
+    fn add_hosts(mut self, pool: &str, count: usize, defect: Option<Defect>) -> Self {
+        let pool = pool.to_owned();
+        self.hosts.push(Hosts {
+            pool,
+            count,
+            defect,
+        });
+        self
+    }
+
+    /// This scenario, with `faults` on the agent wire from the start. A drop, duplicate
+    /// or reorder chance is a fault, so a scenario that has one puts faults without one
+    /// back with an action before it can settle.
+    #[must_use]
+    pub fn bus(mut self, faults: Faults) -> Self {
+        self.bus = faults;
+        self
+    }
+
+    /// This scenario, submitting `count` items of `work` at time zero.
+    #[must_use]
+    pub fn work(self, count: u32, work: Work) -> Self {
+        self.at(Duration::ZERO, submit_work(count, work))
+    }
+
+    /// This scenario, running `action` `after` the start. Actions of one time run in the
+    /// order they were added, after the kernel's events of that time.
+    #[must_use]
+    pub fn at(mut self, after: Duration, action: impl Action + 'static) -> Self {
+        let at = FarmTime::default().saturating_add(after);
+        self.actions.push((at, Rc::new(action)));
+        self
+    }
+
+    /// This scenario, expecting `expect` of every seed.
+    #[must_use]
+    pub fn expect(mut self, expect: Expect) -> Self {
+        self.expects.push(expect);
+        self
+    }
+
+    /// This scenario, failing unless at least one seed's agents' counts, added together,
+    /// satisfy `holds`.
+    #[must_use]
+    pub fn witness(mut self, name: &str, holds: impl Fn(&Counters) -> bool + 'static) -> Self {
+        self.witnesses.push(Witness {
+            name: name.to_owned(),
+            holds: Rc::new(holds),
+        });
+        self
+    }
+
+    /// This scenario, running `within` of virtual time after its last action (the end of
+    /// its last fault is an action) before the end check.
+    #[must_use]
+    pub fn settle_within(mut self, within: Duration) -> Self {
+        self.settle_within = within;
+        self
+    }
+
+    /// This scenario, its client made by `front` in place of [`LeaseFront::factory`].
+    #[must_use]
+    pub fn front(mut self, front: FrontFactory) -> Self {
+        self.front = front;
+        self
+    }
+
+    /// Runs seeds `0..seeds` in order.
+    ///
+    /// # Panics
+    ///
+    /// With the [`ScenarioFailure`] as text, at the first failure: how a scenario fails
+    /// its test.
+    pub fn run_seeds(&self, seeds: u64) -> Passed {
+        self.try_run_seeds(seeds)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Runs seeds `0..seeds` in order, stopping at the first that fails, then judges the
+    /// witnesses over every seed.
+    ///
+    /// # Errors
+    ///
+    /// The first failure.
+    pub fn try_run_seeds(&self, seeds: u64) -> Result<Passed, ScenarioFailure> {
+        let runs = (0..seeds).map(|seed| self.run_seed(seed));
+        let runs = runs.collect::<Result<Vec<SeedRun>, ScenarioFailure>>()?;
+        let held = |witness: &&Witness| runs.iter().any(|run| (witness.holds)(&run.counters));
+        let unwitnessed = self.witnesses.iter().find(|witness| !held(witness));
+        match unwitnessed {
+            Some(witness) => Err(ScenarioFailure::Unwitnessed {
+                scenario: self.name.clone(),
+                witness: witness.name.clone(),
+                seeds,
+                counted: Counters::sum(runs.iter().map(|run| &run.counters)),
+            }),
+            None => Ok(Passed { runs }),
+        }
+    }
+
+    fn run_seed(&self, seed: u64) -> Result<SeedRun, ScenarioFailure> {
+        let build = |setup: Setup| self.build(setup);
+        let settle = |cell: &mut Cell| cell.settle(self.settle_within);
+        let ran = replay::drive(&self.name, seed, &build, &settle);
+        let cell = ran.map_err(|failure| self.failed(seed, failure))?;
+        let unmet = self.expects.iter().find_map(|expect| expect.unmet(&cell));
+        match unmet {
+            Some(detail) => Err(ScenarioFailure::Unmet {
+                scenario: self.name.clone(),
+                seed,
+                detail,
+            }),
+            None => Ok(SeedRun {
+                seed,
+                hash: cell.trace_hash(),
+                counters: cell.total_counters(),
+            }),
+        }
+    }
+
+    fn failed(&self, seed: u64, failure: Failure) -> ScenarioFailure {
+        match failure {
+            Failure::Start(error) => ScenarioFailure::Start {
+                scenario: self.name.clone(),
+                seed,
+                error,
+            },
+            Failure::Violated(report) => ScenarioFailure::Violated(report),
+        }
+    }
+
+    /// The cell of one seed: the server, the front, the hosts in order, and the actions.
+    fn build(&self, setup: Setup) -> Result<Cell, StartupError> {
+        let unnamed = StartupError::new("scratch", "the scenario names no scratch directory");
+        let root = self.scratch.as_ref().ok_or(unnamed)?;
+        let name = format!("{}-{}", self.name, setup.seed());
+        let dir = TestDir::under(root.join("js-sim-cell"), &name);
+        let mut cell = Cell::new(setup, self.server.clone(), dir, self.bus.clone())?;
+        cell.set_front(self.front.make(&self.server));
+        for hosts in &self.hosts {
+            self.add(&mut cell, hosts)?;
+        }
+        for (at, action) in &self.actions {
+            let action = Rc::clone(action);
+            cell.at(*at, move |cell| action.run(cell));
+        }
+        Ok(cell)
+    }
+
+    /// Adds `hosts` to `cell`, refusing hosts of a pool the server does not have.
+    fn add(&self, cell: &mut Cell, hosts: &Hosts) -> Result<(), StartupError> {
+        if hosts.pool != self.server.pool() {
+            let why = format!("the server has no pool {}", hosts.pool);
+            return Err(StartupError::new("hosts", why));
+        }
+        for _ in 0..hosts.count {
+            let added = match hosts.defect {
+                Some(defect) => cell.add_broken_agent(defect),
+                None => cell.add_agent(),
+            };
+            added.map_err(StartupError::because("hosts"))?;
+        }
+        Ok(())
+    }
+}

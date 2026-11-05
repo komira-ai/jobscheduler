@@ -141,9 +141,10 @@ async fn answer(
 
 /// Asserts that the port hands a request to the transport its content type names: with
 /// `application/grpc` (alone or with a suffix) to the gRPC service, which answers
-/// `UNIMPLEMENTED` (12) to a caller with the token and `UNAUTHENTICATED` (16) to one without,
-/// as a gRPC status in an HTTP 200; with any other content type, or none, to the gateway,
-/// which answers 501 `unimplemented` with the token and 401 with an empty body without it.
+/// `UNIMPLEMENTED` (12: no method has the gateway's path) to a caller with the token and
+/// `UNAUTHENTICATED` (16) to one without, as a gRPC status in an HTTP 200; with any other
+/// content type, or none, to the gateway, which answers 404 `unknown-job` (no job is stored)
+/// with the token and 401 with an empty body without it.
 /// It catches a port that sends every request one way, or that reads the content type
 /// another way than the bearer layer does.
 #[tokio::test]
@@ -166,11 +167,7 @@ async fn the_port_routes_by_content_type() {
         let (status, code, body) = answer(other, true).await;
         assert_eq!(
             (status, code, body.as_str()),
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                None,
-                r#"{"error":"unimplemented"}"#
-            ),
+            (StatusCode::NOT_FOUND, None, r#"{"error":"unknown-job"}"#),
             "{other:?}"
         );
         let (status, code, body) = answer(other, false).await;
