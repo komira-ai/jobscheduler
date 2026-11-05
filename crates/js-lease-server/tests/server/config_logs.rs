@@ -10,7 +10,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use js_lease_server::{Cli, Config, LogsConfig, Minting, ObjectStoreLogs};
-use rustix::process::{Pid, Signal, kill_process};
 
 use crate::binary::{Guard, launch};
 use crate::config_support::{PoolText, file, load, quoted, server};
@@ -533,8 +532,26 @@ fn no_secret_is_printed_from_the_configuration() {
     assert!(!said.contains(secret), "{said}");
 }
 
-/// The standard error of the program run on `args` (the program name first), up to its stop
-/// on SIGTERM once it printed its address.
+/// What `child` wrote to standard error until it is killed. The start log line is written
+/// before the address is printed, so it is there once the address is: the program is killed
+/// rather than stopped with SIGTERM, which could arrive before its handler is set and is not
+/// what this test is about.
+fn stderr_after_kill(child: &mut Guard) -> String {
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut log = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut log)
+        .unwrap();
+    log
+}
+
+/// The standard error of the program run on `args` (the program name first), once it printed
+/// its address.
 fn start_log(args: &[OsString]) -> String {
     let mut child = Guard(
         Command::new(PROGRAM)
@@ -548,17 +565,7 @@ fn start_log(args: &[OsString]) -> String {
     let stdout = child.0.stdout.take().unwrap();
     BufReader::new(stdout).read_line(&mut line).unwrap();
     assert!(line.starts_with("listening on "), "{line:?}");
-    kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
-    assert_eq!(child.0.wait().unwrap().code(), Some(0));
-    let mut log = String::new();
-    child
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut log)
-        .unwrap();
-    log
+    stderr_after_kill(&mut child)
 }
 
 /// Asserts the start log line of the real program: run from flags it says `logs=none`, and run
@@ -569,16 +576,7 @@ fn start_log(args: &[OsString]) -> String {
 fn the_start_log_line_names_the_sink() {
     let scratch = Scratch::new("logs_start_flags");
     let (mut child, _addr) = launch(&base_args(&scratch), Stdio::piped());
-    kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();
-    assert_eq!(child.0.wait().unwrap().code(), Some(0));
-    let mut log = String::new();
-    child
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut log)
-        .unwrap();
+    let log = stderr_after_kill(&mut child);
     let listening = log.lines().find(|line| line.contains("listening"));
     assert!(
         listening.is_some_and(|line| line.contains(" logs=none")),
