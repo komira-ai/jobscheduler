@@ -246,6 +246,7 @@ mod tests {
                 disk_bytes: 0,
                 gpu_class: None,
                 max_leases: None,
+                accelerator: None,
             },
             capabilities: macos(),
             gpu_devices: Vec::new(),

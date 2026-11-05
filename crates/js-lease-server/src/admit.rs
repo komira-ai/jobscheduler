@@ -160,7 +160,9 @@ pub(crate) fn host_views(listed: Vec<HostCapacity>, registry: Option<&Registry>)
     registered.into_iter().chain(fixed).collect()
 }
 
-/// A host of the registry as admission sees it. It is tainted when it reported a taint or
+/// A host of the registry as admission sees it, on the shape the registry places it on
+/// ([`RegistryView::placement_shape`]: the pool's booking with the host's validated
+/// accelerator facts). It is tainted when it reported a taint or
 /// announces the tainted phase; draining when it is being released ([`HostMark::Releasing`]:
 /// it is leaving the pool, and nothing ends the mark); lost when it is not live (silent
 /// past its grace, or not heard since a restart). A drain mark ([`HostMark::Draining`]) is
@@ -168,6 +170,7 @@ pub(crate) fn host_views(listed: Vec<HostCapacity>, registry: Option<&Registry>)
 /// the host. Nor is the phase an agent announces when it is told to stop (`draining`): the
 /// agent comes back, as after a restart. Such a host stays capable.
 pub(crate) fn registered(host: &RegistryView) -> HostView {
+    let placed = host.placement_shape();
     HostView {
         id: host.id.clone(),
         state: state_of(
@@ -177,8 +180,8 @@ pub(crate) fn registered(host: &RegistryView) -> HostView {
         ),
         tainted: host.taint.is_some() | (host.phase == js_agent_wire::Phase::Tainted),
         draining: host.mark == Some(HostMark::Releasing),
-        total: host.shape.resources().clone(),
-        facts: host.shape.capabilities().clone(),
+        total: placed.resources().clone(),
+        facts: placed.capabilities().clone(),
     }
 }
 

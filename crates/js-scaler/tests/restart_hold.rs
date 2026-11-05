@@ -164,10 +164,12 @@ fn a_restored_machine_that_fits_part_of_a_request_does_not_hold_it() {
     // The request wants two a10s; the machine's offer has one. The catalog has a two-gpu
     // offer, which is what the launch asks for.
     let mut pair = offer("a10x2", 120);
-    pair.gpus = 2;
+    pair.accelerator = accel("nvidia-a10", 2);
     rig.pool().offers.push(pair);
     rig.input.waiting[0].demand.resources =
         Resources::new(4000, 16 << 30, 2, Some("nvidia-a10".to_owned())).unwrap();
+    rig.input.waiting[0].demand.accelerator =
+        js_types::AcceleratorNeed::booked(&rig.input.waiting[0].demand.resources);
     assert_eq!(acquires(&rig.tick(at(0))).len(), 1);
 }
 

@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use js_elastic::{Demand, Offer, PriceUnit, ProviderCaps};
-use js_types::{Arch, ExecMode, normalise_arch};
+use js_types::{Arch, ExecMode, accelerator_of, normalise_arch};
 
 use crate::model::{Architecture, InstanceTypeOffer};
 use crate::options::OptionTable;
@@ -30,8 +30,8 @@ const DOCUMENTED: [Architecture; 2] = [Architecture::X86_64, Architecture::Arm64
 
 /// What the provider could ever offer, from the same sources as [`offers`]: the one
 /// operating system, the architecture of every instance type Lambda documents as
-/// [`offers`] spells it, and the GPU class of every row of `table`, which is where an
-/// offer's class comes from. An instance type of an architecture Lambda does not document
+/// [`offers`] spells it, and the canonical GPU family of every row of `table`, which is where an
+/// offer's accelerator model comes from. An instance type of an architecture Lambda does not document
 /// reaches the catalog as its own text; the provider adds those its catalog has carried. A machine runs the agent, so it can be had whole and its
 /// jobs may declare host ports.
 pub(crate) fn capabilities(table: &OptionTable) -> ProviderCaps {
@@ -41,7 +41,7 @@ pub(crate) fn capabilities(table: &OptionTable) -> ProviderCaps {
         accelerators: table
             .rows()
             .iter()
-            .map(|row| row.gpu_class.clone())
+            .map(|row| row.gpu_class.canonical().model)
             .collect(),
         whole_host: true,
         host_ports: true,
@@ -103,8 +103,7 @@ pub(crate) fn offers(
                 cpu_millis: u64::from(kind.vcpus) * 1000,
                 memory_bytes: u64::from(kind.memory_gib) * GIB,
                 disk_bytes: kind.storage_gib.saturating_mul(GIB),
-                gpus: kind.gpus,
-                gpu_class: Some(row.gpu_class.clone()),
+                accelerator: Some(accelerator_of(&row.gpu_class, kind.gpus, None)),
                 os: OS.to_owned(),
                 arch: arch_name(&kind.architecture),
                 // The catalog does not say which ISA level an instance type's CPU reaches,
@@ -136,7 +135,7 @@ pub(crate) fn candidates(offers: &[Offer], demand: &Demand) -> Vec<Offer> {
         (
             o.price_cents_per_hour.is_none(),
             o.price_cents_per_hour,
-            o.gpus,
+            o.accelerator.as_ref().map_or(0, |a| a.count),
         )
     };
     fits.sort_by(|a, b| {
@@ -183,6 +182,7 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: None,
             network: Default::default(),
             host_ports: Vec::new(),
         }

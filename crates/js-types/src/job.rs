@@ -3,10 +3,10 @@
 //! A job never names a cloud, an image of a machine or an instance type; those live in
 //! the pool that serves it. [`ContainerSpec`] is the container, [`Requirements`] is the
 //! host it needs. A lease request still carries resources and capabilities only, so
-//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib` and `exec`
-//! from the capabilities the request requires. A job's image is built for one platform
-//! ([`Os`] and [`Arch`]): [`Requirements::with_image_platform`] adds it to what the
-//! request asked for.
+//! [`Requirements::from_request`] reads `os`, `arch`, `isa_level`, `disk-gib`, `exec` and
+//! the `accelerator.*` keys from the capabilities the request requires. A job's image is
+//! built for one platform ([`Os`] and [`Arch`]): [`Requirements::with_image_platform`] adds
+//! it to what the request asked for.
 
 use std::fmt;
 use std::str::FromStr;
@@ -14,7 +14,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{DigestRef, DigestRefError};
-use crate::{Arch, IsaLevel, JobNetwork, PortMap, Request, Resources, normalise_arch};
+use crate::{
+    AccelError, AcceleratorNeed, Arch, IsaLevel, JobNetwork, PortMap, Request, Resources,
+    normalise_arch,
+};
 
 /// The capability key a request names its operating system by.
 const OS_KEY: &str = "os";
@@ -216,6 +219,10 @@ pub struct Requirements {
     pub isa_level: Option<IsaLevel>,
     /// The mode the host runs jobs in. `None`: either.
     pub exec: Option<ExecMode>,
+    /// The accelerators the job needs: its booked GPU count and class (`model` the class as
+    /// spelt, `count` the count), narrowed by the request's `accelerator.*` keys
+    /// ([`AcceleratorNeed::requested`]). `None`: none asked for.
+    pub accelerator: Option<AcceleratorNeed>,
     /// The network level the job asks for. A lease request asks for none.
     pub network: JobNetwork,
     /// The host ports the job declares, sorted ascending, each once. A lease request
@@ -223,7 +230,8 @@ pub struct Requirements {
     pub host_ports: Vec<u16>,
 }
 
-/// Why a request's `disk-gib`, `exec` or `isa_level` capability is not a requirement.
+/// Why a request's `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
+/// requirement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RequirementsError {
     /// `disk-gib` is not a whole number of GiB that fits in bytes.
@@ -235,6 +243,23 @@ pub enum RequirementsError {
     /// `isa_level` names no ISA level.
     #[error("isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a, not {0:?}")]
     BadIsaLevel(String),
+    /// An `accelerator.*` key holds a value that is not valid.
+    #[error("accelerator: {0}")]
+    BadAccelerator(#[from] AccelError),
+    /// `accelerator.count` asks for devices without a model, from `accelerator.model` or
+    /// the booked GPU class. A booked GPU count needs a class (a lease is stored with
+    /// both), so a count names its model.
+    #[error("accelerator.model is required when accelerator.count is above zero")]
+    CountWithoutModel,
+    /// `accelerator.count` asks for more devices than the request books in its
+    /// resources, so the devices it needs would not be booked.
+    #[error("accelerator.count {count} is more than the {gpus} gpus the request books")]
+    CountNotBooked {
+        /// The devices the need asks for.
+        count: u32,
+        /// The GPUs the resources book.
+        gpus: u64,
+    },
 }
 
 /// The request asks for another operating system or architecture than the job's image is
@@ -249,11 +274,12 @@ pub struct PlatformConflict {
 
 impl Requirements {
     /// The requirements of a lease request: its resources, and `os`, `arch` (through
-    /// [`normalise_arch`]), `isa_level`, `disk-gib` and `exec` from the capabilities it
-    /// requires. A capability the request does not name is `None`: any. A `disk-gib`,
-    /// `exec` or `isa_level` that is not valid also reads as `None` here, and so do the
-    /// other two; [`Request::validate`] refuses such a request, so none that was admitted
-    /// has one ([`Self::try_from_request`] says why).
+    /// [`normalise_arch`]), `isa_level`, `disk-gib`, `exec` and the accelerator from the
+    /// capabilities it requires. A capability the request does not name is `None`: any. A
+    /// `disk-gib`, `exec`, `isa_level` or `accelerator.*` key that is not valid makes all
+    /// four read as not asked here, the accelerator then as the booked GPU count and class;
+    /// [`Request::validate`] refuses such a request, so none that was admitted has one
+    /// ([`Self::try_from_request`] says why).
     pub fn from_request(request: &Request) -> Self {
         Self::try_from_request(request).unwrap_or_else(|_| Self {
             resources: request.resources.clone(),
@@ -262,20 +288,24 @@ impl Requirements {
             arch: arch_of(request),
             isa_level: None,
             exec: None,
+            accelerator: AcceleratorNeed::booked(&request.resources),
             network: JobNetwork::None,
             host_ports: Vec::new(),
         })
     }
 
-    /// [`Self::from_request`], refusing a `disk-gib`, `exec` or `isa_level` that is not
-    /// valid.
+    /// [`Self::from_request`], refusing a `disk-gib`, `exec`, `isa_level` or
+    /// `accelerator.*` key that is not valid.
     ///
     /// # Errors
     ///
     /// [`RequirementsError::BadDisk`] when `disk-gib` is not a whole number of GiB whose
     /// size in bytes fits 64 bits; [`RequirementsError::BadExec`] when `exec` is not a
     /// mode name; [`RequirementsError::BadIsaLevel`] when `isa_level` is not a level
-    /// name. `disk-gib=0` is valid and asks for nothing.
+    /// name; [`RequirementsError::BadAccelerator`] when an `accelerator.*` key is not
+    /// valid; [`RequirementsError::CountWithoutModel`] when `accelerator.count` is above
+    /// zero and neither `accelerator.model` nor a booked GPU class names a model;
+    /// [`RequirementsError::CountNotBooked`] when it is above the GPUs the request books. `disk-gib=0` is valid and asks for nothing.
     pub fn try_from_request(request: &Request) -> Result<Self, RequirementsError> {
         let caps = &request.capabilities;
         let disk_bytes = caps
@@ -307,6 +337,7 @@ impl Requirements {
             arch: arch_of(request),
             isa_level,
             exec,
+            accelerator: need_of(request)?,
             network: JobNetwork::None,
             host_ports: Vec::new(),
         })
@@ -346,6 +377,26 @@ fn platform_part(
     }
 }
 
+/// The accelerator need of `request`: its `accelerator.*` keys over its booked GPU count
+/// and class ([`AcceleratorNeed::requested`]), refused when it asks for devices without a
+/// model or for more devices than it books.
+fn need_of(request: &Request) -> Result<Option<AcceleratorNeed>, RequirementsError> {
+    let need = AcceleratorNeed::requested(&request.capabilities, &request.resources)?;
+    let Some(need) = need else {
+        return Ok(None);
+    };
+    if need.count > 0 && need.model.is_none() {
+        return Err(RequirementsError::CountWithoutModel);
+    }
+    match u64::from(need.count) <= request.resources.gpus() {
+        true => Ok(Some(need)),
+        false => Err(RequirementsError::CountNotBooked {
+            count: need.count,
+            gpus: request.resources.gpus(),
+        }),
+    }
+}
+
 /// The `arch` a request requires, in the one spelling.
 fn arch_of(request: &Request) -> Option<String> {
     let arch = request.capabilities.get(ARCH_KEY)?;
@@ -358,7 +409,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{Capabilities, ClassId};
+    use crate::{Capabilities, ClassId, Model};
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -376,6 +427,15 @@ mod tests {
             validation_run: None,
             probe_host: None,
         }
+    }
+
+    /// The need the test request's booked GPU states: one `nvidia-a10`.
+    fn a10() -> Option<AcceleratorNeed> {
+        Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a10").unwrap()),
+            count: 1,
+            ..AcceleratorNeed::default()
+        })
     }
 
     /// Asserts that both modes parse from and print as the names a pool and a hello use,
@@ -460,6 +520,7 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: a10(),
             network: JobNetwork::None,
             host_ports: Vec::new(),
         };
@@ -529,6 +590,7 @@ mod tests {
                 arch: Some("arm64".to_owned()),
                 isa_level: None,
                 exec: None,
+                accelerator: a10(),
                 network: JobNetwork::None,
                 host_ports: Vec::new(),
             };

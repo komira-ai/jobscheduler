@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use js_elastic::GpuClass;
+use js_types::Model;
 use serde::Deserialize;
 
 use crate::error::cut;
@@ -19,7 +19,7 @@ pub struct OptionRow {
     /// Lambda's name for the type, such as `gpu_1x_a10`.
     pub instance_type: String,
     /// The class the agent on this type reports for its GPUs.
-    pub gpu_class: GpuClass,
+    pub gpu_class: Model,
     /// How many GPUs the type has (at least 1).
     pub gpus: u32,
 }
@@ -123,6 +123,19 @@ impl OptionTable {
     }
 }
 
+/// The class `text`, in the agent's spelling, or why it is not one: the reason reads
+/// `is empty` for no text and names the spelling rule for any other text that is not a
+/// model.
+pub(crate) fn class(text: &str) -> Result<Model, String> {
+    if text.is_empty() {
+        return Err("is empty".to_owned());
+    }
+    Model::parse(text).map_err(|_| {
+        "must be lower case letters and digits joined by single '-', as the agent reports a GPU model"
+            .to_owned()
+    })
+}
+
 fn row(number: usize, raw: RawRow) -> Result<OptionRow, OptionsError> {
     let refuse = |why: String| OptionsError::Row { row: number, why };
     let named = !raw.instance_type.is_empty()
@@ -139,8 +152,7 @@ fn row(number: usize, raw: RawRow) -> Result<OptionRow, OptionsError> {
     if raw.gpus == 0 {
         return Err(refuse("gpus must be at least 1".to_owned()));
     }
-    let gpu_class =
-        GpuClass::parse(&raw.gpu_class).map_err(|why| refuse(format!("gpu_class {why}")))?;
+    let gpu_class = class(&raw.gpu_class).map_err(|why| refuse(format!("gpu_class {why}")))?;
     Ok(OptionRow {
         instance_type: raw.instance_type,
         gpu_class,

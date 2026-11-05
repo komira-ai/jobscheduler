@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 
-use js_elastic::{GpuClass, Offer, PriceUnit, ProviderCaps};
-use js_types::{Capabilities, ExecMode, HostId, IsaLevel, JobNetwork, Requirements, Resources};
+use js_elastic::{Offer, PriceUnit, ProviderCaps};
+use js_types::{
+    AcceleratorNeed, Capabilities, ExecMode, HostId, IsaLevel, JobNetwork, Model, Requirements,
+    Resources, accelerator_of,
+};
 
 use super::*;
 
@@ -9,8 +12,10 @@ const GIB: u64 = 1 << 30;
 
 /// Four cores, 16 GiB and one `nvidia-a10`, on Linux x86_64.
 fn wanted() -> Requirements {
+    let resources = Resources::new(4000, 16 * GIB, 1, Some("nvidia-a10".to_owned())).unwrap();
     Requirements {
-        resources: Resources::new(4000, 16 * GIB, 1, Some("nvidia-a10".to_owned())).unwrap(),
+        accelerator: AcceleratorNeed::booked(&resources),
+        resources,
         disk_bytes: None,
         os: Some("linux".to_owned()),
         arch: Some("x86_64".to_owned()),
@@ -62,8 +67,11 @@ fn offer(id: &str) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 32 * GIB,
         disk_bytes: 200 * GIB,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a10").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -78,7 +86,7 @@ fn caps() -> ProviderCaps {
     ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
         arch: BTreeSet::from(["x86_64".to_owned()]),
-        accelerators: BTreeSet::from([GpuClass::parse("nvidia-a10").unwrap()]),
+        accelerators: BTreeSet::from([Model::parse("nvidia-a10").unwrap()]),
         whole_host: true,
         host_ports: false,
     }
@@ -310,10 +318,16 @@ fn a_host_whose_shape_or_facts_miss_is_not_capable() {
         },
         Requirements {
             resources: Resources::new(1000, GIB, 2, Some("nvidia-a10".to_owned())).unwrap(),
+            accelerator: AcceleratorNeed::booked(
+                &Resources::new(1000, GIB, 2, Some("nvidia-a10".to_owned())).unwrap(),
+            ),
             ..exact.clone()
         },
         Requirements {
             resources: Resources::new(1000, GIB, 1, Some("nvidia-h100".to_owned())).unwrap(),
+            accelerator: AcceleratorNeed::booked(
+                &Resources::new(1000, GIB, 1, Some("nvidia-h100".to_owned())).unwrap(),
+            ),
             ..exact.clone()
         },
     ];
@@ -339,6 +353,9 @@ fn a_request_outside_a_providers_capabilities_does_not_count() {
         },
         Requirements {
             resources: Resources::new(1000, GIB, 1, Some("nvidia-h100".to_owned())).unwrap(),
+            accelerator: AcceleratorNeed::booked(
+                &Resources::new(1000, GIB, 1, Some("nvidia-h100".to_owned())).unwrap(),
+            ),
             ..wanted()
         },
     ];
@@ -354,6 +371,7 @@ fn a_request_outside_a_providers_capabilities_does_not_count() {
         resources: Resources::new(1000, GIB, 0, None).unwrap(),
         os: None,
         arch: None,
+        accelerator: None,
         ..wanted()
     };
     let bare = ProviderView {

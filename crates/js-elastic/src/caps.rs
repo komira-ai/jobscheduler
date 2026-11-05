@@ -4,7 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::offer::{GpuClass, Offer};
+use js_types::Model;
+
+use crate::offer::Offer;
 
 /// What a provider could ever offer, in the strings an [`Offer`] carries: a job that needs
 /// something outside these sets can never be served by it, however long it waits. The
@@ -16,8 +18,10 @@ pub struct ProviderCaps {
     pub os: BTreeSet<String>,
     /// The CPU architectures, as [`Offer::arch`] spells them (`x86_64`, `arm64`).
     pub arch: BTreeSet<String>,
-    /// The GPU classes, as [`Offer::gpu_class`] spells them.
-    pub accelerators: BTreeSet<GpuClass>,
+    /// The accelerator models, canonical (the family the alias table resolves a spelling
+    /// to, as an [`Offer::accelerator`] holds it; a name the table does not know as
+    /// itself).
+    pub accelerators: BTreeSet<Model>,
     /// Whether a job may have one of its machines whole.
     pub whole_host: bool,
     /// Whether a job on one of its machines may declare host ports.
@@ -26,12 +30,12 @@ pub struct ProviderCaps {
 
 impl ProviderCaps {
     /// Whether `offer` is inside these capabilities: its operating system and architecture
-    /// are in the sets, and so is its GPU class when it has one.
+    /// are in the sets, and so is its accelerator model when it has one.
     pub fn covers(&self, offer: &Offer) -> bool {
         let class = offer
-            .gpu_class
+            .accelerator
             .as_ref()
-            .is_none_or(|class| self.accelerators.contains(class));
+            .is_none_or(|accelerator| self.accelerators.contains(&accelerator.model));
         [
             self.os.contains(&offer.os),
             self.arch.contains(&offer.arch),
@@ -58,7 +62,7 @@ pub struct Capacity {
 
 #[cfg(test)]
 mod tests {
-    use js_types::ExecMode;
+    use js_types::{ExecMode, accelerator_of};
 
     use super::*;
     use crate::offer::PriceUnit;
@@ -70,8 +74,7 @@ mod tests {
             cpu_millis: 1,
             memory_bytes: 1,
             disk_bytes: 1,
-            gpus: u32::from(class.is_some()),
-            gpu_class: class.map(|class| GpuClass::parse(class).unwrap()),
+            accelerator: class.map(|class| accelerator_of(&Model::parse(class).unwrap(), 1, None)),
             os: os.to_owned(),
             arch: arch.to_owned(),
             isa_level: None,
@@ -86,21 +89,26 @@ mod tests {
         ProviderCaps {
             os: BTreeSet::from(["linux".to_owned()]),
             arch: BTreeSet::from(["x86_64".to_owned()]),
-            accelerators: BTreeSet::from([GpuClass::parse("nvidia-a10").unwrap()]),
+            accelerators: BTreeSet::from([Model::parse("nvidia-a100").unwrap()]),
             whole_host: true,
             host_ports: true,
         }
     }
 
-    /// Asserts that an offer is covered when its platform and GPU class are in the sets,
-    /// that one with no GPU needs no class, and that an operating system, an architecture
-    /// or a GPU class outside the sets each makes it not covered on its own. It catches a
+    /// Asserts that an offer is covered when its platform and accelerator model are in the
+    /// sets (a variant by its family), that one with no GPU needs no model, and that an
+    /// operating system, an architecture or a model outside the sets each makes it not
+    /// covered on its own. It catches a
     /// check that skips one of the three, which would let a catalog drift from the
     /// capabilities unseen.
     #[test]
     fn an_offer_is_covered_only_when_each_of_its_strings_is_in_the_sets() {
         let caps = caps();
-        assert!(caps.covers(&offer("linux", "x86_64", Some("nvidia-a10"))));
+        assert!(caps.covers(&offer("linux", "x86_64", Some("nvidia-a100"))));
+        assert!(
+            caps.covers(&offer("linux", "x86_64", Some("nvidia-a100-sxm4-80gb"))),
+            "a variant is covered by its family"
+        );
         assert!(caps.covers(&offer("linux", "x86_64", None)));
         assert!(!caps.covers(&offer("macos", "x86_64", None)));
         assert!(!caps.covers(&offer("linux", "arm64", None)));

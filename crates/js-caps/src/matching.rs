@@ -45,7 +45,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use js_types::{Arch, IsaLevel};
+use js_types::{
+    ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AccelError, Accelerator,
+    AcceleratorMiss, AcceleratorNeed, Arch, IsaLevel,
+};
 
 use crate::cpu::CpuCaps;
 
@@ -215,6 +219,9 @@ pub struct NodeCaps {
     /// The ready iOS devices, from its report's `ios.device` entries: by device id
     /// (the UDID), each device's other attributes (`class`, `os_version`, ...).
     pub devices: BTreeMap<String, BTreeMap<String, String>>,
+    /// The node's accelerators, from its report's `accelerator.*` entries, resolved
+    /// through the alias table. `None`: it reports none.
+    pub accelerator: Option<Accelerator>,
 }
 
 impl NodeCaps {
@@ -229,6 +236,7 @@ impl NodeCaps {
             consumables: BTreeMap::new(),
             drivers: BTreeSet::new(),
             devices: BTreeMap::new(),
+            accelerator: None,
         }
     }
 
@@ -257,6 +265,9 @@ pub enum RequestError {
         "vm.image {0:?} names no digest; name an image as <name>@sha256:<64 lowercase hex digits>"
     )]
     NoImageDigest(String),
+    /// An `accelerator.*` key holds a value that is not valid.
+    #[error(transparent)]
+    Accelerator(#[from] AccelError),
     /// The key is one a node reports and a request may not name.
     #[error("{0:?} is reported by a node and cannot be requested")]
     ReportOnly(String),
@@ -288,6 +299,9 @@ pub struct Request {
     minimums: BTreeMap<Consumable, u64>,
     /// With `ios.device=1`: the attributes one device must have, by attribute name.
     device: Option<BTreeMap<String, String>>,
+    /// The `accelerator.*` keys as requested; resolved through the alias table when
+    /// matched.
+    accelerator: Option<AcceleratorNeed>,
 }
 
 /// One requirement a node does not meet.
@@ -316,6 +330,9 @@ pub enum Unmet<'a> {
     },
     /// The request asks for a device (`ios.device=1`) and the node reports none.
     NoDevice,
+    /// The node's accelerators miss the request's `accelerator.*` need; the first part
+    /// missed, in the order [`AcceleratorNeed::met_by`] checks.
+    Accelerator(AcceleratorMiss),
     /// No device the node reports has every attribute the request names. One entry per
     /// attribute the closest device lacks: the device with fewest unmet attributes,
     /// the first by id among equals.
@@ -333,7 +350,8 @@ pub enum Unmet<'a> {
 
 impl fmt::Display for Unmet<'_> {
     /// The requirement in request syntax: `arch=arm64`, `isa_level>=x86-64-v3`,
-    /// `cpu.feature=avx2`, `os=macos`, `xcode=16C5032a`, `gpu>=2 (has 1)`,
+    /// `cpu.feature=avx2`, `os=macos`, `xcode=16C5032a`, `gpu>=2 (has 1)`, the
+    /// `accelerator.*` key whose part is missed (`accelerator.memory-gib`),
     /// `ios.device=1`, `ios.device.os_version=26.0 (device <id> has 18.6)`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -343,6 +361,7 @@ impl fmt::Display for Unmet<'_> {
             Self::Exact { key, want } | Self::Member { key, want } => write!(f, "{key}={want}"),
             Self::Consumable { what, want, have } => write!(f, "{what}>={want} (has {have})"),
             Self::NoDevice => write!(f, "{IOS_DEVICE_KEY}=1"),
+            Self::Accelerator(miss) => f.write_str(accelerator_key(*miss)),
             Self::Device {
                 attribute,
                 want,
@@ -381,6 +400,7 @@ impl Request {
         let mut req = Self::default();
         let mut wants_device = false;
         let mut attributes = BTreeMap::new();
+        let mut accelerator = BTreeMap::new();
         for (key, value) in properties {
             let bad = || RequestError::BadValue {
                 key: key.to_owned(),
@@ -393,7 +413,14 @@ impl Request {
             if REPORT_ONLY_KEYS.contains(&key) {
                 return Err(RequestError::ReportOnly(key.to_owned()));
             }
-            if key == IOS_DEVICE_KEY {
+            if ACCEL_KEYS.contains(&key) {
+                if accelerator
+                    .insert(key.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    return Err(repeated());
+                }
+            } else if key == IOS_DEVICE_KEY {
                 if value != "1" {
                     return Err(bad());
                 }
@@ -446,6 +473,10 @@ impl Request {
                 return Err(RequestError::UnknownKey(key.to_owned()));
             }
         }
+        // A need that asks for nothing (`accelerator.count=0` alone) is no need, so the
+        // request reads back from its properties as it was parsed.
+        req.accelerator = AcceleratorNeed::from_capabilities(&accelerator)?
+            .filter(|need| *need != AcceleratorNeed::default());
         if !wants_device {
             if let Some(attribute) = attributes.keys().next() {
                 return Err(RequestError::DeviceAttributeAlone(format!(
@@ -471,9 +502,10 @@ impl Request {
     /// The properties that [`Self::parse`] reads as this request, one per requirement,
     /// in a fixed order: `arch`, `isa_level`, each `cpu.feature`, the countable keys,
     /// the exact keys, the membership keys (each group by key, a membership key with the
-    /// value as requested), then `ios.device=1` and each `ios.device.<attribute>` in
-    /// [`DEVICE_ATTRIBUTES`] order. `Request::parse(r.properties())` is `r`, so a
-    /// request can be written as these pairs and read back.
+    /// value as requested), the `accelerator.*` keys in [`ACCEL_KEYS`] order, then
+    /// `ios.device=1` and each `ios.device.<attribute>` in [`DEVICE_ATTRIBUTES`] order.
+    /// `Request::parse(r.properties())` is `r`, so a request can be written as these pairs
+    /// and read back.
     #[must_use]
     pub fn properties(&self) -> Vec<(&str, String)> {
         let mut out = Vec::new();
@@ -487,6 +519,9 @@ impl Request {
                 .iter()
                 .map(|(k, (v, _))| (k.as_str(), v.clone())),
         );
+        if let Some(need) = &self.accelerator {
+            out.extend(need.to_capabilities());
+        }
         if let Some(attributes) = &self.device {
             out.push((IOS_DEVICE_KEY, "1".to_owned()));
             out.extend(
@@ -557,10 +592,24 @@ impl Request {
                 unmet.push(Unmet::Consumable { what, want, have });
             }
         }
+        if let Some(Err(miss)) = self
+            .accelerator
+            .as_ref()
+            .map(|need| need.met_by(node.accelerator.as_ref()))
+        {
+            unmet.push(Unmet::Accelerator(miss));
+        }
         if let Some(want) = &self.device {
             unmet.extend(closest_device(want, node));
         }
         unmet
+    }
+
+    /// The accelerators the request's `accelerator.*` keys ask for, as requested. `None`:
+    /// it names none.
+    #[must_use]
+    pub fn accelerator(&self) -> Option<&AcceleratorNeed> {
+        self.accelerator.as_ref()
     }
 
     /// Whether the node meets every requirement.
@@ -612,6 +661,18 @@ fn closest_device<'w>(want: &'w BTreeMap<String, String>, node: &NodeCaps) -> Ve
             have: have.get(attribute).cloned(),
         })
         .collect()
+}
+
+/// The request key of the part of an accelerator need that `miss` names.
+fn accelerator_key(miss: AcceleratorMiss) -> &'static str {
+    match miss {
+        AcceleratorMiss::Vendor => ACCEL_VENDOR_KEY,
+        AcceleratorMiss::Model => ACCEL_MODEL_KEY,
+        AcceleratorMiss::Count => ACCEL_COUNT_KEY,
+        AcceleratorMiss::Memory => ACCEL_MEMORY_GIB_KEY,
+        AcceleratorMiss::Interconnect => ACCEL_INTERCONNECT_KEY,
+        AcceleratorMiss::FormFactor => ACCEL_FORM_FACTOR_KEY,
+    }
 }
 
 /// Sets `slot` if empty. `None` if it was already set.

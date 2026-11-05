@@ -229,8 +229,7 @@ fn a_stored_offer_rebuilds_its_offer() {
         ..offer("mac", 40)
     };
     let bare = Offer {
-        gpu_class: None,
-        gpus: 0,
+        accelerator: None,
         ..offer("cpu", 10)
     };
     for original in [offer("a10", 60), sandbox, bare] {
@@ -244,7 +243,7 @@ fn a_stored_offer_rebuilds_its_offer() {
     assert_eq!(unknown.exec, StoredExec::Container);
     let shown = unknown.to_offer(5);
     assert_eq!(shown.cpu_millis, 0);
-    assert_eq!(shown.gpu_class, None);
+    assert_eq!(shown.accelerator, None);
 }
 
 /// Asserts that a record written when offers spelt Arm `aarch64` rebuilds an `arm64`
@@ -476,4 +475,120 @@ fn a_brake_with_an_unknown_field_and_no_failures_reads() {
     let read = Records::decode(&text).unwrap();
     assert_eq!(read.brake["gpu"].failures, 0);
     assert_eq!(read.brake["gpu"].tripped_at, Some(at(7 * MINUTE)));
+}
+
+/// Asserts that an offer with an accelerator round-trips through the record with its
+/// family, variant, count and the variant's nominal memory, and that the keys written are
+/// still `gpus` and `gpu_class` (the variant spelling, else the family). Catches a record
+/// that drops the variant or the memory, or one that writes a key the release before
+/// refuses.
+#[test]
+fn an_offer_with_an_accelerator_round_trips_through_the_record() {
+    let original = Offer {
+        accelerator: accel("nvidia-a100-sxm4-80gb", 4),
+        ..offer("a100", 300)
+    };
+    let stored = StoredOffer::from_offer(&original);
+    assert_eq!(stored.gpus, 4);
+    assert_eq!(stored.gpu_class.as_deref(), Some("nvidia-a100-sxm4-80gb"));
+    let rebuilt = stored.to_offer(300);
+    assert_eq!(rebuilt, original);
+    let held = rebuilt.accelerator.unwrap();
+    assert_eq!(held.model.as_str(), "nvidia-a100");
+    assert_eq!(held.variant.unwrap().as_str(), "nvidia-a100-sxm4-80gb");
+    assert_eq!(held.count, 4);
+    assert_eq!(held.memory_per_device, Some(80 << 30));
+
+    let json = serde_json::to_value(&stored).unwrap();
+    assert_eq!(json["gpus"], 4);
+    assert_eq!(json["gpu_class"], "nvidia-a100-sxm4-80gb");
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "arch",
+            "cpu_millis",
+            "disk_bytes",
+            "exec",
+            "gpu_class",
+            "gpus",
+            "id",
+            "memory_bytes",
+            "os",
+            "zone"
+        ]
+    );
+
+    let family = StoredOffer::from_offer(&offer("a10", 60));
+    assert_eq!(family.gpu_class.as_deref(), Some("nvidia-a10"));
+    let mut hand_edited = family;
+    hand_edited.gpu_class = Some("Not A Model".to_owned());
+    assert_eq!(hand_edited.to_offer(60).accelerator, None);
+}
+
+/// Asserts that an offer for a model the alias table does not know keeps every fact it
+/// states through the stored shape: the memory per device, vendor, interconnect and form
+/// factor come back from `to_offer`, and the offer still meets an 80 GiB need. Catches a
+/// stored shape that rebuilds the accelerator from the class spelling alone, losing the
+/// memory so a machine on its way stops covering the request it was launched for.
+#[test]
+fn a_stored_offer_of_an_unknown_model_keeps_every_fact_it_stated() {
+    let original = gb300_offer("gb", 60);
+    let stored = StoredOffer::from_offer(&original);
+    assert_eq!(stored.gpu_class.as_deref(), Some("nvidia-gb300"));
+    assert_eq!(stored.accelerator_facts, original.accelerator);
+    let rebuilt = stored.to_offer(60);
+    assert_eq!(rebuilt, original);
+    let held = rebuilt.accelerator.as_ref().unwrap();
+    assert_eq!(held.memory_per_device, Some(80 << 30));
+    assert_eq!(held.vendor.as_str(), "nvidia");
+    assert_eq!(held.form_factor, Some(js_types::FormFactor::Sxm));
+    assert_eq!(held.interconnect.as_ref().unwrap().kind(), "nvlink");
+    assert_eq!(rebuilt.fit(&gb300_request("r1").demand), Ok(()));
+}
+
+/// Asserts that the facts held in memory are not part of the records file: the written
+/// text of a record of an unknown model has the same keys as that of an alias offer and
+/// names none of the facts, a decoded record holds none, and one that spells a class the
+/// table knows holds none either. Catches a facts field that reaches the file, which the
+/// release before this one would refuse as an unknown key.
+#[test]
+fn the_accelerator_facts_never_reach_the_records_file() {
+    let mut unknown = record(Phase::Launching, 60, 0);
+    unknown.offer = StoredOffer::from_offer(&gb300_offer("gb", 60));
+    let mut alias = unknown.clone();
+    alias.offer = StoredOffer::from_offer(&offer("gb", 60));
+    alias.offer.gpu_class = unknown.offer.gpu_class.clone();
+    assert_eq!(alias.offer.accelerator_facts, None);
+    let text = |record: &Record| {
+        let mut records = Records::default();
+        records.instances.push(record.clone());
+        records.encode().unwrap()
+    };
+    let written = text(&unknown);
+    assert_eq!(written, text(&alias));
+    for key in [
+        "accelerator_facts",
+        "memory_per_device",
+        "interconnect",
+        "nvlink",
+    ] {
+        assert!(!written.contains(key), "{key}");
+    }
+    let read = Records::decode(&written).unwrap();
+    assert_eq!(read.instances[0].offer.accelerator_facts, None);
+    assert_eq!(
+        read.instances[0].offer.gpu_class.as_deref(),
+        Some("nvidia-gb300")
+    );
+    let mut table = record(Phase::Launching, 60, 0);
+    table.offer = StoredOffer::from_offer(&offer("a10", 60));
+    let read = Records::decode(&text(&table)).unwrap();
+    assert_eq!(read.instances[0], table);
 }

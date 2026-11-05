@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, GpuClass, Held, HostRef,
-    Observed, Offer, PriceUnit, ProviderCaps, ProviderError, Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Held, HostRef, Observed, Offer,
+    PriceUnit, ProviderCaps, ProviderError, Released,
 };
 use js_lease_server::{BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, OwnerOnlyFiles};
-use js_types::{ExecMode, HostId, ProviderId, RequestId};
+use js_types::{ExecMode, HostId, Model, ProviderId, RequestId, accelerator_of};
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hello_body, session, start_agents};
@@ -65,7 +65,7 @@ impl CapacityProvider for Handle {
         ProviderCaps {
             os: BTreeSet::from(["linux".to_owned()]),
             arch: BTreeSet::from(["x86_64".to_owned()]),
-            accelerators: BTreeSet::from([GpuClass::parse("nvidia-a100").unwrap()]),
+            accelerators: BTreeSet::from([Model::parse("nvidia-a100").unwrap()]),
             whole_host: true,
             host_ports: false,
         }
@@ -130,7 +130,7 @@ fn admission_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, Ki
         provider: Box::new(Handle(cloud.unwrap())),
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))
@@ -144,8 +144,11 @@ fn a100(available: bool) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a100").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,

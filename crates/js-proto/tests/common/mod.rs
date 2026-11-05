@@ -46,6 +46,7 @@ pub fn spec(contents: &str) -> JobSpec {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             exec: ExecMode::Container.into(),
+            ..Constraints::default()
         }),
         wall_limit_seconds: Some(3600),
         network: NetworkLevel::AllowList.into(),

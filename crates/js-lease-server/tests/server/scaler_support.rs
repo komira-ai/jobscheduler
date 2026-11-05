@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostName,
-    HostRef, Offer, ProviderError, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, Held, HostName, HostRef,
+    Offer, ProviderError, Released,
 };
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{
@@ -22,7 +22,7 @@ use js_provider_lambdalabs::{
     OptionTable, Region,
 };
 use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, Request, RequestId, ResourceClass, Resources,
+    Capabilities, ClassId, ExecMode, LeaseId, Model, Request, RequestId, ResourceClass, Resources,
 };
 use serde_json::{Value, json};
 
@@ -142,7 +142,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             provider: Box::new(cloud),
             floor: Floor {
                 gpus: 1,
-                gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+                gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
             },
             exec: vec![ExecMode::Container],
         }));
@@ -177,7 +177,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         provider,
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))

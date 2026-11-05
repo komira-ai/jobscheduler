@@ -24,13 +24,34 @@ Options:
       --spec.command <TEXT>
           The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob.
 
+      --spec.constraints.accelerator.count <N>
+          The least number of devices.
+
+      --spec.constraints.accelerator.form-factor <TEXT>
+          The form factor: sxm or pcie.
+
+      --spec.constraints.accelerator.interconnect <TEXT>
+          The least interconnect, as kind>=size.
+
+      --spec.constraints.accelerator.memory-per-device-gib <N>
+          The least memory of each device, in whole GiB.
+
+      --spec.constraints.accelerator.model <TEXT>
+          The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.
+
+      --spec.constraints.accelerator.vendor <TEXT>
+          The vendor, such as nvidia.
+
       --spec.constraints.arch <TEXT>
-          The CPU architecture, as free text matched exactly against the spelling the host or offer reports, such as x86_64. Today ARM is spelt arm64 by some sources and aarch64 by others (design section 3.8). Empty: any.
+          The CPU architecture: x86_64 or arm64. aarch64 is accepted and stored as arm64 (design section 3.8). Empty: any.
 
       --spec.constraints.exec <NAME>
           The mode the host runs jobs in. Unspecified: either.
           
           [possible values: unspecified, container, sandbox-exec]
+
+      --spec.constraints.isa-level <TEXT>
+          The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A host is capable when it reports that level or a higher one of the same architecture. Empty: any.
 
       --spec.constraints.os <TEXT>
           The operating system: linux or macos. Empty: any.
@@ -54,10 +75,10 @@ Options:
           Scratch disk, in bytes. Absent: none is asked for.
 
       --spec.needs.gpu-class <TEXT>
-          The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class.
+          The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class. It is resolved through the alias table like Accelerator.model.
 
       --spec.needs.gpus <N>
-          The number of GPUs. 0: none.
+          The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no Constraints.accelerator, keeps the meaning it has always had: the class is read through the alias table of design section 3.8, so a full spelling pins its variant and a family name such as nvidia-a100 matches every variant of it.
 
       --spec.needs.memory-bytes <N>
           Memory, in bytes.

@@ -21,7 +21,7 @@ pub(crate) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const MONTH: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The order in which [`Offer::fit`] checks, which is how near a miss is.
-const DIMENSIONS: [Dimension; 9] = [
+const DIMENSIONS: [Dimension; 13] = [
     Dimension::Os,
     Dimension::Arch,
     Dimension::IsaLevel,
@@ -29,8 +29,12 @@ const DIMENSIONS: [Dimension; 9] = [
     Dimension::CpuMillis,
     Dimension::MemoryBytes,
     Dimension::DiskBytes,
-    Dimension::Gpus,
-    Dimension::GpuClass,
+    Dimension::AcceleratorVendor,
+    Dimension::AcceleratorModel,
+    Dimension::AcceleratorCount,
+    Dimension::AcceleratorMemory,
+    Dimension::AcceleratorInterconnect,
+    Dimension::AcceleratorFormFactor,
 ];
 
 /// How far down [`Offer::fit`]'s checks `dimension` is.
@@ -113,7 +117,7 @@ pub(crate) fn choose<'a>(
         .min_by_key(|offer| {
             (
                 offer.price_cents_per_hour,
-                offer.gpus,
+                offer.accelerator.as_ref().map_or(0, |a| a.count),
                 offer.id.clone(),
                 offer.zone.clone(),
             )

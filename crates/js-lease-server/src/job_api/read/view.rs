@@ -125,6 +125,10 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             os: spec.constraints.os.clone().unwrap_or_default(),
             arch: spec.constraints.arch.clone().unwrap_or_default(),
             exec: exec(spec.constraints.exec).into(),
+            // A stored job holds no ISA level or accelerator of its own yet: no submit
+            // writes them, so the view shows neither.
+            isa_level: String::new(),
+            accelerator: None,
         }),
         wall_limit_seconds: Some(spec.wall_limit_secs),
         network: network(spec.network).into(),

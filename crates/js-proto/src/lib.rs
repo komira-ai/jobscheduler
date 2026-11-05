@@ -27,6 +27,9 @@
 //! A refused submit is a [`tonic::Status`] carrying a [`v1::Refusal`] in its details;
 //! [`refusal`] makes one and reads one back. [`FILE_DESCRIPTOR_SET`] is the encoded
 //! descriptor set of the package, with its comments, for reflection and for the tests.
+//!
+//! [`request_need`] converts a job's needs and constraints, with its optional accelerator,
+//! into the booking and the `accelerator.*` capability keys, through `js_caps`.
 
 use std::fmt;
 
@@ -48,6 +51,38 @@ impl fmt::Debug for v1::JobFile {
             .field("name", &self.name)
             .field("contents_len", &self.contents.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// The booking and the capability keys a job's needs and constraints state: the one
+/// conversion of `js_caps::request_need`, called with what the lease body passes it, the
+/// GPU count, the class when it is not empty, and the accelerator object field by field.
+/// A job that sets only `gpus` and `gpu_class` converts as the pair always did.
+///
+/// # Errors
+///
+/// [`js_caps::RequestNeedError`] when a field of the accelerator is not valid, when it asks
+/// for a count and names no model, or when it disagrees with the pair.
+pub fn request_need(
+    needs: &v1::Needs,
+    constraints: Option<&v1::Constraints>,
+) -> Result<js_caps::RequestNeed, js_caps::RequestNeedError> {
+    let class = (!needs.gpu_class.is_empty()).then_some(needs.gpu_class.as_str());
+    let object = constraints
+        .and_then(|constraints| constraints.accelerator.as_ref())
+        .map(accelerator_request);
+    js_caps::request_need(u64::from(needs.gpus), class, object.as_ref())
+}
+
+/// The request object `js_caps` converts, field by field from the message.
+fn accelerator_request(accelerator: &v1::Accelerator) -> js_caps::AcceleratorRequest {
+    js_caps::AcceleratorRequest {
+        vendor: accelerator.vendor.clone(),
+        model: accelerator.model.clone(),
+        count: accelerator.count,
+        memory_per_device_gib: accelerator.memory_per_device_gib,
+        interconnect: accelerator.interconnect.clone(),
+        form_factor: accelerator.form_factor.clone(),
     }
 }
 

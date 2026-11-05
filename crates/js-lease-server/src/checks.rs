@@ -204,13 +204,24 @@ fn catalog_notes(offers: &[Offer], floor: &Floor, pins: Option<&AgentPins>) -> V
     if let Some(offer) = offers.iter().find(|o| o.price_cents_per_hour.is_none()) {
         notes.push(format!("catalog: {} has no price", offer.id));
     }
-    if let Some(offer) = offers.iter().find(|o| u64::from(o.gpus) < floor.gpus) {
+    let gpus = |o: &Offer| o.accelerator.as_ref().map_or(0, |have| have.count);
+    if let Some(offer) = offers.iter().find(|o| u64::from(gpus(o)) < floor.gpus) {
         notes.push(format!(
             "catalog: {} has {} gpus, below the pool floor of {}",
-            offer.id, offer.gpus, floor.gpus
+            offer.id,
+            gpus(offer),
+            floor.gpus
         ));
     }
-    let other_class = |o: &&Offer| o.gpus > 0 && o.gpu_class != floor.gpu_class;
+    let floor_model = floor
+        .gpu_class
+        .as_ref()
+        .map(|class| class.canonical().model);
+    let other_class = |o: &&Offer| {
+        o.accelerator
+            .as_ref()
+            .is_some_and(|have| Some(&have.model) != floor_model.as_ref())
+    };
     if let Some(offer) = offers.iter().filter(|_| floor.gpus > 0).find(other_class) {
         notes.push(format!(
             "catalog: {} has gpus of another class than the pool's",

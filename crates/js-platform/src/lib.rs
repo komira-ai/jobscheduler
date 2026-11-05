@@ -29,7 +29,7 @@ use std::fmt;
 use std::future::{Future, ready};
 use std::time::Duration;
 
-use js_types::{Arch, ImageDigestRef, JobNetwork, Os, Requirements};
+use js_types::{Arch, ImageDigestRef, JobNetwork, Model, Os, Requirements};
 
 /// The name of a container platform: a `[[platform]]` table's `name`, or a name the
 /// configuration loader made for a pool that names its provider directly.
@@ -75,7 +75,8 @@ pub struct PlatformCaps {
     pub os: BTreeSet<Os>,
     /// The CPU architectures, in the one spelling.
     pub arch: BTreeSet<Arch>,
-    /// The accelerator models, as the agent spells a GPU class (`nvidia-a100-sxm4-80gb`).
+    /// The accelerator models, as the agent spells a GPU class (`nvidia-a100-sxm4-80gb`) or
+    /// as a canonical family (`nvidia-a100`); both are compared by their family.
     pub accelerators: BTreeSet<String>,
     /// Whether a job may have one of the platform's hosts whole.
     pub whole_host: bool,
@@ -99,8 +100,10 @@ impl PlatformCaps {
     }
 
     /// Whether these capabilities admit `r`: the operating system and the architecture it
-    /// names, when it names one, are in the sets; and a request for GPUs finds its class
-    /// among the accelerators (a request's GPUs always name their class). A name
+    /// names, when it names one, are in the sets; and a request for GPUs finds the family of
+    /// its model (its `accelerator.model`, else its GPU class) among the families of the
+    /// accelerators, through the alias table, so a request for one variant is admitted by a
+    /// platform that lists another of the family or the family itself. A name
     /// that is not an operating system or an architecture is in no set. Sizes are not
     /// compared: capabilities say what kind of host exists, not how big.
     pub fn admits(&self, r: &Requirements) -> bool {
@@ -111,10 +114,16 @@ impl PlatformCaps {
             arch.parse()
                 .is_ok_and(|arch: Arch| self.arch.contains(&arch))
         });
-        let gpus = r
-            .resources
-            .gpu_class()
-            .is_none_or(|class| self.accelerators.contains(class));
+        let model = r
+            .accelerator
+            .as_ref()
+            .and_then(|need| need.model.as_ref())
+            .map(Model::as_str)
+            .or(r.resources.gpu_class());
+        let gpus = model.is_none_or(|want| {
+            let want = family(want);
+            self.accelerators.iter().any(|own| family(own) == want)
+        });
         [os, arch, gpus].into_iter().all(|met| met)
     }
 
@@ -349,9 +358,18 @@ pub trait ContainerPlatform {
     }
 }
 
+/// The canonical family of a model name through the alias table, or the text itself when
+/// it is not a model name.
+fn family(text: &str) -> String {
+    Model::parse(text).map_or_else(
+        |_| text.to_owned(),
+        |model| model.canonical().model.to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use js_types::Resources;
+    use js_types::{AcceleratorNeed, Resources};
 
     use super::*;
 
@@ -368,6 +386,7 @@ mod tests {
             arch: arch.map(str::to_owned),
             isa_level: None,
             exec: None,
+            accelerator: None,
             network: JobNetwork::None,
             host_ports: Vec::new(),
         }
@@ -403,6 +422,38 @@ mod tests {
         assert!(!caps.admits(&wanting(None, Some("sparc"), 0, None)));
         assert!(!caps.admits(&wanting(None, None, 1, Some("nvidia-h100"))));
         assert!(!PlatformCaps::default().admits(&wanting(None, None, 1, Some("nvidia-a10"))));
+    }
+
+    /// Asserts that GPU models are compared by their family through the alias table: a
+    /// request for a variant is admitted by a platform that lists another variant of its
+    /// family or the family itself, a request for another family is not, the model of the
+    /// request's accelerator need is used before its booked class, and a class that is not
+    /// a model name is compared as written. Catches a platform refused for a request that
+    /// spells its model differently from the platform's listing.
+    #[test]
+    fn gpu_models_are_compared_by_their_family() {
+        let a100 = |listed: &str| {
+            PlatformCaps::new(
+                BTreeSet::from([Os::Linux]),
+                BTreeSet::from([Arch::X86_64]),
+                BTreeSet::from([listed.to_owned()]),
+                false,
+            )
+        };
+        let variant = wanting(None, None, 1, Some("nvidia-a100-sxm4-40gb"));
+        assert!(a100("nvidia-a100-sxm4-80gb").admits(&variant));
+        assert!(a100("nvidia-a100").admits(&variant));
+        assert!(!a100("nvidia-h100").admits(&variant));
+        let mut by_need = wanting(None, None, 0, None);
+        by_need.accelerator = Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a100").unwrap()),
+            ..AcceleratorNeed::default()
+        });
+        assert!(a100("nvidia-a100-sxm4-80gb").admits(&by_need));
+        assert!(!a100("nvidia-h100").admits(&by_need));
+        let odd = wanting(None, None, 1, Some("A100_X"));
+        assert!(a100("A100_X").admits(&odd));
+        assert!(!a100("A100_Y").admits(&odd));
     }
 
     /// Asserts that a union holds every set member of both sides and a whole host when

@@ -492,7 +492,7 @@ impl CapacityProvider for ElasticFake {
         true
     }
 
-    /// The operating systems, architectures and GPU classes of the offers it lists, and a
+    /// The operating systems, architectures and accelerator models (canonical families) of the offers it lists, and a
     /// whole machine with host ports, as every machine that runs the agent has.
     fn capabilities(&self) -> ProviderCaps {
         let mut state = self.state();
@@ -503,7 +503,7 @@ impl CapacityProvider for ElasticFake {
             arch: offers.iter().map(|offer| offer.arch.clone()).collect(),
             accelerators: offers
                 .iter()
-                .filter_map(|offer| offer.gpu_class.clone())
+                .filter_map(|offer| offer.accelerator.as_ref().map(|have| have.model.clone()))
                 .collect::<BTreeSet<_>>(),
             whole_host: true,
             host_ports: true,

@@ -113,7 +113,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | `invariants` | `tests/invariants.rs` | Each invariant over hand-built observations, with negative cases it must flag and correct siblings it must not. |
 | `whole_host` | `tests/whole_host.rs` | The whole-host family: fifty whole-node requests over twenty hosts, run once per value of `--placement` (`Placement::value_variants()`), and two negative cases on the real server's history (an agent that reports ready for another lease, a server view that drains by cancelling). The scenario is in `tests/cell/whole_host.rs`. |
 | `whole_host_faults` | `tests/whole_host_faults.rs` | The whole-host fault family: hosts silent on a prepare, a refused prepare for each refusal reason, a drain behind busy hosts, a ready report racing the prepare deadline (a scenario per second of the sweep), an agent that restarts while its host is committed, a cancelled request (queued and marked), and a held lease whose agent restarts, each over sixteen seeds under every value of `--placement`. The scenarios are in `tests/cell/whole_host_faults.rs` and `tests/cell/whole_host_cancel.rs`. |
-| `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations, `Scenario::under`, and the server spec's class, placement and whole-node keys. |
+| `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path (under its own request id, a given one or none) and the answers it keeps, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations (on a raw answer, on the server as it stands when judged, at the end or at a virtual time, and over a request's tries), `Scenario::under`, the list of refusal reasons, and the server spec's class, whole-node keys and placement. |
+| `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts under every placement over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
 
@@ -213,6 +214,10 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `.under(placement)` after `.server(...)` to run under a value of `--placement` (the
   scenario's name gains the placement);
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
+  a whole host with `Work::whole_host(d)`, asked for under a request id of the item's own,
+  under a given one with `.with_request_id(id)`, or under none with
+  `.without_request_id()`; a whole-node pool with `ServerSpec::whole_node_pool`, and its
+  keys with `.prepare_timeout(d)`, `.reserve_backoff(d)` and `.max_replace(n)`;
 - the actions, at a virtual time after the start, with `.at(after, action)`:
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`,
   `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
@@ -234,7 +239,16 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   booked on a host where an earlier try of the same item failed sooner than `backoff`
   after, read from the server's listing to within one read) and
   `Expect::held_after_the_runs_on_its_host(item)`, judged once per
-  seed after the end check;
+  seed after the end check with `.expect(e)`, or at a virtual time with
+  `.expect_at(after, e)` (after the kernel's events and the actions of that time, before
+  the client's calls of it). A test of the server moved onto the cell also has the
+  facts that test read: `Expect::answer(call, status, body)`, the raw answer the client
+  kept for one of its calls (`Call::acquire(item, n)`), and the server as it stands when
+  the statement is judged: `Expect::listed(call, Listed::...)` and
+  `Expect::no_leases_listed()` (the lease list as a client reads it),
+  `Expect::booked(call, Booked::...)` (where the agent registry books the lease),
+  `Expect::request_record(key, RecordFact::...)`, `Expect::waiting(id, place)`,
+  `Expect::no_reservations()` and `Expect::set_aside(index, request)`;
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
   (`start_repeated`, `start_after_stop`, `start_dropped_late`, `result_resent`,
   `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) added over one seed, which at least one seed must satisfy. A witness

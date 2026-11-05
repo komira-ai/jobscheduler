@@ -825,6 +825,7 @@ impl Elastic<'_> {
             arch: None,
             isa_level: None,
             exec,
+            accelerator: built.floor.need(),
             network: Default::default(),
             host_ports: Vec::new(),
         };

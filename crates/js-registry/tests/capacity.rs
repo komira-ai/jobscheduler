@@ -10,15 +10,17 @@ use std::time::Duration;
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, InstanceIdentity, Taint};
 use js_elastic::conformance::{REGISTERED_CASES, RegisteredRig, run_all_registered};
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, Claim, GpuClass,
-    Hello, HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, Reason,
-    Refusal, RefusalCode, Released, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, Claim, Hello,
+    HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, Reason, Refusal,
+    RefusalCode, Released, SchedulerId,
 };
 use js_provider::Pool;
 use js_registry::{
     DEFAULT_LOST_RETENTION_MS, HostState, MIN_LOST_RETENTION_MS, PoolConfig, StaticCapacity,
 };
-use js_types::{ExecMode, ProviderId, Request, ResourceClass, Resources, Shape};
+use js_types::{
+    ExecMode, Model, ProviderId, Request, ResourceClass, Resources, Shape, accelerator_of,
+};
 use support::*;
 
 /// One hour on the manual clock: well within the default lost-host retention.
@@ -68,8 +70,7 @@ fn offer(os: &str, gpus: u32, class: Option<&str>) -> Offer {
         cpu_millis: 1000,
         memory_bytes: 1 << 30,
         disk_bytes: 0,
-        gpus,
-        gpu_class: class.map(|class| GpuClass::parse(class).unwrap()),
+        accelerator: class.map(|class| accelerator_of(&Model::parse(class).unwrap(), gpus, None)),
         os: os.to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -306,7 +307,7 @@ fn static_provider_reports_hosts_supplied_and_nothing_to_launch() {
     );
     assert_eq!(
         caps.accelerators,
-        BTreeSet::from([GpuClass::parse("nvidia-a10").unwrap()])
+        BTreeSet::from([Model::parse("nvidia-a10").unwrap()])
     );
     assert!(caps.whole_host && caps.host_ports);
     let four = Capacity {

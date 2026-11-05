@@ -60,16 +60,19 @@ fn launch_actions(
 /// ([`crate::StoredOffer::isa_level`]), so a record read back after a restart has none;
 /// the level is a fact of the offer, which the catalog states again, so a machine still
 /// booting for a request that asked for a level keeps covering it. An offer the catalog no
-/// longer lists states no level, as before.
+/// longer lists states no level, as before. The accelerator is restored the same way
+/// ([`crate::StoredOffer::accelerator_facts`]): a record that holds none takes the
+/// catalog's accelerator for the offer when it spells the stored class and count.
 fn launched_offer(record: &Record, pool: &PoolInput) -> Offer {
+    let listed = pool
+        .offers
+        .iter()
+        .find(|listed| (&listed.id, &listed.zone) == (&record.offer.id, &record.offer.zone));
     let mut offer = record.offer.to_offer(0);
-    if offer.isa_level.is_none() {
-        offer.isa_level = pool
-            .offers
-            .iter()
-            .find(|listed| (&listed.id, &listed.zone) == (&offer.id, &offer.zone))
-            .and_then(|listed| listed.isa_level);
-    }
+    offer.isa_level = offer.isa_level.or_else(|| listed.and_then(|l| l.isa_level));
+    offer.accelerator = record
+        .offer
+        .accelerator_with(listed.and_then(|l| l.accelerator.as_ref()));
     offer
 }
 

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use js_agent_wire::{Hello, Phase, ProtocolRange, Taint, WireShape};
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, GpuClass, Held, HostRef,
-    Observed, Offer, ProviderCaps, ProviderError, Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Held, HostRef, Observed, Offer,
+    ProviderCaps, ProviderError, Released,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::DefaultPlatform;
@@ -21,8 +21,8 @@ use js_sched::admission_ever::{
     can_ever_serve,
 };
 use js_types::{
-    Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId, Os, ProviderId,
-    Request, Requirements, ResourceClass, Resources, Shape,
+    AcceleratorNeed, Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId,
+    Model, Os, ProviderId, Request, Requirements, ResourceClass, Resources, Shape,
 };
 
 /// The capabilities every host of the test pool reports and the pool books.
@@ -68,6 +68,7 @@ fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
                 disk_bytes: 0,
                 gpu_class: None,
                 max_leases: None,
+                accelerator: None,
             },
             capabilities: facts(),
             gpu_devices: Vec::new(),
@@ -142,7 +143,7 @@ fn gpu_cloud() -> Arc<dyn CapacityProvider> {
     Arc::new(Cloud(ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
         arch: BTreeSet::from(["x86_64".to_owned(), "sparc".to_owned()]),
-        accelerators: BTreeSet::from([GpuClass::parse("nvidia-a10").unwrap()]),
+        accelerators: BTreeSet::from([Model::parse("nvidia-a10").unwrap()]),
         whole_host: true,
         host_ports: true,
     }))
@@ -150,8 +151,10 @@ fn gpu_cloud() -> Arc<dyn CapacityProvider> {
 
 fn wanting(cores: u64, gpus: u64) -> Requirements {
     let class = (gpus > 0).then(|| "nvidia-a10".to_owned());
+    let resources = Resources::new(cores * 1000, 1 << 30, gpus, class).unwrap();
     Requirements {
-        resources: Resources::new(cores * 1000, 1 << 30, gpus, class).unwrap(),
+        accelerator: AcceleratorNeed::booked(&resources),
+        resources,
         disk_bytes: None,
         os: Some("linux".to_owned()),
         arch: None,

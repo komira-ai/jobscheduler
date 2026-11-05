@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CheckResult, GpuClass, Held,
-    HostRef, Offer, PriceUnit, ProviderError, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CheckResult, Held, HostRef,
+    Offer, PriceUnit, ProviderError, Released,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
 use js_lease::Booking;
@@ -20,8 +20,8 @@ use js_lease_server::{
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, ProviderId, Request, RequestId, ResourceClass,
-    Resources,
+    Capabilities, ClassId, ExecMode, LeaseId, Model, ProviderId, Request, RequestId, ResourceClass,
+    Resources, accelerator_of,
 };
 
 use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body, routed};
@@ -125,7 +125,7 @@ fn logged_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindE
         provider: Box::new(Logged { cloud, log }),
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))
@@ -183,8 +183,11 @@ fn offer() -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a100").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
