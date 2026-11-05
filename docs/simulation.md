@@ -185,8 +185,9 @@ fn a_lossy_agent_wire_settles_every_run() {
 // End of the copy.
 ```
 
-What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/` and
-`crates/js-sim-cell/src/actions/`:
+What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
+`crates/js-sim-cell/src/actions/`, `crates/js-sim-cell/src/work.rs` and
+`crates/js-sim-cell/src/server/spec.rs`:
 
 - the world: `.server(ServerSpec::registered_pool(pool, Shape::gpu_host(), count))`,
   `.hosts(pool, count)` for correct agents, `.broken_hosts(pool, count, defect)` for
@@ -223,7 +224,8 @@ The rules:
   negative cases of `tests/broken_agent.rs`, which check that a scenario fails and how,
   are the exception.
 - One family is one test binary: a new family is a new file `tests/<family>.rs`, and it
-  is named in the table under "Run one" above, or `docs.rs` fails. Code two binaries
+  is named on this page as `` `tests/<family>.rs` `` (add a row to the table under "Run
+  one"), or `docs.rs` fails. Code two binaries
   share goes in a subdirectory and is included with `#[path = ...]`, as
   `tests/cell/lossy_wire.rs` is.
 - One action is one file: a new action is a file in `src/actions/` and one `pub use` line
