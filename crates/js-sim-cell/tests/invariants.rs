@@ -2,8 +2,9 @@
 //!
 //! Each invariant has negative cases that it must flag, alone, and correct siblings it
 //! must not flag, so a check that flags nothing fails the first and a check that flags
-//! everything fails the second. [`NEGATIVE_CASES`] lists every negative case; a new
-//! invariant without one fails `every_invariant_has_a_negative_case_in_the_table`.
+//! everything fails the second. [`NEGATIVE_CASES`] and the whole-host module's table
+//! list every negative case; a new invariant without one fails
+//! `every_invariant_has_a_negative_case_in_the_table`.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -21,6 +22,9 @@ mod boundaries;
 // The invariants of the fault family, a module of this test binary too.
 #[path = "invariants/faults.rs"]
 mod faults;
+// The whole-host invariants' cases, likewise.
+#[path = "invariants/whole_host.rs"]
+mod whole_host;
 
 const GIB: u64 = 1 << 30;
 
@@ -148,12 +152,14 @@ fn whole_host_beside_another_lease() -> Observations {
         .with_agent(host(0), runs_lease_one())
 }
 
-/// Whole-host item 0, submitted and queued with lease 0, at virtual time 500.
+/// Whole-host item 0, submitted and queued with lease 0, at virtual time 500; host 0's
+/// agent reported ready for lease 0 at 150.
 fn whole_item_queued() -> Observations {
     Observations::quiet()
         .at(ms(500))
         .with_item(ItemId(0), whole())
         .with_event(ItemId(0), ms(100), ClientEvent::Submitted)
+        .with_ready(host(0), "1-0", ms(150))
         .with_event(ItemId(0), ms(200), queued(0))
 }
 
@@ -422,8 +428,9 @@ fn a_clean_history_passes_every_invariant() {
         }
     });
     // The server books item 2's whole-host lease on host 1 before the client learns
-    // where it was placed.
+    // where it was placed, and host 1's agent reports ready for it.
     cell.step(200, items(&[0, 1, 2, 4, 5]).server(), |o| {
+        *o = std::mem::take(o).with_ready(host(1), "1-2", ms(200));
         for (i, h) in [(0, 0), (1, 0), (5, 2)] {
             hear(o, i, queued(u64::from(i)));
             hear(o, i, placed(h));
@@ -714,7 +721,8 @@ fn a_whole_host_conflict_revealed_by_an_item_or_a_listing_alone_is_flagged() {
 
     let mut checker = Checker::new();
     none(&checker.step(&busy, &first));
-    let placed_there = busy.clone().with_event(ItemId(0), ms(250), placed(1));
+    let placed_there = busy.clone().with_ready(host(1), "1-0", ms(240));
+    let placed_there = placed_there.with_event(ItemId(0), ms(250), placed(1));
     none(&checker.step(&placed_there, &Touched::nothing().item(ItemId(0))));
 
     let mut checker = Checker::new();
@@ -930,7 +938,7 @@ fn a_step_that_touched_one_agent_is_not_checked_against_every_agent() {
 }
 
 /// Asserts that every member of `Invariant::ALL` has a negative case in
-/// `NEGATIVE_CASES`, that no two members share a name, and that each case is flagged
+/// `NEGATIVE_CASES` or the whole-host module's table, that no two members share a name, and that each case is flagged
 /// by exactly the invariant of its row. Catches an invariant added without a negative
 /// case, two invariants reported under one name, and a negative case that passes by
 /// tripping another invariant.
@@ -942,15 +950,16 @@ fn every_invariant_has_a_negative_case_in_the_table() {
         Invariant::ALL.len(),
         "two invariants share a name"
     );
+    let table = || NEGATIVE_CASES.iter().chain(whole_host::NEGATIVE_CASES);
     for invariant in Invariant::ALL {
-        let rows = NEGATIVE_CASES.iter().filter(|(row, _)| *row == invariant);
+        let rows = table().filter(|(row, _)| *row == invariant);
         assert!(
             rows.count() > 0,
             "{} has no negative case",
             invariant.name()
         );
     }
-    for (invariant, case) in NEGATIVE_CASES {
+    for (invariant, case) in table() {
         let found = verdict(*invariant, &case());
         assert_eq!(
             flagged(&found),
@@ -981,6 +990,10 @@ fn names_are_stable_and_distinct() {
             ("bookings-match-agents", Checked::AtEnd),
             ("no-lease-on-a-lost-host", Checked::EveryStep),
             ("no-result-lost", Checked::AtEnd),
+            ("whole-host-is-exclusive", Checked::EveryStep),
+            ("held-means-ready", Checked::EveryStep),
+            ("drain-kills-nothing", Checked::EveryStep),
+            ("marked-hosts-serve-no-ordinary-start", Checked::EveryStep),
         ]
     );
     let ends: Vec<&str> = HowEnded::ALL.iter().map(|h| h.name()).collect();

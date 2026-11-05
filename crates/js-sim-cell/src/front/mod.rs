@@ -36,7 +36,7 @@ use crate::work::Work;
 
 mod lease;
 
-pub use lease::{LeaseFront, POLL_EVERY};
+pub use lease::{LeaseFront, POLL_EVERY, REQUEST_PREFIX};
 
 /// The server's client router, as a front calls it: one request, answered at once.
 pub trait ClientPort {

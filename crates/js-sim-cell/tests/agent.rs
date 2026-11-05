@@ -23,6 +23,9 @@ use serde_json::{Value, json};
 
 #[path = "agent/standin.rs"]
 mod standin;
+// The whole-host handshake, a module of this test binary.
+#[path = "agent/exclusive.rs"]
+mod exclusive;
 
 use standin::{
     BeatAnswer, Cell, HelloAnswer, POOL, SESSION_PREFIX, Script, agent, agent_mut, cell, stand_in,

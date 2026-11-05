@@ -10,9 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS};
 use js_lease::{Clock, ManualClock, Monotonic};
-use js_lease_server::{Cli, Config, StartupError};
+use js_lease_server::{Cli, Config, Placement, StartupError};
 use js_registry::DEFAULT_LOST_RETENTION_MS;
 use js_types::Resources;
 
@@ -24,6 +25,16 @@ pub const JOIN_TOKEN: &str = "sim-cell-join-token-0123456789-abcdefgh";
 
 /// The class of the cell's one pool: what a lease asks for by name.
 pub const POOL_CLASS: &str = "gpu-host";
+
+/// The class of a pool whose hosts are leased whole, each after its agent reports it
+/// ready ([`ServerSpec::whole_node_pool`]): what a whole-host item asks for by name.
+pub const WHOLE_CLASS: &str = "whole-node";
+
+/// The capability key a host's architecture is given under.
+pub const ARCH_KEY: &str = "arch";
+
+/// The architecture [`ServerSpec::placement`] gives a shape that names none.
+pub const ARCH: &str = "x86_64";
 
 /// What the pool books for every host, and what each of the cell's agents offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,11 +89,15 @@ impl Shape {
 /// [`ServerSpec::heartbeat`] says otherwise, and hosts are forgotten after the
 /// registry's default `lost_retention` unless [`ServerSpec::lost_retention`] says
 /// otherwise. Usage recording is off (`--usage-off`): its store reads the system's clock
-/// and commits on a thread of its own, so a run would depend on both. Placement is the
-/// default, `registry`.
+/// and commits on a thread of its own, so a run would depend on both. The pool's class is
+/// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]), and placement
+/// (`--placement`) is the default, `registry`, unless [`ServerSpec::placement`] says
+/// otherwise.
 #[derive(Clone, Debug)]
 pub struct ServerSpec {
     pool: String,
+    class: &'static str,
+    placement: Placement,
     shape: Shape,
     hosts: usize,
     hello_burst: usize,
@@ -101,6 +116,8 @@ impl ServerSpec {
     pub fn registered_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
         Self {
             pool: pool_name.to_owned(),
+            class: POOL_CLASS,
+            placement: Placement::default(),
             shape,
             hosts,
             hello_burst: hosts,
@@ -109,6 +126,32 @@ impl ServerSpec {
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
             resume: false,
         }
+    }
+
+    /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
+    /// each of `hosts` hosts that register with [`JOIN_TOKEN`]: every lease of it holds a
+    /// host whole, and is held only once the host's agent reported it ready. The pool
+    /// sets no whole-node key, so each takes the server's default.
+    #[must_use]
+    pub fn whole_node_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
+        Self {
+            class: WHOLE_CLASS,
+            ..Self::registered_pool(pool_name, shape, hosts)
+        }
+    }
+
+    /// This server, placing leases as `placement` says (`--placement`). The pool's shape
+    /// is given the capability [`ARCH_KEY`] = [`ARCH`] when it names no architecture:
+    /// `js-sched` refuses a pool without one and `registry` reads none, so one scenario
+    /// runs the same pool under every placement. The agents announce, and the client's
+    /// leases ask for, the shape's capabilities, this one too.
+    #[must_use]
+    pub fn placement(mut self, placement: Placement) -> Self {
+        self.placement = placement;
+        let caps = &mut self.shape.capabilities;
+        caps.entry(ARCH_KEY.to_owned())
+            .or_insert_with(|| ARCH.to_owned());
+        self
     }
 
     /// This server, telling its hosts to beat every `interval` and holding a host lost
@@ -187,7 +230,7 @@ impl ServerSpec {
              grace = \"{}ms\"\nlost_retention = \"{}ms\"\n\n[shape]\ncpu_millis = {}\n\
              memory_bytes = {}\ngpus = {}\n{}\n[capabilities]\n{}",
             quoted(&self.pool),
-            quoted(POOL_CLASS),
+            quoted(self.class),
             self.hosts,
             self.interval.as_millis(),
             self.grace.as_millis(),
@@ -203,7 +246,7 @@ impl ServerSpec {
     /// Writes the pool file and the two token files into `dir` and returns the server's
     /// command line: the lease file in `dir`, a first boot (or a resumed one, for a
     /// server started again), registration into the pool with [`JOIN_TOKEN`], the hello
-    /// burst, and usage off.
+    /// burst, the placement, and usage off.
     ///
     /// # Errors
     ///
@@ -222,13 +265,16 @@ impl ServerSpec {
             &format!("{JOIN_TOKEN}\n"),
             "--agent-token-file",
         )?;
-        let flags: [(&str, OsString); 6] = [
+        let placement = self.placement.to_possible_value();
+        let placement = placement.map(|value| value.get_name().to_owned());
+        let flags: [(&str, OsString); 7] = [
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
             ("--token-file", token),
             ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
+            ("--placement", placement.unwrap_or_default().into()),
         ];
         let pairs = flags
             .into_iter()

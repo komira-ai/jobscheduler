@@ -12,17 +12,26 @@
 //!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
 //!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
 //!   process, the processes it killed ([`Killed`]), and the server's list of hosts
-//!   ([`ServerView`]), gathered at one virtual time into [`Observations`].
+//!   ([`ServerView`]), gathered at one virtual time into [`Observations`]. The ledger
+//!   also keeps what the agents sent and were sent for the whole-host handshake
+//!   ([`ReadyReport`], [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Seven
+//!   step and once at the end, and the one-line [`Violation`] it reports. Eleven
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
 //!   ([`Invariant::OneTerminalAnswer`]); no new lease on a host the server lists as lost
 //!   ([`Invariant::NoLeaseOnALostHost`]); everything settled once quiet
 //!   ([`Invariant::SettlesWhenQuiet`]); no booking without a run and no run without a
-//!   booking at the end ([`Invariant::BookingsMatchAgents`]); and no result lost or
-//!   recorded twice ([`Invariant::NoResultLost`]).
+//!   booking at the end ([`Invariant::BookingsMatchAgents`]); no result lost or
+//!   recorded twice ([`Invariant::NoResultLost`]); and the four of a whole host: no host
+//!   held by two whole-host leases or booked beside one
+//!   ([`Invariant::WholeHostIsExclusive`]), a whole-host lease granted only after its
+//!   host's agent reported ready for exactly that lease ([`Invariant::HeldMeansReady`]),
+//!   no run on a host drained for a reservation stopped that its client did not ask to
+//!   stop ([`Invariant::DrainKillsNothing`]), and no ordinary start on a host set aside
+//!   for a whole-host request but backfill inside its tail
+//!   ([`Invariant::MarkedHostsServeNoOrdinaryStart`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -30,12 +39,15 @@
 //!   ([`Counters`]). Its agent is one of two kinds ([`AgentKind`]): the conformance
 //!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
 //!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
+//!   Either kind has the node's side of the whole-host handshake, which prepares, reports
+//!   ready, refuses or stays silent as its [`Prepare`] switch says.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
 //!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]).
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
-//!   asks for, and when the client gives up on it.
+//!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
+//!   it.
 //! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
 //!   server and reports what it hears as [`ClientEvent`]s; [`LeaseFront`] does it as `js
 //!   run` does today. The client is not a bus node: the run loop polls it at exact virtual
@@ -91,20 +103,21 @@ mod text;
 pub mod work;
 
 pub use actions::Action;
-pub use agent::{AgentKind, AgentNode, AgentSpec, SIM_RUN_IMAGE};
+pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
-pub use front::{ClientPort, Front, FrontFactory, LeaseFront};
+pub use front::{ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
     AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
-    Observations, RunId, Running, ServerHost, ServerView, Verdict,
+    Observations, ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand,
+    StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
-pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape};
+pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
 pub use work::Work;

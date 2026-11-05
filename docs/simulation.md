@@ -107,10 +107,12 @@ with `#[path = ...]`; they are not binaries of their own.
 | `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
 | `builder` | `tests/builder.rs` | The scenario builder and the lease front, each shown to fail when it should. |
 | `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire. |
-| `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server. |
+| `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server, its side of the whole-host handshake included. |
 | `real_agent` | `tests/real_agent.rs` | The real agent node (the lifecycle of `js-agent` over the in-memory runtime) against the same scripted stand-in. |
 | `agreement` | `tests/agreement.rs` | The agreement family: each scenario run with every agent fake and again with every agent real, and the client's outcome of every item compared seed by seed. |
 | `invariants` | `tests/invariants.rs` | Each invariant over hand-built observations, with negative cases it must flag and correct siblings it must not. |
+| `whole_host` | `tests/whole_host.rs` | The whole-host family: fifty whole-node requests over twenty hosts, run once per value of `--placement` (`Placement::value_variants()`), and two negative cases on the real server's history (an agent that reports ready for another lease, a server view that drains by cancelling). The scenario is in `tests/cell/whole_host.rs`. |
+| `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path, the actions that set how agents answer a prepare and that request whole hosts, the whole-host expectations, and the server spec's class and placement. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
 
@@ -263,6 +265,10 @@ submission order.
 | `no-lease-on-a-lost-host` | A host the server lists as lost takes no new lease: no client is told an item was placed on it, and the listing never shows a lease booked on it for the first time. | `item3 was placed on host h002 at 64000 while the server lists it lost` or `lease 1.7 is booked on host h002 while the server lists it lost` | every step |
 | `bookings-match-agents` | At the end, the server's listing books nothing on a host that its agent does not run, and no agent runs a run that the listing does not book: the leak detector. | `host h002 books lease 1.7 and its agent runs no run of it` or `host h002 runs run "a" of lease 1.7 and the server books no such lease there` | at the end |
 | `no-result-lost` | From the cell's own ledger of completions and the verdicts the agents read, never the server's record: no run's result is accepted twice; every run an agent completed ends `succeeded` for its client, unless the client had its answer before the completion or the agent was killed between the completion and the first verdict on it; and no client hears `succeeded` for a run no agent completed. | `run "a" was accepted twice: on host h001 at 64010 and on host h001 at 69010`, `run "a" completed on host h001 at 64010 and item3 ended lost`, or `item3 succeeded and no agent completed its run "a"` | at the end |
+| `whole-host-is-exclusive` | While a whole-host item holds its host (as the client asked for it, from its grant to its release), no other whole-host item holds the same host, and the server's listing books no other lease there. That the host runs only that lease's runs is `no-double-booking`. | `host h002 is held by whole-host item3 with lease 1.5 and by whole-host item4 with lease 1.6` or `host h002 books lease 1.7 while whole-host item3 holds lease 1.5 there` | every step |
+| `held-means-ready` | A whole-host item is granted its lease on a host only after that host's agent sent a ready report naming exactly that lease (what the agent sent, not what the server took). | `whole-host item3 was granted lease 1.5 on host h002 at 41000 before the host's agent reported ready for that lease` | every step |
+| `drain-kills-nothing` | No run on a host the server sets aside for a whole-host request is sent a stop or a cancel unless its own client asked first (it cancelled the item or sent its release), or the run's own wall limit had run out. | `host h002, set aside for request sim-item-7, was sent a cancel of run "a" of lease 1.4 at 52000 that its client did not ask for` | every step |
+| `marked-hosts-serve-no-ordinary-start` | A host the server sets aside for a whole-host request is sent no start of a lease of an item that did not ask for a whole host, unless it is backfill that ends inside the host's tail. | `host h002, set aside for request sim-item-7 with its tail ending at 90000, was sent a start of run "a" of ordinary lease 1.4 at 52000 that may run until 120000` | every step |
 
 The step invariants are checked after every kernel step, every poll of the client and
 every client call; the end invariants once, after the scenario has been quiet (no partition, no
@@ -360,17 +366,20 @@ agent counts it as `result_resent`, the counter the lossy scenario's witness rea
 `crates/js-sim-cell/tests/golden/trace-hashes.txt` pins the trace hash of seeded runs:
 family `js-sim-cell` holds the sixteen seeds of the replay scenario of `tests/replay.rs`,
 family `smoke` the first four seeds of the lossy agent wire, family `real_agent` the
-first two seeds of the agreement family's world without faults, run with real agents, and
+first two seeds of the agreement family's world without faults, run with real agents,
 family `faults` the first four seeds of the restart of the server with runs in flight
-(`tests/cell/server_restart.rs`). A trace hash covers the
+(`tests/cell/server_restart.rs`), and family `whole_host` the first two seeds of the fifty
+whole-host requests under each value of `--placement`. A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
 own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 
 `replay`'s tests `pinned_seeds_match_the_golden_file`,
-`the_smoke_scenario_matches_the_golden_file` and
-`the_real_agent_scenario_matches_the_golden_file` fail on a moved hash and print the command
+`the_smoke_scenario_matches_the_golden_file`,
+`the_real_agent_scenario_matches_the_golden_file` and
+`the_whole_host_scenario_matches_the_golden_file_under_every_placement` fail on a moved
+hash and print the command
 that regenerates the lines:
 
 ```sh
@@ -450,3 +459,10 @@ real agent does in the situations of section 7 ("Result lost", "Duplicate start"
 of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
+
+The whole-host family covers no row yet. Its fifty requests wait on the server's wait list
+and are presented again at every tick, but it pins neither the order the list serves
+(row 11, advisory as built) nor what happens when a request is not presented within
+`regain_grace` (row 12); it has no failed prepare and no hello under a held lease, so it
+does not reach row 25 or 26. It holds every placement to the four whole-host invariants
+above.

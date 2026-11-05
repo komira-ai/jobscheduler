@@ -15,9 +15,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
 
-use js_agent_wire::{HeldState, Outcome};
+use js_agent_wire::{HeldState, Outcome, Phase};
 use js_sim::Sim;
-use js_sim_cell::{AgentKind, AgentSpec, Counter, Ledger, RunId, SIM_RUN_IMAGE, Verdict};
+use js_sim_cell::{
+    AgentKind, AgentSpec, Counter, Ledger, Prepare, RunId, SIM_RUN_IMAGE, StopCommand, Verdict,
+};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
@@ -378,4 +380,53 @@ fn a_real_agent_is_handed_only_the_starts_the_cell_can_account_for() {
     let last = stand_in(&sim).beats().pop().expect("a heartbeat").1;
     let held: Vec<&str> = last.held.iter().map(|run| run.run_id.as_str()).collect();
     assert_eq!(held, ["r1"]);
+}
+
+/// A real agent, silent on a prepare, goes through the whole-host handshake of the
+/// session as the fake does: answer 1 names lease `1-1` and carries a start of it, which
+/// is written into the ledger and not handed to the lifecycle (a cancel beside it is
+/// handed over) (heartbeat 2 says
+/// `preparing`, and nothing is launched or counted invalid); answer 2 names no lease
+/// (heartbeat 3 says `restoring`); answer 3 carries a start, which the serving agent's
+/// lifecycle launches at 3 020; answer 4 stops it, and the ledger holds the stop of the
+/// running run. Catches a real agent that launches a start while it prepares, one whose
+/// withheld start is counted as one the cell cannot account for, and a stop of a real
+/// agent's run left out of the ledger.
+#[test]
+fn a_real_agent_launches_no_start_while_it_prepares_and_its_stops_reach_the_ledger() {
+    let root = root("real-exclusive");
+    let script = Script::plain()
+        .beat(
+            1,
+            BeatAnswer::Reply(json!({
+                "exclusive": "1-1",
+                "commands": [start("r1", LONG_RUN_MS, 1), { "type": "cancel", "run_id": "r8" }],
+            })),
+        )
+        .commands(3, json!([start("r2", LONG_RUN_MS, 3)]))
+        .commands(4, json!([{ "type": "stop", "run_id": "r2" }]));
+    let (mut sim, ledger) = cell(spec(&root), script, INTERVAL);
+    agent_mut(&mut sim).set_prepare(Prepare::Silent);
+    sim.run_until(ms(4_500));
+    let phases: Vec<Phase> = stand_in(&sim)
+        .beats()
+        .iter()
+        .map(|(_, b)| b.phase)
+        .collect();
+    let wanted = [
+        Phase::Serving,
+        Phase::Preparing,
+        Phase::Restoring,
+        Phase::Serving,
+    ];
+    assert_eq!(phases, wanted);
+    let started: Vec<RunId> = ledger.starts().into_iter().map(|s| s.run).collect();
+    assert_eq!(started, [RunId::new("r1"), RunId::new("r2")]);
+    assert_eq!(launches(&ledger), [("r2".to_owned(), 3_020)]);
+    assert_eq!(count(&sim, Counter::ReplyInvalid), 0);
+    let stops = ledger.stops();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].run, RunId::new("r2"));
+    assert_eq!(stops[0].command, StopCommand::Stop);
+    assert_eq!(stops[0].at, ms(4_020));
 }

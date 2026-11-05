@@ -3,12 +3,15 @@
 
 use std::time::Duration;
 
+use js_agent_wire::Phase;
+use js_registry::{HostState, HostView};
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
 use crate::bus::agent_name;
 use crate::cell::Cell;
 use crate::observe::{ClientEvent, HowEnded, ItemRecord};
+use crate::server::ServerNode;
 
 use super::launched_on;
 
@@ -40,6 +43,8 @@ enum Wanted {
     AllTerminal,
     Count(usize, HowEnded),
     Host(usize, HostIs),
+    HeldAndReleased(usize),
+    EveryHostServing,
     Launched(Vec<usize>, FarmTime),
 }
 
@@ -60,6 +65,21 @@ impl Expect {
     #[must_use]
     pub fn host_state(index: usize, state: HostIs) -> Self {
         Self(Wanted::Host(index, state))
+    }
+
+    /// Exactly `count` items were held and released: the client heard each placed on a
+    /// host (for a whole-host item, the grant of its lease) and heard its release
+    /// answered.
+    #[must_use]
+    pub fn held_and_released(count: usize) -> Self {
+        Self(Wanted::HeldAndReleased(count))
+    }
+
+    /// The server's listing shows every agent's host live and serving: its last phase
+    /// `serving`, nothing booked, not releasing, not set aside and not tainted.
+    #[must_use]
+    pub fn every_host_serving() -> Self {
+        Self(Wanted::EveryHostServing)
     }
 
     /// Every agent of `agents` (by index, `h000` is 0) launched at least one run at or
@@ -100,6 +120,17 @@ impl Expect {
                 let name = format!("host-state(h{index:03})");
                 (name, state.name().to_owned(), is.name().to_owned())
             }
+            Wanted::HeldAndReleased(count) => {
+                let both = items.filter(|record| held_and_released(record)).count();
+                let name = "held-and-released".to_owned();
+                (name, count.to_string(), both.to_string())
+            }
+            Wanted::EveryHostServing => {
+                let hosts = cell.server().map(ServerNode::hosts).unwrap_or_default();
+                let serving = hosts.iter().filter(|host| serving(host)).count();
+                let name = "every-host-serving".to_owned();
+                (name, cell.agent_count().to_string(), serving.to_string())
+            }
             Wanted::Launched(agents, after) => {
                 let [name, wanted, got] = launched_on::judged(agents, *after, cell.ledger());
                 (name, wanted, got)
@@ -116,4 +147,22 @@ pub(crate) fn ended(record: &ItemRecord) -> Option<HowEnded> {
         _ => None,
     };
     record.heard.iter().find_map(|heard| terminal(&heard.event))
+}
+
+/// Whether the client heard the item placed and heard its release answered.
+fn held_and_released(record: &ItemRecord) -> bool {
+    let mut heard = record.heard.iter().map(|heard| &heard.event);
+    let placed = heard.any(|event| matches!(event, ClientEvent::Placed { .. }));
+    let released = record
+        .heard
+        .iter()
+        .any(|h| h.event == ClientEvent::Released);
+    placed & released
+}
+
+/// Whether the listing shows `host` live and serving, with nothing booked, set aside or
+/// left to finish, and untainted.
+fn serving(host: &HostView) -> bool {
+    let idle = host.leases.is_empty() & !host.releasing & host.mark.is_none();
+    (host.state == HostState::Live) & (host.phase == Phase::Serving) & idle & host.taint.is_none()
 }

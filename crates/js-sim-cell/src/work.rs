@@ -1,5 +1,6 @@
 //! One unit of client work: a run of [`crate::SIM_RUN_IMAGE`] that lasts a fixed time,
-//! the resources it asks for, and how long the client waits for it before it gives up.
+//! the resources it asks for, whether it wants a whole host, and how long the client
+//! waits for it before it gives up.
 //!
 //! A [`Work`] says nothing of how it reaches the server: a [`crate::front::Front`] turns
 //! it into calls. The cell numbers the items it submits from zero, in submission order
@@ -33,6 +34,7 @@ pub struct Work {
     runs_for: Duration,
     give_up_after: Duration,
     needs: Resources,
+    whole_host: bool,
 }
 
 impl Work {
@@ -44,6 +46,19 @@ impl Work {
             runs_for: duration,
             give_up_after: DEFAULT_GIVE_UP,
             needs: default_needs(),
+            whole_host: false,
+        }
+    }
+
+    /// A run that ends by itself `duration` after its launch on a host it holds whole:
+    /// the client asks for a whole-node lease under a request id, waits until the lease
+    /// is held (after the host's agent reported ready for it), runs, and releases.
+    /// Otherwise as [`Work::run_for`].
+    #[must_use]
+    pub fn whole_host(duration: Duration) -> Self {
+        Self {
+            whole_host: true,
+            ..Self::run_for(duration)
         }
     }
 
@@ -80,11 +95,17 @@ impl Work {
         &self.needs
     }
 
+    /// Whether it wants a whole host.
+    #[must_use]
+    pub fn wants_whole_host(&self) -> bool {
+        self.whole_host
+    }
+
     /// What an item of this work submitted at `now` asks for.
     #[must_use]
     pub fn ask(&self, now: FarmTime) -> Ask {
         Ask {
-            whole_host: false,
+            whole_host: self.whole_host,
             resources: self.needs.clone(),
             gives_up_at: now.saturating_add(self.give_up_after),
         }

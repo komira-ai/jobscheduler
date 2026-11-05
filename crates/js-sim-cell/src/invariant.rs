@@ -1,5 +1,6 @@
 //! What must always be true of the cell: the seven properties of "exactly once, nothing
-//! double-booked, nothing lost", and the [`Checker`] that tests them.
+//! double-booked, nothing lost", the four of a whole host held, drained and served
+//! (`whole.rs`), and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -14,13 +15,16 @@
 //! the items and whether the server's listing the step changed or re-read; the checker
 //! then reads, for each touched agent, that agent's own runs; for each touched item,
 //! that item's own events; for each ledger entry appended since the last step, one
+//! lookup; for each ready report, start and stop appended since the last step, one
 //! lookup; and otherwise only the indices it keeps (which agent runs each run, which run
 //! was launched, which whole-host item holds which host, how many events of each item it
-//! has read), each lookup logarithmic. An
+//! has read, which item each run and lease belongs to, which host reported ready for
+//! which lease), each lookup logarithmic. An
 //! agent, item or host the step did not touch is not re-read, so a fact that is wrong
 //! there is caught at the step that touches it, not before. A step that touched the
-//! server reads the whole listing, at a cost in the hosts and bookings it lists, and
-//! keeps the host each lease was first booked on; the cell re-reads the listing at every client call and once per virtual second, not
+//! server reads the whole listing, at a cost in the hosts and bookings it lists and the
+//! hosts whole-host items hold, and keeps the host each lease was first booked on; the
+//! cell re-reads the listing at every client call and once per virtual second, not
 //! at every step. Only the end check scans everything.
 
 use std::collections::btree_map::Entry;
@@ -38,6 +42,7 @@ use crate::observe::{
 use crate::text;
 
 mod results;
+mod whole;
 
 /// One property the cell must keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,11 +106,36 @@ pub enum Invariant {
     /// the first verdict it read on the result after it. (c) No client has `Succeeded`
     /// for a run that no agent completed. A run no item queued is not judged.
     NoResultLost,
+    /// Step check. A whole-host item holds its host, by the client's facts, as in
+    /// [`Invariant::NoDoubleBooking`] (c) (placed there, until it sent its release or
+    /// heard the server end its run). While it does, no other whole-host item holds the
+    /// same host, and the server's listing books no other lease there, read at a step
+    /// that re-read the listing. That the host runs only that lease's runs is
+    /// [`Invariant::NoDoubleBooking`] (c).
+    WholeHostIsExclusive,
+    /// Step check. A whole-host item hears that its lease is placed on a host (the grant,
+    /// [`ClientEvent::Placed`], after the lease was held) only after the agent of that
+    /// host sent a ready report naming exactly that lease ([`Observations::ready`]): what
+    /// the agent sent, not what the server took.
+    HeldMeansReady,
+    /// Step check. A drain never cuts work (design section 6.4): no run on a host the
+    /// server's listing sets aside for a whole-host request is sent a stop or a cancel
+    /// unless its own client asked for it first (it asked to cancel the item,
+    /// [`Observations::cancels`], or sent the release of the item's lease), or the run's
+    /// own wall limit had run out. Read over the stops and cancels that reached a
+    /// running run ([`Observations::stops`]).
+    DrainKillsNothing,
+    /// Step check. A host the server's listing sets aside for a whole-host request is sent
+    /// no start of a lease of an item that did not ask for a whole host, unless the start
+    /// is backfill inside the host's tail: its wall limit, counted from the heartbeat the
+    /// start names, ends no later than the tail the host was set aside on. Read over the
+    /// starts the agents were sent ([`Observations::starts`]).
+    MarkedHostsServeNoOrdinaryStart,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 7] = [
+    pub const ALL: [Invariant; 11] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -113,6 +143,10 @@ impl Invariant {
         Invariant::BookingsMatchAgents,
         Invariant::NoLeaseOnALostHost,
         Invariant::NoResultLost,
+        Invariant::WholeHostIsExclusive,
+        Invariant::HeldMeansReady,
+        Invariant::DrainKillsNothing,
+        Invariant::MarkedHostsServeNoOrdinaryStart,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -126,6 +160,10 @@ impl Invariant {
             Invariant::BookingsMatchAgents => "bookings-match-agents",
             Invariant::NoLeaseOnALostHost => "no-lease-on-a-lost-host",
             Invariant::NoResultLost => "no-result-lost",
+            Invariant::WholeHostIsExclusive => "whole-host-is-exclusive",
+            Invariant::HeldMeansReady => "held-means-ready",
+            Invariant::DrainKillsNothing => "drain-kills-nothing",
+            Invariant::MarkedHostsServeNoOrdinaryStart => "marked-hosts-serve-no-ordinary-start",
         }
     }
 
@@ -136,7 +174,11 @@ impl Invariant {
             Invariant::NoDoubleBooking
             | Invariant::AtMostOneLaunch
             | Invariant::OneTerminalAnswer
-            | Invariant::NoLeaseOnALostHost => Checked::EveryStep,
+            | Invariant::NoLeaseOnALostHost
+            | Invariant::WholeHostIsExclusive
+            | Invariant::HeldMeansReady
+            | Invariant::DrainKillsNothing
+            | Invariant::MarkedHostsServeNoOrdinaryStart => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost => Checked::AtEnd,
@@ -288,6 +330,16 @@ pub struct Checker {
     events_read: BTreeMap<ItemId, usize>,
     /// The host each lease was first seen booked on, by the server's listing.
     booked_on: BTreeMap<LeaseId, HostId>,
+    /// How many ready reports, starts and stops were read.
+    ready_read: usize,
+    starts_read: usize,
+    stops_read: usize,
+    /// When each host first reported ready for each lease (as the report wrote it).
+    ready: BTreeMap<(HostId, String), FarmTime>,
+    /// The item of each run, by the client's facts.
+    runs: BTreeMap<RunId, ItemId>,
+    /// The leases of items that did not ask for a whole host.
+    ordinary: BTreeSet<LeaseId>,
 }
 
 impl Checker {
@@ -302,9 +354,11 @@ impl Checker {
     pub fn step(&mut self, observations: &Observations, touched: &Touched) -> Vec<Violation> {
         let mut found = Found::at(observations.at);
         self.read_ledger(observations, &mut found);
+        self.read_ready(observations);
         let items = touched.items.iter();
         for (item, record) in items.filter_map(|i| observations.items.get_key_value(i)) {
             self.read_item(*item, record, &mut found);
+            self.whole_item(*item, record, &mut found);
             self.read_placed(observations, *item, record, &mut found);
         }
         if touched.server {
@@ -320,10 +374,15 @@ impl Checker {
             let whole =
                 listed.filter(|(_, host)| host.leases.iter().any(|l| self.whole.contains_key(l)));
             hosts.extend(whole.map(|(host, _)| host));
+            let held = self.held.iter().filter(|(_, items)| !items.is_empty());
+            hosts.extend(held.map(|(host, _)| host));
         }
         for host in hosts {
             self.whole_host(observations, host, touched.server, &mut found);
+            self.exclusive(observations, host, touched.server, &mut found);
         }
+        self.read_starts(observations, &mut found);
+        self.read_stops(observations, &mut found);
         found.list
     }
 
