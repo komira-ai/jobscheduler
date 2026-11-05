@@ -8,10 +8,32 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, Labels};
 
 use super::*;
+use crate::result::{JobResult, JobTiming, ResourceUsage, ResultReason};
 use crate::suite::{full_spec, whole_host_spec};
 
 fn at(secs: u64) -> StoreTime {
     StoreTime::from_duration(Duration::from_secs(secs))
+}
+
+/// A result with every optional field set.
+fn full_result() -> JobResult {
+    JobResult {
+        exit_code: Some(-9),
+        reason: ResultReason::WallLimit,
+        stdout_tail: "out".to_owned(),
+        stderr_tail: "err".to_owned(),
+        truncated: true,
+        timing: JobTiming {
+            queued_at: at(1),
+            placed_at: Some(at(2)),
+            started_at: Some(at(3)),
+            ended_at: at(4),
+        },
+        usage: Some(ResourceUsage {
+            cpu_time: Duration::from_secs(7),
+            peak_memory_bytes: 4096,
+        }),
+    }
 }
 
 /// A job with every optional field set.
@@ -28,6 +50,7 @@ fn full_job() -> JobRecord {
         host: Some(HostId::new("host-a").expect("a host")),
         cancel_requested: true,
         cancel_requested_at: Some(at(5)),
+        result: Some(full_result()),
         retention_ends: Some(at(6)),
         carried: Carried::default(),
     }
@@ -56,6 +79,7 @@ fn bare_job() -> JobRecord {
         host: None,
         cancel_requested: false,
         cancel_requested_at: None,
+        result: None,
         retention_ends: None,
         carried: Carried::default(),
     }
@@ -115,7 +139,24 @@ fn items(items: &[&[u8]]) -> Vec<u8> {
 // everything set and on one with nothing optional set, for both kinds of row.
 #[test]
 fn a_record_reads_back_as_written() {
-    for job in [full_job(), bare_job()] {
+    let bare_result = JobRecord {
+        result: Some(JobResult {
+            exit_code: None,
+            reason: ResultReason::Cancelled,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            timing: JobTiming {
+                queued_at: at(1),
+                placed_at: None,
+                started_at: None,
+                ended_at: at(2),
+            },
+            usage: None,
+        }),
+        ..bare_job()
+    };
+    for job in [full_job(), bare_job(), bare_result] {
         assert_eq!(decode_job(&job_row(&job)), Ok(job));
     }
     let mut booked = allocation(Booked::WholeHost);
@@ -223,6 +264,23 @@ fn every_enum_value_has_its_own_fixed_code() {
         );
         assert_eq!(decode_allocation(&with(&row, 12, &[code])), Ok(record));
     }
+    for (reason, code) in [
+        (ResultReason::Exit, 0),
+        (ResultReason::WallLimit, 1),
+        (ResultReason::Memory, 2),
+        (ResultReason::Cancelled, 3),
+    ] {
+        let mut record = full_job();
+        if let Some(result) = record.result.as_mut() {
+            result.reason = reason;
+        }
+        assert_eq!(
+            field_of(&job_row(&record), 31),
+            Some(vec![code]),
+            "{reason:?}"
+        );
+        assert_eq!(decode_job(&with(&job, 31, &[code])), Ok(record));
+    }
 }
 
 // Catches a value of a later build read as some value this build knows (or refused as
@@ -234,6 +292,7 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
         (job_tag::STATE, 12),
         (job_tag::EXEC, 2),
         (job_tag::NETWORK, 3),
+        (job_tag::RESULT_REASON, 4),
     ] {
         assert_eq!(
             decode_job(&with(&job, tag, &[code])),
@@ -328,6 +387,16 @@ fn the_layout_is_pinned_byte_for_byte() {
         (28, vec![1]),
         (29, seconds(5)),
         (30, seconds(6)),
+        (31, vec![1]),
+        (32, (-9i32).to_be_bytes().to_vec()),
+        (33, b"out".to_vec()),
+        (34, b"err".to_vec()),
+        (35, vec![1]),
+        (36, seconds(1)),
+        (37, seconds(2)),
+        (38, seconds(3)),
+        (39, seconds(4)),
+        (40, [seconds(7), 4096u64.to_be_bytes().to_vec()].concat()),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -368,6 +437,13 @@ fn the_layout_is_pinned_byte_for_byte() {
     );
     assert_eq!(field_of(&bare, 24), None, "None is not written");
     assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
+    for tag in 31..=40 {
+        assert_eq!(
+            field_of(&bare, tag),
+            None,
+            "a job with no result has no field {tag}"
+        );
+    }
 }
 
 // Catches a time cut to fit: the largest reading of the store's clock is written as it is,
@@ -443,10 +519,42 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::LABELS,
         job_tag::PRIORITY,
         job_tag::CANCEL_REQUESTED,
+        job_tag::RESULT_EXIT_CODE,
+        job_tag::RESULT_STDOUT,
+        job_tag::RESULT_STDERR,
+        job_tag::RESULT_TRUNCATED,
+        job_tag::RESULT_PLACED_AT,
+        job_tag::RESULT_STARTED_AT,
+        job_tag::RESULT_USAGE,
     ] {
         row = without(&row, tag);
     }
     let job = decode_job(&row).expect("reads");
+    assert_eq!(
+        job.result,
+        Some(JobResult {
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            timing: JobTiming {
+                placed_at: None,
+                started_at: None,
+                ..full_result().timing
+            },
+            usage: None,
+            ..full_result()
+        })
+    );
+    // A row without a reason, as every row before results were stored, has no result.
+    let mut before_results = job_row(&full_job());
+    for tag in 31..=40 {
+        before_results = without(&before_results, tag);
+    }
+    assert_eq!(
+        decode_job(&before_results).map(|job| (job.result, job.carried)),
+        Ok((None, Carried::default()))
+    );
     assert_eq!(
         (
             job.spec.command.len(),
@@ -516,6 +624,8 @@ fn a_row_without_a_required_field_is_refused() {
         job_tag::WALL_LIMIT_SECS,
         job_tag::STATE,
         job_tag::SUBMITTED_AT,
+        job_tag::RESULT_QUEUED_AT,
+        job_tag::RESULT_ENDED_AT,
     ] {
         assert_eq!(
             decode_job(&without(&job, tag)),
@@ -609,6 +719,102 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
             t::LABELS,
             items(&[b"jobscheduler.dev/run", b"NOT LOWER"]),
             BadValue { tag: t::LABELS },
+        ),
+        (
+            t::RESULT_REASON,
+            vec![0, 0],
+            BadLength {
+                tag: t::RESULT_REASON,
+            },
+        ),
+        (
+            t::RESULT_EXIT_CODE,
+            vec![0; 5],
+            BadLength {
+                tag: t::RESULT_EXIT_CODE,
+            },
+        ),
+        (
+            t::RESULT_STDOUT,
+            not_utf8.to_vec(),
+            NotUtf8 {
+                tag: t::RESULT_STDOUT,
+            },
+        ),
+        (
+            t::RESULT_STDERR,
+            not_utf8.to_vec(),
+            NotUtf8 {
+                tag: t::RESULT_STDERR,
+            },
+        ),
+        (
+            t::RESULT_TRUNCATED,
+            vec![2],
+            BadValue {
+                tag: t::RESULT_TRUNCATED,
+            },
+        ),
+        (
+            t::RESULT_QUEUED_AT,
+            vec![0; 11],
+            BadLength {
+                tag: t::RESULT_QUEUED_AT,
+            },
+        ),
+        (
+            t::RESULT_PLACED_AT,
+            vec![0; 13],
+            BadLength {
+                tag: t::RESULT_PLACED_AT,
+            },
+        ),
+        (
+            t::RESULT_STARTED_AT,
+            vec![0; 4],
+            BadLength {
+                tag: t::RESULT_STARTED_AT,
+            },
+        ),
+        (
+            t::RESULT_ENDED_AT,
+            vec![0; 12 + 1],
+            BadLength {
+                tag: t::RESULT_ENDED_AT,
+            },
+        ),
+        (
+            t::RESULT_USAGE,
+            vec![0; 11],
+            BadLength {
+                tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            t::RESULT_USAGE,
+            vec![0; 19],
+            BadLength {
+                tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            t::RESULT_USAGE,
+            [seconds(0), 4096u64.to_be_bytes().to_vec(), vec![0]].concat(),
+            BadLength {
+                tag: t::RESULT_USAGE,
+            },
+        ),
+        (
+            t::RESULT_USAGE,
+            [
+                0u64.to_be_bytes().to_vec(),
+                1_000_000_000u32.to_be_bytes().to_vec(),
+                0u64.to_be_bytes().to_vec(),
+            ]
+            .concat(),
+            BadValue {
+                tag: t::RESULT_USAGE,
+            },
         ),
     ];
     for (tag, value, why) in cases {

@@ -13,8 +13,9 @@
 //! has a `validate()` and the server and the agent must call it on every message they
 //! receive, before they act on any field:** [`Hello::validate`], [`Welcome::validate`]
 //! (and [`HelloReply::validate`]), [`Heartbeat::validate`], [`HeartbeatReply::validate`],
-//! [`Command::validate`] (a start is [`JobSpec::validate`]), and the parts they hold
-//! ([`HeldRun`], [`RunResult`], [`Taint`], [`ResultAck`], [`Mount`], [`Refused`]). A
+//! [`Command::validate`] (a start is [`JobSpec::validate`], a job start
+//! [`JobStartSpec::validate`]), and the parts they hold ([`HeldRun`], [`RunResult`],
+//! [`HeldJob`], [`JobResult`], [`Taint`], [`ResultAck`], [`Mount`], [`Refused`]). A
 //! validator reads no state and no clock; whether an epoch is current, a lease is held
 //! or a shape fits a pool is the caller's. [`JobSpec::fits_shape`] answers the one
 //! question of that kind a single job and a single shape can answer.
@@ -56,26 +57,69 @@
 //! enum value this version does not know reads as an `Unknown` variant ([`Outcome`],
 //! [`Ack`], [`HeldState`], [`Command`]) and never fails the message around it; a reply
 //! decodes its commands one by one, so one command this version cannot read does not cost
-//! the commands beside it. Two values are the deliberate exceptions, because skipping
+//! the commands beside it. Three values are the deliberate exceptions, because skipping
 //! them would be unsafe:
 //!
 //! - an unknown [`Phase`] reads as [`Phase::Quarantined`], which takes no work;
 //! - an unknown [`Isolation`] value is a decode error (inside a reply, that one start reads
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
-//!   absent one means [`Isolation::Contained`].
+//!   absent one means [`Isolation::Contained`];
+//! - an unknown `JobSpec::network` level is a decode error in the same way, so an agent
+//!   never runs a job at a level it did not name, while an absent one means `none`;
+//! - an unknown `os` or `arch` of a start ([`JobSpec::os`], [`JobSpec::arch`]) is a decode
+//!   error in the same way, so an agent never runs an image built for a platform it cannot
+//!   name, while an absent one is a legacy start.
 //!
 //! A field an old receiver would silently ignore cannot carry something the job needs.
 //! `JobSpec::files` is such a field (a presigned URL is a secret the task cannot run
 //! without), so an agent that can write them reports the capability `run-files` in its
 //! hello, and the server queues and sends a start with files only to a host that did.
+//! `JobSpec::run` is another (an older agent would run the image's own command instead):
+//! a server sends it, with `os` and `arch`, only to a host that reported `one-job`
+//! ([`ONE_JOB_CAPABILITY`]), and writes the start in the legacy forms for any other
+//! ([`JobSpec::downgrade_for`]).
+//! `JobSpec::network` and `JobSpec::ports` are two more: an agent reports its network ceiling
+//! in its hello ([`NetworkCeiling`]: an absent one is `none` with no port), and the server
+//! sends a start that asks for more than `none`, or declares a port, only to a host whose
+//! ceiling covers it.
+//!
+//! # Live logs
+//!
+//! The live-log fields are a message set added within major 1 (`docs/design/live-logs.md`,
+//! section 7; see [`LogSink`]): `log_sink` in a job start ([`JobStartSpec::log_sink`], where
+//! to upload one job's output, no secret), `log_grant` in a reply
+//! ([`HeartbeatReply::log_grant`], the host's upload credential, one for all its jobs),
+//! `log_grant_state` in a heartbeat ([`Heartbeat::log_grant_state`]) and `logs` in a job's
+//! result ([`JobResult::logs`], each stream's length and dropped bytes). An agent that
+//! uploads reports the hello capability [`LOG_UPLOAD_CAPABILITY`], and a server sends
+//! `log_sink` and `log_grant` only to an agent that reported it.
+//!
+//! **A log field never refuses a job or a heartbeat.** Each is decoded as a [`NodeLoad`] is
+//! (a malformed value reads as absent) and is checked apart from its message: a start with
+//! a bad sink still passes [`JobStartSpec::validate`] and runs without live logs
+//! ([`JobStartSpec::log_sink_checked`]), a bad grant is set aside in
+//! [`ReplyCheck::log_grant`] while the rest of the reply applies, and an inconsistent `logs`
+//! report is dropped by [`JobResult::logs_report`] while the result is recorded.
+//!
+//! # Two keyings in one major
+//!
+//! A start, stop and report are keyed by run and lease ([`Command::Start`], [`HeldRun`],
+//! [`RunResult`]) or by job ([`Command::JobStart`], [`Command::JobStop`], [`HeldJob`],
+//! [`JobResult`], [`JobResultAck`], and the `retired_jobs` and `retired_acks` lists; see
+//! [`per_job`]). The job messages are a message set added within major 1 and announced by
+//! the hello capability [`PER_JOB_CAPABILITY`], so one server speaks to agents of both
+//! kinds (see [`protocol`]). An agent lists what a job start began only under the job
+//! keying, so a server that knows no job ids never sees one in `held` or `results`.
 //!
 //! # Not here yet
 //!
 //! Fields of design 5.2 that a later change adds, as optional fields of the types here:
 //!
-//! - the start's `fence`, `booking`, `deadline`, named `assignments` beyond `gpu_indices`,
-//!   and environment by reference: the run-delivery change, which is where a start is
-//!   first sent (and where the server fills `valid_for_ms`);
+//! - the start's `booking`, `deadline`, named `assignments` beyond `gpu_indices`, and
+//!   environment by reference: the run-delivery change, which is where a start is first
+//!   sent (and where the server fills `valid_for_ms`). The fence of a job start is the
+//!   pair of its job id and allocation id, which it already carries; an agent that
+//!   enforces it says so with the hello capability [`START_FENCE_CAPABILITY`];
 //! - the sum of several jobs' limits against one shape, and checks against pool state
 //!   (the pool's shape, `max_machines`, the tainted set): the server's registry. The
 //!   credential binding is there now, in `js-registry` (`Binding`, checked by
@@ -93,7 +137,8 @@
 //! a [`HelloReply`]; over HTTP the welcome is bare and a refusal is the API's
 //! `{"error", "supported"}` body, see [`HelloReply`]), [`Heartbeat`] and
 //! [`HeartbeatReply`] keep it, and a reply carries [`Command`]s down while a heartbeat
-//! carries [`RunResult`]s up until each is acknowledged and may carry a [`NodeLoad`]
+//! carries [`RunResult`]s (and [`HeldJob`]s with their [`JobResult`]s) up until each is
+//! acknowledged and may carry a [`NodeLoad`]
 //! (telemetry: a bad one is dropped, never the beat). [`refusal`] holds the codes a
 //! refusal carries.
 
@@ -103,6 +148,7 @@ mod caps;
 mod check;
 mod command;
 mod credential;
+mod env;
 mod error;
 mod files;
 mod heartbeat;
@@ -110,13 +156,19 @@ mod hello;
 mod image;
 pub mod limits;
 mod load;
+mod log_sink;
 mod native;
+mod network;
+pub mod per_job;
+mod platform;
 pub mod protocol;
 pub mod refusal;
+mod run;
 
-pub use caps::{Caps, ReadModel, bundle_capability};
+pub use caps::{Caps, LOG_UPLOAD_CAPABILITY, ONE_JOB_CAPABILITY, ReadModel, bundle_capability};
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
+pub use env::check_env;
 pub use error::{Rule, ValidationError};
 pub use files::{RunFile, validate_files};
 pub use heartbeat::{
@@ -127,11 +179,19 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
 };
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
+pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};
 pub use native::{
     BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, InputRef, NativeSpec, NetworkLevel, OutputKind,
     OutputSpec, Placement,
 };
+pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
+pub use per_job::{
+    BookedResources, HeldJob, JobResult, JobResultAck, JobStartSpec, PER_JOB_CAPABILITY,
+    START_FENCE_CAPABILITY,
+};
+pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
+pub use run::RunSpec;
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration
 /// says otherwise, in milliseconds.

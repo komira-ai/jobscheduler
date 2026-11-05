@@ -66,17 +66,25 @@
 //! never calls the container runtime and never waits for the worker:
 //!
 //! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
-//!   results not yet acknowledged and the taint to report. So does every hello, as its
+//!   results not yet acknowledged, the jobs a job start began (with their results) and the
+//!   retired job ids, and the taint to report. Every hello carries the held runs as its
 //!   held list, so a server that restarted learns what the agent still runs. A new epoch
 //!   keeps the worker and everything it holds.
-//! - Every accepted reply that says anything (a command, an acknowledgement, a
-//!   `taint_ack`) is handed to the worker, which checks it as a whole and acts on each
-//!   command in order; a command it refuses is logged by its place in the reply. A reply
-//!   the worker has no room for is dropped and noted ([`Note::Busy`]): the server sends
-//!   everything again.
+//! - Every accepted reply that says anything (a command, an acknowledgement of a result or
+//!   a retired job id, a `taint_ack`) is handed to the worker, which checks it as a whole
+//!   and acts on each command in order; a command it refuses is logged by its place in the
+//!   reply. A reply the worker has no room for is dropped and noted ([`Note::Busy`]): the
+//!   server sends everything again.
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told.
+//! - Every welcome and every reply the session accepts (decoded, after a success) is
+//!   contact: the session stamps it on the worker's clock ([`Worker::heard`]) before it
+//!   hands the reply over, so a reply the worker had no room for counts too. The worker's
+//!   lifecycle stops every job once the server has not been heard for the silence bound.
+//!   A welcome whose grace plus the stop grace the bound does not outlast ends the session
+//!   with [`Step::Failed`] naming `--silence-stop` ([`Worker::check_grace`]): such a bound
+//!   could stop the jobs of a host the server still counts as present.
 //! - A worker that has ended ends the session with [`Step::Failed`]. So does one that is
 //!   found gone without having said so (a reply that finds nobody to read the queue), and
 //!   one that has been inside a single order or step for longer than its calls can take
@@ -349,7 +357,8 @@ pub enum Step {
     },
     /// The agent ends: the server refused the host for good.
     Fatal(Fatal),
-    /// The agent ends: the job worker is gone, so the jobs would run unsupervised.
+    /// The agent ends: the job worker is gone, so the jobs would run unsupervised; or the
+    /// silence bound is too short for the grace the welcome named.
     Failed(String),
 }
 
@@ -728,6 +737,9 @@ impl<'a> Session<'a> {
             exclusive_refused: lease.refused,
             load,
             disk_gib: self.saying,
+            jobs: jobs.jobs,
+            retired_jobs: jobs.retired_jobs,
+            log_grant_state: None,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -782,6 +794,12 @@ impl<'a> Session<'a> {
     }
 
     fn registered(&mut self, welcome: &Welcome) -> Step {
+        if let Some(jobs) = &self.jobs {
+            if let Err(why) = jobs.worker.check_grace(welcome.grace_ms) {
+                return Step::Failed(why);
+            }
+            jobs.worker.heard();
+        }
         let credential = self.keep_credential(welcome.host_credential.as_ref());
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
         self.live = Some(Live {
@@ -845,6 +863,7 @@ impl<'a> Session<'a> {
                 self.backoff.reset();
                 self.proven = true;
                 self.lost_young = false;
+                self.jobs.iter().for_each(|jobs| jobs.worker.heard());
                 // `None` when the lease id the reply names is not acceptable: the agent
                 // then changes nothing.
                 let lease = reply

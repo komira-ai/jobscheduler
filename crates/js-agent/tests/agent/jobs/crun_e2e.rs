@@ -20,19 +20,15 @@ use js_agent::crun::{
     require_trusted_ancestors,
 };
 use js_agent::crun_host::{CrunHost, start};
-use js_agent::integrity::HostView;
-use js_agent::lifecycle::{
-    DirLayout, Found, Local, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
-};
-use js_agent::quota::{Call, ProjectId, ScratchQuota};
-use js_agent::{
-    Backend, Cli, FileReader, Handle, Machine, Platform, RuntimeBuild, SharedClock, System,
-};
-use js_agent_wire::LogTail;
+use js_agent::lifecycle::{DirLayout, Local};
+use js_agent::quota::{Call, ProjectId};
+use js_agent::{Backend, Cli, Handle, Machine as _, Platform, RuntimeBuild, System};
+use js_contain::oci::{end_supervisor, recorded_supervisor};
 use js_contain::subids::IdFiles;
 use js_testkit::dir::TestDir;
 use serde_json::json;
 
+use super::crun_machine::CrunMachine;
 use super::fake::FakeMachine;
 use crate::crun_host::Fixture;
 use crate::server::{Agent, POOL_RUNS_TOML, Redirect, Server};
@@ -186,7 +182,7 @@ fn node() -> &'static Node {
 
 /// The seams of the crun runtime over the node: its cgroups, its stand-in files for the start
 /// check and its id files; nothing is given away and the clock reads 5000.
-fn seams() -> Seams {
+pub(super) fn seams() -> Seams {
     let node = node();
     Seams {
         cgroups: CgroupSource::Fixed(CgroupSettings {
@@ -207,6 +203,9 @@ fn seams() -> Seams {
             tool_path: node.tools.clone().into_os_string(),
             check_search: false,
         },
+        // The agent runs inside this test binary, which does not answer the helper modes: each
+        // container's supervisor is the agent's own binary.
+        daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     }
 }
 
@@ -268,103 +267,6 @@ fn host_with_store_mounted() -> Host {
     host_on(false, true)
 }
 
-/// The real [`System`] for the clock, the runtime and the start check, over the node; the
-/// view of the host, the cgroup files and the quota are the fake machine's, as a test that is
-/// not root cannot read the namespaces of process 1.
-pub(super) struct CrunMachine {
-    system: System,
-    fake: FakeMachine,
-    /// The grace of every stop the runtime was asked for.
-    stops: Arc<Mutex<Vec<Duration>>>,
-}
-
-impl CrunMachine {
-    pub(super) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            system: System::new().with_crun(seams()),
-            fake: FakeMachine::new(),
-            stops: Arc::default(),
-        })
-    }
-}
-
-/// A runtime that notes the grace of each stop and leaves everything to the one it wraps.
-struct Noting {
-    inner: Box<dyn Runtime>,
-    stops: Arc<Mutex<Vec<Duration>>>,
-}
-
-impl Runtime for Noting {
-    fn prepare(&mut self, image: &str, waited: Option<Ticket>) -> Prepared {
-        self.inner.prepare(image, waited)
-    }
-
-    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        self.inner.create_and_start(spec)
-    }
-
-    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
-        self.inner.poll(id)
-    }
-
-    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
-        self.stops.lock().expect("stops").push(grace);
-        self.inner.stop(id, grace)
-    }
-
-    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        self.inner.remove(id)
-    }
-
-    fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        self.inner.list_labelled()
-    }
-
-    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
-        self.inner.log_tail(id)
-    }
-
-    fn supports_gpus(&self) -> bool {
-        self.inner.supports_gpus()
-    }
-
-    fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
-        self.inner.lease_dir(run_id)
-    }
-
-    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
-        self.inner.cgroup(id)
-    }
-}
-
-impl Machine for CrunMachine {
-    fn clock(&self) -> SharedClock {
-        self.system.clock()
-    }
-
-    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
-        let (inner, warnings) = self.system.runtime(build)?;
-        let stops = self.stops.clone();
-        Ok((Box::new(Noting { inner, stops }), warnings))
-    }
-
-    fn view(&self) -> Box<dyn HostView> {
-        self.fake.view()
-    }
-
-    fn cgroup_files(&self) -> Box<dyn FileReader> {
-        self.fake.cgroup_files()
-    }
-
-    fn scratch_quota(&self, root: &Path) -> Arc<dyn ScratchQuota> {
-        self.fake.scratch_quota(root)
-    }
-
-    fn crun_host(&self) -> CrunHost {
-        self.system.crun_host()
-    }
-}
-
 /// The checked settings of the crun runtime for the node, placed beside its scratch root.
 fn crun_settings() -> Settings {
     let node = node();
@@ -408,7 +310,7 @@ fn crun_settings_place_the_store_beside_the_scratch_root() {
         Some("/oci".into())
     );
     // Settings of an engine are left as they are.
-    let engine = Settings::new(Path::new("/bin/sh"), None, None).expect("an executable");
+    let engine = Settings::new(Path::new("/bin/sh"), None).expect("an executable");
     let placed = engine.clone().placed_beside(Path::new("/x/scratch"), None);
     assert!(placed.crun().is_none());
     assert_eq!(placed, engine);
@@ -532,6 +434,22 @@ pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
     flags
 }
 
+/// Ends the containers an earlier test's agent left on the shared node. A container outlives
+/// its agent (its supervisor holds it), and the next agent, of the same host id, would adopt it
+/// and hold its run, so a start for the same run id would run nothing. Each lease directory in
+/// the scratch root names its supervisor: it is ended, and waited for until it is gone, so the
+/// next agent finds a lease whose supervisor ended and removes it.
+fn end_leftovers(scratch: &Path) {
+    for entry in fs::read_dir(scratch).into_iter().flatten().flatten() {
+        if let Some(id) = recorded_supervisor(&entry.path()) {
+            end_supervisor(id);
+            while id.alive() {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
 impl Rig {
     /// Starts the server and the agent, waits until the agent has said hello, and takes a
     /// lease on its host.
@@ -541,13 +459,24 @@ impl Rig {
 
     /// [`Rig::new`] over the pool `pool` describes.
     fn on_pool(name: &str, extra: &[&str], pool: &'static str) -> Self {
+        Self::on_flags(name, crun_flags("h1", extra), pool)
+    }
+
+    /// [`Rig::on_pool`] with the agent's flags given whole.
+    fn on_flags(name: &str, flags: Vec<String>, pool: &'static str) -> Self {
         let node = node();
+        end_leftovers(&node.scratch);
         for signal in ["ready", "go", "calls"] {
             let _ = fs::remove_file(node.dir.path().join(signal));
         }
+        // Each test has a server of its own, which numbers its runs from the start again: the
+        // results and retired ids an earlier test's agent kept in the shared state root are
+        // another server's, and a retired id would keep this test's run of the same id from
+        // starting.
+        let _ = fs::remove_file(node.state.join("retired.json"));
+        let _ = fs::remove_dir_all(node.state.join("held"));
         let server = Server::start_pool(name, &[], pool);
         let address = Arc::new(Mutex::new(server.url()));
-        let flags = crun_flags("h1", extra);
         let machine = CrunMachine::new();
         let agent = Self::spawn(&server, &address, &flags, &machine);
         let worker = match agent.try_worker() {
@@ -578,7 +507,8 @@ impl Rig {
         }
     }
 
-    /// An agent with `flags`, over a machine that is the node's.
+    /// An agent with `flags`, over a machine that is the node's. Flags that name no
+    /// `--runtime` start the agent of the default runtime, which on Linux is crun.
     fn spawn(
         server: &Server,
         address: &Arc<Mutex<String>>,
@@ -586,14 +516,12 @@ impl Rig {
         machine: &Arc<CrunMachine>,
     ) -> Agent {
         let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-        Agent::spawn_machine(
-            server.url(),
-            server.join_file(),
-            &flags,
-            host,
-            Redirect(address.clone()),
-            machine.clone(),
-        )
+        let (url, join, to) = (server.url(), server.join_file(), Redirect(address.clone()));
+        if flags.contains(&"--runtime") {
+            Agent::spawn_machine(url, join, &flags, host, to, machine.clone())
+        } else {
+            Agent::spawn_machine_defaulted(url, join, &flags, host, to, machine.clone())
+        }
     }
 
     /// A second agent with `flags` against the same server, run to its end.
@@ -726,6 +654,42 @@ fn an_agent_started_with_runtime_crun_runs_a_job_through_crun() {
     let dir = node.dir.path();
     HostClaim::take(dir, "h1").expect("the id is free after the agent ended");
     HostClaim::scratch_root(dir, &node.scratch).expect("the scratch root is free too");
+}
+
+/// Asserts that crun is the default Linux runtime: an agent of the node started with the
+/// flags of `--runtime crun` less `--runtime crun` itself passes the crun start check on the
+/// node's stand-in files, registers, and runs a queued job through the stand-in's `crun run`
+/// with the run's container name to its result, `exited` and `succeeded`; nothing else could
+/// run it, as the node's machine has no container engine, and the agent prints no warning of
+/// the engine. It catches a default that is still the engine, a default the start check reads
+/// but the runtime does not, and an agent that registers with no runtime at all.
+#[test]
+fn the_default_runtime_is_crun() {
+    let _own = NODE_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+    let node = node();
+    let mut flags = crun_flags("h1", &[]);
+    let at = flags.iter().position(|flag| flag == "--runtime").unwrap();
+    assert_eq!(
+        flags.drain(at..at + 2).collect::<Vec<_>>(),
+        ["--runtime", "crun"]
+    );
+    let rig = Rig::on_flags("jobs_crun_default", flags, POOL_RUNS_TOML);
+    let run = rig.queued();
+    rig.until_up(&run);
+    let calls = fs::read_to_string(node.dir.path().join("calls")).expect("the stand-in's calls");
+    let started = calls
+        .lines()
+        .any(|line| line.contains(" run ") && line.contains(&run));
+    assert!(started, "no `crun run` for {run} in\n{calls}");
+    fs::write(node.dir.path().join("go"), "go").expect("let the container end");
+    rig.until(&run, |seen| seen.1.is_some());
+    assert_eq!(
+        rig.view(&run),
+        ("exited".to_owned(), Some("succeeded".to_owned()))
+    );
+    let ran = rig.agent.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(!ran.err.contains(js_agent::ENGINE_WARNING), "{}", ran.err);
 }
 
 /// Asserts that `--stop-grace` is what the runtime is told to wait before it kills: an agent

@@ -20,7 +20,7 @@ pub fn a_freed_allocation_row_is_kept_as_history<B: Backend>(backend: &B) {
     rig.tick();
     let ended = rig
         .jobs
-        .transition(&id, JobState::Running, JobState::Succeeded)
+        .end_job(&id, super::exited(0))
         .expect("a_freed_allocation_row_is_kept_as_history: the job ends");
     let releasing = rig
         .jobs
@@ -91,9 +91,7 @@ pub fn a_freed_allocation_row_is_kept_as_history<B: Backend>(backend: &B) {
 pub fn free_twice_keeps_the_first_reason<B: Backend>(backend: &B) {
     let rig = rig(backend);
     let id = rig.placed("t");
-    rig.jobs
-        .transition(&id, JobState::Placed, JobState::Cancelled)
-        .expect("ends");
+    rig.jobs.end_job(&id, super::cancelled()).expect("ends");
     let first = rig.jobs.free(&id, EndReason::Cancelled).expect("frees");
     let before = rig.raw("alloc/t");
     rig.tick();
@@ -135,9 +133,7 @@ pub fn free_twice_keeps_the_first_reason<B: Backend>(backend: &B) {
 pub fn an_ended_job_cannot_move_again<B: Backend>(backend: &B) {
     let rig = rig(backend);
     let id = rig.running("u");
-    rig.jobs
-        .transition(&id, JobState::Running, JobState::Succeeded)
-        .expect("ends");
+    rig.jobs.end_job(&id, super::exited(0)).expect("ends");
     let before = rig.snapshot();
     for next in [
         JobState::Running,
@@ -229,7 +225,7 @@ pub fn ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit<
     let commits = rig.store.commit_stats().txns;
     let ended = rig
         .jobs
-        .transition(&id, JobState::Placed, JobState::Cancelled)
+        .end_job(&id, super::cancelled())
         .expect("a placed job is cancelled");
     assert_eq!(
         rig.store.commit_stats().txns,
@@ -255,9 +251,7 @@ pub fn ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit<
     let before = rig.snapshot();
     rig.store.fail_next();
     assert_eq!(
-        rig.jobs
-            .transition(&failing, JobState::Placed, JobState::Lost)
-            .map(drop),
+        rig.jobs.end_job(&failing, crate::JobEnd::Lost).map(drop),
         Err(JobStoreError::Store(StoreError::Failed(
             INJECTED.to_owned()
         ))),
@@ -280,9 +274,7 @@ pub fn ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit<
             .expect("reachable")
             .expect("commits");
     });
-    let answer = rig
-        .jobs
-        .transition(&raced, JobState::Placed, JobState::Lost);
+    let answer = rig.jobs.end_job(&raced, crate::JobEnd::Lost);
     assert_eq!(
         rig.jobs
             .get_job(&raced)
@@ -308,10 +300,9 @@ pub fn ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit<
     let queued = rig.queue("v-queued");
     let gave_up = rig
         .jobs
-        .transition(
+        .end_job(
             &queued,
-            JobState::Queued,
-            JobState::FailedToStart(StartFailure::NoCapacity),
+            crate::JobEnd::FailedToStart(StartFailure::NoCapacity),
         )
         .expect("a queued job fails to start");
     assert!(gave_up.ended_at.is_some(), "{name}: the end has no time");
@@ -325,7 +316,7 @@ pub fn ending_a_placed_job_moves_its_allocation_to_releasing_in_the_same_commit<
     rig.jobs.request_cancel(&intent).expect("an intent");
     let releasing = rig.jobs.mark_releasing(&intent).expect("releases");
     rig.jobs
-        .transition(&intent, JobState::Running, JobState::Cancelled)
+        .end_job(&intent, super::cancelled())
         .expect("the host reports it stopped");
     assert_eq!(
         rig.jobs.get_allocation(&intent).expect("reads"),
@@ -358,6 +349,17 @@ pub fn cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent<B: B
         "{name}: a queued job was not cancelled at once"
     );
     assert_eq!(
+        (
+            cancelled
+                .result
+                .as_ref()
+                .map(|result| (result.reason, result.exit_code)),
+            cancelled.retention_ends.is_some(),
+        ),
+        (Some((crate::ResultReason::Cancelled, None)), true),
+        "{name}: a queued job was cancelled without its result or retention end"
+    );
+    assert_eq!(
         rig.jobs.get_job(&queued).expect("reads"),
         Some(cancelled),
         "{name}: the cancel is not what the store holds"
@@ -386,8 +388,9 @@ pub fn cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent<B: B
                 intent.cancel_requested,
                 intent.ended_at,
                 intent.cancel_requested_at.is_some(),
+                intent.result.is_none() & intent.retention_ends.is_none(),
             ),
-            (state, true, None, true),
+            (state, true, None, true, true),
             "{name}: a cancel of a {state:?} job is not an intent alone"
         );
         assert_eq!(
@@ -408,9 +411,7 @@ pub fn cancel_of_a_queued_job_is_immediate_and_of_a_placed_job_is_an_intent<B: B
 pub fn cancel_twice_is_cancel_once<B: Backend>(backend: &B) {
     let rig = rig(backend);
     let ended = rig.running("y-ended");
-    rig.jobs
-        .transition(&ended, JobState::Running, JobState::Failed)
-        .expect("ends");
+    rig.jobs.end_job(&ended, super::exited(1)).expect("ends");
     for (key, id) in [
         ("job/y", rig.placed("y")),
         ("job/y-queued", rig.queue("y-queued")),

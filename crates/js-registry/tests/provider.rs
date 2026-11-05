@@ -3,8 +3,8 @@
 mod support;
 
 use js_agent_wire::{Phase, refusal};
-use js_pool_static::SeatError;
-use js_provider::{Flavour, Observed, Provider, RefusalCode, StartAck, StopAck};
+use js_provider::SeatError;
+use js_provider::{Observed, Pool, RefusalCode, StartAck, StopAck};
 use js_registry::{HostState, Refusal};
 use js_types::{Admission, ClassId, ResourceClass};
 use support::*;
@@ -247,7 +247,6 @@ fn identity_and_class_gate() {
     let mut fx = fixture(4);
     fx.join("a", "t");
     assert_eq!(fx.provider.id().as_str(), "builders");
-    assert_eq!(fx.provider.flavour(), Flavour::Delegated);
     assert_eq!(fx.provider.classes(), vec![class()]);
     let foreign = ResourceClass::new(ClassId::new("other").unwrap(), Admission::BookAll, 0);
     let mut asks_foreign = request();

@@ -696,15 +696,31 @@ pub struct Ready {
     pub warnings: Vec<String>,
 }
 
-/// What `--runtime crun` asks of the other flags, and then of the host.
+/// What a start that names no `--runtime` is told after why `crun` cannot run, on a line of
+/// its own: `crun` is the default, and the two ways forward. A start that names
+/// `--runtime crun` is not told of the engine.
+pub const DEFAULTED: &str = "no --runtime was given, so the runtime is crun, the default Linux \
+     runtime, and the agent does not fall back to another. Either make this host ready for crun \
+     (fix what is named above; see docs/runbooks/crun-host-setup.md), or opt in to the container \
+     engine, a fallback whose jobs get network none: --runtime docker --container-bin <path> \
+     --allow-container-engine";
+
+/// What `--runtime crun`, or a Linux start that names no `--runtime` (see
+/// [`Cli::effective_runtime`]), asks of the other flags, and then of the host.
 ///
 /// # Errors
 ///
-/// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`].
+/// The text for exit status 2: a flag that is wrong or missing, or [`Report::refusal`]; for a
+/// start that names no `--runtime`, followed by [`DEFAULTED`].
 pub fn start(cli: &Cli, host: &CrunHost, commands: &dyn CommandRunner) -> Result<Ready, String> {
-    let request = flags(cli)?;
-    let report = check(&request, host, commands);
-    ready(&request, report)
+    let checked = flags(cli).and_then(|request| {
+        let report = check(&request, host, commands);
+        ready(&request, report)
+    });
+    match cli.runtime {
+        None => checked.map_err(|why| format!("{why}\n{DEFAULTED}")),
+        Some(_) => checked,
+    }
 }
 
 /// The host the check found, as the runtime is built from it.
@@ -733,31 +749,35 @@ pub fn ready(request: &Request<'_>, report: Report) -> Result<Ready, String> {
     })
 }
 
-/// The flags of `--runtime`, `--crun-bin` and `--job-user` checked against each other.
+/// The flags of `--runtime`, `--crun-bin` and `--job-user` checked against each other, for
+/// `--runtime crun` or for no `--runtime` (the caller asks only where
+/// [`Cli::effective_runtime`] is `crun`).
 ///
 /// # Errors
 ///
-/// The text names the flag at fault.
+/// The text names the flag at fault; `--runtime docker` and `--runtime none` are not a crun
+/// start.
 pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
-    if cli.runtime != Some(RuntimeKind::Crun) {
+    if matches!(cli.runtime, Some(RuntimeKind::Docker | RuntimeKind::NoJobs)) {
         return Err("--runtime crun: not given".to_owned());
     }
-    let mut engine_flags = vec![
+    let engine_flags = [
         ("--container-bin", cli.container_bin.is_some()),
-        ("--container-network", cli.container_network.is_some()),
         ("--container-user", cli.container_user.is_some()),
         ("--container-subuid", cli.container_subuid.is_some()),
         ("--container-host", cli.container_host.is_some()),
         ("--container-pull", cli.container_pull.is_some()),
         ("--container-tmp-size", cli.container_tmp_size.is_some()),
         ("--container-add-host", !cli.container_add_host.is_empty()),
-        (
-            "--container-egress-allow",
-            !cli.container_egress_allow.is_empty(),
-        ),
-        ("--container-nft", cli.container_nft.is_some()),
         ("--actions-cgroup", cli.actions_cgroup.is_some()),
         ("--gpu-toolkit-hook", cli.gpu_toolkit_hook.is_some()),
+    ];
+    if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
+        return Err(format!(
+            "{flag}: not accepted with --runtime crun (a flag of the container engine, which the crun runtime does not use; --runtime docker --allow-container-engine selects the engine)"
+        ));
+    }
+    let mut other_flags = vec![
         // A job's mount is bound from a directory the job's writer may swap for a link
         // between the agent's check and the bind; `CrunRuntime` does not read the binds
         // back yet, so no mount root is accepted.
@@ -765,10 +785,10 @@ pub fn flags(cli: &Cli) -> Result<Request<'_>, String> {
         ("--mount-root-ro", !cli.mount_roots_ro.is_empty()),
     ];
     // Native jobs are a Mac runtime; a crun agent would start and ignore them.
-    engine_flags.extend(cli.native_flags());
-    if let Some((flag, _)) = engine_flags.into_iter().find(|(_, given)| *given) {
+    other_flags.extend(cli.native_flags());
+    if let Some((flag, _)) = other_flags.into_iter().find(|(_, given)| *given) {
         return Err(format!(
-            "{flag}: not accepted with --runtime crun (a flag of the container engine or of native jobs, or a mount root, which the crun runtime does not read back after it binds)"
+            "{flag}: not accepted with --runtime crun (a flag of native jobs, or a mount root, which the crun runtime does not read back after it binds)"
         ));
     }
     let crun = cli.crun_bin.as_deref().unwrap_or(Path::new(DISTRO_CRUN));

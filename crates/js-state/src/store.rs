@@ -104,6 +104,47 @@ pub trait Store: Send + Sync {
     }
 }
 
+/// A shared handle to any store is a store: every call goes to the store it holds. A type
+/// generic over `S: Store` that keeps an `Arc<S>` (a typed table over the store) can then run
+/// on a store chosen at start, as `Arc<dyn Store>`.
+impl Store for std::sync::Arc<dyn Store> {
+    fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
+        (**self).apply_batch(batch)
+    }
+
+    fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        (**self).get(key)
+    }
+
+    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        (**self).scan_prefix(prefix)
+    }
+
+    fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
+        (**self).scan_range(scan)
+    }
+
+    fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError> {
+        (**self).changes(after, limit)
+    }
+
+    fn reap_expired(&self) -> Result<usize, StoreError> {
+        (**self).reap_expired()
+    }
+
+    fn commit_stats(&self) -> CommitStats {
+        (**self).commit_stats()
+    }
+
+    fn now(&self) -> StoreTime {
+        (**self).now()
+    }
+
+    fn txn(&self, txn: Txn) -> Result<Result<Commit, Conflict>, StoreError> {
+        (**self).txn(txn)
+    }
+}
+
 /// The keys a C8 request may return: its bounds clipped to its prefix. The lower edge is
 /// always a key, since every key under the prefix is at or after the prefix itself; the
 /// upper is unbounded only when no string follows every key under the prefix.
@@ -204,9 +245,60 @@ pub(crate) fn page_of(mut rows: Vec<(String, Versioned)>, limit: NonZeroUsize) -
 mod tests {
     use std::num::NonZeroUsize;
     use std::ops::Bound;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::{Span, successor};
-    use crate::types::ScanRange;
+    use super::{Span, Store, successor};
+    use crate::clock::{Clock, ManualClock};
+    use crate::fake::{Fake, Flaw};
+    use crate::types::{Cond, Revision, ScanRange, Txn};
+
+    /// A shared handle answers every call as the store it holds: a write through the handle
+    /// is read back through the store and through the handle alike, the scans, the feed,
+    /// the reaper, the counters and the clock are the store's. It catches a forwarding
+    /// method that answers from somewhere else (a default, another method) instead.
+    #[test]
+    fn a_shared_handle_is_the_store_it_holds() {
+        let clock = Arc::new(ManualClock::default());
+        let inner: Arc<dyn Store> = Arc::new(Fake::with_flaw(clock.clone(), Flaw::None));
+        let handle: Arc<dyn Store> = Arc::clone(&inner);
+        let through = |txn| <Arc<dyn Store> as Store>::txn(&handle, txn);
+        through(Txn::new().put("k/a", b"1".to_vec(), Cond::Absent))
+            .expect("store")
+            .expect("commit");
+        let batch = vec![
+            Txn::new().put("k/b", b"2".to_vec(), Cond::Absent),
+            Txn::new().put_ttl("k/c", b"3".to_vec(), Duration::from_secs(1), Cond::Absent),
+        ];
+        let results = <Arc<dyn Store> as Store>::apply_batch(&handle, batch).expect("store");
+        assert!(results.iter().all(Result::is_ok));
+
+        let got = <Arc<dyn Store> as Store>::get(&handle, "k/a").expect("store");
+        assert_eq!(got, inner.get("k/a").expect("store"));
+        assert_eq!(got.map(|row| row.value), Some(b"1".to_vec()));
+        let keys = |rows: Vec<(String, crate::types::Versioned)>| {
+            rows.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
+        };
+        let prefix = <Arc<dyn Store> as Store>::scan_prefix(&handle, "k/").expect("store");
+        assert_eq!(keys(prefix), ["k/a", "k/b", "k/c"]);
+        let page =
+            <Arc<dyn Store> as Store>::scan_range(&handle, ScanRange::new("k/", NonZeroUsize::MIN))
+                .expect("store");
+        assert_eq!(keys(page.rows), ["k/a"]);
+        assert!(page.resume.is_some());
+        let feed = <Arc<dyn Store> as Store>::changes(&handle, Revision(0), 10).expect("store");
+        assert_eq!(feed, inner.changes(Revision(0), 10).expect("store"));
+        assert_eq!(feed.rows.len(), 3);
+        assert_eq!(<Arc<dyn Store> as Store>::commit_stats(&handle).txns, 3);
+
+        let before = <Arc<dyn Store> as Store>::now(&handle);
+        clock.advance(Duration::from_secs(1));
+        let after = <Arc<dyn Store> as Store>::now(&handle);
+        assert_eq!(after, clock.now());
+        assert!(after > before);
+        assert_eq!(<Arc<dyn Store> as Store>::reap_expired(&handle), Ok(1));
+        assert_eq!(inner.get("k/c").expect("store"), None);
+    }
 
     // Catches a successor that steps into the surrogate gap (no char there, so the
     // character would be dropped and the bound would jump a whole level) or that keeps

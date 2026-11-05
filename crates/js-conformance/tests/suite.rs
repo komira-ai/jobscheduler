@@ -4,19 +4,17 @@ use std::collections::BTreeMap;
 
 use js_conformance::{Check, Report, Subject, Verdict, run};
 use js_pool_static::StaticPool;
-use js_provider::{
-    Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
-use js_provider_fake::{Defect, FakeProvider, Rank};
+use js_provider::{Call, HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider_fake::{Defect, FakePool, Rank};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 /// One subject type for both providers, so the generic suite is exercised under one
 /// instantiation that reaches every arm: the fake can be scripted, the pool cannot.
 enum Under {
-    Fake(FakeProvider),
+    Fake(FakePool),
     Pool(StaticPool),
     /// A fake that cannot be made to list an unleasable class.
-    Bare(FakeProvider),
+    Bare(FakePool),
     /// A fake whose capacity listing shows a second lease on every booked host.
     Phantom(Phantom),
 }
@@ -24,14 +22,11 @@ enum Under {
 /// A fake that lists a lease nobody started beside the lease of each booked host: the
 /// listing and the booking table disagree, as a provider that books many leases per host
 /// and keeps them out of one of the two would.
-struct Phantom(FakeProvider);
+struct Phantom(FakePool);
 
-impl Provider for Phantom {
+impl Pool for Phantom {
     fn id(&self) -> ProviderId {
         self.0.id()
-    }
-    fn flavour(&self) -> Flavour {
-        self.0.flavour()
     }
     fn classes(&self) -> Vec<ResourceClass> {
         self.0.classes()
@@ -57,7 +52,7 @@ impl Provider for Phantom {
 }
 
 impl Subject for Under {
-    fn provider(&mut self) -> &mut dyn Provider {
+    fn provider(&mut self) -> &mut dyn Pool {
         match self {
             Self::Fake(fake) | Self::Bare(fake) => fake,
             Self::Pool(pool) => pool,
@@ -118,9 +113,9 @@ memory_bytes = 1073741824
 gpus = 1
 ";
 
-fn placeholder() -> FakeProvider {
+fn placeholder() -> FakePool {
     let id = ProviderId::new("fake").unwrap();
-    FakeProvider::new(id, js_conformance::standard_hosts())
+    FakePool::new(id, js_conformance::standard_hosts())
 }
 
 fn fake(defect: Option<Defect>) -> Under {
@@ -277,7 +272,7 @@ fn a_provider_that_places_on_the_highest_host_first_conforms() {
     let make = || {
         let id = ProviderId::new("fake").unwrap();
         let hosts = js_conformance::standard_hosts();
-        Under::Fake(FakeProvider::new(id, hosts).with_rank(Rank::HighestHostFirst))
+        Under::Fake(FakePool::new(id, hosts).with_rank(Rank::HighestHostFirst))
     };
     let report = run(make);
     assert!(
@@ -295,7 +290,7 @@ fn the_highest_rank_option_places_on_h2_first() {
     let mut subject = {
         let id = ProviderId::new("fake").unwrap();
         let hosts = js_conformance::standard_hosts();
-        FakeProvider::new(id, hosts).with_rank(Rank::HighestHostFirst)
+        FakePool::new(id, hosts).with_rank(Rank::HighestHostFirst)
     };
     subject.start(
         StartSpec::new(
@@ -316,12 +311,9 @@ fn the_highest_rank_option_places_on_h2_first() {
 /// A provider that refuses every start and books nothing.
 struct Refuser;
 
-impl Provider for Refuser {
+impl Pool for Refuser {
     fn id(&self) -> ProviderId {
         ProviderId::new("refuser").unwrap()
-    }
-    fn flavour(&self) -> js_provider::Flavour {
-        js_provider::Flavour::Delegated
     }
     fn classes(&self) -> Vec<ResourceClass> {
         vec![ResourceClass::gpu_host()]
@@ -343,7 +335,7 @@ impl Provider for Refuser {
 }
 
 impl Subject for Refuser {
-    fn provider(&mut self) -> &mut dyn Provider {
+    fn provider(&mut self) -> &mut dyn Pool {
         self
     }
     fn booked(&self) -> BTreeMap<HostId, LeaseId> {

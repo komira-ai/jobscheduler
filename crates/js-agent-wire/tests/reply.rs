@@ -29,6 +29,9 @@ fn reply(commands: Vec<Command>) -> HeartbeatReply {
         result_acks: Vec::new(),
         taint_ack: false,
         exclusive: None,
+        job_acks: Vec::new(),
+        retired_acks: Vec::new(),
+        log_grant: None,
     }
 }
 

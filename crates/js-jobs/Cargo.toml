@@ -20,6 +20,8 @@ postgres = ["js-state/postgres"]
 [dependencies]
 # A minted job id and every allocation id are 128 bits from the system's random source.
 getrandom.workspace = true
+# The cap on a stored log tail is the agent's own, `limits::MAX_LOG_STREAM_LEN`.
+js-agent-wire = { path = "../js-agent-wire" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 thiserror.workspace = true

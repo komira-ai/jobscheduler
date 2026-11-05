@@ -6,10 +6,9 @@
 //! lives, and from every chunk it keeps
 //!
 //! - a **file** per stream in the lease directory ([`stdout_path`], [`stderr_path`]),
-//!   holding the first [`LogLimits::file_cap`] bytes of the stream. Bytes past the cap are
-//!   read and discarded, never queued: the reader does not stop reading, so a job that
-//!   writes ten times the cap is not blocked on a full pipe, and the memory held is one
-//!   chunk;
+//!   holding the first `file_cap` bytes of the stream. Bytes past the cap are read and
+//!   discarded, never queued: the reader does not stop reading, so a job that writes ten
+//!   times the cap is not blocked on a full pipe, and the memory held is one chunk;
 //! - a **ring** per stream holding the last [`LogLimits::tail`] bytes, which
 //!   [`Running::tail`](crate::running::Running::tail) returns as a [`LogTail`] (a value,
 //!   copied out).
@@ -18,10 +17,23 @@
 //! 1 MiB a stream, and a ring of 64 KiB, well above the 8 KiB a run's result carries, so
 //! that whoever cuts the tail at a character boundary has bytes to spare.
 //!
-//! **A restart of the agent** keeps the files (the lease directory is not touched) and
-//! loses the rings, which exist only in the process that read the pipes. A container that
-//! outlives its agent finds the read ends of its pipes closed: its next write is an
-//! `EPIPE` (`SIGPIPE`), where a file would have taken it.
+//! **The file cap is per run.** The runtime's [`LogLimits::file_cap`] is the default; a
+//! start ([`Oci::start`](super::Oci::start), [`Oci::start_supervised`](super::Oci::start_supervised))
+//! may give one run another, for that run's files only (a supervisor is given it as its
+//! file-cap argument). The ring ([`LogLimits::tail`]) and the drain grace stay the runtime's.
+//!
+//! **The files can be read while they grow.** They are plain files, written with plain
+//! unbuffered writes as the bytes are read from the pipes and never rewritten, so the agent
+//! (root) can read each by byte offset while the job runs, from another process than the
+//! capture's; the capture takes no lock a reader could hold.
+//!
+//! **Who reads the pipes:** the process that runs the capture. A container started under a
+//! supervisor process (`supervise`) has its pipes read, its files written and its rings held
+//! by that process, which outlives the agent: a restart of the agent leaves the capture as
+//! it is, the files stay in the lease directory, and the tail reaches the agent through the
+//! exit record the supervisor writes. A container started by `Oci::start` has its pipes read
+//! by the process that started it; one that outlives that process finds the read ends of its
+//! pipes closed, and its next write is an `EPIPE` (`SIGPIPE`).
 //!
 //! **The end of the drain:** a stream ends when every write end of its pipe is closed,
 //! which is the container's exit (the agent holds its own copies of the write ends until

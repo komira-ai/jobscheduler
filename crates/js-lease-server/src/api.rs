@@ -13,13 +13,14 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport, Timings};
-use js_provider::Provider;
+use js_provider::{Pool, RefusalCode};
 use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::{error, info};
 
-use crate::adapt::{BoxedProvider, SharedClock};
+use crate::adapt::{BoxedPool, SharedClock};
+use crate::admit::{Admit, Decision};
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
@@ -41,7 +42,7 @@ use crate::wire::{
 pub const BODY_LIMIT: usize = 64 * 1024;
 
 /// The lease table over the server's provider and clock.
-pub(crate) type Table = LeaseTable<BoxedProvider, SharedClock>;
+pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
 
 /// What every request handler and the tick loop share: the table behind its one lock,
 /// the token, the count of lease-file writes that failed, and the agent side when agents
@@ -64,6 +65,8 @@ pub(crate) struct Shared {
     counted: std::sync::Mutex<WholeCounts>,
     /// The reservation ledger the last tick handed the table.
     handed: Handed,
+    /// Admission of a lease request: the pool's launching machine providers.
+    admit: Admit,
 }
 
 impl Shared {
@@ -83,7 +86,16 @@ impl Shared {
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
             handed,
+            admit: Admit::default(),
         }
+    }
+
+    /// The same state admitting lease requests over `admit`'s launching providers as well
+    /// as the hosts; without it only the hosts can admit.
+    #[must_use]
+    pub(crate) fn with_admit(mut self, admit: Admit) -> Self {
+        self.admit = admit;
+        self
     }
 
     /// The same state serving the brake reset route for `scaler`.
@@ -368,12 +380,31 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
     let body = parse::<AcquireBody>(&body)?;
     let request_id = body.request_id()?;
     let (request, ttl) = body.into_parts()?;
-    let outcome = {
+    let registry = shared.registry();
+    // Admission first, under the table lock; the catalogs, when the hosts alone admit
+    // nothing, are read with the lock let go, and the question is asked again (see
+    // `admit`). The second answer is never `ReadCatalogs`.
+    let mut providers = None;
+    let outcome = loop {
         let mut table = shared.lock("wait-acquire").await;
-        match request_id {
-            Some(id) => table.acquire_with_id(id, request, ttl),
-            None => table.acquire(request, ttl),
+        let decision = shared.admit.decide(
+            &table,
+            registry.as_ref(),
+            request_id.as_ref(),
+            &request,
+            providers.as_deref(),
+        );
+        match decision {
+            Decision::Start => {
+                break match request_id {
+                    Some(id) => table.acquire_with_id(id, request, ttl),
+                    None => table.acquire(request, ttl),
+                };
+            }
+            Decision::Refuse => break Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
+            Decision::ReadCatalogs => drop(table),
         }
+        providers = Some(shared.admit.read().await);
     };
     match outcome {
         Ok(lease) => {

@@ -1,15 +1,16 @@
 //! The registering side of the server: the registry, the join tokens, the hello limit
 //! and the file of bindings, and how they are put together at start.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
 use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, ProfileLives, Registry};
-use js_types::ProviderId;
+use js_types::{HostId, ProviderId};
 use js_usage::{ProfileCurves, ProfileKey};
 use tracing::{error, warn};
 
@@ -19,9 +20,11 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
 use crate::usage_map::limits_of;
 use crate::usage_setup::UsageSetup;
@@ -65,6 +68,14 @@ pub(crate) struct Agents {
     /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
     /// call has returned.
     pub(crate) usage: Option<Arc<Usage>>,
+    /// The job and allocation tables, when the job service is on. With them, each heartbeat of
+    /// a host that reports the `per-job` capability is also served the starts and stops of its
+    /// jobs, and its job listing is committed ([`crate::per_job`]); without them, and for any
+    /// other host, the reply is the lease and run reply alone.
+    pub(crate) jobs: Option<Arc<ServerJobs>>,
+    /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
+    /// is a leaf.
+    unclean: Mutex<BTreeSet<HostId>>,
 }
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
@@ -90,8 +101,18 @@ pub(crate) fn assemble(
     clock: &SharedClock,
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
+    assemble_placed(hosts, usage, clock, state_file).map(|(assembled, _)| assembled)
+}
+
+/// [`assemble`], with the placer the registry was given under `--placement js-sched`.
+pub(crate) fn assemble_placed(
+    hosts: Hosts,
+    usage: UsageSetup,
+    clock: &SharedClock,
+    state_file: &Path,
+) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
-        Hosts::Static(source) => Ok((source, None)),
+        Hosts::Static(source) => Ok(((source, None), None)),
         Hosts::Layered {
             static_pool,
             agents,
@@ -104,6 +125,7 @@ pub(crate) fn assemble(
                 require_host_credential,
                 placement,
                 estimate_feed,
+                cpu_slack,
                 max_lease_wall,
             } = *agents;
             let path = state_path(state_file, ".agents");
@@ -116,12 +138,15 @@ pub(crate) fn assemble(
             let bindings = agent_state::load(&path)?;
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+            // `--placement js-sched`: the scheduler picks the host of a start, and books
+            // the share of each host's memory the pool's percent says; the registry books
+            // the whole shape. Under `registry` the registry cuts it, as it always did.
+            let (pool, memory) = placement.split(pool);
             let registry = Registry::new(pool, clock.clone());
-            // `--placement js-sched`: the scheduler picks the host of a start.
-            let placers = placement.placer(max_lease_wall);
-            placers
-                .into_iter()
-                .for_each(|placer| registry.set_placer(placer));
+            let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
+            placer
+                .iter()
+                .for_each(|placer| registry.set_placer(placer.clone()));
             let usage = usage.build(clock, limits, &registry)?;
             // `--estimate-feed`: the learned lives of the profiles cost a lease's end in the
             // drain order. Set before the bookings are put back, so a lease restored from
@@ -146,8 +171,10 @@ pub(crate) fn assemble(
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
                 usage,
+                jobs: None,
+                unclean: Mutex::default(),
             };
-            Ok((Box::new(source), Some(Arc::new(agents))))
+            Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
     }
 }
@@ -185,7 +212,44 @@ impl Agents {
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
             usage: None,
+            jobs: None,
+            unclean: Mutex::default(),
         }
+    }
+
+    /// This agent side holding the job tables `jobs`, for a test of the per-job heartbeat.
+    #[cfg(test)]
+    pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
+        Self {
+            jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// Records whether the last job listing of `host` was clean: it named only jobs the host
+    /// holds a live allocation for.
+    pub(crate) fn note_listing(&self, host: &HostId, clean: bool) {
+        let mut unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
+        if clean {
+            unclean.remove(host);
+        } else {
+            unclean.insert(host.clone());
+        }
+    }
+
+    /// Whether the capacity of `host` may be counted by placement: its last job listing was
+    /// clean (design section 6.2, section 8 row 37). A host that lists a job it holds no live
+    /// allocation for is told to stop it and is not placed on until a listing is clean.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the placement engine reads it; until it lands only tests do"
+        )
+    )]
+    pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
+        let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
+        !unclean.contains(host)
     }
 
     /// Lets the hello of `host` register with the one-time token or host credential `who`

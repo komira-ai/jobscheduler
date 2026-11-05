@@ -1,5 +1,7 @@
-//! The hosts of a pool that register themselves, and a [`js_provider::Provider`] over
-//! them.
+//! The hosts of a pool that register themselves, the lease-level [`js_provider::Pool`]
+//! over them ([`RegisteredProvider`], the allocation port the lease table books on), and
+//! the `static` machine provider over the same host table ([`StaticCapacity`], a
+//! [`js_elastic::CapacityProvider`] that never launches).
 //!
 //! An operator of a static pool lists every host in a file. Here a machine says hello
 //! (design 5.8): it names its id, the pool it wants to join and the shape it offers, and
@@ -128,6 +130,7 @@
 //!   from any holder of the pool token. That is the restart gap a caller that persists
 //!   bindings closes.
 
+mod capacity;
 mod config;
 mod credential;
 mod lives;
@@ -142,6 +145,7 @@ mod tail_counters;
 mod whole;
 use js_whole::config as whole_config;
 
+pub use capacity::StaticCapacity;
 pub use config::{
     ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
     PoolConfig,
@@ -157,8 +161,8 @@ pub use placer::{MarkedTails, Placer, ProbeHost};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{
-    Busy, Cordoned, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost, Registry,
-    Restored, Uncordoned, Waiting, WholeCounts,
+    Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost,
+    Registry, Restored, Uncordoned, Waiting, WholeCounts,
 };
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};

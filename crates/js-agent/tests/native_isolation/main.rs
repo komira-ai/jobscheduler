@@ -300,6 +300,7 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
             outputs: Vec::new(),
             network: NetworkLevel::Off,
         }),
+        env: Vec::new(),
         cpu_millis: 1000,
         memory_bytes: 1 << 30,
         pids: None,
@@ -311,6 +312,8 @@ fn spec(fixture: &Fixture, run_id: &str, exe: &Path, env: &[(&str, &str)]) -> Ru
         isolation: Isolation::Contained,
         labels: Default::default(),
         bundle: None,
+        network: Default::default(),
+        ports: Vec::new(),
     }
 }
 

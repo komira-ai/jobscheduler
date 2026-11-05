@@ -1,11 +1,9 @@
-//! Several sources of hosts behind the one provider the lease table runs on.
+//! Several sources of hosts behind the one pool the lease table runs on.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_lease::Booking;
-use js_provider::{
-    Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
+use js_provider::{HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_registry::{Binding, Registry};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
@@ -44,12 +42,12 @@ use crate::error::StartupError;
 /// `LayeredSource`.
 pub struct LayeredProvider {
     id: ProviderId,
-    children: Vec<Box<dyn Provider + Send>>,
+    children: Vec<Box<dyn Pool + Send>>,
 }
 
 impl LayeredProvider {
     /// A layer over `children`, asked in order.
-    pub fn new(id: ProviderId, children: Vec<Box<dyn Provider + Send>>) -> Self {
+    pub fn new(id: ProviderId, children: Vec<Box<dyn Pool + Send>>) -> Self {
         Self { id, children }
     }
 }
@@ -80,13 +78,9 @@ fn combine(reads: impl IntoIterator<Item = Observed>) -> Observed {
     combined
 }
 
-impl Provider for LayeredProvider {
+impl Pool for LayeredProvider {
     fn id(&self) -> ProviderId {
         self.id.clone()
-    }
-
-    fn flavour(&self) -> Flavour {
-        Flavour::Delegated
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
@@ -199,7 +193,7 @@ impl CapacitySource for LayeredSource {
     /// the registry: an id belongs to one source only, and the registry reserves the
     /// static pool's ids so that no hello can take one.
     fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
-        let mut children: Vec<Box<dyn Provider + Send>> = Vec::new();
+        let mut children: Vec<Box<dyn Pool + Send>> = Vec::new();
         let mut unseated = Vec::new();
         let mut listed = BTreeSet::new();
         if let Some(source) = &self.static_pool {
@@ -244,7 +238,7 @@ mod tests {
     use std::time::Duration;
 
     use js_provider::Call;
-    use js_provider_fake::FakeProvider;
+    use js_provider_fake::FakePool;
     use js_types::{Admission, ClassId, Request, Resources, Shape};
 
     use super::*;
@@ -261,22 +255,22 @@ mod tests {
         )
     }
 
-    fn fake(name: &str, hosts: &[(&str, u64, u64)]) -> FakeProvider {
+    fn fake(name: &str, hosts: &[(&str, u64, u64)]) -> FakePool {
         let hosts = hosts
             .iter()
             .map(|(id, cpu, gpus)| (host(id), shape(*cpu, *gpus)))
             .collect();
-        FakeProvider::new(ProviderId::new(name).unwrap(), hosts)
+        FakePool::new(ProviderId::new(name).unwrap(), hosts)
     }
 
     fn mac() -> ResourceClass {
         ResourceClass::new(ClassId::new("mac-host").unwrap(), Admission::BookAll, 0)
     }
 
-    fn layered(children: Vec<FakeProvider>) -> LayeredProvider {
+    fn layered(children: Vec<FakePool>) -> LayeredProvider {
         let children = children
             .into_iter()
-            .map(|child| Box::new(child) as Box<dyn Provider + Send>)
+            .map(|child| Box::new(child) as Box<dyn Pool + Send>)
             .collect();
         LayeredProvider::new(ProviderId::new("layered").unwrap(), children)
     }
@@ -321,16 +315,13 @@ mod tests {
 
     /// A child that answers every start with `ack` and is a fake in every other call.
     struct Refuses {
-        inner: FakeProvider,
+        inner: FakePool,
         ack: StartAck,
     }
 
-    impl Provider for Refuses {
+    impl Pool for Refuses {
         fn id(&self) -> ProviderId {
             self.inner.id()
-        }
-        fn flavour(&self) -> Flavour {
-            self.inner.flavour()
         }
         fn classes(&self) -> Vec<ResourceClass> {
             self.inner.classes()
@@ -349,16 +340,16 @@ mod tests {
         }
     }
 
-    fn refusing(name: &str, code: RefusalCode) -> Box<dyn Provider + Send> {
+    fn refusing(name: &str, code: RefusalCode) -> Box<dyn Pool + Send> {
         answering(name, StartAck::Refused(code))
     }
 
-    fn answering(name: &str, ack: StartAck) -> Box<dyn Provider + Send> {
+    fn answering(name: &str, ack: StartAck) -> Box<dyn Pool + Send> {
         let inner = fake(name, &[(name, 1000, 1)]);
         Box::new(Refuses { inner, ack })
     }
 
-    fn layer_of(children: Vec<Box<dyn Provider + Send>>) -> LayeredProvider {
+    fn layer_of(children: Vec<Box<dyn Pool + Send>>) -> LayeredProvider {
         LayeredProvider::new(ProviderId::new("layered").unwrap(), children)
     }
 
@@ -370,7 +361,7 @@ mod tests {
         for flip in [false, true] {
             let mut busy = fake("s", &[("s-1", 1000, 1)]);
             busy.start(spec(9, 1, 1));
-            let mut children: Vec<Box<dyn Provider + Send>> =
+            let mut children: Vec<Box<dyn Pool + Send>> =
                 vec![Box::new(busy), refusing("r", RefusalCode::NoCapableHost)];
             if flip {
                 children.reverse();
@@ -466,7 +457,6 @@ mod tests {
     fn exclusive_not_ready_is_final() {
         let child = refusing("r", RefusalCode::ExclusiveNotReady);
         assert_eq!(child.id().as_str(), "r");
-        assert_eq!(child.flavour(), fake("r", &[]).flavour());
         let mut provider = layer_of(vec![child, Box::new(fake("s", &[("s-1", 1000, 1)]))]);
         let ack = provider.start(spec(1, 1, 1));
         assert_eq!(ack, StartAck::Refused(RefusalCode::ExclusiveNotReady));
@@ -487,22 +477,19 @@ mod tests {
 
     /// A child that lets leases share its host: the booking table alone.
     struct Shares {
-        book: js_pool_static::HostBook,
+        book: js_provider::HostBook,
         classes: Vec<ResourceClass>,
     }
 
-    impl Provider for Shares {
+    impl Pool for Shares {
         fn id(&self) -> ProviderId {
             ProviderId::new("shares").unwrap()
-        }
-        fn flavour(&self) -> Flavour {
-            Flavour::Delegated
         }
         fn classes(&self) -> Vec<ResourceClass> {
             self.classes.clone()
         }
         fn start(&mut self, spec: StartSpec) -> StartAck {
-            let gate = js_pool_static::HostBook::listed_gate(&self.classes, &spec);
+            let gate = js_provider::HostBook::listed_gate(&self.classes, &spec);
             self.book.start_where(&spec, gate, &|_, _| true)
         }
         fn stop(&mut self, lease: &LeaseId) -> StopAck {
@@ -543,7 +530,7 @@ mod tests {
     /// lease of each host, which sends the repeat to the free host and books the lease twice.
     #[test]
     fn a_lease_booked_second_on_a_host_is_found_in_its_child() {
-        let mut book = js_pool_static::HostBook::new();
+        let mut book = js_provider::HostBook::new();
         book.insert_host(host("x"), shape(4000, 0));
         let mut shares = Shares {
             book,
@@ -552,7 +539,6 @@ mod tests {
         shares.start(sharing_spec(1));
         shares.start(sharing_spec(2));
         assert_eq!(shares.id().as_str(), "shares");
-        assert_eq!(shares.flavour(), Flavour::Delegated);
         assert_eq!(shares.classes(), vec![sharing()]);
         let free = fake("a", &[("a-1", 4000, 0)]).with_class(sharing());
         let mut provider = layer_of(vec![Box::new(free), Box::new(shares)]);
@@ -768,7 +754,6 @@ mod tests {
             fake("b", &[("a-1", 1000, 1)]),
         ]);
         assert_eq!(provider.id().as_str(), "layered");
-        assert_eq!(provider.flavour(), Flavour::Delegated);
         assert_eq!(provider.classes(), vec![ResourceClass::gpu_host(), mac()]);
         let ids: Vec<_> = provider.capacity().into_iter().map(|h| h.host).collect();
         assert_eq!(ids, vec![host("a-1"), host("z-1")]);

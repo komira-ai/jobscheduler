@@ -54,8 +54,9 @@ pub(super) fn pinned(image: &str) -> Result<PinnedImage, String> {
 }
 
 /// The container of `run` named `name` over `image`, with its directories and the cgroup
-/// `cgroup_parent`. The program and environment are the image's to give
-/// ([`ImageConfig::apply`](crate::image::ImageConfig::apply)); they are empty here.
+/// `cgroup_parent`. The program and environment are empty here: the image's config gives
+/// them ([`ImageConfig::apply`](crate::image::ImageConfig::apply)), and the job's
+/// environment goes over the image's after that ([`job_env`]).
 ///
 /// The run's scratch directory, its mounts and its files are bound after the exec root, in
 /// that order, as js-contain wants host mounts.
@@ -107,6 +108,48 @@ pub(super) fn container_spec(
     }
 }
 
+/// Sets the job's environment (`env`, [`RunSpec::env`]) in `container`, whose image config
+/// is applied: the image's variables stay, and a job variable replaces every image
+/// variable of its name. The job's follow the image's, in the order given. Called after
+/// [`ImageConfig::apply`](crate::image::ImageConfig::apply), which replaces the whole
+/// environment, and before a GPU run's variables, which go over the job's.
+pub(super) fn job_env(container: &mut ContainerSpec, env: &[(String, String)]) {
+    container
+        .env
+        .retain(|(name, _)| !env.iter().any(|(job, _)| job == name));
+    container.env.extend(env.iter().cloned());
+}
+
+/// The container of an adopted run, rebuilt from what its sidecar records: what a stop, an
+/// end, the pid ask and the image collection read of it (its name, directory, image digest
+/// and cgroup). The bundle exists already and the container is never made again, so the rest
+/// is empty.
+pub(super) fn adopted_spec(
+    name: &str,
+    image_digest: &str,
+    lease: &LeaseDirs,
+    cgroup_parent: &str,
+) -> ContainerSpec {
+    ContainerSpec {
+        name: name.to_owned(),
+        image: image_digest.to_owned(),
+        image_digest: image_digest.to_owned(),
+        dir: lease.dir.clone(),
+        cgroup_parent: cgroup_parent.to_owned(),
+        exec_root: EXEC_ROOT.to_owned(),
+        input_root: lease.root.clone(),
+        upper: lease.upper.clone(),
+        overlay_work: lease.work.clone(),
+        working_directory: String::new(),
+        env: Vec::new(),
+        argv: Vec::new(),
+        limits: ContainerLimits::DEFAULT,
+        shared: Vec::new(),
+        mounts: Vec::new(),
+        devices: Vec::new(),
+    }
+}
+
 /// What a container's end is to the lifecycle: the exit status of the job, or [`NOT_RUN`]
 /// for one that did not run; flagged out of memory only when the kernel's killer ran for
 /// the lease's own limit (a node short of memory is not the booking's fault).
@@ -153,6 +196,18 @@ pub(super) fn end_of(
         }
     };
     exit_of(ended, oom.as_ref())
+}
+
+/// The exit and the tail a run's end becomes: `ended` as js-contain read it, `captured` what
+/// the run wrote, and the lease's `cgroup`, `cap` and `backstop` for the OOM account
+/// ([`end_of`]).
+pub(super) fn concluded(
+    ended: Result<Ended, String>,
+    captured: &Captured,
+    (cgroup, cap, backstop): (&LeaseCgroup, Option<u64>, Option<u64>),
+) -> (Exit, LogTail) {
+    let tail = log_tail_of(captured, not_run_words(&ended));
+    (end_of(ended, cgroup, cap, backstop), tail)
 }
 
 /// The words `crun` or the init gave for a container that did not run to an exit.

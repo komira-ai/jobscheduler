@@ -6,7 +6,7 @@
 mod support;
 
 use js_agent_wire::Taint;
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{Binding, Busy, HostMark, HostState, HostView};
 use support::*;
 

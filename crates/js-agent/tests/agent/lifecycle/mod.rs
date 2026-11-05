@@ -10,13 +10,17 @@ mod cleanup;
 mod disk;
 mod exclusive;
 pub mod fake;
+mod fence;
 mod files;
 mod flags;
+mod held;
 mod layout;
 mod lease_dir;
 mod logs;
 mod mounts;
+mod network;
 mod owed;
+mod per_job;
 mod prepare;
 pub mod quota;
 mod quota_health;
@@ -25,6 +29,7 @@ mod results;
 mod rules;
 mod running;
 mod scratch;
+pub mod silence;
 mod slots;
 mod taint;
 mod taint_idle;
@@ -253,6 +258,11 @@ pub fn job(run_id: &str) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 

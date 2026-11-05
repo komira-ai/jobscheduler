@@ -1,8 +1,11 @@
 //! The command line: flags only, never environment variables.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+
+use crate::facts::Platform;
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
@@ -172,9 +175,15 @@ pub struct Cli {
     /// agent refuses to start when it is not. A reboot clears it, which is fine: a run does
     /// not survive a reboot. A tmpfs can be swapped to disk when the host has swap, so run hosts
     /// that handle these secrets with swap off or encrypted. It may not be, hold or lie in
-    /// the state, scratch or a mount root. Needs `--container-bin`. Without the flag `/run/js-agent/files` is used when it can be
+    /// the state, scratch or a mount root. Needs `--container-bin` or
+    /// `--native-helper-socket`. Without the flag `/run/js-agent/files` is used when it can be
     /// made; when it cannot, the agent runs without run files and does not report the
-    /// `run-files` capability.
+    /// `run-files` capability. With `--native-helper-socket` (a Mac, which has no tmpfs) the
+    /// root is used only when this flag is given and is not checked for a tmpfs: the files are
+    /// on disk unless the flag points at a RAM-backed volume. Each run's directory is given to
+    /// the run's user (`0500`, files `0400`) before its program starts and is named by
+    /// `JS_FILES_DIR`; the root may not be, hold or lie in the homes of the native users or a
+    /// path native runs may not read.
     #[arg(long, value_name = "PATH")]
     pub run_files_root: Option<PathBuf>,
     /// The directory the agent keeps its taint marker and its host credential in: it must be
@@ -292,10 +301,13 @@ pub struct Cli {
     /// The `pfctl` program to ask (by default `/sbin/pfctl`). Needs `--native-network on`.
     #[arg(long, value_name = "PATH")]
     pub native_pfctl: Option<PathBuf>,
-    /// The absolute path of the `docker` or `podman` program that runs container jobs.
+    /// The absolute path of the `docker` or `podman` program that runs container jobs, with
+    /// `--runtime docker --allow-container-engine`; given without `--runtime` on Linux it is
+    /// refused, because the runtime is then `crun`, which takes no engine flag.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
-    /// inherited); without it the agent runs no container. A job that names a GPU needs
+    /// inherited); without it the agent runs no engine (a Linux agent runs `crun` unless
+    /// `--runtime none` is given). A job that names a GPU needs
     /// the NVIDIA container toolkit with Docker, and with Podman a CDI specification
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
@@ -309,15 +321,25 @@ pub struct Cli {
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
-    /// The runtime that runs jobs: `docker` (the engine program at `--container-bin`, which
-    /// may be Docker or Podman, exactly as before) or `crun` (`js-contain` drives the
-    /// distribution's `crun`, run as the `--job-user`; Linux only, and the agent must be
-    /// root). Without the flag the runtime is the engine of `--container-bin`, as before. The
-    /// packaged unit of the Docker cloud hosts names `--runtime docker`; the unit for the
-    /// Linux farm names `--runtime crun`. With `crun` the agent checks the host before it
-    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`).
-    #[arg(long, value_enum, value_name = "docker|crun")]
+    /// The runtime that runs jobs: `crun` (`js-contain` drives the distribution's `crun`, run
+    /// as the `--job-user`; Linux only, and the agent must be root) or `docker` (the engine
+    /// program at `--container-bin`, which may be Docker or Podman; it needs
+    /// `--allow-container-engine`). Without the flag a Linux agent runs `crun`, the default
+    /// Linux runtime, unless a `--native-*` flag is given; a Mac agent's runtime is the native
+    /// one of the `--native-*` flags. With `crun` the agent checks the host before it
+    /// registers and exits 2 naming every piece that is missing (see `--crun-bin`); it never
+    /// falls back to the engine. The packaged unit of the Docker cloud hosts names
+    /// `--runtime docker --allow-container-engine`; the unit for the Linux farm names
+    /// `--runtime crun`. `none` is an agent that registers and heartbeats and starts no job;
+    /// it takes neither `--container-bin` nor a `--native-*` flag.
+    #[arg(long, value_enum, value_name = "docker|crun|none")]
     pub runtime: Option<RuntimeKind>,
+    /// Accept `--runtime docker`: the container engine at `--container-bin` runs the jobs.
+    /// The engine is a fallback for a host that cannot run `crun` and for GPU jobs: every
+    /// job it runs gets network none, and the agent says so in a warning at start. Without
+    /// the flag `--runtime docker` exits 2; the flag without `--runtime docker` exits 2.
+    #[arg(long)]
+    pub allow_container_engine: bool,
     /// The `crun` program of `--runtime crun`, by absolute path; by default
     /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
     /// distribution's AppArmor profile for `crun` (the one that allows it a user
@@ -361,12 +383,6 @@ pub struct Cli {
     /// and is given once. Needs `--gpu-device`.
     #[arg(long = "gpu-env", value_name = "NAME=VALUE")]
     pub gpu_env: Vec<String>,
-    /// The network containers join: the name of a user-defined network. By default
-    /// `none`, no network at all. `host` is refused. Any named network gives the job
-    /// egress to whatever that network reaches, the host's metadata endpoint included;
-    /// the agent warns at start. Needs `--container-bin`.
-    #[arg(long, value_name = "NAME")]
-    pub container_network: Option<String>,
     /// The `<uid>:<gid>` of the first slot, the base of the users containers run as:
     /// container ids, both above zero (see `--container-subuid`). By default `1000:1000`.
     /// A run in slot `k` (from 0; one slot for each run the agent can hold, 4096) runs as
@@ -410,60 +426,57 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
     /// A static host entry for every container, `<dns-name>:<ip>` (IPv4 or IPv6); repeatable,
-    /// at most 16; passed at create as `--add-host`. A network made without DNS resolves
-    /// nothing, and a presigned URL names its host (the signature covers it), so each
-    /// endpoint a job may reach is given here. `host-gateway` and anything that is not an
-    /// address are refused. Needs `--container-bin`.
+    /// at most 16; passed at create as `--add-host`. `host-gateway` and anything that is not
+    /// an address are refused. Needs `--container-bin`.
     #[arg(long, value_name = "NAME:IP")]
     pub container_add_host: Vec<String>,
-    /// An endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (a prefix of 24
-    /// to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16.
-    /// Required with a named `--container-network`. Before every job is created the agent
-    /// reads back the network (a bridge, DNS off, no IPv6) and the nftables table
-    /// `inet js_egress` that `deploy/js-agent/egress-network.sh` installs, and refuses the
-    /// job (`egress-unchecked`) unless the table holds exactly the rules for these
-    /// endpoints. Podman only; `br_netfilter` must be active.
-    #[arg(long, value_name = "IP:PORT")]
-    pub container_egress_allow: Vec<String>,
-    /// The absolute path of the `nft` program the egress check runs, by default
-    /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
-    #[arg(long, value_name = "PATH")]
-    pub container_nft: Option<String>,
-    /// The network a job's `crun` container gets: `none` (the default: loopback only, no
-    /// route) or `allow-list` (one interface to the host, which forwards only what
+    /// The most network a job's `crun` container may ask for, the agent's ceiling (a job
+    /// asks with its `network`; one above the ceiling is refused `network-above-ceiling`,
+    /// never run with less): `none` (the default: every job has loopback only, no route),
+    /// `allow-list` (a job may ask for one interface to the host, which forwards only what
     /// `--egress-allow` and `--egress-dns` name and refuses everything else, the metadata
-    /// range and all IPv6 first). The agent, as root in the host's network namespace, wires
-    /// each container from outside and keeps the firewall; see `docs/design/agent-egress.md`.
-    /// Only `--runtime crun` reads it, so another runtime is refused `allow-list` at start;
-    /// the Podman network flags above are the Podman runtime's own and are refused together
-    /// with this one.
-    #[arg(long, value_name = "none|allow-list")]
+    /// range and all IPv6 first) or `open` (a job may also ask for any IPv4 address but the
+    /// metadata range, the host and another job; IPv6 is dropped). The agent, as root in the
+    /// host's network namespace, wires each container that asked for a network from outside
+    /// and keeps the firewall; see `docs/design/agent-egress.md`. The hello reports the
+    /// ceiling as the capability `egress`. Only `--runtime crun` reads it, so another runtime
+    /// is refused `allow-list` and `open` at start: a job run through the container engine
+    /// (`--container-bin`) always has network none.
+    #[arg(long, value_name = "none|allow-list|open")]
     pub egress: Option<String>,
-    /// An endpoint an `allow-list` may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; a prefix of
-    /// 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least one
-    /// is required by `--egress allow-list`.
+    /// An endpoint an `allow-list` job may reach, `IPV4:PORT` or `CIDR:PORT` (TCP; a prefix
+    /// of 24 to 32, outside 169.254.0.0/16 and the pool); repeatable, at most 16; at least
+    /// one is required by `--egress allow-list`, none by `--egress open`.
     #[arg(long, value_name = "IP:PORT")]
     pub egress_allow: Vec<String>,
-    /// A resolver an `allow-list` may ask (UDP and TCP, port 53), and the only nameserver of
-    /// a job's `/etc/resolv.conf`; an IPv4 address, repeatable, at most 4. Without one a job
-    /// resolves no name.
+    /// A resolver a job with a network may ask (UDP and TCP, port 53), and the only
+    /// nameserver of its `/etc/resolv.conf`; an IPv4 address, repeatable, at most 4. Without
+    /// one a job resolves no name. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "IP")]
     pub egress_dns: Vec<String>,
+    /// A host port a job may declare (`ports`), `PORT` or `LO-HI`, each from 1 to 65535;
+    /// repeatable, at most 16. A job that declares a port not listed is refused
+    /// `port-above-ceiling`. Each declared port of an admitted `allow-list` or `open` job is
+    /// forwarded from the host's port to the job's (a `none` job that declares one is refused
+    /// `ports-not-supported`), and the hello reports them as `egress-ports`. Needs
+    /// `--egress allow-list` or `open`.
+    #[arg(long, value_name = "PORT|LO-HI")]
+    pub egress_forward_port: Vec<String>,
     /// The IPv4 network the jobs' addresses are taken from, one /30 each, `<addr>/16` to
-    /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list`.
+    /// `<addr>/24`; by default `198.18.0.0/16`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "CIDR")]
     pub egress_pool: Option<String>,
     /// The absolute path of the `ip` program the egress setup runs, by default
-    /// `/usr/sbin/ip`. Needs `--egress allow-list`.
+    /// `/usr/sbin/ip`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "PATH")]
     pub egress_ip: Option<String>,
     /// The absolute path of the `nft` program the egress setup runs, by default
-    /// `/usr/sbin/nft`. Needs `--egress allow-list`.
+    /// `/usr/sbin/nft`. Needs `--egress allow-list` or `open`.
     #[arg(long, value_name = "PATH")]
     pub egress_nft: Option<String>,
     /// The absolute path of the `nsenter` program the egress setup runs to configure a
     /// job's network namespace from outside, by default `/usr/bin/nsenter`. Needs
-    /// `--egress allow-list`.
+    /// `--egress allow-list` or `open`.
     #[arg(long, value_name = "PATH")]
     pub egress_nsenter: Option<String>,
     /// The control group that holds every container the agent starts, as a directory of
@@ -510,7 +523,9 @@ pub struct Cli {
     /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
     /// host (every account on it) is refused at start. An image on no entry is never
     /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
-    /// runtimes do not.
+    /// runtimes do not. A Mac agent with `--bundle-store` reads it too: a start named by its
+    /// image (with a `run`) is a bundle, and its image must be on an entry or it is refused
+    /// `image-not-allowed`.
     #[arg(long, value_name = "HOST/PREFIX")]
     pub image_allow: Vec<String>,
     /// The credentials an allow-list entry sends to its registry's token realm, for a
@@ -535,6 +550,15 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SECONDS")]
     pub drain_wait: Option<u64>,
+    /// How many seconds the agent goes on running its jobs when it hears nothing from the
+    /// server (no welcome and no accepted heartbeat reply): then it stops every job it
+    /// holds, as a stop from the server would (the stop grace, then the kill), and reports
+    /// each `killed` with the detail `silence-stop`. By default 300; from 1 to 7200; it must
+    /// be above the stop grace plus the server's default grace of 15 seconds, and a welcome
+    /// whose grace plus the stop grace is not below it ends the agent. There is no value
+    /// that turns the stop off. Needs `--container-bin` or `--native-helper-socket`.
+    #[arg(long, value_name = "SECONDS")]
+    pub silence_stop: Option<u64>,
 
     /// The bundle store: the directory a Mac keeps unpacked toolchain bundles in (`--bundle-*`
     /// flags need it). Absolute; on the same APFS volume as `--scratch-root` (cloning needs
@@ -562,15 +586,17 @@ pub struct Cli {
     /// Whether a bundle that is not in the store is fetched: `never` (the default: the
     /// operator, or the updater, puts it there first, and a job that names another is
     /// refused `bundle-not-held`) or `missing` (only with `--bundle-trust list`, and at
-    /// least one registry flag): the first start that names one begins a fetch in the
-    /// background (`bundle-pending` until the bundle is held; every byte is checked against
+    /// least one `--image-allow`, `--bundle-registry-allow` or
+    /// `--bundle-registry-allow-private` entry): the first start that names one, by a
+    /// `bundle` pin or by its image, begins a fetch in the background (`bundle-pending` until the bundle is held; every byte is checked against
     /// its digest, and a fetch that fails is reported once as `bundle-fetch-failed`). Needs
     /// `--bundle-store`.
     #[arg(long, value_name = "never|missing")]
     pub bundle_pull: Option<String>,
     /// A registry and namespace a bundle may be fetched from, `HOST[:PORT]/PREFIX`
-    /// (`ghcr.io/example/`); not a bare host. A job's bundle must name one when any is
-    /// given. May be given more than once. Needs `--bundle-store`.
+    /// (`ghcr.io/example/`); not a bare host. A job's `bundle` pin (the legacy form; an
+    /// image reference is held to `--image-allow` instead) must name one when any is given.
+    /// May be given more than once. Needs `--bundle-store`.
     #[arg(long = "bundle-registry-allow", value_name = "HOST[:PORT]/PREFIX")]
     pub bundle_registry_allow: Vec<String>,
     /// Like `--bundle-registry-allow`, for a registry on a private address, and for that
@@ -615,6 +641,18 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The runtime this start runs jobs with: `--runtime` when it is given; else, on Linux and
+    /// with no `--native-*` flag, `crun`, the default Linux runtime; else none (a Mac, whose
+    /// runtime is the native one the `--native-*` flags select). Every reader of the runtime
+    /// asks this, and [`Cli::runtime`] stays the flag as given, so a refusal can say whether
+    /// the runtime was named or is the default.
+    #[must_use]
+    pub fn effective_runtime(&self, platform: &Platform) -> Option<RuntimeKind> {
+        let native = self.native_flags().into_iter().any(|(_, given)| given);
+        self.runtime
+            .or((platform.os == "linux" && !native).then_some(RuntimeKind::Crun))
+    }
+
     /// The flags of the GPUs a crun job is given, with whether each was given: an agent
     /// that does not run the crun runtime refuses them all.
     #[must_use]
@@ -655,6 +693,72 @@ impl Cli {
     }
 }
 
+/// The flags that were removed, without their leading `--`, each with the refusal that names
+/// what to give instead. A command line that gives one is refused by [`removed_flag`] before
+/// clap reads it, so the operator is told the replacement and not only that the flag is
+/// unknown.
+static REMOVED: [(&str, &str); 3] = [
+    (
+        "container-network",
+        "--container-network: removed. A job run through the container engine now always has \
+         network none. For networking give --runtime crun with --egress, and ask for a network \
+         per job in the job's network field",
+    ),
+    (
+        "container-egress-allow",
+        "--container-egress-allow: removed. Use --egress allow-list with --egress-allow on the \
+         crun runtime, or the job's network field",
+    ),
+    (
+        "container-nft",
+        "--container-nft: removed together with --container-network. The crun runtime's nft \
+         program is --egress-nft",
+    ),
+];
+
+/// The refusal of the first removed flag (see [`REMOVED`]) that `args` gives, the program
+/// name first, as `--flag value` or `--flag=value`; none when it gives none. The words are
+/// read the way clap reads them, so a removed name that is the value of another flag is not
+/// taken for the flag: a flag of [`Cli`] that takes a value takes the next word, unless that
+/// word starts with `-` and the flag does not take values that start with one, in which case
+/// clap reads the word as a flag too. Nothing after a bare `--` is a flag. The words are read
+/// as bytes, so a value that is not UTF-8 (attached with `=` or not) never hides the flag
+/// name before it.
+pub fn removed_flag(args: &[OsString]) -> Option<&'static str> {
+    let mut command = Cli::command();
+    command.build();
+    let mut words = args
+        .iter()
+        .skip(1)
+        .map(|word| word.as_encoded_bytes())
+        .peekable();
+    while let Some(word) = words.next() {
+        let Some(long) = word.strip_prefix(b"--") else {
+            continue;
+        };
+        if long.is_empty() {
+            return None;
+        }
+        let (name, attached) = match long.iter().position(|&byte| byte == b'=') {
+            Some(at) => (&long[..at], true),
+            None => (long, false),
+        };
+        let removed = REMOVED.iter().find(|(flag, _)| flag.as_bytes() == name);
+        if let Some(&(_, refusal)) = removed {
+            return Some(refusal);
+        }
+        let takes = command
+            .get_arguments()
+            .find(|arg| arg.get_long().map(str::as_bytes) == Some(name))
+            .filter(|arg| !attached && arg.get_action().takes_values());
+        if let Some(arg) = takes {
+            let hyphen = arg.is_allow_hyphen_values_set();
+            let _value = words.next_if(|next| hyphen || !next.starts_with(b"-"));
+        }
+    }
+    None
+}
+
 /// `name=path` split at the first `=`.
 fn named_path(text: &str) -> Result<(String, PathBuf), String> {
     key_value(text).map(|(name, path)| (name, PathBuf::from(path)))
@@ -674,4 +778,157 @@ pub enum RuntimeKind {
     Docker,
     /// `js-contain`'s `crun` backend, over the distribution's `crun`.
     Crun,
+    /// No runtime, spelled `none`: the agent registers and heartbeats and starts no job.
+    #[value(name = "none")]
+    NoJobs,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    use super::{REMOVED, removed_flag};
+
+    /// The command line `js-agent` then `words`.
+    fn args(words: Vec<OsString>) -> Vec<OsString> {
+        std::iter::once(OsString::from("js-agent"))
+            .chain(words)
+            .collect()
+    }
+
+    fn of(words: &[&str]) -> Vec<OsString> {
+        args(words.iter().map(OsString::from).collect())
+    }
+
+    /// The refusal of the removed flag `name`.
+    fn refusal(name: &str) -> Option<&'static str> {
+        REMOVED
+            .iter()
+            .find(|(removed, _)| *removed == name)
+            .map(|&(_, refusal)| refusal)
+    }
+
+    /// Catches a scan that misreads a word: a removed flag is found in both spellings, with no
+    /// value and with an empty attached one, after a word that is not a flag, a word that is
+    /// not UTF-8, a flag that takes no value, a flag clap does not know and the value of a
+    /// flag; a name that only starts like a removed one is not it; a removed name is a value
+    /// after a flag that takes values starting with `-` (and the scan goes on after that
+    /// value, a `--` included), attached with `=` to another flag, and after a bare `--`, but
+    /// is the flag after one whose value cannot start with `-`; a value that is not UTF-8,
+    /// separate or attached, neither hides the flag before it nor ends the scan; and the
+    /// first removed flag given is the one named.
+    #[test]
+    fn the_scan_reads_the_words_as_clap_does() {
+        let network = refusal("container-network");
+        let allow = refusal("container-egress-allow");
+        let nft = refusal("container-nft");
+        assert!(network.is_some(), "container-network");
+        assert!(allow.is_some(), "container-egress-allow");
+        assert!(nft.is_some(), "container-nft");
+        let found: [(&[&str], Option<&str>); 22] = [
+            (&[], None),
+            (&["--container-network", "jobs"], network),
+            (&["--container-network=jobs"], network),
+            (&["--container-network"], network),
+            (&["--container-network="], network),
+            (&["--container-nft=/usr/sbin/nft"], nft),
+            (&["--container-network-extra", "x"], None),
+            (&["--container-nftx=/x"], None),
+            (&["--container-egress-allow=192.0.2.1:443"], allow),
+            (&["stray", "--container-nft", "/usr/sbin/nft"], nft),
+            (&["--scratch-quota", "--container-nft", "/x"], nft),
+            (&["--no-such-flag", "--container-network", "x"], network),
+            (&["--label", "k=v", "--container-network", "x"], network),
+            (&["--label", "--container-network", "x"], network),
+            (&["--label"], None),
+            (&["--readiness-hook-arg", "--container-network"], None),
+            (
+                &[
+                    "--readiness-hook-arg",
+                    "--container-network",
+                    "--container-nft=/usr/sbin/nft",
+                ],
+                nft,
+            ),
+            (
+                &["--readiness-hook-arg", "--", "--container-network", "x"],
+                network,
+            ),
+            (
+                &["--readiness-hook-arg", "x", "--", "--container-network"],
+                None,
+            ),
+            (&["--label=k=--container-network"], None),
+            (&["--", "--container-network", "x"], None),
+            (&["--container-nft", "/x", "--container-network", "x"], nft),
+        ];
+        for (words, want) in found {
+            assert_eq!(removed_flag(&of(words)), want, "{words:?}");
+        }
+        let bad = || OsString::from_vec(b"\xff".to_vec());
+        let flag = |word: &str| OsString::from(word);
+        let unreadable = args(vec![bad(), flag("--container-network"), flag("x")]);
+        assert_eq!(removed_flag(&unreadable), network);
+        let value = args(vec![flag("--label"), bad(), flag("--container-nft")]);
+        assert_eq!(removed_flag(&value), nft);
+        let attached = |name: &str| {
+            let mut word = format!("--{name}=").into_bytes();
+            word.push(0xff);
+            OsString::from_vec(word)
+        };
+        let nft_first = args(vec![
+            attached("container-nft"),
+            flag("--container-network=jobs"),
+        ]);
+        assert_eq!(removed_flag(&nft_first), nft);
+        let label_first = args(vec![attached("label"), flag("--container-egress-allow=x")]);
+        assert_eq!(removed_flag(&label_first), allow);
+    }
+
+    /// Asserts the runtime a start runs, for each way it can be named: `--runtime` given is
+    /// that runtime on every platform (`none` included); with no `--runtime` a Linux start is
+    /// `crun` unless a `--native-*` flag is given, and a Mac start, or any other platform's,
+    /// has none; and the flag as given stays readable, so a refusal can tell the default from
+    /// a choice. It catches a default that is still the engine, a default on a Mac, and a
+    /// native flag that a Linux start ignores.
+    #[test]
+    fn the_runtime_is_the_flag_or_crun_on_linux() {
+        use clap::Parser as _;
+
+        use super::{Cli, RuntimeKind};
+        use crate::facts::Platform;
+
+        let on = |os: &str| Platform {
+            os: os.to_owned(),
+            arch: "x86_64".to_owned(),
+        };
+        let cli = |extra: &[&str]| {
+            let base = ["js-agent", "--server", "http://127.0.0.1:1", "--pool", "p"];
+            Cli::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        let native = ["--native-helper-socket", "/native/helper.sock"];
+        let rows: [(&[&str], &str, Option<RuntimeKind>); 9] = [
+            (&[], "linux", Some(RuntimeKind::Crun)),
+            (&[], "macos", None),
+            (&[], "freebsd", None),
+            (&native, "linux", None),
+            (&["--runtime", "docker"], "linux", Some(RuntimeKind::Docker)),
+            (&["--runtime", "crun"], "macos", Some(RuntimeKind::Crun)),
+            (&["--runtime", "none"], "linux", Some(RuntimeKind::NoJobs)),
+            (&["--runtime", "none"], "macos", Some(RuntimeKind::NoJobs)),
+            (
+                &["--container-bin", "/bin/sh"],
+                "linux",
+                Some(RuntimeKind::Crun),
+            ),
+        ];
+        for (extra, os, want) in rows {
+            let parsed = cli(extra);
+            assert_eq!(parsed.effective_runtime(&on(os)), want, "{extra:?} on {os}");
+        }
+        assert_eq!(cli(&[]).runtime, None);
+        assert!(!cli(&[]).allow_container_engine);
+        assert!(cli(&["--allow-container-engine"]).allow_container_engine);
+    }
 }

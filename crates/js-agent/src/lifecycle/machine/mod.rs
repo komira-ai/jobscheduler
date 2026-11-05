@@ -1,14 +1,18 @@
 //! The state machine: one [`Job`] per run the agent holds, moved by the commands of a
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 //!
-//! The jobs and what they book are in `job`, a restart in `adopt`, and the end of a job
-//! (watching its container and the cleanup in order) in `cleanup`.
+//! The jobs and what they book are in `job`, a restart in `adopt`, the end of a job
+//! (watching its container and the cleanup in order) in `cleanup`, and the stop after a
+//! silence of the server in `silence`.
 
 mod adopt;
 mod cleanup;
 mod exclusive;
+mod held;
 mod job;
+mod per_job;
 mod prepare;
+mod silence;
 mod slots;
 mod tails;
 
@@ -16,12 +20,14 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Outcome, ResultAck,
+    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
     RunResult, Taint, limits, refusal,
 };
 
 pub use self::exclusive::{Quiet, Restored};
-use self::job::{Job, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
+use self::held::Records;
+use self::job::{Job, Keyed, Retired, Stage, Stuck, Waiting, blind_taint, host_taint, run_spec};
+pub use self::per_job::RETIRED_LISTED;
 pub use self::slots::Slots;
 use super::quota::QuotaHealth;
 use super::runtime::{Prepared, ResolvedMount, RunHandle, Runtime, RuntimeError};
@@ -29,9 +35,10 @@ use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
 use crate::quota::QuotaError;
 
-/// How many finished or stopped run ids the agent remembers, so a late or repeated start
-/// for one of them runs nothing. The oldest is forgotten first; a start for a run older
-/// than the last [`RETIRED_CAP`] is the server's to stop sending.
+/// How many fences of finished or stopped work the agent remembers (a run id, or a job id
+/// with its allocation id), so a late or repeated start for one of them runs nothing. The
+/// oldest is forgotten first; a start for work older than the last [`RETIRED_CAP`] is the
+/// server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
 
 /// The most jobs the agent holds, each listed in the held runs of a heartbeat. A job
@@ -89,6 +96,11 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    /// The files in the state root that keep the held results and the retired list.
+    records: Records,
+    /// The job ids retired on a `JobStop` for a job the agent did not hold, oldest first,
+    /// listed in `retired_jobs` until a reply's `retired_acks` names them (see `per_job`).
+    answered: Vec<String>,
     /// The slots the runs hold, and the ones taken out of use.
     slots: Slots,
     taint: TaintState,
@@ -103,6 +115,8 @@ pub struct Lifecycle {
     /// When the slots that stay parked were last reported, on the clock; none while no slot
     /// is parked.
     parked_reminded_ms: Option<u64>,
+    /// The stop after a silence of the server, once it is set (see `silence`).
+    silence: Option<silence::Watch>,
 }
 
 impl Lifecycle {
@@ -136,9 +150,11 @@ impl Lifecycle {
         }
         for command in &checked.commands {
             match command {
-                Command::Start(spec) => self.start(spec, received, &mut events),
+                Command::Start(spec) => self.start((spec, Keyed::Run), received, &mut events),
                 Command::Stop { run_id } => self.stop(run_id, false),
                 Command::Cancel { run_id } => self.stop(run_id, true),
+                Command::JobStart(spec) => self.start_job(spec, received, &mut events),
+                Command::JobStop { job_id } => self.stop_job(job_id),
                 Command::Unknown => {}
             }
         }
@@ -148,8 +164,18 @@ impl Lifecycle {
                 .iter()
                 .for_each(|ack| self.acknowledge(ack));
         }
+        if checked.job_acks.is_ok() {
+            reply
+                .job_acks
+                .iter()
+                .for_each(|ack| self.acknowledge_job(ack));
+        }
+        if checked.retired_acks.is_ok() {
+            self.acknowledge_retired(&reply.retired_acks);
+        }
         self.taint.ack(reply.taint_ack);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
@@ -166,15 +192,17 @@ impl Lifecycle {
         self.taint.is_tainted()
     }
 
-    /// Lets the jobs make progress: watches each running container and its wall-time
-    /// limit, then takes each finished job as far through its cleanup as it will go, and
-    /// tries again to remove the containers no job stands for that could not be removed.
-    /// Call it on every tick.
+    /// Lets the jobs make progress: stops every job when the server has been silent for the
+    /// bound ([`Lifecycle::stop_on_silence`]), watches each running container and its
+    /// wall-time limit, then takes each finished job as far through its cleanup as it will
+    /// go, and tries again to remove the containers no job stands for that could not be
+    /// removed. Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         // A marker that could not be written is tried again; the failure was noted when it
         // happened, and the agent refuses starts and frees no slot until it is written.
         let _ = self.taint.persist();
+        self.watch_silence(&mut events);
         for index in 0..self.jobs.len() {
             self.advance(index, &mut events);
             self.supervise(index, &mut events);
@@ -185,33 +213,35 @@ impl Lifecycle {
         self.watch_quota(&mut events);
         self.fit_log_tails_to_beat(&mut events);
         self.sweep();
+        self.persist_held(&mut events);
         events
     }
 
     /// The runs the agent holds, for the next heartbeat: adopted ones first, then in the
     /// order they started. A run is listed until its container and scratch are gone and
-    /// its result is acknowledged.
+    /// its result is acknowledged. A job a job start began is not a run and is not here
+    /// ([`Lifecycle::held_jobs`]).
     pub fn held(&self) -> Vec<HeldRun> {
-        self.jobs
-            .iter()
+        self.keyed(Keyed::Run)
             .map(|job| HeldRun {
                 run_id: job.run_id.clone(),
-                state: match job.stage {
-                    Stage::Preparing(_) => HeldState::Starting,
-                    Stage::Running(_) => HeldState::Running,
-                    _ => HeldState::ExitedUnacked,
-                },
+                state: job.held_state(),
             })
             .collect()
     }
 
+    /// The jobs of one keying, in the order of [`Lifecycle::held`].
+    fn keyed(&self, keyed: Keyed) -> impl Iterator<Item = &Job> {
+        self.jobs.iter().filter(move |job| job.keyed == keyed)
+    }
+
     /// The runs that are running, one for each lease (a second run of a lease already named
-    /// is left out), in the order of [`Lifecycle::held`].
+    /// is left out), in the order of [`Lifecycle::held`]. A job a job start began has no
+    /// lease and is not sampled per lease, so it is not here.
     pub fn running(&self) -> Vec<RunningLease> {
         let mut named = BTreeSet::new();
         let running = self
-            .jobs
-            .iter()
+            .keyed(Keyed::Run)
             .filter(|job| matches!(job.stage, Stage::Running(_)));
         running
             .filter(|job| named.insert(job.lease_id.as_str()))
@@ -251,10 +281,10 @@ impl Lifecycle {
         lines
     }
 
-    /// The results the server has not acknowledged, for the next heartbeat.
+    /// The results of runs the server has not acknowledged, for the next heartbeat. The
+    /// result of a job a job start began is in its listing ([`Lifecycle::held_jobs`]).
     pub fn results(&self) -> Vec<RunResult> {
-        self.jobs
-            .iter()
+        self.keyed(Keyed::Run)
             .filter_map(|job| job.result.clone())
             .collect()
     }
@@ -322,28 +352,51 @@ impl Lifecycle {
             .jobs
             .extract_if(.., |job| job.stage == Stage::Freed && job.result.is_none())
             .collect();
-        gone.iter().for_each(|job| self.retired.insert(&job.run_id));
+        for job in &gone {
+            self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+        }
     }
 
     fn acknowledge(&mut self, ack: &ResultAck) {
-        if ack.ack == Ack::Unknown {
+        self.drop_result((Keyed::Run, &ack.run_id), ack.ack);
+    }
+
+    /// Drops the result of the job of `keyed` named `id` on a verdict the agent knows; an
+    /// unknown verdict keeps it, to be sent again.
+    fn drop_result(&mut self, (keyed, id): (Keyed, &str), ack: Ack) {
+        if ack == Ack::Unknown {
             return;
         }
         self.jobs
             .iter_mut()
-            .filter(|job| job.run_id == ack.run_id)
+            .filter(|job| job.keyed == keyed && job.run_id == id)
             .for_each(|job| job.result = None);
     }
 
+    /// Stops (or, `silent`, cancels) the run `run_id`. Its id is retired at once, with the
+    /// lease of a run the agent holds, so the list in the state root names it before the
+    /// stop is reported and a restart does not run it again.
     fn stop(&mut self, run_id: &str, silent: bool) {
-        match self.jobs.iter_mut().find(|job| job.run_id == run_id) {
-            Some(job) => job.request_stop(silent),
+        let held = self
+            .jobs
+            .iter_mut()
+            .find(|job| job.keyed == Keyed::Run && job.run_id == run_id);
+        match held {
+            Some(job) => {
+                job.request_stop(silent);
+                self.retired.insert_with(&job.run_id, Some(&job.lease_id));
+            }
             None => self.retired.insert(run_id),
         }
     }
 
-    /// Whether a start may run now, and its mounts resolved when it may.
-    fn admit(&self, spec: &JobSpec) -> Result<Vec<ResolvedMount>, Refusal> {
+    /// Whether a start may run now, and its mounts resolved when it may. `env` is the
+    /// environment of a job start, empty for a run start.
+    fn admit(
+        &self,
+        spec: &JobSpec,
+        env: &[(String, String)],
+    ) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
@@ -352,26 +405,47 @@ impl Lifecycle {
         // capability says so (`bundle-unsupported`) and a host with it applies the bundle's
         // rules before the native body is checked.
         if spec.bundle.is_some() {
-            match &self.config.bundle {
-                None => {
-                    return Err(no(
-                        refusal::BUNDLE_UNSUPPORTED,
-                        "this agent holds no bundle store",
-                    ));
-                }
-                Some(bundle) => bundle.admit(spec)?,
+            self.admit_bundle(spec)?;
+        }
+        // The runtime must carry the job's environment; asked before the image and the body,
+        // so a runtime that carries none answers for the environment (`env-unsupported`).
+        self.runtime
+            .check_env(env)
+            .map_err(|refused| (refused.code, refused.why))?;
+        // The native body of the start: the legacy `native` one, or the `run` of a start
+        // named by its image on a runtime that runs those (the Mac one, by the bundle the
+        // image resolves to).
+        let image_run = spec.native.is_none() && self.runtime.runs_image_runs();
+        let body = match (&spec.native, &spec.run) {
+            (Some(native), _) => Some(native.clone()),
+            (None, Some(run)) if image_run => Some(NativeSpec::from(run.clone())),
+            _ => None,
+        };
+        // A start named by its image that the runtime cannot run (no `run`, or no store) is
+        // refused, and a `run` where no runtime runs it is refused rather than dropped.
+        if spec.native.is_none() && body.is_none() {
+            self.runtime
+                .check_image()
+                .map_err(|refused| (refused.code, refused.why))?;
+            if spec.run.is_some() {
+                return Err(no(
+                    refusal::RUN_UNSUPPORTED,
+                    "this agent runs an image's own command and no run body yet",
+                ));
             }
         }
-        if let Some(native) = &spec.native {
+        // A native start with files is admitted like a container's: below, it needs this
+        // agent's files root, and the runtime gives the run's directory to the run's user.
+        if let Some(native) = &body {
             self.runtime
                 .check_native(native)
                 .map_err(|refused| (refused.code, refused.why))?;
-            if !spec.files.is_empty() {
-                return Err(no(
-                    detail::FILES_NEED_CONTAINER,
-                    "run files are delivered to containers only",
-                ));
-            }
+        }
+        // An image start is a bundle start: the image is the bundle's name. It is admitted
+        // after the checks above so that a start the runtime refuses begins no fetch. (A
+        // start with a `bundle` and no `native` body never gets here: the wire refuses it.)
+        if image_run {
+            self.admit_bundle(spec)?;
         }
         if let Some(why) = self.quota_health.why() {
             return Err(no(
@@ -441,16 +515,30 @@ impl Lifecycle {
             .map(|mount| self.config.mounts.resolve(mount))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
+        // A job above the runtime's ceiling is refused, never run with less; it costs no call.
+        crate::egress::admit(&self.runtime.network_ceiling(), spec)
+            .map_err(|refused| (refused.code, refused.detail))?;
         // Last, so that a job refused for another reason costs no call. Before every
         // contained create: the firewall can change between two jobs. A native job has its
         // own check (a Mac pool is limited by a packet filter, not a container network).
-        let egress = match &spec.native {
+        let egress = match &body {
             Some(native) => self.runtime.check_native_egress(native),
             None if spec.isolation == Isolation::Contained => self.runtime.check_egress(),
             None => Ok(()),
         };
         egress.map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
         Ok(mounts)
+    }
+
+    /// The bundle of a start, by the agent's bundle rules; a host without a store refuses.
+    fn admit_bundle(&self, spec: &JobSpec) -> Result<(), Refusal> {
+        match &self.config.bundle {
+            None => Err((
+                refusal::BUNDLE_UNSUPPORTED,
+                "this agent holds no bundle store".to_owned(),
+            )),
+            Some(bundle) => bundle.admit(spec),
+        }
     }
 
     /// Taints the host for a job that may change it, and writes the marker.
@@ -465,8 +553,15 @@ impl Lifecycle {
     }
 
     /// Answers a start `failed_to_start` with `wire` as the detail, having created nothing.
-    fn refuse(&mut self, spec: &JobSpec, wire: &'static str, why: String, events: &mut Vec<Event>) {
+    fn refuse(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        wire: &'static str,
+        why: String,
+        events: &mut Vec<Event>,
+    ) {
         let mut job = Job::of(spec, Stage::Freed, 0, None, 0);
+        job.keyed = keyed;
         job.result = Some(job.report(Outcome::FailedToStart, None, Some(wire)));
         self.jobs.push(job);
         events.push(Event::Refused {
@@ -585,7 +680,25 @@ impl Lifecycle {
         }
     }
 
-    fn start(&mut self, spec: &JobSpec, received: u64, events: &mut Vec<Event>) {
+    /// Starts the run `spec` names, or the job a job start names (`keyed`; see `per_job`).
+    fn start(&mut self, (spec, keyed): (&JobSpec, Keyed), received: u64, events: &mut Vec<Event>) {
+        if self.may_start((spec, keyed), received, events) {
+            self.admit_and_start((spec, keyed), &[], received, events);
+        }
+    }
+
+    /// Whether a start is new work this agent may take on: not late, not held (a start of
+    /// held work changes nothing; one that names held work of the other keying is a clash),
+    /// not retired (a run start by its run id, `Skip::Retired`; a job start by its fence,
+    /// the job id with the allocation id, `Skip::FenceRetired`), and not beyond the jobs a
+    /// heartbeat can list. A start that may not is skipped, with an event when that is
+    /// worth a line. Nothing is booked or made before this has passed.
+    fn may_start(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        received: u64,
+        events: &mut Vec<Event>,
+    ) -> bool {
         let run_id = &spec.run_id;
         let waited = self.clock.now_ms().saturating_sub(received);
         let late = spec.valid_for_ms != 0 && waited > spec.valid_for_ms;
@@ -594,35 +707,64 @@ impl Lifecycle {
                 run_id: run_id.clone(),
                 why: Skip::Stale,
             });
-            return;
+            return false;
         }
-        if self.jobs.iter().any(|job| &job.run_id == run_id) {
-            return;
+        if let Some(held) = self.jobs.iter().find(|job| &job.run_id == run_id) {
+            // The same id under the other keying is another piece of work that would share
+            // this one's scratch directory and labels: it is not started.
+            if held.keyed != keyed {
+                events.push(Event::Skipped {
+                    run_id: run_id.clone(),
+                    why: Skip::Clash,
+                });
+            }
+            return false;
         }
-        if self.retired.contains(run_id) {
+        let retired = match keyed {
+            Keyed::Run => self.retired.contains(run_id).then_some(Skip::Retired),
+            Keyed::Job => {
+                let fenced = self.retired.fenced(run_id, &spec.lease_id);
+                fenced.then_some(Skip::FenceRetired)
+            }
+        };
+        if let Some(why) = retired {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
-                why: Skip::Retired,
+                why,
             });
-            return;
+            return false;
         }
         if self.jobs.len() >= MAX_JOBS {
             events.push(Event::Skipped {
                 run_id: run_id.clone(),
                 why: Skip::Full,
             });
-            return;
+            return false;
         }
+        true
+    }
+
+    /// Admits a start [`Lifecycle::may_start`] let through and starts it, or refuses it.
+    /// `env` is the environment of a job start (empty for a run start), which the run's
+    /// container is given ([`RunSpec::env`](crate::lifecycle::RunSpec::env)).
+    fn admit_and_start(
+        &mut self,
+        (spec, keyed): (&JobSpec, Keyed),
+        env: &[(String, String)],
+        received: u64,
+        events: &mut Vec<Event>,
+    ) {
+        let run_id = &spec.run_id;
         // A job that may change the host taints it before it exists: whatever it does, and
         // however the agent or the host ends, the marker is already there. One whose marker
         // cannot be written is not started.
         let admitted = self
-            .admit(spec)
+            .admit(spec, env)
             .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
         let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
-                self.refuse(spec, wire, why, events);
+                self.refuse((spec, keyed), wire, why, events);
                 return;
             }
         };
@@ -642,7 +784,7 @@ impl Lifecycle {
         let slot = match self.take_slot(run_id, events) {
             Ok(slot) => slot,
             Err((wire, why)) => {
-                self.refuse(spec, wire, why, events);
+                self.refuse((spec, keyed), wire, why, events);
                 return;
             }
         };
@@ -667,6 +809,7 @@ impl Lifecycle {
                 };
                 let waiting = Waiting {
                     spec: spec.clone(),
+                    env: env.to_vec(),
                     mounts,
                     slot,
                     booked,
@@ -674,15 +817,19 @@ impl Lifecycle {
                     lease_end_ms,
                 };
                 let stage = Stage::Preparing(Box::new(waiting));
-                self.jobs.push(Job::of(spec, stage, 0, Some(slot), booked));
+                let mut job = Job::of(spec, stage, 0, Some(slot), booked);
+                job.keyed = keyed;
+                self.jobs.push(job);
             }
             Prepared::Ready => {
-                let started = self.begin(spec, mounts, slot, booked, events);
-                self.settle(spec, started, (slot, booked), (None, u64::MAX), events);
+                let started = self.begin((spec, keyed), env, mounts, slot, booked, events);
+                let at = (None, u64::MAX);
+                self.settle((spec, keyed), started, (slot, booked), at, events);
             }
             Prepared::Failed(why) => {
                 let failure = runtime_failure(&why);
-                self.settle(spec, Err(failure), (slot, booked), (None, u64::MAX), events);
+                let at = (None, u64::MAX);
+                self.settle((spec, keyed), Err(failure), (slot, booked), at, events);
             }
         }
     }
@@ -691,7 +838,8 @@ impl Lifecycle {
     /// its container.
     fn begin(
         &mut self,
-        spec: &JobSpec,
+        (spec, keyed): (&JobSpec, Keyed),
+        env: &[(String, String)],
         mounts: Vec<ResolvedMount>,
         slot: u32,
         booked: u64,
@@ -738,7 +886,8 @@ impl Lifecycle {
             written.map(|files| (scratch, files)).map_err(failed)
         });
         started.and_then(|(scratch, files)| {
-            let run = run_spec(spec, mounts, scratch, files, slot, booked);
+            let made = (mounts, scratch, files);
+            let run = run_spec((spec, keyed), env, made, slot, booked);
             self.runtime
                 .create_and_start(&run)
                 .map_err(|why| runtime_failure(&why))
@@ -751,14 +900,14 @@ impl Lifecycle {
     /// `replace` (a start that waited), or is added.
     fn settle(
         &mut self,
-        spec: &JobSpec,
+        (spec, keyed): (&JobSpec, Keyed),
         started: Result<RunHandle, Failure>,
         (slot, booked): (u32, u64),
         (replace, cap): (Option<usize>, u64),
         events: &mut Vec<Event>,
     ) {
         let run_id = &spec.run_id;
-        let job = match started {
+        let mut job = match started {
             Ok(id) => {
                 let now = self.clock.now_ms();
                 let deadline = now.saturating_add(spec.limits.wall_ms).min(cap);
@@ -786,6 +935,7 @@ impl Lifecycle {
                 job
             }
         };
+        job.keyed = keyed;
         match replace {
             Some(index) => self.jobs[index] = job,
             None => self.jobs.push(job),

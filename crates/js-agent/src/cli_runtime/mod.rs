@@ -7,15 +7,15 @@
 //!
 //! # What a contained job gets
 //!
-//! `create` with, in this order: the name, the labels, the limits ([`limits_to_args`]),
-//! the hardening ([`hardening_args`]), then `--`, the image and the command line. Nothing
-//! after `--` is read as an option. Then the mounts are read back (see below), then
-//! `start`; when either fails the container is removed again, so a failed start leaves
-//! nothing behind.
+//! `create` with, in this order: the name, the labels, the job's environment, set over the
+//! image's ([`env_args`]), the limits ([`limits_to_args`]), the hardening ([`hardening_args`]),
+//! then `--`, the image and the command line. Nothing after `--` is read as an option. Then
+//! the mounts are read back (see below), then `start`; when either fails the container is
+//! removed again, so a failed start leaves nothing behind.
 //!
 //! ```text
 //! <bin> create --name js-<agent tag>-<run id> --label jobscheduler.dev/run-id=r1 ...
-//!   --label jobscheduler.dev/agent=<host>
+//!   --label jobscheduler.dev/agent=<host> [--env <name>=<value> ...]
 //!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 4096
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
 //!   --mount type=bind,src=<scratch>,dst=/scratch,nosuid,nodev            (Podman)
@@ -282,19 +282,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::{Isolation, LogTail};
 use serde_json::Value;
 
-mod egress;
 use args::user_args;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, FILES_TARGET, SCRATCH_TARGET, binds_of, check_submounts,
-    hardening_args, label_args, limits_to_args, scratch_volume_options,
-};
-pub use egress::{
-    ALLOW_MAX as EGRESS_ALLOW_MAX, Allow, DEFAULT_NFT, Egress, EgressError, TABLE as EGRESS_TABLE,
+    env_args, hardening_args, label_args, limits_to_args, scratch_volume_options,
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    ADD_HOST_MAX, CGROUP_ROOT, CRUN_STORE_DIR, CrunPlan, DEFAULT_NETWORK, DEFAULT_TMP_SIZE,
-    DEFAULT_USER, Flags, Pull, Settings, SettingsError,
+    ADD_HOST_MAX, CGROUP_ROOT, CRUN_STORE_DIR, CrunPlan, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags,
+    Pull, Settings, SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
@@ -440,14 +436,6 @@ pub enum CliError {
         /// The process id the engine reported (`State.Pid`).
         pid: u32,
     },
-    /// The egress check failed: the network or the firewall is not as
-    /// `--container-egress-allow` requires.
-    #[error("{0}")]
-    Egress(#[from] EgressError),
-    /// Egress flags with Docker: the check reads netavark's network and the host's nftables
-    /// table; Docker keeps its own iptables chains, which it does not read.
-    #[error("--container-egress-allow: only Podman is supported")]
-    EgressDocker,
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
     #[error("{why}{note}")]
@@ -627,9 +615,6 @@ impl CliRuntime {
                 why,
             })?;
         let engine = Engine::of_version(&printed).ok_or(CliError::NotAnEngine)?;
-        if engine == Engine::Docker && settings.egress().is_some() {
-            return Err(CliError::EgressDocker);
-        }
         let docker_major = major_of(&printed).filter(|_| engine == Engine::Docker);
         let mut runtime = Self {
             settings,
@@ -716,29 +701,6 @@ impl CliRuntime {
         self.engine
     }
 
-    /// Confirms that the named network is limited to the endpoints of
-    /// `--container-egress-allow`: see [`EgressError`]. Nothing is checked for the default
-    /// network. The agent calls this at start and before every job is created.
-    ///
-    /// # Errors
-    ///
-    /// [`CliError::Egress`].
-    pub fn egress_enforced(&self) -> Result<(), CliError> {
-        let Some(egress) = self.settings.egress() else {
-            return Ok(());
-        };
-        let env = engine_env(&self.settings);
-        let proc = |path: &str| (self.proc_read)(path);
-        egress::check(
-            &*self.runner,
-            (self.settings.bin(), &env),
-            self.settings.network(),
-            egress,
-            &proc,
-        )
-        .map_err(CliError::Egress)
-    }
-
     fn call(&self, call: &'static str, args: &[&str]) -> Result<String, CliError> {
         self.runner
             .run_in(self.settings.bin(), args, &engine_env(&self.settings))
@@ -811,7 +773,7 @@ impl CliRuntime {
         labels.insert(label::AGENT.to_owned(), self.host_id.clone());
         labels.insert(label::CREATED_MS.to_owned(), created_ms.to_string());
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
-        args.extend(label_args(&labels)?);
+        args.extend([label_args(&labels)?, env_args(&spec.env)?].concat());
         if !self.recursive_ro && self.host_mounts {
             let mountinfo = (self.proc_read)("/proc/self/mountinfo");
             check_submounts(spec, mountinfo.as_deref())?;
@@ -1423,10 +1385,6 @@ impl Runtime for CliRuntime {
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         self.read_logs(id).map_err(RuntimeError::from)
-    }
-
-    fn check_egress(&self) -> Result<(), RuntimeError> {
-        self.egress_enforced().map_err(RuntimeError::from)
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {

@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_lease::{Held, ReservationRecord, Timestamp};
-use js_pool_static::Candidate;
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::Candidate;
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, PoolConfig, Restored};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources};
 use support::world::*;

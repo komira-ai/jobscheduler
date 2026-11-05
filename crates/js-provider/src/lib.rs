@@ -1,52 +1,48 @@
-//! The provider interface of the job scheduler, delegated flavour only.
+//! The scheduler's internal allocation port: book an allocation on a host, stop it,
+//! observe it.
 //!
-//! This crate is design section 5.2 for a provider the scheduler calls and that
-//! answers each call: [`Provider::start`], [`Provider::stop`], [`Provider::observe`]
-//! and [`Provider::capacity`]. The agent flavour (a daemon holding one stream to the
-//! scheduler, answering through events) is a future [`Flavour`] variant and is not
-//! implemented here. The calls are synchronous in this slice because no provider yet
-//! leaves the process; they become async at the edge with the first provider that
-//! calls a network.
+//! [`Pool`] is the synchronous lease-level surface the lease table calls under its lock:
+//! [`Pool::start`], [`Pool::stop`], [`Pool::observe`] and [`Pool::capacity`]. It is not a
+//! provider of machines: what supplies machines, launched or registered, is
+//! `js_elastic::CapacityProvider`. A pool answers every call. The calls are synchronous
+//! because no pool yet leaves the process; they become async at the edge with the first
+//! one that calls a network.
 //!
-//! The wall-time and reserved-label rules of the start contract of 5.2, and the class
-//! checks this slice adds to it, live in
-//! [`StartSpec::new`], the one constructor of the only value [`Provider::start`]
-//! accepts. A request that breaks one of them cannot reach a provider, and a provider
-//! cannot relax it. Two rules of 5.2 are not modelled yet: the fence must be stated, and
-//! retries are never passed to a provider. `Request` has no fence or retry field, so
-//! nothing checks either.
+//! The wall-time and reserved-label rules of the start contract of design 5.2, and the
+//! class checks this crate adds to it, live in [`StartSpec::new`], the one constructor of
+//! the only value [`Pool::start`] accepts. A request that breaks one of them cannot reach
+//! a pool, and a pool cannot relax it. Two rules of 5.2 are not modelled yet: the fence
+//! must be stated, and retries are never passed to a pool. `Request` has no fence or retry
+//! field, so nothing checks either.
 //!
 //! Observed state follows 5.6: [`Observed::Present`] and [`Observed::Absent`] are
 //! answers, [`Observed::Unknown`] is the lack of one. Only `Absent` frees a booking
 //! ([`Observed::frees_booking`]).
+//!
+//! [`HostBook`] is the booking table a pool of hosts keeps: the leases each host holds
+//! and what each books there, and every lease it has stopped. The static pool (`js-pool-static`) and the
+//! registry of self-registered hosts (`js-registry`) both book through it, so neither
+//! copies its rules.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod ack;
+mod book;
 mod spec;
 
 pub use ack::{Call, HostCapacity, Observed, StartAck, StopAck};
+pub use book::{Candidate, ChooseOver, Held, HostBook, SeatError};
 pub use spec::{RefusalCode, StartSpec};
 
 use js_types::{LeaseId, ProviderId, ResourceClass};
 
-/// Which side initiates contact (design 5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Flavour {
-    /// A cloud service the scheduler calls. Every call is answered.
-    Delegated,
-}
-
-/// A place work can be leased. See the crate docs for the contract.
-pub trait Provider {
+/// Hosts an allocation can be booked on: the allocation port. See the crate docs for the
+/// contract.
+pub trait Pool {
     /// A stable id. The scheduler never branches on its text.
     fn id(&self) -> ProviderId;
 
-    /// Which flavour of provider this is.
-    fn flavour(&self) -> Flavour;
-
-    /// The resource classes this provider can serve.
+    /// The resource classes this pool can serve.
     fn classes(&self) -> Vec<ResourceClass>;
 
     /// Records the intent to start one attempt. Idempotent on the lease id: a second
@@ -67,14 +63,14 @@ pub trait Provider {
     /// explicit not-found, or [`Observed::Unknown`] for no answer.
     fn observe(&mut self, lease: &LeaseId) -> Observed;
 
-    /// Every host the provider lists, with its shape and the lease holding it.
+    /// Every host the pool lists, with its shape and the lease holding it.
     fn capacity(&self) -> Vec<HostCapacity>;
 
-    /// Whether the provider holds the lease's request on a wait list: the request carried
-    /// a request id ([`StartSpec::with_request_id`]), no host is booked for it yet, and the
-    /// provider has neither placed nor refused it. A start of the same spec again is a poll
+    /// Whether the pool holds the lease's request on a wait list: the request carried a
+    /// request id ([`StartSpec::with_request_id`]), no host is booked for it yet, and the
+    /// pool has neither placed nor refused it. A start of the same spec again is a poll
     /// that keeps its place, and the start that finds it a host books the lease. A stop
-    /// takes it off the list. A provider that queues nothing answers `false`, the default.
+    /// takes it off the list. A pool that queues nothing answers `false`, the default.
     fn waits(&self, lease: &LeaseId) -> bool {
         let _ = lease;
         false

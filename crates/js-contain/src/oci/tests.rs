@@ -11,6 +11,8 @@ use super::image::{FetchError, ImageCheckError, ImageSource, PinnedImage};
 use super::*;
 use crate::subids::IdFiles;
 
+mod modes;
+
 pub(super) fn scratch(name: &str) -> crate::test_dir::TestDir {
     crate::unit_dir(&format!("oci-{name}"))
 }
@@ -69,7 +71,7 @@ impl ImageSource for NoImages {
     }
 }
 
-fn start(config: &OciConfig, scratch: &Path) -> Result<Arc<Oci>, OciError> {
+pub(super) fn start(config: &OciConfig, scratch: &Path) -> Result<Arc<Oci>, OciError> {
     Oci::on(config, Arc::new(NoImages), scratch, "/actions", "x86_64")
 }
 
@@ -897,49 +899,6 @@ async fn a_failed_unpack_is_reported_and_leaves_no_blobs() {
     let left = names(&scratch.join("oci-images"));
     assert!(left.iter().all(|n| !n.ends_with("-blobs")), "{left:?}");
     assert!(!left.contains(&"a".repeat(64)), "{left:?}");
-}
-
-/// Catches the helper names a caller configures not reaching the helpers: with another
-/// binary path and other mode arguments, the job's argv, the bind of the host binary,
-/// and the mount points of the helper root carry exactly those and none of the defaults.
-#[test]
-fn configured_helper_names_are_the_only_names_in_the_helpers() {
-    let modes = helper::HelperModes {
-        give: "give".to_owned(),
-        whole: "--all".to_owned(),
-        unpack: "unpack".to_owned(),
-        binary: "/other/bin/host".to_owned(),
-    };
-    let give = helper::give_job(&modes, Path::new("/d"), "1:1", None, &[Path::new("/a")]);
-    assert_eq!(
-        give.args,
-        ["/other/bin/host", "give", "1:1", "-", "--all", "/t/0"]
-    );
-    let unpack = helper::unpack_job(
-        &modes,
-        Path::new("/d"),
-        Path::new("/s"),
-        Path::new("/b"),
-        &[],
-    );
-    assert_eq!(unpack.args[..2], ["/other/bin/host", "unpack"]);
-    let ids = DaemonIds {
-        uid: 990,
-        gid: 991,
-        sub_uid: 100_000,
-        sub_gid: 200_000,
-    };
-    let config = helper::config(Path::new("/r"), &ids, Mapping::Setup, "/x/h", &give);
-    let text = serde_json::to_string(&config).expect("json");
-    assert!(
-        text.contains(r#""destination":"/other/bin/host""#),
-        "{text}"
-    );
-    assert!(!text.contains("/js/daemon"), "{text}");
-    let dir = scratch("modes-root");
-    helper::prepare_rootfs(&dir, &modes.binary).expect("made");
-    assert!(dir.join("other/bin/host").is_file());
-    assert!(!dir.join("js").exists());
 }
 
 /// Catches a configured init path not reaching the bundle a lease is made with.

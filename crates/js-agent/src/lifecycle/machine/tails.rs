@@ -5,25 +5,43 @@
 //! is 8 KiB a stream, but a job that prints control characters serialises six times as
 //! large (`\u00XX`), so the results are measured as they are sent.
 
-use js_agent_wire::{HeldRun, LogTail, limits};
+use js_agent_wire::{HeldJob, LogTail, RunResult, limits};
 
-use super::Lifecycle;
+use super::job::Keyed;
+use super::{Job, Lifecycle, per_job};
 use crate::lifecycle::{Event, code};
 
 /// What a heartbeat keeps for its envelope (ids, session, phase, taint, exclusive fields),
 /// in bytes.
 const ENVELOPE_MARGIN: usize = 4 * 1024;
 
-/// What the results of a heartbeat may weigh together once serialised, given the held
-/// list that goes with them: the whole body the server reads
-/// ([`limits::HEARTBEAT_BODY_BUDGET`]; a beat over it is refused and the agent ends) less
-/// the held list as it is, the most a load can weigh ([`limits::MAX_LOAD_BYTES`], reserved
-/// whether or not this agent sends one yet) and the envelope. Measuring the held list, and
-/// not assuming its worst case, leaves the room a host with short ids really has.
-fn results_budget(held: &[HeldRun]) -> usize {
-    let held = serde_json::to_vec(held).map_or(0, |bytes| bytes.len());
-    let rest = held + limits::MAX_LOAD_BYTES + ENVELOPE_MARGIN;
+/// The bytes the key that holds a job's result in its listing adds to it (`,"result":`).
+const RESULT_KEY_LEN: usize = 10;
+
+/// What the results of a heartbeat may weigh together once serialised, given the lists
+/// that go with them (`listed` bytes: the held runs, the jobs without their results and the
+/// retired job ids): the whole body the server reads ([`limits::HEARTBEAT_BODY_BUDGET`]; a
+/// beat over it is refused and the agent ends) less those lists as they are, the most a load
+/// can weigh ([`limits::MAX_LOAD_BYTES`], reserved whether or not this agent sends one yet)
+/// and the envelope. Measuring the lists, and not assuming their worst case, leaves the room
+/// a host with short ids really has.
+fn results_budget(listed: usize) -> usize {
+    let rest = listed + limits::MAX_LOAD_BYTES + ENVELOPE_MARGIN;
     limits::HEARTBEAT_BODY_BUDGET.saturating_sub(rest)
+}
+
+/// The serialised length of `value`.
+fn len_of<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+/// What the result of `job` weighs in a heartbeat: a run's in `results`, a job's inside its
+/// listing, in the form each is sent.
+fn result_len(job: &Job, result: &RunResult) -> usize {
+    match job.keyed {
+        Keyed::Run => len_of(result),
+        Keyed::Job => len_of(&per_job::job_result(result)) + RESULT_KEY_LEN,
+    }
 }
 
 /// `text` cut to at most `max` bytes, keeping the end, at a character boundary.
@@ -52,8 +70,13 @@ fn weight(tail: &LogTail) -> usize {
 impl Lifecycle {
     /// [`Lifecycle::fit_log_tails`] to what the next heartbeat can carry.
     pub(super) fn fit_log_tails_to_beat(&mut self, events: &mut Vec<Event>) {
-        let budget = results_budget(&self.held());
-        self.fit_log_tails(budget, events);
+        let bare = |job: HeldJob| HeldJob {
+            result: None,
+            ..job
+        };
+        let jobs: Vec<HeldJob> = self.held_jobs().into_iter().map(bare).collect();
+        let listed = len_of(&self.held()) + len_of(&jobs) + len_of(&self.retired_jobs());
+        self.fit_log_tails(results_budget(listed), events);
     }
 
     /// Cuts the log tails of the held results until their results serialise to at most
@@ -62,10 +85,9 @@ impl Lifecycle {
     /// is left out of its result, and the run notes a `log-tail-shed` finding. The stored
     /// result is changed, so every heartbeat carries the same cut.
     pub fn fit_log_tails(&mut self, budget: usize, events: &mut Vec<Event>) {
-        let size = |jobs: &[super::Job]| -> usize {
+        let size = |jobs: &[Job]| -> usize {
             jobs.iter()
-                .filter_map(|job| job.result.as_ref())
-                .map(|result| serde_json::to_vec(result).map_or(0, |bytes| bytes.len()))
+                .filter_map(|job| Some(result_len(job, job.result.as_ref()?)))
                 .sum()
         };
         while size(&self.jobs) > budget {

@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkLevel, refusal};
+use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal};
+use js_types::{JobNetwork, PortMap};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -46,6 +47,10 @@ pub mod label {
     /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
     /// as a number; absent on a container an earlier agent made.
     pub const SLOT: &str = "jobscheduler.dev/slot";
+    /// `job` on a container a job start made (its run id is the job id and its lease id the
+    /// allocation id), so a restarted agent lists it under the job keying again; absent on
+    /// a container of a run start and on one an earlier agent made.
+    pub const KEYING: &str = "jobscheduler.dev/keying";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -97,6 +102,13 @@ pub struct RunSpec {
     pub run_id: String,
     /// What the run executes.
     pub body: Body,
+    /// The environment a job start names, by name in order, which the runtime sets in the
+    /// container over the image's own variables (a name in both takes this value). Empty
+    /// for a run start and for a native body, whose environment is its own
+    /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
+    /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one
+    /// ([`Runtime::check_env`]).
+    pub env: Vec<(String, String)>,
     /// Thousandths of a CPU core.
     pub cpu_millis: u64,
     /// Bytes of memory.
@@ -118,6 +130,14 @@ pub struct RunSpec {
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
+    /// The network level the job was admitted at: never above the runtime's
+    /// [`Runtime::network_ceiling`]. A backend that wires networks gives the container that
+    /// level; `none` is loopback only.
+    pub network: JobNetwork,
+    /// The ports the job declared, each forwarded from the host's port to the job's (design
+    /// 5.8) by a backend that wires networks; the admission let them through only when the
+    /// runtime's ceiling lists their host ports and the level is wired (not `none`).
+    pub ports: Vec<PortMap>,
     /// The job's labels and the agent's own ([`label`]); the agent's win.
     pub labels: BTreeMap<String, String>,
     /// The darwin bundle a native run pins, `name[:tag]@sha256:<manifest digest>`: the
@@ -173,12 +193,24 @@ pub struct Found {
 /// A runtime call that failed. The text is the runtime's own and stays on the host.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct RuntimeError(pub String, bool);
+pub struct RuntimeError(pub String, Kind);
+
+/// What kind of failure a [`RuntimeError`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// The call failed.
+    Call,
+    /// The agent cannot see the host ([`RuntimeError::blind`]).
+    Blind,
+    /// A removal that ended everything of the run and could not copy a declared output
+    /// ([`RuntimeError::outputs`]).
+    Outputs,
+}
 
 impl RuntimeError {
     /// A failure of the call.
     pub fn new(text: impl Into<String>) -> Self {
-        Self(text.into(), false)
+        Self(text.into(), Kind::Call)
     }
 
     /// A start that failed because the agent cannot see the host: the container started,
@@ -186,13 +218,41 @@ impl RuntimeError {
     /// post-job checks would read a host that is not the one the job runs on. The backend
     /// has removed the container; the lifecycle taints the host as unchecked.
     pub fn blind(text: impl Into<String>) -> Self {
-        Self(text.into(), true)
+        Self(text.into(), Kind::Blind)
     }
 
     /// Whether the failure is that the agent cannot see the host ([`RuntimeError::blind`]).
     pub fn is_blind(&self) -> bool {
-        self.1
+        self.1 == Kind::Blind
     }
+
+    /// A removal that did everything a removal does (the run's processes and its user are
+    /// gone) but could not copy one or more of the run's declared outputs. Nothing of the
+    /// run is left on the host, so the lifecycle reports it and does not taint the host.
+    pub(crate) fn outputs(text: impl Into<String>) -> Self {
+        Self(text.into(), Kind::Outputs)
+    }
+
+    /// Whether the failure is only that outputs were not copied ([`RuntimeError::outputs`]).
+    pub(crate) fn is_outputs(&self) -> bool {
+        self.1 == Kind::Outputs
+    }
+}
+
+/// Checks the environment of a run before a runtime creates anything for it, with the
+/// wire's one check ([`js_agent_wire::check_env`]): a run reaches a runtime by paths that
+/// skip the wire's validation, and a name the agent reserves (the loader's, the agent's
+/// own) must never reach a job's process. A name given twice is refused as well.
+///
+/// # Errors
+///
+/// The rule the environment breaks, naming `env` and never a name or a value.
+pub fn check_run_env(env: &[(String, String)]) -> Result<(), RuntimeError> {
+    let names: BTreeMap<String, String> = env.iter().cloned().collect();
+    if names.len() != env.len() {
+        return Err(RuntimeError::new("env names a variable twice"));
+    }
+    js_agent_wire::check_env("env", &names).map_err(|why| RuntimeError::new(why.to_string()))
 }
 
 /// Why a runtime will not run a native body: the wire code the start is answered with and
@@ -334,6 +394,41 @@ pub trait Runtime {
         })
     }
 
+    /// Whether this runtime carries a job start's environment (`env`, by name in order),
+    /// asked at admission for every start, before anything is created and before
+    /// [`Runtime::check_image`], so a start the runtime cannot give its environment is
+    /// answered for that and not for another reason. The default carries it, which is every
+    /// container runtime; the runtime a Mac agent has refuses a non-empty one
+    /// (`env-unsupported`): a job must never run without the environment it names.
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_env(&self, _env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        Ok(())
+    }
+
+    /// Whether this runtime runs a start named by its image (an `image`, with or without a
+    /// `run`), asked before such a start creates anything. The default runs them, which is
+    /// every container runtime. The runtime a Mac agent has runs one only with a `run` and a
+    /// bundle store ([`Runtime::runs_image_runs`]); otherwise it refuses it
+    /// (`image-unsupported-here`).
+    ///
+    /// # Errors
+    ///
+    /// The code the start is refused with, and why.
+    fn check_image(&self) -> Result<(), NativeRefusal> {
+        Ok(())
+    }
+
+    /// Whether this runtime runs a start named by its image with a `run`: the Mac runtime
+    /// with a bundle store does, by the bundle the image resolves to, and runs the `run` as
+    /// a native body. The default is a runtime that does not (a container runtime refuses a
+    /// `run`, `run-unsupported`).
+    fn runs_image_runs(&self) -> bool {
+        false
+    }
+
     /// Ends and removes whatever an earlier process left, which no list of the runtime's
     /// can say: the leases a native runtime journalled and never saw deleted. Called when a
     /// worker starts and by the rescue, before anything else; returns one line for each
@@ -358,6 +453,17 @@ pub trait Runtime {
     /// What is wrong with the network or the firewall; the text stays on the host.
     fn check_egress(&self) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// The most network a contained job of this runtime may ask for (design 5.8): a start
+    /// above it is refused (`network-above-ceiling`, `port-above-ceiling`,
+    /// `ports-not-supported`) before anything is made, and never run with less. The default is
+    /// `none` with no port: the container-engine runtimes (Docker, Podman) and the native one
+    /// give a job no network of its own choosing and forward no port, so a job that asks for
+    /// more through them is refused naming the ceiling `none`, and one that declares a port
+    /// `ports-not-supported`. The `crun` runtime answers its egress's ceiling.
+    fn network_ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling::default()
     }
 
     /// Whether the network a native job would get is limited as the agent was told. Called

@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use js_lease::Timestamp;
-use js_pool_static::{Candidate, SeatError};
-use js_provider::{Provider, StartSpec};
+use js_provider::{Candidate, SeatError};
+use js_provider::{Pool, StartSpec};
 use js_registry::{MarkedTails, Placer, ProfileLives, TailCounters};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use js_usage::ProfileKey;

@@ -9,26 +9,31 @@
 //!
 //! | field | cap |
 //! |---|---|
-//! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
+//! | ids (`run_id`, `lease_id`, `job_id`, `allocation_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
-//! | native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
-//! | native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
-//! | native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
+//! | `run` and native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
+//! | `run` and native `args` | as `args` |
+//! | `run` and native `env`, and a job start's `env` (one check, [`crate::check_env`]) | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
+//! | `run` and native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
-//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` |
+//! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`], or [`MAX_BUNDLE_CAPABILITY_VALUE_LEN`] for `bundle` and [`MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN`] for `egress-ports` |
+//! | declared ports (`JobSpec::ports`) | [`MAX_PORTS`] entries, each port from 1 to 65535; the capability `egress-ports` [`MAX_PORTS`] items |
 //! | caps frame | [`MAX_CAPS_BUNDLES`] digests, [`MAX_CAPS_XCODES`] Xcode builds of [`MAX_XCODE_BUILD_LEN`] bytes |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
-//! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
+//! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, jobs, retired job ids or retired acks, [`MAX_RESULTS`] results, run acks or job acks, [`MAX_COMMANDS`] commands |
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_DISK_GIB`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
+//! | log sink of a job start | `endpoint` [`MAX_LOG_ENDPOINT_LEN`] bytes; `region` [`MAX_LOG_REGION_LEN`] and `bucket` [`MAX_LOG_BUCKET_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric; `prefix` [`MAX_LOG_PREFIX_LEN`] bytes, for a job id of at most [`MAX_LOG_JOB_ID_LEN`] bytes |
+//! | log grant of a reply | `access_key_id`, `secret_access_key` [`MAX_LOG_CREDENTIAL_FIELD`] bytes; `session_token` [`MAX_LOG_SESSION_TOKEN`] bytes; printable ASCII, no space |
+//! | bodies | a heartbeat [`HEARTBEAT_BODY_BUDGET`] bytes, a heartbeat reply [`REPLY_BODY_BUDGET`] bytes |
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
 pub const MAX_ID_LEN: usize = 128;
@@ -41,19 +46,20 @@ pub const MAX_ARGS: usize = 1024;
 pub const MAX_ARG_LEN: usize = 16 * 1024;
 /// Most bytes all arguments of one job may hold together.
 pub const MAX_ARGS_TOTAL_BYTES: usize = 256 * 1024;
-/// Longest `program` of a native job, in bytes.
+/// Longest `program` of a run or a native job, in bytes.
 pub const MAX_PROGRAM_LEN: usize = 4096;
-/// Most environment entries on a native job.
+/// Most environment entries on a run, a native job or a job start.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
 pub const MAX_ENV_KEY_LEN: usize = js_types::env::MAX_ENV_NAME_LEN;
 /// Longest environment variable value, in bytes.
 pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
-/// Most bytes the names and values of one native job's environment may hold together.
+/// Most bytes the names and values of one run's, native job's or job start's environment
+/// may hold together.
 pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
-/// Most inputs on a native job.
+/// Most inputs on a run or a native job.
 pub const MAX_INPUTS: usize = 256;
-/// Most declared outputs on a native job.
+/// Most declared outputs on a run or a native job.
 pub const MAX_OUTPUTS: usize = 256;
 /// Most mounts on one job.
 pub const MAX_MOUNTS: usize = 64;
@@ -100,12 +106,22 @@ pub const MAX_CAPS_XCODES: usize = 16;
 /// Longest Xcode build id in a [`crate::Caps`] frame, in bytes.
 pub const MAX_XCODE_BUILD_LEN: usize = 32;
 
-/// The longest value, in bytes, the capability `key` may have: a held-bundle list is longer
-/// than the other capabilities, which are short facts.
+/// Most ports one job may declare (`JobSpec::ports`), and most items of the capability
+/// [`crate::EGRESS_PORTS_CAPABILITY`] (the host ports an agent allows).
+pub const MAX_PORTS: usize = 16;
+/// Longest value of the capability [`crate::EGRESS_PORTS_CAPABILITY`], in bytes: that many
+/// items of at most 11 bytes (`65535-65535`) and the commas between them.
+pub const MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN: usize = MAX_PORTS * 12 - 1;
+
+/// The longest value, in bytes, the capability `key` may have: a held-bundle list and a list
+/// of host ports are longer than the other capabilities, which are short facts.
 #[must_use]
 pub fn capability_value_max(key: &str) -> usize {
-    [MAX_CAPABILITY_VALUE_LEN, MAX_BUNDLE_CAPABILITY_VALUE_LEN]
-        [usize::from(key == BUNDLE_CAPABILITY)]
+    match key {
+        BUNDLE_CAPABILITY => MAX_BUNDLE_CAPABILITY_VALUE_LEN,
+        crate::network::EGRESS_PORTS_CAPABILITY => MAX_EGRESS_PORTS_CAPABILITY_VALUE_LEN,
+        _ => MAX_CAPABILITY_VALUE_LEN,
+    }
 }
 /// Longest session secret, in bytes (see [`crate::Welcome::session`]). A secret the
 /// registry issues is far shorter; the cap only bounds what a peer can send.
@@ -193,3 +209,25 @@ pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// This is not a guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS` allow far
 /// more, and a beat over the server's limit is refused there.
 pub const HEARTBEAT_BODY_BUDGET: usize = 65_536;
+/// The body an agent reads for a heartbeat reply (or any other answer of the server), in
+/// bytes; the agent's client (`js-client`) reads no more. A [`crate::LogGrant`] at every cap
+/// is 4,464 bytes of it, and a test holds a busy reply with one to a quarter of it.
+pub const REPLY_BODY_BUDGET: usize = 1024 * 1024;
+
+/// Longest [`crate::LogSink::endpoint`], in bytes.
+pub const MAX_LOG_ENDPOINT_LEN: usize = 512;
+/// Longest [`crate::LogSink::region`], in bytes.
+pub const MAX_LOG_REGION_LEN: usize = 64;
+/// Longest [`crate::LogSink::bucket`], in bytes: the longest S3 bucket name.
+pub const MAX_LOG_BUCKET_LEN: usize = 63;
+/// Longest job id a [`crate::LogSink`] is accepted for, in bytes: the service's job id. A start
+/// of a longer id (the wire allows [`MAX_ID_LEN`]) runs without live logs.
+pub const MAX_LOG_JOB_ID_LEN: usize = 63;
+/// Longest [`crate::LogSink::prefix`], in bytes: a configured prefix of 512 bytes, `/`, a job
+/// id of [`MAX_LOG_JOB_ID_LEN`] bytes and the trailing `/`.
+pub const MAX_LOG_PREFIX_LEN: usize = 512 + 1 + MAX_LOG_JOB_ID_LEN + 1;
+/// Longest access key id or secret access key of a [`crate::LogGrant`], in bytes.
+pub const MAX_LOG_CREDENTIAL_FIELD: usize = 128;
+/// Longest session token of a [`crate::LogGrant`], in bytes. With it a grant at every cap is
+/// 4,464 bytes of JSON, far inside [`REPLY_BODY_BUDGET`].
+pub const MAX_LOG_SESSION_TOKEN: usize = 4096;

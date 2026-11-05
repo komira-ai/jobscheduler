@@ -21,7 +21,7 @@ The design adds, in this order:
 
 1. `js-elastic`: the provider-neutral version of the Lambda `Elastic` trait (acquire, list,
    release) plus `Offer`, `Demand`, `Bootstrap` and `Secret`. The lease-level
-   `js_provider::Provider` trait does not change.
+   trait of `js-provider` (now `js_provider::Pool`) does not change.
 2. In `js-types`: the job types (`ContainerSpec`, `Requirements`) of section 3.1.
 3. A launch payload (`user_data` for Lambda) and a no-inbound firewall attach in the Lambda crate,
    and a bundled-roots HTTPS client so a pool needs no CA file. The service renders the payload;
@@ -177,15 +177,15 @@ Three things are called a provider in the code and must not be merged:
 
 | name | file | calls | who calls it |
 |---|---|---|---|
-| lease-level `Provider` | `crates/js-provider/src/lib.rs` | `start`, `stop`, `observe`, `capacity` per lease, synchronous | the lease table, under its lock |
-| `CapacitySource` | `crates/js-lease-server/src/capacity.rs` | builds a `Provider` once at start | `Config` |
+| lease-level `Pool` (the allocation port; formerly `Provider`) | `crates/js-provider/src/lib.rs` | `start`, `stop`, `observe`, `capacity` per lease, synchronous | the lease table, under its lock |
+| `CapacitySource` | `crates/js-lease-server/src/capacity.rs` | builds a `Pool` once at start | `Config` |
 | `Elastic` | `crates/js-provider-lambdalabs/src/elastic.rs` | `acquire`, `list`, `release` of machines | nothing yet |
 
-An elastic provider does not implement `js_provider::Provider`. It launches machines; those
+An elastic provider does not implement `js_provider::Pool`. It launches machines; those
 machines register through the agent protocol and become hosts of the pool, which the
-registry already serves as a `Provider` (`crates/js-registry/src/provider.rs`). The lease
+registry already serves as a `Pool` (`crates/js-registry/src/provider.rs`). The lease
 table never waits on a cloud call. The Lambda crate says the same ("It does not implement
-the delivered whole-host `Provider` trait, which is called under the lease table's lock",
+the lease-level `Pool` trait of `js-provider`, which is called under the lease table's lock",
 `lib.rs`). The scaler calls the elastic trait from its own task with no lock held.
 
 ### 3.4 Network (requirements 5, 6)
@@ -410,7 +410,8 @@ message naming pool and field:
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
-| two pools with one name; more than one registering pool; a class that books part of a host (first slice) | `pool "b": only one pool may register agents in this version` |
+| two pools with one name; a class that books part of a host (first slice) | `pool "b": name: also the name of an earlier pool` |
+| more than one registering pool: the file is valid, and the server does not start on it | `pool "b": several elastic pools are parsed; running them needs the ordered walk of design 5.6` |
 | `exec` not `container` or `sandbox-exec`; `sandbox-exec` with an elastic kind that cannot launch macOS | `pool "mac": exec: ...` |
 | an elastic pool and no `server.agent_listen`; `agent_listen` equal to `listen` | `server.agent_listen: required with an elastic pool; must differ from server.listen` |
 | `advertise_url` that is `http://` and not loopback, whenever any elastic pool exists (the agent refuses it, `crates/js-agent/src/cli.rs`; a pool that passed start and then failed every boot would bill 15 minutes per launch with only "booting, no hello" to show) | `server.advertise_url: http:// is refused by agents; use https (or loopback)` |

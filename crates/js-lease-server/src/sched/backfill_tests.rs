@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_lease::{Clock, ManualClock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
-use js_registry::Credential;
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
+use js_registry::{Credential, Placer};
 use js_testkit::dir::TestDir;
 use js_types::{HostId, LeaseId, ResourceClass, Resources};
 
@@ -26,7 +26,7 @@ use crate::config::{Cli, Config};
 /// and the whole-node requests a consumer polls (lease sequence and request name).
 struct Live {
     agents: Arc<Agents>,
-    provider: Box<dyn Provider + Send>,
+    provider: Box<dyn Pool + Send>,
     /// What the server builds its lease table from: the capacity source, its settings,
     /// its file and how it boots.
     source: Box<dyn crate::CapacitySource>,
@@ -97,8 +97,8 @@ fn live_over(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Live {
 impl Live {
     /// The lease table the server runs over this agent side, on the same clock: it ends a
     /// lease at its wall time when it ticks.
-    fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedProvider, SharedClock> {
-        let provider = crate::adapt::BoxedProvider(self.source.provider(&[]).unwrap().provider);
+    fn table(&self) -> js_lease::LeaseTable<crate::adapt::BoxedPool, SharedClock> {
+        let provider = crate::adapt::BoxedPool(self.source.provider(&[]).unwrap().provider);
         let (settings, file, boot) = self.table_of.clone();
         let clock = SharedClock::new(self.clock.clone());
         js_lease::LeaseTable::open(provider, clock, settings, &file, boot).unwrap()
@@ -125,6 +125,9 @@ impl Live {
                     exclusive_refused: None,
                     load: None,
                     disk_gib: None,
+                    jobs: Vec::new(),
+                    retired_jobs: Vec::new(),
+                    log_grant_state: None,
                 };
                 self.agents.registry.heartbeat(&beat, &credential).unwrap();
             }
@@ -399,7 +402,7 @@ fn with_the_flag_a_probe_on_a_marked_host_is_not_backfilled() {
 /// passed to the placer, or applied with `<` for `<=`.
 #[test]
 fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
-    use js_pool_static::Candidate;
+    use js_provider::Candidate;
     let open = [Candidate {
         host: HostId::new("h1").unwrap(),
         shape: js_types::Shape::new(
@@ -410,15 +413,19 @@ fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
     }];
     let marked =
         js_registry::MarkedTails::from([(open[0].host.clone(), Some(Duration::from_secs(600)))]);
-    let five = crate::config::Placement::JsSched
-        .placer(Some(Duration::from_secs(300)))
-        .unwrap();
+    let placer = |wall: Option<Duration>, placement: crate::config::Placement| {
+        let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
+        let slack = crate::config::CpuSlack::default();
+        placement.placer(wall, slack, js_sched::MemoryPercent::FULL, &clock)
+    };
+    let js_sched = crate::config::Placement::JsSched;
+    let five = placer(Some(Duration::from_secs(300)), js_sched).unwrap();
     let wall = |s: u64| share_for(1, Duration::from_secs(s));
     assert_eq!(five.pick(&wall(300), &open, &marked), Some(0));
     assert_eq!(five.pick(&wall(301), &open, &marked), None);
-    let none = crate::config::Placement::JsSched.placer(None).unwrap();
+    let none = placer(None, js_sched).unwrap();
     assert_eq!(none.pick(&wall(301), &open, &marked), Some(0));
-    assert!(crate::config::Placement::Registry.placer(None).is_none());
+    assert!(placer(None, crate::config::Placement::Registry).is_none());
 }
 
 /// Asserts, through the server's lease table, that backfill ends at its enforced wall and
@@ -697,4 +704,52 @@ fn with_the_flag_a_restored_reservation_without_a_tail_takes_no_backfill() {
     assert_eq!(refused, Err(StartAck::Refused(RefusalCode::NoCapacity)));
     assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
     assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
+}
+
+/// A lease of `cpu_millis` of class `share` that may run `wall`, numbered `sequence`.
+fn share_sized(sequence: u64, cpu_millis: u64, wall: Duration) -> StartSpec {
+    let mut request = share_for(sequence, wall).request().clone();
+    request.resources = Resources::new(cpu_millis, 1 << 20, 0, None).unwrap();
+    StartSpec::new(LeaseId::new(1, sequence), request, &[sharing()]).unwrap()
+}
+
+/// Asserts, with one engine throughout, that a mark that goes frees its host and that the
+/// mark left still holds: two hosts each carry a five-core lease of 600 s and are set aside
+/// for two whole-node requests; once one request is cancelled, a lease of 600 s, which no
+/// marked host takes, is booked on the host it held, and on the host still marked a
+/// three-core lease of 600 s is refused while one of 60 s is booked as backfill. It catches
+/// a hold the engine keeps after its mark is gone (the freed host would refuse long work)
+/// and one dropped with another mark's.
+#[test]
+fn with_the_flag_a_cancelled_mark_frees_its_host_and_the_other_still_holds() {
+    // Two hosts may be drained at once, so each request takes one.
+    let pool = format!("max_draining = 2\n{SHARED_POOL}");
+    let hosts = ["h1", "h2"];
+    let mut l = live_over(
+        "backfill_cancelled",
+        &pool,
+        &hosts,
+        &["--placement", "js-sched"],
+    );
+    let five = |sequence| share_sized(sequence, 5_000, Duration::from_secs(600));
+    let first = host_of(&l.provider.start(five(1))).unwrap().to_owned();
+    let second = host_of(&l.provider.start(five(2))).unwrap().to_owned();
+    assert_ne!(first, second);
+    assert!(host_of(&l.whole(3, "q1")).is_none());
+    assert!(host_of(&l.whole(4, "q2")).is_none());
+    let freed = l.mark("q1").unwrap().0;
+    let held = l.mark("q2").unwrap().0;
+    assert_ne!(freed, held);
+    l.at(10_000);
+    l.asks.retain(|(_, name)| name != "q1");
+    l.provider.stop(&LeaseId::new(1, 3));
+    assert_eq!(l.mark("q1"), None);
+    let long = share_sized(5, 1_000, Duration::from_secs(600));
+    assert_eq!(host_of(&l.provider.start(long)), Some(freed.as_str()));
+    let three_long = share_sized(6, 3_000, Duration::from_secs(600));
+    let refused = l.provider.start(three_long);
+    assert_eq!(refused, StartAck::Refused(RefusalCode::NoCapacity));
+    let three_short = share_sized(7, 3_000, Duration::from_secs(60));
+    assert_eq!(host_of(&l.provider.start(three_short)), Some(held.as_str()));
+    assert_eq!(l.mark("q2").map(|mark| mark.0), Some(held));
 }

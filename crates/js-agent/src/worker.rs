@@ -9,16 +9,23 @@
 //! - **Replies go in through a bounded queue** ([`QUEUE`] orders). [`Worker::try_deliver`]
 //!   never waits: when the worker is busy and the queue is full the reply is dropped and
 //!   the caller says so. Nothing is lost for good: the server resends a start until the
-//!   run is listed, a stop until it leaves the held list, a cancel for as long as the host
+//!   run (or job) is listed, a stop until it leaves the held list (or the job listing, or
+//!   its id is in `retired_jobs`), a cancel for as long as the host
 //!   lists the run, the acknowledgement of every result the heartbeat still carries and
 //!   the acknowledgement of every heartbeat that carries the taint.
 //! - **State comes out as a snapshot.** After every order and every step the worker
-//!   publishes the held runs, the results not yet acknowledged and the taint to report
-//!   ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
+//!   publishes the held runs, the results not yet acknowledged, the jobs a job start began
+//!   and the retired job ids, and the taint to report ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
 //!   swap it, never across a runtime call.
 //! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
 //!   whenever it has had none for the step interval of its [`Plan`], so a container that
 //!   exited is found whether or not the server said anything.
+//! - **The session says when it heard the server.** [`Worker::heard`] stamps a [`Contact`]
+//!   on the lifecycle's clock without waiting, at every welcome and every accepted reply,
+//!   whether or not the queue had room for it; the lifecycle reads it at every step and
+//!   stops every job once the server has been silent for the plan's bound
+//!   ([`Lifecycle::stop_on_silence`]). The session refuses a welcome whose grace that
+//!   bound does not outlast ([`Worker::check_grace`]).
 //! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
@@ -91,12 +98,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Taint};
+use js_agent_wire::{Command, HeartbeatReply, HeldJob, HeldRun, HeldState, RunResult, Taint};
 
 use crate::cli_runtime::CALL_LIMIT;
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{CheckHook, Config, Event, Lifecycle, Status};
+use crate::lifecycle::{CheckHook, Config, Contact, Event, Lifecycle, Status, fits_grace};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
@@ -125,8 +132,9 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
 
-/// The calls a start is counted as: the create, and the egress check's `network inspect`
-/// and `nft` before it (the other calls of a start are inside the margin, as before).
+/// The calls a start is counted as: the create, and the two `nft` listings of the `crun`
+/// runtime's egress check before it (the other calls of a start are inside the margin, as
+/// before).
 pub const CALLS_PER_START: usize = 3;
 
 /// The most calls [`stall_bound`] allows time for.
@@ -162,6 +170,9 @@ pub struct Plan {
     /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
     /// none when the operator gave no `--readiness-hook`.
     pub readiness: Option<WorkerHook>,
+    /// How long the server may be silent before every job is stopped (`--silence-stop`);
+    /// none for a worker that never stops a job for silence, which the agent never builds.
+    pub silence_stop: Option<Duration>,
 }
 
 /// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
@@ -317,6 +328,10 @@ pub struct Snapshot {
     pub results: Vec<RunResult>,
     /// The taint to report, until the server acknowledges it.
     pub taint: Option<Taint>,
+    /// Every job a job start began, with its result until acknowledged.
+    pub jobs: Vec<HeldJob>,
+    /// The job ids retired on a stop for a job the agent did not hold, until acknowledged.
+    pub retired_jobs: Vec<String>,
 }
 
 impl Snapshot {
@@ -325,18 +340,28 @@ impl Snapshot {
             held: life.held(),
             results: life.results(),
             taint: life.pending_taint(),
+            jobs: life.held_jobs(),
+            retired_jobs: life.retired_jobs(),
         }
     }
 
-    /// Whether a run is in the running state.
+    /// Whether a run, or a job a job start began, is in the running state.
     pub fn running(&self) -> bool {
-        let running = |run: &HeldRun| run.state == HeldState::Running;
-        self.held.iter().any(running)
+        let run = self.held.iter().map(|run| run.state);
+        let job = self.jobs.iter().map(|job| job.state);
+        run.chain(job).any(|state| state == HeldState::Running)
     }
 
     /// Whether the agent holds nothing and owes nothing.
     pub fn is_empty(&self) -> bool {
-        self.held.is_empty() && self.results.is_empty()
+        [
+            self.held.is_empty(),
+            self.results.is_empty(),
+            self.jobs.is_empty(),
+            self.retired_jobs.is_empty(),
+        ]
+        .into_iter()
+        .all(|empty| empty)
     }
 }
 
@@ -488,6 +513,10 @@ pub struct Worker {
     handle: Handle,
     clock: SharedClock,
     rescue: Rescue,
+    /// When the server was last heard, which the lifecycle reads.
+    contact: Contact,
+    /// The silence bound and the stop grace, when the lifecycle stops jobs for silence.
+    silence: Option<(Duration, Duration)>,
 }
 
 impl Worker {
@@ -507,6 +536,8 @@ impl Worker {
         let hook = plan.readiness.take();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
         let stop_grace = plan.config.stop_grace;
+        let contact = Contact::default();
+        let (bound, thread_contact) = (plan.silence_stop, contact.clone());
         let rescue = Rescue::new(
             plan.machine.clone(),
             plan.backend.clone(),
@@ -527,7 +558,10 @@ impl Worker {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
-                Ok((life, usage, lines)) => {
+                Ok((mut life, usage, lines)) => {
+                    if let Some(bound) = bound {
+                        life.stop_on_silence(bound, thread_contact);
+                    }
                     own.publish(Snapshot::of(&life), &LeaseAnswers::default(), lines);
                     let _ = ready.send(Ok(()));
                     let seams = (step_every, stop_grace);
@@ -543,6 +577,8 @@ impl Worker {
             handle: Handle { orders, shared },
             clock,
             rescue,
+            contact,
+            silence: bound.map(|bound| (bound, stop_grace)),
         })
     }
 
@@ -584,6 +620,8 @@ impl Worker {
             },
             clock,
             rescue,
+            contact: Contact::default(),
+            silence: None,
         }
     }
 
@@ -602,8 +640,29 @@ impl Worker {
         }
     }
 
-    /// From now on a `Start` is not acted on. Stops, cancels and acknowledgements still
-    /// are.
+    /// Says that the server was heard now, on the lifecycle's clock: a welcome, or a
+    /// heartbeat reply the session accepted, whether or not [`Worker::try_deliver`] found
+    /// room for it. The silence after which the lifecycle stops every job counts from the
+    /// last of these. It never waits.
+    pub fn heard(&self) {
+        self.contact.heard(self.clock.now_ms());
+    }
+
+    /// Whether the silence bound outlasts the grace a welcome names (`grace_ms`) plus the
+    /// stop grace; always for a worker that stops no job for silence.
+    ///
+    /// # Errors
+    ///
+    /// The text names `--silence-stop` and the numbers: a bound the server's own grace
+    /// could trip.
+    pub fn check_grace(&self, grace_ms: u64) -> Result<(), String> {
+        self.silence.map_or(Ok(()), |(bound, stop_grace)| {
+            fits_grace(bound, grace_ms, stop_grace)
+        })
+    }
+
+    /// From now on a `Start` or `JobStart` is not acted on. Stops, cancels, job stops and
+    /// acknowledgements still are.
     pub fn close(&self) {
         self.handle.shared.closed.store(true, Ordering::SeqCst);
         let _ = self.handle.orders.try_send(Order::Nudge);
@@ -776,9 +835,10 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
-        // A run held may cost three calls (a stop, then an inspect, the read of its log
-        // and a remove).
-        let calls = life.held().len().saturating_mul(3).saturating_add(asked);
+        // A run or job held may cost three calls (a stop, then an inspect, the read of its
+        // log and a remove).
+        let held = life.held().len().saturating_add(life.held_jobs().len());
+        let calls = held.saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
@@ -840,21 +900,25 @@ fn work(
     }
 }
 
-/// A reply that stops every run `life` holds.
+/// A reply that stops every run and every job `life` holds.
 fn stops(life: &Lifecycle) -> HeartbeatReply {
-    let commands = life
+    let runs = life
         .held()
         .into_iter()
-        .map(|run| Command::Stop { run_id: run.run_id })
-        .collect();
+        .map(|run| Command::Stop { run_id: run.run_id });
+    let jobs = life
+        .held_jobs()
+        .into_iter()
+        .map(|job| Command::JobStop { job_id: job.job_id });
+    let commands = runs.chain(jobs).collect();
     HeartbeatReply {
         commands,
         ..HeartbeatReply::default()
     }
 }
 
-/// `reply` with each `Start` made an unknown command (so the places of the others, which
-/// a refusal is logged by, stay), and a line for each.
+/// `reply` with each `Start` and `JobStart` made an unknown command (so the places of the
+/// others, which a refusal is logged by, stay), and a line for each.
 fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
     let mut lines = Vec::new();
     reply.commands = reply
@@ -865,6 +929,13 @@ fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
                 lines.push(format!(
                     "draining: the start of {} is not taken",
                     spec.run_id
+                ));
+                Command::Unknown
+            }
+            Command::JobStart(spec) => {
+                lines.push(format!(
+                    "draining: the start of job {} is not taken",
+                    spec.job_id
                 ));
                 Command::Unknown
             }

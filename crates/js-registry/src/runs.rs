@@ -17,7 +17,7 @@ use js_agent_wire::{
     RunResult, ValidationError, WireShape, limits,
 };
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, Resources};
 use js_usage::ProfileKey;
@@ -613,6 +613,9 @@ impl Runs {
             result_acks,
             taint_ack: false,
             exclusive: None,
+            job_acks: Vec::new(),
+            retired_acks: Vec::new(),
+            log_grant: None,
         }
     }
 
@@ -767,6 +770,11 @@ mod tests {
             valid_for_ms: 0,
             bundle: None,
             native: None,
+            network: Default::default(),
+            ports: Vec::new(),
+            run: None,
+            os: None,
+            arch: None,
         }
     }
 
@@ -783,6 +791,9 @@ mod tests {
             exclusive_refused: None,
             load: None,
             disk_gib: None,
+            jobs: Vec::new(),
+            retired_jobs: Vec::new(),
+            log_grant_state: None,
         }
     }
 

@@ -2,6 +2,7 @@
 
 use js_agent::egress::Egress;
 use js_contain::container::Ended;
+use js_types::JobNetwork;
 
 use crate::container::{ContainerHost, Network, PROBE, block_on, interfaces, section};
 use crate::sys::{
@@ -54,7 +55,9 @@ fn an_allowed_endpoint_answers_and_everything_else_is_refused_by_its_rule() {
         let host = ContainerHost::new("allow", network).await;
         egress.check().expect("checked before the create");
         let live = host.start(&script).await;
-        let attachment = egress.attach("allow", live.pid).expect("attach");
+        let attachment = egress
+            .attach("allow", live.pid, JobNetwork::AllowList, &[])
+            .expect("attach");
         assert_eq!(attachment.interface(), Some("jsv0"));
         let outcome = live.finish().await;
         attachment.release().expect("release");
@@ -134,7 +137,9 @@ fn the_far_host_answers_only_through_the_masquerade() {
     let allowed = Server::tcp(&far_host.ns, far::ALLOWED);
     let egress = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("start");
     let holder = Holder::new();
-    let attachment = egress.attach("masq", holder.pid()).expect("attach");
+    let attachment = egress
+        .attach("masq", holder.pid(), JobNetwork::AllowList, &[])
+        .expect("attach");
 
     nft(&["flush", "chain", "ip", "js_crun_egress_nat", "postrouting"]);
     let without = tcp(&holder.ns, far::ALLOWED);

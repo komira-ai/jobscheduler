@@ -1031,7 +1031,6 @@ dependencies = [
  "js-mac-provision",
  "js-mac-session",
  "js-oci",
- "js-pool-static",
  "js-provider",
  "js-registry",
  "js-testkit",
@@ -1292,6 +1291,7 @@ name = "js-jobs"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "js-agent-wire",
  "js-jobs",
  "js-state",
  "js-testkit",
@@ -1331,7 +1331,10 @@ dependencies = [
  "js-caps",
  "js-elastic",
  "js-elastic-fake",
+ "js-jobs",
  "js-lease",
+ "js-lease-server",
+ "js-platform",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
@@ -1359,6 +1362,20 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "x509-parser",
+]
+
+[[package]]
+name = "js-logstore"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "js-logstore",
+ "rustls",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "time",
+ "ureq",
 ]
 
 [[package]]
@@ -1485,6 +1502,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-platform"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "thiserror",
+]
+
+[[package]]
 name = "js-pool-static"
 version = "0.1.0"
 dependencies = [
@@ -1515,6 +1540,7 @@ name = "js-provider"
 version = "0.1.0"
 dependencies = [
  "js-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -1586,6 +1612,7 @@ name = "js-sched"
 version = "0.1.0"
 dependencies = [
  "js-caps",
+ "js-elastic",
  "js-sim",
  "js-sizing",
  "js-types",
@@ -1618,6 +1645,14 @@ dependencies = [
  "js-types",
  "rand_chacha",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "js-sim-cell"
+version = "0.1.0"
+dependencies = [
+ "js-sim",
+ "js-types",
 ]
 
 [[package]]

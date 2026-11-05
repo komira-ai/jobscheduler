@@ -135,8 +135,10 @@
 //!   it, so a process left there would look like a system service's. A path with a group
 //!   named `actions` in it names a container and counts, whatever is below; the runtime
 //!   refuses to open over a leases' group of another name, so this name is the leases'. The runner's own
-//!   processes (`crun run`, `kill`, `delete`, the keeper) are children of the agent, alive
-//!   under a parent that is not `init`, in the agent's group exactly: they are not counted.
+//!   processes (`crun run`, `kill`, `delete`, the keeper, and the supervisors) are children
+//!   of the agent, alive under a parent that is not `init`, in the agent's group exactly:
+//!   they are not counted. After a restart a supervisor's parent is `init`, but it was there
+//!   at the new agent's baseline, so it is not new.
 //!   The helper containers (`actions/helpers/...`) are not counted either: a background
 //!   pull runs one while another job's checks run, and it is gone when its runtime call
 //!   returns, so a helper that never ends is not found here. A live container is named by

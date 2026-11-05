@@ -12,11 +12,13 @@ use std::time::Duration;
 
 use js_agent::crun::{CrunRuntime, EgressPort, Hooks, Wired, start_egress};
 use js_agent::egress::{Config as EgressConfig, EgressError, Flags};
+use js_agent::lifecycle::RunSpec;
 use js_agent::lifecycle::{
     Capacity, Clock, Config, DirLayout, Event, Lifecycle, MountRoots, NoChecks, Prepared, Runtime,
     ScratchRoot, StateRoot, Status,
 };
-use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits};
+use js_agent_wire::{Command, HeartbeatReply, Isolation, JobSpec, Limits, NetworkCeiling};
+use js_types::{JobNetwork, PortMap};
 
 use crate::node::{LONG, NoImages, Node, PID};
 
@@ -28,6 +30,10 @@ struct Seen {
     calls: Mutex<Vec<String>>,
     /// The directory of the runtime's sidecars.
     ledger: PathBuf,
+    /// The level of each attach, in order.
+    levels: Mutex<Vec<JobNetwork>>,
+    /// The declared ports of each attach, in order.
+    ports: Mutex<Vec<Vec<PortMap>>>,
     check_fails: AtomicBool,
     attach_fails: AtomicBool,
     release_fails: AtomicBool,
@@ -61,6 +67,13 @@ fn port(seen: &Arc<Seen>) -> Option<Arc<dyn EgressPort>> {
 struct Port(Arc<Seen>);
 
 impl EgressPort for Port {
+    fn ceiling(&self) -> NetworkCeiling {
+        NetworkCeiling {
+            level: JobNetwork::AllowList,
+            ports: Vec::new(),
+        }
+    }
+
     fn check(&self) -> Result<(), EgressError> {
         let sidecars = std::fs::read_dir(&self.0.ledger).map_or(0, Iterator::count);
         self.0.note(format!("check {sidecars}"));
@@ -70,7 +83,15 @@ impl EgressPort for Port {
         }
     }
 
-    fn attach(&self, run: &str, pid: u32) -> Result<Box<dyn Wired>, EgressError> {
+    fn attach(
+        &self,
+        run: &str,
+        pid: u32,
+        level: JobNetwork,
+        ports: &[PortMap],
+    ) -> Result<Box<dyn Wired>, EgressError> {
+        self.0.levels.lock().expect("levels").push(level);
+        self.0.ports.lock().expect("ports").push(ports.to_vec());
         self.0.note(format!("attach {run} {pid}"));
         match self.0.attach_fails.load(Ordering::SeqCst) {
             true => Err(EgressError::Exhausted),
@@ -98,6 +119,14 @@ impl Wired for Wire {
             }),
             false => Ok(()),
         }
+    }
+}
+
+/// The run `run_id` of the node's image, asking for the allow-list: the run the port wires.
+fn wired(node: &Node, run_id: &str) -> RunSpec {
+    RunSpec {
+        network: JobNetwork::AllowList,
+        ..node.spec(run_id)
     }
 }
 
@@ -224,6 +253,11 @@ fn start(life: &mut Lifecycle, node: &Node, run_id: &str) -> Vec<String> {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: JobNetwork::AllowList,
+        ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     };
     let reply = HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],
@@ -302,7 +336,7 @@ fn crun_attaches_the_container_pid_after_start() {
     let node = Node::new("egress-attach");
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
-    let id = runtime.stage(&node.spec("r1")).expect("staged");
+    let id = runtime.stage(&wired(&node, "r1")).expect("staged");
     assert_eq!(
         seen.taken(),
         Vec::<String>::new(),
@@ -327,7 +361,7 @@ fn a_pid_named_after_empty_answers_is_wired() {
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
     let id = runtime
-        .create_and_start(&node.spec("r1-late"))
+        .create_and_start(&wired(&node, "r1-late"))
         .expect("wired at the third ask");
     assert_eq!(asks(&node, "r1-late"), 3);
     assert_eq!(seen.taken(), [format!("attach {} {PID}", id.0)]);
@@ -349,7 +383,7 @@ fn a_failed_attach_ends_the_container_and_runs_no_job() {
     seen.attach_fails.store(true, Ordering::SeqCst);
     let mut runtime = open(&node, port(&seen), impatient());
     let why = runtime
-        .create_and_start(&node.spec("r1-wired"))
+        .create_and_start(&wired(&node, "r1-wired"))
         .map(|_| ())
         .expect_err("not wired");
     assert_eq!(
@@ -378,7 +412,7 @@ fn a_failed_container_pid_releases_nothing_and_removes_the_lease() {
         ("r2-hugepid", "crun state: pid 99999999999 is not a pid"),
     ] {
         let why = runtime
-            .create_and_start(&node.spec(run))
+            .create_and_start(&wired(&node, run))
             .map(|_| ())
             .expect_err("no pid");
         let text = why.to_string();
@@ -401,7 +435,7 @@ fn a_run_that_ends_before_its_pid_is_named_is_never_wired() {
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
     let why = runtime
-        .create_and_start(&node.spec("r1-nopid"))
+        .create_and_start(&wired(&node, "r1-nopid"))
         .map(|_| ())
         .expect_err("no pid");
     let text = why.to_string();
@@ -435,7 +469,7 @@ fn no_pid_within_the_route_wait_is_never_wired() {
     };
     let mut runtime = open(&node, port(&seen), hooks);
     let why = runtime
-        .create_and_start(&node.spec("r1-deaf"))
+        .create_and_start(&wired(&node, "r1-deaf"))
         .map(|_| ())
         .expect_err("no pid in time");
     let text = why.to_string();
@@ -456,7 +490,9 @@ fn release_runs_when_the_run_is_removed() {
     let node = Node::new("egress-release-remove");
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), Node::hooks(LONG, LONG));
-    let id = runtime.create_and_start(&node.spec("r1")).expect("started");
+    let id = runtime
+        .create_and_start(&wired(&node, "r1"))
+        .expect("started");
     runtime.wait_ended(&id);
     assert_eq!(seen.taken().len(), 1, "attached");
     runtime.remove(&id).expect("removed");
@@ -476,7 +512,9 @@ fn release_runs_when_the_run_ends_by_itself() {
     let node = Node::new("egress-release-end");
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), Node::hooks(LONG, LONG));
-    let id = runtime.create_and_start(&node.spec("r1")).expect("started");
+    let id = runtime
+        .create_and_start(&wired(&node, "r1"))
+        .expect("started");
     runtime.wait_ended(&id);
     assert_eq!(seen.taken().len(), 1, "attached");
     assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
@@ -496,7 +534,7 @@ fn release_runs_when_a_running_container_is_removed() {
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
     let id = runtime
-        .create_and_start(&node.spec("r1-wired"))
+        .create_and_start(&wired(&node, "r1-wired"))
         .expect("started");
     assert_eq!(seen.taken().len(), 1, "attached");
     assert_eq!(runtime.poll(&id).expect("polled"), Status::Running);
@@ -541,7 +579,9 @@ fn release_twice_is_harmless_and_a_release_error_does_not_leave_the_lease() {
     let seen = Seen::new(&node);
     seen.release_fails.store(true, Ordering::SeqCst);
     let mut runtime = open(&node, port(&seen), Node::hooks(LONG, LONG));
-    let id = runtime.create_and_start(&node.spec("r1")).expect("started");
+    let id = runtime
+        .create_and_start(&wired(&node, "r1"))
+        .expect("started");
     runtime.wait_ended(&id);
     let ended = runtime.poll(&id).expect("polled");
     assert!(
@@ -608,6 +648,7 @@ fn mode_none_calls_no_egress_port() {
     assert!(matches!(runtime.poll(&id), Ok(Status::Exited(_))));
     runtime.remove(&id).expect("removed");
     assert_eq!(asks(&node, "r1"), 0, "no pid asked for without a port");
+    assert_eq!(runtime.network_ceiling(), NetworkCeiling::default());
     drop(runtime);
 
     let wanted = allow_list();
@@ -625,7 +666,9 @@ fn mode_none_calls_no_egress_port() {
     );
     let mut runtime = open(&node, port, Node::hooks(LONG, LONG));
     runtime.check_egress().expect("checked");
-    let id = runtime.create_and_start(&node.spec("r2")).expect("started");
+    let id = runtime
+        .create_and_start(&wired(&node, "r2"))
+        .expect("started");
     runtime.remove(&id).expect("removed");
     let calls = seen.taken();
     assert_eq!(calls.len(), 3, "{calls:?}");
@@ -635,6 +678,22 @@ fn mode_none_calls_no_egress_port() {
 
     let failed = start_egress(&wanted, |_| Err::<(), _>(EgressError::Forwarding));
     assert_eq!(failed, Err(EgressError::Forwarding));
+
+    let open = EgressConfig::from_flags(&Flags {
+        mode: Some("open"),
+        ip: Some("/bin/sh"),
+        nft: Some("/bin/sh"),
+        nsenter: Some("/bin/sh"),
+        ..Flags::default()
+    })
+    .expect("a sound open ceiling");
+    let started = start_egress(&open, |config| {
+        assert_eq!(config, open);
+        starts += 1;
+        Ok(())
+    });
+    assert_eq!(started, Ok(Some(())));
+    assert_eq!(starts, 2, "an open ceiling starts its egress too");
 }
 
 /// Captures the warnings logged on this thread while the guard lives.
@@ -671,7 +730,7 @@ fn a_pid_named_after_the_route_wait_is_refused() {
     };
     let mut runtime = open(&node, port(&seen), hooks);
     let why = runtime
-        .create_and_start(&node.spec("r1-wired"))
+        .create_and_start(&wired(&node, "r1-wired"))
         .map(|_| ())
         .expect_err("named too late");
     assert_eq!(
@@ -695,10 +754,12 @@ fn a_release_error_on_removal_is_logged_and_the_lease_still_goes() {
     let seen = Seen::new(&node);
     seen.release_fails.store(true, Ordering::SeqCst);
     let mut runtime = open(&node, port(&seen), impatient());
-    let ended = runtime.create_and_start(&node.spec("r1")).expect("started");
+    let ended = runtime
+        .create_and_start(&wired(&node, "r1"))
+        .expect("started");
     runtime.wait_ended(&ended);
     let running = runtime
-        .create_and_start(&node.spec("r2-wired"))
+        .create_and_start(&wired(&node, "r2-wired"))
         .expect("started");
     seen.taken();
     for (id, run) in [(&ended, "r1"), (&running, "r2-wired")] {
@@ -735,7 +796,7 @@ fn a_removal_that_fails_after_its_release_is_retried_without_a_second_release() 
     let seen = Seen::new(&node);
     let mut runtime = open(&node, port(&seen), impatient());
     let id = runtime
-        .create_and_start(&node.spec("r1-wired"))
+        .create_and_start(&wired(&node, "r1-wired"))
         .expect("started");
     seen.taken();
     let blocker = node.cgroup_of(&id.0).join("left");
@@ -767,7 +828,7 @@ fn a_failed_wiring_whose_cleanup_fails_keeps_the_lease_for_a_later_removal() {
     seen.attach_fails.store(true, Ordering::SeqCst);
     let mut runtime = open(&node, port(&seen), impatient());
     let why = runtime
-        .create_and_start(&node.spec("r1-stuckcg"))
+        .create_and_start(&wired(&node, "r1-stuckcg"))
         .map(|_| ())
         .expect_err("not wired");
     assert_eq!(
@@ -833,4 +894,111 @@ fn a_failed_wiring_is_a_failed_start_of_the_lifecycle() {
         1,
         "{calls:?}"
     );
+}
+
+/// Proves a run that asked for no network is not wired under a ceiling that has one: the
+/// firewall is checked before its create as for any run, and then the port is asked nothing,
+/// no pid is asked for, and its removal releases nothing; a `none` run under the lifecycle is
+/// started the same way. Catches a `none` job given an interface because its host has them,
+/// and one held for a route nobody adds.
+#[test]
+fn a_none_run_under_a_ceiling_is_not_wired() {
+    let node = Node::new("egress-none-run");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    assert_eq!(runtime.network_ceiling().level, JobNetwork::AllowList);
+    runtime.check_egress().expect("checked");
+    let id = runtime
+        .create_and_start(&node.spec("r1-quiet"))
+        .expect("started");
+    assert_eq!(asks(&node, "r1-quiet"), 0, "no pid asked for a none run");
+    runtime.remove(&id).expect("removed");
+    assert_eq!(seen.taken(), ["check 0"]);
+    assert!(nothing_left(&node, "r1-quiet"));
+}
+
+/// Proves a run that asked for a network on a runtime with no egress is refused before its
+/// container exists, so its command can never run with loopback only: staging it fails naming
+/// the ceiling `none` and makes nothing (no sidecar, no lease directory, no cgroup, so there is
+/// no bundle for `crun` to run), no pid is asked for, and `create_and_start` refuses it the
+/// same way. The admission refuses such a start first (`network-above-ceiling`); this is the
+/// runtime's own floor under it. Catches a job started and then refused, which a real
+/// command could outrun.
+#[test]
+fn a_wired_level_without_an_egress_is_refused() {
+    let node = Node::new("egress-no-port");
+    let mut runtime = open(&node, None, impatient());
+    let said = "the job asked for allow-list and this agent's ceiling is none";
+    let staged = runtime.stage(&wired(&node, "r1-lone")).map(|id| id.0);
+    assert_eq!(staged.map_err(|why| why.to_string()), Err(said.to_owned()));
+    assert!(nothing_left(&node, "r1-lone"));
+    assert!(runtime.list_labelled().expect("listed").is_empty());
+    let refused = runtime
+        .create_and_start(&wired(&node, "r2-lone"))
+        .expect_err("no egress");
+    assert_eq!(refused.to_string(), said);
+    assert_eq!(asks(&node, "r2-lone"), 0);
+    assert!(nothing_left(&node, "r2-lone"));
+}
+
+/// Proves each run is wired at the level its job was admitted at: an `allow-list` run and an
+/// `open` run are attached once each, with their own level, and both are released at their
+/// removal. Catches a runtime that wires every run as an allow-list one (an open job would
+/// be held to the list) or the reverse.
+#[test]
+fn each_run_is_wired_at_its_own_level() {
+    let node = Node::new("egress-levels");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let listed = runtime
+        .create_and_start(&wired(&node, "r1-listed"))
+        .expect("started");
+    let spec = RunSpec {
+        network: JobNetwork::Open,
+        ..node.spec("r2-open")
+    };
+    let wide = runtime.create_and_start(&spec).expect("started");
+    assert_eq!(
+        *seen.levels.lock().expect("levels"),
+        [JobNetwork::AllowList, JobNetwork::Open]
+    );
+    for id in [&listed, &wide] {
+        runtime.remove(id).expect("removed");
+    }
+    let calls = seen.taken();
+    assert_eq!(calls.iter().filter(|c| c.starts_with("attach")).count(), 2);
+    assert_eq!(calls.iter().filter(|c| c.starts_with("release")).count(), 2);
+}
+
+/// Proves a run's declared ports reach the wiring: a run admitted with the ports `8080 -> 80`
+/// and `9000 -> 9001` is attached with exactly those, in its own call, and a run with none
+/// is attached with none. Catches a runtime that drops the ports between the start and the
+/// attach (the job would run with no forward, unreachable on the ports it declared).
+#[test]
+fn a_runs_declared_ports_reach_its_attach() {
+    let node = Node::new("egress-ports");
+    let seen = Seen::new(&node);
+    let mut runtime = open(&node, port(&seen), impatient());
+    let declared = vec![
+        PortMap {
+            host: 8080,
+            container: 80,
+        },
+        PortMap {
+            host: 9000,
+            container: 9001,
+        },
+    ];
+    let spec = RunSpec {
+        ports: declared.clone(),
+        ..wired(&node, "r1-ports")
+    };
+    let forwarded = runtime.create_and_start(&spec).expect("started");
+    let bare = runtime
+        .create_and_start(&wired(&node, "r2-bare"))
+        .expect("started");
+    assert_eq!(*seen.ports.lock().expect("ports"), [declared, Vec::new()]);
+    for id in [&forwarded, &bare] {
+        runtime.remove(id).expect("removed");
+    }
 }

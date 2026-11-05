@@ -29,10 +29,8 @@ use std::fs;
 use js_lease::{
     AcquireError, Booking, Boot, LeaseState, LeaseTable, ManualClock, Timestamp, read_bookings,
 };
-use js_pool_static::{HostBook, SeatError};
-use js_provider::{
-    Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
+use js_provider::{HostBook, SeatError};
+use js_provider::{HostCapacity, Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{Admission, ClassId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
 
 use crate::support::{Scratch, clock, fake, gpu_host_request, host, open, request, secs, settings};
@@ -102,12 +100,9 @@ impl Sharing {
     }
 }
 
-impl Provider for Sharing {
+impl Pool for Sharing {
     fn id(&self) -> ProviderId {
         ProviderId::new("sharing").unwrap()
-    }
-    fn flavour(&self) -> Flavour {
-        Flavour::Delegated
     }
     fn classes(&self) -> Vec<ResourceClass> {
         vec![ResourceClass::whole_node(), sharing()]

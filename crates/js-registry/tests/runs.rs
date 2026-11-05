@@ -8,7 +8,7 @@ use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Limits, Mount, Outcome,
     Phase, RunResult, limits, refusal,
 };
-use js_provider::{Provider, RefusalCode, StartAck};
+use js_provider::{Pool, RefusalCode, StartAck};
 use js_registry::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, PoolConfig, RunRefusal, RunState, RunView};
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 use js_usage::ProfileKey;
@@ -38,6 +38,11 @@ fn job(run: &str, cpu: u64) -> JobSpec {
         valid_for_ms: 0,
         bundle: None,
         native: None,
+        network: Default::default(),
+        ports: Vec::new(),
+        run: None,
+        os: None,
+        arch: None,
     }
 }
 
@@ -89,6 +94,8 @@ fn words(reply: &HeartbeatReply) -> Vec<String> {
             Command::Start(spec) => format!("start {}", spec.run_id),
             Command::Stop { run_id } => format!("stop {run_id}"),
             Command::Cancel { run_id } => format!("cancel {run_id}"),
+            Command::JobStart(spec) => format!("job_start {}", spec.job_id),
+            Command::JobStop { job_id } => format!("job_stop {job_id}"),
             Command::Unknown => "unknown".into(),
         })
         .collect()

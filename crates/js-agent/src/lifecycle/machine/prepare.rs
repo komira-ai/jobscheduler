@@ -13,6 +13,7 @@ impl Lifecycle {
     /// `failed_to_start`; otherwise it waits on.
     pub(super) fn advance(&mut self, index: usize, events: &mut Vec<Event>) {
         let job = &mut self.jobs[index];
+        let keyed = job.keyed;
         let Stage::Preparing(waiting) = &mut job.stage else {
             return;
         };
@@ -33,15 +34,16 @@ impl Lifecycle {
                 let waiting = (**waiting).clone();
                 let Waiting {
                     spec,
+                    env,
                     mounts,
                     slot,
                     booked,
                     lease_end_ms,
                     ..
                 } = waiting;
-                let started = self.begin(&spec, mounts, slot, booked, events);
+                let started = self.begin((&spec, keyed), &env, mounts, slot, booked, events);
                 let at = (Some(index), lease_end_ms);
-                self.settle(&spec, started, (slot, booked), at, events);
+                self.settle((&spec, keyed), started, (slot, booked), at, events);
             }
             Prepared::Failed(why) => {
                 let (spec, slot, booked, lease_end_ms) = (
@@ -52,7 +54,7 @@ impl Lifecycle {
                 );
                 let failure = runtime_failure(&why);
                 let at = (Some(index), lease_end_ms);
-                self.settle(&spec, Err(failure), (slot, booked), at, events);
+                self.settle((&spec, keyed), Err(failure), (slot, booked), at, events);
             }
         }
     }

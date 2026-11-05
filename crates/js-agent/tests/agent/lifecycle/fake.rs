@@ -8,10 +8,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, Exit, Finished, Found, Prepared, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, label,
+    CheckFinding, CheckHook, Clock, Exit, Finished, Found, NativeRefusal, Prepared, RunHandle,
+    RunSpec, Runtime, RuntimeError, Status, Ticket, label,
 };
-use js_agent_wire::LogTail;
+use js_agent_wire::{LogTail, NetworkCeiling};
 
 /// A clock that moves only when a test says so. Clones share one reading.
 #[derive(Clone, Default)]
@@ -83,6 +83,8 @@ struct State {
     generation: u64,
     /// Whether the runtime cannot use a GPU (`supports_gpus` says so).
     gpus_off: bool,
+    /// Whether the runtime carries no job start's environment (`check_env` refuses one).
+    env_off: bool,
     /// The exit code of a container that handles SIGTERM, by run id: a stop ends it with
     /// that code instead of the kill's 137.
     term_exits: BTreeMap<String, i32>,
@@ -91,6 +93,10 @@ struct State {
     lease_root: Option<PathBuf>,
     /// Whether the directory it names has no name to make it by.
     lease_unnamable: bool,
+    /// What `network_ceiling` answers; `none` by default, as the trait's default.
+    ceiling: NetworkCeiling,
+    /// How many times `network_ceiling` was asked.
+    ceiling_asks: u32,
 }
 
 /// Where a scripted pull stands.
@@ -130,6 +136,12 @@ impl FakeRuntime {
     pub fn without_gpus(self) -> Self {
         self.state.borrow_mut().gpus_off = true;
         self
+    }
+
+    /// From now on the runtime carries no job start's environment, as the Mac runtime: its
+    /// `check_env` answers a non-empty one `env-unsupported`.
+    pub fn refuse_env(&self) {
+        self.state.borrow_mut().env_off = true;
     }
 
     /// The container of `run_id` handles SIGTERM: a stop ends it with `code` (the kill of a
@@ -174,10 +186,20 @@ impl FakeRuntime {
             .insert(run_id.to_owned(), tail);
     }
 
-    /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs` or
-    /// `list`) fail; `u32::MAX` for as long as the test wants.
+    /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove`, `logs`,
+    /// `list` or `egress`, the egress check) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// The network ceiling the runtime answers (`Runtime::network_ceiling`).
+    pub fn set_ceiling(&self, ceiling: NetworkCeiling) {
+        self.state.borrow_mut().ceiling = ceiling;
+    }
+
+    /// How many times the network ceiling was asked for.
+    pub fn ceiling_asks(&self) -> u32 {
+        self.state.borrow().ceiling_asks
     }
 
     /// Whether the runtime says it puts every container in a control group the agent can
@@ -361,6 +383,14 @@ impl FakeRuntime {
         self.state.borrow().stops.clone()
     }
 
+    /// Whether the container of `run_id` was started and has not exited: a job's one write
+    /// to its store succeeds only then.
+    pub fn running(&self, run_id: &str) -> bool {
+        let state = self.state.borrow();
+        let mut live = state.containers.values().filter(|c| c.started);
+        live.any(|c| c.run_id == run_id && c.exit.is_none())
+    }
+
     /// Whether the container of `run_id` is gone.
     pub fn gone(&self, run_id: &str) -> bool {
         let state = self.state.borrow();
@@ -380,6 +410,19 @@ impl FakeRuntime {
 }
 
 impl Runtime for FakeRuntime {
+    fn network_ceiling(&self) -> NetworkCeiling {
+        let mut state = self.state.borrow_mut();
+        state.ceiling_asks += 1;
+        state.ceiling.clone()
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        match self.fails("egress") {
+            true => Err(err("egress")),
+            false => Ok(()),
+        }
+    }
+
     fn lease_dir(&self, run_id: &str) -> Option<PathBuf> {
         let state = self.state.borrow();
         if state.lease_unnamable {
@@ -523,6 +566,16 @@ impl Runtime for FakeRuntime {
 
     fn places_in_cgroup(&self) -> bool {
         self.state.borrow().places
+    }
+
+    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
+        match env.is_empty() || !self.state.borrow().env_off {
+            true => Ok(()),
+            false => Err(NativeRefusal {
+                code: js_agent_wire::refusal::ENV_UNSUPPORTED,
+                why: "this runtime carries no environment".to_owned(),
+            }),
+        }
     }
 
     fn supports_gpus(&self) -> bool {

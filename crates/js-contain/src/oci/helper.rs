@@ -40,7 +40,10 @@ use crate::subids::DaemonIds;
 /// `<binary> <unpack> <stage> <blobs> <layer>...`: it applies the layer files of `blobs`,
 /// in order, into `stage/`[`image::ROOTFS`](super::image::ROOTFS). Both are implemented
 /// here ([`crate::modes`]); the embedding process's `main` calls [`crate::modes::dispatch`]
-/// with the same value first.
+/// with the same value first. The supervise mode is not run in a helper container but on the
+/// host, by [`Oci::start_supervised`](super::Oci::start_supervised), as
+/// `<daemon> <supervise> <crun> <lease dir> <name> <file cap> <tail bytes> <drain grace ms>`
+/// ([`super::supervise`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelperModes {
     /// The argument that selects the give mode.
@@ -50,6 +53,9 @@ pub struct HelperModes {
     pub whole: String,
     /// The argument that selects the unpack mode.
     pub unpack: String,
+    /// The argument that selects the supervise mode, which runs one container to its end and
+    /// writes its exit record ([`super::supervise`]).
+    pub supervise: String,
     /// Where the host binary is bound read-only inside a helper: an absolute path whose
     /// parent directory the helper root gets a mount point for.
     pub binary: String,
@@ -61,6 +67,7 @@ impl Default for HelperModes {
             give: "__give-dirs".to_owned(),
             whole: "--whole".to_owned(),
             unpack: "__unpack-layers".to_owned(),
+            supervise: "__supervise-run".to_owned(),
             binary: "/js/daemon".to_owned(),
         }
     }

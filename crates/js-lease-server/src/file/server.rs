@@ -5,10 +5,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
+use js_jobs::Retention;
 use js_lease::Settings;
 
 use super::{Load, Section};
-use crate::config::{BootMode, Limits, Placement, TlsFiles, Token, parse_token};
+use crate::config::{
+    BootMode, CpuSlack, JOB_RETENTION_MUST, Limits, Placement, TlsFiles, Token,
+    parse_job_retention, parse_token,
+};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
 use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
@@ -39,6 +43,7 @@ const SERVER_KEYS: &[&str] = &[
     "require_host_credential",
     "placement",
     "estimate_feed",
+    "cpu_slack",
     "usage_db",
     "usage_off",
     "profile_store_bytes",
@@ -48,6 +53,7 @@ const SERVER_KEYS: &[&str] = &[
     "max_spend_per_day_total",
     "max_spend_per_month_total",
     "max_spend_since_go_total",
+    "job_retention",
 ];
 
 /// What the `[server]` table says.
@@ -70,6 +76,8 @@ pub(crate) struct Server {
     /// The totals over every pool of the server.
     pub(crate) totals: js_scaler::Totals,
     pub(crate) alerts: Option<AlertKeys>,
+    /// `job_retention`: how long an ended job is kept; seven days unless the file sets it.
+    pub(crate) job_retention: Retention,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -97,6 +105,7 @@ pub(crate) struct AgentKeys {
     require_host_credential: Option<bool>,
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
+    cpu_slack: Option<CpuSlack>,
 }
 
 impl AgentKeys {
@@ -111,6 +120,7 @@ impl AgentKeys {
             ),
             ("placement", self.placement.is_some()),
             ("estimate_feed", self.estimate_feed.is_some()),
+            ("cpu_slack", self.cpu_slack.is_some()),
         ];
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
@@ -139,6 +149,12 @@ impl AgentKeys {
     /// says so.
     pub(crate) fn estimate_feed(&self) -> bool {
         self.estimate_feed.unwrap_or(false)
+    }
+
+    /// The CPU slack the file gives, if it gives one; the placement decides what an
+    /// absent one means ([`Placement::slack`]).
+    pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
+        self.cpu_slack
     }
 }
 
@@ -191,6 +207,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         require_host_credential: s.boolean("require_host_credential")?,
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
+        cpu_slack: read_cpu_slack(&mut s)?,
     };
     let usage = read_usage(&mut s)?;
     // The rule of `--estimate-feed`: with usage off there is nothing to estimate from.
@@ -199,6 +216,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     }
     let totals = super::budget::read_totals(&mut s)?;
     let alerts = read_alerts(&mut s)?;
+    let job_retention = read_job_retention(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -226,7 +244,17 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         usage,
         totals,
         alerts,
+        job_retention,
     })
+}
+
+/// The `job_retention` key, read as `--job-retention` is; [`Retention::DEFAULT`] when the
+/// file does not give it. A refusal says what the value must be and does not repeat it.
+fn read_job_retention(s: &mut Section) -> Result<Retention, StartupError> {
+    let Some(text) = s.string("job_retention")? else {
+        return Ok(Retention::DEFAULT);
+    };
+    parse_job_retention(&text).map_err(|_| s.fail("job_retention", JOB_RETENTION_MUST))
 }
 
 /// The alert keys. The token file and the repeat period mean something only with the URL.
@@ -272,6 +300,20 @@ fn read_placement(s: &mut Section) -> Result<Option<Placement>, StartupError> {
         _ => Err(s.fail("placement", "must be registry or js-sched")),
     };
     text.map(named).transpose()
+}
+
+/// `cpu_slack`, the key of `--cpu-slack`: a number written as the multiplier, such as
+/// `1.1`, read as the flag reads its text. A string, even one that spells a number, is
+/// refused, as every other number of the file is.
+fn read_cpu_slack(s: &mut Section) -> Result<Option<CpuSlack>, StartupError> {
+    let text = match s.map.remove("cpu_slack") {
+        None => return Ok(None),
+        Some(toml::Value::Float(number)) => number.to_string(),
+        Some(toml::Value::Integer(number)) => number.to_string(),
+        Some(_) => return Err(s.fail("cpu_slack", "must be a number such as 1.1")),
+    };
+    let slack = CpuSlack::parse(&text).map_err(|err| s.fail("cpu_slack", &err.to_string()))?;
+    Ok(Some(slack))
 }
 
 /// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`

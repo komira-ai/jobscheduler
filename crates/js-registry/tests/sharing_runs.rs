@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, HeldRun, HeldState, Hello, JobSpec};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_pool_static::Candidate;
+use js_provider::Candidate;
 use js_provider::{StartAck, StartSpec};
 use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
 use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};
@@ -103,7 +103,7 @@ fn host_with_two_leases(came: Came) -> (Fixture, u64) {
     let epoch = fx.hello(&host_hello(), &cred("t")).unwrap().epoch;
     if let Came::Started = came {
         for n in 1..=2 {
-            let ack = js_provider::Provider::start(&mut provider, spec_of(n));
+            let ack = js_provider::Pool::start(&mut provider, spec_of(n));
             assert_eq!(ack, StartAck::Started { host: host("a") });
         }
     }

@@ -18,6 +18,14 @@ name = "js-update-hook-fake"
 path = "tests/bin/update_hook_fake.rs"
 test = false
 
+# The launch time of a `crun` job with egress mode none and with an allow-list, through the
+# agent's own `CrunRuntime` (tests/launch_measure), for the manual workflow
+# js-launch-measure.yml. A measurement, not a test. Not shipped.
+[[bin]]
+name = "js-launch-measure"
+path = "tests/bin/launch_measure.rs"
+test = false
+
 [dependencies]
 js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
@@ -57,7 +65,6 @@ js-contain = { path = "../js-contain" }
 [dev-dependencies]
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
-js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }

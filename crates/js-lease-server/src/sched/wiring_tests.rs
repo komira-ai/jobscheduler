@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use js_agent_wire::Hello;
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
 use js_types::{HostId, LeaseId, Request, ResourceClass, Resources};
@@ -59,10 +59,25 @@ pub(super) fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
 /// The configuration of a server with agent registration over the agent pool `pool` and
 /// `extra` flags.
 pub(super) fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
+    config_booted(dir, pool, extra, "initialise")
+}
+
+/// [`config_of`], booting as `boot` says (`initialise` or `resume`).
+pub(super) fn config_booted(dir: &Path, pool: &str, extra: &[&str], boot: &str) -> Config {
+    config_result(dir, pool, extra, boot).unwrap()
+}
+
+/// [`config_booted`], or the refusal of the configuration.
+pub(super) fn config_result(
+    dir: &Path,
+    pool: &str,
+    extra: &[&str],
+    boot: &str,
+) -> Result<Config, crate::StartupError> {
     let flags = [
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("leases.toml").into_os_string()),
-        ("--boot", "initialise".into()),
+        ("--boot", boot.into()),
         (
             "--pool-config",
             write(dir, "pool.toml", js_pool_static::EXAMPLE_CONFIG, 0o644),
@@ -83,7 +98,7 @@ pub(super) fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
         args.push(value);
     }
     args.extend(extra.iter().map(OsString::from));
-    Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
+    Config::from_cli(Cli::try_parse_from(args).unwrap())
 }
 
 pub(super) fn hello(host: &str) -> Hello {
