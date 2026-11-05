@@ -29,7 +29,7 @@ use js_proto::v1::{
 use js_state::fake::{Fake, Flaw};
 use js_state::recording::RecordingStore;
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{ManualClock, Store};
+use js_state::{ManualClock, Store, StoreTime};
 use js_testkit::dir::TestDir;
 use js_types::{HostId, ImageDigestRef, Labels, Resources};
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -400,9 +400,9 @@ fn exit_3() -> JobEnd {
     }
 }
 
-/// The result of a job queued at `queued`, placed and started at `started` and ended at
-/// `ended` (milliseconds) with [`exit_3`]: both tails cut at the next character boundary.
-fn result_of_exit_3(queued: u64, started: u64, ended: u64) -> v1::JobResult {
+/// The result of a job with `times` that ended with [`exit_3`]: both tails cut at the next
+/// character boundary.
+fn result_of_exit_3(times: v1::JobTimes) -> v1::JobResult {
     v1::JobResult {
         state: v1::JobState::Failed.into(),
         exit_code: Some(3),
@@ -410,12 +410,7 @@ fn result_of_exit_3(queued: u64, started: u64, ended: u64) -> v1::JobResult {
         stdout_tail: "a".repeat(8191).into_bytes(),
         stderr_tail: "日".repeat(2730).into_bytes(),
         truncated: true,
-        times: Some(v1::JobTimes {
-            queued_at_ms: queued,
-            placed_at_ms: Some(started),
-            started_at_ms: Some(started),
-            ended_at_ms: Some(ended),
-        }),
+        times: Some(times),
         usage: Some(v1::ResourceUsage {
             cpu_usec: BIG,
             peak_memory_bytes: BIG,
@@ -425,6 +420,26 @@ fn result_of_exit_3(queued: u64, started: u64, ended: u64) -> v1::JobResult {
     }
 }
 
+/// The times the row of the job `text` holds, in milliseconds since the Unix epoch. The fake
+/// store moves its clock on each commit (the cost of a sync), so a test reads the instants
+/// the store recorded rather than assume them.
+pub(super) fn times_of(jobs: &ServerJobs, text: &str) -> v1::JobTimes {
+    let job = jobs.get_job(&id(text)).expect("read").expect("a row");
+    let ms = |time: StoreTime| u64::try_from(time.as_duration().as_millis()).expect("fits");
+    v1::JobTimes {
+        queued_at_ms: ms(job.submitted_at),
+        placed_at_ms: job.placed_at.map(ms),
+        started_at_ms: job.started_at.map(ms),
+        ended_at_ms: job.ended_at.map(ms),
+    }
+}
+
+/// Whether `ms` falls in the second that begins `s` seconds after [`START_MS`].
+fn in_second(ms: Option<u64>, s: u64) -> bool {
+    let start = START_MS + s * 1000;
+    ms.is_some_and(|ms| (start..start + 1000).contains(&ms))
+}
+
 /// The `GetLogs` answer of a job in `state` that has no result: empty tails, not cut.
 fn no_tails(state: v1::JobState) -> GetLogsResponse {
     GetLogsResponse {
@@ -432,6 +447,9 @@ fn no_tails(state: v1::JobState) -> GetLogsResponse {
         ..GetLogsResponse::default()
     }
 }
+
+/// A step that moves a job on: placing, starting or running it.
+pub(super) type Step = fn(&ServerJobs, &JobId);
 
 /// The (code, message) of a refusal.
 fn refusal<T>(answer: Result<T, Status>) -> (Code, String) {
@@ -473,11 +491,15 @@ async fn the_job_is_visible_over_grpc_and_json_identically() {
                 .map(|needs| needs.memory_bytes),
             Some(BIG)
         );
-        let queued = v1::JobTimes {
-            queued_at_ms: START_MS,
-            ..v1::JobTimes::default()
-        };
-        assert_eq!(job.times, Some(queued), "{name}");
+        let recorded = times_of(jobs, "visible-1");
+        assert_eq!(job.times, Some(recorded), "{name}");
+        assert!(in_second(Some(recorded.queued_at_ms), 0), "{recorded:?}");
+        let later = (
+            recorded.placed_at_ms,
+            recorded.started_at_ms,
+            recorded.ended_at_ms,
+        );
+        assert_eq!(later, (None, None, None), "{name}");
         let listed = rig.list(ListJobsRequest::default()).await.expect("a list");
         assert_eq!(
             (listed.jobs, listed.next_page_token),
@@ -495,14 +517,12 @@ async fn the_job_is_visible_over_grpc_and_json_identically() {
         let job = rig.get_job("visible-1").await.expect("the job is read");
         assert_eq!(job.state, i32::from(v1::JobState::Running), "{name}");
         assert_eq!(job.host_id, "host-a", "{name}");
-        let started = START_MS + 1000;
-        let times = v1::JobTimes {
-            queued_at_ms: START_MS,
-            placed_at_ms: Some(started),
-            started_at_ms: Some(started),
-            ended_at_ms: None,
-        };
-        assert_eq!(job.times, Some(times));
+        let running = times_of(jobs, "visible-1");
+        assert_eq!(job.times, Some(running), "{name}");
+        assert_eq!(running.queued_at_ms, recorded.queued_at_ms, "{name}");
+        assert!(in_second(running.placed_at_ms, 1), "{running:?}");
+        assert!(in_second(running.started_at_ms, 1), "{running:?}");
+        assert_eq!(running.ended_at_ms, None, "{name}");
         let listed = rig.list(ListJobsRequest::default()).await.expect("a list");
         assert_eq!(listed.jobs, vec![job]);
         assert_eq!(refusal(rig.get_result("visible-1").await), not_finished);
@@ -511,12 +531,13 @@ async fn the_job_is_visible_over_grpc_and_json_identically() {
 
         rig.advance(Duration::from_secs(1));
         jobs.end_job(&id, exit_3()).expect("the job ends");
-        let ended = START_MS + 2000;
+        let ended = times_of(jobs, "visible-1");
         let job = rig.get_job("visible-1").await.expect("the job is read");
         assert_eq!(job.state, i32::from(v1::JobState::Failed), "{name}");
-        assert_eq!(job.times.and_then(|times| times.ended_at_ms), Some(ended));
+        assert_eq!(job.times, Some(ended), "{name}");
+        assert!(in_second(ended.ended_at_ms, 2), "{ended:?}");
         let result = rig.get_result("visible-1").await.expect("the result");
-        assert_eq!(result, result_of_exit_3(START_MS, started, ended), "{name}");
+        assert_eq!(result, result_of_exit_3(ended), "{name}");
         let logs = rig.get_logs("visible-1").await.expect("logs");
         let tails = GetLogsResponse {
             state: v1::JobState::Failed.into(),
@@ -566,7 +587,14 @@ async fn a_result_is_readable_after_the_job_ends() {
 
     let rig = Rig::over(over_sqlite(&dir, &clock), Arc::clone(&clock)).await;
     let ended = START_MS + 5000;
-    let expected = result_of_exit_3(START_MS, START_MS, ended);
+    let times = v1::JobTimes {
+        queued_at_ms: START_MS,
+        placed_at_ms: Some(START_MS),
+        started_at_ms: Some(START_MS),
+        ended_at_ms: Some(ended),
+    };
+    assert_eq!(times_of(&rig.jobs, "result-1"), times);
+    let expected = result_of_exit_3(times);
     assert_eq!(rig.get_result("result-1").await.expect("read"), expected);
     let retention = rig.jobs.retention().window();
     rig.advance(retention - Duration::from_secs(1));
@@ -603,7 +631,7 @@ async fn get_result_of_a_running_job_is_not_finished() {
     let jobs = &rig.jobs;
     let id = queue(jobs, "live-1", spec(&[]));
     let not_finished = (Code::FailedPrecondition, "not-finished".to_owned());
-    let steps: [(v1::JobState, fn(&ServerJobs, &JobId)); 4] = [
+    let steps: [(v1::JobState, Step); 4] = [
         (v1::JobState::Queued, |_, _| {}),
         (v1::JobState::Placed, place),
         (v1::JobState::Starting, start),

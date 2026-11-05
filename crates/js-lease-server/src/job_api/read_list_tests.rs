@@ -10,7 +10,7 @@ use js_proto::v1::{self, ListJobsRequest, ListJobsResponse};
 use tonic::Code;
 
 use super::read;
-use super::read_tests::{Rig, START_MS, clock, over_fake, place, queue, run, running, spec, start};
+use super::read_tests::{Rig, clock, over_fake, place, queue, run, running, spec, start, times_of};
 use crate::job_store::ServerJobs;
 
 /// The ids of a page's jobs.
@@ -68,7 +68,7 @@ fn exited(code: i32) -> JobEnd {
     }
 }
 
-/// Records eight jobs, one a second from [`START_MS`], whose ids do not sort in the order
+/// Records eight jobs, one a second from the clock's start, whose ids do not sort in the order
 /// they were made: (id, made at second, state, labels)
 ///
 /// | id | s | state | labels |
@@ -112,9 +112,11 @@ fn eight(rig: &Rig) {
     end(jobs, &j4, JobEnd::Lost);
 }
 
-/// The milliseconds of second `s` after [`START_MS`].
-fn at(s: u64) -> u64 {
-    START_MS + s * 1000
+/// When the job `text` of [`eight`] was queued, as its row holds it, in milliseconds. The
+/// fake store's clock moves on each commit, so the windows are set from the recorded
+/// instants: the jobs are a second apart, and a commit moves the clock by milliseconds.
+fn queued(rig: &Rig, text: &str) -> u64 {
+    times_of(&rig.jobs, text).queued_at_ms
 }
 
 /// Asserts, over eight jobs across states, labels and times ([`eight`]), that `ListJobs`
@@ -179,8 +181,8 @@ async fn list_filters_by_state_label_and_time() {
     assert!(rig.list(absent).await.expect("a list").jobs.is_empty());
 
     let window = ListJobsRequest {
-        queued_after_ms: Some(at(3)),
-        queued_before_ms: Some(at(6)),
+        queued_after_ms: Some(queued(&rig, "j-1")),
+        queued_before_ms: Some(queued(&rig, "j-6")),
         ..ListJobsRequest::default()
     };
     assert_eq!(
@@ -188,18 +190,18 @@ async fn list_filters_by_state_label_and_time() {
         ["j-1", "j-3", "j-7"]
     );
     let after = ListJobsRequest {
-        queued_after_ms: Some(at(6)),
+        queued_after_ms: Some(queued(&rig, "j-6")),
         ..ListJobsRequest::default()
     };
     assert_eq!(ids(&rig.list(after).await.expect("a list")), ["j-4", "j-6"]);
     let before = ListJobsRequest {
-        queued_before_ms: Some(at(1)),
+        queued_before_ms: Some(queued(&rig, "j-2")),
         ..ListJobsRequest::default()
     };
     assert_eq!(ids(&rig.list(before).await.expect("a list")), ["j-5"]);
     let between = ListJobsRequest {
-        queued_after_ms: Some(at(1) + 1),
-        queued_before_ms: Some(at(2)),
+        queued_after_ms: Some(queued(&rig, "j-2") + 1),
+        queued_before_ms: Some(queued(&rig, "j-8")),
         ..ListJobsRequest::default()
     };
     assert!(rig.list(between).await.expect("a list").jobs.is_empty());
@@ -207,7 +209,7 @@ async fn list_filters_by_state_label_and_time() {
     let failed_ml = filtered(&[v1::JobState::Failed], &[("team", "ml")]);
     assert_eq!(ids(&rig.list(failed_ml).await.expect("a list")), ["j-1"]);
     let late = ListJobsRequest {
-        queued_after_ms: Some(at(2)),
+        queued_after_ms: Some(queued(&rig, "j-8")),
         ..filtered(&[v1::JobState::Running, v1::JobState::Failed], &[])
     };
     assert_eq!(ids(&rig.list(late).await.expect("a list")), ["j-1"]);

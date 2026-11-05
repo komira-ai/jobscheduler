@@ -13,7 +13,7 @@ use js_proto::v1;
 use js_types::{ExecMode, Resources};
 
 use super::read_tests::{
-    BIG, Rig, START_MS, clock, id, image, over_fake, place, queue, run, running, spec, start,
+    BIG, Rig, Step, clock, id, image, over_fake, place, queue, run, running, spec, start, times_of,
 };
 use crate::job_store::ServerJobs;
 
@@ -104,10 +104,7 @@ async fn get_job_shows_every_field_of_the_record() {
         start_failure: v1::StartFailureCode::Unspecified.into(),
         start_failure_detail: String::new(),
         host_id: String::new(),
-        times: Some(v1::JobTimes {
-            queued_at_ms: START_MS,
-            ..v1::JobTimes::default()
-        }),
+        times: Some(times_of(jobs, "full-1")),
         host_silent_since_ms: None,
         cancel_requested: false,
     };
@@ -196,7 +193,7 @@ enum Before {
 /// The job `text`, taken to `before`.
 fn taken(jobs: &ServerJobs, text: &str, before: Before) -> JobId {
     let job = queue(jobs, text, spec(&[]));
-    let steps: [fn(&ServerJobs, &JobId); 3] = [place, start, run];
+    let steps: [Step; 3] = [place, start, run];
     let count = match before {
         Before::Queued => 0,
         Before::Placed => 1,
@@ -323,14 +320,14 @@ async fn every_way_a_job_ends_is_shown() {
             "{text}"
         );
         let result = rig.get_result(text).await.expect("the result");
-        let times = shown.times.clone();
+        let times = shown.times;
         let expected = match reported {
             Some((exit_code, reason)) => v1::JobResult {
                 state: state.into(),
                 exit_code,
                 reason: reason.into(),
                 truncated: false,
-                times: result.times.clone(),
+                times: result.times,
                 usage: None,
                 ..v1::JobResult::default()
             },
