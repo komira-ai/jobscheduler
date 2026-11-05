@@ -1647,6 +1647,7 @@ dependencies = [
 name = "js-sched"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
  "js-caps",
  "js-elastic",
  "js-sim",
@@ -1688,6 +1689,7 @@ name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "js-agent",
  "js-agent-wire",
  "js-conformance",
  "js-lease",

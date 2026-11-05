@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The real agent lifecycle, which a real agent node runs (src/agent/real.rs).
+js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-conformance = { path = "../js-conformance" }
 js-lease = { path = "../js-lease" }

@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-sizing = { path = "../js-sizing" }

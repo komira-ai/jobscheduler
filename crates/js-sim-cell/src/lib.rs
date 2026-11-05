@@ -1,5 +1,5 @@
 //! The whole-cell simulation of this repository, built in parts: the real lease server
-//! under the [`js_sim`] kernel, many fake agents and a client driver, with properties
+//! under the [`js_sim`] kernel, many fake agents (or a few real ones) and a client driver, with properties
 //! checked after every step, and a builder in which a scenario reads top to bottom.
 //!
 //! How to run, write and read a scenario, and what the cell does not model, is in
@@ -25,9 +25,11 @@
 //!   recorded twice ([`Invariant::NoResultLost`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
-//! - [`agent`]: the agent node ([`AgentNode`]), the conformance suite's in-process agent
-//!   behind the real wire, which writes what it launches and completes and the verdicts
-//!   it reads into the cell's [`Ledger`] and counts what happened to it ([`Counters`]).
+//! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
+//!   launches and completes, and the verdicts it reads, into the cell's [`Ledger`] and counts what happened to it
+//!   ([`Counters`]). Its agent is one of two kinds ([`AgentKind`]): the conformance
+//!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
+//!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
 //!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]).
@@ -51,6 +53,9 @@
 //!   family (`tests/faults.rs`) runs agents that die and return or never return,
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
 //!   restart of the server and a forgotten host, each over sixteen seeds.
+//! - [`agreement`]: one scenario run with every agent a fake and again with every agent
+//!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
+//!   is held to the real agent.
 //! - [`replay`]: a seed run to its end, run again with its trace kept when it fails, and the
 //!   [`FailureReport`] that names the scenario, the seed, the trace hash, the violation
 //!   and the last trace lines.
@@ -70,6 +75,7 @@
 
 pub mod actions;
 pub mod agent;
+pub mod agreement;
 pub mod bus;
 pub mod cell;
 mod counters;
@@ -85,7 +91,8 @@ mod text;
 pub mod work;
 
 pub use actions::Action;
-pub use agent::{AgentNode, AgentSpec, SIM_RUN_IMAGE};
+pub use agent::{AgentKind, AgentNode, AgentSpec, SIM_RUN_IMAGE};
+pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};

@@ -21,7 +21,9 @@ use js_registry::{
 use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
-use js_types::{ExecMode, HostId, MemoryHeadroom, RequestId, Requirements, Resources, Shape};
+use js_types::{
+    ExecMode, HostId, JobNetwork, MemoryHeadroom, RequestId, Requirements, Resources, Shape,
+};
 
 /// The wall time every test clock starts at.
 pub const START: u64 = 1_000_000_000_000;
@@ -454,6 +456,8 @@ pub fn request(id: &str) -> Waiting {
             arch: None,
             isa_level: None,
             exec: None,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         },
         since: Timestamp::from_millis(START),
         reserved: None,

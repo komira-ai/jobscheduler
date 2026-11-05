@@ -57,7 +57,13 @@ What is simulated:
   dropped message is a connection reset, a delay is a slow network and a partition is a
   cut link. Duplication and reordering are off unless a scenario turns them on.
 - the agents: the conformance suite's in-process agent (`FakeAgent`) behind the real
-  wire. It runs nothing; a run ends by itself after the time its `Work` names.
+  wire, the agent a cell runs by the hundred. It runs nothing; a run ends by itself after
+  the time its `Work` names. A host can instead run the real agent lifecycle of
+  `js-agent` (`Scenario::real_hosts`, `AgentKind::Real`) over an in-memory container
+  runtime (`js_conformance::agent::memory`), behind the same wire and session code: its
+  heartbeats are built by the lifecycle and every reply is handed to it, and its runs end
+  the same way. It is for a handful of hosts, since it writes its held list to disk at
+  every step, and the agreement family holds the fake to it.
 - time: virtual. The server reads a manual clock that the node sets to the kernel's time
   before every input. Usage recording, whose store reads the system's clock, is off.
 - the clients: `LeaseFront` turns each unit of `Work` into the calls `js run` makes today
@@ -102,6 +108,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | `builder` | `tests/builder.rs` | The scenario builder and the lease front, each shown to fail when it should. |
 | `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire. |
 | `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server. |
+| `real_agent` | `tests/real_agent.rs` | The real agent node (the lifecycle of `js-agent` over the in-memory runtime) against the same scripted stand-in. |
+| `agreement` | `tests/agreement.rs` | The agreement family: each scenario run with every agent fake and again with every agent real, and the client's outcome of every item compared seed by seed. |
 | `invariants` | `tests/invariants.rs` | Each invariant over hand-built observations, with negative cases it must flag and correct siblings it must not. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
@@ -193,7 +201,8 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
 
 - the world: `.server(ServerSpec::registered_pool(pool, Shape::gpu_host(), count))`,
   `.hosts(pool, count)` for correct agents, `.broken_hosts(pool, count, defect)` for
-  agents that lack a behaviour (a `js_conformance::agent::Defect`), `.bus(faults)` for the
+  agents that lack a behaviour (a `js_conformance::agent::Defect`), `.real_hosts(pool,
+  count)` for hosts running the real agent lifecycle, `.bus(faults)` for the
   bus's faults at the start, `.front(factory)` for a client other than `LeaseFront`, and
   `.scratch(env!("CARGO_TARGET_TMPDIR"))` for the server's files;
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
@@ -350,15 +359,18 @@ agent counts it as `result_resent`, the counter the lossy scenario's witness rea
 
 `crates/js-sim-cell/tests/golden/trace-hashes.txt` pins the trace hash of seeded runs:
 family `js-sim-cell` holds the sixteen seeds of the replay scenario of `tests/replay.rs`,
-family `smoke` the first four seeds of the lossy agent wire, and family `faults` the first
-four seeds of the restart of the server with runs in flight (`tests/cell/server_restart.rs`). A trace hash covers the
+family `smoke` the first four seeds of the lossy agent wire, family `real_agent` the
+first two seeds of the agreement family's world without faults, run with real agents, and
+family `faults` the first four seeds of the restart of the server with runs in flight
+(`tests/cell/server_restart.rs`). A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
 own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 
-`replay`'s tests `pinned_seeds_match_the_golden_file` and
-`the_smoke_scenario_matches_the_golden_file` fail on a moved hash and print the command
+`replay`'s tests `pinned_seeds_match_the_golden_file`,
+`the_smoke_scenario_matches_the_golden_file` and
+`the_real_agent_scenario_matches_the_golden_file` fail on a moved hash and print the command
 that regenerates the lines:
 
 ```sh
@@ -426,3 +438,15 @@ what the server as built and the design both promise (the invariants and every i
 terminal). `a_thirty_second_partition_of_twenty_agents_loses_no_result` and
 `a_forgotten_host_that_comes_back_is_seated_once` in `tests/faults.rs` cover section 7's
 "Result lost" and section 6.3's retention, which are not rows of section 8.
+
+The agreement family (`tests/agreement.rs`, its world in `tests/cell/real_agents.rs`)
+checks every invariant of `Invariant::ALL` on both sides of each comparison, and beyond
+them that each item's terminal is the same with fake and with real agents. It runs five
+situations over eight seeds: no fault, a lossy wire (15% of messages dropped for 300 s,
+witness `result_resent`), two of six agents cut off for 30 s, two agents killed and
+replaced mid-run, and the stale start of `tests/broken_agent.rs` (witness
+`start_after_stop`). It covers no row by itself: it shows that the fake answers as the
+real agent does in the situations of section 7 ("Result lost", "Duplicate start", "Stop
+of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
+containers and retired list died with the agent), so a scenario that pins either row
+with fake agents is held to the real one there.

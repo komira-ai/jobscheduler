@@ -110,7 +110,7 @@ impl Expect {
 }
 
 /// How the item ended, as the client first heard it.
-fn ended(record: &ItemRecord) -> Option<HowEnded> {
+pub(crate) fn ended(record: &ItemRecord) -> Option<HowEnded> {
     let terminal = |event: &ClientEvent| match event {
         ClientEvent::Terminal { how } => Some(*how),
         _ => None,

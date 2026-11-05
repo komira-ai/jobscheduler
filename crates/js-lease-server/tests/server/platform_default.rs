@@ -21,8 +21,8 @@ use js_sched::admission_ever::{
     can_ever_serve,
 };
 use js_types::{
-    Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, LeaseId, Os, ProviderId, Request,
-    Requirements, ResourceClass, Resources, Shape,
+    Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId, Os, ProviderId,
+    Request, Requirements, ResourceClass, Resources, Shape,
 };
 
 /// The capabilities every host of the test pool reports and the pool books.
@@ -157,6 +157,8 @@ fn wanting(cores: u64, gpus: u64) -> Requirements {
         arch: None,
         isa_level: None,
         exec: None,
+        network: JobNetwork::None,
+        host_ports: Vec::new(),
     }
 }
 

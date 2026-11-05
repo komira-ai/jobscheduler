@@ -52,7 +52,7 @@
 //! | operation | transaction |
 //! |---|---|
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
-//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked) |
+//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports) |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
