@@ -245,7 +245,8 @@ fn the_run_loop_stops_at_the_first_violation_and_checks_after_every_step() {
 #[test]
 fn a_server_that_refuses_its_configuration_is_a_failure_to_start() {
     let empty = |setup| {
-        let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), 0);
+        // A burst of one, so the flags parse and the pool file is what is refused.
+        let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), 0).hello_burst(1);
         Cell::new(setup, spec, scratch("empty"), Faults::default())
     };
     match run(SCENARIO, 0, ms(HORIZON_MS), empty) {

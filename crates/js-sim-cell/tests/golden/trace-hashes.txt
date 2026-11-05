@@ -5,3 +5,19 @@
 # command the failing test prints, and justify each changed line in the pull request.
 # A change that only moves code must leave every hash as it is.
 format 1
+js-sim-cell/replay/seed-0 db2f77f77fcf3921a6796854917be73e4abceb13a2fb17f51de33a4a257e2b04
+js-sim-cell/replay/seed-1 ef96f8544bbfd57dd7081dcf363e71c3c22c1aca441bcdbbf7ebe00daaafb8df
+js-sim-cell/replay/seed-10 8e00e5fa6f9616014a31ceee9925f1e6ecda74c61c55d4589645feb029090288
+js-sim-cell/replay/seed-11 c46c9d70e4ec174f92beb25aafaadf061e1b333fadd27de9faf5d93f81e2da13
+js-sim-cell/replay/seed-12 153ba9f7ecc4ad681766f352c41ad5c0b1e05efc253e5207bbdd8aa9de63e995
+js-sim-cell/replay/seed-13 6b7e3a7ff3f51d980dfe931a6047407f2eb7afaeae33cb8c7ac85b2d380dcc64
+js-sim-cell/replay/seed-14 5dbaf1f58c9847637e169f1184a6f2ae582549180461df775d8dde0aa0580592
+js-sim-cell/replay/seed-15 7bd3e9fd34a9b64ac2bfd44be34829307457d5a87af24991d2d819ea45a36a04
+js-sim-cell/replay/seed-2 c2c944ae2d9d3fefa828a24c21425e69829a065fa1da0f53fd6bf89beb89a4ea
+js-sim-cell/replay/seed-3 03e6ab6f1615dafdbebc5ca4ce822447856e2df585fd1b1f4ef47ec21af312d1
+js-sim-cell/replay/seed-4 690934690fe8afad5fbd074de9e909e75851970d244288fa68afdb7d320e42f1
+js-sim-cell/replay/seed-5 aa121e2710fd2c395919e7862f580162c0781ee249ee4e900ecb3ca1ee0e0210
+js-sim-cell/replay/seed-6 39489c2e3674dcec4b63733b94a5ab1cbb0b07f155dd2e54ad591e4571d4cf79
+js-sim-cell/replay/seed-7 a41a04cccdd56d1837bc777204c9509d7f3dca274d504fea6ba4b3a87250d84e
+js-sim-cell/replay/seed-8 dab6e49f7880ff04cfb778e688cf0e8f386c7d19b8e7f240e786d59d6c492eff
+js-sim-cell/replay/seed-9 d87fa405c802e1856275928c13da2eee93ecb8333044f9139e357fa893c86465
