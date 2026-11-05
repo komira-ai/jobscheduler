@@ -1,13 +1,14 @@
 //! The per-job heartbeat against a fake agent, scenario by scenario (design section 5.3 and
 //! section 8, rows 37 and 38): starts resent until listed, unknown and ended jobs told to
-//! stop, a cancel answered by a retired id, a late start after a cancel.
+//! stop, a cancel answered by a retired id, a late start after a cancel, and a queued job
+//! placed by a heartbeat under `--placement js-sched`.
 
 use std::collections::BTreeMap;
 
 use js_agent_wire::{Ack, BookedResources, HeldState, JobStartSpec, Outcome};
-use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState};
+use js_jobs::{AllocationStep, EndReason, JobEnd, JobId, JobState, NewJob};
 
-use super::job_rig::{FakeAgent, image, rig, starts, stops};
+use super::job_rig::{FakeAgent, image, placing_rig, rig, spec, starts, stops};
 use super::*;
 
 /// A placed job's start is in every reply, the same each time, with the allocation's booked
@@ -238,4 +239,44 @@ async fn a_late_start_after_a_cancel_does_not_run() {
     agent.end("job-b", Outcome::Succeeded, Some(0));
     agent.take(&rig.beat(&agent).await.unwrap());
     assert_eq!(agent.launched, ["job-b"]);
+}
+
+/// Under `--placement js-sched`, a heartbeat through the route places a job only queued (no
+/// test places it): after the beat the job is placed on the beating host with its allocation
+/// booked, in the one commit the pass makes; the reply to that beat, built before the pass,
+/// carries no start, and the next beat's reply carries the job's start. Under the registry's
+/// placement the same beat places nothing. It catches a heartbeat that does not run the pass,
+/// a pass that does not commit, and a start sent before the placement is committed.
+#[tokio::test]
+async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
+    let queue = |rig: &super::job_rig::Rig| {
+        let new = NewJob {
+            id: Some(JobId::parse("job-q").unwrap()),
+            spec: spec(),
+            priority: 0,
+        };
+        rig.jobs.insert_queued(new).unwrap().record.id
+    };
+    let mut placing = placing_rig("beat_places");
+    placing.register("host-a", true);
+    let agent = FakeAgent::new("host-a");
+    let id = queue(&placing);
+    let commits = placing.commits();
+    let first = placing.beat(&agent).await.unwrap();
+    assert_eq!(
+        placing.states(&id),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+    assert_eq!(placing.allocation(&id).host.as_str(), "host-a");
+    assert_eq!(placing.commits(), commits + 1);
+    assert_eq!(starts(&first), Vec::new());
+    let second = placing.beat(&agent).await.unwrap();
+    let started: Vec<String> = starts(&second).into_iter().map(|s| s.job_id).collect();
+    assert_eq!(started, ["job-q"]);
+
+    let mut unplaced = rig("beat_places_not", true);
+    unplaced.register("host-a", true);
+    let id = queue(&unplaced);
+    unplaced.beat(&agent).await.unwrap();
+    assert_eq!(unplaced.job(&id).state, JobState::Queued);
 }

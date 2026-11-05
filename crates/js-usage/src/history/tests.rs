@@ -314,6 +314,28 @@ fn a_row_is_written_once_under_its_end_and_id() {
     });
 }
 
+/// Asserts that the two writes a writer puts in its own transaction are the index entry,
+/// naming the row's key, and the row under that key, and that a range reads the row back
+/// once they are committed. It catches writes under another key than `put` uses, or a row
+/// stored in a form the range cannot read.
+#[test]
+fn the_writes_of_a_row_are_its_index_entry_and_the_row_under_its_key() {
+    let first = row(20_000);
+    let [index, stored] = ended_writes(&first);
+    let key = "usage/ended/00000000000000020000/7-123";
+    assert_eq!(
+        index,
+        ("usage/ended-id/7-123".to_owned(), key.as_bytes().to_vec())
+    );
+    assert_eq!(stored, (key.to_owned(), encode(&first)));
+    let store = Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None);
+    let txn = Txn::new()
+        .put(index.0, index.1, Cond::Any)
+        .put(stored.0, stored.1, Cond::Any);
+    store.txn(txn).unwrap().unwrap();
+    assert_eq!(all(&store).rows, [first]);
+}
+
 /// Catches: a write error swallowed as written.
 #[test]
 fn a_failed_write_writes_nothing_and_says_so() {

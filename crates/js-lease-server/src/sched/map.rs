@@ -103,12 +103,23 @@ pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCap
 /// [`MapError::GpuClass`] when a `gpu.kind` capability names another class than the
 /// resources.
 pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
-    let mut pairs: BTreeMap<&str, &str> = request
-        .capabilities
+    needs_of(&request.capabilities, &request.resources)
+}
+
+/// What a run asking for `capabilities` and `resources` requires of a node, as [`needs`]
+/// says: a lease's request and a queued job's constraints alike.
+///
+/// # Errors
+/// As [`needs`].
+pub(crate) fn needs_of(
+    capabilities: &js_types::Capabilities,
+    resources: &Resources,
+) -> Result<js_caps::Request, MapError> {
+    let mut pairs: BTreeMap<&str, &str> = capabilities
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    if let Some(class) = request.resources.gpu_class() {
+    if let Some(class) = resources.gpu_class() {
         match pairs.insert(GPU_KIND, class) {
             Some(other) if other != class => {
                 return Err(MapError::GpuClass {
