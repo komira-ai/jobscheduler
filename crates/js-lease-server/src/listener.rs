@@ -29,6 +29,19 @@
 //! The read and write limits are limits on stalls, not on total time: a client that goes
 //! on making progress (a byte in each read period, say) is not cut by them, and what it
 //! can send is bounded by the sizes above and by `max_requests`.
+//!
+//! # HTTP/1.1, or both
+//!
+//! The lease and agent listeners ([`serve`]) speak HTTP/1.1 alone. The job service's
+//! listener ([`serve_both`]) speaks HTTP/1.1 or HTTP/2 on the same port, whichever the
+//! client starts with (gRPC is HTTP/2), with the same accept loop, slots, timeouts and
+//! drain. An HTTP/1.1 connection there is held to everything above. An HTTP/2 connection
+//! is held to the same handshake, read and write limits; its head is at most [`MAX_BUF`];
+//! `max_requests` and the `Connection: close` it adds do not apply to it (HTTP/2 has no
+//! such header, and its streams are bounded by the protocol's concurrency limit instead).
+//! HTTP/2 runs each request on a task of its own: those tasks hold the connection's slot
+//! and are cut with it, so a drain that cuts a connection cuts its requests too, and
+//! nothing a connection started outlives [`serve_both`].
 
 use std::future::Future;
 use std::io;
@@ -45,8 +58,10 @@ use axum::http::HeaderValue;
 use axum::http::header::CONNECTION;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::Response;
+use hyper::rt::Executor;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -139,18 +154,53 @@ async fn accept_counted(
     (accept_stream(listener, ACCEPT_BACKOFF).await, permit)
 }
 
-/// Serves `app` on `listener` until `stop` fires (or its sender is dropped), then
-/// drains: no new connections, each connection finishes the request it is serving, and
-/// the connections still open after `limits.drain_timeout` are cut, and the cut ones are
-/// dropped before this returns. `slots` holds
-/// `limits.max_connections` slots.
+/// What the connections of a listener speak.
+#[derive(Debug, Clone, Copy)]
+enum Speech {
+    /// HTTP/1.1 alone: the lease and agent listeners.
+    Http1,
+    /// HTTP/1.1 or HTTP/2, as the client starts: the job service's listener.
+    Both,
+}
+
+/// Serves `app` on `listener` over HTTP/1.1 until `stop` fires (or its sender is dropped),
+/// then drains: no new connections, each connection finishes the request it is serving,
+/// and the connections still open after `limits.drain_timeout` are cut, and the cut ones
+/// are dropped before this returns. `slots` holds `limits.max_connections` slots.
 pub(crate) async fn serve(
     listener: TcpListener,
     tls: Option<TlsAcceptor>,
     app: Router,
     limits: Limits,
     slots: Arc<Slots>,
+    stop: oneshot::Receiver<()>,
+) {
+    accept_all(listener, tls, app, limits, slots, stop, Speech::Http1).await;
+}
+
+/// [`serve`], speaking HTTP/1.1 or HTTP/2 on each connection, as its client starts: the job
+/// service's listener. A request of an HTTP/2 connection that is cut is cut too, and is
+/// dropped before this returns.
+pub(crate) async fn serve_both(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    app: Router,
+    limits: Limits,
+    slots: Arc<Slots>,
+    stop: oneshot::Receiver<()>,
+) {
+    accept_all(listener, tls, app, limits, slots, stop, Speech::Both).await;
+}
+
+/// The accept loop and the drain of [`serve`] and [`serve_both`].
+async fn accept_all(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    app: Router,
+    limits: Limits,
+    slots: Arc<Slots>,
     mut stop: oneshot::Receiver<()>,
+    speech: Speech,
 ) {
     let (graceful, _) = watch::channel(());
     let (cut, _) = watch::channel(());
@@ -160,13 +210,19 @@ pub(crate) async fn serve(
             accepted = accept_counted(&listener, &slots) => Some(accepted),
         };
         let Some((stream, permit)) = next else { break };
-        let task = connection(
-            stream,
-            tls.clone(),
-            app.clone(),
+        let permit = Arc::new(permit);
+        let streams = Streams {
+            permit: Arc::clone(&permit),
+            cut: cut.subscribe(),
+        };
+        let talk = Talk {
+            app: app.clone(),
             limits,
-            graceful.subscribe(),
-        );
+            stopping: graceful.subscribe(),
+            speech,
+            streams,
+        };
+        let task = connection(stream, tls.clone(), talk);
         let mut cut = cut.subscribe();
         tokio::spawn(async move {
             tokio::select! {
@@ -184,28 +240,45 @@ pub(crate) async fn serve(
         warn!("connections still open at the end of the drain are cut");
         let _ = cut.send(());
         // A cut task drops its connection (and the router clone in it) when it next runs,
-        // and gives its permit back after that: with every permit back, nothing of the
-        // server is held by a connection, and a restart finds the lease file free.
+        // and gives its share of the permit back after that, as does each HTTP/2 request
+        // task of the connection: with every permit back, nothing of the server is held by a
+        // connection, and a restart finds the lease file (and the job store) free.
         let _ = slots.gate.acquire_many(all).await;
     }
 }
 
-/// One connection: its handshake, then its requests, until it ends or `stopping`
-/// fires and the request in flight is answered.
-async fn connection(
-    stream: TcpStream,
-    tls: Option<TlsAcceptor>,
+/// What a connection's requests are served with once its handshake is done.
+struct Talk {
     app: Router,
     limits: Limits,
+    /// Fires when the listener stops: the request in flight is answered, then the
+    /// connection ends.
     stopping: watch::Receiver<()>,
-) {
+    speech: Speech,
+    /// Where an HTTP/2 connection runs its requests.
+    streams: Streams,
+}
+
+/// One connection: its handshake, then its requests, until it ends or `stopping`
+/// fires and the request in flight is answered.
+async fn connection(stream: TcpStream, tls: Option<TlsAcceptor>, talk: Talk) {
+    let Talk {
+        app,
+        limits,
+        stopping,
+        speech,
+        streams,
+    } = talk;
     // The peer is read before the handshake, so a plain and a TLS connection carry it the
     // same way. A stream that cannot name its peer carries none, and the routes that
     // gate on the peer refuse it.
     let app = with_peer(app, stream.peer_addr().ok());
     let io = handshake(stream, tls, limits.handshake_timeout).await;
     if let Some(io) = io {
-        talk(io, app, limits, stopping).await;
+        match speech {
+            Speech::Http1 => talk_http1(io, app, limits, stopping).await,
+            Speech::Both => talk_both(io, app, limits, stopping, streams).await,
+        }
     }
 }
 
@@ -235,13 +308,9 @@ async fn handshake(stream: TcpStream, tls: Option<TlsAcceptor>, limit: Duration)
 /// in flight is answered (with `Connection: close`) and an idle connection is closed.
 /// An error on the connection (a reset, a head that did not arrive in time, a write
 /// that stalled) ends it.
-async fn talk(io: Io, app: Router, limits: Limits, mut stopping: watch::Receiver<()>) {
+async fn talk_http1(io: Io, app: Router, limits: Limits, mut stopping: watch::Receiver<()>) {
     let io = IoTimeout::new(io, limits.read_timeout, limits.write_timeout);
-    let served = Arc::new(Served {
-        count: AtomicU32::new(0),
-        limit: limits.max_requests,
-    });
-    let app = app.layer(from_fn_with_state(served, close_after_last));
+    let app = counted(app, limits);
     let served = http1::Builder::new()
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_timeout)
@@ -255,6 +324,81 @@ async fn talk(io: Io, app: Router, limits: Limits, mut stopping: watch::Receiver
             let _ = served.await;
         }
     }
+}
+
+/// Speaks HTTP/1.1 or HTTP/2 on `io`, as the client starts, until the client is done.
+/// HTTP/1.1 is served as [`talk_http1`] serves it; an HTTP/2 connection runs its requests
+/// on `streams`. When `stopping` fires the requests in flight are answered and the
+/// connection is closed (HTTP/2 tells the client to open no new request first).
+async fn talk_both(
+    io: Io,
+    app: Router,
+    limits: Limits,
+    mut stopping: watch::Receiver<()>,
+    streams: Streams,
+) {
+    let io = IoTimeout::new(io, limits.read_timeout, limits.write_timeout);
+    let app = counted(app, limits);
+    let mut builder = auto::Builder::new(streams);
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_timeout)
+        .max_buf_size(MAX_BUF);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .max_header_list_size(MAX_HEAD_LIST);
+    let served = builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
+    let mut served = pin!(served);
+    tokio::select! {
+        _ = served.as_mut() => {}
+        _ = stopping.changed() => {
+            served.as_mut().graceful_shutdown();
+            let _ = served.await;
+        }
+    }
+}
+
+/// The most bytes of headers an HTTP/2 request may carry: [`MAX_BUF`], the limit an
+/// HTTP/1.1 head is held to.
+const MAX_HEAD_LIST: u32 = 64 * 1024;
+
+/// Where an HTTP/2 connection runs its requests: each on a task of its own, as hyper wants,
+/// holding the connection's slot until it ends and ended by the listener's cut, so that the
+/// slots count every task a connection started and a drain that cuts the connection cuts
+/// its requests too.
+#[derive(Clone)]
+struct Streams {
+    permit: Arc<OwnedSemaphorePermit>,
+    cut: watch::Receiver<()>,
+}
+
+impl<F> Executor<F> for Streams
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    fn execute(&self, stream: F) {
+        let permit = Arc::clone(&self.permit);
+        let mut cut = self.cut.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = stream => {}
+                _ = cut.changed() => {}
+            }
+            drop(permit);
+        });
+    }
+}
+
+/// `app`, counting the requests of one connection: the answer to the `max_requests`th
+/// closes an HTTP/1.1 connection.
+fn counted(app: Router, limits: Limits) -> Router {
+    let served = Arc::new(Served {
+        count: AtomicU32::new(0),
+        limit: limits.max_requests,
+    });
+    app.layer(from_fn_with_state(served, close_after_last))
 }
 
 /// How many requests a connection has had and how many it may have.
@@ -415,5 +559,70 @@ mod tests {
             "a cut connection still holds the router"
         );
         drop(client.await.unwrap());
+    }
+
+    /// Asserts that `serve_both` cuts the HTTP/2 requests of a connection it cuts, and
+    /// returns only after they are dropped: a gRPC call (HTTP/2, prior knowledge) held in
+    /// its handler past a drain timeout of zero is cut, and when `serve_both` returns
+    /// nothing of the router state is alive, every slot is free, and the call has failed.
+    /// A request of an HTTP/2 connection runs on a task of its own; it catches such a task
+    /// that outlives the drain (holding the router, and with it the job store's file, which
+    /// a restart could then not open) or that holds no slot.
+    #[tokio::test]
+    async fn serve_both_returns_after_the_cut_http2_requests_are_dropped() {
+        use tonic::client::Grpc;
+        use tonic::codegen::http::uri::PathAndQuery;
+        use tonic::transport::Endpoint;
+        use tonic_prost::ProstCodec;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let held = Arc::new(Held {
+            entered: entered.clone(),
+        });
+        let alive = Arc::downgrade(&held);
+        let app = Router::new()
+            .route("/hold", axum::routing::post(hold))
+            .with_state(held);
+        let limits = Limits {
+            drain_timeout: Duration::ZERO,
+            ..Limits::default()
+        };
+        let slots = Arc::new(Slots::new(limits.max_connections));
+        let (stop, stopped) = oneshot::channel();
+        let call = tokio::spawn(async move {
+            let channel = Endpoint::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap();
+            let mut grpc = Grpc::new(channel);
+            grpc.ready().await.unwrap();
+            let path = PathAndQuery::from_static("/hold");
+            let request = tonic::Request::new(());
+            grpc.unary::<(), (), _>(request, path, ProstCodec::default())
+                .await
+        });
+        let stopper = tokio::spawn(async move {
+            entered.notified().await;
+            let _ = stop.send(());
+        });
+        let bound = Duration::from_secs(30);
+        let ended = serve_both(listener, None, app, limits, slots.clone(), stopped);
+        tokio::time::timeout(bound, ended)
+            .await
+            .expect("serve_both did not return");
+        assert_eq!(
+            alive.strong_count(),
+            0,
+            "a cut request still holds the router"
+        );
+        assert_eq!(
+            slots.gate.available_permits(),
+            usize::from(limits.max_connections)
+        );
+        stopper.await.unwrap();
+        assert!(call.await.unwrap().is_err());
     }
 }

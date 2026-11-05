@@ -38,6 +38,10 @@ second rule:
   slot, in full, from clone to destroy (5.15); a share lease the vector it names; a whole-node lease every dimension (5.17).
 - **Fit.** A capable host fits a request when its offer covers the booking on every gated dimension, a slot is free if the booking needs
   one, and its facts meet the request's constraints, `vms`, `virt` and `lifecycle` among them (5.13).
+  A queued job's host ports are booked with its allocation: a host where another live allocation holds a port the job declares has no
+  room for it, so a port is held by one job per host until its allocation is freed. A host is capable of a job only if the network ceiling
+  its hello advertises (`egress`, `egress-ports`) covers the job's network level and each of its ports; a host that advertised none
+  reads as level none with no port.
 - **Rank.** In a pool that scales, `FirstFit` (6.5): the first fitting host in hierarchy order, then host order, so work packs onto the
   fewest hosts and the rest go idle and are released (5.8, 5.10).
 - **Demand.** Queued bookings that fit no existing host, none about to be freed and none `registering` are placed by the same fit and

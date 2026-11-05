@@ -821,6 +821,8 @@ impl Elastic<'_> {
             isa_level: None,
             exec,
             accelerator: built.floor.need(),
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);

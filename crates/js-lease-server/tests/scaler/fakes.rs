@@ -22,8 +22,8 @@ use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
 use js_types::{
-    AcceleratorNeed, ExecMode, HostId, MemoryHeadroom, Model, RequestId, Requirements, Resources,
-    Shape, accelerator_of,
+    AcceleratorNeed, ExecMode, HostId, JobNetwork, MemoryHeadroom, Model, RequestId, Requirements,
+    Resources, Shape, accelerator_of,
 };
 
 /// The wall time every test clock starts at.
@@ -465,6 +465,8 @@ pub fn request(id: &str) -> Waiting {
                 count: 1,
                 ..AcceleratorNeed::default()
             }),
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         },
         since: Timestamp::from_millis(START),
         reserved: None,

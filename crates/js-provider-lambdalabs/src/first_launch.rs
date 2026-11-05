@@ -296,6 +296,8 @@ impl Runner<'_, '_> {
             isa_level: None,
             exec: None,
             accelerator: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,

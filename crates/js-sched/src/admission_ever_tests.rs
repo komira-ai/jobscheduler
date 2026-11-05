@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use js_elastic::{Offer, PriceUnit, ProviderCaps};
 use js_types::{
-    AcceleratorNeed, Capabilities, ExecMode, HostId, IsaLevel, Model, Requirements, Resources,
-    accelerator_of,
+    AcceleratorNeed, Capabilities, ExecMode, HostId, IsaLevel, JobNetwork, Model, Requirements,
+    Resources, accelerator_of,
 };
 
 use super::*;
@@ -21,6 +21,8 @@ fn wanted() -> Requirements {
         arch: Some("x86_64".to_owned()),
         isa_level: None,
         exec: None,
+        network: JobNetwork::None,
+        host_ports: Vec::new(),
     }
 }
 
@@ -404,4 +406,92 @@ fn a_capable_host_comes_before_a_provider() {
     assert_eq!(can_ever_serve(&wanted(), &[host("h1")], &providers), HOST);
     assert_eq!(can_ever_serve(&wanted(), &[], &providers), OFFER);
     assert_eq!(can_ever_serve(&wanted(), &[], &[]), Admission::Refuse);
+}
+
+/// A host that reports `pairs` beside the usual facts.
+fn advertising(name: &str, pairs: &[(&str, &str)]) -> HostView {
+    let mut view = host(name);
+    for (key, value) in pairs {
+        view.facts.insert((*key).to_owned(), (*value).to_owned());
+    }
+    view
+}
+
+/// `wanted()` declaring the host ports `ports` and asking for the network `network`.
+fn networked(network: JobNetwork, ports: &[u16]) -> Requirements {
+    Requirements {
+        network,
+        host_ports: ports.to_vec(),
+        ..wanted()
+    }
+}
+
+/// Asserts that a host whose advertised ports lack a port the job declares is not capable,
+/// and that the pool admits through a second host that forwards it. Catches admission that
+/// queues a job for a port no host forwards.
+#[test]
+fn a_host_whose_ceiling_lacks_the_port_is_not_capable() {
+    let narrow = advertising("h1", &[("egress", "allow-list"), ("egress-ports", "9000")]);
+    let req = networked(JobNetwork::AllowList, &[8080]);
+    assert_eq!(
+        can_ever_serve(&req, std::slice::from_ref(&narrow), &[]),
+        Admission::Refuse
+    );
+    let wide = advertising(
+        "h2",
+        &[("egress", "allow-list"), ("egress-ports", "80,8000-8100")],
+    );
+    assert_eq!(can_ever_serve(&req, &[narrow, wide], &[]), HOST);
+}
+
+/// Asserts that a host whose network ceiling is below the job's level is not capable (none
+/// and allow-list against open), and that a host at the level is. Catches admission that
+/// ignores the level a host advertises.
+#[test]
+fn a_host_whose_network_ceiling_is_below_the_job_level_is_not_capable() {
+    let req = networked(JobNetwork::Open, &[]);
+    let none = advertising("h1", &[("egress", "none")]);
+    let listed = advertising("h2", &[("egress", "allow-list")]);
+    assert_eq!(
+        can_ever_serve(&req, &[none.clone(), listed.clone()], &[]),
+        Admission::Refuse
+    );
+    let open = advertising("h3", &[("egress", "open")]);
+    assert_eq!(can_ever_serve(&req, &[none, listed, open], &[]), HOST);
+}
+
+/// Asserts that a host that advertised no ceiling (an agent from before the keys) is not
+/// capable of a job that declares a port, and is of one that asks for no network and no
+/// port. Catches an absent ceiling read as permissive.
+#[test]
+fn a_host_that_advertised_no_ports_is_not_capable_of_a_job_with_ports() {
+    let hosts = [host("h1")];
+    let with_port = networked(JobNetwork::None, &[8080]);
+    assert_eq!(can_ever_serve(&with_port, &hosts, &[]), Admission::Refuse);
+    let plain = networked(JobNetwork::None, &[]);
+    assert_eq!(can_ever_serve(&plain, &hosts, &[]), HOST);
+}
+
+/// Asserts that with no capable host a provider without the host-port capability is passed
+/// over for a job that declares a port, offers for one that declares none, and that a
+/// provider with the capability offers for the job with a port. Catches a platform that
+/// cannot forward ports admitted for a job that needs one.
+#[test]
+fn a_provider_without_host_ports_is_passed_over_for_a_job_with_ports() {
+    let without = cloud(CatalogView::Unread);
+    let with = ProviderView {
+        capabilities: ProviderCaps {
+            host_ports: true,
+            ..caps()
+        },
+        ..cloud(CatalogView::Unread)
+    };
+    let with_port = networked(JobNetwork::None, &[8080]);
+    let plain = networked(JobNetwork::None, &[]);
+    assert_eq!(
+        can_ever_serve(&with_port, &[], std::slice::from_ref(&without)),
+        Admission::Refuse
+    );
+    assert_eq!(can_ever_serve(&plain, &[], &[without]), OFFER);
+    assert_eq!(can_ever_serve(&with_port, &[], &[with]), OFFER);
 }

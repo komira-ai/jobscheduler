@@ -98,10 +98,12 @@ rules, both commented `fwd-<host>`; the prefix `fwd-` is reserved for them
 `attach` adds them after the default route, all of a job's forwards in one `nft -f`
 transaction, reads both tables back and requires them to hold exactly the forwards it built;
 otherwise the attach fails (`EgressError::Rules`) and is undone. It refuses a host port another
-run of the agent forwards (`EgressError::PortTaken`) before loading anything; placement treating
-a host port as a resource of the allocation is not built yet. `release` lists each table,
-deletes the run's rules by handle and frees their ports; a rule already gone is forgiven as a
-gone veth is, and a release that leaves a rule keeps the run's address block out of use. A
+run of the agent forwards (`EgressError::PortTaken`) before loading anything. Placement books a
+job's host ports with its allocation, so it never offers a second job a host port a live
+allocation on that host holds, and it places a job only on a host whose ceiling covers its level
+and ports. `release` lists each table, deletes the run's rules by handle and frees their ports;
+a rule already gone is forgiven as a gone veth is, and a release that leaves a rule keeps the
+run's address block out of use. A
 start removes both tables, so a restarted agent holds no forward. `Egress::check` requires every
 forward of a run wired now to be there, whole (its two rules, each exactly as written), its
 acceptance ahead of the other rules of `forward`, and no other rule under the prefix: a forward

@@ -223,6 +223,11 @@ pub struct Requirements {
     /// spelt, `count` the count), narrowed by the request's `accelerator.*` keys
     /// ([`AcceleratorNeed::requested`]). `None`: none asked for.
     pub accelerator: Option<AcceleratorNeed>,
+    /// The network level the job asks for. A lease request asks for none.
+    pub network: JobNetwork,
+    /// The host ports the job declares, sorted ascending, each once. A lease request
+    /// declares none.
+    pub host_ports: Vec<u16>,
 }
 
 /// Why a request's `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
@@ -284,6 +289,8 @@ impl Requirements {
             isa_level: None,
             exec: None,
             accelerator: AcceleratorNeed::booked(&request.resources),
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         })
     }
 
@@ -331,6 +338,8 @@ impl Requirements {
             isa_level,
             exec,
             accelerator: need_of(request)?,
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         })
     }
 
@@ -512,6 +521,8 @@ mod tests {
             isa_level: None,
             exec: None,
             accelerator: a10(),
+            network: JobNetwork::None,
+            host_ports: Vec::new(),
         };
         assert_eq!(read(&[]), Ok(none.clone()));
         for arch in ["x86_64", "arm64"] {
@@ -580,6 +591,8 @@ mod tests {
                 isa_level: None,
                 exec: None,
                 accelerator: a10(),
+                network: JobNetwork::None,
+                host_ports: Vec::new(),
             };
             assert_eq!(lenient, want, "{refusal}");
         }

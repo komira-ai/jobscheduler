@@ -103,6 +103,8 @@ pub fn demand() -> Demand {
             count: 1,
             ..AcceleratorNeed::default()
         }),
+        network: Default::default(),
+        host_ports: Vec::new(),
     }
 }
 

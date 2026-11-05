@@ -71,6 +71,7 @@ where
     a_requeued_job_gets_a_new_allocation(backend);
     a_repeated_allocation_id_is_drawn_again(backend);
     booked_on_sums_the_live_allocations_of_a_host(backend);
+    placement_books_the_jobs_host_ports(backend);
     live_on_lists_the_live_allocations_of_one_host(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
@@ -151,6 +152,7 @@ macro_rules! job_store_tests {
             a_requeued_job_gets_a_new_allocation,
             a_repeated_allocation_id_is_drawn_again,
             booked_on_sums_the_live_allocations_of_a_host,
+            placement_books_the_jobs_host_ports,
             live_on_lists_the_live_allocations_of_one_host,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,

@@ -313,6 +313,8 @@ fn request(gpus: u64) -> Demand {
         isa_level: None,
         exec: None,
         accelerator: booked("nvidia-sample", gpus),
+        network: Default::default(),
+        host_ports: Vec::new(),
     }
 }
 

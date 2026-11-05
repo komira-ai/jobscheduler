@@ -170,6 +170,8 @@ mod tests {
             isa_level: None,
             exec: None,
             accelerator: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         let none = offer_of(&shape(0, &[]), &shape(0, &[]), ExecMode::Container);
         let some = offer_of(&shape(0, &[]), &shape(10 << 30, &[]), ExecMode::Container);

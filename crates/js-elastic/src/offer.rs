@@ -221,6 +221,8 @@ mod tests {
             isa_level: None,
             exec: Some(ExecMode::Container),
             accelerator: need("nvidia-sample", 2),
+            network: Default::default(),
+            host_ports: Vec::new(),
         }
     }
 
@@ -237,6 +239,8 @@ mod tests {
             isa_level: None,
             exec: None,
             accelerator: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
         let mut small = demand();

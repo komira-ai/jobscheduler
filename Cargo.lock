@@ -1648,6 +1648,7 @@ dependencies = [
 name = "js-sched"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
  "js-caps",
  "js-elastic",
  "js-sim",
