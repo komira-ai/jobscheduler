@@ -1,0 +1,105 @@
+//! The host upload credential of live logs: one temporary credential per host (agent), minted
+//! by the object store's STS `AssumeRole` call with an inline session policy
+//! (`docs/design/live-logs.md`, section 4).
+//!
+//! - [`policy`] builds the session policy: one statement that allows `s3:PutObject` and
+//!   `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*`, where `L` is the configured log prefix with
+//!   its trailing `/` (`arn:aws:s3:::BUCKET/*` when the prefix is empty).
+//! - [`Minter`] turns a [`MintRequest`] (the bucket, the log prefix, the host and the lifetime)
+//!   into a [`Credential`]. [`StsMinter`] is the production one: one signed `AssumeRole` call
+//!   over a [`js_logstore::Transport`]. The `fake` feature's [`fake::FakeMinter`] issues
+//!   credentials from [`js_logstore::fake::FakeStore`] with the same policy text, and can be
+//!   scripted.
+//!
+//! **What the credential can do**: put and delete any object under the log prefix, whichever
+//! job it belongs to, until it expires. **What it cannot do**: read or list any object, or touch
+//! any object outside the log prefix. A session policy can only narrow what the role allows, so
+//! the credential can do no more than this whatever the role grants.
+//!
+//! **What the operator configures in the store.** The role (`role_arn`) must allow at least
+//! `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*`, so that the session policy
+//! intersects with it to exactly that; its trust policy must let the mint key call
+//! `sts:AssumeRole` on it; and its maximum session duration must be at least the lifetime asked
+//! (STS refuses a longer one, which is a [`MintError::Refused`]). A store that does not serve
+//! `AssumeRole` cannot be a sink.
+//!
+//! **Errors** ([`MintError`]) are told apart by transport kind, HTTP status and STS error code,
+//! never by message text: `Unavailable` (retrying later may succeed) and `Refused` (it will not,
+//! with the same configuration). No error, `Debug` output or log line of this crate holds a
+//! secret access key, a session token or a signature.
+//!
+//! **What the crate never does.** It never retries (the caller owns retry and backoff), never
+//! reads an environment variable or a file, and starts no thread or async runtime.
+
+use std::time::Duration;
+
+use js_logstore::{Credential, Unavailable};
+
+#[cfg(feature = "fake")]
+pub mod fake;
+pub mod names;
+pub mod policy;
+pub mod sts;
+
+pub use names::{Bucket, LogPrefix, NameError, RoleArn};
+pub use policy::{POLICY_VERSION, policy};
+pub use sts::{STS_API_VERSION, StsEndpoint, StsMinter};
+
+/// What to mint: a credential for `host` that may put and delete under the log prefix `prefix`
+/// of `bucket`, for `ttl`. The credential is for the host, not for a job: every job's log
+/// objects under the prefix are in its scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintRequest {
+    /// The bucket of the log store.
+    pub bucket: Bucket,
+    /// The configured log prefix.
+    pub prefix: LogPrefix,
+    /// The host's agent id. It names the session only: `RoleSessionName` is `js-` and the
+    /// first 32 hex digits of its SHA-256, so the store's audit trail names the host.
+    pub host: String,
+    /// How long the credential is asked to live.
+    pub ttl: Duration,
+}
+
+/// Mints host credentials.
+pub trait Minter: Send + Sync {
+    /// A credential for `request`'s host, scoped by session policy to its log prefix.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::Unavailable`] when retrying later may succeed, [`MintError::Refused`] when
+    /// it will not.
+    fn mint(&self, request: &MintRequest) -> Result<Credential, MintError>;
+}
+
+/// Why a mint failed. A failure is told apart by the transport's kind, the HTTP status and the
+/// STS error code, never by a message text; it carries no secret, token or signature.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MintError {
+    /// The store's STS could not be reached or asked to be called later: a transport failure,
+    /// a timeout, a 5xx, a 429 or a 400 `Throttling`. Retrying later may succeed.
+    #[error("the STS is unavailable: {0}")]
+    Unavailable(Unavailable),
+    /// The store's STS refused the call (a 403, or any 400 other than `Throttling`, such as
+    /// `AccessDenied`, `InvalidClientTokenId` or `MalformedPolicyDocument`), or answered a
+    /// credential that cannot be used. Retrying with the same configuration does not help.
+    #[error("the STS refused the mint: {0}")]
+    Refused(Refusal),
+}
+
+/// What made a mint refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// The STS answered an error.
+    #[error("status {status}, code `{code}`")]
+    Status {
+        /// The status.
+        status: u16,
+        /// The STS error code (1 to 64 ASCII letters and digits), or empty.
+        code: String,
+    },
+    /// The STS answered success with a credential that cannot be used: a field missing or
+    /// malformed, or a lifetime too short.
+    #[error("{0}")]
+    Answer(&'static str),
+}

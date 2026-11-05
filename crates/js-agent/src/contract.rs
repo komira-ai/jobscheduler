@@ -52,7 +52,9 @@
 
 use std::path::Path;
 
-use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
+use js_agent_wire::{
+    Hello, LOG_UPLOAD_CAPABILITY, NetworkCeiling, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
+};
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
     SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
@@ -135,15 +137,16 @@ fn report_per_job(hello: &mut Hello) {
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
 /// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on;
-/// `gpu_passthrough` says the runtime gives jobs the GPUs they book, and `ceiling` is the most
-/// network its jobs may ask for. Returns the warnings the operator should read.
+/// `gpu_passthrough` says the runtime gives jobs the GPUs they book, `ceiling` is the most
+/// network its jobs may ask for, and `log_upload` says the runtime uploads live logs (the
+/// `crun` runtime), reported as `log-upload`. Returns the warnings the operator should read.
 pub(crate) fn report(
     hello: &mut Hello,
     hook: Option<&ToolkitHook>,
     commands: &dyn CommandRunner,
     run_files: bool,
     scratch_default_gib: Option<u64>,
-    (gpu_passthrough, ceiling): (bool, &NetworkCeiling),
+    (gpu_passthrough, ceiling, log_upload): (bool, &NetworkCeiling, bool),
 ) -> Vec<String> {
     let mode = ExecMode::Container.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
@@ -151,6 +154,8 @@ pub(crate) fn report(
     ceiling.insert_into(&mut hello.capabilities);
     report_per_job(hello);
     report_run_files(hello, run_files);
+    let upload = (LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello.capabilities.extend(log_upload.then_some(upload));
     if gpu_passthrough {
         hello
             .capabilities
@@ -242,7 +247,7 @@ mod tests {
             &Failing,
             false,
             None,
-            (false, &config.ceiling()),
+            (false, &config.ceiling(), false),
         );
         assert_eq!(
             warnings,
@@ -278,6 +283,40 @@ mod tests {
         assert_eq!(flag(&native, START_FENCE_CAPABILITY), None);
         assert_eq!(flag(&native, PER_JOB_CAPABILITY), None);
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
+    }
+
+    /// Asserts that `log-upload` is in the hello of an agent whose runtime uploads live logs
+    /// (the `crun` agent reports with `log_upload` set) and in no other: not an engine
+    /// agent's, not a native agent's. It catches a server that sends a sink to an agent that
+    /// cannot upload, and one never told that a crun agent can.
+    #[test]
+    fn the_agent_reports_log_upload_only_on_the_crun_runtime() {
+        let ceiling = Config::none().ceiling();
+        let mut crun = hello();
+        assert!(
+            report(
+                &mut crun,
+                None,
+                &Failing,
+                false,
+                None,
+                (false, &ceiling, true)
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            crun.capabilities
+                .get(LOG_UPLOAD_CAPABILITY)
+                .map(String::as_str),
+            Some(FLAG_SET)
+        );
+        assert_eq!(crun.validate(), Ok(()));
+        let engine = reported(&Config::none());
+        assert!(!engine.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
+        let mut native = hello();
+        let _ = report_native(&mut native, false, Ceiling::Off);
+        assert!(!native.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
+        assert_eq!(LOG_UPLOAD_CAPABILITY, "log-upload");
     }
 
     /// Catches a container agent that does not say its ceiling, says it under another key,

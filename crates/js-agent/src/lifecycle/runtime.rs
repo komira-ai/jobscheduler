@@ -18,8 +18,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::{Isolation, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal};
+use js_agent_wire::{
+    Isolation, LogReport, LogTail, NativeSpec, NetworkCeiling, NetworkLevel, refusal,
+};
 use js_types::{JobNetwork, PortMap};
+
+use crate::logs::Sink;
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -146,6 +150,10 @@ pub struct RunSpec {
     /// ([`Admission`](crate::bundle::Admission)); a runtime that holds no bundle store
     /// fails a start that has one.
     pub bundle: Option<String>,
+    /// Where the run's output is uploaded while it runs: the checked sink of a job start
+    /// ([`Sink::of_start`]), `None` for a run start and a start without one. A runtime that
+    /// uploads no live logs ignores it.
+    pub log_sink: Option<Sink>,
 }
 
 /// How a container ended.
@@ -378,6 +386,14 @@ pub trait Runtime {
     /// The runtime cannot read the log.
     fn log_tail(&mut self, _id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
         Ok(None)
+    }
+
+    /// What the capture saw of each stream of the exited container `id` (its length, and the
+    /// bytes it could not keep), for a run whose output this runtime uploads; read beside
+    /// [`Runtime::log_tail`], before the container is removed. It never waits for the upload.
+    /// The default, a runtime that uploads nothing, has none.
+    fn logs_report(&mut self, _id: &RunHandle) -> Option<LogReport> {
+        None
     }
 
     /// Whether this runtime runs the native body `native`, asked before a native start

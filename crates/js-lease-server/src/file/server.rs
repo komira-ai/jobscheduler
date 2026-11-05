@@ -15,7 +15,7 @@ use crate::config::{
 };
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
-use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
+use crate::usage_setup::{DEFAULT_HISTORY_RETENTION_DAYS, DEFAULT_PROFILE_STORE_BYTES};
 
 const SERVER_KEYS: &[&str] = &[
     "listen",
@@ -47,6 +47,7 @@ const SERVER_KEYS: &[&str] = &[
     "usage_db",
     "usage_off",
     "profile_store_bytes",
+    "history_retention_days",
     "alert_webhook_url",
     "alert_webhook_token_file",
     "alert_repeat_after",
@@ -89,12 +90,14 @@ pub(crate) struct AlertKeys {
     pub(crate) repeat_after: Duration,
 }
 
-/// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
-/// `--usage-off` and `--profile-store-bytes`, with their defaults.
+/// The usage keys of `[server]`, as the file gave them, or the flags `--usage-db`,
+/// `--usage-off`, `--profile-store-bytes` and `--history-retention-days`, with their
+/// defaults.
 pub(crate) struct UsageKeys {
     pub(crate) db: Option<PathBuf>,
     pub(crate) off: bool,
     pub(crate) profile_store_bytes: u64,
+    pub(crate) history_retention_days: u64,
 }
 
 /// The keys of `[server]` that belong to agent registration, as the file gave them. They
@@ -316,8 +319,8 @@ fn read_cpu_slack(s: &mut Section) -> Result<Option<CpuSlack>, StartupError> {
     Ok(Some(slack))
 }
 
-/// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
-/// beside `usage_off = true`.
+/// The usage keys. The rules are the flags': a budget and a retention of at least 1, and no
+/// `usage_db` beside `usage_off = true`.
 fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
     let db = s.path("usage_db")?;
     let off = s.boolean("usage_off")?.unwrap_or(false);
@@ -327,6 +330,12 @@ fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
         u64::MAX,
         DEFAULT_PROFILE_STORE_BYTES,
     )?;
+    let days = s.bounded(
+        "history_retention_days",
+        1,
+        u64::MAX,
+        DEFAULT_HISTORY_RETENTION_DAYS,
+    )?;
     if db.is_some() & off {
         return Err(s.fail("usage_db", "not allowed with server.usage_off"));
     }
@@ -334,6 +343,7 @@ fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
         db,
         off,
         profile_store_bytes: bytes,
+        history_retention_days: days,
     })
 }
 

@@ -8,8 +8,22 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-agent-wire = { path = "../js-agent-wire" }
+js-conformance = { path = "../js-conformance" }
+js-lease = { path = "../js-lease" }
+# The server in process, with no listener (src/in_process.rs of that crate).
+js-lease-server = { path = "../js-lease-server", features = ["in-process"] }
+js-registry = { path = "../js-registry" }
 js-sim = { path = "../js-sim" }
+js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
+# Requests and bodies for the server's routers (`axum::http`, `axum::body`).
+axum.workspace = true
+serde_json.workspace = true
+# The current-thread runtime each request and tick of the server runs on.
+tokio = { workspace = true, features = ["rt"] }
+# `oneshot`, to call a router as a service.
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

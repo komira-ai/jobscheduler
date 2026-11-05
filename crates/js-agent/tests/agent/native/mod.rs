@@ -125,6 +125,7 @@ impl Rig {
             bundle: None,
             network: Default::default(),
             ports: Vec::new(),
+            log_sink: None,
         }
     }
 

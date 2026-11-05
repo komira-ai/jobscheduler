@@ -197,6 +197,7 @@ fn spec(fixture: &Fixture, exe: &Path) -> RunSpec {
         network: Default::default(),
         ports: Vec::new(),
         env: Vec::new(),
+        log_sink: None,
     }
 }
 

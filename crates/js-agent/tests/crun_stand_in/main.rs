@@ -20,6 +20,7 @@ mod egress;
 mod env;
 mod gpus;
 mod images;
+mod logs;
 mod node;
 mod open;
 mod pins;

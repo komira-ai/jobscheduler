@@ -10,7 +10,7 @@
 //!   launched. The ledger is the cell's, not the agent's, so an agent that dies and is
 //!   replaced cannot reset it;
 //! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
-//!   is to fill it from the registry's host views, never through the JSON route.
+//!   fills it from the registry's host views, never through the JSON route.
 //!
 //! Some facts are carried for invariants that later parts add and no check here reads
 //! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`],
@@ -240,7 +240,7 @@ pub struct ServerHost {
 
 /// The server's own list of hosts, as the cell last read it from the registry.
 ///
-/// The cell is to re-read it at every client call and once per virtual second, not at
+/// The cell re-reads it at every client call and once per virtual second, not at
 /// every step, so between two reads it can lag what the server holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerView {

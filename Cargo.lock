@@ -1027,6 +1027,7 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-logstore",
  "js-mac-pool",
  "js-mac-provision",
  "js-mac-session",
@@ -1084,6 +1085,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "js-api-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "heck",
+ "http-body-util",
+ "js-proto",
+ "percent-encoding",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "protox",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tonic",
+ "tower",
 ]
 
 [[package]]
@@ -1307,14 +1329,18 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-alert",
+ "js-api-gateway",
  "js-caps",
  "js-elastic",
  "js-elastic-fake",
  "js-jobs",
  "js-lease",
  "js-lease-server",
+ "js-logmint",
+ "js-logstore",
  "js-platform",
  "js-pool-static",
+ "js-proto",
  "js-provider",
  "js-provider-fake",
  "js-provider-lambdalabs",
@@ -1326,6 +1352,7 @@ dependencies = [
  "js-types",
  "js-usage",
  "log",
+ "prost-types",
  "rcgen",
  "rustix",
  "rustls",
@@ -1336,11 +1363,38 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tonic",
+ "tonic-prost",
  "tower",
  "tracing",
  "tracing-subscriber",
  "ureq",
  "x509-parser",
+]
+
+[[package]]
+name = "js-logmint"
+version = "0.1.0"
+dependencies = [
+ "js-logmint",
+ "js-logstore",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "js-logstore"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "js-logstore",
+ "rustls",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "time",
+ "ureq",
 ]
 
 [[package]]
@@ -1551,6 +1605,8 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-sim",
+ "js-state",
+ "js-testkit",
  "js-types",
  "js-usage",
  "js-whole",
@@ -1616,8 +1672,18 @@ dependencies = [
 name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "js-agent-wire",
+ "js-conformance",
+ "js-lease",
+ "js-lease-server",
+ "js-registry",
  "js-sim",
+ "js-testkit",
  "js-types",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -2123,6 +2189,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
+name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "os_pipe"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2410,10 +2485,13 @@ version = "0.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
 dependencies = [
+ "base64 0.22.1",
  "logos",
  "miette",
  "prost",
  "prost-types",
+ "serde",
+ "serde-value",
 ]
 
 [[package]]
@@ -2780,6 +2858,16 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-value"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
+dependencies = [
+ "ordered-float",
+ "serde",
 ]
 
 [[package]]

@@ -14,6 +14,7 @@ use js_lease_server::{
 };
 use js_types::sched::usage::MinutePoint;
 use js_types::{HostId, LeaseId};
+use js_usage::EndedRow;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, agent_args, post};
@@ -52,6 +53,7 @@ struct State {
     minutes: BTreeSet<(LeaseId, u16)>,
     drop_with: Option<DropReason>,
     fail: bool,
+    history: Vec<EndedRow>,
 }
 
 /// A sink over memory: a reading becomes a node row for the minute it was taken in, a
@@ -64,6 +66,11 @@ pub struct Fake {
 impl Fake {
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap()
+    }
+
+    /// The records of ended allocations written, in order.
+    pub fn history(&self) -> Vec<EndedRow> {
+        self.state().history.clone()
     }
 
     pub fn seen(&self) -> Vec<Seen> {
@@ -307,6 +314,11 @@ impl UsageSink for Fake {
 
     fn counters(&self) -> SinkCounters {
         SinkCounters::default()
+    }
+
+    fn allocation_ended(&self, row: &EndedRow) -> Result<(), UsageFault> {
+        self.state().history.push(row.clone());
+        Ok(())
     }
 }
 

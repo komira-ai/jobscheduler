@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// The packages whose simulations run in CI test builds.
-const OPTIMISED: [&str; 4] = ["js-sched", "js-sim", "js-sizing", "js-types"];
+const OPTIMISED: [&str; 5] = ["js-sched", "js-sim", "js-sim-cell", "js-sizing", "js-types"];
 
 /// The repository root.
 fn repo() -> PathBuf {

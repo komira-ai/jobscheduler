@@ -353,6 +353,17 @@ pub struct Cli {
     /// agent with a loud warning. Needs `--runtime crun`.
     #[arg(long, value_name = "PATH")]
     pub crun_bin: Option<PathBuf>,
+    /// The bytes of each stream of a `--runtime crun` job with a live-log sink that the
+    /// capture keeps in its file in the lease directory, from 1 MiB to 1 GiB: the file is
+    /// what the agent uploads while the store is down, and bytes past it are a gap in the
+    /// job's live logs. A job without a sink keeps the capture's 1 MiB.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = crate::logs::DEFAULT_FILE_CAP,
+        value_parser = clap::value_parser!(u64).range(crate::logs::MIN_FILE_CAP..=crate::logs::MAX_FILE_CAP)
+    )]
+    pub log_file_cap: u64,
     /// The dedicated non-root user every `crun` command of `--runtime crun` runs as, such as
     /// `jsjob`: the account whose ranges in `/etc/subuid` and `/etc/subgid` (at least 65536
     /// ids each) every job's user namespace is mapped onto. It must exist, with a uid and a

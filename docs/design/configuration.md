@@ -15,7 +15,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
-| `--usage-db`, `--usage-off`, `--profile-store-bytes` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1) |
+| `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
@@ -131,24 +131,36 @@ start within `start_timeout`, and the pick of an offer when a pool acquires a ma
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 
-## Live logs: `[logs]` (Planned)
+## Live logs: `[logs]`
 
 The table of [live-logs.md](live-logs.md), section 6, which gives each key's type, default and bound. It is in the `--config` file only,
-beside `[server]`, and has no flags; an unknown key is refused; `sink = "none"` (the default, also when the table is absent) with any
-other key present is refused, naming the key. The keys are files, never inline secrets, and each file is owner-only like every other
-key file. The server does not read the table yet.
+beside `[server]`, and has no flags: a server run from flags has no sink. An unknown key is refused; `sink = "none"` (the default, also
+when the table is absent) with any other key present is refused, naming the key. The keys are files, never inline secrets, and each
+file is owner-only like every other key file (mode 0600 or 0400, owned by the service user), holding exactly
+`{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
+bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
+repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). Nothing uses the table
+yet: no credential is minted and no log is read.
+
+The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
+section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64
+bytes of `[a-z0-9-]`; `endpoint` and `sts_endpoint` are `https` URLs, or `http` to a loopback address, with no path, query, fragment or
+user; `credentials` is `"sts"` (anything else is refused as not built); `role_arn` begins with `arn:` and is at most 2,048 bytes of
+printable ASCII; `credential_ttl` is from 15 minutes to 12 hours; `max_follow` is from 1 to 4,096. `credential_ttl` must also be at most
+the role's maximum session duration, which is the operator's to set in the store and which the server cannot check at start: STS
+refuses a longer session, and the refusal shows as a mint failure.
 
 ```toml
 [logs]
 sink            = "object_store"                        # "object_store" | "none"; default "none"
 url             = "s3://bucket/prefix"                  # required with object_store; the prefix is optional
 region          = "us-east-1"                           # required with object_store
-endpoint        = "https://objects.example"             # optional; default the region's AWS endpoint
+endpoint        = "https://objects.example"             # required: the store's URL; the server names no cloud's host by default
 path_style      = false                                 # optional; true for stores that need /bucket/key URLs
 read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
 credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
-sts_endpoint    = "https://objects.example"             # optional; default endpoint, or the region's AWS STS endpoint
-role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts
+sts_endpoint    = "https://objects.example"             # optional; default endpoint
+role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts; its maximum session duration at least credential_ttl
 mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
 credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once

@@ -43,7 +43,7 @@ pub struct Row {
     pub ring: Ring,
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+pub(crate) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     loop {
         let low = (v & 0x7f) as u8;
         v >>= 7;
