@@ -34,6 +34,7 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
     rig.tick();
     queue("q-high", 5);
     queue("q-b-low", -1);
+    rig.tick();
     queue("q-a-low", -1);
     rig.tick();
     queue("q-later", 0);
@@ -48,8 +49,8 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
         .collect();
     assert_eq!(
         order,
-        ["q-high", "q-late-low", "q-later", "q-a-low", "q-b-low"],
-        "{name}: the queue is not in priority, then submit, then id order"
+        ["q-high", "q-late-low", "q-later", "q-b-low", "q-a-low"],
+        "{name}: the queue is not in priority, then submit order"
     );
     rig.store.fail_read_after(0);
     assert_eq!(

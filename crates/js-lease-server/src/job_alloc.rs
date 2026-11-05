@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, EndReason, IdSource, JobEnd, JobId, JobRecord,
-    JobState, JobStore, JobStoreError, Output, ResultReason, StartFailure,
+    JobState, JobStore, JobStoreError, Output, ResultReason, Row, StartFailure,
 };
 use js_state::Store;
 use js_types::HostId;
@@ -120,7 +120,7 @@ pub(crate) fn answer_retired<S: Store, I: IdSource>(
 /// id), on its host, with what it booked; queued from the job's submit to this placement,
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
 /// row is gone), ended at the free, for the reason it was freed.
-fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<(String, Vec<u8>)> {
+fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
         let ended = job.ended_at.unwrap_or(end);

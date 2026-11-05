@@ -82,8 +82,15 @@ fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
     if ok { Ok(()) } else { Err(error) }
 }
 
+/// One row a caller writes beside a free: its key and its value.
+pub type Row = (String, Vec<u8>);
+
+/// What gives the rows written beside a free ([`JobStore::free_with`],
+/// [`JobStore::end_and_free_with`]), from the allocation as it is freed.
+pub type Beside = dyn Fn(&AllocationRecord) -> Vec<Row>;
+
 /// `txn` with a put of each of `rows`, whatever its key holds.
-fn with_rows(txn: Txn, rows: Vec<(String, Vec<u8>)>) -> Txn {
+fn with_rows(txn: Txn, rows: Vec<Row>) -> Txn {
     rows.into_iter()
         .fold(txn, |txn, (key, value)| txn.put(key, value, Cond::Any))
 }
@@ -558,7 +565,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         &self,
         id: &JobId,
         reason: EndReason,
-        beside: &dyn Fn(&AllocationRecord) -> Vec<(String, Vec<u8>)>,
+        beside: &Beside,
     ) -> Result<AllocationRecord, JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         if allocation.step == AllocationStep::Freed {

@@ -71,7 +71,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         id: &JobId,
         end: JobEnd,
         reason: EndReason,
-        beside: &dyn Fn(&AllocationRecord) -> Vec<(String, Vec<u8>)>,
+        beside: &super::Beside,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let (job, job_version) = self.job_row(id)?;
         let (allocation, allocation_version) = self.allocation_row(id)?;

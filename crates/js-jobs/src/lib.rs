@@ -105,5 +105,6 @@ pub use result::{
     RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, SCHEMA_VERSION, queue_order,
+    Beside, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, Row, SCHEMA_VERSION,
+    queue_order,
 };

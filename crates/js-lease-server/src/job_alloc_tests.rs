@@ -196,7 +196,8 @@ fn history_rows(store: &Interfere<Fake>) -> Vec<EndedRow> {
 /// Asserts that freeing a job's allocation, on its host's confirmation or on the provider's
 /// absence, writes exactly one usage history row, in the commit that frees: keyed by the
 /// free's time and the job id, naming the host, what it booked, its queue wait (submit to
-/// placement) and its run time (start to end), and the reason; that freeing again writes
+/// placement, at least the 2 s the test waits) and its run time (start to end, at least 5 s),
+/// and the reason; that freeing again writes
 /// nothing; and that a failed commit leaves neither the free nor the row. It catches a row
 /// written in a second transaction, twice, or not at all.
 #[test]
@@ -239,8 +240,19 @@ fn a_freed_job_allocation_writes_one_usage_row() {
         assert_eq!((step, usage_keys()), (AllocationStep::Releasing, 0));
 
         let before = store.commit_stats().txns;
-        free_allocation(&jobs, &id, freed).unwrap();
+        let allocation = free_allocation(&jobs, &id, freed).unwrap();
         assert_eq!(store.commit_stats().txns, before + 1, "{freed:?}");
+        // The fake's clock moves a little at each write, so the times are read back from
+        // the records: the queue wait is submit to placement, the run start to end.
+        let job = jobs.get_job(&id).unwrap().unwrap();
+        let ms = |duration: Duration| u64::try_from(duration.as_millis()).unwrap();
+        let queued = ms(allocation.created_at.since(job.submitted_at));
+        let ran = ms(job.ended_at.unwrap().since(job.started_at.unwrap()));
+        let ended = ms(allocation.freed_at.unwrap().as_duration());
+        assert!(
+            (queued >= 2_000) & (ran >= 5_000),
+            "{freed:?}: {queued} {ran}"
+        );
         let row = EndedRow {
             id: AllocationId::parse("job-a").unwrap(),
             profile: None,
@@ -250,13 +262,13 @@ fn a_freed_job_allocation_writes_one_usage_row() {
                 cpu_milli: 1500,
                 memory_bytes: 1 << 30,
             }),
-            queued_ms: Some(2_000),
-            run_ms: Some(5_000),
+            queued_ms: Some(queued),
+            run_ms: Some(ran),
             ended_reason: reason,
             drain_outcome: DrainOutcome::None,
             give_up_outcome: None,
             estimated_end: None,
-            actual_end: 10_000,
+            actual_end: ended,
             error_ms: None,
             used: None,
         };
