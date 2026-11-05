@@ -46,6 +46,7 @@ pub(crate) fn run(
         waiter,
         clock,
         signals,
+        ..
     } = services;
     let events = Events::new();
     signals(events.signaller())

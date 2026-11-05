@@ -1,0 +1,59 @@
+# The generated job commands and client
+
+The job service is one protobuf `service`, `jobscheduler.v1.JobService`, in
+`crates/js-proto/proto/jobscheduler/v1/` (design section 3.6). Two pieces of client code are
+generated from it, so a call added to the definition appears in both with no hand-written
+code:
+
+- `crates/js-client/src/jobs/generated.rs`: one method of `js_client::jobs::JobClient` per
+  call, taking and returning the messages of `js-proto`.
+- `crates/js-cli/src/jobs/generated.rs`: `SURFACE`, the table of the `js` job commands (the
+  words of each command, one flag per request field, the call), and `dispatch`, which sends a
+  request through the client.
+
+Both are rendered by `cargo xtask gen-job-surface` (`crates/xtask/src/job_surface`) from the
+descriptor set js-proto builds, and both are checked in: a build needs no protobuf compiler,
+and the generated code is reviewed with the change that makes it. The hand-written parts are
+the connection and the classification of failures in js-client (`jobs/mod.rs`, `jobs/wire.rs`,
+`jobs/error.rs`) and the interpreter in js-cli (`jobs/mod.rs`, `jobs/text.rs`), which builds
+the commands from the table and names no call.
+
+## Adding a call
+
+1. Add the `rpc` and its messages to the `.proto` files, under the evolution rule in the
+   header of `service.proto`, with a comment on the call and on every field: the comments
+   become the client's documentation and the commands' help.
+2. Render the files again from the repository root:
+
+   ```text
+   cargo xtask gen-job-surface --out .
+   ```
+
+3. Move the goldens the change moves (the help texts under
+   `crates/js-cli/tests/cli/goldens/job_help/` and `job_surface.json`), and add the call's
+   server side.
+
+`cargo test -p xtask --test job_surface` runs `cargo xtask gen-job-surface --check --out .`,
+which fails naming each checked-in file that is not what the definition renders, so a
+definition changed without step 2 is red in CI.
+
+## The rules
+
+How a call becomes a command and a field a flag is in the crate docs of js-cli ("Job
+commands") and of `xtask::job_surface::cli`. In short: a call is a verb and a noun
+(`ListHosts` is `js host list`); a request's one singular scalar field, when it has exactly
+one, is its subject and its flag is required (`GetJob` is `js job get --job-id ID`); every leaf
+field is a flag named by its path (`--spec.needs.cpu-millis`); a field the flags cannot spell is
+read from a file of proto3 JSON (`--spec.ports-file`).
+
+The subject rule has one limit: a request whose one singular scalar field is really optional
+gets a required flag. The fix is to mark the field `optional` in the definition, which is
+additive.
+
+One entry is held by the generator and not read from the definition:
+`xtask::job_surface::surface::RETRY_KEYS` says that `SubmitJob` is idempotent on
+`spec.job_id` (design section 5.3 says so in words; the definition has no option for it). Its
+flag is `--id`, and `js` draws a random id when it is not given, so that a submit whose answer
+was lost can be run again as it was. Reading the job service fails when the call or the field
+is gone, so the entry cannot fall out of date unnoticed; an additive option in the definition
+would replace it.
