@@ -48,7 +48,8 @@ pub(crate) enum Failure {
     /// A flag or a file it names is unusable.
     #[error("{0}")]
     Usage(String),
-    /// The server or the network failed.
+    /// The server or the network failed, or the program itself (a job command table that
+    /// does not match the job service).
     #[error("{0}")]
     Server(String),
     /// The server refused with this code.
@@ -95,11 +96,6 @@ pub(crate) enum Failure {
     /// A job command's request was written and no definite answer was read.
     #[error("{0}")]
     Unanswered(String),
-    /// The generated command table does not match the descriptor set it was generated from.
-    #[error(
-        "the job command table does not match the job service ({0}); regenerate it with cargo xtask gen-job-surface"
-    )]
-    Surface(String),
 }
 
 /// A job command's failure: a bad flag is a usage error as for every command; a request
@@ -150,7 +146,6 @@ impl Failure {
             Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),
             Self::NotSent(_) => (exit::SERVER, "not-sent"),
             Self::Unanswered(_) => (exit::UNCONFIRMED, "unconfirmed"),
-            Self::Surface(_) => (exit::SERVER, "internal"),
         }
     }
 }

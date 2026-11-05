@@ -362,26 +362,20 @@ pub(crate) fn run(
     let ca_cert = globals.get_one::<PathBuf>("ca_cert").map(PathBuf::as_path);
     let pool = pool()?;
     let request = message(&pool, command.request)?;
-    let mut encoded = Vec::new();
+    let mut values = Vec::new();
     for flag in command.flags {
-        let given = given(flag, args)?;
-        encoded.extend(
-            given
-                .map(|value| field(&request, flag, value))
-                .transpose()?
-                .unwrap_or_default(),
-        );
+        values.extend(given(flag, args)?.map(|value| (flag, value)));
     }
     let key = retry_key(command, args)?;
     let drawn = key
         .as_ref()
         .filter(|(flag, _)| args.get_one::<Json>(flag.name).is_none());
-    encoded.extend(
-        drawn
-            .map(|(flag, id)| field(&request, flag, Json::from(id.as_str())))
-            .transpose()?
-            .unwrap_or_default(),
-    );
+    // A drawn id is encoded as the value of its flag, after the flags given.
+    values.extend(drawn.map(|(flag, id)| (*flag, Json::from(id.as_str()))));
+    let mut encoded = Vec::new();
+    for (flag, value) in values {
+        encoded.extend(field(&request, flag, value)?);
+    }
     // A drawn id is the only way to run the command again safely, so nothing is sent unless
     // it was printed.
     let group = command.path.first().copied().unwrap_or_default();
@@ -395,10 +389,13 @@ pub(crate) fn run(
         })?;
     let response = message(&pool, command.response)?;
     let mut sink = |answer: &[u8]| print(&response, answer, render, out);
+    // Building a runtime with no worker threads fails only when the system is out of file
+    // descriptors, which no test can arrange; its error is made up front.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|why| Failure::Server(format!("cannot start the client: {why}")))?;
+        .ok()
+        .ok_or(Failure::Server("cannot start the client".to_owned()))?;
     let sent = runtime.block_on(async {
         let mut client =
             JobClient::connect_via(server, token_file, ca_cert, REQUEST_LIMIT, dialer.clone())
@@ -527,8 +524,11 @@ fn show(to: &mut dyn Write, text: &str) -> std::io::Result<()> {
 
 /// The descriptor set of the job service.
 fn pool() -> Result<DescriptorPool, Failure> {
+    // The set is built into the program by js-proto, which decodes it in its own tests, so
+    // this does not fail; its error is made up front.
     DescriptorPool::decode(js_proto::FILE_DESCRIPTOR_SET)
-        .map_err(|why| mismatch("the descriptor set", &why))
+        .ok()
+        .ok_or(mismatch("the descriptor set", &"does not decode"))
 }
 
 /// The message `name` of the descriptor set.
@@ -538,15 +538,11 @@ fn message(pool: &DescriptorPool, name: &str) -> Result<MessageDescriptor, Failu
 }
 
 /// The failure of a table that does not match the descriptor set it should have been
-/// generated from.
+/// generated from: exit 1, kind `server`, as any failure on the program's side.
 fn mismatch(what: &str, why: &dyn std::fmt::Display) -> Failure {
-    Failure::Surface(format!("{what}: {why}"))
-}
-
-/// The failure of a call the dispatcher does not know (the table and the dispatcher are
-/// generated together, so this is a table that is not current).
-pub(crate) fn unknown_call(rpc: &str) -> Failure {
-    mismatch(rpc, &"no such call")
+    Failure::Server(format!(
+        "the job command table does not match the job service ({what}: {why}); regenerate it with cargo xtask gen-job-surface"
+    ))
 }
 
 /// The message `T` of an encoded request the flags built.
@@ -569,15 +565,19 @@ mod tests {
             Ok(json) => json.to_string(),
             Err(why) => why,
         };
-        let cases: [(&'static Kind, &str, &str); 15] = [
+        let cases: [(&'static Kind, &str, &str); 21] = [
             (&Kind::Bool, "true", "true"),
             (&Kind::Bool, "yes", r#""yes" is not true or false"#),
             (&Kind::I32, "-4", "-4"),
+            (&Kind::I32, "x", r#""x" is not a 32-bit integer"#),
             (&Kind::I64, "-9000000000", r#""-9000000000""#),
             (&Kind::I64, "x", r#""x" is not a 64-bit integer"#),
             (&Kind::U32, "7", "7"),
+            (&Kind::U32, "-1", r#""-1" is not a whole number below 2^32"#),
             (&Kind::U64, "7", r#""7""#),
+            (&Kind::U64, "-1", r#""-1" is not a whole number below 2^64"#),
             (&Kind::F32, "1.5", r#""1.5""#),
+            (&Kind::F32, "z", r#""z" is not a number"#),
             (&Kind::F64, "z", r#""z" is not a number"#),
             (&Kind::Text, "a b", r#""a b""#),
             (&Kind::Seconds, "2m", "120"),
@@ -596,6 +596,16 @@ mod tests {
                 &Kind::Pair(&Kind::Text, &Kind::Text),
                 "no-equals",
                 r#""no-equals" is not KEY=VALUE"#,
+            ),
+            (
+                &Kind::Pair(&Kind::U32, &Kind::Text),
+                "x=a",
+                r#""x" is not a whole number below 2^32"#,
+            ),
+            (
+                &Kind::Pair(&Kind::Text, &Kind::U32),
+                "a=x",
+                r#""x" is not a whole number below 2^32"#,
             ),
         ];
         for (kind, text, want) in cases {
@@ -752,25 +762,19 @@ mod tests {
         );
     }
 
-    /// Asserts the failures of a table that does not match the job service: a call the
-    /// dispatcher does not know, a message the descriptor set lacks, a request that does not
-    /// decode, and a random source that fails; each says what, and the first three as
-    /// `internal` (exit 1).
+    /// Asserts the failures of a table that does not match the job service: a message the
+    /// descriptor set lacks and a request that does not decode, each saying what as a
+    /// failure on the program's side (`server`, exit 1); and a random source that fails.
     #[test]
     fn a_stale_table_and_a_failed_draw_are_named() {
         let stale = "the job command table does not match the job service";
-        let surface = unknown_call("WatchThings");
-        assert_eq!(
-            surface.to_string(),
-            format!(
-                "{stale} (WatchThings: no such call); regenerate it with cargo xtask gen-job-surface"
-            )
-        );
-        assert_eq!(surface.parts(), (exit::SERVER, "internal"));
         let pool = pool().expect("the job service decodes");
-        let missing = message(&pool, "jobscheduler.v1.Nothing")
-            .err()
-            .map(|f| f.to_string());
+        let missing = message(&pool, "jobscheduler.v1.Nothing").err();
+        assert_eq!(
+            missing.as_ref().map(Failure::parts),
+            Some((exit::SERVER, "server"))
+        );
+        let missing = missing.map(|f| f.to_string());
         assert_eq!(
             missing.unwrap_or_default(),
             format!(

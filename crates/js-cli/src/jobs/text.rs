@@ -44,7 +44,7 @@ fn put(path: &str, kind: &Kind, value: &Value, out: &mut String) {
             let item_kind = kind
                 .as_message()
                 .map(|entry| entry.map_entry_value_field().kind());
-            let item_kind = item_kind.unwrap_or_else(|| kind.clone());
+            let item_kind = item_kind.unwrap_or(kind.clone());
             let mut sorted: Vec<(&MapKey, &Value)> = entries.iter().collect();
             sorted.sort_by(|a, b| a.0.cmp(b.0));
             for (key, item) in sorted {

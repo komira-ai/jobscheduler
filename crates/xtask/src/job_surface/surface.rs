@@ -185,7 +185,8 @@ const METHOD: i32 = 2;
 ///
 /// # Errors
 ///
-/// [`GenError::Services`] unless `set` holds exactly one service; [`GenError::Unresolved`]
+/// [`GenError::Services`] unless `set` holds exactly one service with calls;
+/// [`GenError::Unresolved`]
 /// for a type name that names no message or enum of the set;
 /// [`GenError::ClientStreaming`] for a call whose request streams;
 /// [`GenError::Foreign`] for a call whose request or response is in another package;
@@ -202,6 +203,8 @@ pub fn read(set: &FileDescriptorSet) -> Result<Surface, GenError> {
                 .enumerate()
                 .map(move |(at, s)| (file, at, s))
         })
+        // A service with no call has no command, and the dispatcher's match needs an arm.
+        .filter(|(_, _, service)| !service.method.is_empty())
         .collect();
     let (file, at, service) = match services.as_slice() {
         [one] => *one,
@@ -250,7 +253,7 @@ fn attach(rpcs: &mut [Rpc], entry: &KeyEntry) -> Result<(), GenError> {
     let rpc = rpcs.iter_mut().find(|rpc| rpc.name == entry.rpc);
     let rpc = rpc.ok_or_else(|| missing("is not in the definition".to_owned()))?;
     let field: Vec<String> = entry.field.split('.').map(str::to_owned).collect();
-    let found = field_at(&rpc.request, &field);
+    let found = field_at(&rpc.request, entry.field);
     let text = found.is_some_and(|field| {
         matches!(
             (field.label, &field.kind, field.oneof.is_some()),
@@ -272,18 +275,20 @@ fn attach(rpcs: &mut [Rpc], entry: &KeyEntry) -> Result<(), GenError> {
     }
 }
 
-/// The field at `path` from `message`, through nested messages.
-fn field_at<'a>(message: &'a Message, path: &[String]) -> Option<&'a Field> {
-    let (first, rest) = path.split_first()?;
-    let field = message.fields.iter().find(|field| field.name == *first)?;
-    match (rest.is_empty(), &field.kind) {
-        (true, _) => Some(field),
+/// The field at the dotted `path` from `message`, through nested messages.
+fn field_at<'a>(message: &'a Message, path: &str) -> Option<&'a Field> {
+    let (name, rest) = path
+        .split_once('.')
+        .map_or((path, None), |(name, rest)| (name, Some(rest)));
+    let field = message.fields.iter().find(|field| field.name == name)?;
+    match (rest, &field.kind) {
+        (None, _) => Some(field),
         // The flags reach a nested field only through a singular message outside a `oneof`.
-        (false, Kind::Message(inner)) => match (field.label, field.oneof.is_some()) {
+        (Some(rest), Kind::Message(inner)) => match (field.label, field.oneof.is_some()) {
             (Label::Singular | Label::Optional, false) => field_at(inner, rest),
             _ => None,
         },
-        (false, _) => None,
+        (Some(_), _) => None,
     }
 }
 

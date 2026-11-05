@@ -433,6 +433,76 @@ async fn a_call_is_limited_to_its_whole_answer() {
     );
 }
 
+/// Asserts that every call, not only the ones the other tests use, classifies a definite
+/// refusal as `Rejected` and an answer that never ends as a lost answer at the limit: each
+/// generated method keeps the same rule. The clock is paused, so the limit passes with no
+/// real waiting.
+#[tokio::test(start_paused = true)]
+async fn every_call_classifies_a_refusal_and_a_lost_answer() {
+    let dir = Scratch::new("jobs_every_call");
+    let fake = Fake::new();
+    let calls = [
+        "SubmitJob",
+        "GetJob",
+        "ListJobs",
+        "CancelJob",
+        "GetResult",
+        "GetLogs",
+        "ListHosts",
+        "CordonHost",
+        "UncordonHost",
+        "ListPools",
+        "ListProviders",
+        "GetUsage",
+    ];
+    for call in calls {
+        fake.answer(
+            call,
+            vec![
+                Answer::Status(Code::NotFound, "no such thing"),
+                Answer::Stall,
+            ],
+        );
+    }
+    let mut jobs = client(&dir, PLAIN, None, fake.dialer(None)).await.unwrap();
+    let mut said = Vec::new();
+    for _ in 0..2 {
+        said.push(jobs.submit_job(SubmitJobRequest::default()).await.err());
+        said.push(jobs.get_job(get()).await.err());
+        said.push(jobs.list_jobs(ListJobsRequest::default()).await.err());
+        said.push(jobs.cancel_job(CancelJobRequest::default()).await.err());
+        said.push(jobs.get_result(GetResultRequest::default()).await.err());
+        said.push(jobs.get_logs(GetLogsRequest::default()).await.err());
+        said.push(jobs.list_hosts(ListHostsRequest {}).await.err());
+        said.push(jobs.cordon_host(CordonHostRequest::default()).await.err());
+        said.push(
+            jobs.uncordon_host(UncordonHostRequest::default())
+                .await
+                .err(),
+        );
+        said.push(jobs.list_pools(ListPoolsRequest {}).await.err());
+        said.push(jobs.list_providers(ListProvidersRequest {}).await.err());
+        said.push(jobs.get_usage(GetUsageRequest::default()).await.err());
+    }
+    let said: Vec<(String, bool)> = said
+        .into_iter()
+        .map(|error| {
+            let error = error.unwrap();
+            (error.to_string(), error.may_have_acted())
+        })
+        .collect();
+    let refused = ("no such thing (not-found)".to_owned(), false);
+    let lost = (
+        "no answer from http://localhost:7070 within 20s after the request was sent".to_owned(),
+        true,
+    );
+    let want: Vec<(String, bool)> = std::iter::repeat_n(refused, calls.len())
+        .chain(std::iter::repeat_n(lost, calls.len()))
+        .collect();
+    assert_eq!(said, want);
+    assert_eq!(fake.seen().len(), 2 * calls.len());
+}
+
 /// Asserts that the dialer is given the server's own host and port: an IPv6 address without
 /// its brackets and an explicit port, and the default ports of `https://` and `http://`;
 /// and that a request carries the server's origin, `https://` included, though the client

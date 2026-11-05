@@ -384,18 +384,20 @@ fn choices(enumeration: &Enumeration) -> Vec<(String, String)> {
 pub fn render(surface: &Surface, table: &[Command]) -> String {
     let mut out = super::client::header(surface);
     out.push_str(&format!(
-        "\nuse js_client::jobs::JobClient;\nuse prost::Message;\n\nuse super::{{Command, Flag, Idempotency, Kind, Sink, decode, unknown_call}};\nuse crate::failure::Failure;\n\n/// The commands, one per call of `{}.{}`, in the order the definition names them.\npub(crate) const SURFACE: &[Command] = &[\n",
+        "\nuse js_client::jobs::JobClient;\nuse prost::Message;\n\nuse super::{{Command, Flag, Idempotency, Kind, Sink, decode}};\nuse crate::failure::Failure;\n\n/// The commands, one per call of `{}.{}`, in the order the definition names them.\npub(crate) const SURFACE: &[Command] = &[\n",
         surface.package, surface.service
     ));
     table
         .iter()
         .for_each(|command| out.push_str(&command_text(command)));
-    out.push_str("];\n\n/// Sends `request`, the encoded request of the call `rpc` names, through `client`, and hands\n/// each answer, encoded, to `sink`.\npub(crate) async fn dispatch(client: &mut JobClient, rpc: &str, request: &[u8], sink: Sink<'_>) -> Result<(), Failure> {\n    match rpc {\n");
+    out.push_str("];\n\n/// Sends `request`, the encoded request of the call `rpc` names, through `client`, and hands\n/// each answer, encoded, to `sink`. `rpc` is the `rpc` of an entry of `SURFACE`: the table and\n/// this match are generated together from the same calls, so the last call's arm is the\n/// match's fallback.\npub(crate) async fn dispatch(client: &mut JobClient, rpc: &str, request: &[u8], sink: Sink<'_>) -> Result<(), Failure> {\n    match rpc {\n");
+    let last = surface.rpcs.len().saturating_sub(1);
     surface
         .rpcs
         .iter()
-        .for_each(|rpc| out.push_str(&dispatch_arm(rpc)));
-    out.push_str("        _ => Err(unknown_call(rpc)),\n    }\n}\n");
+        .enumerate()
+        .for_each(|(at, rpc)| out.push_str(&dispatch_arm(rpc, at == last)));
+    out.push_str("    }\n}\n");
     out
 }
 
@@ -481,17 +483,19 @@ fn scalar_name(scalar: Scalar) -> &'static str {
     }
 }
 
-/// The arm of `dispatch` for one call.
-fn dispatch_arm(rpc: &Rpc) -> String {
+/// The arm of `dispatch` for one call: the last call's arm matches any name (`last`).
+fn dispatch_arm(rpc: &Rpc, last: bool) -> String {
     let method = snake(&rpc.name);
+    let pattern = match last {
+        true => format!("_ /* {} */", rpc.name),
+        false => format!("{:?}", rpc.name),
+    };
     match rpc.server_streaming {
         true => format!(
-            "        {:?} => {{\n            let mut answers = client.{method}(decode(request)?).await?;\n            while let Some(answer) = answers.next().await {{\n                sink(&answer?.encode_to_vec())?;\n            }}\n            Ok(())\n        }}\n",
-            rpc.name
+            "        {pattern} => {{\n            let mut answers = client.{method}(decode(request)?).await?;\n            while let Some(answer) = answers.next().await {{\n                sink(&answer?.encode_to_vec())?;\n            }}\n            Ok(())\n        }}\n"
         ),
         false => format!(
-            "        {:?} => sink(&client.{method}(decode(request)?).await?.encode_to_vec()),\n",
-            rpc.name
+            "        {pattern} => sink(&client.{method}(decode(request)?).await?.encode_to_vec()),\n"
         ),
     }
 }

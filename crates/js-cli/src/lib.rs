@@ -307,7 +307,11 @@ fn lease(
     err: &mut dyn Write,
     services: Services,
 ) -> Result<u8, Failure> {
-    let cli = Cli::from_arg_matches(matches).map_err(|usage| Failure::Usage(usage.to_string()))?;
+    // clap already checked `matches` against these commands, so this does not fail; its
+    // error is made up front.
+    let cli = Cli::from_arg_matches(matches)
+        .ok()
+        .ok_or(Failure::Usage("not a lease command".to_owned()))?;
     dispatch(cli, render, out, err, services)
 }
 

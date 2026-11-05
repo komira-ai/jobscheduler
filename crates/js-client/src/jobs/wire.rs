@@ -78,18 +78,16 @@ pub(crate) struct Connector {
 }
 
 impl Connector {
-    /// The connector of `server`, trusting the certificates of `ca_cert` (only those) or,
-    /// without it, the public roots bundled in `webpki-roots`, never the platform's store.
+    /// The connector of `server` (whose base is `uri`), trusting the certificates of
+    /// `ca_cert` (only those) or, without it, the public roots bundled in `webpki-roots`,
+    /// never the platform's store.
     pub(crate) fn new(
         server: &ServerUrl,
+        uri: &Uri,
         ca_cert: Option<&Path>,
         dialer: Dialer,
         begun: Arc<AtomicU64>,
     ) -> Result<Self, JobError> {
-        let uri: Uri = server
-            .base
-            .parse()
-            .map_err(|why| JobError::flag("--server", why))?;
         let host = uri
             .host()
             .unwrap_or_default()
@@ -148,13 +146,16 @@ fn tls(
     ca_cert: Option<&Path>,
 ) -> Result<(TlsConnector, ServerName<'static>), JobError> {
     let roots = roots(ca_cert)?;
+    // The provider is ring's, which has every safe protocol version, so this does not fail.
     let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
         .with_safe_default_protocol_versions()
-        .map_err(|why| JobError::flag("--server", why))?;
+        .ok()
+        .ok_or(JobError::flag("--server", "no TLS version to speak"))?;
     let mut config = builder.with_root_certificates(roots).with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec()];
-    let name =
-        ServerName::try_from(host.to_owned()).map_err(|why| JobError::flag("--server", why))?;
+    let name = ServerName::try_from(host.to_owned())
+        .ok()
+        .ok_or(JobError::flag("--server", "is not a TLS server name"))?;
     Ok((TlsConnector::from(Arc::new(config)), name))
 }
 

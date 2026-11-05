@@ -139,6 +139,40 @@ fn check_names_the_stale_file() {
     );
 }
 
+/// Asserts that the verb, given a descriptor file it cannot read or that does not decode,
+/// exits 1 naming the file or the decoding and writes nothing under `--out`.
+#[test]
+fn the_verb_refuses_a_descriptor_it_cannot_use() {
+    let dir = scratch("refused");
+    let out = dir.path().join("out");
+    let missing = dir.path().join("missing.bin");
+    let undecodable = dir.path().join("text.bin");
+    // `//` is a field tag of wire type 7, which no message has.
+    std::fs::write(&undecodable, b"// not a descriptor set\n").expect("the file");
+    let run = |descriptor: &Path| {
+        xtask(&[
+            "gen-job-surface",
+            "--descriptor",
+            descriptor.to_str().expect("UTF-8"),
+            "--out",
+            out.to_str().expect("UTF-8"),
+        ])
+    };
+    let (code, said, err) = run(&missing);
+    assert_eq!((code, said.as_str()), (Some(1), ""));
+    assert!(
+        err.starts_with(&format!("xtask: cannot read {}: ", missing.display())),
+        "{err}"
+    );
+    let (code, said, err) = run(&undecodable);
+    assert_eq!((code, said.as_str()), (Some(1), ""));
+    assert!(
+        err.starts_with("xtask: the descriptor set does not decode: "),
+        "{err}"
+    );
+    assert!(!out.exists());
+}
+
 /// Asserts that the verb, given a descriptor file, writes both files under `--out` (making
 /// their directories) as the generator renders them, and says so.
 #[test]
@@ -310,9 +344,13 @@ fn client_methods(client: &str) -> BTreeMap<String, String> {
     methods
 }
 
-/// The client method the dispatcher of a rendered CLI file calls for `rpc`.
+/// The client method the dispatcher of a rendered CLI file calls for `rpc`: its own arm, or
+/// the fallback arm that the last call takes (`_ /* Name */`).
 fn dispatched(cli: &str, rpc: &str) -> String {
-    let arm = cli.find(&format!("{rpc:?} =>")).expect("a dispatch arm");
+    let arm = cli
+        .find(&format!("{rpc:?} =>"))
+        .or_else(|| cli.find(&format!("_ /* {rpc} */ =>")))
+        .expect("a dispatch arm");
     let call = cli[arm..].find("client.").expect("a client call") + arm + "client.".len();
     cli[call..]
         .chars()

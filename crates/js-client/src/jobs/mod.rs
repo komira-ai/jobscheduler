@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use js_proto::v1::job_service_client::JobServiceClient;
+use tonic::codegen::http::Uri;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 
@@ -94,24 +95,31 @@ impl JobClient {
             .strip_prefix("Bearer ")
             .unwrap_or_default()
             .to_owned();
+        // The token file's check admits printable ASCII only, and `ServerUrl::parse` admits
+        // a URI with a host, so these conversions do not fail; their errors are made up
+        // front rather than in a path no input reaches.
         let mut bearer = MetadataValue::try_from(bearer.as_str())
-            .map_err(|why| JobError::flag("--token-file", why))?;
+            .ok()
+            .ok_or(JobError::flag("--token-file", "is not printable ASCII"))?;
         bearer.set_sensitive(true);
+        let origin: Uri = server
+            .base
+            .parse()
+            .ok()
+            .ok_or(JobError::flag("--server", "is not a URI"))?;
         let begun = Arc::new(AtomicU64::new(0));
-        let connector = wire::Connector::new(&server, ca_cert, dialer, Arc::clone(&begun))?;
+        let connector =
+            wire::Connector::new(&server, &origin, ca_cert, dialer, Arc::clone(&begun))?;
         // The connector does TLS itself, so the channel's own address is plain `http://` (a
         // tonic built with its TLS features would otherwise wrap or refuse the stream), and
         // the origin the requests carry is the server's, `https://` included.
-        let origin: tonic::codegen::http::Uri = server
-            .base
-            .parse()
-            .map_err(|why| JobError::flag("--server", why))?;
         let authority = origin
             .authority()
             .map(|a| a.as_str().to_owned())
             .unwrap_or_default();
         let endpoint = Endpoint::from_shared(format!("http://{authority}"))
-            .map_err(|why| JobError::flag("--server", why))?
+            .ok()
+            .ok_or(JobError::flag("--server", "is not a URI"))?
             .origin(origin);
         let channel = endpoint.connect_with_connector_lazy(connector);
         Ok(Self {

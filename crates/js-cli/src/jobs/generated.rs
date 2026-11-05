@@ -6,7 +6,7 @@
 use js_client::jobs::JobClient;
 use prost::Message;
 
-use super::{Command, Flag, Idempotency, Kind, Sink, decode, unknown_call};
+use super::{Command, Flag, Idempotency, Kind, Sink, decode};
 use crate::failure::Failure;
 
 /// The commands, one per call of `jobscheduler.v1.JobService`, in the order the definition names them.
@@ -194,7 +194,9 @@ pub(crate) const SURFACE: &[Command] = &[
 ];
 
 /// Sends `request`, the encoded request of the call `rpc` names, through `client`, and hands
-/// each answer, encoded, to `sink`.
+/// each answer, encoded, to `sink`. `rpc` is the `rpc` of an entry of `SURFACE`: the table and
+/// this match are generated together from the same calls, so the last call's arm is the
+/// match's fallback.
 pub(crate) async fn dispatch(client: &mut JobClient, rpc: &str, request: &[u8], sink: Sink<'_>) -> Result<(), Failure> {
     match rpc {
         "SubmitJob" => sink(&client.submit_job(decode(request)?).await?.encode_to_vec()),
@@ -208,7 +210,6 @@ pub(crate) async fn dispatch(client: &mut JobClient, rpc: &str, request: &[u8], 
         "UncordonHost" => sink(&client.uncordon_host(decode(request)?).await?.encode_to_vec()),
         "ListPools" => sink(&client.list_pools(decode(request)?).await?.encode_to_vec()),
         "ListProviders" => sink(&client.list_providers(decode(request)?).await?.encode_to_vec()),
-        "GetUsage" => sink(&client.get_usage(decode(request)?).await?.encode_to_vec()),
-        _ => Err(unknown_call(rpc)),
+        _ /* GetUsage */ => sink(&client.get_usage(decode(request)?).await?.encode_to_vec()),
     }
 }

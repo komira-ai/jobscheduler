@@ -85,7 +85,7 @@ fn one(name: &str, fields: Vec<FieldDescriptorProto>) -> String {
 }
 
 /// Asserts the refusals of what cannot be read: bytes that are not a descriptor set, a set
-/// with no service, a type that is not in the set (a request, a response, an enum), a map
+/// with no service or only a service with no call, a type that is not in the set (a request, a response, an enum), a map
 /// entry without its two fields, and a call whose request streams.
 #[test]
 fn what_cannot_be_read_is_refused_by_name() {
@@ -95,7 +95,11 @@ fn what_cannot_be_read_is_refused_by_name() {
     };
     assert_eq!(
         refused(&empty.encode_to_vec()),
-        "the descriptor set must hold one service, not 0"
+        "the descriptor set must hold one service with calls, not 0"
+    );
+    assert_eq!(
+        refused(&set("p", Vec::new(), Vec::new())),
+        "the descriptor set must hold one service with calls, not 0"
     );
     assert_eq!(
         refused(&set(
@@ -185,8 +189,8 @@ fn a_command_that_cannot_be_is_refused_by_name() {
 }
 
 /// Asserts that the retry-key entry fails loudly when the job service loses what it names:
-/// the call `SubmitJob`, the message on the way to the id (`spec` is no message), or a
-/// `spec.job_id` that is not a string. It catches the entry dropped without a word, which
+/// the call `SubmitJob`, the field `spec`, the message on the way to the id (`spec` is no
+/// message, or a repeated one), or a `spec.job_id` that is not a string. It catches the entry dropped without a word, which
 /// would leave `js job submit` without its drawn id.
 #[test]
 fn the_retry_key_entry_fails_when_the_definition_loses_it() {
@@ -213,6 +217,10 @@ fn the_retry_key_entry_fails_when_the_definition_loses_it() {
     let flat = message("Req", vec![field("spec", 1, Type::String, "")]);
     let lost = "jobscheduler.v1.JobService.SubmitJob has no singular string field spec.job_id, which the generator's retry-key entry names";
     assert_eq!(service(vec![submit.clone()], vec![flat]), lost);
+    assert_eq!(
+        service(vec![submit.clone()], vec![message("Req", Vec::new())]),
+        lost
+    );
     let mut repeated = field("spec", 1, Type::Message, ".jobscheduler.v1.Spec");
     repeated.label = Some(Label::Repeated.into());
     let text_id = message("Spec", vec![field("job_id", 1, Type::String, "")]);
@@ -254,9 +262,9 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Asserts the verb's own refusals: a descriptor file that cannot be read, a root the files
-/// cannot be written under (it is a file), and `--check` against a root without them, which
-/// names both.
+/// Asserts the verb's own refusals: a descriptor file that cannot be read or does not
+/// decode, a root the files cannot be written under (it is a file), and `--check` against a
+/// root without them, which names both.
 #[test]
 fn the_verb_names_what_it_cannot_read_write_or_match() {
     let missing = here().join("no-such-descriptor.bin");
@@ -270,6 +278,15 @@ fn the_verb_names_what_it_cannot_read_write_or_match() {
         .map(|e| e.to_string());
     let want = format!("cannot read {}: ", missing.display());
     assert!(said.unwrap_or_default().starts_with(&want));
+    // A Rust source file opens with `//`, a field tag of wire type 7, which no message has.
+    let undecodable = here().join("src/job_surface/tests.rs");
+    let said = run(&args(Some(undecodable), &here(), false))
+        .err()
+        .map(|e| e.to_string());
+    assert!(
+        said.unwrap_or_default()
+            .starts_with("the descriptor set does not decode: ")
+    );
     let file = here().join("Cargo.toml");
     let said = run(&args(None, &file, false)).err().map(|e| e.to_string());
     let want = format!("cannot write {}: ", file.join(super::CLIENT_FILE).display());

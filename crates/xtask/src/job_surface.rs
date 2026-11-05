@@ -55,8 +55,8 @@ pub enum GenError {
     /// The bytes are not an encoded `FileDescriptorSet`.
     #[error("the descriptor set does not decode: {0}")]
     Decode(#[from] prost::DecodeError),
-    /// The set does not hold exactly one service.
-    #[error("the descriptor set must hold one service, not {0}")]
+    /// The set does not hold exactly one service with calls.
+    #[error("the descriptor set must hold one service with calls, not {0}")]
     Services(usize),
     /// A type name names no message or enum of the set.
     #[error("the descriptor set has no type {0}")]
@@ -130,7 +130,7 @@ pub struct Generated {
 /// # Errors
 ///
 /// [`GenError::Decode`] for bytes that are not a descriptor set; the errors of reading the
-/// surface (no single service, an unresolved type, a request that streams, a message of
+/// surface (no single service with calls, an unresolved type, a request that streams, a message of
 /// another package, a retry-key entry that no longer matches); and those of the command
 /// table (a command without words, on a taken word or where another is; a reserved or
 /// doubled flag).
