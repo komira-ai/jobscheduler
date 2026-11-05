@@ -31,6 +31,7 @@
 //! correct twin's witness holds.
 
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -308,7 +309,21 @@ impl Scenario {
     ///
     /// The first failure.
     pub fn try_run_seeds(&self, seeds: u64) -> Result<Passed, ScenarioFailure> {
-        let runs = (0..seeds).map(|seed| self.run_seed(seed));
+        self.try_run_seed_range(0..seeds)
+    }
+
+    /// Runs the seeds of `seeds` in order, stopping at the first that fails, then judges
+    /// the witnesses over every seed of the range: [`Scenario::try_run_seeds`] over a part
+    /// of the seeds. A scenario is built and run on one thread, so a test that runs a
+    /// large scenario's seeds on several threads builds the scenario on each and gives
+    /// each a range.
+    ///
+    /// # Errors
+    ///
+    /// The first failure.
+    pub fn try_run_seed_range(&self, seeds: Range<u64>) -> Result<Passed, ScenarioFailure> {
+        let count = seeds.end.saturating_sub(seeds.start);
+        let runs = seeds.map(|seed| self.run_seed(seed));
         let runs = runs.collect::<Result<Vec<SeedRun>, ScenarioFailure>>()?;
         let held = |witness: &&Witness| runs.iter().any(|run| (witness.holds)(&run.counters));
         let unwitnessed = self.witnesses.iter().find(|witness| !held(witness));
@@ -316,7 +331,7 @@ impl Scenario {
             Some(witness) => Err(ScenarioFailure::Unwitnessed {
                 scenario: self.name.clone(),
                 witness: witness.name.clone(),
-                seeds,
+                seeds: count,
                 counted: Counters::sum(runs.iter().map(|run| &run.counters)),
             }),
             None => Ok(Passed { runs }),

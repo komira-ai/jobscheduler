@@ -59,6 +59,9 @@ const DIE_REPLACE_AT: Duration = Duration::from_secs(80);
 const DIE_SECOND_AT: Duration = Duration::from_secs(120);
 const DIE_SECOND_RUNS: u32 = 100;
 const DIE_SETTLE: Duration = Duration::from_secs(1_300);
+/// The 200-host scenario is the family's largest by far: its seeds run on this many
+/// threads, a quarter each.
+const DIE_THREADS: u64 = 4;
 
 /// Agents killed for good: five of fifty hosts, at the server's default heartbeat.
 const GOOD_HOSTS: usize = 50;
@@ -240,6 +243,27 @@ fn should_fail(scenario: &Scenario, invariant: Invariant) {
 /// dead process's run again on the new one (`at-most-one-launch`).
 #[test]
 fn ten_of_two_hundred_agents_die_mid_run() {
+    let parts: Vec<_> = (0..DIE_THREADS)
+        .map(|part| {
+            let seeds = part * SEEDS / DIE_THREADS..(part + 1) * SEEDS / DIE_THREADS;
+            std::thread::spawn(move || {
+                let ran = agents_that_die().try_run_seed_range(seeds);
+                ran.map(|_| ()).map_err(|failure| failure.to_string())
+            })
+        })
+        .collect();
+    for part in parts {
+        match part.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(failure)) => panic!("{failure}"),
+            Err(panicked) => std::panic::resume_unwind(panicked),
+        }
+    }
+}
+
+/// The scenario of [`ten_of_two_hundred_agents_die_mid_run`], built on each of the
+/// threads that run its seeds.
+fn agents_that_die() -> Scenario {
     let dead = || Agents::Listed(DIE_AGENTS.to_vec());
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), DIE_HOSTS)
         .heartbeat(DIE_INTERVAL, DIE_GRACE);
@@ -255,7 +279,6 @@ fn ten_of_two_hundred_agents_die_mid_run() {
         .expect(Expect::all_items_terminal())
         .expect(Expect::launched_on(&DIE_AGENTS, DIE_SECOND_AT))
         .settle_within(DIE_SETTLE)
-        .run_seeds(SEEDS);
 }
 
 /// Covers section 8, row 41 (a host silent for good keeps its bookings until they are
