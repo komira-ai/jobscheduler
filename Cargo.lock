@@ -1313,6 +1313,8 @@ dependencies = [
  "js-jobs",
  "js-lease",
  "js-lease-server",
+ "js-logmint",
+ "js-logstore",
  "js-platform",
  "js-pool-static",
  "js-provider",
@@ -1341,6 +1343,17 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "x509-parser",
+]
+
+[[package]]
+name = "js-logmint"
+version = "0.1.0"
+dependencies = [
+ "js-logmint",
+ "js-logstore",
+ "serde_json",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

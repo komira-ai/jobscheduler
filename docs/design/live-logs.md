@@ -1,7 +1,8 @@
 # Live logs: a job's output in an object store
 
-Status: **Planned.** Only the wire fields of section 7 are built (`js-agent-wire`, with the per-run capture file cap in
-`js-contain`); no agent or server fills them yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+Status: **Planned.** Built so far, and used by nothing yet: the wire fields of section 7 (`js-agent-wire`, with the per-run capture
+file cap in `js-contain`), which no agent or server fills; the object-store client (`js-logstore`); the `[logs]` table of section 6,
+which the server reads and checks at start; and the mint of section 4 (`js-logmint`), which the server does not call. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design

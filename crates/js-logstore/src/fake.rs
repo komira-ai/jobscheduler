@@ -15,6 +15,12 @@
 //! 5. the credential's [`Policy`] must allow the call's action on its key, or a listing's
 //!    prefix (403 `AccessDenied`).
 //!
+//! It also serves STS `AssumeRole` (a `POST` of a form to `/`, signed for the service `sts` by a
+//! key of [`FakeStore::minting_key`]): it parses the request's session policy into a [`Policy`]
+//! ([`Policy::from_session_policy`]) and answers a temporary credential holding exactly that
+//! policy, valid for the `DurationSeconds` asked (or for what
+//! [`FakeStore::answer_sts_with_lifetime`] says).
+//!
 //! A refused request changes nothing. [`FakeStore::operations`] lists the accepted ones in
 //! order. A put can be held ([`FakeStore::block_puts`]) until the test releases it, never for a
 //! time, and the answer of a stored put can be lost
@@ -34,8 +40,15 @@ use crate::credential::{Credential, Endpoint};
 use crate::http::{HttpRequest, HttpResponse, Method, Transport, TransportError};
 use crate::sigv4::{Scope, Unsigned, sign};
 
-/// How long a credential the fake issues is valid, from the fake's clock at issue.
+mod sts;
+
+pub use sts::{MAX_DURATION_SECS, MIN_DURATION_SECS};
+
+/// How long a credential [`FakeStore::issue`] makes is valid, from the fake's clock at issue.
 pub const ISSUED_TTL: Duration = Duration::from_secs(3600);
+
+/// How long a key of [`FakeStore::minting_key`] is valid, from the fake's clock at issue.
+pub const MINTING_KEY_TTL: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The headers the signer adds; the fake computes them again rather than reading them.
 const SIGNER_HEADERS: [&str; 5] = [
@@ -146,6 +159,7 @@ struct State {
     puts_waiting: usize,
     lose_next_put: bool,
     operations: Vec<Op>,
+    sts_lifetime: Option<Duration>,
 }
 
 struct Stored {
@@ -157,6 +171,16 @@ struct Stored {
 struct Issued {
     credential: Credential,
     policy: Policy,
+    /// Whether the key may call `AssumeRole`: a key of [`FakeStore::minting_key`].
+    may_assume: bool,
+}
+
+/// A request whose signature the fake checked: the credential that signed it, and its URL's
+/// path and decoded query.
+struct Verified<'s, 'r> {
+    issued: &'s Issued,
+    path: &'r str,
+    query: Vec<(String, String)>,
 }
 
 /// A call the fake serves, as parsed from a request.
@@ -220,18 +244,63 @@ impl FakeStore {
     /// A new temporary credential (with a session token) that may do what `policy` allows,
     /// until [`ISSUED_TTL`] after the fake's clock now.
     pub fn issue(&self, policy: Policy) -> Credential {
+        self.issue_for(policy, ISSUED_TTL)
+    }
+
+    /// A new temporary credential (with a session token) that may do what `policy` allows,
+    /// until `lifetime` after the fake's clock now.
+    pub fn issue_for(&self, policy: Policy, lifetime: Duration) -> Credential {
+        self.issue_in(&mut self.lock(), policy, lifetime, false)
+    }
+
+    /// A new long-lived key (no session token) that may call `AssumeRole` and nothing else,
+    /// until [`MINTING_KEY_TTL`] after the fake's clock now: the key a minter signs with.
+    pub fn minting_key(&self) -> Credential {
+        let none = Policy {
+            actions: Vec::new(),
+            prefix: String::new(),
+        };
+        self.issue_in(&mut self.lock(), none, MINTING_KEY_TTL, true)
+    }
+
+    /// Makes the credential `access_key_id` expire now, as the store sees it: every later
+    /// request signed with it is answered 403 `ExpiredToken`. An unknown id changes nothing.
+    pub fn expire(&self, access_key_id: &str) {
+        let now = self.shared.clock.now();
         let mut state = self.lock();
+        if let Some(issued) = state.keys.get_mut(access_key_id) {
+            issued.credential.expires_at = now;
+        }
+    }
+
+    /// Answers every later `AssumeRole` with a credential valid for `lifetime` whatever
+    /// duration it asked, as a store that shortens a session does; `None` goes back to the
+    /// duration asked.
+    pub fn answer_sts_with_lifetime(&self, lifetime: Option<Duration>) {
+        self.lock().sts_lifetime = lifetime;
+    }
+
+    /// Issues a credential: a minting key (no session token, may call `AssumeRole`) when
+    /// `minting`, else a temporary credential with a session token.
+    fn issue_in(
+        &self,
+        state: &mut State,
+        policy: Policy,
+        lifetime: Duration,
+        minting: bool,
+    ) -> Credential {
         state.issued += 1;
         let n = state.issued;
         let credential = Credential {
             access_key_id: format!("FAKEKEY{n:012}"),
             secret_access_key: format!("fake-secret-{n}"),
-            session_token: Some(format!("fake-session-token-{n}")),
-            expires_at: self.shared.clock.now() + ISSUED_TTL,
+            session_token: (!minting).then(|| format!("fake-session-token-{n}")),
+            expires_at: self.shared.clock.now() + lifetime,
         };
         let issued = Issued {
             credential: credential.clone(),
             policy,
+            may_assume: minting,
         };
         state.keys.insert(credential.access_key_id.clone(), issued);
         credential
@@ -293,6 +362,25 @@ impl FakeStore {
     /// The call `request` is, when the request is signed by a valid credential whose policy
     /// allows it; otherwise the refusal.
     fn authorize(&self, state: &State, request: &HttpRequest) -> Result<Call, HttpResponse> {
+        let verified = self.verify(state, request, "s3")?;
+        let call = self.call(request, verified.path, &verified.query)?;
+        let (action, name) = call.needs();
+        let policy = &verified.issued.policy;
+        let allowed = policy.actions.contains(&action) && name.starts_with(&policy.prefix);
+        match allowed {
+            true => Ok(call),
+            false => Err(error(403, "AccessDenied")),
+        }
+    }
+
+    /// The credential that signed `request` for `service`, when it is one the fake issued, it
+    /// is unexpired and the signature is the one the fake computes; otherwise the refusal.
+    fn verify<'s, 'r>(
+        &self,
+        state: &'s State,
+        request: &'r HttpRequest,
+        service: &str,
+    ) -> Result<Verified<'s, 'r>, HttpResponse> {
         let mismatch = || error(403, "SignatureDoesNotMatch");
         let (key_id, signed_names) = request
             .header("authorization")
@@ -331,23 +419,20 @@ impl FakeStore {
         };
         let scope = Scope {
             region: self.shared.endpoint.region(),
-            service: "s3",
+            service,
         };
         let expected = sign(&unsigned, &issued.credential, &scope, at);
         let genuine = expected
             .headers
             .iter()
             .all(|(name, value)| request.header(name) == Some(value.as_str()));
-        if !genuine {
-            return Err(mismatch());
-        }
-        let call = self.call(request, path, &query)?;
-        let (action, name) = call.needs();
-        let allowed =
-            issued.policy.actions.contains(&action) && name.starts_with(&issued.policy.prefix);
-        match allowed {
-            true => Ok(call),
-            false => Err(error(403, "AccessDenied")),
+        match genuine {
+            true => Ok(Verified {
+                issued,
+                path,
+                query,
+            }),
+            false => Err(mismatch()),
         }
     }
 
@@ -472,6 +557,9 @@ impl Transport for FakeStore {
         }
         if let Some(status) = state.faults.pop_front() {
             return Ok(status.answer());
+        }
+        if sts::is_sts(&request) {
+            return Ok(self.assume_role(&mut state, &request));
         }
         let call = match self.authorize(&state, &request) {
             Ok(call) => call,

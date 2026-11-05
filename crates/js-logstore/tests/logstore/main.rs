@@ -7,6 +7,7 @@
 mod answers;
 mod endpoint;
 mod fake_requests;
+mod fake_sts;
 mod layout;
 mod secrets;
 mod server;

@@ -25,7 +25,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, LogsConfig, Registering};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
@@ -410,6 +410,8 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    /// Where live logs go (`[logs]`; no sink from flags).
+    pub(crate) logs: LogsConfig,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -501,6 +503,7 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            logs: LogsConfig::None,
         })
     }
 
@@ -529,6 +532,7 @@ impl Config {
             hosts,
             mut warnings,
             unrunnable,
+            logs,
             ..
         } = file::load(path, &load)?;
         if let Some(refusal) = unrunnable {
@@ -613,6 +617,7 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            logs,
         })
     }
 
@@ -754,6 +759,11 @@ impl Config {
     /// once here and applied when a job ends.
     pub fn job_retention(&self) -> Retention {
         self.job_retention
+    }
+
+    /// Where live logs go: the `[logs]` table of the file, checked; no sink from flags.
+    pub fn logs(&self) -> &LogsConfig {
+        &self.logs
     }
 
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).

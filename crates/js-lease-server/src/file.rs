@@ -1,4 +1,5 @@
-//! The configuration file of `--config`: a `[server]` table and `[[pool]]` tables.
+//! The configuration file of `--config`: a `[server]` table, `[[pool]]` tables and the
+//! `[logs]` table of live logs.
 //!
 //! Every table refuses a field it does not know, and the file holds no secret: a secret is
 //! the path of a file, read owner-only. A refusal names the pool and the field, such as
@@ -40,6 +41,7 @@ mod budget;
 mod joined;
 mod lifetime;
 mod limits;
+mod logs;
 mod network;
 mod pins;
 mod platform;
@@ -49,6 +51,7 @@ mod server;
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
 pub use limits::ProviderLimits;
+pub use logs::{AccessKey, LogsConfig, Minting, ObjectStoreLogs};
 use network::read_network;
 use pins::{LIVE_NEEDS, read_agents};
 pub use platform::{
@@ -67,7 +70,14 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 /// The memory a host of an elastic pool must report at least: 1 GiB.
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
-const ROOT_KEYS: &[&str] = &["server", "pool", "budget", "machine_provider", "platform"];
+const ROOT_KEYS: &[&str] = &[
+    "server",
+    "pool",
+    "budget",
+    "machine_provider",
+    "platform",
+    "logs",
+];
 
 const POOL_KEYS: &[&str] = &[
     "name",
@@ -303,6 +313,8 @@ pub(crate) struct Loaded {
     pub(crate) client_token: Token,
     pub(crate) hosts: LoadedHosts,
     pub(crate) warnings: Vec<String>,
+    /// Where live logs go: the `[logs]` table, or no sink.
+    pub(crate) logs: LogsConfig,
     /// The machine providers, platforms and pools, however each pool was written.
     pub(crate) resolved: Resolved,
     /// Why the server cannot start on the file although it is valid: it has more than one
@@ -350,9 +362,11 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let budget = root.table("budget")?;
     let machine_providers = root.tables("machine_provider")?;
     let platforms = root.tables("platform")?;
+    let logs = root.table("logs")?;
     let server = read_server(server)?;
     let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
+    let logs = logs::read_logs(logs, ld.files)?;
     let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
     let mut static_pool = None;
     let mut registering = Vec::new();
@@ -416,6 +430,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         client_token,
         hosts,
         warnings,
+        logs,
         resolved,
         unrunnable,
     })

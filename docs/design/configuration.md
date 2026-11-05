@@ -131,12 +131,24 @@ start within `start_timeout`, and the pick of an offer when a pool acquires a ma
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 
-## Live logs: `[logs]` (Planned)
+## Live logs: `[logs]`
 
 The table of [live-logs.md](live-logs.md), section 6, which gives each key's type, default and bound. It is in the `--config` file only,
-beside `[server]`, and has no flags; an unknown key is refused; `sink = "none"` (the default, also when the table is absent) with any
-other key present is refused, naming the key. The keys are files, never inline secrets, and each file is owner-only like every other
-key file. The server does not read the table yet.
+beside `[server]`, and has no flags: a server run from flags has no sink. An unknown key is refused; `sink = "none"` (the default, also
+when the table is absent) with any other key present is refused, naming the key. The keys are files, never inline secrets, and each
+file is owner-only like every other key file (mode 0600 or 0400, owned by the service user), holding exactly
+`{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
+bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
+repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). Nothing uses the table
+yet: no credential is minted and no log is read.
+
+The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
+section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64
+bytes of `[a-z0-9-]`; `endpoint` and `sts_endpoint` are `https` URLs, or `http` to a loopback address, with no path, query, fragment or
+user; `credentials` is `"sts"` (anything else is refused as not built); `role_arn` begins with `arn:` and is at most 2,048 bytes of
+printable ASCII; `credential_ttl` is from 15 minutes to 12 hours; `max_follow` is from 1 to 4,096. `credential_ttl` must also be at most
+the role's maximum session duration, which is the operator's to set in the store and which the server cannot check at start: STS
+refuses a longer session, and the refusal shows as a mint failure.
 
 ```toml
 [logs]
@@ -148,7 +160,7 @@ path_style      = false                                 # optional; true for sto
 read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
 credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
 sts_endpoint    = "https://objects.example"             # optional; default endpoint, or the region's AWS STS endpoint
-role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts
+role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts; its maximum session duration at least credential_ttl
 mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
 credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once
