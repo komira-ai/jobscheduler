@@ -1651,8 +1651,11 @@ dependencies = [
 name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
+ "js-conformance",
  "js-sim",
  "js-types",
+ "serde_json",
 ]
 
 [[package]]
