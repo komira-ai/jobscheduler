@@ -31,7 +31,7 @@ use js_types::{HostId, LeaseId};
 pub use js_usage::UsageCounters;
 use js_usage::{
     AcceptedResult, AllocationLog, Beat, BeatLoad, DroppedReadings, EndedRow, Finish, Flushed,
-    HistoryWritten, UsageHub,
+    HistoryWritten, TailSink, UsageHub,
 };
 use tracing::{error, info, warn};
 
@@ -94,6 +94,11 @@ impl Usage {
     /// The sink's learned curves, for admission.
     pub(crate) fn curves(&self) -> Option<Arc<ProfileCurves>> {
         self.hub.curves()
+    }
+
+    /// The sink's tail sink, for the registry's tail counters.
+    pub(crate) fn tail(&self) -> Option<Arc<dyn TailSink>> {
+        self.hub.tail()
     }
 
     /// What has been counted so far, with the sink's own counts.

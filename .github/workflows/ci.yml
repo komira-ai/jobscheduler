@@ -270,8 +270,9 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # js-state's Postgres backend against a real server: its conformance suite, the schema
-  # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), and clippy
-  # with the feature on. The server is a service container
+  # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), js-usage's
+  # tail counter scenarios and history store on it (tests/postgres_tail.rs,
+  # tests/postgres_history.rs), and clippy with the feature on. The server is a service container
   # pinned by digest; its password is a throwaway for this container, which lives only for
   # this job. The tests read the server's URL from KBF_TEST_POSTGRES_URL (the name the code
   # has; a rename is a later change to the code). The in-memory fake and its deliberately

@@ -34,6 +34,7 @@ mod marks;
 mod provider_side;
 mod record;
 mod start;
+mod tail;
 mod view;
 
 use record::Record;
@@ -177,7 +178,7 @@ struct State {
     /// hello, whether or not the registry holds them yet ([`Registry::mark_ending`]).
     ending: BTreeSet<HostId>,
     /// What the tail rule is measured by ([`Registry::tail_counters`]).
-    tail: crate::TailCounters,
+    tail: crate::tail_counters::TailBook,
 }
 
 impl State {
@@ -269,7 +270,7 @@ impl Registry {
             dropped: 0,
             launchable: None,
             ending: BTreeSet::new(),
-            tail: crate::TailCounters::default(),
+            tail: crate::tail_counters::TailBook::default(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -443,11 +444,10 @@ impl Registry {
         }
     }
 
-    /// What the tail rule is measured by since the registry started: leases started on
-    /// marked hosts, the share of them that were backfill, and the error of the end
-    /// estimated for each lease that ended. In memory only.
+    /// The tail rule's counters ([`crate::TailCounters`]): what the tail sink held when it
+    /// was set ([`Registry::set_tail_sink`]), plus every count since, written or not.
     pub fn tail_counters(&self) -> crate::TailCounters {
-        self.lock().tail
+        self.lock().tail.counters
     }
 
     /// The hosts reserved and held, and the requests waiting, now.

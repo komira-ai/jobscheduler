@@ -1,6 +1,6 @@
 # The usage store
 
-The server keeps what it measured and what it learned in one `js-state` store: the SQLite file `--usage-db` names (`usage.db` beside the lease file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. These key spaces live there:
+The server keeps what it measured and what it learned in one `js-state` store: the SQLite file `--usage-db` names (`usage.db` beside the lease file unless given). `js-usage` owns the rows; the server opens the store and hands it to them. A server without agent registration, or with `--usage-off` (`server.usage_off`), runs without one. These key spaces live there:
 
 | prefix | one row per | written | kept |
 |---|---|---|---|
@@ -8,6 +8,7 @@ The server keeps what it measured and what it learned in one `js-state` store: t
 | `usage/key/<profile key>` | profile key: the ring of its last runs that ended cleanly, from which its cost curve and its P90 wall time are fitted | when a clean run of the key ends | under `--profile-store-bytes`, least recently used key first |
 | `usage/ended/<ended-at>/<id>` | ended allocation: the record below | by the tick after the allocation ended | `--history-retention-days` (default 90) |
 | `usage/ended-id/<id>` | ended allocation: the key of its record, so an allocation is recorded once | with its record, in one transaction | deleted with its record |
+| `usage/tail/<counter>` | tail counter: the counter's total since the rows were first written (below) | by the flush, every five minutes, and at shutdown | never reset by the server |
 
 Every row starts with a version byte.
 
@@ -44,3 +45,51 @@ Every row starts with a version byte.
 **Reading.** `UsageSink::ended_rows(from_ms, to_ms, limit)` returns the records that ended in a range, oldest first. A record whose key is not the one its own end and id give is skipped and counted, as an unreadable one is. No route serves them yet.
 
 **Stored form.** A version byte (1), then each field in the order of the table: text as a varint length and UTF-8 bytes, a number as a varint, the error as a zigzag varint, and an optional field as a byte 0 (absent) or 1 followed by the field. A field is added at the end under the same version, and a reader ignores the bytes after the fields it knows, so an older build reads a newer record; the version changes only if a field already written changes meaning. A record this build does not read (another version, a reason or outcome name it does not know, bytes that do not decode) is left in place, and a read skips and counts it rather than failing.
+
+## Tail counters
+
+The registry counts what the tail rule of whole-node placement is measured by: leases
+started on a host a whole-node request marked, how many of those were backfill, and how
+far each ended lease's end was from its estimated end (a count with an estimate, a count
+without, a signed sum in milliseconds and eight signed buckets).
+
+**Rows.** One row per counter, named by its field:
+
+- `usage/tail/started_on_marked`, `usage/tail/backfilled`, `usage/tail/ended_estimated`,
+  `usage/tail/ended_unestimated`: a count;
+- `usage/tail/error_sum_ms`: the signed sum of the errors (actual end minus estimated end);
+- `usage/tail/error_bucket_0` to `usage/tail/error_bucket_7`: the errors by bucket;
+- `usage/tail/error_edges_ms`: the bucket edges the counts were made with.
+
+A counter row is a version byte (1) and the value as 8 little-endian bytes, unsigned for a
+count and two's complement for the sum. The edges row is a version byte (1), the number of
+edges and each edge as 8 little-endian bytes.
+
+**Writing.** The registry hands each change to the sink once its lock is released; the
+sink joins it to the counts waiting to be written, and the usage flush (every five minutes,
+and at shutdown) adds them to the rows in one transaction conditional on the version of
+every row it read. A row that changed in between is read again and the write tried again,
+so two writers, or two boots, each add their own counts and neither loses nor doubles the
+other's. Flushes run one after another, so the final flush at shutdown also writes what an
+earlier flush still under way put back. A write that fails keeps its counts for the next
+flush, is counted (`UsageCounters::tail.writes_failed`) and is logged once per run of
+failures, with one more line when a write lands again; a flush with nothing waiting asks
+the store nothing and neither ends nor starts a run. The counts not yet written when a
+server stops without its final flush are lost from the store; what earlier flushes wrote
+stays.
+
+**Restart.** At start the registry reads the rows and counts on from them, so its
+counters are the stored totals plus every count since, written or not. The totals are
+exact while they stay within their ranges; a total that reaches the end of its range stops
+there, and only then may the order in which counts were grouped change it. The rows are
+additive: the server never resets them; only a person deleting them does.
+
+**Refusals.** Rows bucketed by other edges than the build's, rows whose edges row does not
+read, and counter rows with no edges row at all are refused: the counters start at zero,
+nothing is added to those rows (the counts that would have been are dropped and counted),
+and they are left as they are. A counter row of a newer version is skipped, read as zero, counted
+(`UsageCounters::tail.rows_skipped`) and never overwritten. A store that cannot be read at
+start leaves the counters at zero and is logged once.
+
+**Without a usage store** the counters are in the registry's memory only and start at
+zero at every start.
