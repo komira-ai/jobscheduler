@@ -401,12 +401,12 @@ fn the_system_opens_the_crun_runtime_for_crun_settings() {
 }
 
 /// A server, an agent started with `--runtime crun` over the node, and a lease on its host.
-struct Rig {
+pub(super) struct Rig {
     server: Server,
-    agent: Agent,
+    pub(super) agent: Agent,
     worker: Handle,
     lease: String,
-    machine: Arc<CrunMachine>,
+    pub(super) machine: Arc<CrunMachine>,
     flags: Vec<String>,
     address: Arc<Mutex<String>>,
 }
@@ -453,7 +453,7 @@ fn end_leftovers(scratch: &Path) {
 impl Rig {
     /// Starts the server and the agent, waits until the agent has said hello, and takes a
     /// lease on its host.
-    fn new(name: &str, extra: &[&str]) -> Self {
+    pub(super) fn new(name: &str, extra: &[&str]) -> Self {
         Self::on_pool(name, extra, POOL_RUNS_TOML)
     }
 

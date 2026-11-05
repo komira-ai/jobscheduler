@@ -12,7 +12,7 @@ use js_agent::lifecycle::{
     Found, Prepared, RunHandle, RunSpec, Runtime, RuntimeError, Status, Ticket,
 };
 use js_agent::quota::ScratchQuota;
-use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock, System};
+use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock, System};
 use js_agent_wire::LogTail;
 
 use super::crun_e2e::seams;
@@ -26,6 +26,9 @@ pub(super) struct CrunMachine {
     pub(super) fake: FakeMachine,
     /// The grace of every stop the runtime was asked for.
     pub(super) stops: Arc<Mutex<Vec<Duration>>>,
+    /// The live-log capture cap (`--log-file-cap`) of the crun settings of every runtime
+    /// opened, in order.
+    pub(super) log_file_caps: Arc<Mutex<Vec<u64>>>,
 }
 
 impl CrunMachine {
@@ -34,6 +37,7 @@ impl CrunMachine {
             system: System::new().with_crun(seams()),
             fake: FakeMachine::new(),
             stops: Arc::default(),
+            log_file_caps: Arc::default(),
         })
     }
 }
@@ -93,6 +97,10 @@ impl Machine for CrunMachine {
     }
 
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+        if let Backend::Container(settings) = build.backend {
+            let caps = settings.crun().map(|plan| plan.logs.file_cap);
+            self.log_file_caps.lock().expect("caps").extend(caps);
+        }
         let (inner, warnings) = self.system.runtime(build)?;
         let stops = self.stops.clone();
         Ok((Box::new(Noting { inner, stops }), warnings))
