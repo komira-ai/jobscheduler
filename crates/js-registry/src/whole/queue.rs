@@ -188,6 +188,13 @@ impl WaitList {
         Some(self.entries.remove(at).id)
     }
 
+    /// The request lease `lease` presented last, if it waits, and when it was first
+    /// presented.
+    pub(crate) fn presented_by(&self, lease: &LeaseId) -> Option<(&RequestId, Timestamp)> {
+        let entry = &self.entries[self.position_of(lease)?];
+        Some((&entry.id, entry.since))
+    }
+
     /// Whether a request lease `lease` presented last is waiting.
     pub(crate) fn holds_lease(&self, lease: &LeaseId) -> bool {
         self.position_of(lease).is_some()

@@ -83,6 +83,13 @@ impl LogsConfig {
     }
 }
 
+impl crate::config::Config {
+    /// Where live logs go: the `[logs]` table of the file, checked; no sink from flags.
+    pub fn logs(&self) -> &LogsConfig {
+        &self.logs
+    }
+}
+
 /// An object-store sink, as `[logs]` describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectStoreLogs {
