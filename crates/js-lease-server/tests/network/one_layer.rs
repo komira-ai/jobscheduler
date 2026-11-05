@@ -320,7 +320,7 @@ fn the_path_check_finds_a_stray_file() {
 /// Asserts the check of the design's 8.6 over the tree: the service names `network::` only
 /// in its `network/` module and the files that launch or check through a mode; and no
 /// provider crate (every directory `js-provider*`, so a new one is scanned too),
-/// `js-pool-static`, `js-registry` or `js-scaler` names a network type. It catches a
+/// `js-pool-fake`, `js-registry` or `js-scaler` names a network type. It catches a
 /// provider that reaches for a mode, and a core module of the service that starts to
 /// depend on one.
 #[test]
@@ -337,7 +337,7 @@ fn the_network_path_is_named_only_where_the_design_allows() {
                 .is_some_and(|n| n.to_string_lossy().starts_with("js-provider"))
         })
         .collect();
-    providers.push(crate_dir("js-pool-static"));
+    providers.push(crate_dir("js-pool-fake"));
     assert!(providers.len() >= 4, "the scan found {providers:?}");
 
     let all = [NETWORK_WORDS.as_slice(), SERVICE_WORDS.as_slice()].concat();

@@ -17,10 +17,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use js_lease::Timestamp;
 
+use crate::agents_support::{JOIN, hello_body};
 use crate::binary::launch;
-use crate::support::{
-    Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard, lease_body,
-};
+use crate::config_support::registering_args;
+use crate::support::{Harness, LogCapture, Scratch, TOKEN, args_with, config, guard, lease_body};
 use crate::tls::{connector, tls_request};
 
 /// A self-signed certificate for 127.0.0.1 with this serial number and validity, and its
@@ -349,7 +349,7 @@ async fn sighup_reloads_the_program() {
         key: scratch.path("test-only-key.pem"),
     };
     files.put(&scratch, &first);
-    let mut args = base_args(&scratch);
+    let mut args = registering_args(&scratch);
     args.extend(
         [
             "--tls-cert",
@@ -360,6 +360,12 @@ async fn sighup_reloads_the_program() {
         .map(Into::into),
     );
     let (mut child, addr) = launch(&args, Stdio::piped());
+    // The program serves only hosts that register: one says hello before the lease.
+    let hello = hello_body("gpu-01").to_string().into_bytes();
+    let path = "/v1/agent/hello";
+    let trusting = connector(&first.0);
+    let welcome = tls_request(addr, &trusting, "POST", path, Some(JOIN), Some(&hello)).await;
+    assert_eq!(welcome.status, 200, "{}", welcome.body);
     let body = lease_body().to_string().into_bytes();
     let made = tls_request(
         addr,

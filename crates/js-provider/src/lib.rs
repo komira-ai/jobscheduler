@@ -20,9 +20,9 @@
 //! ([`Observed::frees_booking`]).
 //!
 //! [`HostBook`] is the booking table a pool of hosts keeps: the leases each host holds
-//! and what each books there, and every lease it has stopped. The static pool (`js-pool-static`) and the
-//! registry of self-registered hosts (`js-registry`) both book through it, so neither
-//! copies its rules.
+//! and what each books there, and every lease it has stopped. The registry of
+//! self-registered hosts (`js-registry`) and the fake host pool of the tests
+//! (`js-pool-fake`) both book through it, so neither copies its rules.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 

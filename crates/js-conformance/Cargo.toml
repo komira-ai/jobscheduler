@@ -22,7 +22,7 @@ js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
-js-pool-static = { path = "../js-pool-static" }
+js-pool-fake = { path = "../js-pool-fake" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit" }
 

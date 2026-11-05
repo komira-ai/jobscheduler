@@ -7,10 +7,12 @@ requirements do not make; each one is listed under Open questions (section 14).
 
 ## 1. Summary
 
-Today the server leases whole hosts. Hosts come from two places: a static file
-(`--pool-config`, `crates/js-pool-static`) and agents that register themselves into one
-pool (`--agent-pool-config`, `--agent-token-file`,
-`crates/js-lease-server/src/agent_pool.rs`). A Lambda provider exists
+Today the server leases whole hosts, and every host runs `js-agent` and registers itself
+into a pool (`--agent-pool-config`, `--agent-token-file`,
+`crates/js-lease-server/src/agent_pool.rs`, or a `[[pool]]` of `kind = "static"` in the
+`--config` file). The agentless hosts-file pool (`--pool-config`, the provider kind
+`static` with a `hosts_file`) was removed and is refused at start with the migration in
+`docs/design/configuration.md`; `crates/js-pool-fake` keeps a fake host list for tests. A Lambda provider exists
 (`crates/js-provider-lambdalabs`) that can launch and terminate instances, but nothing
 calls it: its docs say "The provider is not wired to a scheduler"
 (`crates/js-provider-lambdalabs/src/lib.rs`). One-time join tokens can be minted and
@@ -159,7 +161,8 @@ A pool is one `[[pool]]` table: a name, a class, a cap, a provider, a network, a
 time, an execution mode. Today the server has exactly one registering pool: `Registry::new`
 takes one `PoolConfig` (`crates/js-registry/src/registry.rs`, built in
 `crates/js-lease-server/src/agents.rs`). The first slice keeps that: at most one pool whose
-provider is elastic or `agent`, plus any number of `static` pools.
+provider is elastic or a registering `static` pool (the machines run `js-agent` and register). A pool of a
+simulated test kind is served beside it, and only one of those.
 
 This replaces the provider hierarchy of `docs/design/providers.md` (`providers = [...]` per
 pool, `provider_max_machines`) for the first slice. A pool has one provider. Choosing among
@@ -346,11 +349,6 @@ tls_key        = "/run/credentials/js/tls-key"
 max_lease_wall = "2h"                                    # the longest max_wall a lease may ask for; required with an accelerator pool (6.4)
 # tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
 
-[[pool]]
-name     = "gpu-static"
-class    = "gpu-host"
-provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
-
 [[pool]]                       # the 4.1 pool, with every optional key written out
 name   = "gpu"
 class  = "whole-node"
@@ -371,6 +369,10 @@ network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oau
 agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
              aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
 ```
+
+One pool registers agents in this version, so the file above holds the elastic pool alone. A pool of
+machines that run `js-agent` and register is a `[[pool]]` of `kind = "static"` (its keys are in
+`docs/design/configuration.md`) and takes the place of the elastic pool in a file.
 
 A pool whose hosts already have a route to the scheduler omits `network` (mode `default`). The
 network mode is the same set for every provider: the pool names it in `network`, and no provider
@@ -403,13 +405,14 @@ message naming pool and field:
 |---|---|
 | file missing or unreadable | `--config /etc/js.toml: cannot read: No such file` |
 | unknown table or field anywhere | `pool "gpu": provider.api_keyfile: unknown field; known: api_key_file, regions, types, ssh_key, api_url` |
-| unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs, static` |
+| unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
 | type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (`GpuClass::parse`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
 | elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
+| a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` (the removed agentless pool; the message names the migration and never echoes the path) | `pool "old": provider.kind = "static", provider.hosts_file: the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = "static" (with its shape and max_machines)` |
 | two pools with one name; more than one registering pool; a class that books part of a host (first slice) | `pool "b": only one pool may register agents in this version` |
 | `exec` not `container` or `sandbox-exec`; `sandbox-exec` with an elastic kind that cannot launch macOS | `pool "mac": exec: ...` |
 | an elastic pool and no `server.agent_listen`; `agent_listen` equal to `listen` | `server.agent_listen: required with an elastic pool; must differ from server.listen` |
@@ -438,12 +441,12 @@ A table compiled into `js-lease-server`, file `src/kinds.rs`:
 
 ```rust
 pub type Ctor = fn(&toml::Table, &BuildCtx<'_>) -> Result<Built, KindError>;
-pub enum Built { Static(Box<dyn CapacitySource>), Elastic(Box<dyn CapacityProvider>) }
+pub enum Built { Simulated(Box<dyn CapacitySource>), Elastic(Box<dyn CapacityProvider>) }
 pub struct BuildCtx<'a> { pub pool: &'a str, pub scheduler: &'a SchedulerId,
     pub clock: Arc<dyn Clock>, pub files: &'a dyn SecretFiles }  // files: owner-only reads; tests inject
 pub struct KindError { pub field: String, pub reason: String }
 impl Kinds {
-    pub fn standard() -> Self;   // "static", "lambdalabs"
+    pub fn standard() -> Self;   // "lambdalabs"
     pub fn build(&self, kind: &str, table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError>;
 }
 ```
@@ -455,9 +458,9 @@ same for `default` and `tailscale`; it is read by the launch shell, never by a p
 
 Constructors live in the provider crates:
 
-- `js_pool_static::kind::build` reads `hosts_file` and returns `Built::Static(...)` over
-  today's `StaticPoolSource` (`capacity.rs`) and today's file format
-  (`crates/js-pool-static/example.toml`).
+- The standard table has no constructor for hosts a file lists: the agentless pool's
+  `js_pool_static::kind::build` and `StaticPoolSource` were removed. A test registers a kind of
+  its own that returns `Built::Simulated(...)` over a fake host list (`crates/js-pool-fake`).
 - `js_provider_lambdalabs::kind::build` returns `Built::Elastic`. The crate doc says
   "Nothing here has a built-in address"; the constructor now holds the default API address
   and `api_url` overrides it, which the HTTP tests need (`crates/js-provider-lambdalabs/tests/http`).
@@ -924,7 +927,7 @@ Rules, each tied to a requirement or to existing behaviour:
   A registered host that said hello and has not been heard from since
   (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
   heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
-  cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
+  cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool (machines that run `js-agent`) are never released by the
   scaler. Until then the machine counts toward the caps and the state shows the age of its
   silence.
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
@@ -977,7 +980,7 @@ Rules, each tied to a requirement or to existing behaviour:
 - `Agents` today requires `AgentTokens::open(--agent-token-file)` for any registering pool
   (`config.rs::hosts`: both agent flags come together). An elastic pool needs only one-time
   tokens, so the shared pool token file becomes optional and a pool without it admits only
-  hosts whose one-time token verifies. A hand-joined pool still sets `join_token_file`.
+  hosts whose one-time token verifies. A static pool (machines started by hand) still sets `join_token_file`.
 
 ### 6.4 Orphans, lost state, spend over time
 
@@ -1129,7 +1132,7 @@ launch, not as an option:
   256 random bits, minted by the registry at the first admitted hello for that host.
 - The agent writes it to a 0600 file under its state root and uses it for every later
   heartbeat and call (`crates/js-agent`). Older agents ignore the field and keep using the
-  token (the token path is unchanged for a hand-joined pool).
+  token (the token path is unchanged for a static pool).
 - The join token is marked retired at that hello: it no longer authenticates anything, so
   the `user_data` copy is useless. The credential is stored hashed in the same whole-file
   state as tokens (`agent_state::replace`), revoked by the same `revoke_for(pool, name)`, and
@@ -1501,7 +1504,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 | 1 | elastic types | new `js-elastic`; `js-types`; `js-provider-lambdalabs` | trait (`host_prep`, `payload_limit`, `acquire(payload)`), `Offer` (`fit` refuses os/arch mismatch), `Demand`, `Secret`, `BootPayload`, `HostName`, `BootPlan`, `Acquired`/`Released`/`Held` moved; `ContainerSpec`, `Requirements` (os, arch from the request); Lambda implements `CapacityProvider`; the existing provider tests move and stay |
 | 2 | network layer, renderer | `js-lease-server` (modules `network`, `bootstrap`) | `NetworkMode` trait, `default`, `tailscale` (OAuth, key mint, device delete), `render` with `Mask`/`Real`, template golden tests, fake HTTP server |
 | 3 | Lambda launch inputs | `js-provider-lambdalabs` | `user_data` as the opaque payload, firewall ids, `ensure_firewall`, ssh key rule, bundled roots, `catalog()` offers, `host_prep`, `payload_limit`, `kind::build`, fake updated, log-grep test |
-| 4 | config file | `js-lease-server`, `js-pool-static` | `--config`, `[server]`, `[[pool]]`, `kinds.rs`, static `kind::build`, offline validation, `StartupError` with pool and field; `listen` and required `agent_listen` (route split), wildcard-bind warning; flags still work when `--config` is absent; one registering pool |
+| 4 | config file | `js-lease-server` | `--config`, `[server]`, `[[pool]]`, `kinds.rs`, a `kind::build` per provider kind, offline validation, `StartupError` with pool and field; `listen` and required `agent_listen` (route split), wildcard-bind warning; flags still work when `--config` is absent; one registering pool |
 | 5 | checks and status | `js-lease-server` | per-pool check loop, `Checking`, `/v1/pools`, `/status` (private address only, no status token), masked plan |
 | 6 | host contract | `js-caps`, `js-agent`, `js-agent-wire`, `js-registry` | `runtime`, `gpu-toolkit`, `exec` capabilities, `host-contract` and `execution-mismatch` refusals, pool `exec` |
 | 7 | registry | `js-registry`, `js-lease-server` | `waiting` (with `reserved`), `HostMark::Draining`/`Releasing`, `drain`/`undrain`/`release_host`, `remove`, direct run start reads the marks, `Launchable`, optional shared token file, `mint_for`/`revoke_for` |

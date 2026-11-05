@@ -4,19 +4,23 @@
 use std::os::unix::fs::PermissionsExt;
 
 use js_lease_server::{Config, Kinds, OwnerOnlyFiles};
+use js_pool_fake::EXAMPLE_CONFIG;
 
 use crate::config_support::{
     API_KEY, OAUTH_SECRET, PoolText, clock, file, load, oauth_file, quote, quoted, refusal, server,
     server_with_agents,
 };
-use crate::support::Scratch;
+use crate::support::{Scratch, base_args, config};
+
+/// Why the old agentless hosts-file pool is refused, as the server words it.
+const MIGRATION: &str = "the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"static\" (with its shape and max_machines)";
 
 /// The refusal of a file whose elastic pool is `pool`.
 fn elastic(scratch: &Scratch, pool: &PoolText) -> String {
     refusal(scratch, &file(&server_with_agents(scratch), &[pool]))
 }
 
-/// The refusal of a file whose static pool is `pool`.
+/// The refusal of a file whose pool of the test kind `fake-hosts` is `pool`.
 fn hosts(scratch: &Scratch, pool: &PoolText) -> String {
     refusal(scratch, &file(&server(scratch, ""), &[pool]))
 }
@@ -73,7 +77,7 @@ fn a_pool_needs_a_name_a_class_and_a_provider() {
 
 /// Asserts that a kind the server does not have is refused with the kinds it has, for the
 /// provider and for the network mode (`none` and `script` are not modes), and that the
-/// server as shipped has `lambdalabs` and `static`. It catches a kind name read as a default.
+/// server as shipped has `lambdalabs` alone. It catches a kind name read as a default.
 #[test]
 fn an_unknown_kind_is_refused_with_the_known_ones() {
     let scratch = Scratch::new("pool_kinds");
@@ -84,7 +88,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     assert_eq!(
         elastic(&scratch, &lambda),
-        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, lambdalabs, static"
+        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, fake-hosts, lambdalabs"
     );
     for mode in ["none", "script"] {
         let pool = PoolText::elastic(&scratch).set("network", &format!("{{ kind = {mode:?} }}"));
@@ -115,7 +119,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     let mut names = Kinds::standard().names();
     names.sort_unstable();
-    assert_eq!(names, ["lambdalabs", "static"]);
+    assert_eq!(names, ["lambdalabs"]);
 }
 
 /// Asserts the unknown fields of a provider table and of a network table, each naming
@@ -418,24 +422,25 @@ fn a_floor_that_no_host_can_meet_is_refused() {
     assert!(said.starts_with("pool \"gpu\": provider: "), "{said}");
 }
 
-/// Asserts that pools may not share a name, that a second static pool and a second
-/// registering pool are refused with the design's message, and that a static pool refuses
-/// every key that belongs to an elastic one, naming the key; and that `launch = "live"`
-/// on a pool whose provider launches nothing is refused naming `launch`.
+/// Asserts that pools may not share a name, that a second pool of a simulated kind and a
+/// second registering pool are refused with the design's message, and that a pool of the
+/// test kind `fake-hosts` refuses every key that belongs to an elastic one, naming the
+/// key; and that `launch = "live"` on a pool whose provider launches nothing is refused
+/// naming `launch`.
 #[test]
-fn pools_are_counted_and_a_static_pool_launches_nothing() {
+fn pools_are_counted_and_a_fake_hosts_pool_launches_nothing() {
     let scratch = Scratch::new("pool_counts");
     let server = server_with_agents(&scratch);
-    let one = PoolText::static_pool(&scratch, "dup");
-    let two = PoolText::static_pool(&scratch, "dup");
+    let one = PoolText::fake_hosts(&scratch, "dup");
+    let two = PoolText::fake_hosts(&scratch, "dup");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&one, &two])),
         "pool \"dup\": name: also the name of an earlier pool"
     );
-    let other = PoolText::static_pool(&scratch, "other");
+    let other = PoolText::fake_hosts(&scratch, "other");
     assert_eq!(
         refusal(&scratch, &file(&server, &[&one, &other])),
-        "pool \"other\": only one static pool is served in this version"
+        "pool \"other\": only one pool of a simulated kind is served"
     );
     let first = PoolText::elastic(&scratch);
     let second = PoolText::elastic(&scratch).set("name", &quote("b"));
@@ -443,12 +448,12 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
         refusal(&scratch, &file(&server, &[&first, &second])),
         "pool \"b\": only one pool may register agents in this version"
     );
-    let live = PoolText::static_pool(&scratch, "hosts").set("launch", "\"live\"");
+    let live = PoolText::fake_hosts(&scratch, "hosts").set("launch", "\"live\"");
     assert_eq!(
         hosts(&scratch, &live),
         "pool \"hosts\": launch: live needs an elastic provider; this kind launches nothing"
     );
-    let plan = PoolText::static_pool(&scratch, "hosts").set("launch", "\"plan\"");
+    let plan = PoolText::fake_hosts(&scratch, "hosts").set("launch", "\"plan\"");
     assert!(load(&scratch, &file(&server_with_agents(&scratch), &[&plan])).is_ok());
     let elastic_keys = [
         ("exec", "\"none\""),
@@ -463,7 +468,7 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
         ("network", "{ kind = \"default\" }"),
     ];
     for (key, value) in elastic_keys {
-        let pool = PoolText::static_pool(&scratch, "hosts").set(key, value);
+        let pool = PoolText::fake_hosts(&scratch, "hosts").set(key, value);
         assert_eq!(
             hosts(&scratch, &pool),
             format!("pool \"hosts\": {key}: only for an elastic pool")
@@ -471,52 +476,123 @@ fn pools_are_counted_and_a_static_pool_launches_nothing() {
     }
 }
 
-/// Asserts the static kind's table: a missing or mistyped `hosts_file`, an unknown field,
-/// a file that is not there and a file that lists no host are each refused naming the pool
-/// and `provider.hosts_file` (or the unknown field).
+/// Asserts that a `[[pool]]` whose provider is the old kind `static` (the agentless
+/// hosts-file pool) is refused at load with the migration sentence, whatever else the
+/// provider table holds: with its `hosts_file`, without one, with a `hosts_file` that is
+/// not even a string, and under a name that is not a valid id (the pool is then `#1`). Each
+/// message is asserted whole, so it names the pool and the keys, carries the migration to
+/// `js-agent`, and echoes neither the path of the host list nor a host it lists. It catches
+/// the old kind still being served or read as the new `kind = "static"`, a refusal that
+/// leaves out the migration, and one that prints a value from the file.
 #[test]
-fn the_static_kind_checks_its_hosts_file() {
-    let scratch = Scratch::new("pool_static");
-    let set = |provider: &str| {
-        let pool = PoolText::static_pool(&scratch, "hosts").set("provider", provider);
+fn an_old_static_pool_config_is_refused_with_a_migration_message() {
+    let scratch = Scratch::new("pool_old_static");
+    let listed = scratch.write("old-hosts.toml", EXAMPLE_CONFIG, 0o644);
+    let set = |name: &str, provider: &str| {
+        let pool = PoolText::fake_hosts(&scratch, "old")
+            .set("name", &quote(name))
+            .set("provider", provider);
         hosts(&scratch, &pool)
     };
-    assert_eq!(
-        set("{ kind = \"static\" }"),
-        "pool \"hosts\": provider.hosts_file: required"
-    );
-    assert_eq!(
-        set("{ kind = \"static\", hosts_file = 5 }"),
-        "pool \"hosts\": provider.hosts_file: must be a string"
-    );
-    assert_eq!(
-        set("{ kind = \"static\", hosts_fil = \"/x\" }"),
-        "pool \"hosts\": provider.hosts_fil: unknown field; known: hosts_file"
-    );
-    let absent = scratch.path("no-hosts.toml");
-    let said = set(&format!(
-        "{{ kind = \"static\", hosts_file = {} }}",
-        quoted(&absent)
-    ));
+    let with_file = format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&listed));
+    let said = set("old", &with_file);
     assert_eq!(
         said,
-        format!(
-            "pool \"hosts\": provider.hosts_file: {}: No such file or directory (os error 2)",
-            absent.display()
-        )
+        format!("pool \"old\": provider.kind = \"static\", provider.hosts_file: {MIGRATION}")
     );
-    let empty = scratch.write("empty-hosts.toml", "", 0o644);
-    let said = set(&format!(
-        "{{ kind = \"static\", hosts_file = {} }}",
-        quoted(&empty)
-    ));
+    for word in ["pool \"old\"", "provider.kind", "hosts_file", "js-agent"] {
+        assert!(said.contains(word), "{said}");
+    }
+    let path = listed.display().to_string();
+    for hidden in [path.as_str(), "gpu-01", "gpu-02"] {
+        assert!(!said.contains(hidden), "{said}");
+    }
+    let said = set("old", "{ kind = \"static\" }");
     assert_eq!(
         said,
-        format!(
-            "pool \"hosts\": provider.hosts_file: {}: the pool lists no host",
-            empty.display()
-        )
+        format!("pool \"old\": provider.kind = \"static\": {MIGRATION}")
     );
+    assert!(!said.contains("hosts_file"), "{said}");
+    let said = set("old", "{ kind = \"static\", hosts_file = 5 }");
+    assert_eq!(
+        said,
+        format!("pool \"old\": provider.kind = \"static\", provider.hosts_file: {MIGRATION}")
+    );
+    let said = set("Old Name", &with_file);
+    assert_eq!(
+        said,
+        format!("pool #1: provider.kind = \"static\", provider.hosts_file: {MIGRATION}")
+    );
+    assert!(!said.contains("Old Name"), "{said}");
+}
+
+/// Asserts that the flag `--pool-config` is refused, with a host list that is valid: the
+/// refusal names the flag and its reason is the migration sentence exactly, and the
+/// message holds neither the path of the file nor a host it lists. The same refusal,
+/// whole, comes when the value is a path that does not exist and when it is a directory,
+/// with no filesystem detail in it. It catches the flag being read again, a refusal that
+/// quotes the file, and one that opens the path first and reports "No such file" or
+/// "Is a directory".
+#[test]
+fn the_pool_config_flag_is_refused_with_a_migration_message() {
+    let scratch = Scratch::new("pool_config_flag");
+    let listed = scratch.write("old-hosts.toml", EXAMPLE_CONFIG, 0o644);
+    let mut args = base_args(&scratch);
+    args.push("--pool-config".into());
+    args.push(listed.clone().into_os_string());
+    let refused = config(args).err().expect("the flag should be refused");
+    assert_eq!(refused.flag(), "--pool-config");
+    assert_eq!(refused.reason(), MIGRATION);
+    let said = refused.to_string();
+    assert!(!said.contains(&*listed.to_string_lossy()), "{said}");
+    assert!(!said.contains("gpu-01"), "{said}");
+
+    for (label, value) in [
+        ("missing", scratch.path("no-such-hosts.toml")),
+        ("directory", scratch.path("")),
+    ] {
+        let mut args = base_args(&scratch);
+        args.push("--pool-config".into());
+        args.push(value.clone().into_os_string());
+        let refused = config(args).err().expect("the flag should be refused");
+        let said = refused.to_string();
+        assert_eq!(said, format!("--pool-config: {MIGRATION}"), "{label}");
+        assert!(!said.contains(&*value.to_string_lossy()), "{label}: {said}");
+        for detail in ["No such file", "directory"] {
+            assert!(!said.contains(detail), "{label}: {said}");
+        }
+    }
+}
+
+/// Asserts that an old `kind = "static"` provider whose `hosts_file` is a path that does
+/// not exist, or a directory, is refused with the migration sentence whole, as when the
+/// file is there. It catches a loader that reads the path before refusing the kind, and
+/// so says "No such file" or "Is a directory", or prints the path.
+#[test]
+fn an_old_static_pool_config_with_a_missing_or_directory_hosts_file_is_refused() {
+    let scratch = Scratch::new("pool_old_static_paths");
+    for (label, path) in [
+        ("missing", scratch.path("no-such-hosts.toml")),
+        ("directory", scratch.path("")),
+    ] {
+        let pool = PoolText::fake_hosts(&scratch, "old")
+            .set("name", &quote("old"))
+            .set(
+                "provider",
+                &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&path)),
+            );
+        let said = hosts(&scratch, &pool);
+        assert_eq!(
+            said,
+            format!("pool \"old\": provider.kind = \"static\", provider.hosts_file: {MIGRATION}"),
+            "{label}"
+        );
+        let shown = path.display().to_string();
+        assert!(!said.contains(&shown), "{label}: {said}");
+        for detail in ["No such file", "directory"] {
+            assert!(!said.contains(detail), "{label}: {said}");
+        }
+    }
 }
 
 /// Asserts that no refusal and no `Debug` holds a secret the test planted: the content of

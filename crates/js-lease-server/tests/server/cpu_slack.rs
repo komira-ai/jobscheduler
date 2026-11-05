@@ -8,7 +8,7 @@ use js_lease_server::{Cli, Config, CpuSlack};
 
 use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{FakeHosts, Scratch, base_args, config, take_fake_hosts};
 
 /// A pool of up to two machines whose capabilities name an `arch`, as `js-sched` needs.
 const POOL: &str = r#"
@@ -42,8 +42,13 @@ fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {
+    let (args, hosts) = take_fake_hosts(args);
     let cli = Cli::try_parse_from(args).map_err(|err| err.to_string())?;
-    Config::from_cli(cli).map_err(|err| err.to_string())
+    match hosts {
+        Some(path) => Config::simulated(cli, Box::new(FakeHosts::new(path))),
+        None => Config::from_cli(cli),
+    }
+    .map_err(|err| err.to_string())
 }
 
 /// The refusal of `given` as a slack, after what names the flag or key.
@@ -106,7 +111,7 @@ fn cpu_slack_values_outside_the_range_are_refused() {
     assert_eq!(said, "--cpu-slack: requires --agent-pool-config");
 
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
-    let pool = PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    let pool = PoolText::registering("burst").set("capabilities", "{ arch = \"x86_64\" }");
     let text_of = |scratch: &Scratch, extra: &str| {
         let table = server(scratch, &format!("{listeners}\n{extra}"));
         file(&table, &[&pool])
@@ -135,7 +140,7 @@ fn cpu_slack_values_outside_the_range_are_refused() {
 #[test]
 fn the_key_is_read_from_the_file() {
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
-    let pool = PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    let pool = PoolText::registering("burst").set("capabilities", "{ arch = \"x86_64\" }");
     let default = CpuSlack::default().permille();
     for (name, extra, permille) in [
         ("cpu_slack_key_off", "", default),

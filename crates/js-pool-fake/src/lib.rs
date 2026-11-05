@@ -1,12 +1,16 @@
-//! A static pool provider: hosts an operator lists in a TOML file, leased one whole
-//! host at a time.
+//! A test double: a fake pool of hosts listed in TOML text, leased one whole host at a
+//! time. It is never a production pool. No `js-agent` runs on its hosts, the bookings are
+//! in memory only, and every lease holds a whole host. Tests and simulations of the
+//! scheduler use it where real hosts would register (the lease table, the conformance
+//! suite, the client's and the server's tests); no crate depends on it outside
+//! `[dev-dependencies]`.
 //!
 //! The pool serves `gpu-host` ([`js_types::ResourceClass::gpu_host`], admitted
-//! `BookAll`) unless [`StaticPool::with_classes`] names others, such as `whole-node`
+//! `BookAll`) unless [`FakeHostPool::with_classes`] names others, such as `whole-node`
 //! ([`js_types::ResourceClass::whole_node`], admitted `Whole`). In both a lease holds
 //! a whole host, so nothing else runs on it. The pool refuses an admission mode that
 //! does not book a whole host with `UnsupportedClass` rather than leasing a whole
-//! host anyway. A static pool has no agent, so a `Whole` lease is held at once: the
+//! host anyway. The fake has no agent, so a `Whole` lease is held at once: the
 //! table shows the host quiet and there is nothing to wait for. Its rules, in design
 //! terms:
 //!
@@ -22,23 +26,22 @@
 //!   [`js_provider::Pool::observe`] answers `Present` or `Absent`, never
 //!   `Unknown`, and a stop frees the host at once.
 //! - **Seating.** The pool's bookings live in memory and a restart loses them.
-//!   [`StaticPool::seat`] books a named host for a named lease without a start, so a
+//!   [`FakeHostPool::seat`] books a named host for a named lease without a start, so a
 //!   caller that has the bookings elsewhere (a lease file) can put them back; it refuses
 //!   a host the pool does not list or another lease holds ([`js_provider::SeatError`]).
 //!
-//! # Configuration
+//! # The host list
 //!
-//! [`StaticPool::from_config_file`] takes the path of the file, which the caller
-//! reads from its own `--pool-config` style flag. The file is TOML; an unknown key is
-//! refused so a typo does not pass as a default, and a syntax or type error names the
-//! line. This is the example file shipped with the crate:
+//! [`FakeHostPool::from_toml`] reads the hosts from text, and
+//! [`FakeHostPool::from_config_file`] from a file a test wrote. The text is TOML; an
+//! unknown key is refused so a typo does not pass as a default, and a syntax or type error
+//! names the line. This is [`EXAMPLE_CONFIG`], the two-host list the tests share:
 //!
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![doc = concat!("```toml\n", include_str!("../example.toml"), "```")]
 
 mod config;
-pub mod kind;
 mod pool;
 
 pub use config::{ConfigError, EXAMPLE_CONFIG};
-pub use pool::StaticPool;
+pub use pool::FakeHostPool;

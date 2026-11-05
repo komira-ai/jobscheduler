@@ -19,17 +19,18 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
-| `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
-| `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
+| `--pool-config` | removed: refused with the migration in [Migrating an agentless pool](#migrating-an-agentless-pool); a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` is refused the same way |
+| `--agent-pool-config` | a `[[pool]]` with `kind = "static"` for machines that run `js-agent` and register (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
 
-A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
+A pool of machines that run `js-agent` and register is one `[[pool]]` of kind `static` (`kind = "joined"` is its old spelling: it loads
+the same and draws one warning per pool, and a later release refuses it). It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents, so it counts as the one
 pool that may; `server.agent_listen` is required as for an elastic pool.
 
 ```toml
 [[pool]]
-kind  = "joined"
+kind  = "static"
 name  = "nodes"                       # the `pool` of a hello, and the `provider` of a one-time token
 class = "whole-node"
 exec  = "container"                   # optional; absent or "none": no host contract
@@ -51,8 +52,8 @@ same way (0, 101, a negative number or a word is refused at the check that reads
 
 | where | what it cuts |
 |---|---|
-| a `[[pool]]` of the `--config` file | the hosts of a static pool (the pool's key replaces the hosts file's, once, never on top of it; it may be larger as well as smaller than the file's own value), and the floor memory (1 GiB) of an elastic pool |
-| the hosts file of a static pool (top level, before the first `[[host]]`; `--pool-config` or a `hosts_file`) | the `memory_bytes` of every host the file lists |
+| a `[[pool]]` of the `--config` file | the shape of a static pool (the memory every registering host books), and the floor memory (1 GiB) of an elastic pool |
+| the hosts file of the test double `js-pool-fake` (library only; top level, before the first `[[host]]`) | the `memory_bytes` of every host the file lists |
 | the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the `[shape]` `memory_bytes` the pool books for each host |
 
 The server books `floor(memory x percent / 100)` bytes, computed once where the booked shape is built, and every booking path sees that
@@ -65,7 +66,7 @@ figure), and `GET /v1/pools` and `/status` show the same three for an elastic po
 Under `--placement js-sched` the percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
 engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
-`GET /v1/hosts` shows the same as under `registry`: `shape.memory_bytes` is the cut, beside `memory`. A static pool is not affected.
+`GET /v1/hosts` shows the same as under `registry`: `shape.memory_bytes` is the cut, beside `memory`. Hosts of a simulated source (the fake host pool of the tests) are not affected.
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
@@ -193,7 +194,7 @@ shorthand for a one-entry `providers`, except that an elastic `x` gets the `defa
 it is refused unless the scheduler runs with `--allow-test-providers`; no production example uses it. Its shape is:
 
 ```toml
-[[provider]]                                # TESTS ONLY: hosts the operator lists (the merged --pool-config hosts)
+[[provider]]                                # TESTS ONLY: hosts the operator lists (a test double; the server's own agentless pool was removed)
 name = "listed"
 kind = "static"
 
@@ -208,3 +209,89 @@ providers = ["listed"]                      # max_machines defaults to the hosts
 shape = "linux-x86-16"
 class = "action"
 ```
+
+## Migrating an agentless pool
+
+The agentless pool, in which the server booked hosts from a list in a file and nothing ran on them, was removed. The server refuses it at
+start with exit status 2, and the message names the migration.
+
+### The old files
+
+The old file was a `[[pool]]` that named a hosts file:
+
+```toml
+[[pool]]
+name     = "gpu"
+class    = "gpu-host"
+provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
+```
+
+and the hosts file listed each host:
+
+```toml
+[[host]]
+id = "gpu-01"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+```
+
+The replacement is one pool of `kind = "static"`: the pool of hosts that run `js-agent` and register. It lists no hosts; a host is in the
+pool when its agent registers, up to `max_machines`, and every host books the pool's one shape. Install and start `js-agent` on each host that
+the hosts file listed, naming the pool `gpu` and the server's agent address, then move the server to one of the two routes below, remove
+the old pool and the hosts file, and restart the server. The two routes are not mixed: the `--config` file's pool is written in the file's
+`[[pool]]` format, and the `--agent-pool-config` file has a format of its own.
+
+### Route 1: a pool in the `--config` file
+
+A registering pool needs `agent_listen` in `[server]`, which the agentless pool did not (`listen` stays as it was). The pool is a `[[pool]]`
+with `kind = "static"`; its shared token, if any, is `join_token_file` of the pool.
+
+```toml
+[server]
+# the keys the file already has, and the address the agents register on:
+agent_listen = "127.0.0.1:7443"
+```
+
+```toml
+[[pool]]
+kind         = "static"
+name         = "gpu"
+class        = "whole-node"
+max_machines = 2
+shape        = { cpu_millis = 64000, memory_bytes = 549755813888, gpus = 8, gpu_class = "nvidia-a100" }
+capabilities = { os = "linux", arch = "x86_64" }          # optional
+join_token_file = "/run/credentials/js/join-token"        # optional shared pool token
+```
+
+### Route 2: the flags `--agent-pool-config` and `--agent-token-file`
+
+The agent pool file is one pool at its root, with the shape and the capabilities as tables of their own; it has no `[[pool]]` and no
+`kind`. The shared token is not in this file: it is the file that `--agent-token-file` names, and its presence is what turns agent
+registration on.
+
+```toml
+name         = "gpu"
+class        = "gpu-host"
+max_machines = 2
+
+[shape]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+gpu_class = "nvidia-a100"
+
+[capabilities]
+os = "linux"
+arch = "x86_64"
+```
+
+The server is then started with `--agent-pool-config <that file> --agent-token-file <the token file>` beside its other flags; the agents register on
+the server's own `--listen` address.
+
+The flag `--pool-config` is refused the same way, with the same migration in its message, and beside `--config` it is refused as every flag is.
+The message never echoes the path. `kind = "joined"` keeps loading, read as `kind = "static"`, with one warning per pool; a later release
+refuses it, so change the spelling when the file is next edited.

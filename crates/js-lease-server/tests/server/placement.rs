@@ -11,7 +11,7 @@ use js_lease_server::{Cli, Config, Placement};
 
 use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{FakeHosts, Scratch, base_args, config, take_fake_hosts};
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
 /// its `arch`.
@@ -46,8 +46,13 @@ fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {
+    let (args, hosts) = take_fake_hosts(args);
     let cli = Cli::try_parse_from(args).map_err(|err| err.to_string())?;
-    Config::from_cli(cli).map_err(|err| err.to_string())
+    match hosts {
+        Some(path) => Config::simulated(cli, Box::new(FakeHosts::new(path))),
+        None => Config::from_cli(cli),
+    }
+    .map_err(|err| err.to_string())
 }
 
 /// Asserts the flag's parse: absent it is the registry; `registry` and `js-sched` are
@@ -93,7 +98,8 @@ fn pool(scratch: &Scratch) -> PoolText {
 /// `config_one_file`.
 #[test]
 fn the_key_is_read_from_the_file() {
-    let arch = |_: &Scratch| PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    let arch =
+        |_: &Scratch| PoolText::registering("burst").set("capabilities", "{ arch = \"x86_64\" }");
     for (name, extra, expected) in [
         ("placement_key_off", "", Placement::Registry),
         (

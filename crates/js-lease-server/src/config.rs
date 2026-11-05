@@ -16,27 +16,27 @@ use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_registry::Credential;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
-use crate::agent_pool;
-use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
-use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::capacity::CapacitySource;
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
-use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod cpu_slack;
+mod hosts;
 mod placement;
 mod retention;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub(crate) use hosts::{AgentSetup, Hosts};
+use hosts::{hosts, with_pool_settings};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 
@@ -72,8 +72,10 @@ pub struct Cli {
     /// silently started empty.
     #[arg(long, value_enum, required_unless_present = "config")]
     pub boot: Option<BootMode>,
-    /// The TOML file listing the hosts to lease. Optional when agents register hosts
-    /// (`--agent-pool-config`); one of the two sources is required.
+    /// Removed: the agentless hosts-file pool is no longer served. The flag is kept only
+    /// so that a start that gives it is refused naming it, with the migration: run
+    /// `js-agent` on each host and use `--agent-pool-config` (or a `[[pool]]` of
+    /// `kind = "static"` in `--config`).
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
@@ -411,53 +413,46 @@ pub struct Config {
     pub(crate) job_retention: Retention,
 }
 
-/// Where the hosts come from: the operator's pool file alone, or that file (when given)
-/// beside the hosts agents register.
-pub(crate) enum Hosts {
-    /// `--pool-config` alone: the server builds exactly what it always has.
-    Static(Box<dyn CapacitySource>),
-    /// Agent registration is on.
-    Layered {
-        /// The static pool, when `--pool-config` was given; it is tried first.
-        static_pool: Option<Box<dyn CapacitySource>>,
-        /// The registering side.
-        agents: Box<AgentSetup>,
-    },
-}
-
-/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
-/// decided.
-pub(crate) struct AgentSetup {
-    pub(crate) tokens: AgentTokens,
-    pub(crate) pool: PoolConfig,
-    /// The one provider the mint route accepts, when the configuration names it.
-    pub(crate) mint_provider: Option<String>,
-    pub(crate) hello_limit: HelloLimit,
-    /// `--require-host-credential`.
-    pub(crate) require_host_credential: bool,
-    /// `--placement`.
-    pub(crate) placement: Placement,
-    /// `--estimate-feed`.
-    pub(crate) estimate_feed: bool,
-    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
-    pub(crate) cpu_slack: CpuSlack,
-    /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
-    /// and the one up to which `--placement js-sched` trusts it for backfill.
-    pub(crate) max_lease_wall: Option<Duration>,
-}
-
 impl Config {
     /// Checks `cli`: the ttls are consistent, a listen address that is not loopback has
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
-    /// valid, and at least one source of hosts is configured.
+    /// valid, and agents register hosts (`--agent-pool-config`, or a registering
+    /// `[[pool]]` of `--config`). `--pool-config` is refused with the migration.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] naming the flag, or the field of the file, at fault.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        Self::checked(cli, None)
+    }
+
+    /// The simulation seam: checks `cli` as [`Config::from_cli`] does, with the hosts of
+    /// `hosts` served beside the hosts agents register, or alone when the flags turn no
+    /// registration on. It is for tests and simulations of the scheduler without real
+    /// hosts; the program never calls it, and no flag or file reaches it.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] as [`Config::from_cli`] refuses `cli`.
+    pub fn simulated(cli: Cli, hosts: Box<dyn CapacitySource>) -> Result<Self, StartupError> {
+        Self::checked(cli, Some(hosts))
+    }
+
+    fn checked(cli: Cli, simulated: Option<Box<dyn CapacitySource>>) -> Result<Self, StartupError> {
         let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
             if let Some(flag) = given.first() {
                 return Err(flags::beside_config(flag));
             }
             let clock = SharedClock::new(SystemClock);
-            return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
+            let config = Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
+            // The simulated source a library caller handed in, if any, beside the file's pools.
+            return Ok(simulated
+                .into_iter()
+                .fold(config, Self::with_capacity_source));
+        }
+        if cli.pool_config.is_some() {
+            return Err(StartupError::new("--pool-config", flags::AGENTLESS_REMOVED));
         }
         flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
@@ -466,7 +461,7 @@ impl Config {
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
         let limits = Limits::from(&cli);
-        let hosts = hosts(&cli, &token)?;
+        let hosts = hosts(&cli, &token, simulated)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let usage = usage_setup(
@@ -529,9 +524,9 @@ impl Config {
             mut warnings,
         } = file::load(path, &load)?;
         let (hosts, elastic) = match hosts {
-            LoadedHosts::Static(source) => (Hosts::Static(source), None),
+            LoadedHosts::Simulated(source) => (Hosts::Simulated(source), None),
             LoadedHosts::Registering {
-                static_pool,
+                simulated,
                 registering,
             } => {
                 let Registering {
@@ -559,13 +554,7 @@ impl Config {
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                 });
-                (
-                    Hosts::Layered {
-                        static_pool,
-                        agents,
-                    },
-                    plan,
-                )
+                (Hosts::Layered { simulated, agents }, plan)
             }
         };
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
@@ -679,13 +668,14 @@ impl Config {
         self.elastic.as_ref()
     }
 
-    /// The same configuration taking its static hosts from `capacity` instead of the
-    /// file `--pool-config` names.
+    /// The same configuration taking its simulated hosts from `capacity`: in place of the
+    /// simulated source it has, or beside the hosts agents register. Part of the
+    /// simulation seam ([`Config::simulated`]).
     pub fn with_capacity_source(mut self, capacity: Box<dyn CapacitySource>) -> Self {
         self.hosts = match self.hosts {
-            Hosts::Static(_) => Hosts::Static(capacity),
+            Hosts::Simulated(_) => Hosts::Simulated(capacity),
             Hosts::Layered { agents, .. } => Hosts::Layered {
-                static_pool: Some(capacity),
+                simulated: Some(capacity),
                 agents,
             },
         };
@@ -720,7 +710,7 @@ impl Config {
     pub fn placement(&self) -> Placement {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.placement,
-            Hosts::Static(_) => Placement::Registry,
+            Hosts::Simulated(_) => Placement::Registry,
         }
     }
 
@@ -729,7 +719,7 @@ impl Config {
     pub fn estimate_feed(&self) -> bool {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.estimate_feed,
-            Hosts::Static(_) => false,
+            Hosts::Simulated(_) => false,
         }
     }
 
@@ -739,7 +729,7 @@ impl Config {
     pub fn cpu_slack(&self) -> CpuSlack {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.cpu_slack,
-            Hosts::Static(_) => CpuSlack::default(),
+            Hosts::Simulated(_) => CpuSlack::default(),
         }
     }
 
@@ -783,86 +773,10 @@ impl Config {
     }
 }
 
-/// `settings` with what the registered pool's file decides about whole-node leases: the
-/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
-/// (the lease table counts it; the registry counts the same figure per commit). A pool
-/// without whole-node settings, or no registered pool, leaves `settings` as the flags
-/// made them.
-fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
-    match hosts {
-        Hosts::Layered { agents, .. } => {
-            let whole = agents.pool.whole_node();
-            let settings = with_whole_node(settings, whole)?;
-            Ok(crate::reservations::with_restart_grace(settings, whole))
-        }
-        Hosts::Static(_) => Ok(settings),
-    }
-}
-
-fn with_whole_node(
-    settings: Settings,
-    whole: Option<&WholeNodeConfig>,
-) -> Result<Settings, StartupError> {
-    let Some(whole) = whole else {
-        return Ok(settings);
-    };
-    settings
-        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
-        .map_err(|err| StartupError::new("--agent-pool-config", err))
-}
-
 /// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
     value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
-}
-
-/// The sources of hosts the flags name. At least one is required; the shared join token
-/// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
-    let static_pool = cli
-        .pool_config
-        .as_ref()
-        .map(|path| Box::new(StaticPoolSource::new(path)) as Box<dyn CapacitySource>);
-    match (&cli.agent_token_file, &cli.agent_pool_config) {
-        (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
-            StartupError::new(
-                "--pool-config",
-                "required unless agents register hosts (--agent-pool-config)",
-            )
-        }),
-        (tokens, Some(pool)) => {
-            let tokens = match tokens {
-                Some(path) => AgentTokens::open(path, client)?,
-                None => AgentTokens::none(),
-            };
-            let pool = agent_pool::read(pool)?;
-            cli.placement.check(&pool, "--placement")?;
-            let needs = "--placement js-sched";
-            let cpu_slack = cli.placement.slack(cli.cpu_slack, "--cpu-slack", needs)?;
-            Ok(Hosts::Layered {
-                static_pool,
-                agents: Box::new(AgentSetup {
-                    tokens,
-                    pool,
-                    mint_provider: None,
-                    hello_limit: HelloLimit {
-                        burst: cli.agent_hello_burst,
-                        interval: cli.agent_hello_interval,
-                    },
-                    require_host_credential: cli.require_host_credential,
-                    placement: cli.placement,
-                    estimate_feed: cli.estimate_feed,
-                    cpu_slack,
-                    max_lease_wall: None,
-                }),
-            })
-        }
-        (Some(_), None) => Err(StartupError::new(
-            "--agent-pool-config",
-            "required with --agent-token-file",
-        )),
-    }
 }
 
 fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {

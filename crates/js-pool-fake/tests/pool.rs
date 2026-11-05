@@ -1,21 +1,21 @@
-//! Behaviour of the static pool through the public provider interface.
+//! Behaviour of the fake host pool through the public provider interface.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use js_pool_static::{ConfigError, EXAMPLE_CONFIG, StaticPool};
+use js_pool_fake::{ConfigError, EXAMPLE_CONFIG, FakeHostPool};
 use js_provider::SeatError;
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources,
 };
 
-fn pool(config: &str) -> StaticPool {
-    StaticPool::from_toml(ProviderId::new("pool").unwrap(), config).unwrap()
+fn pool(config: &str) -> FakeHostPool {
+    FakeHostPool::from_toml(ProviderId::new("pool").unwrap(), config).unwrap()
 }
 
-fn example() -> StaticPool {
+fn example() -> FakeHostPool {
     pool(EXAMPLE_CONFIG)
 }
 
@@ -208,15 +208,15 @@ fn capacity_lists_hosts_and_holders() {
 fn config_file_loads_and_missing_file_is_refused() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example.toml");
     let id = ProviderId::new("pool").unwrap();
-    let loaded = StaticPool::from_config_file(id.clone(), &path).unwrap();
+    let loaded = FakeHostPool::from_config_file(id.clone(), &path).unwrap();
     assert_eq!(loaded.capacity().len(), 2);
     let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("absent.toml");
-    let err = StaticPool::from_config_file(id, &missing).unwrap_err();
+    let err = FakeHostPool::from_config_file(id, &missing).unwrap_err();
     assert!(matches!(err, ConfigError::Read { .. }));
     assert!(err.to_string().contains("absent.toml"));
 }
 
-/// A class admitted by `Book` (it gates only on GPUs), which a static pool does not lease.
+/// A class admitted by `Book` (it gates only on GPUs), which a fake host pool does not lease.
 fn shared_class() -> ResourceClass {
     let gate = std::collections::BTreeSet::from([js_types::Dim::Gpus]);
     let id = ClassId::new("gpu-shared").unwrap();

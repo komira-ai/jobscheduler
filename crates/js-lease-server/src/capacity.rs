@@ -1,11 +1,7 @@
 //! Where the hosts a server leases come from.
 
-use std::path::PathBuf;
-
 use js_lease::Booking;
-use js_pool_static::StaticPool;
 use js_provider::Pool;
-use js_types::{MemoryPercent, ProviderId, ResourceClass};
 
 use crate::error::StartupError;
 
@@ -43,12 +39,14 @@ pub struct Unseated {
 /// records (see [`js_lease::read_bookings`]; none on a first boot). A source whose
 /// provider remembers nothing across a process restart must put them back before it
 /// returns, because the table is about to ask the provider about each held lease and
-/// drops the ones it does not know. Today the only source is the operator's static pool
-/// ([`StaticPoolSource`]): the hosts are listed in a file, the bookings are in memory
-/// only, and the lease file is their record. Hosts that agents register themselves are
-/// a future source of the same trait: its provider answers from the agents that report
-/// in, so it ignores the bookings it is given. The server needs no change for it, and it
-/// is not built here.
+/// drops the ones it does not know. The server builds one source itself: the hosts that
+/// run `js-agent` and register, layered behind one provider with the source a library
+/// caller handed in, if any. A library caller hands one in only through the simulation
+/// seam ([`Config::simulated`](crate::Config::simulated),
+/// [`Config::with_capacity_source`](crate::Config::with_capacity_source), or a kind of
+/// its own that builds [`Built::Simulated`](crate::Built::Simulated)): tests and
+/// simulations of the scheduler without real hosts. No flag and no kind the server ships
+/// makes one.
 ///
 /// # Blocking
 ///
@@ -57,76 +55,9 @@ pub struct Unseated {
 /// request and the tick wait for a call to return, and a few slow calls stall the
 /// server. A provider must therefore return promptly, and one that talks to a network
 /// must apply its own timeout and report the call as unanswered
-/// (`Unknown`, as [`js_provider::StartAck`] and its siblings spell it) when it expires. The static
-/// pool never leaves memory.
+/// (`Unknown`, as [`js_provider::StartAck`] and its siblings spell it) when it expires.
 pub trait CapacitySource {
     /// The provider with `bookings` put back as far as it can, or the flag that made it
     /// impossible to build.
     fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError>;
-}
-
-/// The hosts an operator lists in a TOML file (`--pool-config`), as
-/// [`js_pool_static::StaticPool`] reads them.
-///
-/// The lease file is the source of truth for this pool's bookings. At start every
-/// booking of the file is seated in the fresh pool, in lease id order: a booking whose
-/// host the file no longer lists, or that an earlier lease of the file already holds,
-/// is not seated and comes back as [`Unseated`].
-#[derive(Debug, Clone)]
-pub struct StaticPoolSource {
-    path: PathBuf,
-    classes: Option<Vec<ResourceClass>>,
-    memory_percent: Option<MemoryPercent>,
-}
-
-impl StaticPoolSource {
-    /// A source over the pool configuration file at `path`.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            classes: None,
-            memory_percent: None,
-        }
-    }
-
-    /// The same source booking `percent` of the memory of each host the file lists, in
-    /// place of the percent the file itself says (which is all of it when it says none).
-    #[must_use]
-    pub fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
-        self.memory_percent = Some(percent);
-        self
-    }
-
-    /// The same source serving `classes` instead of the class the pool serves by default.
-    #[must_use]
-    pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
-        self.classes = Some(classes);
-        self
-    }
-}
-
-impl CapacitySource for StaticPoolSource {
-    fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
-        let id = ProviderId::new("static-pool").map_err(StartupError::because("--pool-config"))?;
-        let pool = StaticPool::from_config_file_with_percent(id, &self.path, self.memory_percent)
-            .map_err(StartupError::because("--pool-config"))?;
-        let mut pool = match &self.classes {
-            Some(classes) => pool.with_classes(classes.clone()),
-            None => pool,
-        };
-        let unseated = bookings
-            .iter()
-            .filter_map(|booking| {
-                let refused = pool.seat(&booking.host, booking.lease).err()?;
-                Some(Unseated {
-                    booking: booking.clone(),
-                    reason: refused.to_string(),
-                })
-            })
-            .collect();
-        Ok(Seated {
-            provider: Box::new(pool),
-            unseated,
-        })
-    }
 }

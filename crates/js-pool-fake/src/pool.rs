@@ -13,13 +13,13 @@ use crate::config::{self, ConfigError};
 /// The pool remembers every lease id it has stopped (see [`HostBook`]), in memory only,
 /// as the pool is.
 #[derive(Debug)]
-pub struct StaticPool {
+pub struct FakeHostPool {
     id: ProviderId,
     classes: Vec<ResourceClass>,
     book: HostBook,
 }
 
-impl StaticPool {
+impl FakeHostPool {
     /// A pool over configuration text, booking the share of each host's memory that the
     /// text's `memory_schedulable_percent` says (all of it when the key is left out).
     pub fn from_toml(id: ProviderId, source: &str) -> Result<Self, ConfigError> {
@@ -29,7 +29,7 @@ impl StaticPool {
     /// A pool over configuration text, booking `percent` of each host's memory when it
     /// is given, and else the share the text says. The percent is applied once, here, to
     /// the memory the file lists: each host is booked as the shape with its memory cut,
-    /// and a host's own claim has no part in it (a static host makes none).
+    /// and a host's own claim has no part in it (a fake host makes none).
     pub fn from_toml_with_percent(
         id: ProviderId,
         source: &str,
@@ -55,7 +55,7 @@ impl StaticPool {
     }
 
     /// A pool over the configuration file at `path`, as
-    /// [`from_toml_with_percent`](StaticPool::from_toml_with_percent) reads text.
+    /// [`from_toml_with_percent`](FakeHostPool::from_toml_with_percent) reads text.
     pub fn from_config_file_with_percent(
         id: ProviderId,
         path: &Path,
@@ -96,7 +96,7 @@ impl StaticPool {
     }
 }
 
-impl Pool for StaticPool {
+impl Pool for FakeHostPool {
     fn id(&self) -> ProviderId {
         self.id.clone()
     }

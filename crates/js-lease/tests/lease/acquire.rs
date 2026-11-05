@@ -7,7 +7,7 @@ use js_lease::{
     AcquireError, Boot, Clock, LeaseState, LeaseTable, ManualClock, ReleaseError, ReleaseOutcome,
     RenewError, Settings, SettingsError, SystemClock, Timestamp,
 };
-use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
 use js_provider::{Call, HostCapacity, Pool, RefusalCode};
 use js_types::{ClassId, LeaseId, ProviderId, Request, Resources};
 
@@ -15,12 +15,12 @@ use crate::support::{
     Scratch, T0, at, clock, fresh, gpu_host_request, host, request, secs, settings, states,
 };
 
-/// Asserts that the same flow works on the static pool, that two acquires never get the
+/// Asserts that the same flow works on the fake host pool, that two acquires never get the
 /// same host, and that a third is refused when every host is booked.
 #[test]
 fn two_acquires_never_share_a_host_on_the_pool() {
     let scratch = Scratch::new("pool");
-    let pool = StaticPool::from_toml(ProviderId::new("pool").unwrap(), EXAMPLE_CONFIG).unwrap();
+    let pool = FakeHostPool::from_toml(ProviderId::new("pool").unwrap(), EXAMPLE_CONFIG).unwrap();
     let mut table =
         LeaseTable::open(pool, clock(), settings(), scratch.file(), Boot::Initialise).unwrap();
     let wanted = || Request {

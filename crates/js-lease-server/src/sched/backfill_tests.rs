@@ -359,8 +359,8 @@ fn without_the_flag_no_lease_shares_a_host() {
 }
 
 /// Asserts that the provider the server leases through, built from a pool file with a
-/// `share_class`, serves the pool's class and the share class beside the static pool's
-/// own (`gpu-host`, from the fixture's `--pool-config`), and no other. It catches the
+/// `share_class`, serves the pool's class and the share class beside the simulated pool's
+/// own (`gpu-host`, from the fixture's simulated hosts), and no other. It catches the
 /// key read but not served.
 #[test]
 fn a_pool_files_share_class_is_served_beside_its_class() {
@@ -474,7 +474,7 @@ fn with_the_flag_the_table_ends_backfill_at_its_wall_and_the_request_starts_at_t
 }
 
 /// The agent side and the provider of a server started from a configuration file with a
-/// joined pool of `whole-node` hosts shared by the class `share`, `server.placement =
+/// static pool (`kind = "joined"`, its old spelling) of `whole-node` hosts shared by the class `share`, `server.placement =
 /// "js-sched"`, and `max_lease_wall` set to `ceiling` when given; host `h1` registered.
 fn from_file(name: &str, ceiling: Option<&str>) -> Live {
     let dir = scratch(name);

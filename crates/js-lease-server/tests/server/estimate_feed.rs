@@ -10,7 +10,7 @@ use js_lease_server::{Cli, Config};
 
 use crate::agents_support::{JOIN, POOL};
 use crate::config_support::{PoolText, file, load, refusal, server};
-use crate::support::{Scratch, base_args, config};
+use crate::support::{FakeHosts, Scratch, base_args, config, take_fake_hosts};
 
 /// The flags of a server with agent registration over the agents' test pool, and `extra`
 /// after them.
@@ -31,8 +31,13 @@ fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {
+    let (args, hosts) = take_fake_hosts(args);
     let cli = Cli::try_parse_from(args).map_err(|err| err.to_string())?;
-    Config::from_cli(cli).map_err(|err| err.to_string())
+    match hosts {
+        Some(path) => Config::simulated(cli, Box::new(FakeHosts::new(path))),
+        None => Config::from_cli(cli),
+    }
+    .map_err(|err| err.to_string())
 }
 
 /// Asserts the flag's parse: absent it is off, given it is on; without
@@ -82,14 +87,14 @@ fn the_key_is_read_from_the_file_and_refused_beside_usage_off() {
     ] {
         let scratch = Scratch::new(name);
         let table = server(&scratch, &format!("{listeners}\n{extra}"));
-        let text = file(&table, &[&PoolText::joined("burst")]);
+        let text = file(&table, &[&PoolText::registering("burst")]);
         let config = load(&scratch, &text).unwrap();
         assert_eq!(config.estimate_feed(), expected, "{name}");
     }
     let scratch = Scratch::new("estimate_feed_key_usage_off");
     let extra = "estimate_feed = true\nusage_off = true";
     let table = server(&scratch, &format!("{listeners}\n{extra}"));
-    let text = file(&table, &[&PoolText::joined("burst")]);
+    let text = file(&table, &[&PoolText::registering("burst")]);
     assert_eq!(
         refusal(&scratch, &text),
         "server.estimate_feed: not allowed with server.usage_off"

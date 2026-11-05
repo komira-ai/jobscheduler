@@ -34,7 +34,9 @@ use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
+use agentless::{AGENTLESS_REMOVED, agentless_keys};
 
+mod agentless;
 mod brake;
 mod budget;
 mod joined;
@@ -240,23 +242,24 @@ impl fmt::Debug for ElasticPlan {
 
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
 pub(crate) struct Registering {
-    /// The launching side; `None` for a pool of hand-joined agents.
+    /// The launching side; `None` for a static pool (hosts that run `js-agent`).
     pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
     /// The one `provider` the mint route accepts, when the pool is the only thing that
-    /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
+    /// admits hosts by hand: a static pool's name. `None` takes any provider, as an
     /// elastic pool's launches are minted for under the provider kind's name.
     pub(crate) mint_provider: Option<String>,
 }
 
 /// The pools of the file, as the sources of hosts they make.
 pub(crate) enum LoadedHosts {
-    /// Static pools only.
-    Static(Box<dyn CapacitySource>),
-    /// An elastic pool that agents register into, beside a static pool when there is one.
+    /// A pool of a simulated kind only (a kind a library caller registered).
+    Simulated(Box<dyn CapacitySource>),
+    /// A pool that agents register into (static or elastic), beside a pool of a
+    /// simulated kind when there is one.
     Registering {
-        static_pool: Option<Box<dyn CapacitySource>>,
+        simulated: Option<Box<dyn CapacitySource>>,
         registering: Box<Registering>,
     },
 }
@@ -519,9 +522,10 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let server = read_server(server)?;
     let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
-    let mut static_pool = None;
+    let mut simulated = None;
     let mut registering = None;
     let mut names = BTreeSet::new();
+    let mut warnings = Vec::new();
     for (index, table) in pools.into_iter().enumerate() {
         let ceiling = server.max_lease_wall;
         let read = read_pool(
@@ -535,10 +539,11 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             let reason = "also the name of an earlier pool";
             return Err(StartupError::at(format!("{pool}: name"), reason));
         }
+        warnings.extend(read.warning);
         match read.pool {
-            Pool::Static(source) => {
-                if static_pool.replace(source).is_some() {
-                    let reason = "only one static pool is served in this version";
+            Pool::Simulated(source) => {
+                if simulated.replace(source).is_some() {
+                    let reason = "only one pool of a simulated kind is served";
                     return Err(StartupError::at(pool, reason));
                 }
             }
@@ -551,18 +556,18 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         }
     }
     let elastic = registering.is_some();
-    // A joined pool has no plan, so only an elastic pool's launch settings are checked.
+    // A static pool has no plan, so only an elastic pool's launch settings are checked.
     if let Some(registering) = &registering
         && let Some(plan) = &registering.plan
     {
         check_live(&server, plan)?;
     }
-    let hosts = match (static_pool, registering) {
-        (static_pool, Some(registering)) => LoadedHosts::Registering {
-            static_pool,
+    let hosts = match (simulated, registering) {
+        (simulated, Some(registering)) => LoadedHosts::Registering {
+            simulated,
             registering,
         },
-        (Some(source), None) => LoadedHosts::Static(source),
+        (Some(source), None) => LoadedHosts::Simulated(source),
         (None, None) => {
             let reason = "required: add at least one [[pool]] table";
             return Err(StartupError::at("pool", reason));
@@ -572,7 +577,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         let reason = "needs an elastic pool, whose hosts register agents";
         return Err(StartupError::at(format!("server.{key}"), reason));
     }
-    let mut warnings = check_listeners(&server, elastic)?;
+    warnings.extend(check_listeners(&server, elastic)?);
     let now = Millis::new(ld.clock.now().millis());
     warnings.extend(budget::notes(&hosts, &budgets, now));
     Ok(Loaded {
@@ -583,14 +588,15 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     })
 }
 
-/// A pool of the file, built.
+/// A pool of the file, built, and the warning it gives at start, if any.
 struct Read {
     name: String,
     pool: Pool,
+    warning: Option<String>,
 }
 
 enum Pool {
-    Static(Box<dyn CapacitySource>),
+    Simulated(Box<dyn CapacitySource>),
     Elastic(Box<Registering>),
 }
 
@@ -612,7 +618,8 @@ struct ElasticKeys {
 }
 
 impl ElasticKeys {
-    /// The first key a static pool was given, in the order of the file's reference.
+    /// The first key a pool of a simulated kind was given, in the order of the file's
+    /// reference.
     fn first_given(&self) -> Option<&'static str> {
         let given = [
             ("exec", self.exec.is_some()),
@@ -657,6 +664,12 @@ fn read_pool(
         Some(name) if ProviderId::new(name).is_ok() => format!("pool {name:?}: "),
         _ => format!("pool #{number}: "),
     };
+    if let Some(found) = agentless_keys(&table) {
+        return Err(StartupError::at(
+            format!("{head}{found}"),
+            AGENTLESS_REMOVED,
+        ));
+    }
     let mut s = Section::open(table, head);
     s.only(POOL_KEYS)?;
     let name = s.required_string("name")?;
@@ -724,7 +737,7 @@ fn read_pool(
         Err(err) => return Err(p.fail(&err.field, &err.reason)),
     };
     let pool = match built {
-        Built::Static(source) => {
+        Built::Simulated(source) => {
             if let Some(key) = keys.first_given() {
                 return Err(s.fail(key, "only for an elastic pool"));
             }
@@ -732,7 +745,7 @@ fn read_pool(
                 let reason = "live needs an elastic provider; this kind launches nothing";
                 return Err(s.fail("launch", reason));
             }
-            Pool::Static(source)
+            Pool::Simulated(source)
         }
         Built::Elastic(built) => {
             let elastic = Elastic {
@@ -751,7 +764,11 @@ fn read_pool(
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
     };
-    Ok(Read { name, pool })
+    Ok(Read {
+        name,
+        pool,
+        warning: None,
+    })
 }
 
 /// What an elastic pool is made from.
@@ -935,62 +952,4 @@ fn registry_pool(
 }
 
 #[cfg(test)]
-mod tests {
-    use js_types::Dims;
-
-    use super::*;
-
-    fn section() -> Section {
-        Section::open(toml::Table::new(), "pool \"x\": ".to_owned())
-    }
-
-    fn floor() -> Shape {
-        let floor = Resources::new(1000, 1 << 30, 0, None).unwrap();
-        Shape::new(floor, BTreeMap::new())
-    }
-
-    /// Asserts that a class that books part of a host is refused naming the pool and
-    /// `class`, with the reason the pool file of the flags gives, and that a class that
-    /// books whole hosts is served. No class a file can name books part of a host today,
-    /// so the check is tried on a class built here. It catches a mixed pool that is served
-    /// as if it booked whole hosts.
-    #[test]
-    fn a_class_that_books_part_of_a_host_is_refused() {
-        let mixed = ResourceClass::new(
-            ClassId::new("mixed").unwrap(),
-            Admission::Book(Dims::new()),
-            0,
-        );
-        let refused = section().class_served(&mixed).err().unwrap();
-        assert_eq!(
-            refused.to_string(),
-            "pool \"x\": class: a mixed pool (a class that books part of a host) is not served by this server yet"
-        );
-        assert!(section().class_served(&ResourceClass::whole_node()).is_ok());
-        assert!(section().class_served(&ResourceClass::gpu_host()).is_ok());
-    }
-
-    /// Asserts how the registry's pool is built: a whole-node pool of no machines is
-    /// refused naming the pool and `class` with the registry's own reason; a whole-node
-    /// pool of machines gets the dedicated settings; a pool of another class gets none; and
-    /// the host contract is set when asked for and absent when not. It catches a dedicated
-    /// pool whose settings are dropped when the registry refuses them.
-    #[test]
-    fn the_registry_pool_takes_the_class_and_the_contract() {
-        let id = ProviderId::new("x").unwrap();
-        let full = MemoryPercent::FULL;
-        let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None, full);
-        let said = refused.err().unwrap().to_string();
-        assert!(said.starts_with("pool \"x\": class: "), "{said}");
-        assert!(said.ends_with("must be at least 1"), "{said}");
-        let exec = Some(ExecMode::Container);
-        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec, full).unwrap();
-        assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
-        assert_eq!(built.exec(), exec);
-        let gpu = ResourceClass::gpu_host();
-        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None, full).unwrap();
-        assert!(plain.whole_node().is_none());
-        assert_eq!(plain.exec(), None);
-    }
-}
+mod tests;

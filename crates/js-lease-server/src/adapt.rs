@@ -66,7 +66,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use js_lease::ManualClock;
-    use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
+    use js_pool_fake::{EXAMPLE_CONFIG, FakeHostPool};
 
     use super::*;
 
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn wrappers_delegate() {
         let id = ProviderId::new("p").unwrap();
-        let pool = StaticPool::from_toml(id.clone(), EXAMPLE_CONFIG).unwrap();
+        let pool = FakeHostPool::from_toml(id.clone(), EXAMPLE_CONFIG).unwrap();
         let mut boxed = BoxedPool(Box::new(pool));
         assert_eq!(boxed.id(), id);
         assert_eq!(boxed.classes(), vec![ResourceClass::gpu_host()]);

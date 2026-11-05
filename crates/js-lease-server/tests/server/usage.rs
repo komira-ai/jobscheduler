@@ -16,6 +16,7 @@ use crate::agents_support::{JOIN, JOIN_B, Session, agent_args, join, post};
 use crate::runs_support::{beat, held, lease, queued, result, verdicts};
 use crate::support::{
     Harness, LogCapture, Reply, Scratch, TOKEN, args_with, base_args, config, logged_with, request,
+    take_fake_hosts,
 };
 use crate::usage_support::{Fake, Seen, beat_load, load, start_over, start_usage};
 
@@ -274,7 +275,7 @@ fn the_flags_decide_where_usage_lives_and_how_much_it_may_keep() {
         &["--usage-off", "--usage-db", "u.db"],
     ];
     for extra in refused {
-        let parsed = Cli::try_parse_from(args_with(&scratch, extra));
+        let parsed = Cli::try_parse_from(take_fake_hosts(args_with(&scratch, extra)).0);
         assert!(parsed.is_err(), "{extra:?}");
     }
 }

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::support::{Harness, Reply, Scratch, base_args, replace, request};
+use crate::support::{Harness, Reply, Scratch, base_args, replace, request, take_fake_hosts};
 
 /// The join token in the token file at the start.
 pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
@@ -16,7 +16,7 @@ pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 pub const JOIN_B: &str = "join-token-B-0123456789-abcdefghijklmnop";
 
 /// The pool registering hosts join: room for two machines, and a floor that the shipped
-/// two-host static pool's requests (`lease_body`) fit, so one request can be served by
+/// two-host fake pool's requests (`lease_body`) fit, so one request can be served by
 /// either source.
 pub const POOL: &str = r#"
 name = "burst"
@@ -34,12 +34,11 @@ isa = "x86-64-v3"
 "#;
 
 /// The base flags plus the agent flags: the join token file holds [`JOIN`] and
-/// [`JOIN_B`]; the static pool is dropped when `keep_static` is false.
+/// [`JOIN_B`]; the fake hosts are dropped when `keep_static` is false.
 pub fn agent_args(scratch: &Scratch, keep_static: bool) -> Vec<OsString> {
     let mut args = base_args(scratch);
     if !keep_static {
-        let at = args.iter().position(|arg| arg == "--pool-config").unwrap();
-        args.drain(at..at + 2);
+        args = take_fake_hosts(args).0;
     }
     let tokens = scratch.write("agent-tokens", &format!("{JOIN}\n{JOIN_B}\n"), 0o600);
     let pool = scratch.write("agent-pool.toml", POOL, 0o644);

@@ -10,11 +10,12 @@ use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 use crate::capacity::{CapacitySource, Seated, Unseated};
 use crate::error::StartupError;
 
-/// The static pool (when there is one) and the registered hosts, as one provider.
+/// The simulated hosts (when a library caller handed a source in) and the registered
+/// hosts, as one provider.
 ///
 /// - **Start** asks the child that already holds the lease, if there is one, so a
 ///   repeated start never books a second host. Otherwise it asks the children in order,
-///   the static pool first, and moves on to the next only when a child has no room for
+///   the simulated hosts first, and moves on to the next only when a child has no room for
 ///   the request ([`RefusalCode::NoCapacity`], [`RefusalCode::NoFit`]), could never
 ///   serve it ([`RefusalCode::NoCapableHost`], a registry with no host that could be
 ///   given a whole-node request) or does not serve its class
@@ -35,10 +36,10 @@ use crate::error::StartupError;
 /// - **Observe** and the read-back of a stop are `Present` if any child says so, else
 ///   `Unknown` if any does, else `Absent`.
 /// - **Capacity** lists every child's hosts by id. Host ids are unique across children:
-///   the registry refuses a hello for an id the static pool lists.
+///   the registry refuses a hello for an id the simulated source lists.
 ///
 /// Public (and hidden from the documentation) only so that the conformance suite can
-/// run over a layer of a static pool and a registry; the server builds it through
+/// run over a layer of a fake host pool and a registry; the server builds it through
 /// `LayeredSource`.
 pub struct LayeredProvider {
     id: ProviderId,
@@ -161,11 +162,11 @@ impl Pool for LayeredProvider {
     }
 }
 
-/// Builds the layered provider: the static pool from its source, and the registered
-/// hosts from the registry, with the lease file's bookings put back in whichever of the
-/// two lists the host.
+/// Builds the layered provider: the simulated hosts from the source a library caller
+/// handed in (when it did), and the registered hosts from the registry, with the lease
+/// file's bookings put back in whichever of the two lists the host.
 pub(crate) struct LayeredSource {
-    static_pool: Option<Box<dyn CapacitySource>>,
+    simulated: Option<Box<dyn CapacitySource>>,
     registry: Registry,
     bindings: BTreeMap<HostId, Binding>,
 }
@@ -173,12 +174,12 @@ pub(crate) struct LayeredSource {
 impl LayeredSource {
     /// `bindings` are what the previous run persisted for the hosts it admitted.
     pub(crate) fn new(
-        static_pool: Option<Box<dyn CapacitySource>>,
+        simulated: Option<Box<dyn CapacitySource>>,
         registry: Registry,
         bindings: BTreeMap<HostId, Binding>,
     ) -> Self {
         Self {
-            static_pool,
+            simulated,
             registry,
             bindings,
         }
@@ -186,17 +187,17 @@ impl LayeredSource {
 }
 
 impl CapacitySource for LayeredSource {
-    /// The static pool seats the bookings of the hosts it lists. Every other booking is
-    /// seated on the registry as an awaiting host, with the binding persisted for it,
+    /// The simulated source seats the bookings of the hosts it lists. Every other booking
+    /// is seated on the registry as an awaiting host, with the binding persisted for it,
     /// and what the registry refuses to seat comes back unseated. A booking of a host
-    /// the static pool lists but could not seat stays unseated, and is not offered to
+    /// the simulated source lists but could not seat stays unseated, and is not offered to
     /// the registry: an id belongs to one source only, and the registry reserves the
-    /// static pool's ids so that no hello can take one.
+    /// simulated source's ids so that no hello can take one.
     fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
         let mut children: Vec<Box<dyn Pool + Send>> = Vec::new();
         let mut unseated = Vec::new();
         let mut listed = BTreeSet::new();
-        if let Some(source) = &self.static_pool {
+        if let Some(source) = &self.simulated {
             let Seated {
                 provider,
                 unseated: refused,

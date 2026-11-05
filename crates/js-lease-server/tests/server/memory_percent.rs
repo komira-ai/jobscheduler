@@ -8,7 +8,7 @@ use crate::agents_support::{JOIN, POOL, agent_args, entry, hello_body, hosts, po
 use crate::config_support::{
     PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
 };
-use crate::support::{Harness, Scratch, base_args, config, replace, request};
+use crate::support::{FAKE_HOSTS, Harness, Scratch, base_args, config, replace, request};
 
 const GIB: u64 = 1 << 30;
 
@@ -62,11 +62,11 @@ async fn ask(h: &Harness, memory_bytes: u64) -> (u16, String) {
     (reply.status, said)
 }
 
-/// A server over a static hosts file given by the flag `--pool-config`.
+/// A server over a hosts file given as the simulated hosts (`--fake-hosts`).
 async fn flagged(name: &str, hosts_line: &str) -> Harness {
     let scratch = Scratch::new(name);
     let path = scratch.write("big-hosts.toml", &hosts_text(hosts_line), 0o644);
-    let args = replace(base_args(&scratch), "--pool-config", path.into_os_string());
+    let args = replace(base_args(&scratch), FAKE_HOSTS, path.into_os_string());
     Harness::with(scratch, args, None).await
 }
 
@@ -75,9 +75,12 @@ async fn flagged(name: &str, hosts_line: &str) -> Harness {
 async fn configured(name: &str, hosts_line: &str, pool_percent: Option<&str>) -> Harness {
     let scratch = Scratch::new(name);
     let path = scratch.write("big-hosts.toml", &hosts_text(hosts_line), 0o644);
-    let mut pool = PoolText::static_pool(&scratch, "big").set(
+    let mut pool = PoolText::fake_hosts(&scratch, "big").set(
         "provider",
-        &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&path)),
+        &format!(
+            "{{ kind = \"fake-hosts\", hosts_file = {} }}",
+            quoted(&path)
+        ),
     );
     if let Some(percent) = pool_percent {
         pool = pool.set("memory_schedulable_percent", percent);
@@ -148,7 +151,7 @@ fn a_percent_outside_one_to_a_hundred_is_refused() {
         ("\"ninety\"", "must be an integer"),
     ];
     for (value, reason) in cases {
-        let pool = PoolText::static_pool(&scratch, "hosts").set(key, value);
+        let pool = PoolText::fake_hosts(&scratch, "hosts").set(key, value);
         let said = refusal(&scratch, &file(&server(&scratch, ""), &[&pool]));
         assert_eq!(said, format!("pool \"hosts\": {key}: {reason}"));
         let elastic = PoolText::elastic(&scratch).set(key, value);
@@ -163,9 +166,12 @@ fn a_percent_outside_one_to_a_hundred_is_refused() {
         &hosts_text("memory_schedulable_percent = 0"),
         0o644,
     );
-    let pool = PoolText::static_pool(&scratch, "hosts").set(
+    let pool = PoolText::fake_hosts(&scratch, "hosts").set(
         "provider",
-        &format!("{{ kind = \"static\", hosts_file = {} }}", quoted(&hosts)),
+        &format!(
+            "{{ kind = \"fake-hosts\", hosts_file = {} }}",
+            quoted(&hosts)
+        ),
     );
     let said = refusal(&scratch, &file(&server(&scratch, ""), &[&pool]));
     assert_eq!(

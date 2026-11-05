@@ -56,7 +56,8 @@ impl MemoryView {
     }
 }
 
-/// One host. `source` says where it comes from: `static` for the operator's pool file,
+/// One host. `source` says where it comes from: `static` for a host of a simulated source
+/// (the simulation seam; the wire value is kept from the removed hosts-file pool),
 /// `registered` for a host that said hello. The remaining fields of a registered host
 /// are what the registry knows of its session.
 #[derive(Debug, Serialize)]

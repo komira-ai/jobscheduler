@@ -8,11 +8,11 @@
 //!   refuse a start (a token file anyone can read, a listen address off the loopback
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
-//!   compiled in (`static` and `lambdalabs`).
-//! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
-//!   operator's pool file. With agent registration on (see "Agents" below), the static
-//!   pool and the hosts agents register are two sources of the same trait, layered
-//!   behind one provider.
+//!   compiled in (`lambdalabs`).
+//! - [`CapacitySource`]: where the hosts come from: the hosts that run `js-agent` and
+//!   register (see "Agents" below). A library caller may hand in a source of its own
+//!   beside them, or alone, through the simulation seam ([`Config::simulated`]): tests
+//!   and simulations of the scheduler without real hosts. The program never does.
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
@@ -39,9 +39,9 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
-//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
+//! | `--pool-config <path>` | removed: the agentless hosts-file pool is not served. A start that gives it is refused naming it, with the migration (run `js-agent` on each listed host and use `--agent-pool-config`; see "Migrating an agentless pool" in `docs/design/configuration.md`) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project`, whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes`, with `shape-not-accepted`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its leases share a host with room (only with `--placement js-sched`, else the server refuses to start; it may not name `class`); a joined pool of the file takes the same key |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]` (`cpu_millis`, `memory_bytes`, `gpus?`, `gpu_class?`, `disk_bytes?`: the scratch disk the pool books for every host and the floor a hello must meet; zero or absent books none; required above zero when `[capabilities]` names `scratch-quota`, or the file is refused; a pool that books disk and does not name `scratch-quota` refuses every agent that does not report disk, which no current agent does; a pool that names `scratch-quota` refuses a host whose `scratch-quota` is not `project`, whose `scratch-default-gib` is absent, zero or above the wire maximum, or whose default is more than `disk_bytes`, with `shape-not-accepted`), `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `memory_schedulable_percent` (1 to 100, default 100: the share of `[shape]` `memory_bytes` the pool books, rounded down; a hello is still held to the whole shape; write it before `[shape]`), `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Turns agent registration on; `share_class?`: a class that books part of a host, served beside `class` so that its leases share a host with room (only with `--placement js-sched`, else the server refuses to start; it may not name `class`); a static pool of the file takes the same key |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--require-host-credential` | off by default: turn it on once every agent is new. The first hello of a one-time join token must then say the agent keeps a host credential, or it is refused `join-token-credential-required` (403) and the token stays unused; so the token of every launched host is dead after its first hello. Pool join tokens are not affected. Needs `--agent-pool-config` |
 //! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets, and books the host it names among the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable): for a class that books part of a host, the hosts' load readings choose among those that still fit, then the host the lease fits most tightly, so the most booked first, equal hosts by a hash of the lease and the host; a lease that books a whole host is not scored and takes the first free host by id, as under `registry`. A start costs time in the open hosts plus their leases, under the registry's lock; the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings (the two windows its load is read from), and the start is counted. A class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room (CPU up to `--cpu-slack` over a host's cores) and makes the booking. The pool's `memory_schedulable_percent` is the scheduler's rule under this placement: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; a request above the percent still fits no host (`no-fit`), and `GET /v1/hosts` still shows the cut memory as `shape.memory_bytes`, beside the percent. A request the scheduler cannot describe is booked on the first host with room for it within the pool's memory percent (none if no host has, and the start answers `no-capacity`); one the scheduler places nowhere is booked nowhere (`no-capacity`); each is counted and logged. A host a whole-node request has set aside takes, under `js-sched`, a lease of the pool's `share_class` (not a probe) only as backfill: when its max wall time ends, with a minute to spare, by the end of the host's tail as the mark took it, a wall time above `server.max_lease_wall` never does, and a host whose tail is unknown or past takes none; the registry's own placement keeps such a host for its request alone. The flag is refused at start for a pool whose capabilities name no `arch`. Leases restored from the lease file are seated with the resources it records whatever the flag says now. Needs `--agent-pool-config` |
@@ -72,8 +72,8 @@
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
 //! above, and no flag may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
-//! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
-//! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
+//! and with exit status 2. `--token-file` is `server.client_token_file`,
+//! `--agent-pool-config` is a `[[pool]]` table, `--agent-token-file` is a pool's
 //! `join_token_file`, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
@@ -115,9 +115,11 @@
 //! # file and alert_repeat_after are refused without the URL.
 //!
 //! [[pool]]
-//! name     = "gpu-static"
-//! class    = "gpu-host"
-//! provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
+//! kind  = "static"
+//! name  = "nodes"
+//! class = "whole-node"
+//! max_machines = 6
+//! shape = { cpu_millis = 16000, memory_bytes = 68719476736 }
 //! ```
 //!
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
@@ -126,9 +128,8 @@
 //! `max_age`, `min_host_lifetime`, `boot_timeout` (`15m`), `boot_fail_cooldown_max`, `boot_fail_trip_after`, `boot_fail_reset_after`, `launch`, `exec`, `join_token_file`, `agent` and `network`.
 //! Every pool, static or elastic, may set `memory_schedulable_percent`, a whole number from
 //! 1 to 100 (default 100): the share of the pool's configured memory that is booked, rounded
-//! down. A static pool books that share of each host's `memory_bytes` (the pool's key
-//! replaces the one in its hosts file); an elastic pool books that share of its floor's
-//! memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
+//! down. A static pool books that share of its `shape`'s `memory_bytes`; an elastic pool
+//! books that share of its floor's memory, 1 GiB. An agent's own claim never raises it, and a hello must still meet the
 //! whole floor. `0`, above `100`, a negative number or a word is refused naming the pool and
 //! the field.
 //! An elastic pool may also set `live_until`, a TOML date-time with an offset such as
@@ -206,10 +207,13 @@
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
-//! = ... }`. At most one elastic pool and one static pool are served in this version.
+//! = ... }`.
 //!
-//! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
-//! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
+//! A pool of machines we install `js-agent` on, which reach out and register, has
+//! `kind = "static"` and no `provider`; it lists no hosts, as a host is in the pool when its
+//! agent registers. `kind = "joined"` is the old spelling of the same pool: it is read the
+//! same, and the server logs one warning at start for each pool that spells it so, naming
+//! the pool. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
 //! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as
 //! in the agent pool file), and optionally `capabilities` (a table of text values, as the
 //! agent pool file's `[capabilities]`: a lease request is matched against them, and a
@@ -223,6 +227,12 @@
 //! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
 //! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
 //! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
+//!
+//! The removed agentless hosts-file pool, a `[[pool]]` with no top-level `kind` whose
+//! `provider` table is of kind `static` and names a hosts file, is refused at start naming
+//! the pool, the keys it found and the migration (run `js-agent` on each listed host and
+//! replace the pool with one of `kind = "static"`, with its `shape` and `max_machines`);
+//! the error repeats no path and nothing of the hosts file.
 //!
 //! # API
 //!
@@ -246,7 +256,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools (and simulated sources) can book disk: elastic and static pools of the file have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, a simulated source, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -338,7 +348,7 @@
 //! The table sits behind one async mutex, taken for the table call alone and never held
 //! across an await. A table call is synchronous: it writes and syncs the lease file and
 //! calls the provider on a runtime worker thread, with the lock held, so every other
-//! request and the tick wait for it. That is cheap for the static pool; a provider that
+//! request and the tick wait for it. That is cheap for a provider in memory; a provider that
 //! can take long (one that calls over a network) must bound its own calls, see
 //! [`CapacitySource`].
 //!
@@ -346,10 +356,10 @@
 //!
 //! With `--agent-pool-config` (and, for hosts that join with a token shared by the pool,
 //! `--agent-token-file`) a machine can register itself as
-//! a host of the pool the pool file describes, beside the static pool (if any). The
+//! a host of the pool the pool file describes. The
 //! machine's agent calls two routes with a join token, on the same listener, body cap,
 //! timeouts and connection cap as everything else. Without the pool file the routes do not
-//! exist and the server builds exactly what it always has.
+//! exist, and the program refuses to start: it serves only hosts that register.
 //!
 //! | request | answers |
 //! |---|---|
@@ -378,9 +388,9 @@
 //! same way. The routes are served by the agent routes' listener (`agent_listen`, when
 //! there is one).
 //!
-//! A leasing client asks for a lease as ever and is given a static host first, a
-//! registered one when the static pool has none; it cannot tell which it got except by
-//! `GET /v1/hosts`. A registered host takes a lease only while it is live (heard within
+//! A leasing client asks for a lease as ever. Under the simulation seam, a simulated host
+//! is given first and a registered one when the simulated source has none; the client
+//! cannot tell which it got except by `GET /v1/hosts`. A registered host takes a lease only while it is live (heard within
 //! the grace period) and serving. A host that goes silent keeps its lease and reads
 //! `Unknown` until it is heard again or the lease ends by its ttl or a release.
 //!
@@ -510,9 +520,9 @@
 //!
 //! # Restart
 //!
-//! The lease file is the record of the leases, and for the static pool it is also the
-//! record of the pool's bookings: the pool is built again from `--pool-config` at every
-//! start and holds its bookings in memory only. So before the table looks at a held
+//! The lease file is the record of the leases, and for a source that holds its bookings in
+//! memory only (a simulated one) it is also the record of the source's bookings. So before
+//! the table looks at a held
 //! lease, the server reads the hosts the file names ([`js_lease::read_bookings`]) and
 //! asks the [`CapacitySource`] to seat each lease on its host again, in lease id order.
 //! A lease the source seats is observed present, stays held on the same host, and the
@@ -520,15 +530,14 @@
 //!
 //! A booking the source cannot seat is logged at warn level with the lease, the host,
 //! the state and the reason, and the table then finds the provider ignorant of it and
-//! drops it: a host the pool file no longer lists, or a host the file gives to two
-//! leases (the lower id keeps it). Edit the pool file with that in mind: removing a
-//! host from it ends the leases on it at the next start. A source that keeps its own
+//! drops it: a host the source no longer lists, or a host the file gives to two leases
+//! (the lower id keeps it). A source that keeps its own
 //! state across restarts (a provider that is a service, or hosts that agents report) is
 //! free to ignore the bookings it is given.
 //!
 //! The registered hosts are a source of that second kind in part. The registry holds
 //! nothing across a restart, so each booking of the lease file that names a host the
-//! static pool does not list is seated on the registry as an *awaiting* host: its lease
+//! simulated source does not list is seated on the registry as an *awaiting* host: its lease
 //! is held and observes `Unknown` (never `Absent`, so the table keeps it), the host takes
 //! no new lease, and it counts toward `max_machines`, until its agent says hello again.
 //! That hello is admitted as any other and the lease then observes `Present`. An awaiting
@@ -546,8 +555,7 @@
 //! reads it at start. It holds SHA-256 digests of join tokens, not tokens, and the taint of
 //! each host that reported one: such a host is put back at start as an awaiting host (and
 //! counts toward `max_machines`) whether or not it holds a lease. The file is
-//! not part of the lease file, so the lease file's format and the static-only start are
-//! unchanged. A file that is present and unreadable, or not private, is a refused start
+//! not part of the lease file, so the lease file's format is unchanged. A file that is present and unreadable, or not private, is a refused start
 //! naming `--state-file`. A missing file means no bindings: a lease on a registered host
 //! then restores without one, and the first hello binds the id. If the file cannot be
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
@@ -684,7 +692,7 @@ use tokio::sync::mpsc;
 
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
-pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
+pub use capacity::{CapacitySource, Seated, Unseated};
 pub use config::{
     BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles,
     Token, is_private_address, parse_duration,

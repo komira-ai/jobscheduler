@@ -11,7 +11,9 @@ use js_lease_server::{Cli, Config};
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hello_body};
-use crate::config_support::{PoolText, file, quote, quoted, refusal, server};
+use crate::config_support::{
+    PoolText, file, quote, quoted, refusal, registering_args, server, server_with_agents,
+};
 use crate::support::{Harness, Reply, Scratch, request};
 
 const MINT: &str = "/v1/agent/join-tokens";
@@ -149,7 +151,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ("cpu_slack", "1.1"),
     ] {
         let scratch = Scratch::new(&format!("one_file_needs_{key}"));
-        let stat = PoolText::static_pool(&scratch, "hosts");
+        let stat = PoolText::fake_hosts(&scratch, "hosts");
         let text = file(&server(&scratch, &format!("{key} = {value}")), &[&stat]);
         assert_eq!(refusal(&scratch, &text), format!("server.{key}: {needs}"));
     }
@@ -185,6 +187,9 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         assert_eq!(refusal(&scratch, &text), said);
     }
 }
+
+/// Why `--pool-config` is refused, as the server words it.
+const AGENTLESS_REMOVED: &str = "the agentless hosts-file pool was removed: run js-agent on each listed host and use --agent-pool-config, or a [[pool]] of kind = \"static\" (with its shape and max_machines)";
 
 /// The flags beside `--config`, with the refusal each gets. Every flag of the command
 /// line but `--config` is here (the next test checks that).
@@ -233,7 +238,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
     ));
     let moved = [
         ("--token-file", "set server.client_token_file"),
-        ("--pool-config", "add a [[pool]] with provider kind static"),
+        ("--pool-config", AGENTLESS_REMOVED),
         (
             "--agent-pool-config",
             "add a [[pool]] with an elastic provider",
@@ -249,8 +254,9 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
 
 /// A valid file at `js.toml` of `scratch` and the command line that names it.
 fn with_file(scratch: &Scratch) -> Vec<OsString> {
-    let stat = PoolText::static_pool(scratch, "hosts");
-    let path = scratch.write("js.toml", &file(&server(scratch, ""), &[&stat]), 0o644);
+    let registering = PoolText::registering("burst");
+    let text = file(&server_with_agents(scratch), &[&registering]);
+    let path = scratch.write("js.toml", &text, 0o644);
     vec![
         "js-lease-server".into(),
         "--config".into(),
@@ -361,7 +367,7 @@ fn a_cli_parsed_another_way_is_refused() {
     let scratch = Scratch::new("one_file_other_parse");
     let mut args = with_file(&scratch);
     args.extend(["--listen", "127.0.0.1:0"].map(OsString::from));
-    for args in [args, crate::support::base_args(&scratch)] {
+    for args in [args, registering_args(&scratch)] {
         let cli = <Cli as clap::Parser>::try_parse_from(args).unwrap();
         let said = Config::from_cli(cli).err().unwrap().to_string();
         assert!(

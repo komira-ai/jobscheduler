@@ -491,6 +491,33 @@ async fn the_gpu_path_matches_its_golden() {
     assert_eq!(names, SECTIONS, "the golden holds exactly these sections");
 }
 
+/// The block of `text` for the route `GET /v1/hosts`: its heading line and the lines
+/// under it that start with two spaces, up to the next line that does not.
+fn hosts_block(text: &str) -> String {
+    let mut lines = text.lines().skip_while(|line| *line != "GET /v1/hosts");
+    let head = lines
+        .next()
+        .unwrap_or_else(|| panic!("no GET /v1/hosts block in\n{text}"));
+    let mut block = vec![head];
+    block.extend(lines.take_while(|line| line.starts_with("  ")));
+    block.join("\n")
+}
+
+/// Asserts that the `GET /v1/hosts` block of the routes section, probed on a running
+/// server, equals the same block of the golden byte for byte: the same rows, in the same
+/// order, with the same `source` value and the same shape, memory and capabilities. It
+/// catches a change of the source value or of the shape of a hosts row, which the whole
+/// section's comparison would also show but not name.
+#[tokio::test]
+async fn hosts_listing_golden_is_unchanged() {
+    let golden = fs::read_to_string(GOLDEN)
+        .unwrap_or_else(|err| panic!("cannot read {GOLDEN}: {err}; regenerate: {REGENERATE}"));
+    let expected = hosts_block(section(&golden, "routes"));
+    let now = hosts_block(&routes("hosts_listing").await);
+    assert!(expected.contains("\"hosts\":[{"), "{expected}");
+    assert_eq!(now, expected);
+}
+
 /// Asserts that two runs of the pinned scenarios give the same text: nothing in a section
 /// depends on the port, the run directory, the order of a hash map or the time.
 #[tokio::test]

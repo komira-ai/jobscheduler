@@ -10,15 +10,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::Hello;
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Booking, ManualClock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, RegisteredProvider};
 use js_testkit::dir::TestDir;
-use js_types::{HostId, LeaseId, Request, ResourceClass, Resources};
+use js_types::{HostId, LeaseId, ProviderId, Request, ResourceClass, Resources};
 use serde_json::{Value, json};
 
 use crate::adapt::SharedClock;
 use crate::agents::{Agents, assemble};
+use crate::capacity::{CapacitySource, Seated, Unseated};
 use crate::config::{Cli, Config};
 use crate::hosts::HostList;
 
@@ -56,6 +57,33 @@ pub(super) fn write(dir: &Path, name: &str, text: &str, mode: u32) -> OsString {
     path.into_os_string()
 }
 
+/// The two fake hosts of the fake pool's example configuration, as the simulated source a
+/// server serves beside the agent pool: the bookings of a lease file are seated in a fresh
+/// pool at every start, and one the pool refuses comes back unseated.
+struct FakeHosts;
+
+impl CapacitySource for FakeHosts {
+    fn provider(&self, bookings: &[Booking]) -> Result<Seated, crate::error::StartupError> {
+        let id = ProviderId::new("fake-hosts").unwrap();
+        let mut pool = js_pool_fake::FakeHostPool::from_toml(id, js_pool_fake::EXAMPLE_CONFIG)
+            .map_err(crate::error::StartupError::because("--fake-hosts"))?;
+        let unseated = bookings
+            .iter()
+            .filter_map(|booking| {
+                let refused = pool.seat(&booking.host, booking.lease).err()?;
+                Some(Unseated {
+                    booking: booking.clone(),
+                    reason: refused.to_string(),
+                })
+            })
+            .collect();
+        Ok(Seated {
+            provider: Box::new(pool),
+            unseated,
+        })
+    }
+}
+
 /// The configuration of a server with agent registration over the agent pool `pool` and
 /// `extra` flags.
 pub(super) fn config_of(dir: &Path, pool: &str, extra: &[&str]) -> Config {
@@ -78,10 +106,6 @@ pub(super) fn config_result(
         ("--listen", "127.0.0.1:0".into()),
         ("--state-file", dir.join("leases.toml").into_os_string()),
         ("--boot", boot.into()),
-        (
-            "--pool-config",
-            write(dir, "pool.toml", js_pool_static::EXAMPLE_CONFIG, 0o644),
-        ),
         ("--token-file", write(dir, "token", &"t".repeat(40), 0o600)),
         (
             "--agent-token-file",
@@ -98,7 +122,7 @@ pub(super) fn config_result(
         args.push(value);
     }
     args.extend(extra.iter().map(OsString::from));
-    Config::from_cli(Cli::try_parse_from(args).unwrap())
+    Config::simulated(Cli::try_parse_from(args).unwrap(), Box::new(FakeHosts))
 }
 
 pub(super) fn hello(host: &str) -> Hello {
