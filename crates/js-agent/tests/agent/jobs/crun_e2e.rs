@@ -29,7 +29,6 @@ use js_testkit::dir::TestDir;
 use serde_json::json;
 
 use super::crun_machine::CrunMachine;
-use super::fake::FakeMachine;
 use crate::crun_host::Fixture;
 use crate::server::{Agent, POOL_RUNS_TOML, Redirect, Server};
 use crate::support::{Host, code, linux_host};
@@ -1174,11 +1173,7 @@ fn an_agent_whose_cgroups_cannot_be_set_up_exits_2() {
         &scratch,
     ];
     let cgroups = CgroupSource::Delegate { mount, own };
-    let machine = Arc::new(CrunMachine {
-        system: System::new().with_crun(Seams { cgroups, ..seams() }),
-        fake: FakeMachine::new(),
-        stops: Arc::default(),
-    });
+    let machine = CrunMachine::with_system(System::new().with_crun(Seams { cgroups, ..seams() }));
     let ran = Agent::spawn_machine(
         server.url(),
         server.join_file(),

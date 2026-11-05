@@ -33,8 +33,13 @@ pub(super) struct CrunMachine {
 
 impl CrunMachine {
     pub(super) fn new() -> Arc<Self> {
+        Self::with_system(System::new().with_crun(seams()))
+    }
+
+    /// The machine over `system`, with the fake machine's view, cgroup files and quota.
+    pub(super) fn with_system(system: System) -> Arc<Self> {
         Arc::new(Self {
-            system: System::new().with_crun(seams()),
+            system,
             fake: FakeMachine::new(),
             stops: Arc::default(),
             log_file_caps: Arc::default(),
