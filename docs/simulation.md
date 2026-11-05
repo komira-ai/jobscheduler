@@ -199,15 +199,19 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
 - the actions, at a virtual time after the start, with `.at(after, action)`:
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`,
-  `partition_agents(agents, lasting)` and `set_bus_faults(faults)`. Agents are named by
+  `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
+  `set_bus_faults(faults)` and `restart_server()` (the server started again over its
+  files with `--boot resume`). Agents are named by
   the index they were added at (`agents(0..10)`), or drawn from the seed when the action
   runs (`drawn_agents(10)`);
 - what is expected beyond the invariants: `Expect::all_items_terminal()`,
-  `Expect::terminal_count(n, how)` and `Expect::host_state(index, state)`, judged once per
+  `Expect::terminal_count(n, how)`, `Expect::host_state(index, state)` and
+  `Expect::launched_on(&agents, after)` (each of those hosts launched a run at or after
+  `after`, by the launch ledger), judged once per
   seed after the end check;
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
   (`start_repeated`, `start_after_stop`, `start_dropped_late`, `result_resent`,
-  `reply_invalid`) added over one seed, which at least one seed must satisfy. A witness
+  `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) added over one seed, which at least one seed must satisfy. A witness
   shows that the situation the scenario is about happened, so a scenario that passes
   because nothing happened fails instead;
 - `.settle_within(d)`: the virtual time the cell runs after the last action before the
