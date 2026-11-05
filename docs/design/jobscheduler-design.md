@@ -608,7 +608,7 @@ The idea: a whole-host job should wait for the shortest time, and the time the m
 
 ### 5.6 Placement over ordered platforms and machine providers
 
-One engine (`js-sched`, section 3.4) places every job. Status of the walk: Planned. What is Built today for it is the engine itself, the `no-capable-host` refusal over registered hosts, `Offer::fit` (an offer against a demand, naming the first failing dimension), a fixed static-then-registered order, the scaler's choice of the cheapest priced offer that fits (then fewest GPUs, then id; unpriced offers are dropped), and the `capacity` refusal code that tells a caller to fall through. How today's server reaches a placement is in 12.1 step 8.
+One engine (`js-sched`, section 3.4) places every job. Status of the walk: Planned. What is Built today for it is the engine itself, the `no-capable-host` refusal over registered hosts, `Offer::fit` (an offer against a demand, naming the first failing dimension), a fixed static-then-registered order, pass 2's pick of the provider and offer (`js_sched::acquire::pick`, step 5), which the scaler stages for each pool with the pool as its one machine provider behind the `needs_acquire` gate, and the `capacity` refusal code that tells a caller to fall through. How today's server reaches a placement is in 12.1 step 8.
 
 A job carries a size (a share of a host given by its resource needs, or the whole host), resources, typed constraints in the vocabulary of section 3.8 (operating system, architecture, ISA level, accelerator, disk, execution mode, and the network level and host ports its jobs will ask for), a wall limit and labels. The steps:
 

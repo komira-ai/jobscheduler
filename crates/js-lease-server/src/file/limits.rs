@@ -3,8 +3,9 @@
 //!
 //! They are read and checked at start. Admission reads `allowed_instance_types`,
 //! `max_price_cents_per_hour` and `max_machines` (an offer outside them does not admit a
-//! request, design 5.6, step 2); the pick of an offer when a pool acquires a machine
-//! (design 5.6, pass 2) does not read them yet. `catalog_refresh` is how long the cached
+//! request, design 5.6, step 2), and so does the pick of an offer when a pool acquires a
+//! machine (design 5.6, pass 2): the scaler launches no offer outside them, and no machine
+//! past the provider's `max_machines`. `catalog_refresh` is how long the cached
 //! catalog of the provider is used before it is fetched again, and `offer_cooldown` how long
 //! one of its offers cools down once one is (nothing enters a cool-down yet); each defaults
 //! to one hour and must not be zero. A static
@@ -32,8 +33,8 @@ const DEFAULT_CATALOG_REFRESH: Duration = Duration::from_secs(3600);
 const DEFAULT_OFFER_COOLDOWN: Duration = Duration::from_secs(3600);
 
 /// What a pool lets one machine provider launch. Read and checked at start, and read by
-/// admission and by the cache of the provider's catalog; the pick of an offer (design 5.6,
-/// pass 2) does not read it yet.
+/// admission, by the cache of the provider's catalog and by the pick of an offer (design
+/// 5.6, pass 2) in the scaler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProviderLimits {

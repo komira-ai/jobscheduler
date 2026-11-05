@@ -18,8 +18,9 @@
 //!   "may offer"; a stale catalog is still the offers it holds. A restart starts with every
 //!   catalog never fetched and no cool-down.
 //! - [`Catalogs::cool_down`] and [`Catalogs::offers_for_pass2`] are the cool-down and the
-//!   view the pick of an offer (design 5.6, pass 2) will use; nothing in the server enters a
-//!   cool-down or picks an offer through them yet.
+//!   view of the catalog the pick of an offer (design 5.6, pass 2) is to read; nothing in
+//!   the server enters a cool-down yet, and the scaler's pick reads the offers of the pool's
+//!   checks, not this view.
 //!
 //! Caches are keyed by [`CapacityProvider::id`]. The server has at most one launching
 //! provider today (one elastic pool); two providers of one kind would share an id.

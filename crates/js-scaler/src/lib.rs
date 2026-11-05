@@ -20,10 +20,17 @@
 //!   takes it back ([`Action::Undrain`]) instead of launching.
 //!   [`Offer::fit`](js_elastic::Offer::fit) judges every fit, so a request never lands on
 //!   an offer of another operating system or architecture.
-//! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer that has a
-//!   price above zero (an offer with no price, or a price of zero, is never launched: zero
-//!   would pass both spend caps; a request that fits only such an offer shows
-//!   [`Blocked::Unpriced`]), when the pool is in `Live` mode, its checks pass, its list of machines was read, it is not
+//! * Launch. Up to `max_step` launches per step, each to the offer pass 2 of placement picks
+//!   for the request (`js_sched::acquire::pick`, design 5.6, step 5; the scaler does not
+//!   choose): with the pool as its one machine provider, the cheapest available fitting
+//!   offer inside the pool's `provider_limits` (`allowed_instance_types`,
+//!   `max_price_cents_per_hour`), then the fewest accelerators, the least spare CPU and
+//!   memory, and the offer id and zone, never one a provider refused for capacity in the
+//!   same step. An offer with no price, or a price of zero, is never launched (zero would
+//!   pass both spend caps; a request that fits only such an offer shows
+//!   [`Blocked::Unpriced`]), and a provider that holds its share ([`Settings::provider_share`])
+//!   launches nothing and shows [`Blocked::MaxInstances`]. A launch is made when the pool
+//!   is in `Live` mode, its checks pass, its list of machines was read, it is not
 //!   cooling off, no launch of it is waiting for the time its provider named, and the caps
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
@@ -121,6 +128,7 @@ mod caps;
 mod go;
 mod input;
 mod pass;
+mod pick;
 mod record;
 mod scale;
 mod settings;
@@ -131,8 +139,9 @@ use std::collections::BTreeSet;
 
 use js_elastic::Demand;
 
-use crate::caps::{check, choose};
+use crate::caps::{check, holding};
 use crate::pass::{Pass, host_named};
+use crate::pick::decide;
 use crate::scale::Claims;
 
 pub use budget::{Budgets, Totals, overrun};
@@ -145,7 +154,7 @@ pub use record::{
 };
 pub use settings::{
     BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked, Health,
-    LaunchMode, Settings,
+    LaunchMode, Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
@@ -186,8 +195,9 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
 }
 
 /// Whether a request for `demand` could be served by launching a machine now: some pool
-/// is live and available, an offer of it fits, and the caps allow one more machine once
-/// the idle hosts that would be released count as free. This is the registry's
+/// is live and available, pass 2 picks an offer of it (the same pick a step stages), and
+/// the caps allow one more machine once the idle hosts that would be released count as
+/// free. This is the registry's
 /// `Launchable`; a request it refuses fails at once instead of waiting on a pool that
 /// cannot launch. A pool cooling off after a failure still answers yes: the request waits.
 #[must_use]
@@ -218,7 +228,9 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
             })
             .map(|record| record.name.clone())
             .collect();
-        let price = choose(settings, &pool.offers, demand, &[])
+        let machines = holding(settings, &state.records.instances, &[], &idle).len();
+        let price = decide(settings, &pool.offers, &[], demand, machines)
+            .ok()
             .and_then(|offer| offer.price_cents_per_hour);
         let within = price.is_some_and(|price| {
             let all = (state.records.instances.as_slice(), [].as_slice());

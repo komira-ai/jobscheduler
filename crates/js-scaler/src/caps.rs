@@ -1,4 +1,5 @@
-//! The caps (section 6.2, "Caps"), the choice among offers, and the billed time.
+//! The caps (section 6.2, "Caps"), the nearest miss of the offers, and the billed time.
+//! The offer a launch takes is pass 2's (`crate::pick`), not chosen here.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -53,75 +54,6 @@ pub(crate) fn nearest_miss<'a>(
 ) -> Option<Dimension> {
     let misses: Option<Vec<Dimension>> = offers.map(|offer| offer.fit(demand).err()).collect();
     misses.and_then(|all| all.into_iter().max_by_key(|each| depth(*each)))
-}
-
-/// Whether `offer` could serve `demand` but for its price: available, fitting, and not
-/// refused this step.
-fn usable(
-    settings: &Settings,
-    offer: &Offer,
-    demand: &Demand,
-    refused: &[(String, String, Option<String>)],
-) -> bool {
-    let lately = refused.iter().any(|(pool, id, zone)| {
-        (pool.as_str(), id.as_str(), zone.as_deref())
-            == (
-                settings.pool.as_str(),
-                offer.id.as_str(),
-                offer.zone.as_deref(),
-            )
-    });
-    [offer.available, offer.fit(demand).is_ok(), !lately]
-        .into_iter()
-        .all(|ok| ok)
-}
-
-/// Whether `offer` has a price above zero. A price of zero is no price: it would pass both
-/// spend caps for any number of machines.
-fn priced(offer: &Offer) -> bool {
-    offer.price_cents_per_hour.is_some_and(|price| price > 0)
-}
-
-/// Whether some offer would serve `demand` but for having no price, or a price of zero.
-/// [`choose`] never takes one, so the pool launches nothing for the request, and the
-/// operator is told why.
-pub(crate) fn unpriced(
-    settings: &Settings,
-    offers: &[Offer],
-    demand: &Demand,
-    refused: &[(String, String, Option<String>)],
-) -> bool {
-    offers.iter().any(|offer| {
-        [usable(settings, offer, demand, refused), !priced(offer)]
-            .into_iter()
-            .all(|ok| ok)
-    })
-}
-
-/// The offer a launch for `demand` takes: available, priced above zero, fitting, and not
-/// refused this step; the cheapest, then the one with fewest gpus, then by id, then by
-/// zone.
-pub(crate) fn choose<'a>(
-    settings: &Settings,
-    offers: &'a [Offer],
-    demand: &Demand,
-    refused: &[(String, String, Option<String>)],
-) -> Option<&'a Offer> {
-    offers
-        .iter()
-        .filter(|offer| {
-            [usable(settings, offer, demand, refused), priced(offer)]
-                .into_iter()
-                .all(|ok| ok)
-        })
-        .min_by_key(|offer| {
-            (
-                offer.price_cents_per_hour,
-                offer.accelerator.as_ref().map_or(0, |a| a.count),
-                offer.id.clone(),
-                offer.zone.clone(),
-            )
-        })
 }
 
 /// What `price` per hour costs for `time`, rounded up to whole minutes and then to a
@@ -180,6 +112,30 @@ fn spent(record: &Record, settings: &Settings, now: Millis) -> u64 {
     spent_since(record, settings.boot_timeout, now, now.back(DAY))
 }
 
+/// The machines the pool holds against its caps: its records and the launches this step
+/// staged that count, less those named in `freed`. Pass 2 counts the provider's machines
+/// by the same rule.
+pub(crate) fn holding<'r>(
+    settings: &Settings,
+    records: &'r [Record],
+    staged: &'r [Record],
+    freed: &BTreeSet<String>,
+) -> Vec<&'r Record> {
+    records
+        .iter()
+        .chain(staged)
+        .filter(|record| {
+            [
+                record.pool == settings.pool,
+                record.counts(),
+                !freed.contains(record.name.as_str()),
+            ]
+            .into_iter()
+            .all(|ok| ok)
+        })
+        .collect()
+}
+
 /// Whether one more machine of `price` may be launched into the pool.
 ///
 /// `records` are the pool's machines, `staged` the launches this step has already made,
@@ -202,15 +158,7 @@ pub(crate) fn check(
         .chain(staged)
         .filter(|record| record.pool == settings.pool)
         .collect();
-    let held: Vec<&Record> = ours
-        .iter()
-        .copied()
-        .filter(|record| {
-            [record.counts(), !freed.contains(record.name.as_str())]
-                .into_iter()
-                .all(|ok| ok)
-        })
-        .collect();
+    let held = holding(settings, records, staged, freed);
     let hourly = held.iter().fold(0u64, |sum, record| {
         sum.saturating_add(record.price_cents_per_hour)
     });

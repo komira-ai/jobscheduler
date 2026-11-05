@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 js-elastic = { path = "../js-elastic" }
+# Pass 2 of placement (`js_sched::acquire`): which offer a launch takes.
+js-sched = { path = "../js-sched" }
 js-types = { path = "../js-types" }
 serde.workspace = true
 serde_json.workspace = true

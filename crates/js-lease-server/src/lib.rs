@@ -292,8 +292,8 @@
 //! `regain_grace` for that pool). The job pass of the tick (design 6.1) ends a queued job of
 //! the job tables past the pool's `max_queue_wait` as `no-capacity`, and a placed or
 //! starting one past its `start_timeout` as `start-timeout` (a joined pool takes the
-//! defaults). Nothing enforces the limits yet: the pick of an offer (design 5.6, pass 2)
-//! will.
+//! defaults). The scaler's pick of an offer (design 5.6, pass 2) enforces
+//! `allowed_instance_types`, `max_price_cents_per_hour` and the provider's `max_machines`.
 //! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
 //! of a file, and [`Resolved::describe`] prints them.
 //!
