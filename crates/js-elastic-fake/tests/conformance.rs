@@ -9,11 +9,11 @@ use std::collections::BTreeSet;
 use common::{PRICE, START, cloud, launch, offer};
 use js_elastic::conformance::{FOREIGN_ACQUIRE, OTHER_SCHEDULER, Rig, run_all};
 use js_elastic::{
-    AcquireId, AcquireRequest, BootPayload, Capacity, CapacityProvider, GpuClass, HostName,
-    HostRef, Observed, ProviderCaps, ProviderEvent, RefusalCode, SchedulerId,
+    AcquireId, AcquireRequest, BootPayload, Capacity, CapacityProvider, HostName, HostRef,
+    Observed, ProviderCaps, ProviderEvent, RefusalCode, SchedulerId,
 };
 use js_elastic_fake::{Billing, Call, ElasticFake, FakeClock, PROVIDER_ID, Step};
-use js_types::ProviderId;
+use js_types::{Model, ProviderId};
 
 /// The fake under the suite: a fresh cloud for each case, whose quota is the room and
 /// whose catalog holds an x86_64 offer and an arm64 one.
@@ -158,7 +158,7 @@ fn the_fake_names_itself_and_offers_what_its_catalog_lists() {
     let expected = ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
         arch: BTreeSet::from(["x86_64".to_owned()]),
-        accelerators: BTreeSet::from([GpuClass::parse("nvidia-a10").unwrap()]),
+        accelerators: BTreeSet::from([Model::parse("nvidia-a10").unwrap().canonical().model]),
         whole_host: true,
         host_ports: true,
     };

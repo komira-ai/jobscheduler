@@ -55,7 +55,7 @@ pub use boot::{
 };
 pub use caps::{Capacity, ProviderCaps};
 pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};
-pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
+pub use offer::{Demand, Dimension, Offer, PriceUnit};
 pub use provider::{
     AcquireRequest, CapacityProvider, CheckResult, EventStream, ProviderError, ProviderEvent,
 };

@@ -63,6 +63,8 @@ fn full_shown() -> v1::JobSpec {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             exec: v1::ExecMode::Container.into(),
+            isa_level: String::new(),
+            accelerator: None,
         }),
         wall_limit_seconds: Some(600),
         network: v1::NetworkLevel::AllowList.into(),

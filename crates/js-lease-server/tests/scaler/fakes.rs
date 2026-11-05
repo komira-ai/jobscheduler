@@ -10,8 +10,8 @@ use std::time::Duration;
 use js_agent_wire::Phase as WirePhase;
 use js_elastic::AcquireId;
 use js_elastic::{
-    Acquired, GpuClass, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released,
-    SchedulerId, Secret,
+    Acquired, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released, SchedulerId,
+    Secret,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, Scaler, SharedClock};
@@ -22,7 +22,8 @@ use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
 use js_types::{
-    ExecMode, HostId, JobNetwork, MemoryHeadroom, RequestId, Requirements, Resources, Shape,
+    AcceleratorNeed, ExecMode, HostId, JobNetwork, MemoryHeadroom, Model, RequestId, Requirements,
+    Resources, Shape, accelerator_of,
 };
 
 /// The wall time every test clock starts at.
@@ -433,8 +434,11 @@ pub fn offer() -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a10").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -456,6 +460,11 @@ pub fn request(id: &str) -> Waiting {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: Some(AcceleratorNeed {
+                model: Some(Model::parse("nvidia-a10").unwrap()),
+                count: 1,
+                ..AcceleratorNeed::default()
+            }),
             network: JobNetwork::None,
             host_ports: Vec::new(),
         },

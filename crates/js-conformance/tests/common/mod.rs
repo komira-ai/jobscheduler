@@ -21,6 +21,7 @@ pub fn hello(host: &str, shape: &Shape) -> Hello {
             disk_bytes: resources.disk_bytes(),
             gpu_class: resources.gpu_class().map(str::to_string),
             max_leases: None,
+            accelerator: None,
         },
         capabilities: shape.capabilities().clone(),
         gpu_devices: Vec::new(),

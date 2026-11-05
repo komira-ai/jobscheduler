@@ -49,6 +49,7 @@ fn spec() -> SubmitSpec {
         arch: None,
         isa_level: None,
         exec: None,
+        accelerator: None,
         network: JobNetwork::None,
         host_ports: Vec::new(),
     };

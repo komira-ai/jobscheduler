@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, BootPayload, GpuClass, HostName, HostRef, HostStatus, Offer,
-    PriceUnit, SchedulerId,
+    AcquireId, AcquireRequest, BootPayload, HostName, HostRef, HostStatus, Offer, PriceUnit,
+    SchedulerId,
 };
 use js_provider_lambdalabs::{
     Architecture, ElasticConfig, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
     LambdaProvider, ManualClock, OptionTable, Region, Tag,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 
 pub const SCHEDULER: &str = "sched-one";
 pub const KEY: &str = "fixture-key";
@@ -140,8 +140,11 @@ pub fn candidate(region: &str) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 100 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-sample").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,

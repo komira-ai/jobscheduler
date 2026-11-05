@@ -7,6 +7,9 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use js_agent_wire::limits;
+use js_caps::{AcceleratorRequest, check_stated, request_need};
+
+use self::accel::AcceleratorBody;
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
 use js_types::{
@@ -16,6 +19,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
 use tracing::error;
+
+mod accel;
 
 /// The body of `POST /v1/leases`.
 #[derive(Debug, Deserialize)]
@@ -66,6 +71,11 @@ struct ResourcesBody {
     /// from a client that predates the field does.
     #[serde(default)]
     disk_bytes: Option<u64>,
+    /// The accelerator the lease needs, beside `gpus` and `gpu_class` (which keep their
+    /// meaning): read at the resources level because it states what those two state, the
+    /// devices the lease books. Left out (or null), the lease is as before.
+    #[serde(default)]
+    accelerator: Option<AcceleratorBody>,
 }
 
 impl AcquireBody {
@@ -77,21 +87,52 @@ impl AcquireBody {
     }
 
     /// The request and the ttl asked for, or the 400 for a body that names an id, a
-    /// GPU class or a `disk_bytes` the types refuse, or a `disk-gib`, `exec` or `isa_level`
-    /// capability that is not a requirement (the registry and the scaler read them as the
-    /// job's disk, mode and least ISA level).
+    /// GPU class, an accelerator or a `disk_bytes` the types refuse, or a `disk-gib`, `exec`,
+    /// `isa_level` or `accelerator.*` capability that is not a requirement (the registry and
+    /// the scaler read them as the job's disk, mode, least ISA level and accelerator).
+    ///
+    /// `resources.gpus` and `resources.gpu_class` are what they were: the devices the lease
+    /// books and their class, and a body with only them parses to the request it parsed to
+    /// before (no capability added, so a repeated acquire matches a lease either release
+    /// stored). An optional `resources.accelerator` object is stated as `accelerator.*`
+    /// capabilities merged into the request's own ([`request_need`]); it, and any
+    /// `accelerator.*` capability the body names itself, must agree with the pair
+    /// ([`check_stated`]).
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
         let probe_host = self.probe_host.as_deref().map(HostId::new).transpose();
-        let probe_host = probe_host.map_err(|_| ApiError::bad_request(PROBE_HOST_INVALID))?;
-        let resources = &self.resources;
-        let (cpu, memory, gpus) = (resources.cpu_millis, resources.memory_bytes, resources.gpus);
-        let resources =
-            Resources::new(cpu, memory, gpus, self.resources.gpu_class).map_err(|_| {
+        let Ok(probe_host) = probe_host else {
+            return Err(ApiError::bad_request(PROBE_HOST_INVALID));
+        };
+        let ResourcesBody {
+            cpu_millis,
+            memory_bytes,
+            gpus,
+            gpu_class,
+            disk_bytes,
+            accelerator,
+        } = self.resources;
+        let object = accelerator.map(AcceleratorRequest::from);
+        if let Err(why) = check_stated(&self.capabilities, gpus, gpu_class.as_deref()) {
+            return Err(ApiError::bad_request(why));
+        }
+        let need = request_need(gpus, gpu_class.as_deref(), object.as_ref())
+            .map_err(ApiError::bad_request)?;
+        let resources = Resources::new(cpu_millis, memory_bytes, need.gpus, need.gpu_class)
+            .map_err(|_| {
                 ApiError::bad_request("gpu_class must be named exactly when gpus is above zero")
             })?;
-        let resources = match self.resources.disk_bytes {
+        let mut capabilities = self.capabilities;
+        for (key, value) in need.capabilities {
+            let stated = capabilities.insert(key.to_owned(), value.clone());
+            if stated.is_some_and(|stated| stated != value) {
+                return Err(ApiError::bad_request(format!(
+                    "capability {key} differs from the accelerator the resources state"
+                )));
+            }
+        }
+        let resources = match disk_bytes {
             None => resources,
             Some(disk) if (1..=limits::MAX_DISK_BYTES).contains(&disk) => {
                 resources.with_disk_bytes(disk)
@@ -105,7 +146,7 @@ impl AcquireBody {
         let request = Request {
             class,
             resources,
-            capabilities: self.capabilities,
+            capabilities,
             max_wall: Duration::from_secs(self.max_wall_seconds),
             labels: self.labels,
             validation_run: self.validation_run,
@@ -114,12 +155,17 @@ impl AcquireBody {
         Requirements::try_from_request(&request).map_err(|why| {
             ApiError::bad_request(match why {
                 RequirementsError::BadDisk(_) => {
-                    "disk-gib must be a whole number of GiB below 2^34"
+                    "disk-gib must be a whole number of GiB below 2^34".to_owned()
                 }
-                RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+                RequirementsError::BadExec(_) => {
+                    "exec must be container or sandbox-exec".to_owned()
+                }
                 RequirementsError::BadIsaLevel(_) => {
-                    "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a"
+                    "isa_level must be x86-64-v1 to x86-64-v4 or armv8.0-a to armv8.4-a".to_owned()
                 }
+                // The accelerator refusals name their key and value themselves; a bad
+                // `accelerator.*` key is refused by `check_stated` before this is reached.
+                other => other.to_string(),
             })
         })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
@@ -357,6 +403,8 @@ pub(crate) fn parse_id(text: &str) -> Option<LeaseId> {
 mod tests {
     use super::*;
     use js_types::ExecMode;
+
+    mod accel;
 
     fn body(capabilities: &str) -> AcquireBody {
         let text = format!(

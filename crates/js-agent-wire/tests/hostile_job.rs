@@ -367,6 +367,7 @@ fn limits_are_checked_against_a_shape() {
         disk_bytes: 0,
         gpu_class: None,
         max_leases: None,
+        accelerator: None,
     };
     let spec = job();
     let (cpu, memory) = (spec.limits.cpu_millis, spec.limits.memory_bytes);

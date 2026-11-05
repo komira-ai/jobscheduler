@@ -4,11 +4,11 @@
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, GpuClass, Held, HostName, HostRef, Offer,
-    PriceUnit, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, Held, HostName, HostRef, Offer, PriceUnit,
+    SchedulerId,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 
 /// The time the fake's clock starts at, in milliseconds.
 pub const START: u64 = 1_000_000_000_000;
@@ -32,8 +32,11 @@ pub fn offer(price: Option<u64>) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a10").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,

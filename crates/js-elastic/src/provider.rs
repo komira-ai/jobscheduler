@@ -217,7 +217,7 @@ mod tests {
     use super::*;
     use crate::answer::HostStatus;
     use crate::ids::SchedulerId;
-    use crate::offer::{GpuClass, PriceUnit};
+    use crate::offer::PriceUnit;
 
     fn offer() -> Offer {
         Offer {
@@ -226,8 +226,11 @@ mod tests {
             cpu_millis: 1,
             memory_bytes: 1,
             disk_bytes: 1,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("x").unwrap()),
+            accelerator: Some(js_types::accelerator_of(
+                &js_types::Model::parse("x").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,

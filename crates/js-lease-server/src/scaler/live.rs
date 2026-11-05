@@ -177,12 +177,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Once;
 
-    use js_elastic::{
-        AcquireId, AcquireRequest, Artifact, BootStep, GpuClass, HostStatus, PriceUnit,
-    };
+    use js_elastic::{AcquireId, AcquireRequest, Artifact, BootStep, HostStatus, PriceUnit};
     use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
-    use js_types::{ExecMode, ResourceClass, Resources, Shape};
+    use js_types::{ExecMode, Model, ResourceClass, Resources, Shape, accelerator_of};
 
     use super::*;
     use crate::adapt::SharedClock;
@@ -326,8 +324,11 @@ mod tests {
             cpu_millis: 8000,
             memory_bytes: 16 << 30,
             disk_bytes: 100 << 30,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+            accelerator: Some(accelerator_of(
+                &Model::parse("nvidia-a10").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,

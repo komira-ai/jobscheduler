@@ -102,7 +102,7 @@
         "required": false
       },
       {
-        "doc": "The number of GPUs. 0: none.",
+        "doc": "The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no Constraints.accelerator, keeps the meaning it has always had: the class is read through the alias table of design section 3.8, so a full spelling pins its variant and a family name such as nvidia-a100 matches every variant of it.",
         "field": [
           "spec",
           "needs",
@@ -115,7 +115,7 @@
         "required": false
       },
       {
-        "doc": "The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class.",
+        "doc": "The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class. It is resolved through the alias table like Accelerator.model.",
         "field": [
           "spec",
           "needs",
@@ -154,7 +154,7 @@
         "required": false
       },
       {
-        "doc": "The CPU architecture, as free text matched exactly against the spelling the host or offer reports, such as x86_64. Today ARM is spelt arm64 by some sources and aarch64 by others (design section 3.8). Empty: any.",
+        "doc": "The CPU architecture: x86_64 or arm64. aarch64 is accepted and stored as arm64 (design section 3.8). Empty: any.",
         "field": [
           "spec",
           "constraints",
@@ -175,6 +175,103 @@
         ],
         "kind": "Enum([(\"unspecified\", \"EXEC_MODE_UNSPECIFIED\"), (\"container\", \"EXEC_MODE_CONTAINER\"), (\"sandbox-exec\", \"EXEC_MODE_SANDBOX_EXEC\")])",
         "name": "spec.constraints.exec",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A host is capable when it reports that level or a higher one of the same architecture. Empty: any.",
+        "field": [
+          "spec",
+          "constraints",
+          "isa_level"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.isa-level",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The vendor, such as nvidia.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "vendor"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.vendor",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "model"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.model",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least number of devices.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "count"
+        ],
+        "kind": "U32",
+        "name": "spec.constraints.accelerator.count",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least memory of each device, in whole GiB.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "memory_per_device_gib"
+        ],
+        "kind": "U32",
+        "name": "spec.constraints.accelerator.memory-per-device-gib",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least interconnect, as kind>=size.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "interconnect"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.interconnect",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The form factor: sxm or pcie.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "form_factor"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.form-factor",
         "oneof": null,
         "repeated": false,
         "required": false

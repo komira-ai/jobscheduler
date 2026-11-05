@@ -185,17 +185,24 @@ pub fn can_ever_serve(
 }
 
 /// Whether `req` is inside `caps`: its operating system and architecture, when it names
-/// them, are in the sets, and so is its GPU class when it asks for GPUs.
+/// them, are in the sets, and so is the canonical family of the model it needs (its
+/// `accelerator.model`, else its booked GPU class, resolved through the alias table), as
+/// the provider's accelerators are canonical. A booked class that is not a model name is
+/// in no provider's set; a need that names no model is inside.
 fn inside(caps: &ProviderCaps, req: &Requirements) -> bool {
     let os = req.os.as_ref().is_none_or(|os| caps.os.contains(os));
     let arch = req
         .arch
         .as_ref()
         .is_none_or(|arch| caps.arch.contains(arch));
-    let class = req
-        .resources
-        .gpu_class()
-        .is_none_or(|class| caps.accelerators.iter().any(|own| own.as_str() == class));
+    let model = req
+        .accelerator
+        .as_ref()
+        .and_then(|need| need.model.as_ref());
+    let class = match model {
+        Some(model) => caps.accelerators.contains(&model.canonical().model),
+        None => req.resources.gpu_class().is_none(),
+    };
     os & arch & class
 }
 

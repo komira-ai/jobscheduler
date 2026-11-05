@@ -383,3 +383,40 @@ fn a_body_from_before_the_exclusive_fields_still_decodes() {
     assert_eq!(reply.exclusive, None);
     assert_eq!(serde_json::to_value(&reply).unwrap(), old_reply);
 }
+
+/// Asserts the exact JSON of a shape that carries an accelerator, with the variant and the
+/// measured memory, and that one with neither leaves both fields out. It catches a
+/// renamed accelerator field, which a deployed server would not read, and a null written
+/// where the field is absent.
+#[test]
+fn the_accelerator_wire_form() {
+    let mut value = hello();
+    value.shape.accelerator = Some(js_agent_wire::WireAccelerator {
+        vendor: "nvidia".into(),
+        model: "nvidia-a100".into(),
+        variant_spelling: Some("nvidia-a100-sxm4-80gb".into()),
+        count: 1,
+        memory_per_device_bytes: Some(85899345920),
+    });
+    assert_eq!(
+        serde_json::to_value(&value.shape).unwrap()["accelerator"],
+        json!({
+            "vendor": "nvidia",
+            "model": "nvidia-a100",
+            "variant_spelling": "nvidia-a100-sxm4-80gb",
+            "count": 1,
+            "memory_per_device_bytes": 85899345920u64
+        })
+    );
+    value.shape.accelerator = Some(js_agent_wire::WireAccelerator {
+        vendor: "apple".into(),
+        model: "apple-m".into(),
+        variant_spelling: None,
+        count: 1,
+        memory_per_device_bytes: None,
+    });
+    assert_eq!(
+        serde_json::to_value(&value.shape).unwrap()["accelerator"],
+        json!({"vendor": "apple", "model": "apple-m", "count": 1})
+    );
+}

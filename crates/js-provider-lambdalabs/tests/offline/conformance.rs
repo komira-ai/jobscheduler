@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use js_elastic::conformance::{FOREIGN_ACQUIRE, OTHER_SCHEDULER, Rig as Conformance, run_all};
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, GpuClass, Hello,
-    HostName, HostRef, HostStatus, Observed, ProviderCaps, RefusalCode, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, Hello, HostName,
+    HostRef, HostStatus, Observed, ProviderCaps, RefusalCode, SchedulerId,
 };
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, POOL_TAG, PROVIDER_ID, SCHEDULER_TAG,
 };
-use js_types::ProviderId;
+use js_types::{Model, ProviderId};
 
 use crate::rig::{Rig, SCHEDULER, ask, candidate, host, id, live, offer, rig, rig_with, row, tag};
 
@@ -195,7 +195,7 @@ gpu_class = "nvidia-example"
 gpus = 8
 "#;
     let rig = rig_with(live(1), table);
-    let class = |text: &str| GpuClass::parse(text).unwrap();
+    let class = |text: &str| Model::parse(text).unwrap().canonical().model;
     let expected = ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
         arch: BTreeSet::from(["arm64".to_owned(), "x86_64".to_owned()]),

@@ -12,6 +12,7 @@
 //! | `vm.image` (repeated: one per image, `<name>@sha256:<64 hex>`) | a set of the `sha256:<hex>` digests, matched by membership |
 //! | `vm.slots`, `vm.max_cpus`, `vm.max_mem_gib` (once each) | checked to be whole numbers, not matched on (report-only) |
 //! | `drivers` (repeated: one per driver the daemon runs) | the drivers; placement reads them for the lease kind, no request key names them |
+//! | `accelerator.vendor`, `accelerator.model`, `accelerator.count`, `accelerator.memory-gib`, `accelerator.interconnect`, `accelerator.form-factor` (once each) | the node's accelerator, its model resolved through the alias table; none without `accelerator.model` |
 //! | `ios.device` (repeated: one per ready device, comma-separated `k=v` fields with an `id`; a value may hold commas, never `=`) | the devices, by id, each with its other attributes; a device request matches one of them |
 //!
 //! Every other entry (`isa_level`, a `label.<k>` an older daemon still sends, ...) is not
@@ -21,7 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_types::{Arch, UnknownArch};
+use js_types::{ACCEL_KEYS, AccelError, Accelerator, Arch, UnknownArch};
 
 use crate::cpu::CpuCaps;
 use crate::matching::{
@@ -57,6 +58,9 @@ pub enum ReportError {
     /// Two `ios.device` entries name one device id.
     #[error("node report names iOS device {0:?} twice")]
     RepeatedDevice(String),
+    /// An `accelerator.*` entry holds a value that is not valid.
+    #[error(transparent)]
+    Accelerator(#[from] AccelError),
     /// A countable entry is not a whole number.
     #[error("node report entry {key}={value:?} is not a whole number")]
     NotANumber {
@@ -73,7 +77,8 @@ impl NodeCaps {
     /// # Errors
     /// No `arch`, an unknown one, a single-valued entry repeated, a countable or
     /// report-only entry that is not a whole number, a `vm.image` entry without a
-    /// digest, or an `ios.device` entry that is malformed or names a device id again.
+    /// digest, an `ios.device` entry that is malformed or names a device id again, or an
+    /// `accelerator.*` entry that is not valid.
     pub fn from_report<'r, I>(entries: I) -> Result<Self, ReportError>
     where
         I: IntoIterator<Item = (&'r str, &'r str)>,
@@ -99,9 +104,17 @@ impl NodeCaps {
         };
         let mut drivers = BTreeSet::new();
         let mut devices = BTreeMap::new();
+        let mut accelerator = BTreeMap::new();
         let repeated = |key: &str| ReportError::Repeated(key.to_owned());
         for (key, value) in entries {
-            if key == "arch" {
+            if ACCEL_KEYS.contains(&key) {
+                if accelerator
+                    .insert(key.to_owned(), value.to_owned())
+                    .is_some()
+                {
+                    return Err(repeated(key));
+                }
+            } else if key == "arch" {
                 if arch.replace(value).is_some() {
                     return Err(repeated(key));
                 }
@@ -146,6 +159,7 @@ impl NodeCaps {
             consumables,
             drivers,
             devices,
+            accelerator: Accelerator::from_capabilities(&accelerator)?,
         })
     }
 }

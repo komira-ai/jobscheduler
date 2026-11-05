@@ -226,6 +226,7 @@ mod tests {
                 disk_bytes: 0,
                 gpu_class: Some("nvidia-a10".into()),
                 max_leases: None,
+                accelerator: None,
             },
             capabilities: BTreeMap::from([("os".to_owned(), "linux".to_owned())]),
             gpu_devices: Vec::new(),

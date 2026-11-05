@@ -52,7 +52,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireShape};
+use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireAccelerator, WireShape};
 use js_mac_session::disclaim::Program;
 use js_types::normalise_arch;
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
@@ -61,8 +61,8 @@ use sha2::{Digest, Sha256};
 
 use crate::container;
 
-/// The GPU class an Apple GPU is reported under.
-pub const APPLE_GPU_CLASS: &str = "apple-m";
+/// The GPU class an Apple GPU is reported under: the alias table's Apple family.
+pub const APPLE_GPU_CLASS: &str = js_caps::APPLE_M;
 
 // The helper programs, each by the absolute path it has on a stock system, never by a bare
 // name looked up on the `PATH` the agent inherited (see the module documentation).
@@ -564,6 +564,37 @@ impl Gpus {
     }
 }
 
+/// The accelerator a host reports for `count` GPUs of `class` with these `devices`: the
+/// class resolved through the alias table (the canonical family, and the class as the
+/// variant spelling when it is not the family itself), the count, and the least memory of
+/// any device as the measured memory per device (never the sum, never the largest). The
+/// class is the detected one or the operator's `--gpu-class`, resolved alike. `None` when
+/// there is no class, or the class is not a model name.
+pub fn accelerator(
+    class: Option<&str>,
+    count: u64,
+    devices: &[GpuDevice],
+) -> Option<WireAccelerator> {
+    let shape = WireShape {
+        cpu_millis: 0,
+        memory_bytes: 0,
+        gpus: count,
+        disk_bytes: 0,
+        gpu_class: class.map(str::to_owned),
+        max_leases: None,
+        accelerator: None,
+    };
+    shape.wire_accelerator(devices)
+}
+
+impl Gpus {
+    /// The accelerator these GPUs make, as [`accelerator`] reports it for the detected
+    /// class.
+    pub fn accelerator(&self) -> Option<WireAccelerator> {
+        accelerator(self.class.as_deref(), self.count, &self.devices)
+    }
+}
+
 /// What a host has, before the operator's flags lower any of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detected {
@@ -742,6 +773,7 @@ fn accepted(gpus: Gpus) -> Result<Gpus, String> {
             disk_bytes: 0,
             gpu_class: gpus.class.clone(),
             max_leases: None,
+            accelerator: None,
         },
         capabilities: BTreeMap::new(),
         gpu_devices: gpus.devices.clone(),
