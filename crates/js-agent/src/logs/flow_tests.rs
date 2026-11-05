@@ -144,3 +144,18 @@ fn a_start_s_sink_is_checked_against_the_layout() {
     assert!(why.starts_with("log_sink.prefix: "), "{why}");
     assert!(!why.contains("aaaa"), "{why}");
 }
+
+/// Catches a `Debug` of the plan, a run's live logs or the limits that fails to say what it
+/// is: each names its type and its cap.
+#[test]
+fn the_plan_and_a_run_s_live_logs_show_what_they_hold() {
+    let plan = super::LogPlan::new(super::DEFAULT_FILE_CAP);
+    let shown = format!(
+        "{plan:?} {:?} {:?}",
+        super::RunLogs::default(),
+        super::Limits::default()
+    );
+    for word in ["LogPlan", "file_cap", "RunLogs", "Limits", "budget"] {
+        assert!(shown.contains(word), "{word} in {shown}");
+    }
+}

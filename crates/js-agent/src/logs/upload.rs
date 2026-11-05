@@ -197,10 +197,7 @@ impl Upload {
                 "live logs: {failure}"
             );
             if let Failure::Store(StoreError::Expired { .. }) = failure {
-                // A newer credential that came while the request was out is used at once.
-                self.grant.refused(generation);
-                let newer = self.grant.generation() != generation;
-                if self.deadline.is_some() && !newer {
+                if self.gives_up(generation) {
                     return Next::Done;
                 }
                 // Both streams wait for the backoff unless a newer credential is held, which
@@ -226,6 +223,15 @@ impl Upload {
             true => Next::Done,
             false => Next::Sleep(now.checked_add(self.limits.poll).unwrap_or(now)),
         }
+    }
+
+    /// Records that the store answered the credential of `generation` as expired, and says
+    /// whether the upload gives up: after the end, when no newer credential has come since (a
+    /// newer one that came while the request was out is used at once).
+    fn gives_up(&self, generation: u64) -> bool {
+        self.grant.refused(generation);
+        let newer = self.grant.generation() != generation;
+        self.deadline.is_some() && !newer
     }
 
     /// The stream and request due at `at` (the step's start), the stream whose turn it is
