@@ -66,7 +66,6 @@ fn each_deadline_counts_from_its_stored_instant_and_is_held_to_the_floor() {
     clock.advance(Duration::from_secs(100));
     let placed = queue(&jobs, "job-p");
     jobs.place(&placed, host(), BOOKED).unwrap();
-    let placed_at = record(&jobs, &placed).placed_at.unwrap();
     let starting = queue(&jobs, "job-s");
     jobs.place(&starting, host(), BOOKED).unwrap();
     jobs.transition(&starting, JobState::Placed, JobState::Starting)
@@ -82,11 +81,21 @@ fn each_deadline_counts_from_its_stored_instant_and_is_held_to_the_floor() {
         .unwrap();
 
     let queue_end = submitted.saturating_add(LIMITS.max_queue_wait);
-    let start_end = placed_at.saturating_add(LIMITS.start_timeout);
+    // The store stamps each commit at its own instant: each start counts from its placement.
+    let start_end = |id| {
+        let placed_at = record(&jobs, id).placed_at.unwrap();
+        placed_at.saturating_add(LIMITS.start_timeout)
+    };
     let of = |id| deadline(&record(&jobs, id), LIMITS);
     assert_eq!(of(&queued), Some((queue_end, StartFailure::NoCapacity)));
-    assert_eq!(of(&placed), Some((start_end, StartFailure::StartTimeout)));
-    assert_eq!(of(&starting), Some((start_end, StartFailure::StartTimeout)));
+    assert_eq!(
+        of(&placed),
+        Some((start_end(&placed), StartFailure::StartTimeout))
+    );
+    assert_eq!(
+        of(&starting),
+        Some((start_end(&starting), StartFailure::StartTimeout))
+    );
     assert_eq!((of(&running), of(&ended)), (None, None));
 
     let job = record(&jobs, &queued);

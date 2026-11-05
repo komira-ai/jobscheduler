@@ -104,12 +104,6 @@ pub(crate) trait Silence: Send + Sync {
     fn silent_since(&self, host: &HostId) -> Option<u64>;
 }
 
-impl Silence for js_registry::Registry {
-    fn silent_since(&self, host: &HostId) -> Option<u64> {
-        js_registry::Registry::silent_since(self, host).map(|at| at.millis())
-    }
-}
-
 /// The state of the read group: how a listing reads the table, and where host silence is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ctx {

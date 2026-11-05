@@ -83,7 +83,7 @@ fn only_an_absent_host_loses_its_jobs_and_frees_its_allocations() {
     };
     jobs.end_job(&swept, exited).unwrap();
     clock.advance(Retention::DEFAULT.window());
-    assert_eq!(jobs.tick().unwrap(), [swept.clone()]);
+    assert_eq!(jobs.tick().unwrap(), std::slice::from_ref(&swept));
     let timed_out = at(&jobs, "job-timeout", "host-a", JobState::Starting);
     jobs.end_job(
         &timed_out,
