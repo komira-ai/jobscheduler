@@ -746,6 +746,14 @@ mod hosts;
 pub mod in_process;
 mod io_timeout;
 mod job_alloc;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the job service listener mounts the job service; until it lands only tests do"
+    )
+)]
+mod job_api;
 mod job_start;
 mod job_store;
 mod join_api;
