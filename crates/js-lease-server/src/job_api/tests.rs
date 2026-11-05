@@ -485,7 +485,7 @@ fn a_group_context_is_replaced_without_touching_the_others() {
     let api = api
         .with_submit(submit::Ctx { mark: 2 })
         .with_cancel(cancel::Ctx { mark: 3 })
-        .with_fleet(fleet::Ctx { mark: 4 })
+        .with_fleet(fleet::Ctx::marked(4))
         .with_read(marked(5));
     assert_eq!(
         (

@@ -1659,11 +1659,18 @@ dependencies = [
 name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "js-agent-wire",
  "js-conformance",
+ "js-lease",
+ "js-lease-server",
+ "js-registry",
  "js-sim",
+ "js-testkit",
  "js-types",
  "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

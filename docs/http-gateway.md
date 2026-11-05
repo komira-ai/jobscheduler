@@ -157,7 +157,8 @@ lease routes take, compared by the same code.
 
 Nothing mounts the two transports yet, so no port serves them. Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it; the read calls are served (below):
+directory serves it (the fleet calls, until the server gives their group its handles); the
+read calls are served (below):
 
 | calls | file |
 |---|---|
@@ -166,7 +167,7 @@ directory serves it; the read calls are served (below):
 | `CancelJob` | `cancel.rs` |
 | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
 
-## Serving the read calls
+### Serving the read calls
 
 `GetJob`, `ListJobs`, `GetResult` and `GetLogs` are served from the job tables (`read.rs`).
 They read the store and nothing else: no call changes any state, none takes a lock of the
@@ -212,3 +213,39 @@ at the end of the table, where it carries no `nextPageToken`, or at that bound, 
 carries one even if it holds few jobs or none. The page token resumes after the last job or
 row the page read; a job submitted between pages appears on a later page if its id sorts
 after the token, and no job is listed twice.
+
+### The fleet calls
+
+The service's calls that are not about one job are an operator's view of the fleet. They
+take the same bearer token as the job calls, and no other gate.
+
+- `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
+  the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or
+  releasing, until the host confirms the job's container gone), in the order they were booked,
+  then one per lease still held through the lease routes, under the lease id's text. A
+  whole-host booking is the host's whole shape. `booked` is read-only: no call creates or ends
+  a booking.
+- `CordonHost` takes a registered host out of placement for `cordon_secs` (300 when absent,
+  cut to 3600, 0 is `INVALID_ARGUMENT` `invalid-cordon`), or renews its cordon without ever
+  shortening it; `already_cordoned` says it was cordoned before. The cordon lapses unless it is
+  renewed. `UncordonHost` lifts it, and changes nothing on a host that is not cordoned. Both
+  are the rules of the host's own `POST /v1/hosts/{id}:cordon` and `:uncordon`, and both answer
+  only once the bindings are written: when they cannot be, the answer is `UNAVAILABLE`
+  `cordon-unsaved` and the change holds on this server all the same. A host the registry does
+  not hold (a static host, or one that never said hello) is `NOT_FOUND` `unknown-host`.
+- `ListPools` and `ListProviders` read the status `GET /v1/pools` writes: per elastic pool its
+  name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
+  credentials check and its own checks, and the machines it launched. Nothing else of the
+  status (the next launch's plan, the alerts, the orphans) is carried. A server with no elastic
+  pool answers empty lists.
+- `GetUsage` reads the ended bookings of the usage store (see `usage-store.md`), oldest end
+  first, from `from_ms` included to `to_ms` excluded, of one host or one job when asked. A page
+  holds `page_size` records (100 when 0, at most 1000); the filters apply before the page is
+  cut. `next_page_token` is the key of the page's last record: the next page starts right after
+  it, so no record is read twice or skipped while records are written; it is empty on the last
+  page. A token no answer gave is `INVALID_ARGUMENT` `invalid-page-token`. A server started
+  with `--usage-off` answers an empty page.
+
+None of the reads takes a write lock, writes a row or counts anything. The hand-written
+`GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies; the
+removal of the lease routes does not remove them.
