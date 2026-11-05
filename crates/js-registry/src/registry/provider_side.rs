@@ -12,10 +12,9 @@ use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
 
 use js_lease::Timestamp;
 
-use super::record::Bound;
+use super::record::{Bound, Queue};
 use super::{HostState, Record, Registry, State};
 use crate::credential::Binding;
-use crate::lives;
 use crate::whole::exclusive::Exclusive;
 
 impl Registry {
@@ -26,10 +25,14 @@ impl Registry {
     /// nothing held (design `whole-node.md` section 8). A whole-node request the lease
     /// presented and that still waits for a host is cancelled at once: it leaves the wait
     /// list and the host set aside for it returns to serving (`whole-node.md` section 3).
+    /// With a log set ([`Registry::set_allocation_log`]), a stop that frees a booking or
+    /// cancels a waiting request hands the log the record of it, once the lock is released.
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
         let ended_at = self.shared.clock.now().millis();
-        let source = self.shared.lives.get().map(|lives| &**lives);
         let mut guard = self.lock();
+        // Read once: the record of the end and the tail counters see the same estimate.
+        let estimate = self.estimate_of(&guard, lease);
+        let ended = self.ended_row(&guard, lease, (ended_at, estimate));
         let State {
             book,
             records,
@@ -52,29 +55,24 @@ impl Registry {
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
-                // A lease ends: the error of its estimate, at the time of this call on the
-                // registry's clock. The host keeps a bound and a start for each lease it
-                // started, so the stop of any of them counts. A lease put back after a
-                // restart has neither unless a source of lives was set when it was put back
-                // (see `seat`), so without one its stop counts nothing.
-                let started: Vec<(LeaseId, u64)> = record
-                    .bounds
-                    .iter()
-                    .filter(|bound| bound.lease == *lease)
-                    .map(|bound| (bound.lease, bound.started_at))
-                    .collect();
-                let estimates = lives::est_ends(source, runs, &started);
-                estimates
-                    .into_iter()
-                    .for_each(|estimate| tail.ended(ended_at, estimate));
+                // A lease ends: the error of its estimate (read once, above), at the time of
+                // this call on the registry's clock. The host keeps a bound and a start for
+                // each lease it started, so the stop of any of them counts. A lease put back
+                // after a restart has neither unless a source of lives was set when it was
+                // put back (see `seat`), so without one its stop counts nothing.
+                let bounds = record.bounds.iter();
+                let started = bounds.filter(|bound| bound.lease == *lease);
+                started.for_each(|_| tail.ended(ended_at, estimate));
                 record.exclusive = record.exclusive.stopped();
             });
         }
-        let read = book.stop(lease);
+        let read_back = book.stop(lease);
         if let Some(placer) = self.shared.placer.get() {
             placer.ended(*lease);
         }
-        read
+        drop(guard);
+        self.log_ended(ended);
+        read_back
     }
 
     /// Binds each restored waiting request of `held` to the lease the lease file keeps it
@@ -95,6 +93,19 @@ impl Registry {
         self.lock().waiting.holds_lease(lease)
     }
 
+    /// Ends every committed whole-node lease that was not reported ready within
+    /// `prepare_timeout` of its commit, as a failed prepare: the lease then reads
+    /// `Absent`, so the lease table drops it by its ordinary path. A silent agent and a
+    /// host gone lost are overdue the same as a slow one. The lease table's tick reads
+    /// every pending lease through [`crate::RegisteredProvider`], which advances first;
+    /// this does the same for a caller with a clock of its own.
+    pub fn advance(&self) {
+        let now = self.shared.clock.now();
+        let mut state = self.lock_at(now);
+        self.advance_at(&mut state, now);
+        self.release(state);
+    }
+
     /// `Present` only while the host holding the lease is live and, for a whole-node
     /// lease, ready; a lost or awaiting host, and a whole-node host not yet ready, is
     /// `Unknown`, never `Absent`, so the booking stays.
@@ -102,7 +113,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let mut state = self.lock_at(now);
         self.advance_at(&mut state, now);
-        match state.book.read(lease) {
+        let observed = match state.book.read(lease) {
             Observed::Present { host } => {
                 let record = state.records.get(&host);
                 let live = record
@@ -114,7 +125,9 @@ impl Registry {
                 }
             }
             absent => absent,
-        }
+        };
+        self.release(state);
+        observed
     }
 
     pub(crate) fn capacity(&self) -> Vec<HostCapacity> {
@@ -163,6 +176,7 @@ impl Registry {
                     lease,
                     end,
                     started_at: started.millis(),
+                    queue: Queue::restored(self.whole_admission()),
                 });
             });
         }
