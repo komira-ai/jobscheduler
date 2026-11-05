@@ -53,6 +53,7 @@ use super::spec::{adopted_spec, concluded};
 use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::{RunSpec, RuntimeError, label};
+use crate::logs::RunLogs;
 
 /// The version 2 fields of a sidecar in the state running, all present.
 #[derive(Debug)]
@@ -373,6 +374,8 @@ impl CrunRuntime {
             // no job with a network; one that ended has no network to release.
             net: net::Net::asked(JobNetwork::None, Vec::new()),
             entry: entry.clone(),
+            // An adopted run gets no uploader: the sink came only in its start.
+            logs: RunLogs::default(),
         }
     }
 

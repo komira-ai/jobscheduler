@@ -241,6 +241,7 @@ pub fn spec_of(s: &mut dyn Subject, run_id: &str, program: Program) -> RunSpec {
         )]),
         network: Default::default(),
         ports: Vec::new(),
+        log_sink: None,
     }
 }
 

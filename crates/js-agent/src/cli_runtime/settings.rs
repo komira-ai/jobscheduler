@@ -218,6 +218,9 @@ pub struct CrunPlan {
     /// passes them, set by [`Settings::with_gpus`].
     #[cfg(target_os = "linux")]
     pub gpus: Option<crate::crun::GpuPassthrough>,
+    /// Live logs: the capture file cap of a run with a sink (`--log-file-cap`) and the host's
+    /// credential, set by [`Settings::with_log_file_cap`].
+    pub logs: crate::logs::LogPlan,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -340,6 +343,7 @@ impl Settings {
                 egress: None,
                 #[cfg(target_os = "linux")]
                 gpus: None,
+                logs: crate::logs::LogPlan::new(crate::logs::DEFAULT_FILE_CAP),
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -376,6 +380,16 @@ impl Settings {
     /// What the crun runtime is opened from, when these are its settings.
     pub fn crun(&self) -> Option<&CrunPlan> {
         self.crun.as_deref()
+    }
+
+    /// These settings with `file_cap` as the capture file cap of a crun run with a sink
+    /// (`--log-file-cap`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_log_file_cap(mut self, file_cap: u64) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.logs.file_cap = file_cap);
+        self
     }
 
     /// [`Settings::crun`], to change.

@@ -224,7 +224,8 @@ pub fn open(
             read: read_node,
         }),
     };
-    let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?;
+    let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?
+        .with_live_logs(plan.logs.live());
     let (uid, gid) = runtime.subordinate_ids();
     // One warning, when no registry is allowed; none otherwise.
     let mut lines = vec![
