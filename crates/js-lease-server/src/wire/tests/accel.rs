@@ -214,3 +214,23 @@ fn an_accelerator_capability_must_agree_with_the_resources_and_be_valid() {
     let reason = refused("{}", r#"{"accelerator.form-factor":"tpu"}"#);
     assert!(reason.starts_with("accelerator: "), "{reason}");
 }
+
+/// Asserts that a body whose class is not a class id, and one whose `gpus` and `gpu_class`
+/// do not pair (GPUs with no class, a class with no GPU), are refused with their own 400
+/// before any accelerator is read, with or without an accelerator object beside them.
+/// Catches a pair the accelerator object would otherwise complete or hide.
+#[test]
+fn a_bad_class_or_an_unpaired_gpu_class_is_refused_before_the_accelerator() {
+    let text = r#"{"class":"Not A Class","resources":{},"max_wall_seconds":60}"#;
+    let err = parse::<AcquireBody>(text.as_bytes())
+        .unwrap()
+        .into_parts()
+        .unwrap_err();
+    assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    assert_eq!(err.reason.as_deref(), Some("class is not a valid class id"));
+    let unpaired = "gpu_class must be named exactly when gpus is above zero";
+    assert_eq!(refused(r#"{"gpus":1}"#, "{}"), unpaired);
+    assert_eq!(refused(r#"{"gpu_class":"nvidia-a100"}"#, "{}"), unpaired);
+    let beside = r#"{"gpus":1,"accelerator":{"vendor":"nvidia"}}"#;
+    assert_eq!(refused(beside, "{}"), unpaired);
+}
