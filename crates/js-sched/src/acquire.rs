@@ -67,8 +67,9 @@ pub enum AcquireDecision {
     Acquire {
         /// The provider to ask.
         provider: ProviderId,
-        /// The offer to acquire, as its catalog gave it.
-        offer: Offer,
+        /// The offer to acquire, as its catalog gave it. Boxed so that a decision to wait
+        /// is not the size of an offer.
+        offer: Box<Offer>,
     },
     /// Acquire nothing now; the job stays queued.
     Wait(Waiting),
@@ -206,7 +207,7 @@ pub fn pick(input: &AcquireInput<'_>) -> (AcquireDecision, Vec<Skip>) {
             Some((_, offer)) => {
                 let decision = AcquireDecision::Acquire {
                     provider: provider.id.clone(),
-                    offer: offer.clone(),
+                    offer: Box::new(offer.clone()),
                 };
                 return (decision, skips);
             }

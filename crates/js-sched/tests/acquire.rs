@@ -636,7 +636,7 @@ fn the_same_inputs_give_the_same_decision() {
             (
                 AcquireDecision::Acquire {
                     provider: id("cloud"),
-                    offer: winner.clone(),
+                    offer: Box::new(winner.clone()),
                 },
                 vec![],
             )
