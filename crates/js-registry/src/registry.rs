@@ -28,6 +28,7 @@ use crate::whole::reserve::{Marks, Reservation};
 mod beat;
 mod cordon;
 mod demand;
+mod history;
 mod ledger;
 mod marks;
 mod provider_side;
@@ -209,6 +210,7 @@ struct Shared {
     lives: OnceLock<Arc<dyn crate::ProfileLives>>,
     /// The placer that picks the host of a start ([`Registry::set_placer`]).
     placer: OnceLock<Arc<dyn crate::Placer>>,
+    log: OnceLock<Arc<dyn js_usage::AllocationLog>>,
 }
 
 /// The hosts of one pool that registered themselves, and the lease bookings on them.
@@ -277,6 +279,7 @@ impl Registry {
                 state: Mutex::new(state),
                 lives: OnceLock::new(),
                 placer: OnceLock::new(),
+                log: OnceLock::new(),
             }),
         }
     }
@@ -336,18 +339,6 @@ impl Registry {
         let State { marks, waiting, .. } = &mut *state;
         marks.retain_waiting(waiting);
         state
-    }
-
-    /// Ends every committed whole-node lease that was not reported ready within
-    /// `prepare_timeout` of its commit, as a failed prepare: the lease then reads
-    /// `Absent`, so the lease table drops it by its ordinary path. A silent agent and a
-    /// host gone lost are overdue the same as a slow one. The lease table's tick reads
-    /// every pending lease through [`crate::RegisteredProvider`], which advances first;
-    /// this does the same for a caller with a clock of its own.
-    pub fn advance(&self) {
-        let now = self.shared.clock.now();
-        let mut state = self.lock_at(now);
-        self.advance_at(&mut state, now);
     }
 
     fn advance_at(&self, state: &mut State, now: Timestamp) {
@@ -774,11 +765,13 @@ impl Registry {
             unready: record.exclusive.awaits_ready(),
         };
         let reply = runs.answer(&host, heartbeat, standing, (book, now.millis()));
-        Ok(HeartbeatReply {
+        let reply = HeartbeatReply {
             taint_ack: heartbeat.taint.is_some(),
             exclusive: record.exclusive.granted(),
             ..reply
-        })
+        };
+        self.release(guard);
+        Ok(reply)
     }
 
     /// Queues `spec` as a run of `lease` on `host`, to go out on the host's next

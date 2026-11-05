@@ -86,6 +86,15 @@ impl FakeAgent {
         }
     }
 
+    /// The leases whose result the agent holds and the scheduler has not yet
+    /// acknowledged: what its next heartbeat carries. Unlike [`Observed::results_sent`],
+    /// which lists every transmission so far, this is the current set.
+    ///
+    /// [`Observed::results_sent`]: super::Observed::results_sent
+    pub fn unacked(&self) -> &BTreeSet<String> {
+        &self.unacked
+    }
+
     fn lacks(&self, defect: Defect) -> bool {
         self.defect == Some(defect)
     }
@@ -222,5 +231,41 @@ impl AgentHarness for FakeAgent {
             launches: self.launches.clone(),
             results_sent: self.sent.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that `unacked` names a result from the moment its job ends until it is
+    /// acknowledged, and nothing else; and that a broken agent that forgets its results
+    /// when the connection drops has an empty set after the drop while a correct one keeps
+    /// it. It catches an accessor that reads the transmissions instead of the current set.
+    #[test]
+    fn unacked_lists_the_results_not_yet_acknowledged() {
+        let held = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_string()).collect()
+        };
+        let mut agent = FakeAgent::new();
+        agent.start("a", 0, 0);
+        agent.start("b", 0, 0);
+        assert_eq!(agent.unacked(), &held(&[]));
+        agent.complete("a");
+        agent.complete("b");
+        assert_eq!(agent.unacked(), &held(&["a", "b"]));
+        agent.ack("a");
+        agent.heartbeat();
+        assert_eq!(agent.unacked(), &held(&["b"]));
+        assert_eq!(agent.observed().results_sent, ["a", "a", "b", "b"]);
+        agent.disconnect();
+        assert_eq!(agent.unacked(), &held(&["b"]));
+
+        let mut broken = FakeAgent::broken(Defect::ForgetsUnackedResult);
+        broken.start("a", 0, 0);
+        broken.complete("a");
+        assert_eq!(broken.unacked(), &held(&["a"]));
+        broken.disconnect();
+        assert_eq!(broken.unacked(), &held(&[]));
     }
 }

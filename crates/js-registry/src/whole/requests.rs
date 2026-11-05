@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use js_lease::Timestamp;
 use js_provider::StartSpec;
 use js_types::{HostId, LeaseId, Request, RequestId};
+use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
 use crate::whole_config::WholeNodeConfig;
@@ -128,6 +129,19 @@ impl RequestRecord {
 pub(crate) struct Requests {
     placed: BTreeMap<LeaseId, RequestKey>,
     records: Vec<Entry>,
+    /// The committed leases whose prepare failed since the registry last took them, for the
+    /// record of each one's end.
+    failed: Vec<FailedPrepare>,
+}
+
+/// A committed whole-node lease whose prepare failed: the booking it freed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailedPrepare {
+    pub(crate) lease: LeaseId,
+    pub(crate) host: HostId,
+    pub(crate) at: Timestamp,
+    /// The first profile name a run of the lease was queued with, if one was.
+    pub(crate) profile: Option<ProfileKey>,
 }
 
 /// A record, the request it belongs to and when the request last asked for a host or
@@ -162,6 +176,16 @@ impl Requests {
     /// The lease ended; it no longer stands for its request.
     pub(crate) fn release(&mut self, lease: &LeaseId) {
         self.placed.remove(lease);
+    }
+
+    /// Notes that the prepare of a committed lease failed and freed its booking.
+    pub(crate) fn note_failed(&mut self, failed: FailedPrepare) {
+        self.failed.push(failed);
+    }
+
+    /// The failed prepares noted since the last call, oldest first.
+    pub(crate) fn take_failed(&mut self) -> Vec<FailedPrepare> {
+        std::mem::take(&mut self.failed)
     }
 
     /// The agent reported `lease` ready: its request is placed, and the record of its

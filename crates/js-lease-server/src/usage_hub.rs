@@ -12,19 +12,27 @@
 //! * a panic in the sink or the key source is caught and counted as a fault, so it never
 //!   costs the heartbeat its reply;
 //! * the hub blocks on the sink, so `tick` and `finish` run it on the pool for blocking
-//!   calls, and what a flush found is logged here (`node minute`, dropped readings).
+//!   calls, and what a flush found is logged here (`node minute`, dropped readings);
+//! * the hub is the registry's log of ended allocations ([`Usage::log`]): the registry
+//!   hands it a record with its own lock released and the hub only queues it, so a stop
+//!   never waits on the store; the tick writes the queue, and a run of failed writes is
+//!   logged once, when it begins, and again when a write succeeds after it.
 //!
 //! The registry's lock is not held when these methods run.
 
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
 use js_lease::Clock;
 use js_types::{HostId, LeaseId};
 pub use js_usage::UsageCounters;
-use js_usage::{AcceptedResult, Beat, BeatLoad, DroppedReadings, Finish, Flushed, UsageHub};
+use js_usage::{
+    AcceptedResult, AllocationLog, Beat, BeatLoad, DroppedReadings, EndedRow, Finish, Flushed,
+    HistoryWritten, UsageHub,
+};
 use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
@@ -38,6 +46,9 @@ use crate::util::blocking;
 pub(crate) struct Usage {
     hub: Arc<UsageHub>,
     clock: SharedClock,
+    /// Whether the last write of the history queue failed: a run of failures is logged
+    /// once.
+    history_failing: AtomicBool,
 }
 
 /// Whether a run that ended with `outcome` is one to learn from: it succeeded, or failed
@@ -63,7 +74,16 @@ impl Usage {
         Self {
             hub: Arc::new(UsageHub::new(sink, keys, limits, started)),
             clock,
+            history_failing: AtomicBool::new(false),
         }
+    }
+
+    /// The log the registry hands the record of each ended allocation to: the hub, which
+    /// queues it for the tick to write. It holds the hub weakly: the hub holds the registry
+    /// (as the source of run keys), so a strong hold would keep both, and the usage store
+    /// with its lock, alive after the server stops.
+    pub(crate) fn log(&self) -> Arc<dyn AllocationLog> {
+        Arc::new(HubLog(Arc::downgrade(&self.hub)))
     }
 
     /// The server's clock in wall minutes since the epoch.
@@ -154,12 +174,31 @@ impl Usage {
         if let Some(Err(fault)) = ticked.prune {
             error!(error = %fault, "cannot prune the usage store");
         }
+        self.report_history(ticked.history);
     }
 
-    /// The flush at shutdown, whatever the schedule says.
+    /// The flush at shutdown, whatever the schedule says, and a last write of the history
+    /// queue.
     pub(crate) async fn finish(&self) {
         let (hub, now) = (Arc::clone(&self.hub), self.now_minute());
-        report(blocking(move || hub.finish(now)).await);
+        let (flushed, history) = blocking(move || (hub.finish(now), hub.write_history())).await;
+        report(flushed);
+        self.report_history(history);
+    }
+
+    /// Logs a write of the history queue: the first failure of a run of them, and the first
+    /// write that succeeds after one.
+    fn report_history(&self, written: Option<HistoryWritten>) {
+        let failing = &self.history_failing;
+        match written {
+            Some(Ok(rows)) if failing.swap(false, Ordering::SeqCst) => {
+                info!(rows, "the allocation history is written again");
+            }
+            Some(Err(fault)) if !failing.swap(true, Ordering::SeqCst) => {
+                error!(error = %fault, "cannot write the allocation history; its records stay queued");
+            }
+            _ => {}
+        }
     }
 
     /// The rows of `host` from minute `from` to minute `to`, at most `limit`. Blocks.
@@ -176,6 +215,17 @@ impl Usage {
     /// What is stored for `key`. Blocks.
     pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         self.hub.key_profile(key)
+    }
+}
+
+/// The registry's log of ended allocations: the hub while it lives, nothing after.
+struct HubLog(Weak<UsageHub>);
+
+impl AllocationLog for HubLog {
+    fn ended(&self, row: EndedRow) {
+        if let Some(hub) = self.0.upgrade() {
+            hub.ended(row);
+        }
     }
 }
 

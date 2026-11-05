@@ -1,34 +1,44 @@
 //! `GET /v1/hosts`: the hosts the server leases, whichever source they come from.
+//!
+//! [`listing`] reads them once for both the JSON route and the job service's `ListHosts`:
+//! the route writes the [`HostList`] as its body, and the job service maps the same entries,
+//! and the leases booked on each host, to its own messages.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
-use js_provider::HostCapacity;
+use js_provider::{Held, HostCapacity, Pool as _};
 use js_registry::{HostMark, HostState, HostView};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
 
+use crate::api::Shared;
 use crate::sched::map::lease_text as sched_lease_text;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 /// The body of `GET /v1/hosts`.
 #[derive(Debug, Serialize)]
 pub(crate) struct HostList {
-    hosts: Vec<HostEntry>,
+    pub(crate) hosts: Vec<HostEntry>,
 }
+
+/// The leases on each host that holds one, in the order they were booked, with what each
+/// books there: as the registry books them on a registered host, and each the whole host on
+/// a static one (the static pool leases whole hosts only).
+pub(crate) type LeasesOn = BTreeMap<HostId, Vec<Held>>;
 
 /// The shape of a host: what a lease on it holds.
 #[derive(Debug, Serialize)]
-struct ShapeView {
-    cpu_millis: u64,
-    memory_bytes: u64,
-    gpus: u64,
+pub(crate) struct ShapeView {
+    pub(crate) cpu_millis: u64,
+    pub(crate) memory_bytes: u64,
+    pub(crate) gpus: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    gpu_class: Option<String>,
+    pub(crate) gpu_class: Option<String>,
     /// Bytes of scratch disk the host books; left out when it books none, so a body for
     /// a host without disk reads as before.
     #[serde(skip_serializing_if = "is_zero")]
-    disk_bytes: u64,
+    pub(crate) disk_bytes: u64,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -56,15 +66,31 @@ impl MemoryView {
     }
 }
 
+/// Where a host comes from, written `static` or `registered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Source {
+    /// The operator's pool file.
+    Static,
+    /// A host that said hello.
+    Registered,
+}
+
 /// One host. `source` says where it comes from: `static` for the operator's pool file,
 /// `registered` for a host that said hello. The remaining fields of a registered host
-/// are what the registry knows of its session.
+/// are what the registry knows of its session. The id, the source, the state and the mark
+/// are held typed and written as text, so a reader other than the body reads them as they
+/// are.
 #[derive(Debug, Serialize)]
-struct HostEntry {
-    id: String,
-    source: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'static str>,
+pub(crate) struct HostEntry {
+    #[serde(serialize_with = "id_text")]
+    pub(crate) id: HostId,
+    pub(crate) source: Source,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "state_named"
+    )]
+    pub(crate) state: Option<HostState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lost: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,12 +101,12 @@ struct HostEntry {
     /// them); absent for a host with none or one, so those bodies are as they were.
     #[serde(skip_serializing_if = "at_most_one")]
     leases: Vec<String>,
-    shape: ShapeView,
-    memory: MemoryView,
-    capabilities: BTreeMap<String, String>,
-    labels: BTreeMap<String, String>,
+    pub(crate) shape: ShapeView,
+    pub(crate) memory: MemoryView,
+    pub(crate) capabilities: BTreeMap<String, String>,
+    pub(crate) labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    agent_version: Option<String>,
+    pub(crate) agent_version: Option<String>,
     /// Set for a registered host: it holds no lease but has runs to finish, so it takes
     /// no new lease yet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,12 +114,12 @@ struct HostEntry {
     /// Set for a registered host that reported a taint: `{reason, run_id?, check?}`. It
     /// is sent no start and takes no new run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    taint: Option<Taint>,
+    pub(crate) taint: Option<Taint>,
     /// Set for a registered host that is set aside: `reserved` for a waiting whole-node
     /// request, `held` while a whole-node lease is committed on it, `draining` and
     /// `releasing` while it is being scaled away.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mark: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "mark_named")]
+    pub(crate) mark: Option<HostMark>,
     /// The request a reserved host is set aside for.
     #[serde(skip_serializing_if = "Option::is_none")]
     reserved_for: Option<String>,
@@ -105,7 +131,7 @@ struct HostEntry {
     /// lapses by itself within the last `lease_secs` it asked for (at most 3600 s from
     /// its last extension), or the host's own `:uncordon` lifts it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    cordon: Option<CordonListed>,
+    pub(crate) cordon: Option<CordonListed>,
     /// Set for a registered host whose latest heartbeat carried a load: the reading of
     /// its actions control group.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,8 +140,8 @@ struct HostEntry {
 
 /// The cordon of a listed host.
 #[derive(Debug, Serialize)]
-struct CordonListed {
-    expires_at_ms: u64,
+pub(crate) struct CordonListed {
+    pub(crate) expires_at_ms: u64,
 }
 
 /// The latest load of a host, in the units its field names state. It is what the agent
@@ -239,8 +265,8 @@ pub(crate) fn mark_text(mark: HostMark) -> &'static str {
 impl HostEntry {
     fn listed(host: HostCapacity) -> Self {
         Self {
-            id: host.host.to_string(),
-            source: "static",
+            id: host.host,
+            source: Source::Static,
             state: None,
             lost: None,
             phase: None,
@@ -262,11 +288,10 @@ impl HostEntry {
     }
 
     fn registered(host: HostView) -> Self {
-        let state = state_text(host.state);
         Self {
-            id: host.id.to_string(),
-            source: "registered",
-            state: Some(state),
+            id: host.id,
+            source: Source::Registered,
+            state: Some(host.state),
             lost: Some(host.state == HostState::Lost),
             phase: Some(String::from(host.phase)),
             lease: lease_text(host.lease),
@@ -278,7 +303,7 @@ impl HostEntry {
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
             taint: host.taint,
-            mark: host.mark.map(mark_text),
+            mark: host.mark,
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
             cordon: host.cordon_until.map(|at| CordonListed {
@@ -301,10 +326,9 @@ impl HostList {
         registered: Vec<HostView>,
         reserved: Option<&BTreeSet<HostId>>,
     ) -> Self {
-        let is_static = |host: &HostCapacity| reserved.is_none_or(|ids| ids.contains(&host.host));
         let statics = capacity
             .into_iter()
-            .filter(is_static)
+            .filter(|host| is_static(host, reserved))
             .map(HostEntry::listed);
         let mut hosts: Vec<HostEntry> = statics
             .chain(registered.into_iter().map(HostEntry::registered))
@@ -312,6 +336,68 @@ impl HostList {
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }
     }
+}
+
+/// Whether `host` of the provider's capacity is a static host: one that `reserved` names
+/// (the ids the registry keeps for the static pool), or any host when there is no registry.
+fn is_static(host: &HostCapacity, reserved: Option<&BTreeSet<HostId>>) -> bool {
+    reserved.is_none_or(|ids| ids.contains(&host.host))
+}
+
+/// The leases on each static host of `capacity` that holds one, each booking the whole
+/// host, since the static pool leases whole hosts only.
+fn static_leases(
+    capacity: &[HostCapacity],
+    reserved: Option<&BTreeSet<HostId>>,
+) -> BTreeMap<HostId, Vec<Held>> {
+    let statics = capacity.iter().filter(|host| is_static(host, reserved));
+    let booked = statics.filter(|host| !host.leases.is_empty());
+    let leases = booked.map(|host| {
+        let whole = |lease: &LeaseId| Held {
+            lease: *lease,
+            resources: host.shape.resources().clone(),
+            whole: true,
+        };
+        (host.host.clone(), host.leases.iter().map(whole).collect())
+    });
+    leases.collect()
+}
+
+/// Every host the server leases, the static pool's and the registered ones, with the leases
+/// booked on each: what `GET /v1/hosts` and the job service's `ListHosts` both read. The
+/// table's lock is taken first and dropped, then the registry's; the order of the two never
+/// reverses. It books, cordons and counts nothing.
+pub(crate) async fn listing(shared: &Shared) -> (HostList, LeasesOn) {
+    let capacity = shared.table().lock().await.provider().capacity();
+    match shared.agents() {
+        Some(agents) => {
+            let reserved = agents.registry.reserved();
+            let mut leases = static_leases(&capacity, Some(&reserved));
+            leases.extend(agents.registry.held());
+            let registered = agents.registry.hosts();
+            (HostList::of(capacity, registered, Some(&reserved)), leases)
+        }
+        None => {
+            let leases = static_leases(&capacity, None);
+            (HostList::of(capacity, Vec::new(), None), leases)
+        }
+    }
+}
+
+/// A host id as the body writes it: its text.
+fn id_text<S: Serializer>(id: &HostId, out: S) -> Result<S::Ok, S::Error> {
+    out.serialize_str(id.as_str())
+}
+
+/// A session's state as the body writes it ([`state_text`]); only called for a host that
+/// has one.
+fn state_named<S: Serializer>(state: &Option<HostState>, out: S) -> Result<S::Ok, S::Error> {
+    out.serialize_str(state.map_or("", state_text))
+}
+
+/// A mark as the body writes it ([`mark_text`]); only called for a host that has one.
+fn mark_named<S: Serializer>(mark: &Option<HostMark>, out: S) -> Result<S::Ok, S::Error> {
+    out.serialize_str(mark.map_or("", mark_text))
 }
 
 #[cfg(test)]

@@ -197,8 +197,13 @@ impl<'a> Raw<'a> {
         self
     }
 
-    /// The request, signed with `credential` at `now`.
+    /// The request, signed with `credential` at `now` for the service `s3`.
     pub fn sign(self, credential: &Credential, now: SystemTime) -> HttpRequest {
+        self.sign_for(credential, now, "s3")
+    }
+
+    /// The request, signed with `credential` at `now` for `service`.
+    pub fn sign_for(self, credential: &Credential, now: SystemTime, service: &str) -> HttpRequest {
         let unsigned = Unsigned {
             method: self.method.as_str(),
             host: self.host,
@@ -210,7 +215,7 @@ impl<'a> Raw<'a> {
         };
         let scope = Scope {
             region: REGION,
-            service: "s3",
+            service,
         };
         let signed = sigv4::sign(&unsigned, credential, &scope, now);
         let query = sigv4::canonical_query(&self.query);

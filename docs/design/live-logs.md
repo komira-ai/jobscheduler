@@ -1,8 +1,10 @@
 # Live logs: a job's output in an object store
 
-Status: **Planned, partly built.** Built: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap in
-`js-contain`), the store client (`js-logstore`), and the agent's uploader of a `crun` job (`js-agent/src/logs`, without the
-progress record of 3.5: a restarted agent uploads nothing more for a job it adopted). No server sends a sink or a grant yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
+in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
+start; the mint of section 4 (`js-logmint`), which the server does not call yet; and the agent's uploader of a `crun` job
+(`js-agent/src/logs`, without the progress record of 3.5: a restarted agent uploads nothing more for a job it adopted), which fills
+`log_grant_state` and `logs`. No server sends a sink or a grant yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design
@@ -234,7 +236,9 @@ mint key (`mint_key_file`), with:
 - `DurationSeconds` = `credential_ttl` in seconds;
 - `Policy` = the session policy below.
 
-The answer's access key id, secret access key, session token and expiry are the credential.
+The answer's access key id, secret access key, session token and expiry are the credential. An answer whose credential expires within a
+minute, or lives less than half of the `DurationSeconds` asked (a store that shortens sessions), is refused and counts as a failed mint
+(section 5): the scheduler never hands out a credential about to die.
 
 **The session policy**, exactly, for the bucket `logs` and the prefix `js`:
 
@@ -325,11 +329,11 @@ unknown key is refused. The example is in `configuration.md`, "Live logs". The k
 | `sink` | string | `"none"` | `"object_store"` or `"none"`. With `"none"`, any other key present is refused, naming the key. |
 | `url` | string | none | Required with `object_store`. `s3://BUCKET` or `s3://BUCKET/prefix`; the bucket 3 to 63 bytes of lower-case letters, digits, `.` and `-`; the prefix as section 2 says. |
 | `region` | string | none | Required with `object_store`. 1 to 64 bytes of `[a-z0-9-]`. Signs every request. |
-| `endpoint` | string | the region's AWS S3 endpoint | Optional. At most 512 bytes; `https`, or `http` to a loopback address; no path, query or user. The agent puts here and the server reads here. |
+| `endpoint` | string | none | Required with `object_store`: the server names no cloud's host by default. At most 512 bytes; `https`, or `http` to a loopback address; no path, query or user. The agent puts here and the server reads here. |
 | `path_style` | bool | `false` | Optional. `true` for stores that need `/bucket/key` URLs. |
 | `read_key_file` | path | none | Required with `object_store`. An owner-only file holding JSON `{"access_key_id": ..., "secret_access_key": ...}`: the read key of section 4 (list and get on the prefix). |
 | `credentials` | string | `"sts"` | How a host's credential is minted. `"sts"` is the only value. |
-| `sts_endpoint` | string | `endpoint` when set, else the region's AWS STS endpoint | Optional. The same URL rule as `endpoint`. |
+| `sts_endpoint` | string | `endpoint` | Optional. The same URL rule as `endpoint`. |
 | `role_arn` | string | none | Required with `sts`. An `arn:` value of at most 2,048 bytes: the role `AssumeRole` assumes (section 4). |
 | `mint_key_file` | path | none | Required with `sts`. An owner-only file, the same JSON as `read_key_file`: the key that calls `AssumeRole`. |
 | `credential_ttl` | duration | `"1h"` | From `"15m"` to `"12h"`. At most the role's maximum session duration, which the server cannot check at start: a longer one is refused by STS and reads as a mint failure. |
@@ -453,8 +457,8 @@ The capture files are on the host's disk, in the lease directories: at the defau
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
 `js-proto` (with its comment, which today promises a running job's tail, rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
-credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, the log fields in
-`js-agent-wire`, and the agent's `logs` module without the progress record (the uploader and the end).
+credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
+fields in `js-agent-wire`, and the agent's `logs` module without the progress record (the uploader and the end).
 
 **Later and open.**
 

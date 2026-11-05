@@ -12,7 +12,7 @@ use js_types::LeaseId;
 use super::*;
 use crate::usage::{DropReason, Observed};
 use js_types::sched::usage::CurveSource;
-use js_usage::RunMinute;
+use js_usage::{AllocationId, DrainOutcome, EndedReason, EndedRow, RunMinute};
 
 /// A store that forwards to the fake and fails every write while `fail` is set.
 struct Flaky {
@@ -308,6 +308,7 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
     let setup = StoreSetup {
         db: dir,
         profile_store_bytes: 1 << 20,
+        history_retention_days: 90,
         names: no_names(),
     };
     let err = open(&setup, 0)
@@ -324,4 +325,111 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
         .expect("a store that cannot be scanned");
     assert_eq!(err.flag(), "--usage-db");
     assert!(err.reason().contains("down"), "{}", err.reason());
+}
+
+/// Milliseconds in a day.
+const DAY_MS: u64 = 86_400_000;
+
+/// The record of lease `1-n`, ended at `end` ms.
+fn ended_row(n: u64, end: u64) -> EndedRow {
+    EndedRow {
+        id: AllocationId::of_lease(&LeaseId::new(1, n)),
+        profile: None,
+        host: Some(host()),
+        booked: None,
+        queued_ms: Some(0),
+        run_ms: Some(1),
+        ended_reason: EndedReason::Released,
+        drain_outcome: DrainOutcome::None,
+        give_up_outcome: None,
+        estimated_end: None,
+        actual_end: end,
+        error_ms: None,
+        used: None,
+    }
+}
+
+fn ids(rows: Result<Vec<EndedRow>, UsageFault>) -> Vec<String> {
+    rows.unwrap().iter().map(|row| row.id.to_string()).collect()
+}
+
+/// Asserts the history side of the sink the server opens over its SQLite usage file: a
+/// record is written once, read back oldest first within the asked range, and the daily
+/// prune removes the records that ended before `--history-retention-days` (two here) and
+/// keeps the one that ended exactly then. It catches a sink that keeps no history, a
+/// record written twice, and a retention not taken from the setup (the default would keep
+/// every record here).
+#[test]
+fn the_usage_file_keeps_ended_allocations_for_the_retention_days() {
+    let scratch = js_testkit::dir::TestDir::under(std::env::temp_dir(), "js-lease-server-ended");
+    let setup = StoreSetup {
+        db: scratch.join("usage.db"),
+        profile_store_bytes: 1 << 20,
+        history_retention_days: 2,
+        names: no_names(),
+    };
+    let sink = open(&setup, 0).unwrap();
+    let now_minute = 10 * MINUTES_PER_DAY;
+    let now = now_minute * 60_000;
+    let edge = now - 2 * DAY_MS;
+    for (n, end) in [(1, edge - 1), (2, edge), (3, now - 1), (3, now - 1)] {
+        sink.allocation_ended(&ended_row(n, end)).unwrap();
+    }
+    let all = NonZeroUsize::new(10).unwrap();
+    assert_eq!(
+        ids(sink.ended_rows(0, u64::MAX, all)),
+        ["1-1", "1-2", "1-3"]
+    );
+    assert_eq!(ids(sink.ended_rows(edge, edge, all)), ["1-2"]);
+    sink.prune(now_minute).unwrap();
+    assert_eq!(ids(sink.ended_rows(0, u64::MAX, all)), ["1-2", "1-3"]);
+}
+
+/// Asserts that a store that refuses writes fails a record's write and the prune of old
+/// records with the store's fault, and that the prune removes them once the store is back:
+/// by default after 90 days. It catches a failure swallowed as success.
+#[test]
+fn a_store_that_refuses_writes_fails_the_history_write_and_prune() {
+    let (sink, fail) = sink();
+    sink.allocation_ended(&ended_row(1, 0)).unwrap();
+    fail.store(true, Ordering::SeqCst);
+    let err = sink.allocation_ended(&ended_row(2, 5)).unwrap_err();
+    assert!(err.0.contains("down"), "{err}");
+    let day_90 = 90 * MINUTES_PER_DAY;
+    assert!(sink.prune(day_90 + 1).is_err());
+    fail.store(false, Ordering::SeqCst);
+    let all = NonZeroUsize::new(10).unwrap();
+    sink.prune(day_90).unwrap();
+    assert_eq!(ids(sink.ended_rows(0, u64::MAX, all)), ["1-1"]);
+    sink.prune(day_90 + 1).unwrap();
+    assert!(sink.ended_rows(0, u64::MAX, all).unwrap().is_empty());
+}
+
+/// Asserts that a page of the history is read from the store the records were written to:
+/// two of three records on the first page with the cursor of the second, and the third
+/// after it with no cursor. It catches a sink that answers the empty page a sink without
+/// history answers.
+#[test]
+fn a_page_of_the_history_is_read_from_the_store() {
+    let (sink, _) = sink();
+    for n in 1..=3 {
+        sink.allocation_ended(&ended_row(n, n * 10)).unwrap();
+    }
+    let query = js_usage::EndedQuery {
+        after: None,
+        from_ms: 0,
+        before_ms: None,
+        host: None,
+        id: None,
+        limit: NonZeroUsize::new(2).unwrap(),
+    };
+    let first = sink.ended_rows_after(&query).unwrap();
+    assert_eq!(ids(Ok(first.rows.clone())), ["1-1", "1-2"]);
+    let next = js_usage::EndedQuery {
+        after: first.next,
+        ..query
+    };
+    let second = sink.ended_rows_after(&next).unwrap();
+    assert_eq!(ids(Ok(second.rows)), ["1-3"]);
+    assert_eq!(second.next, None);
 }

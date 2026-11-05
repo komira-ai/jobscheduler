@@ -5,8 +5,11 @@
 //! compiler binary is installed or run, and tonic-prost-build turns each set into Rust.
 //!
 //! - Package `jobscheduler.v1`, the job service: its descriptor set is also written out
-//!   whole (with the comments, which become the rustdoc of the generated items) for
-//!   `FILE_DESCRIPTOR_SET`. The messages, and the client and server traits of
+//!   whole (with the comments, which become the rustdoc of the generated items, and with
+//!   the files it imports, among them `google/api/annotations.proto` and
+//!   `google/api/http.proto` for the `google.api.http` option of every method) for
+//!   `FILE_DESCRIPTOR_SET`. The Rust of the imported files is written to `OUT_DIR` too and
+//!   is not included anywhere. The messages, and the client and server traits of
 //!   `JobService`: the client is generated without tonic's transport, so it cannot
 //!   connect by itself, and the server trait has a default body for every method that
 //!   answers `UNIMPLEMENTED`. `JobFile` gets no generated `Debug`, which would print its

@@ -25,7 +25,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::alerts::{DEFAULT_ALERT_REPEAT, alert_sink};
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
-use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
@@ -203,6 +203,14 @@ pub struct Cli {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub profile_store_bytes: u64,
+    /// How many days the record of each ended allocation (a lease's booking today) is kept
+    /// in the usage file; older records are removed by the daily prune. At least 1.
+    #[arg(
+        long,
+        default_value = "90",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub history_retention_days: u64,
     /// How long an ended job's record and result are kept after the job ends: a whole
     /// count of days (`7d`) or a duration such as `36h` or `90m`, at least one minute. Read
     /// once at start; it is the window the job store applies when a job ends, so a changed
@@ -410,6 +418,7 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    pub(crate) logs: file::LogsConfig,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -470,12 +479,13 @@ impl Config {
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
-        let usage = usage_setup(
-            cli.usage_off,
-            cli.usage_db.clone(),
-            cli.profile_store_bytes,
-            &state_file,
-        );
+        let keys = UsageKeys {
+            db: cli.usage_db.clone(),
+            off: cli.usage_off,
+            profile_store_bytes: cli.profile_store_bytes,
+            history_retention_days: cli.history_retention_days,
+        };
+        let usage = usage_setup(keys, &state_file);
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
@@ -501,6 +511,7 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            logs: file::LogsConfig::None,
         })
     }
 
@@ -529,6 +540,7 @@ impl Config {
             hosts,
             mut warnings,
             unrunnable,
+            logs,
             ..
         } = file::load(path, &load)?;
         if let Some(refusal) = unrunnable {
@@ -580,8 +592,7 @@ impl Config {
             .as_ref()
             .map_or(DEFAULT_ALERT_REPEAT, |keys| keys.repeat_after);
         let state_file = server.state_file;
-        let keys = server.usage;
-        let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
+        let usage = usage_setup(server.usage, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
         if alerts.is_some() && elastic.is_none() {
@@ -613,6 +624,7 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            logs,
         })
     }
 
@@ -759,6 +771,12 @@ impl Config {
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
+    }
+
+    /// How many days the record of an ended allocation is kept
+    /// (`--history-retention-days`).
+    pub fn history_retention_days(&self) -> u64 {
+        self.usage.history_retention_days
     }
 
     /// The same configuration measuring usage with `sink` instead of the sink that opens
