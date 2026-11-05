@@ -135,12 +135,9 @@ impl Agents {
         match run(jobs, self.job_limits, &observer, now) {
             Ok(passed) => {
                 if !passed.is_empty() {
-                    info!(
-                        expired = passed.expired.len(),
-                        deleted = passed.deleted.len(),
-                        lost = passed.lost.len(),
-                        "the job pass ended or deleted jobs"
-                    );
+                    let expired = passed.expired.len();
+                    let (deleted, lost) = (passed.deleted.len(), passed.lost.len());
+                    info!(expired, deleted, lost, "the job pass ended or deleted jobs");
                 }
                 let settle = |placer: &Arc<SchedPlacer>| placer.settle_gone(&gone);
                 self.placer.iter().for_each(settle);
