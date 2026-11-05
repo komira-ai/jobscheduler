@@ -30,7 +30,13 @@ dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "o
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2.17"
+# The HTTP/JSON gateway (js-api-gateway): the Rust names of generated methods and messages,
+# by the same conversion prost and tonic use. In the lock already through prost-build.
+heck = "0.5.0"
 hex = "0.4.3"
+# The object-store signer (js-logstore): HMAC-SHA256 of AWS Signature Version 4. Already in
+# Cargo.lock at this version through the Postgres client, so the lock gains no package.
+hmac = "0.13.0"
 # Bodies of the registry client (js-oci): the empty request body and the frame reader.
 http-body-util = { version = "0.1.5", default-features = false }
 # The lease server serves its listener with hyper directly (axum's own `serve` has no
@@ -55,6 +61,8 @@ objc2-virtualization = { version = "0.3.2", features = ["block2", "dispatch2", "
 # The container runner (js-contain) writes OCI bundles with oci-spec and drives `crun`
 # with the runc client.
 oci-spec = "0.7.1"
+# The HTTP/JSON gateway (js-api-gateway): the query string of a request, percent-decoded.
+percent-encoding = "2.3.2"
 # macOS only (js-vmm): the property lists of the guest disk, as values, not through serde.
 plist = { version = "1.10.1", default-features = false }
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
@@ -65,10 +73,11 @@ proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 # The job service's messages (js-proto): prost encodes and decodes them, and prost-types
 # holds the descriptor set the crate's tests read the schema from.
 prost = "0.14.4"
-# The job commands of js-cli: a request built from flags and an answer printed, through the
-# job service's descriptor set (proto3 JSON by `serde`, the text of a value by `text-format`).
-# In the lock already through protox.
-prost-reflect = { version = "0.16.5", default-features = false, features = ["serde", "text-format"] }
+# The job service's messages by its descriptor set: the HTTP/JSON gateway (js-api-gateway) reads
+# the `google.api.http` option of each method and maps messages to and from proto3 JSON
+# (`serde`); the job commands of js-cli build a request from flags and print an answer (`serde`,
+# and `text-format` for the text of a value). Members add the features they use.
+prost-reflect = "0.16.5"
 prost-types = "0.14.4"
 # js-proto's build script compiles the `.proto` files with protox, a pure-Rust compiler, so
 # no `protoc` is installed or run.

@@ -16,6 +16,7 @@ js-agent-usage              0      0
 js-agent-wire               0      0
 js-alert                    0      0
 js-analysis                 0      0
+js-api-gateway              0      0
 js-bundle                   0      0
 js-bundle-cli               0      0
 js-caps                     0      0
@@ -32,6 +33,7 @@ js-host-step                0      0
 js-jobs                     0      0
 js-lease                    0      0
 js-lease-server             0      0
+js-logstore                 0      0
 js-mac-pool                 0      0
 js-mac-probe                0      0
 js-mac-provision            0      0
@@ -40,9 +42,10 @@ js-mdm                      0      0
 js-mdm-core                 0      0
 js-measure                  0      0
 js-oci                      0      0
+js-platform                 0      -
 js-pool-static              0      0
 js-proto                    0      -
-js-provider                 0      -
+js-provider                 0      0
 js-provider-fake            0      0
 js-provider-lambdalabs      0      0
 js-registry                 0      0
@@ -50,6 +53,7 @@ js-scaler                   0      0
 js-sched                    0      0
 js-server-core              0      0
 js-sim                      0      0
+js-sim-cell                 0      0
 js-sizing                   0      0
 js-state                    0      0
 js-store                    0      0

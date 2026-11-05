@@ -162,6 +162,45 @@ fn create_builds_the_documented_argv() {
     );
 }
 
+/// Asserts that the opt-in to the engine leaves its GPU jobs as they were: the command line
+/// `--runtime docker --allow-container-engine --container-bin <engine>` parses to the engine
+/// runtime with the opt-in set, and a runtime over that `--container-bin` gives a job that
+/// booked GPUs 0 and 1 exactly those (`--gpus "device=0,1"`) with network none. The opt-in
+/// gates the start only (see the flag tests); the runtime it lets the agent open is the one
+/// whose GPU argv the tests above pin. It catches the fallback losing its GPU devices ahead
+/// of GPU passthrough on crun, which is what keeps GPU jobs on the engine.
+#[test]
+fn a_gpu_job_still_runs_on_the_fallback() {
+    use clap::Parser as _;
+    let cli = js_agent::Cli::try_parse_from([
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "gpu",
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        super::super::BIN,
+    ])
+    .unwrap();
+    assert_eq!(cli.runtime, Some(js_agent::RuntimeKind::Docker));
+    assert!(cli.allow_container_engine);
+    let bin = cli.container_bin.as_deref().unwrap();
+    let set = js_agent::cli_runtime::Settings::new(bin, None).unwrap();
+    let world = docker();
+    let mut rt = open_with(&world, "linux", set);
+    let mut job = spec("r1");
+    job.gpu_indices = vec![0, 1];
+    rt.create_and_start(&job).unwrap();
+    let args = created(&world, "r1");
+    let gpus: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
+    assert_eq!(gpus, [strings(&["--gpus", "\"device=0,1\""])]);
+    let networks: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--network").collect();
+    assert_eq!(networks, [strings(&["--network", "none"])]);
+}
+
 /// Asserts that a Podman runtime is given the same job with CDI devices in place of
 /// `--gpus`, its own `--pid private` (Docker takes no such value), no Docker-only mount
 /// option, and nothing else different; and that no `info` call is made for it.

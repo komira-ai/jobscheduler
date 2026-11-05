@@ -107,18 +107,79 @@ pub enum Built {
 /// A constructor of a kind: the provider table without its `kind`.
 pub type Ctor = fn(&toml::Table, &BuildCtx<'_>) -> Result<Built, KindError>;
 
-/// The kinds the server knows, by name.
+/// A kind of container platform a `[[platform]]` table may name, and whether its jobs run
+/// on hosts of ours (design 3.5). Only `default` is built; the kinds that run jobs with no
+/// host of ours (Kubernetes, Cloud Run, ECS) are refused as not built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformKind {
+    name: &'static str,
+    hosts: bool,
+}
+
+impl PlatformKind {
+    /// `default`: hosts of ours, from its ordered machine providers.
+    pub const DEFAULT: Self = Self {
+        name: "default",
+        hosts: true,
+    };
+
+    /// A kind called `name` whose jobs run with no host of ours. None is built into the
+    /// server; a test registers one ([`Kinds::with_platform`]) to reach the checks of a
+    /// pool that names only hostless platforms.
+    pub const fn hostless(name: &'static str) -> Self {
+        Self { name, hosts: false }
+    }
+
+    /// The name a `[[platform]]` table's `kind` spells it with.
+    pub fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// Whether the platform's jobs run on hosts of ours, so that the keys of a pool that
+    /// describe hosts (`max_machines`, `join_token_file`, the queue settings, ...) apply.
+    pub fn has_hosts(self) -> bool {
+        self.hosts
+    }
+}
+
+/// The kinds the server knows, by name: the provider kinds of a pool's `provider` and of a
+/// `[[machine_provider]]`, and the kinds of a `[[platform]]`.
 #[derive(Clone, Default)]
 pub struct Kinds {
     kinds: BTreeMap<&'static str, Ctor>,
+    platforms: BTreeMap<&'static str, PlatformKind>,
 }
 
 impl Kinds {
-    /// The kinds compiled into the server: `static` and `lambdalabs`.
+    /// The kinds compiled into the server: provider kinds `static` and `lambdalabs`, and
+    /// platform kind `default`.
     pub fn standard() -> Self {
         Self::default()
             .with("static", static_kind)
             .with("lambdalabs", lambdalabs_kind)
+            .with_platform(PlatformKind::DEFAULT)
+    }
+
+    /// These kinds and the platform kind `kind`.
+    #[must_use]
+    pub fn with_platform(mut self, kind: PlatformKind) -> Self {
+        self.platforms.insert(kind.name, kind);
+        self
+    }
+
+    /// The platform kind called `name`, when it is one.
+    pub fn platform(&self, name: &str) -> Option<PlatformKind> {
+        self.platforms.get(name).copied()
+    }
+
+    /// The names of the platform kinds, in order.
+    pub fn platform_names(&self) -> Vec<&'static str> {
+        self.platforms.keys().copied().collect()
+    }
+
+    /// Whether a provider kind called `name` is compiled in.
+    pub fn has(&self, name: &str) -> bool {
+        self.kinds.contains_key(name)
     }
 
     /// These kinds and `name`, built by `ctor`.

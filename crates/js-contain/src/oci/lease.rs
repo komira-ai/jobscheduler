@@ -280,23 +280,34 @@ impl Oci {
     /// [`Running::tail`] as [`logs`](super::logs) says: the files are made here (in
     /// `spec.dir`, [`stdout_path`](super::stdout_path) and
     /// [`stderr_path`](super::stderr_path), new and empty), and the run is not over until
-    /// the drain is (a bounded wait).
+    /// the drain is (a bounded wait). `file_cap` is the most bytes of each stream this run's
+    /// files keep; `None` is the runtime's [`LogLimits::file_cap`](super::LogLimits::file_cap).
+    /// The ring and the drain grace are the runtime's.
     ///
     /// # Errors
     /// The init's report file, a log file or the thread could not be made.
-    pub fn start(&self, spec: &ContainerSpec) -> Result<Running, String> {
+    pub fn start(&self, spec: &ContainerSpec, file_cap: Option<u64>) -> Result<Running, String> {
         let crun = self.crun.clone();
         let (dir, name) = (spec.dir.clone(), spec.name.clone());
         let bundle = dir.join("bundle");
         let thread = format!("crun-{name}");
         // The init's stdin: where it says why the program could not be started.
         let report = init::create_report(&dir)?;
-        let capture = Arc::new(Capture::create(&dir, self.logs)?);
+        let capture = Arc::new(Capture::create(&dir, self.run_logs(file_cap))?);
         let launch: Launch = Box::new(move |stdout, stderr| {
             Box::pin(async move { crun.run(&dir, &name, &bundle, report, stdout, stderr).await })
         });
         let run = logs::supervise(capture.clone(), launch);
         Ok(Running::spawn(thread, run)?.with_capture(capture))
+    }
+
+    /// The runtime's limits on a job's output with the file cap of one run: `file_cap`, or
+    /// the runtime's own when it is `None`.
+    pub(super) fn run_logs(&self, file_cap: Option<u64>) -> logs::LogLimits {
+        logs::LogLimits {
+            file_cap: file_cap.unwrap_or(self.logs.file_cap),
+            ..self.logs
+        }
     }
 
     /// `crun run`'s exit status is the job's, unless `crun` itself failed: told by an
@@ -305,7 +316,17 @@ impl Oci {
     /// # Errors
     /// `crun` itself could not be run or did not finish.
     pub async fn ended(&self, spec: &ContainerSpec, running: &Running) -> Result<Ended, String> {
-        match running.run_end() {
+        self.ended_as(spec, running.run_end()).await
+    }
+
+    /// [`Oci::ended`] for a run whose end is `end`, however it was learnt (an exit record
+    /// of a supervisor, say): the same reading of `crun`'s log and the init's report in
+    /// `spec.dir`.
+    ///
+    /// # Errors
+    /// `end` is a failure of `crun` itself.
+    pub async fn ended_as(&self, spec: &ContainerSpec, end: RunEnd) -> Result<Ended, String> {
+        match end {
             RunEnd::Exited(0) => Ok(Ended::Exited(0)),
             RunEnd::Exited(code) => {
                 let log = tokio::fs::read_to_string(log_path(&spec.dir)).await;

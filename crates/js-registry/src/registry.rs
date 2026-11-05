@@ -1,13 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use js_agent_wire::refusal as refusal_code;
-use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome, WireShape,
-};
+use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Phase, Taint, Welcome, WireShape};
 use js_caps::{BUNDLE_ROOT, EXEC, FLAG_SET, HostContract, RUN_FILES, RUNTIME, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_provider::Observed;
 use js_types::sched::usage::NodeLoad;
 use js_types::{ExecMode, HostId, LeaseId, MemoryHeadroom, ProviderId, RequestId, Shape};
@@ -28,6 +25,7 @@ use crate::whole::requests::{
 };
 use crate::whole::reserve::{Marks, Reservation};
 
+mod beat;
 mod cordon;
 mod demand;
 mod ledger;
@@ -35,9 +33,11 @@ mod marks;
 mod provider_side;
 mod record;
 mod start;
+mod view;
 
 use record::Record;
 
+pub use beat::HeartbeatCheck;
 pub use cordon::{Cordoned, NotHeld, OwnHost, Uncordoned};
 use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
@@ -71,10 +71,11 @@ pub struct HostView {
     /// of them. Empty when the host holds none.
     pub leases: Vec<LeaseId>,
     /// The shape the pool books for the host (not the host's own claim), with its memory
-    /// cut to the pool's memory percent.
+    /// cut to the pool's memory percent: what may be booked on it, also for a pool whose
+    /// placer keeps the percent ([`crate::PoolConfig::booking_whole_memory`]).
     pub shape: Shape,
-    /// The memory the pool lists for the host, the percent of it that is booked and what
-    /// that comes to (the memory of `shape`).
+    /// The memory the pool lists for the host, the percent of it that may be booked and
+    /// what that comes to (the memory of `shape`).
     pub memory: MemoryHeadroom,
     /// The shape the host announced at its last hello, which the registry checked against
     /// the pool's floor; `None` for a host that has not said hello since a restart. A
@@ -180,20 +181,22 @@ struct State {
 
 impl State {
     /// Forgets every host that has been lost for longer than the retention and holds no
-    /// booking, binding included. A booked host stays however long it is silent.
-    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) {
+    /// booking, binding included, and answers which. A booked host stays however long it
+    /// is silent.
+    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> Vec<HostId> {
         let lost = self
             .records
             .iter()
             .filter(|(_, record)| record.out_of_retention(now, grace_ms, retention_ms))
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        for id in lost {
-            if self.book.remove_free(&id) {
-                self.records.remove(&id);
-                self.runs.forget(&id);
-            }
+        let forgotten = lost.into_iter().filter(|id| self.book.remove_free(id));
+        let forgotten: Vec<HostId> = forgotten.collect();
+        for id in &forgotten {
+            self.records.remove(id);
+            self.runs.forget(id);
         }
+        forgotten
     }
 }
 
@@ -219,7 +222,8 @@ struct Shared {
 /// its last hello or heartbeat, computed when asked, so nothing ticks. A lost host that
 /// holds no booking is forgotten, binding included, once it has been lost for the pool's
 /// lost-host retention ([`PoolConfig::with_lost_retention`]), also computed when asked:
-/// every call forgets such hosts first, so they stop counting toward the pool's limit.
+/// every call forgets such hosts first, so they stop counting toward the pool's limit
+/// ([`Registry::check_heartbeat`], which changes nothing, answers as if it had).
 /// A host that holds a booking is never forgotten. An awaiting host (seated after a
 /// restart, never heard) is counted from the time it was seated: once its lease has
 /// ended, it is forgotten after the grace period and the retention have passed since
@@ -294,8 +298,12 @@ impl Registry {
     /// lease takes the second. Without a placer the registry books the first host by id,
     /// leases whole hosts only, and refuses a class that does not book one with
     /// `UnsupportedClass`. Only the first call takes effect.
+    /// The book lets the leases that share a host book together as much CPU above its
+    /// cores as the placer says ([`crate::Placer::cpu_slack_permille`]).
     pub fn set_placer(&self, placer: Arc<dyn crate::Placer>) {
-        let _ = self.shared.placer.set(placer);
+        let slack = placer.cpu_slack_permille();
+        let first = self.shared.placer.set(placer).is_ok();
+        first.then(|| self.lock().book.set_cpu_slack(slack));
     }
 
     /// The provider the lease table runs on, serving the pool's class and its share class
@@ -310,8 +318,8 @@ impl Registry {
     }
 
     /// The registry's state as of `now`: hosts lost for longer than the retention, with
-    /// no booking, are forgotten first, so no call sees or counts one. Every call locks
-    /// through here.
+    /// no booking, are forgotten first, so no call sees or counts one. Every call but
+    /// [`Registry::check_heartbeat`] (which answers as if they were forgotten) locks here.
     fn lock_at(&self, now: Timestamp) -> MutexGuard<'_, State> {
         let mut state = self
             .shared
@@ -319,7 +327,8 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
-        state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        let forgotten = state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        forgotten.iter().for_each(|host| self.tell_gone(host));
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
         let unclaimed = state.waiting.expire(now, Rules::of(config).regain_grace_ms);
@@ -356,6 +365,7 @@ impl Registry {
             requests,
             rules,
             now,
+            placer: self.shared.placer.get().map(|placer| &**placer),
         };
         for (host, record) in records.iter_mut() {
             let overdue = record.exclusive.overdue(now, rules.prepare_timeout_ms);
@@ -646,6 +656,7 @@ impl Registry {
             },
         );
         state.runs.sync(&host, &hello.held, true);
+        self.tell_up(&host);
         Ok(Welcome {
             protocol,
             epoch,
@@ -701,13 +712,16 @@ impl Registry {
     /// untouched until it ends), and is never forgotten for being silent; the
     /// runs it already holds finish, their results are acknowledged, and their stops are
     /// sent as for any host. Nothing here clears a taint.
+    ///
+    /// This records the beat: it changes the registry. [`Registry::check_heartbeat`] runs
+    /// the same checks and finds the taint the beat would record, changing nothing, so a
+    /// caller can make that taint durable first.
     pub fn heartbeat(
         &self,
         heartbeat: &Heartbeat,
         credential: &Credential,
     ) -> Result<HeartbeatReply, Refusal> {
-        let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHeartbeatHostId)?;
-        heartbeat.validate().map_err(Refusal::Invalid)?;
+        let host = beat::parse(heartbeat)?;
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State {
@@ -717,68 +731,27 @@ impl Registry {
             requests,
             ..
         } = &mut *guard;
-        let record = records
-            .get_mut(&host)
-            .filter(|record| record.heard.is_some())
-            .ok_or(Refusal::UnknownHost)?;
-        if record
-            .binding
-            .as_ref()
-            .is_some_and(|bound| bound.credential() != credential)
-        {
-            return Err(Refusal::HostBound);
-        }
-        if record.epoch != heartbeat.epoch {
-            return Err(Refusal::StaleEpoch);
-        }
-        let issued = record
-            .session
-            .as_ref()
-            .is_some_and(|digest| digest.matches(&heartbeat.session));
-        if !issued {
-            return Err(Refusal::SessionMismatch);
-        }
+        let record = beat::admitted(records.get_mut(&host), heartbeat, credential)?;
+        let plan = beat::Plan::of(record, heartbeat);
         let gap = record.state(now, self.grace_ms()) == HostState::Lost;
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
-        record.load.take(heartbeat.load.as_ref());
+        let reading = record.load.take(heartbeat.load.as_ref());
+        self.tell_heard(&host, reading);
         record.held = heartbeat
             .held
             .iter()
             .map(|run| run.run_id.clone())
             .collect();
-        // An agent that refuses a start because its host is tainted may be unable to write
-        // its own marker (a full disk), so that refusal taints the host here as a report
-        // would. It is the host's fault: the result is answered like any other. A start
-        // refused as `quota-unavailable` is the host's fault too, and taints nothing.
-        let refused = heartbeat.results.iter().find(|result| {
-            let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
-            by_host && result.outcome == Outcome::FailedToStart
-        });
-        let reported = heartbeat.taint.clone().or_else(|| {
-            refused.map(|result| Taint {
-                reason: refusal_code::HOST_TAINTED.to_string(),
-                run_id: Some(result.run_id.clone()),
-                check: None,
-            })
-        });
-        record.taint = record.taint.take().or(reported);
-        record.exclusive = record.exclusive.after_beat();
-        let clean = record.taint.is_none();
-        if let Some(ready) = &heartbeat.exclusive_ready {
-            record.exclusive = record.exclusive.report_ready(ready, clean);
+        let clean = plan.taint.is_none();
+        record.taint = plan.taint;
+        record.exclusive = plan.exclusive;
+        if heartbeat.exclusive_ready.is_some() {
             let granted = record.exclusive.ready_lease();
             granted.iter().for_each(|lease| requests.granted(lease));
         }
-        // A typed refusal of the lease committed to the host ends it at once; one for any
-        // other lease says nothing about this host's preparation.
-        let refused = heartbeat.exclusive_refused.as_ref().and_then(|refused| {
-            let lease = record.exclusive.committed()?;
-            let named = lease.to_string() == refused.lease_id;
-            named.then_some((lease, Cause::Refused(refused.code), refused.detail.as_str()))
-        });
-        if let Some((lease, cause, detail)) = refused {
+        if let Some((lease, cause, detail)) = plan.refused {
             let rules = Rules::of(&self.shared.config);
             let mut ending = Ending {
                 book: &mut *book,
@@ -786,6 +759,7 @@ impl Registry {
                 requests: &mut *requests,
                 rules,
                 now,
+                placer: self.shared.placer.get().map(|placer| &**placer),
             };
             ending.fail(
                 (&mut record.taint, &mut record.exclusive),
@@ -1016,64 +990,5 @@ impl Registry {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
         (self.host_views(&state, now), waiting_rows(&state))
-    }
-
-    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
-        let view = self.viewer((&state.book, &state.runs, &state.marks), now);
-        state
-            .records
-            .iter()
-            .map(|(id, record)| view(id, record))
-            .collect()
-    }
-
-    /// The listing's view of one host, given the parts of the state that it reads. The
-    /// reads that are the same for every host are made once, here.
-    fn viewer<'a>(
-        &'a self,
-        (book, runs, marks): (&'a HostBook, &'a Runs, &'a Marks),
-        now: Timestamp,
-    ) -> impl Fn(&HostId, &Record) -> HostView + 'a {
-        let booked = book.booked();
-        let every = book.leases();
-        let shape = self.shared.config.booked();
-        let memory = self.shared.config.memory_headroom();
-        let marks = marks.reservations();
-        move |id, record| {
-            let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
-            HostView {
-                id: id.clone(),
-                state: record.state(now, self.grace_ms()),
-                load: record
-                    .load
-                    .latest
-                    .clone()
-                    .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
-                phase: record.phase,
-                lease: booked.get(id).copied(),
-                leases: every.get(id).cloned().unwrap_or_default(),
-                shape: shape.clone(),
-                memory,
-                claim: record.claim.clone(),
-                labels: record.labels.clone(),
-                agent_version: record.agent_version.clone(),
-                epoch: record.epoch,
-                heard_since_hello: record.session.is_none() | (record.beats > 0),
-                releasing: !booked.contains_key(id)
-                    & !(record.quiet(runs, id) & record.exclusive.is_free()),
-                taint: record.taint.clone(),
-                mark: match (record.leaving, set_aside(id), record.exclusive.held_since()) {
-                    (Some(leaving), _, _) => Some(leaving.mark()),
-                    (None, Some(_), _) => Some(HostMark::Reserved),
-                    (None, None, Some(_)) => Some(HostMark::Held),
-                    (None, None, None) => None,
-                },
-                reserved_for: set_aside(id).map(|mark| mark.request.clone()),
-                drain_deadline: set_aside(id)
-                    .filter(|mark| !mark.assigned)
-                    .map(|mark| mark.deadline),
-                cordon_until: record.cordon.filter(|until| *until > now),
-            }
-        }
     }
 }

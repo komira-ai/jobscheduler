@@ -11,6 +11,7 @@ mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod fake_helper;
+mod files;
 mod journal;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -19,9 +20,11 @@ mod mac;
 mod mac_agent;
 #[cfg(target_os = "macos")]
 mod mac_pf;
+mod outputs;
 mod pf_gate;
 mod runtime;
 mod settings;
+mod silence;
 mod worker;
 
 use std::collections::BTreeMap;
@@ -92,6 +95,14 @@ impl Rig {
         Self { fake, rt, dir }
     }
 
+    /// The same rig, its runtime giving a run's files to the run's user through
+    /// `hand_over`.
+    pub fn handing_over(self, hand_over: js_agent::native::HandOver) -> Self {
+        let Self { fake, rt, dir } = self;
+        let rt = rt.with_hand_over(hand_over);
+        Self { fake, rt, dir }
+    }
+
     /// A run of `native`, with its scratch directory made as the lifecycle makes it.
     pub fn spec(&self, run_id: &str, native: NativeSpec) -> RunSpec {
         let scratch = self.dir.path("scratch").join(run_id);
@@ -99,6 +110,7 @@ impl Rig {
         RunSpec {
             run_id: run_id.to_owned(),
             body: Body::Native(native),
+            env: Vec::new(),
             cpu_millis: 1000,
             memory_bytes: 1 << 30,
             pids: None,

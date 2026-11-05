@@ -161,8 +161,8 @@ pub use placer::{MarkedTails, Placer, ProbeHost};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{
-    Busy, Cordoned, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost, Registry,
-    Restored, Uncordoned, Waiting, WholeCounts,
+    Busy, Cordoned, HeartbeatCheck, HostMark, HostState, HostView, Launchable, NotHeld, OwnHost,
+    Registry, Restored, Uncordoned, Waiting, WholeCounts,
 };
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};

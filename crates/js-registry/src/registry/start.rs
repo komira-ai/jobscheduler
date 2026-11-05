@@ -5,9 +5,9 @@ use std::collections::BTreeSet;
 
 use js_elastic::Demand;
 use js_lease::Timestamp;
-use js_pool_static::{Candidate, HostBook};
+use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
+use js_types::{Admission, Capabilities, HostId, LeaseId, ResourceClass, Resources, Shape};
 
 use super::record::Bound;
 use super::{HostState, Registry, State};
@@ -28,7 +28,31 @@ const ENDLESS: Timestamp = Timestamp::MAX;
 /// The bound [`js_whole::cost::tail`] reads as none.
 const NO_BOUND: u64 = u64::MAX;
 
+/// The hosts that reported a taint: none of them could ever hold a request again.
+fn tainted(state: &State) -> BTreeSet<HostId> {
+    state
+        .records
+        .iter()
+        .filter(|(_, record)| record.taint.is_some())
+        .map(|(host, _)| host.clone())
+        .collect()
+}
+
 impl Registry {
+    /// Whether some host in the table could ever hold a request for `resources` that
+    /// requires `required`: the check a whole-node start makes before it answers
+    /// `NoCapableHost`, without a request's own bars. A host fits when its booked shape
+    /// satisfies both and it has not reported a taint; a busy, lost or reserved host counts,
+    /// since it could free. With no host in the table it is `false`.
+    pub fn could_ever_hold(&self, resources: &Resources, required: &Capabilities) -> bool {
+        let state = self.lock_at(self.shared.clock.now());
+        let tainted = tainted(&state);
+        let listed = state.book.hosts();
+        listed
+            .iter()
+            .any(|host| placement::could_hold(host, resources, required, &tainted))
+    }
+
     /// Every host as the reservation pass reads it, in id order. Every host is booked as
     /// the pool's shape.
     pub(super) fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
@@ -104,7 +128,7 @@ impl Registry {
         *dropped += reserve::advance(marks, waiting, requests, pass);
     }
 
-    /// Books `spec`'s lease as [`js_pool_static::HostBook`] does. A `Whole` class is
+    /// Books `spec`'s lease as [`js_provider::HostBook`] does. A `Whole` class is
     /// committed, not granted: the booking is made only on a host that is bookable (live,
     /// serving, clean), quiet (no held run, none live here) and clear of another
     /// whole-node lease or a restore, and the answer is `Unknown` so the lease stays
@@ -170,18 +194,13 @@ impl Registry {
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
         // so that happens for a request the pool's shape fits only when no host is listed
         // yet. A host could still join, which is capacity, not fit.
-        let floor = self.shared.config.booked();
+        let floor = self.shared.config.fit();
         let wanted = spec.request();
         let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
         // A whole-node request that fits the pool is refused for lack of a host only when
         // no host could ever be given whole; otherwise it waits, if it has an id.
         let listed = state.book.hosts();
-        let tainted = state
-            .records
-            .iter()
-            .filter(|(_, record)| record.taint.is_some())
-            .map(|(host, _)| host.clone())
-            .collect::<BTreeSet<_>>();
+        let tainted = tainted(state);
         let asking = Asking {
             spec,
             key: &key,
@@ -271,12 +290,18 @@ impl Registry {
                 .all(|ok| ok)
         };
         // Without a placer the book books the first host that qualifies, stopping at it;
-        // with one it is shown every host that qualifies. The placer runs under this
-        // registry's lock and costs time in the hosts and leases it is shown.
+        // with one it is shown every host that qualifies, and may read every host listed.
+        // The placer runs under this registry's lock.
         let ack = match placer {
             Some(placer) => {
-                let choose = |open: &[Candidate]| placer.pick(spec, open, &marked);
-                book.start_by(spec, gate, &eligible, &choose)
+                // A start that fits no host by the pool's percent is not shown to the
+                // placer: it is `NoFit` (see the answer below).
+                let choose = |open: &[Candidate], every: &dyn Fn() -> Vec<Candidate>| {
+                    fits_pool
+                        .then(|| placer.pick_over(spec, open, &marked, every))
+                        .flatten()
+                };
+                book.start_over(spec, gate, &eligible, &choose)
             }
             None => book.start_where(spec, gate, &eligible),
         };
@@ -328,6 +353,11 @@ impl Registry {
             (_, true, true) => placement::answer(verdict, capable),
             (StartAck::Refused(RefusalCode::NoFit), true, false) => {
                 StartAck::Refused(RefusalCode::NoCapacity)
+            }
+            // A host's room is its whole memory when the placer keeps the percent: a
+            // request above the share fits a host but never the pool.
+            (StartAck::Refused(RefusalCode::NoCapacity), false, _) => {
+                StartAck::Refused(RefusalCode::NoFit)
             }
             (other, _, _) => other,
         }

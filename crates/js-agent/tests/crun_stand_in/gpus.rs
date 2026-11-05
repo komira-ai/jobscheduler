@@ -414,6 +414,36 @@ fn the_mounts_are_read_only_and_the_job_cannot_remount() {
     runtime.remove(&id).expect("removed");
 }
 
+/// Proves a GPU run's variables go over the job's environment as they go over the image's:
+/// a job that sets the name an operator's `--gpu-env` sets gets the operator's value, once,
+/// and keeps its other variables. Catches a job environment applied after the GPU wiring,
+/// which would let a job point its GPU libraries elsewhere.
+#[test]
+fn a_gpu_variable_goes_over_the_jobs_of_the_same_name() {
+    let node = Node::new("gpu-env-over-job");
+    let (_, mount) = driver_flags(&node, "/usr/local/driver");
+    let mut flags = DEVICES.to_vec();
+    flags.extend(["--gpu-mount", &mount, "--gpu-env", "GPU_ONLY=1"]);
+    let mut runtime = open_with_gpus(&node, passthrough(&flags), four_gpus);
+    let mut spec = run(&node, "r1-hold", &[0]);
+    spec.env = vec![
+        ("B".to_owned(), "job".to_owned()),
+        ("GPU_ONLY".to_owned(), "job".to_owned()),
+    ];
+    let id = runtime.stage(&spec).expect("staged");
+    let config = bundle(&node, &id);
+    let vars = config["process"]["env"].as_array().expect("env");
+    let named = |name: &str| {
+        vars.iter()
+            .filter(|var| var.as_str().is_some_and(|var| var.starts_with(name)))
+            .count()
+    };
+    assert_eq!(named("GPU_ONLY="), 1, "{vars:?}");
+    assert!(vars.contains(&json!("GPU_ONLY=1")), "{vars:?}");
+    assert!(vars.contains(&json!("B=job")), "{vars:?}");
+    runtime.remove(&id).expect("removed");
+}
+
 /// Proves no `--gpu-mount` destination can be one the runtime mounts itself: every mount of
 /// a GPU run's bundle but the driver's is at or below a place a driver mount may not go. A
 /// mount the runtime adds later at a place not on that list fails this, so the list cannot
@@ -587,6 +617,7 @@ fn the_runtime_opened_from_the_settings_passes_the_gpus_and_reads_the_host() {
             tool_path: node.dir.join("tools").into_os_string(),
             check_search: false,
         },
+        daemon: PathBuf::from(env!("CARGO_BIN_EXE_js-agent")),
     };
     let settings = |gpus: Option<GpuPassthrough>| {
         let crun = node.dir.join("crun");

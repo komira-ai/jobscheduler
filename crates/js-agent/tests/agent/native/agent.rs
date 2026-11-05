@@ -22,7 +22,7 @@ use crate::support::{
 };
 
 /// A private directory `name` under `dir`.
-fn private(dir: &Scratch, name: &str) -> String {
+pub(super) fn private(dir: &Scratch, name: &str) -> String {
     let path = dir.path(name);
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -30,7 +30,7 @@ fn private(dir: &Scratch, name: &str) -> String {
 }
 
 /// The flags of a native agent over `fake` with its state and scratch roots in `dir`.
-fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
+pub(super) fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
     vec![
         "--native-helper-socket".to_owned(),
         fake.socket().display().to_string(),
@@ -45,7 +45,11 @@ fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
 
 /// Runs the whole agent on `host` with `extra` flags until the server's first answer
 /// (`answer`); returns what it printed and the hello it sent (`null` for none).
-fn hello_on(host: &Host, extra: &[String], answer: crate::support::Reply) -> (Ran, Value) {
+pub(super) fn hello_on(
+    host: &Host,
+    extra: &[String],
+    answer: crate::support::Reply,
+) -> (Ran, Value) {
     let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
     let args = flags(&refs);
     let (script, sent) = Script::new(vec![answer]);

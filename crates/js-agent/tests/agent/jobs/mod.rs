@@ -13,9 +13,13 @@ mod crun_e2e;
 mod crun_egress;
 #[cfg(target_os = "linux")]
 mod crun_gpu_hello;
+#[cfg(target_os = "linux")]
+mod crun_machine;
 mod drain;
 mod e2e;
 mod ends;
+#[cfg(target_os = "linux")]
+mod engine_opt_in;
 mod exclusive;
 pub mod fake;
 mod files_flags;
@@ -23,6 +27,7 @@ mod per_job;
 mod quiesce;
 mod quota_start;
 mod session;
+mod silence;
 mod system;
 mod usage;
 mod worker;
@@ -112,6 +117,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         usage: None,
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
         readiness: None,
+        silence_stop: None,
     }
 }
 

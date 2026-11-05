@@ -14,9 +14,9 @@ pub mod media {
     pub const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
     /// A Docker schema 2 image manifest.
     pub const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
-    /// An OCI image index, which is always refused.
+    /// An OCI image index, refused unless the [`Kind`](crate::Kind) selects a platform.
     pub const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
-    /// A Docker manifest list, which is always refused.
+    /// A Docker manifest list, refused unless the [`Kind`](crate::Kind) selects a platform.
     pub const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
     /// An OCI image config.
     pub const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
@@ -90,6 +90,17 @@ impl Platform {
     }
 }
 
+/// What a pull does with a pin that names an image index or a Docker manifest list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexPolicy {
+    /// Refuse it ([`Error::Index`]): the default of [`Kind::image`] and [`Kind::bundle`].
+    #[default]
+    Refuse,
+    /// Take from it the one manifest of the kind's platform.
+    SelectPlatform,
+}
+
 /// A kind of artifact: what its manifest, config and layers may be, which platform it is
 /// for, and how much of it may be read. A manifest of another kind is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +122,8 @@ pub struct Kind {
     pub platform_stated: bool,
     /// What may be read.
     pub limits: Limits,
+    /// What a pin that names an index does.
+    pub index: IndexPolicy,
 }
 
 impl Kind {
@@ -135,6 +148,7 @@ impl Kind {
                 layers: 128,
                 total_bytes: 16 * GIB,
             },
+            index: IndexPolicy::Refuse,
         }
     }
 
@@ -155,12 +169,24 @@ impl Kind {
                 layers: 32,
                 total_bytes: 16 * GIB,
             },
+            index: IndexPolicy::Refuse,
+        }
+    }
+
+    /// A bundle whose pin may also name an image index or manifest list: the manifest
+    /// of its platform is taken from the index ([`IndexPolicy::SelectPlatform`]). Every
+    /// other rule is [`Kind::bundle`]'s.
+    #[must_use]
+    pub fn bundle_from_index() -> Self {
+        Self {
+            index: IndexPolicy::SelectPlatform,
+            ..Self::bundle()
         }
     }
 
     /// The `Accept` header of a manifest request: the types this kind takes, and the
-    /// index types, which a registry then answers with (so the refusal can say index)
-    /// rather than with a 404.
+    /// index types too: a refusing kind then gets an index back and says so, a selecting
+    /// kind reads it and takes its platform manifest, rather than getting a 404.
     pub(crate) fn accept(&self) -> String {
         let mut types: Vec<&str> = self.manifest_types.to_vec();
         types.extend([OCI_INDEX, DOCKER_LIST]);
@@ -282,6 +308,18 @@ impl Wire {
     }
 }
 
+/// Refuses `bytes` that do not hash to `pinned`.
+pub(crate) fn check_digest(bytes: &[u8], pinned: &Digest) -> Result<(), Error> {
+    let actual = Digest::of(bytes);
+    if actual == *pinned {
+        return Ok(());
+    }
+    Err(Error::ManifestDigest {
+        pinned: pinned.to_string(),
+        actual: actual.to_string(),
+    })
+}
+
 /// Reads `bytes`, the manifest pinned by `pinned`.
 ///
 /// # Errors
@@ -290,13 +328,7 @@ impl Wire {
 /// (foreign layers, layers served from elsewhere), are not a manifest, or are beyond
 /// `kind`'s limits.
 pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manifest, Error> {
-    let actual = Digest::of(bytes);
-    if actual != *pinned {
-        return Err(Error::ManifestDigest {
-            pinned: pinned.to_string(),
-            actual: actual.to_string(),
-        });
-    }
+    check_digest(bytes, pinned)?;
     let doc: Document = serde_json::from_slice(bytes).map_err(|e| {
         Error::Malformed(format!(
             "the manifest {pinned} is not a manifest: {}",

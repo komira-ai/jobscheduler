@@ -25,15 +25,30 @@ use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
 use crate::image;
 use crate::limits;
+use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
 use crate::refusal;
-use crate::run::{self, RunSpec};
+use crate::run::RunSpec;
 
 /// The hello capability of an agent that takes [`crate::Command::JobStart`] and
 /// [`crate::Command::JobStop`] and reports `jobs` and `retired_jobs` in its heartbeat. Its
 /// value is `true`. An agent without it reads both commands as [`crate::Command::Unknown`],
 /// so a server sends them only to a host that reports it.
 pub const PER_JOB_CAPABILITY: &str = "per-job";
+
+/// The hello capability of an agent that fences its job starts. Its value is `true`. The
+/// fence of a start is the pair already on it, [`JobStartSpec::job_id`] and
+/// [`JobStartSpec::allocation_id`]; no field is added for it. An agent that reports it
+/// remembers the fences of the jobs it stopped, was told to stop or saw end (the newest of
+/// them, a bounded number), keeps them in its state root across a restart, and runs
+/// nothing for a start whose fence is among them (a stop that names no allocation retires
+/// every fence of the job). The same job id under a new allocation is a new fence and
+/// runs. Such an agent also stops every job it holds after a bounded silence of the
+/// server, and retires their fences. An agent without it promises neither: it may judge a
+/// start by its job id alone, and it runs its jobs through any silence until their wall
+/// limits. A server tells the two apart by this capability; nothing else on the wire
+/// changes.
+pub const START_FENCE_CAPABILITY: &str = "start-fence";
 
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
@@ -123,10 +138,12 @@ pub struct JobStartSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<Arch>,
     /// The environment, literal and not secret, held to the rules of a run's
-    /// ([`RunSpec::env`]) by the same check: at most [`limits::MAX_ENV`] entries, names
-    /// `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values without NUL. An agent of this version answers a start whose environment is not empty
-    /// `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing, until its
-    /// runtimes can set it (`js-agent-job-env-runtimes`).
+    /// ([`RunSpec::env`]) by the one check, [`crate::check_env`], naming `env`: at most
+    /// [`limits::MAX_ENV`] entries, names `[A-Za-z_][A-Za-z0-9_]*` and not reserved, values
+    /// without NUL. A container agent sets it in the job's container over the image's own
+    /// variables (a name in both takes the job's value); an agent whose runtime cannot
+    /// carry it (the macOS native runtime) answers a start whose environment is not empty
+    /// `failed_to_start` with [`refusal::ENV_UNSUPPORTED`] and runs nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     /// Files the agent writes for the job before it starts, as [`crate::JobSpec::files`],
@@ -151,13 +168,25 @@ pub struct JobStartSpec {
     /// out when there are none, and refused or forwarded as there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortMap>,
+    /// Where to upload the job's output while it runs ([`LogSink`]), sent only to a host
+    /// that reported [`crate::LOG_UPLOAD_CAPABILITY`]; absent means no live logs. It is
+    /// never part of the start's acceptance: a value that does not decode reads as absent,
+    /// and [`JobStartSpec::validate`] does not look at it; [`JobStartSpec::log_sink_checked`]
+    /// does. An agent that predates the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub log_sink: Option<LogSink>,
 }
 
 impl JobStartSpec {
     /// Checks the start: the ids, that an image is named and well formed, the command, the
     /// environment, the files, the booked resources, the wall limit and the declared ports. The server calls it
     /// before it sends a start and the agent before it acts on one, together with
-    /// [`JobStartSpec::require_pinned`].
+    /// [`JobStartSpec::require_pinned`]. It does not look at `log_sink`: a sink never
+    /// refuses a start ([`JobStartSpec::log_sink_checked`]).
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("job_id"), &self.job_id)?;
@@ -173,7 +202,7 @@ impl JobStartSpec {
                 return Err(at.field("command").fail(Rule::Inconsistent));
             }
         }
-        run::check_env(At::new("env", refusal::INVALID_ENV), &self.env)?;
+        crate::env::check_env("env", &self.env)?;
         files::validate_files(&self.files)?;
         self.booked.check(at)?;
         if self.wall_ms == 0 {
@@ -185,6 +214,24 @@ impl JobStartSpec {
         }
         check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)?;
         network::check_ports(&self.ports)
+    }
+
+    /// The start's [`LogSink`], checked: `Ok(None)` when there is none, and an error with
+    /// [`refusal::INVALID_LOG_SINK`] naming the part (`log_sink.endpoint`, `log_sink.region`,
+    /// `log_sink.bucket` or `log_sink.prefix`) when it is out of the form [`LogSink`] gives,
+    /// or when its prefix does not end in this start's own job id and `/`. The server calls
+    /// it before it sends a sink, and sends none when it fails; the agent calls it and, on an
+    /// error, starts the job without a sink. It never refuses the start.
+    ///
+    /// # Errors
+    ///
+    /// The sink is malformed or names another job's prefix.
+    pub fn log_sink_checked(&self) -> Result<Option<&LogSink>, ValidationError> {
+        let Some(sink) = &self.log_sink else {
+            return Ok(None);
+        };
+        let at = At::new("log_sink", refusal::INVALID_LOG_SINK);
+        sink.check(at, &self.job_id).map(|()| Some(sink))
     }
 
     /// Checks that the image is pinned by a `sha256:` digest, after
@@ -218,13 +265,32 @@ pub struct JobResult {
     /// The end of what the job printed, when the agent could read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_tail: Option<LogTail>,
+    /// What the capture saw of each stream ([`LogReport`]), from a runtime that uploads live
+    /// logs; absent otherwise. Never part of the result's acceptance: a value that does not
+    /// decode reads as absent, [`JobResult::validate`] does not look at it, and
+    /// [`JobResult::logs_report`] gives it only when it is consistent. A server from before
+    /// the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub logs: Option<LogReport>,
 }
 
 impl JobResult {
     /// Checks the ids, the detail, the log tail and that the exit status agrees with the
-    /// outcome, as [`crate::RunResult::validate`] does for a run.
+    /// outcome, as [`crate::RunResult::validate`] does for a run. It does not look at
+    /// `logs`.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.check(At::new("jobs", refusal::INVALID_HEARTBEAT))
+    }
+
+    /// The result's [`LogReport`] when it has one in which neither stream dropped more
+    /// bytes than it had; `None` otherwise, and a server then stores nothing of it.
+    #[must_use]
+    pub fn logs_report(&self) -> Option<&LogReport> {
+        self.logs.as_ref().filter(|report| report.consistent())
     }
 
     fn check(&self, at: At) -> Result<(), ValidationError> {

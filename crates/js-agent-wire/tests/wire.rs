@@ -67,6 +67,9 @@ fn refusal_codes_snapshot() {
         refusal::IMAGE_UNSUPPORTED_HERE,
         refusal::RUN_UNSUPPORTED,
         refusal::ENV_UNSUPPORTED,
+        refusal::IMAGE_NOT_ALLOWED,
+        refusal::INVALID_LOG_SINK,
+        refusal::INVALID_LOG_CREDENTIAL,
     ];
     assert_eq!(
         codes.join(" "),
@@ -77,7 +80,8 @@ fn refusal_codes_snapshot() {
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \
          network-above-ceiling port-above-ceiling ports-not-supported \
-         platform-mismatch image-unsupported-here run-unsupported env-unsupported"
+         platform-mismatch image-unsupported-here run-unsupported env-unsupported image-not-allowed \
+         invalid-log-sink invalid-log-credential"
     );
 }
 
@@ -106,6 +110,7 @@ fn the_refusal_table_names_the_one_job_codes() {
         ("PLATFORM_MISMATCH", refusal::PLATFORM_MISMATCH),
         ("IMAGE_UNSUPPORTED_HERE", refusal::IMAGE_UNSUPPORTED_HERE),
         ("RUN_UNSUPPORTED", refusal::RUN_UNSUPPORTED),
+        ("IMAGE_NOT_ALLOWED", refusal::IMAGE_NOT_ALLOWED),
     ];
     let names = want.map(|(name, _)| name);
     assert_eq!(table_codes(source), names);
@@ -262,5 +267,6 @@ fn round_trip_of_every_message() {
         exclusive: None,
         job_acks: Vec::new(),
         retired_acks: Vec::new(),
+        log_grant: None,
     });
 }

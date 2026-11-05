@@ -18,7 +18,7 @@ js-proto = { path = "../js-proto" }
 clap.workspace = true
 getrandom.workspace = true
 prost.workspace = true
-prost-reflect.workspace = true
+prost-reflect = { workspace = true, features = ["serde", "text-format"] }
 rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 thiserror.workspace = true

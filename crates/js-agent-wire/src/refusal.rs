@@ -13,8 +13,9 @@
 //! | [`INVALID_IMAGE`] | a `run` beside an empty `image` |
 //! | [`INVALID_JOB`] | a `run` beside a `native` body (field `run`) or beside job `args` (field `args`), or a start a server cannot write in the legacy forms for an older host |
 //! | [`PLATFORM_MISMATCH`] | the start's `os` or `arch` is not the platform of its image's config, or that platform is outside the set a start names |
-//! | [`IMAGE_UNSUPPORTED_HERE`] | an image start on a Mac agent, which runs legacy native bodies only |
+//! | [`IMAGE_UNSUPPORTED_HERE`] | an image start on a Mac agent that cannot run it: one without a `run`, or an agent with no bundle store |
 //! | [`RUN_UNSUPPORTED`] | a `run` on a Linux agent, which runs the image's own command only |
+//! | [`IMAGE_NOT_ALLOWED`] | an image start on a Mac agent whose image is on no `--image-allow` entry |
 
 /// A hello whose body is malformed: a bad id, list, label or shape.
 pub const INVALID_HELLO: &str = "invalid-hello";
@@ -48,9 +49,11 @@ pub const INVALID_PROGRAM: &str = "invalid-program";
 /// A native job, or a job start, whose environment has a bad name or value, too many
 /// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
-/// A job start with a non-empty `env`, answered `failed_to_start` by an agent whose
-/// runtimes cannot yet set a container's environment; nothing runs. Temporary: the change
-/// that passes the environment into the runtimes (`js-agent-job-env-runtimes`) removes it.
+/// As the detail of a `failed_to_start` result: a job start with a non-empty `env` on an
+/// agent whose runtime does not carry a job start's environment, today the macOS native
+/// runtime; nothing runs. Before the container runtimes set a job's environment, every
+/// agent answered it so. No container agent of this release or later sends it. Kept, as
+/// every code is: a deployed peer may still match on it.
 pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
@@ -60,16 +63,21 @@ pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
 /// `darwin`; `amd64`, `arm64`). The refusal's `field` is `os` or `arch`, or `image.os` or
 /// `image.architecture` for the image's own. Retrying cannot change it.
 pub const PLATFORM_MISMATCH: &str = "platform-mismatch";
-/// As the detail of a `failed_to_start` result: a start named by its image (`image`, with or
-/// without `run`) on a Mac agent, whose native runtime runs only the legacy `native` body
-/// and pulls no image yet. Nothing is created. It clears when the Mac agent pulls a bundle
-/// by its digest; until then a server sends a Mac host the legacy form.
+/// As the detail of a `failed_to_start` result: a start named by its image on a Mac agent
+/// that cannot run it. A Mac agent with a bundle store runs an image start that carries a
+/// `run`, by the bundle the image resolves to; it refuses one without a `run` (a bundle has
+/// no command of its own) and any image start when it has no bundle store. Nothing is
+/// created. A server sends such a Mac host the legacy form.
 pub const IMAGE_UNSUPPORTED_HERE: &str = "image-unsupported-here";
 /// As the detail of a `failed_to_start` result: a start with a `run` on an agent that runs
 /// containers, which runs an image's own command and has no consumer of `run` yet. Nothing
 /// is created; the field is refused rather than dropped, so the job never runs another
 /// command than it asked for.
 pub const RUN_UNSUPPORTED: &str = "run-unsupported";
+/// As the detail of a `failed_to_start` result: a start on a Mac agent whose image is on no
+/// `--image-allow` entry, so the agent will not fetch it. Nothing is created and no
+/// registry is asked. A Linux agent has no such code.
+pub const IMAGE_NOT_ALLOWED: &str = "image-not-allowed";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A job with a run file that is badly named, named twice, too large, holds a NUL, or
@@ -142,6 +150,15 @@ pub const HOST_LISTED: &str = "host-listed";
 pub const RATE_LIMITED: &str = "rate-limited";
 /// A request body over the transport's cap, refused before it is read in full.
 pub const BODY_TOO_LARGE: &str = "body-too-large";
+/// A job start's `log_sink` that fails [`crate::JobStartSpec::log_sink_checked`]: an
+/// endpoint, region, bucket or prefix out of its form, or a prefix that is not the job's
+/// own. The refusal's `field` names the part. It never refuses the start: the server sends
+/// no sink instead, and an agent starts the job without live logs.
+pub const INVALID_LOG_SINK: &str = "invalid-log-sink";
+/// A reply's `log_grant` with an empty, over-long or malformed field, or an expiry of zero
+/// ([`crate::ReplyCheck::log_grant`]). The refusal's `field` names it. The agent ignores
+/// the credential and acts on the rest of the reply.
+pub const INVALID_LOG_CREDENTIAL: &str = "invalid-log-credential";
 
 /// A whole-node lease request that failed after the host could not be prepared within the
 /// allowed number of replacements; its detail names the last reason code and detail the
@@ -213,7 +230,8 @@ pub const BUNDLE_REGISTRY_NOT_ALLOWED: &str = "bundle-registry-not-allowed";
 /// A start whose bundle could not be fetched or did not verify (a digest or size
 /// mismatch).
 pub const BUNDLE_FETCH_FAILED: &str = "bundle-fetch-failed";
-/// A start whose pin names an index, not a manifest.
+/// A start whose pin names an index whose darwin/arm64 entry is itself an index (one level
+/// only).
 pub const BUNDLE_INDEX: &str = "bundle-index";
 
 /// Whose fault a refused start is, which decides what a client does with it.
@@ -228,7 +246,7 @@ pub enum RefusalClass {
 }
 
 /// The refusals of a bundle start that are the farm's fault.
-const FARM_CODES: [&str; 10] = [
+const FARM_CODES: [&str; 11] = [
     BUNDLE_UNSUPPORTED,
     BUNDLE_PENDING,
     BUNDLE_NOT_HELD,
@@ -239,6 +257,7 @@ const FARM_CODES: [&str; 10] = [
     BUNDLE_DENIED,
     BUNDLE_REGISTRY_NOT_ALLOWED,
     BUNDLE_FETCH_FAILED,
+    IMAGE_NOT_ALLOWED,
 ];
 
 /// The refusals of a bundle start that are the request's fault.

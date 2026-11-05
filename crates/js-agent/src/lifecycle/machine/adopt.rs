@@ -5,6 +5,7 @@ use std::cmp::Reverse;
 
 use js_agent_wire::Taint;
 
+use super::held::Records;
 use super::job::{
     Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
     may_change_host, slot_label,
@@ -44,6 +45,12 @@ impl Lifecycle {
     /// order the runtime lists them in. When the offer is lower than at the last start,
     /// the jobs that no longer fit are therefore the newest, and they are evicted.
     ///
+    /// The results the earlier process had not seen acknowledged, and the ids it had retired,
+    /// are read back from the state root (see `held`) after the containers are taken over: a
+    /// result of a run taken over is set on it, which then makes no second one when its
+    /// container is seen to have exited, and any other is held by a job that owns nothing, so
+    /// the next heartbeat lists it again. A file that cannot be read is dropped and reported.
+    ///
     /// What the runtime lists is the agent's own ([`Runtime::list_labelled`] is
     /// scoped by the agent label); the listing removes nothing, so a container that was
     /// created and never started is evicted here like one whose labels are unreadable.
@@ -72,6 +79,7 @@ impl Lifecycle {
             })
             .collect();
         found.sort_by_key(|(exited, container)| (!exited, Reverse(container.running_ms)));
+        let records = Records::new(&config.state);
         let taint = TaintState::load(config.state.clone());
         let mut this = Self {
             config,
@@ -81,6 +89,7 @@ impl Lifecycle {
             jobs: Vec::new(),
             stuck: Vec::new(),
             retired: Retired::default(),
+            records,
             slots: Slots::new(SLOTS),
             taint,
             exclusive: None,
@@ -88,6 +97,7 @@ impl Lifecycle {
             quota_health: QuotaHealth::default(),
             parked_reminded_ms: None,
             answered: Vec::new(),
+            silence: None,
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);
@@ -156,6 +166,7 @@ impl Lifecycle {
             }
         }
         this.clear_leftovers(&leftover, &mut events);
+        this.restore_held(&mut events);
         Ok((this, events))
     }
 

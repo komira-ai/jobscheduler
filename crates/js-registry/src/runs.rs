@@ -17,7 +17,7 @@ use js_agent_wire::{
     RunResult, ValidationError, WireShape, limits,
 };
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
-use js_pool_static::HostBook;
+use js_provider::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, Resources};
 use js_usage::ProfileKey;
@@ -615,6 +615,7 @@ impl Runs {
             exclusive: None,
             job_acks: Vec::new(),
             retired_acks: Vec::new(),
+            log_grant: None,
         }
     }
 
@@ -792,6 +793,7 @@ mod tests {
             disk_gib: None,
             jobs: Vec::new(),
             retired_jobs: Vec::new(),
+            log_grant_state: None,
         }
     }
 

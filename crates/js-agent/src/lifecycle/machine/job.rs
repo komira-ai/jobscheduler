@@ -1,16 +1,19 @@
 //! What the machine keeps for each run: its [`Job`] and the stage it is in, what it books,
-//! how it ended, the run ids that must not start again, and the taints and the container
-//! spec that follow from a job.
+//! how it ended, the run ids and job fences that must not start again, and the taints and
+//! the container spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
-use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
+use js_agent_wire::{
+    HeldRun, HeldState, Isolation, JobSpec, NativeSpec, Outcome, RunResult, Taint,
+};
+use serde::{Deserialize, Serialize};
 
 use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
 use crate::lifecycle::taint::{TaintState, reason};
-use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
+use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
 
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub(super) enum Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
     pub(super) spec: JobSpec,
+    /// The environment of a job start, empty for a run start ([`RunSpec::env`]).
+    pub(super) env: Vec<(String, String)>,
     pub(super) mounts: Vec<ResolvedMount>,
     pub(super) slot: u32,
     /// The disk the run books.
@@ -103,12 +108,21 @@ pub(super) enum Cause {
     Stopped,
     /// The wall-time limit.
     TimedOut,
+    /// The server was not heard for the silence bound (see `silence`).
+    Silenced,
+}
+
+/// The detail of the result of a job that `cause` ended: [`detail::SILENCE_STOP`] for a
+/// silence, none otherwise.
+pub(super) fn cause_detail(cause: Option<Cause>) -> Option<&'static str> {
+    (cause == Some(Cause::Silenced)).then_some(detail::SILENCE_STOP)
 }
 
 /// What a job is keyed by on the wire, which decides where it is listed: a run (the lease
 /// and run messages: `held`, `results`, `result_acks`) or a job (the per-job messages:
 /// `jobs`, `jobs[].result`, `job_acks`). A job is listed under its own keying alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Keyed {
     /// Started by a `Start`: its id is a run id and its lease a lease id.
     Run,
@@ -293,7 +307,8 @@ impl Job {
     /// only gives the slot back.
     pub(super) fn end_unstarted(&mut self, events: &mut Vec<Event>) {
         if !self.silent {
-            self.result = Some(self.report(Outcome::Killed, None, None));
+            let detail = cause_detail(self.cause);
+            self.result = Some(self.report(Outcome::Killed, None, detail));
             events.push(Event::ResultReady {
                 run_id: self.run_id.clone(),
             });
@@ -314,10 +329,19 @@ impl Job {
     /// Asks a running job, or one still waiting for its image, to stop; a job past its
     /// exit has nothing to stop.
     pub(super) fn request_stop(&mut self, silent: bool) {
-        if matches!(self.stage, Stage::Running(_) | Stage::Preparing(_)) {
-            self.cause.get_or_insert(Cause::Stopped);
+        self.request_stop_for(Cause::Stopped, silent);
+    }
+
+    /// Asks a running job, or one still waiting for its image, to stop for `cause` (a cause
+    /// already set stays); a job past its exit has nothing to stop. Whether it was running
+    /// or waiting.
+    pub(super) fn request_stop_for(&mut self, cause: Cause, silent: bool) -> bool {
+        let live = matches!(self.stage, Stage::Running(_) | Stage::Preparing(_));
+        if live {
+            self.cause.get_or_insert(cause);
             self.silent |= silent;
         }
+        live
     }
 }
 
@@ -326,7 +350,7 @@ impl Job {
 pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
     match (cause, exit) {
         (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
-        (Some(Cause::Stopped), _) => (Outcome::Killed, None),
+        (Some(Cause::Stopped | Cause::Silenced), _) => (Outcome::Killed, None),
         (
             None,
             Some(Exit {
@@ -340,17 +364,31 @@ pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Opt
     }
 }
 
-/// The run ids that must never start again, oldest first.
+/// The fences that must never start again, oldest first: each a run id (or job id) with
+/// the allocation (lease) id of the job when it is known, and a count of the fences added,
+/// which says whether the list has changed since it was last written down. A run start is
+/// judged by its id alone ([`Retired::contains`]); a job start by its fence
+/// ([`Retired::fenced`]), so the same job under a new allocation is new work.
 #[derive(Default)]
 pub(super) struct Retired {
-    order: VecDeque<String>,
-    seen: BTreeSet<String>,
+    order: VecDeque<(String, Option<String>)>,
+    seen: BTreeSet<(String, Option<String>)>,
+    added: u64,
 }
 
 impl Retired {
+    /// Retires every fence of `run_id`: a stop that names no allocation.
     pub(super) fn insert(&mut self, run_id: &str) {
-        if self.seen.insert(run_id.to_owned()) {
-            self.order.push_back(run_id.to_owned());
+        self.insert_with(run_id, None);
+    }
+
+    /// Retires the fence of `run_id` under `allocation`, or every fence of `run_id` when the
+    /// allocation is not known. A fence already retired changes nothing.
+    pub(super) fn insert_with(&mut self, run_id: &str, allocation: Option<&str>) {
+        let fence = (run_id.to_owned(), allocation.map(str::to_owned));
+        if self.seen.insert(fence.clone()) {
+            self.order.push_back(fence);
+            self.added += 1;
         }
         if self.order.len() > RETIRED_CAP {
             self.order.pop_front().iter().for_each(|old| {
@@ -359,8 +397,32 @@ impl Retired {
         }
     }
 
+    /// How many ids were added in all: it differs between two readings when the list
+    /// changed.
+    pub(super) fn added(&self) -> u64 {
+        self.added
+    }
+
+    /// The retired ids with their allocations, oldest first.
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.order
+            .iter()
+            .map(|(id, allocation)| (id.as_str(), allocation.as_deref()))
+    }
+
+    /// Whether any fence of `run_id` is retired: how a run start is judged.
     pub(super) fn contains(&self, run_id: &str) -> bool {
-        self.seen.contains(run_id)
+        let from: (String, Option<String>) = (run_id.to_owned(), None);
+        let first = self.seen.range(from..).next();
+        first.is_some_and(|(id, _)| id == run_id)
+    }
+
+    /// Whether the fence of `job_id` under `allocation` is retired, by itself or by a stop
+    /// of the job that named no allocation: how a job start is judged.
+    pub(super) fn fenced(&self, job_id: &str, allocation: &str) -> bool {
+        let every: (String, Option<String>) = (job_id.to_owned(), None);
+        let this = (job_id.to_owned(), Some(allocation.to_owned()));
+        self.seen.contains(&every) || self.seen.contains(&this)
     }
 }
 
@@ -393,6 +455,40 @@ impl Job {
             host: spec.isolation == Isolation::Host,
             owed: false,
             result: None,
+            findings: Vec::new(),
+            started_usec: None,
+            cgroup: None,
+            cgroup_missing_told: false,
+            blind_told: false,
+            adopted: false,
+            usage_held: None,
+            slot_parked: false,
+        }
+    }
+
+    /// A job that holds nothing and only owes its `result`, as one read back from the state
+    /// root after a restart: its slot is free, so it is only listed until the result is
+    /// acknowledged.
+    pub(super) fn held(keyed: Keyed, result: RunResult) -> Self {
+        Self {
+            run_id: result.run_id.clone(),
+            lease_id: result.lease_id.clone(),
+            keyed,
+            booking: Booking {
+                cpu_millis: 0,
+                memory_bytes: 0,
+                disk_bytes: 0,
+                gpus: Vec::new(),
+            },
+            slot: None,
+            deadline_ms: 0,
+            stage: Stage::Freed,
+            cause: None,
+            silent: false,
+            stop_sent: false,
+            host: false,
+            owed: false,
+            result: Some(result),
             findings: Vec::new(),
             started_usec: None,
             cgroup: None,
@@ -500,13 +596,14 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
     }
 }
 
-/// The run of a start: the spec's own labels with the agent's over them, and the body the
-/// start names, a container's or a native program's.
+/// The run of a start: the spec's own labels with the agent's over them, the body the
+/// start names, a container's or a native program's, and the environment of a job start
+/// (`env`, by name in order; empty for a run start). `made` is what the lifecycle made for
+/// the run: its resolved mounts, its scratch directory and its files directory.
 pub(super) fn run_spec(
     (spec, keyed): (&JobSpec, Keyed),
-    mounts: Vec<ResolvedMount>,
-    scratch: std::path::PathBuf,
-    files: Option<std::path::PathBuf>,
+    env: &[(String, String)],
+    (mounts, scratch, files): (Vec<ResolvedMount>, PathBuf, Option<PathBuf>),
     slot: u32,
     disk_bytes: u64,
 ) -> RunSpec {
@@ -535,13 +632,17 @@ pub(super) fn run_spec(
     }
     RunSpec {
         run_id: spec.run_id.clone(),
-        body: match &spec.native {
-            Some(native) => Body::Native(native.clone()),
-            None => Body::Container {
+        // A `run` only reaches here on a runtime that runs image runs: admission refused it
+        // elsewhere. Its image is the bundle the run is from.
+        body: match (&spec.native, &spec.run) {
+            (Some(native), _) => Body::Native(native.clone()),
+            (None, Some(run)) => Body::Native(NativeSpec::from(run.clone())),
+            (None, None) => Body::Container {
                 image: spec.image.clone(),
                 args: spec.args.clone(),
             },
         },
+        env: env.to_vec(),
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         pids: spec.limits.pids,
@@ -554,6 +655,9 @@ pub(super) fn run_spec(
         network: spec.network,
         ports: spec.ports.clone(),
         labels,
-        bundle: spec.bundle.clone(),
+        bundle: spec
+            .bundle
+            .clone()
+            .or_else(|| spec.run.as_ref().map(|_| spec.image.clone())),
     }
 }

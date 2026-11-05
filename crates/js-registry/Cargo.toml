@@ -12,7 +12,6 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-lease = { path = "../js-lease" }
-js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-types = { path = "../js-types" }
 js-usage = { path = "../js-usage" }
@@ -26,6 +25,7 @@ thiserror.workspace = true
 # tests/capacity.rs runs the registered set of the machine-provider conformance suite
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
+js-pool-static = { path = "../js-pool-static" }
 js-sim = { path = "../js-sim" }
 serde_json.workspace = true
 

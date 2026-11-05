@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,16 +19,17 @@ use js_elastic::{Artifact, CapacityProvider, Demand, SchedulerId};
 use js_lease::Clock;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_scaler::{Budgets, Millis};
+use js_sched::admission_ever::PoolLimits;
 use js_types::{
     Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
     ResourceClass, Resources, Shape,
 };
 
 use crate::adapt::SharedClock;
-use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
+use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{Token, parse_duration};
+use crate::config::Token;
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
@@ -39,14 +39,22 @@ mod brake;
 mod budget;
 mod joined;
 mod lifetime;
+mod limits;
 mod network;
 mod pins;
+mod platform;
+mod section;
 mod server;
 
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
+pub use limits::ProviderLimits;
 use network::read_network;
 use pins::{LIVE_NEEDS, read_agents};
+pub use platform::{
+    PoolSettings, Resolved, ResolvedMachineProvider, ResolvedPlatform, ResolvedPool,
+};
+use section::Section;
 pub(crate) use server::{AlertKeys, Server};
 use server::{read_client_token, read_server};
 
@@ -59,7 +67,7 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 /// The memory a host of an elastic pool must report at least: 1 GiB.
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
-const ROOT_KEYS: &[&str] = &["server", "pool", "budget"];
+const ROOT_KEYS: &[&str] = &["server", "pool", "budget", "machine_provider", "platform"];
 
 const POOL_KEYS: &[&str] = &[
     "name",
@@ -67,6 +75,7 @@ const POOL_KEYS: &[&str] = &[
     "exec",
     MEMORY_PERCENT_KEY,
     "max_instances",
+    "max_machines",
     "max_spend_per_hour",
     "max_spend_per_day",
     "idle",
@@ -81,6 +90,11 @@ const POOL_KEYS: &[&str] = &[
     "agent",
     "join_token_file",
     "provider",
+    "platforms",
+    "provider_limits",
+    "max_queue_wait",
+    "start_timeout",
+    "path_grace",
     "network",
 ];
 
@@ -197,6 +211,11 @@ pub struct ElasticPlan {
     /// The pool's name as the registry knows it.
     pub(crate) id: ProviderId,
     pub(crate) provider: Arc<dyn CapacityProvider>,
+    /// How many machines the provider may hold for the pool, as admission reads it: its
+    /// `provider_limits` `max_machines`, else the pool's.
+    pub(crate) share: u32,
+    /// The pool's `provider_limits` on the provider, as admission reads them.
+    pub(crate) limits: PoolLimits,
 }
 
 impl ElasticPlan {
@@ -250,6 +269,23 @@ pub(crate) struct Registering {
     pub(crate) mint_provider: Option<String>,
 }
 
+impl Registering {
+    /// Gives the launching side the share and the limits admission reads, from the pool's
+    /// `provider_limits` (`limits`; a pool has one launching provider and a limit is refused
+    /// for any other, so it holds that provider's limits or none) and its `max_machines`.
+    fn admit(&mut self, limits: &BTreeMap<String, ProviderLimits>, max_machines: Option<u64>) {
+        let limit = limits.values().next().cloned().unwrap_or_default();
+        let share = limit.max_machines.or(max_machines).unwrap_or_default();
+        self.plan.iter_mut().for_each(|plan| {
+            plan.share = u32::try_from(share).unwrap_or(u32::MAX);
+            plan.limits = PoolLimits {
+                allowed_instance_types: limit.allowed_instance_types.clone(),
+                max_price_cents_per_hour: limit.max_price_cents_per_hour,
+            };
+        });
+    }
+}
+
 /// The pools of the file, as the sources of hosts they make.
 pub(crate) enum LoadedHosts {
     /// Static pools only.
@@ -267,6 +303,11 @@ pub(crate) struct Loaded {
     pub(crate) client_token: Token,
     pub(crate) hosts: LoadedHosts,
     pub(crate) warnings: Vec<String>,
+    /// The machine providers, platforms and pools, however each pool was written.
+    pub(crate) resolved: Resolved,
+    /// Why the server cannot start on the file although it is valid: it has more than one
+    /// pool that registers agents, which the fixed order of this version cannot run.
+    pub(crate) unrunnable: Option<StartupError>,
 }
 
 /// What reading the file needs besides its path.
@@ -274,215 +315,6 @@ pub(crate) struct Load<'a> {
     pub(crate) kinds: &'a Kinds,
     pub(crate) files: &'a dyn SecretFiles,
     pub(crate) clock: SharedClock,
-}
-
-/// One table of the file, and where it is, for the messages.
-struct Section {
-    map: toml::Table,
-    head: String,
-}
-
-impl Section {
-    fn open(map: toml::Table, head: String) -> Self {
-        Self { map, head }
-    }
-
-    /// A refusal of `key` of this table.
-    fn fail(&self, key: &str, reason: &str) -> StartupError {
-        StartupError::at(format!("{}{key}", self.head), reason)
-    }
-
-    /// Refuses a class that books part of a host: this server serves whole hosts only.
-    fn class_served(&self, class: &ResourceClass) -> Result<(), StartupError> {
-        match class.admission() {
-            Admission::Book(_) => Err(self.fail("class", MIXED_UNSERVED)),
-            _ => Ok(()),
-        }
-    }
-
-    /// Refuses the first field that is not one of `known`.
-    fn only(&self, known: &[&str]) -> Result<(), StartupError> {
-        for key in self.map.keys() {
-            if !known.contains(&key.as_str()) {
-                let reason = format!("unknown field; known: {}", known.join(", "));
-                return Err(self.fail(key, &reason));
-            }
-        }
-        Ok(())
-    }
-
-    fn string(&mut self, key: &str) -> Result<Option<String>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::String(text)) => Ok(Some(text)),
-            Some(_) => Err(self.fail(key, "must be a string")),
-        }
-    }
-
-    fn required_string(&mut self, key: &str) -> Result<String, StartupError> {
-        match self.string(key)? {
-            Some(text) => Ok(text),
-            None => Err(self.fail(key, "required")),
-        }
-    }
-
-    fn path(&mut self, key: &str) -> Result<Option<PathBuf>, StartupError> {
-        Ok(self.string(key)?.map(PathBuf::from))
-    }
-
-    fn required_path(&mut self, key: &str) -> Result<PathBuf, StartupError> {
-        match self.path(key)? {
-            Some(path) => Ok(path),
-            None => Err(self.fail(key, "required")),
-        }
-    }
-
-    fn integer(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Integer(number)) => match u64::try_from(number) {
-                Ok(number) => Ok(Some(number)),
-                Err(_) => Err(self.fail(key, "must not be negative")),
-            },
-            Some(_) => Err(self.fail(key, "must be an integer")),
-        }
-    }
-
-    /// The integer `key` when the file gives it, which must be from `low` to `high`.
-    fn bounded_given(
-        &mut self,
-        key: &str,
-        low: u64,
-        high: u64,
-    ) -> Result<Option<u64>, StartupError> {
-        let Some(number) = self.integer(key)? else {
-            return Ok(None);
-        };
-        match (low..=high).contains(&number) {
-            true => Ok(Some(number)),
-            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
-        }
-    }
-
-    /// The integer `key`, or `default`, which must be from `low` to `high`.
-    fn bounded(
-        &mut self,
-        key: &str,
-        low: u64,
-        high: u64,
-        default: u64,
-    ) -> Result<u64, StartupError> {
-        Ok(self.bounded_given(key, low, high)?.unwrap_or(default))
-    }
-
-    fn boolean(&mut self, key: &str) -> Result<Option<bool>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Boolean(flag)) => Ok(Some(flag)),
-            Some(_) => Err(self.fail(key, "must be true or false")),
-        }
-    }
-
-    fn duration(&mut self, key: &str) -> Result<Option<Duration>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match parse_duration(&text) {
-            Ok(duration) => Ok(Some(duration)),
-            Err(_) => Err(self.fail(key, "must be a positive duration such as 600s, 10m or 1h")),
-        }
-    }
-
-    fn duration_or(&mut self, key: &str, default: Duration) -> Result<Duration, StartupError> {
-        Ok(self.duration(key)?.unwrap_or(default))
-    }
-
-    fn address(&mut self, key: &str) -> Result<Option<SocketAddr>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match text.parse::<SocketAddr>() {
-            Ok(address) => Ok(Some(address)),
-            Err(_) => Err(self.fail(key, "must be an address such as 127.0.0.1:7300")),
-        }
-    }
-
-    fn table(&mut self, key: &str) -> Result<Option<toml::Table>, StartupError> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(toml::Value::Table(table)) => Ok(Some(table)),
-            Some(_) => Err(self.fail(key, "must be a table")),
-        }
-    }
-
-    fn tables(&mut self, key: &str) -> Result<Vec<toml::Table>, StartupError> {
-        let must = "must be an array of tables, written [[pool]]";
-        let Some(value) = self.map.remove(key) else {
-            return Ok(Vec::new());
-        };
-        let toml::Value::Array(items) = value else {
-            return Err(self.fail(key, must));
-        };
-        let mut tables = Vec::new();
-        for item in items {
-            let toml::Value::Table(table) = item else {
-                return Err(self.fail(key, must));
-            };
-            tables.push(table);
-        }
-        Ok(tables)
-    }
-
-    /// The pool's `memory_schedulable_percent` when the table gives it: a whole number
-    /// from 1 to 100.
-    fn memory_percent(&mut self) -> Result<Option<MemoryPercent>, StartupError> {
-        let Some(percent) = self.integer(MEMORY_PERCENT_KEY)? else {
-            return Ok(None);
-        };
-        let bounded = MemoryPercent::new(percent);
-        bounded
-            .map(Some)
-            .map_err(|_| self.fail(MEMORY_PERCENT_KEY, "must be from 1 to 100"))
-    }
-
-    /// A spend in cents: a string holding a decimal with at most two places, above zero.
-    fn spend(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
-        let Some(text) = self.string(key)? else {
-            return Ok(None);
-        };
-        match cents(&text) {
-            None => Err(self.fail(
-                key,
-                "must be a decimal with at most two places, such as \"12.00\"",
-            )),
-            Some(0) => Err(self.fail(key, "must be above zero")),
-            Some(amount) => Ok(Some(amount)),
-        }
-    }
-}
-
-fn is_digit(byte: u8) -> bool {
-    byte.is_ascii_digit()
-}
-
-fn digits(part: &str) -> bool {
-    part.bytes().all(is_digit)
-}
-
-/// `text` as cents: digits, then optionally a point and one or two digits.
-fn cents(text: &str) -> Option<u64> {
-    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    let valid = [
-        !whole.is_empty(),
-        fraction.len() <= 2,
-        !text.ends_with('.'),
-        digits(whole),
-        digits(fraction),
-    ];
-    match valid.contains(&false) {
-        true => None,
-        false => format!("{whole}{fraction:0<2}").parse().ok(),
-    }
 }
 
 /// The line of `text` at which the parser stopped; the first when it gives no position.
@@ -516,11 +348,14 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     };
     let pools = root.tables("pool")?;
     let budget = root.table("budget")?;
+    let machine_providers = root.tables("machine_provider")?;
+    let platforms = root.tables("platform")?;
     let server = read_server(server)?;
     let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
+    let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
     let mut static_pool = None;
-    let mut registering = None;
+    let mut registering = Vec::new();
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
         let ceiling = server.max_lease_wall;
@@ -529,6 +364,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             index + 1,
             ld,
             (&client_token, &server.scheduler, ceiling, &budgets),
+            &mut resolved,
         )?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
@@ -542,21 +378,21 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
                     return Err(StartupError::at(pool, reason));
                 }
             }
-            Pool::Elastic(elastic) => {
-                if registering.replace(elastic).is_some() {
-                    let reason = "only one pool may register agents in this version";
-                    return Err(StartupError::at(pool, reason));
-                }
-            }
+            Pool::Elastic(elastic) => registering.push((pool, elastic)),
+            Pool::Hostless => {}
         }
     }
-    let elastic = registering.is_some();
+    resolved.check_named()?;
+    let elastic = !registering.is_empty();
     // A joined pool has no plan, so only an elastic pool's launch settings are checked.
-    if let Some(registering) = &registering
-        && let Some(plan) = &registering.plan
+    for plan in registering
+        .iter()
+        .filter_map(|(_, pool)| pool.plan.as_ref())
     {
         check_live(&server, plan)?;
     }
+    let unrunnable = unrunnable(&registering);
+    let registering = registering.into_iter().next().map(|(_, pool)| pool);
     let hosts = match (static_pool, registering) {
         (static_pool, Some(registering)) => LoadedHosts::Registering {
             static_pool,
@@ -580,8 +416,31 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         client_token,
         hosts,
         warnings,
+        resolved,
+        unrunnable,
     })
 }
+
+/// Why the server cannot run the registering pools `registering` (each with its message
+/// head, `pool "<name>"`): this version runs one, through the fixed order of `layered.rs`.
+/// The refusal names the second pool.
+fn unrunnable(registering: &[(String, Box<Registering>)]) -> Option<StartupError> {
+    let (second, _) = registering.get(1)?;
+    let elastic = registering.iter().filter(|(_, pool)| pool.plan.is_some());
+    let reason = match elastic.count() {
+        0 | 1 => SEVERAL_REGISTERING,
+        _ => SEVERAL_ELASTIC,
+    };
+    Some(StartupError::at(second, reason))
+}
+
+/// Why a file with two elastic pools does not start.
+const SEVERAL_ELASTIC: &str =
+    "several elastic pools are parsed; running them needs the ordered walk of design 5.6";
+
+/// Why a file with two pools that register agents, not both elastic, does not start.
+const SEVERAL_REGISTERING: &str =
+    "several pools register agents; running them needs the ordered walk of design 5.6";
 
 /// A pool of the file, built.
 struct Read {
@@ -592,12 +451,21 @@ struct Read {
 enum Pool {
     Static(Box<dyn CapacitySource>),
     Elastic(Box<Registering>),
+    /// A pool that names only hostless platforms: in [`Resolved`], and nothing to run.
+    Hostless,
 }
 
 /// The keys of a pool that belong to an elastic pool, as the file gave them.
 struct ElasticKeys {
     exec: Option<String>,
+    /// The cap on machines, by either of its names.
     max_instances: Option<u64>,
+    /// The name the cap was given by: `max_machines`, or `max_instances` (also when it was
+    /// not given).
+    cap_key: &'static str,
+    /// The first of the queue settings the file gave.
+    settings_given: Option<&'static str>,
+    provider_limits: Option<toml::Table>,
     hour: Option<u64>,
     day: Option<u64>,
     idle: Option<Duration>,
@@ -616,7 +484,7 @@ impl ElasticKeys {
     fn first_given(&self) -> Option<&'static str> {
         let given = [
             ("exec", self.exec.is_some()),
-            ("max_instances", self.max_instances.is_some()),
+            (self.cap_key, self.max_instances.is_some()),
             ("max_spend_per_hour", self.hour.is_some()),
             ("max_spend_per_day", self.day.is_some()),
             ("idle", self.idle.is_some()),
@@ -627,13 +495,14 @@ impl ElasticKeys {
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
             ("agent", self.agent.is_some()),
+            ("provider_limits", self.provider_limits.is_some()),
         ];
         for (key, set) in given {
             if set {
                 return Some(key);
             }
         }
-        self.brake.first_given()
+        self.settings_given.or_else(|| self.brake.first_given())
     }
 }
 
@@ -647,6 +516,7 @@ fn read_pool(
         Option<Duration>,
         &Budgets,
     ),
+    resolved: &mut Resolved,
 ) -> Result<Read, StartupError> {
     if table.contains_key("kind") {
         return joined::read(table, client);
@@ -658,6 +528,21 @@ fn read_pool(
         _ => format!("pool #{number}: "),
     };
     let mut s = Section::open(table, head);
+    // The platforms first: a pool that names only hostless platforms has other keys.
+    let reach = match s.names("platforms")? {
+        Some(names) => Some(resolved.reach(&s, &names)?),
+        None => None,
+    };
+    let reach = match reach {
+        Some(reach) if !reach.hosts => {
+            let name = platform::hostless(s, reach, resolved)?;
+            return Ok(Read {
+                name,
+                pool: Pool::Hostless,
+            });
+        }
+        reach => reach,
+    };
     s.only(POOL_KEYS)?;
     let name = s.required_string("name")?;
     let id = match ProviderId::new(&name) {
@@ -672,9 +557,14 @@ fn read_pool(
     };
     let class = shipped_class(class);
     s.class_served(&class)?;
-    let keys = ElasticKeys {
+    let (cap_key, max_instances) = cap(&mut s)?;
+    let (settings, settings_given) = platform::settings(&mut s)?;
+    let mut keys = ElasticKeys {
         exec: s.string("exec")?,
-        max_instances: s.integer("max_instances")?,
+        max_instances,
+        cap_key,
+        settings_given,
+        provider_limits: s.table("provider_limits")?,
         hour: s.spend("max_spend_per_hour")?,
         day: s.spend("max_spend_per_day")?,
         idle: s.duration("idle")?,
@@ -700,12 +590,25 @@ fn read_pool(
         (Launch::Live, Some(until)) if now >= until => Launch::Plan,
         (launch, _) => launch,
     };
-    let provider = match s.table("provider")? {
-        Some(provider) => provider,
-        None => return Err(s.fail("provider", "required")),
+    // The provider table to build: the pool's own, or the one launching machine provider
+    // its platforms reach.
+    let (kind, p) = match (s.table("provider")?, &reach) {
+        (Some(_), Some(_)) => {
+            let reason = "and platforms both say where the pool's hosts come from; give one";
+            return Err(s.fail("provider", reason));
+        }
+        (None, None) => return Err(s.fail("provider", "required")),
+        (Some(provider), None) => {
+            let mut p = Section::open(provider, format!("pool {name:?}: provider."));
+            (p.required_string("kind")?, p)
+        }
+        (None, Some(reach)) => {
+            let launching = resolved.launching(&s, reach)?;
+            let head = format!("machine_provider {:?}: ", launching.name);
+            let p = Section::open(launching.table().clone(), head);
+            (launching.kind.clone(), p)
+        }
     };
-    let mut p = Section::open(provider, format!("pool {name:?}: provider."));
-    let kind = p.required_string("kind")?;
     let built = {
         let ctx = BuildCtx {
             pool: &name,
@@ -724,6 +627,10 @@ fn read_pool(
         Err(err) => return Err(p.fail(&err.field, &err.reason)),
     };
     let pool = match built {
+        Built::Static(_) if reach.is_some() => {
+            let reason = "builds a pool of listed hosts, not a machine provider";
+            return Err(p.fail("kind", reason));
+        }
         Built::Static(source) => {
             if let Some(key) = keys.first_given() {
                 return Err(s.fail(key, "only for an elastic pool"));
@@ -735,6 +642,7 @@ fn read_pool(
             Pool::Static(source)
         }
         Built::Elastic(built) => {
+            let limits = keys.provider_limits.take();
             let elastic = Elastic {
                 s: &s,
                 name: &name,
@@ -747,11 +655,42 @@ fn read_pool(
                 scheduler,
                 max_lease_wall,
                 budgets,
+                path_grace: settings.path_grace,
             };
-            Pool::Elastic(Box::new(elastic.finish(built, client)?))
+            let mut registering = elastic.finish(built, client)?;
+            let reach = match reach {
+                Some(reach) => reach,
+                None => resolved.shorthand(&name, &kind, &p.map),
+            };
+            let provider_limits =
+                resolved.limits(limits, &s.head, &reach.providers, max_instances)?;
+            registering.admit(&provider_limits, max_instances);
+            resolved.pools.push(ResolvedPool {
+                name: name.clone(),
+                platforms: reach.platforms,
+                max_machines: max_instances,
+                settings,
+                provider_limits,
+            });
+            Pool::Elastic(Box::new(registering))
         }
     };
     Ok(Read { name, pool })
+}
+
+/// The pool's cap on machines: `max_machines`, or `max_instances`, the same number by its
+/// older name, and the name it was given by; never both.
+fn cap(s: &mut Section) -> Result<(&'static str, Option<u64>), StartupError> {
+    let machines = s.integer("max_machines")?;
+    let instances = s.integer("max_instances")?;
+    match (machines, instances) {
+        (Some(_), Some(_)) => {
+            let reason = "and max_instances are one cap by two names; give one";
+            Err(s.fail("max_machines", reason))
+        }
+        (Some(cap), None) => Ok(("max_machines", Some(cap))),
+        (None, given) => Ok(("max_instances", given)),
+    }
 }
 
 /// What an elastic pool is made from.
@@ -767,6 +706,9 @@ struct Elastic<'a> {
     scheduler: &'a SchedulerId,
     max_lease_wall: Option<Duration>,
     budgets: &'a Budgets,
+    /// The pool's `path_grace`: how long a waiting whole-node request with no capable host
+    /// left keeps its place (the registry's `regain_grace`).
+    path_grace: Duration,
 }
 
 impl Elastic<'_> {
@@ -783,14 +725,15 @@ impl Elastic<'_> {
             scheduler,
             max_lease_wall,
             budgets,
+            path_grace,
         } = self;
-        let max_instances = require(s, "max_instances", keys.max_instances)?;
+        let max_instances = require(s, keys.cap_key, keys.max_instances)?;
         if max_instances == 0 {
-            return Err(s.fail("max_instances", "must be at least 1"));
+            return Err(s.fail(keys.cap_key, "must be at least 1"));
         }
         if max_instances > MAX_INSTANCES {
             let reason = format!("{max_instances} exceeds {MAX_INSTANCES}");
-            return Err(s.fail("max_instances", &reason));
+            return Err(s.fail(keys.cap_key, &reason));
         }
         let hour = require(s, "max_spend_per_hour", keys.hour)?;
         let day = require(s, "max_spend_per_day", keys.day)?;
@@ -865,7 +808,13 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id.clone(), &class, shape, max, exec, memory_percent)?;
+        let pool = registry_pool(
+            s,
+            (id.clone(), &class, shape, max),
+            exec,
+            memory_percent,
+            path_grace,
+        )?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
@@ -890,6 +839,8 @@ impl Elastic<'_> {
             scheduler: scheduler.clone(),
             id,
             provider: Arc::from(built.provider),
+            share: u32::try_from(max).unwrap_or(u32::MAX),
+            limits: PoolLimits::default(),
         };
         Ok(Registering {
             plan: Some(plan),
@@ -910,15 +861,15 @@ fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupErr
 
 /// The registry's pool for an elastic pool of `class`: `max` machines, the floor `shape`,
 /// the host contract of `exec` when the pool asks for one, the booked share of the floor's
-/// memory, and, for a whole-node class, the settings of a dedicated pool.
+/// memory, and, for a whole-node class, the settings of a dedicated pool with `path_grace`
+/// as its `regain_grace`: how long a waiting request whose last capable host went away
+/// keeps its place before it is refused `no-capable-host`.
 fn registry_pool(
     s: &Section,
-    id: ProviderId,
-    class: &ResourceClass,
-    shape: Shape,
-    max: usize,
+    (id, class, shape, max): (ProviderId, &ResourceClass, Shape, usize),
     exec: Option<ExecMode>,
     memory_percent: MemoryPercent,
+    path_grace: Duration,
 ) -> Result<PoolConfig, StartupError> {
     let pool = PoolConfig::new(id, class.clone(), shape, max).with_memory_percent(memory_percent);
     let pool = match exec {
@@ -926,7 +877,10 @@ fn registry_pool(
         None => pool,
     };
     match class.admission() {
-        Admission::Whole => match pool.with_whole_node(WholeNodeConfig::dedicated(max)) {
+        Admission::Whole => match pool.with_whole_node(WholeNodeConfig {
+            regain_grace_ms: u64::try_from(path_grace.as_millis()).unwrap_or(u64::MAX),
+            ..WholeNodeConfig::dedicated(max)
+        }) {
             Ok(pool) => Ok(pool),
             Err(err) => Err(s.fail("class", &err.to_string())),
         },
@@ -980,16 +934,19 @@ mod tests {
         let id = ProviderId::new("x").unwrap();
         let full = MemoryPercent::FULL;
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None, full);
+        let grace = Duration::from_millis(250);
+        let at = |max| (id.clone(), &whole, floor(), max);
+        let refused = registry_pool(&section(), at(0), None, full, grace);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
         let exec = Some(ExecMode::Container);
-        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec, full).unwrap();
+        let built = registry_pool(&section(), at(2), exec, full, grace).unwrap();
         assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
+        assert_eq!(built.whole_node().unwrap().regain_grace_ms, 250);
         assert_eq!(built.exec(), exec);
         let gpu = ResourceClass::gpu_host();
-        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None, full).unwrap();
+        let plain = registry_pool(&section(), (id, &gpu, floor(), 2), None, full, grace).unwrap();
         assert!(plain.whole_node().is_none());
         assert_eq!(plain.exec(), None);
     }

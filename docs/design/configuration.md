@@ -14,7 +14,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 |---|---|
 | `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
-| `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict); refused unless a pool registers agents |
+| `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1) |
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
@@ -24,8 +24,12 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--agent-token-file` | `join_token_file` of that pool |
 
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
-`max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents, so it counts as the one
-pool that may; `server.agent_listen` is required as for an elastic pool.
+`max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
+`server.agent_listen` is required as for an elastic pool. A file may declare any number of joined and elastic pools, each with its own
+`join_token_file`, but the server starts only on a file with at most one pool that registers agents: with more it refuses naming the
+second (`several elastic pools are parsed; running them needs the ordered walk of design 5.6`, or `several pools register agents; ...`
+when they are not all elastic). At most one pool of the agentless `static` provider kind is served; that kind is deprecated, and a later
+version removes it.
 
 ```toml
 [[pool]]
@@ -61,6 +65,97 @@ configured and never to a figure an agent reports about itself: a host that clai
 host's hello is held to the whole listed memory, not the cut (a host must really have the memory; the pool books less of it). `GET
 /v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent, bookable_bytes}` (`shape.memory_bytes` is the bookable
 figure), and `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
+
+Under `--placement js-sched` the percent of an agent pool (the agent pool file, or a `[[pool]]` whose hosts register) is the placement
+engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
+`floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
+`GET /v1/hosts` shows the same as under `registry`: `shape.memory_bytes` is the cut, beside `memory`. A static pool is not affected.
+
+### Machine providers, platforms and pool settings
+
+A pool may name container platforms in priority order instead of naming its provider (design `jobscheduler-design.md`, section 4.2).
+`[[machine_provider]]` tables declare where machines come from: `kind = "static"` is the hosts that run `js-agent` and register
+themselves (no key beside `name` and `kind`; it is not the agentless `static` provider kind of a pool's `provider`), and any other kind is
+a provider kind compiled in, whose own keys follow (`lambdalabs`: `api_key_file` and the rest, as under `provider`). `ec2` and `gce` are
+refused as not built. `[[platform]]` tables declare platforms: only `kind = "default"` is built (`kubernetes`, `cloud_run` and `ecs` are
+refused as not built), with `machine_providers` listing declared machine providers first to last. Names follow the grammar of pool
+names and are unique among their kind of table; every declared machine provider must be named by a platform and every platform by a
+pool.
+
+```toml
+[[machine_provider]]
+name = "rack"
+kind = "static"
+
+[[machine_provider]]
+name = "lambda"
+kind = "lambdalabs"
+api_key_file = "/run/credentials/js/lambda-key"
+
+[[platform]]
+name = "ours"
+kind = "default"
+machine_providers = ["rack", "lambda"]  # first to last
+
+[[pool]]
+name = "gpu"
+class = "whole-node"
+platforms = ["ours"]                    # first to last; refused beside provider
+max_machines = 4                        # max_instances is the same cap by its older name; giving both is refused
+max_spend_per_hour = "12.00"
+max_spend_per_day = "96.00"
+max_queue_wait = "30m"                  # default 1h
+start_timeout = "15m"                   # default 15m
+path_grace = "15s"                      # default 15s
+
+[pool.provider_limits.lambda]
+allowed_instance_types = ["gpu_1x_a10"] # names, none empty, none twice
+max_price_cents_per_hour = 200          # 1 or more
+max_machines = 2                        # 1 or more, at most the pool's
+max_spot_machines = 1                   # at most this table's max_machines
+```
+
+A pool written with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables: a machine provider made from its provider
+table, the `static` machine provider, and a `default` platform naming the two, `static` first. The loader's names start with `+`, which no
+name in the file may hold. This version keeps one fixed order of hosts, registered hosts first and then the elastic provider, so a
+platform that lists a launching machine provider before `static` is refused (`machine_providers: static must come first in this version
+(the ordered walk of design 5.6 is not built yet)`), and a pool's platforms must reach exactly one machine provider that launches.
+
+**Parsed and checked; what acts on them.** `max_queue_wait`, `start_timeout`, `path_grace` (each a positive duration) and the
+`provider_limits` tables are read and checked at start. Admission of a lease request (design 5.6, step 2) reads the limits: an offer
+whose instance type is not allowed, whose price is above the maximum, or that has no price under a maximum does not admit a request, and
+a provider whose `max_machines` (else the pool's) is zero admits none. `path_grace` is how long a waiting whole-node request of the pool
+keeps its place once no host could serve it, after which it is refused `no-capable-host` (it is the registry's `regain_grace` for the
+pool). Nothing acts on the rest yet: the job lifecycle ticks (design 6.1) will end a job that waits past `max_queue_wait` or does not
+start within `start_timeout`, and the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit
+names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
+refused.
+
+## Live logs: `[logs]` (Planned)
+
+The table of [live-logs.md](live-logs.md), section 6, which gives each key's type, default and bound. It is in the `--config` file only,
+beside `[server]`, and has no flags; an unknown key is refused; `sink = "none"` (the default, also when the table is absent) with any
+other key present is refused, naming the key. The keys are files, never inline secrets, and each file is owner-only like every other
+key file. The server does not read the table yet.
+
+```toml
+[logs]
+sink            = "object_store"                        # "object_store" | "none"; default "none"
+url             = "s3://bucket/prefix"                  # required with object_store; the prefix is optional
+region          = "us-east-1"                           # required with object_store
+endpoint        = "https://objects.example"             # optional; default the region's AWS endpoint
+path_style      = false                                 # optional; true for stores that need /bucket/key URLs
+read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
+credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
+sts_endpoint    = "https://objects.example"             # optional; default endpoint, or the region's AWS STS endpoint
+role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts
+mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
+credential_ttl  = "1h"                                  # 15m to 12h
+max_follow      = 256                                   # most GetLogs calls waiting at once
+```
+
+The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a job whose
+start carries a log sink.
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
