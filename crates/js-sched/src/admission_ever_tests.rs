@@ -416,7 +416,7 @@ fn a_host_whose_ceiling_lacks_the_port_is_not_capable() {
     let narrow = advertising("h1", &[("egress", "allow-list"), ("egress-ports", "9000")]);
     let req = networked(JobNetwork::AllowList, &[8080]);
     assert_eq!(
-        can_ever_serve(&req, &[narrow.clone()], &[]),
+        can_ever_serve(&req, std::slice::from_ref(&narrow), &[]),
         Admission::Refuse
     );
     let wide = advertising(
@@ -471,7 +471,7 @@ fn a_provider_without_host_ports_is_passed_over_for_a_job_with_ports() {
     let with_port = networked(JobNetwork::None, &[8080]);
     let plain = networked(JobNetwork::None, &[]);
     assert_eq!(
-        can_ever_serve(&with_port, &[], &[without.clone()]),
+        can_ever_serve(&with_port, &[], std::slice::from_ref(&without)),
         Admission::Refuse
     );
     assert_eq!(can_ever_serve(&plain, &[], &[without]), OFFER);
