@@ -40,9 +40,9 @@
 //! a third lock to that order. The fleet group reaches them only through the narrow traits
 //! of its context (`fleet::Hosts`), whose calls take and drop each lock in that order and
 //! return before the group reads the job tables. The submit group reads the registry's hosts
-//! and the providers' catalogs only through its admission trait (`submit::Admission`), whose
-//! call takes no lock while it reads a catalog and returns before the group writes the job
-//! tables.
+//! and the providers' cached catalogs only through its admission trait (`submit::Admission`),
+//! whose call takes the registry's lock alone, calls no provider, and returns before the
+//! group writes the job tables.
 //!
 //! A request carries at most [`js_api_gateway::BODY_LIMIT`] (64 KiB) over either transport:
 //! the gateway answers a larger body 413 `request-too-large`, and the gRPC service decodes

@@ -60,19 +60,30 @@
 //!
 //! An item of [`Work::whole_host`] takes a second path through the same stages. Its
 //! acquire asks for the class [`WHOLE_CLASS`] under a request id of its own,
-//! `sim-item-<n>` ([`REQUEST_PREFIX`] and the item's number), so the server queues it
-//! while no host is free and presents it again on its own at every tick: the client only
-//! reads the lease list until the lease is held. A whole-node lease is always answered
+//! `sim-item-<n>` ([`REQUEST_PREFIX`] and the item's number), or under the id
+//! [`Work::with_request_id`] gives, so the server queues it while no host is free and
+//! presents it again on its own at every tick: the client only reads the lease list
+//! until the lease is held. One of [`Work::without_request_id`] is asked for under no
+//! id: the server keys it by its content and waits for no host on its behalf, so a 409
+//! `no-capacity` is the answer while no host is free, and the client asks again at its
+//! next poll. A whole-node lease is always answered
 //! 202 and listed `pending` until the host's agent reported ready for it; a held lease is
 //! given its run and then read and released as above, and the `Placed { host }` its
 //! queued run reports is the grant. A lease the list no longer shows (its prepare failed)
 //! is acquired again under the same request id, which is the request's next try. The
-//! acquire's answers differ from the table above in one row:
+//! acquire's answers differ from the table above in two rows:
 //!
 //! | call | answer | event, and what follows |
 //! |---|---|---|
-//! | `POST /v1/leases` (whole host) | 409 `no-capacity` (the wait list is full), `lease-ended` (the last try's lease is still being released) or `no-capable-host` (no host of the pool can serve it as the pool stands: none has said hello yet, or every one is tainted) | none; acquired again at the next poll |
+//! | `POST /v1/leases` (whole host) | 202 (`pending`) | `Pending { lease }`, the try's lease; the lease list is read at the next poll |
+//! | | 409 `no-capacity` (the wait list is full, or no host is free for a request without an id), `lease-ended` (the last try's lease is still being released) or `no-capable-host` (no host of the pool can serve it as the pool stands: none has said hello yet, or every one is tainted) | none; acquired again at the next poll |
 //! | | any other 409 (`exclusive-not-ready` after the last failed prepare, `no-fit`, ...) | `Terminal(Failed)` |
+//!
+//! # Answers
+//!
+//! Every answer the front is given is kept as it came ([`Answer`]: the item, what the
+//! call was for, its time, its status and its body), for [`crate::Expect::answer`]. A
+//! call made for no item, [`listed`], is not kept.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -84,12 +95,12 @@ use js_types::HostId;
 use js_types::sched::FarmTime;
 use serde_json::{Value, json};
 
-use super::{ClientPort, Front, FrontFactory};
+use super::{Answer, CallKind, ClientPort, Front, FrontFactory};
 use crate::SIM_RUN_IMAGE;
 use crate::agent::lease_id;
 use crate::observe::{ClientEvent, HowEnded, ItemId, RunId};
 use crate::server::{CLIENT_TOKEN, POOL_CLASS, ServerSpec, WHOLE_CLASS};
-use crate::work::Work;
+use crate::work::{Naming, Work};
 
 /// How often the front polls while any item holds or waits for a lease: the server's
 /// tick, at which it settles pending leases, as `js` polls a pending lease.
@@ -117,7 +128,10 @@ enum Stage {
 /// One item the front holds.
 struct Item {
     work: Work,
-    /// The request id of a whole-host item; `None` for any other.
+    /// Whether it asks for a whole host.
+    whole: bool,
+    /// The request id a whole-host item is asked for under; `None` for any other, and
+    /// for one asked for under no id.
     request: Option<String>,
     gives_up_at: FarmTime,
     stage: Stage,
@@ -132,36 +146,74 @@ struct Item {
 }
 
 /// What one poll shares across items: the time, the server, the lease requests refused
-/// for want of capacity in this poll, and the events heard.
+/// for want of capacity in this poll, the item being polled, and the events heard and
+/// the answers given.
 struct Poll<'a> {
     now: FarmTime,
     server: &'a mut dyn ClientPort,
     class: String,
     capabilities: Value,
     full: BTreeSet<String>,
+    item: ItemId,
     heard: Vec<ClientEvent>,
+    answers: Vec<Answer>,
 }
 
 impl Poll<'_> {
-    /// One call: the status, and the body as JSON (`Null` when it is not JSON).
-    fn call(&mut self, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
-        let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
-        let request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header(AUTHORIZATION, format!("Bearer {CLIENT_TOKEN}"))
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            // A method and a path built from the server's own ids always make a request;
-            // were they not to, the empty request is refused and read as such.
-            .unwrap_or_default();
-        let answer = self.server.call(request);
-        let status = answer.status().as_u16();
-        (
+    /// One call for the item being polled, its answer kept: the status, and the body as
+    /// JSON (`Null` when it is not JSON).
+    fn call(
+        &mut self,
+        kind: CallKind,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
+        let (status, raw) = send(&mut *self.server, method, path, body);
+        let json = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        self.answers.push(Answer {
+            item: self.item,
+            kind,
+            at: self.now,
             status,
-            serde_json::from_str(answer.body()).unwrap_or(Value::Null),
-        )
+            body: raw,
+        });
+        (status, json)
     }
+}
+
+/// One call through `server` with the client token: the status, and the body as text.
+fn send(
+    server: &mut dyn ClientPort,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> (u16, String) {
+    let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(AUTHORIZATION, format!("Bearer {CLIENT_TOKEN}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        // A method and a path built from the server's own ids always make a request;
+        // were they not to, the empty request is refused and read as such.
+        .unwrap_or_default();
+    let answer = server.call(request);
+    (answer.status().as_u16(), answer.into_body())
+}
+
+/// The lease list as a client reads it through `server` now: the state of each lease
+/// listed, by id; `None` when the read is not answered 200 with a list. What
+/// [`crate::Expect::listed`] reads; no item makes this call and its answer is not kept.
+pub(crate) fn listed(server: &mut dyn ClientPort) -> Option<BTreeMap<String, String>> {
+    let (status, raw) = send(server, "GET", "/v1/leases", None);
+    let answer: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let leases = answer["leases"].as_array().filter(|_| status == 200)?;
+    let states = leases
+        .iter()
+        .map(|lease| (text(&lease["id"]), text(&lease["state"])));
+    Some(states.collect())
 }
 
 /// `value` as text, empty when it is not a string.
@@ -263,23 +315,30 @@ impl Item {
             "ttl_seconds": wall,
             "labels": { "team": "infra" },
         });
-        if let Some(request) = &self.request {
+        if self.whole {
             body["class"] = json!(WHOLE_CLASS);
+        }
+        if let Some(request) = &self.request {
             body["request_id"] = json!(request);
         }
         let key = body.to_string();
         if poll.full.contains(&key) {
             return;
         }
-        let (status, answer) = poll.call("POST", "/v1/leases", Some(&body));
+        let (status, answer) = poll.call(CallKind::Acquire, "POST", "/v1/leases", Some(&body));
         let lease = text(&answer["id"]);
         match status {
             201 => {
                 let host = text(&answer["host"]);
                 self.stage = Stage::Held { lease, host };
             }
-            202 => self.stage = Stage::Pending(lease),
-            409 if self.request.is_none() => {
+            202 => {
+                let pending = lease_id(&lease).filter(|_| self.whole);
+                poll.heard
+                    .extend(pending.map(|lease| ClientEvent::Pending { lease }));
+                self.stage = Stage::Pending(lease);
+            }
+            409 if !self.whole => {
                 poll.full.insert(key);
             }
             409 if waits(&answer) => {}
@@ -289,7 +348,7 @@ impl Item {
 
     /// Reads the lease list for the pending lease `lease`.
     fn look(&mut self, lease: String, poll: &mut Poll<'_>) {
-        let (status, answer) = poll.call("GET", "/v1/leases", None);
+        let (status, answer) = poll.call(CallKind::List, "GET", "/v1/leases", None);
         if status != 200 {
             return;
         }
@@ -318,7 +377,7 @@ impl Item {
             "gpu_indices": gpus,
         });
         let path = format!("/v1/leases/{lease}/runs");
-        let (status, answer) = poll.call("POST", &path, Some(&body));
+        let (status, answer) = poll.call(CallKind::Queue, "POST", &path, Some(&body));
         match status {
             202 => {
                 let run = text(&answer["run_id"]);
@@ -342,12 +401,12 @@ impl Item {
     fn read(&mut self, path: &str, poll: &mut Poll<'_>) {
         if self.cancel && !self.stop_sent {
             self.stop_sent = true;
-            let (status, _) = poll.call("DELETE", path, None);
+            let (status, _) = poll.call(CallKind::Cancel, "DELETE", path, None);
             if status == 410 {
                 return self.end(HowEnded::Forgotten, poll);
             }
         }
-        let (status, answer) = poll.call("GET", path, None);
+        let (status, answer) = poll.call(CallKind::Read, "GET", path, None);
         let how = match status {
             200 => self.heard_run(&answer, poll),
             410 => Some(HowEnded::Forgotten),
@@ -392,7 +451,7 @@ impl Item {
             self.release_sent = true;
             poll.heard.push(ClientEvent::ReleaseSent);
         }
-        let (status, _) = poll.call("DELETE", path, None);
+        let (status, _) = poll.call(CallKind::Release, "DELETE", path, None);
         if matches!(status, 200 | 202 | 404) {
             poll.heard.push(ClientEvent::Released);
             self.stage = Stage::Done;
@@ -406,6 +465,7 @@ pub struct LeaseFront {
     capabilities: Value,
     items: BTreeMap<ItemId, Item>,
     due: Option<FarmTime>,
+    answers: Vec<Answer>,
 }
 
 impl LeaseFront {
@@ -418,6 +478,7 @@ impl LeaseFront {
             capabilities: json!(spec.shape().capabilities),
             items: BTreeMap::new(),
             due: None,
+            answers: Vec::new(),
         }
     }
 
@@ -435,10 +496,16 @@ impl LeaseFront {
 
 impl Front for LeaseFront {
     fn submit(&mut self, item: ItemId, work: &Work, now: FarmTime) {
-        let request = work.wants_whole_host();
+        let whole = work.wants_whole_host();
+        let request = match work.naming() {
+            Naming::OwnItem => Some(format!("{REQUEST_PREFIX}{}", item.0)),
+            Naming::Given(id) => Some(id.clone()),
+            Naming::Absent => None,
+        };
         let held = Item {
             work: work.clone(),
-            request: request.then(|| format!("{REQUEST_PREFIX}{}", item.0)),
+            whole,
+            request: request.filter(|_| whole),
             gives_up_at: work.ask(now).gives_up_at,
             stage: Stage::Asking,
             cancel: false,
@@ -468,19 +535,27 @@ impl Front for LeaseFront {
             class: self.class.clone(),
             capabilities: self.capabilities.clone(),
             full: BTreeSet::new(),
+            item: ItemId(0),
             heard: Vec::new(),
+            answers: Vec::new(),
         };
         let mut heard = Vec::new();
         let open = self.items.iter_mut();
         for (id, item) in open.filter(|(_, item)| !matches!(item.stage, Stage::Done)) {
+            poll.item = *id;
             item.poll(&mut poll);
             heard.extend(poll.heard.drain(..).map(|event| (*id, event)));
         }
+        self.answers.append(&mut poll.answers);
         let waiting = self
             .items
             .values()
             .any(|item| !matches!(item.stage, Stage::Done));
         self.due = waiting.then(|| now.saturating_add(POLL_EVERY));
         heard
+    }
+
+    fn answers(&self) -> &[Answer] {
+        &self.answers
     }
 }

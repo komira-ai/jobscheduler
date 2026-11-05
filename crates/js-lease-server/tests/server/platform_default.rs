@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use js_agent_wire::{Hello, Phase, ProtocolRange, Taint, WireShape};
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Held, HostRef, Observed, Offer,
-    ProviderCaps, ProviderError, Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Held, HostRef,
+    Observed, Offer, ProviderCaps, ProviderError, Released,
 };
 use js_lease::{ManualClock, Timestamp};
-use js_lease_server::DefaultPlatform;
+use js_lease_server::{Catalogs, DefaultPlatform, SharedClock};
 use js_platform::{ContainerPlatform, PlatformId};
 use js_provider::{Pool, StartAck, StartSpec};
 use js_registry::{Binding, Credential, PoolConfig, Registry, StaticCapacity};
@@ -24,6 +24,18 @@ use js_types::{
     AcceleratorNeed, Admission, Arch, ClassId, ExecMode, HostId, IsaLevel, JobNetwork, LeaseId,
     Model, Os, ProviderId, Request, Requirements, ResourceClass, Resources, Shape,
 };
+
+/// A [`DefaultPlatform`] over `providers` and `hosts` whose catalog cache has fetched
+/// nothing: every launching provider's catalog reads as unread (it may offer), the answer
+/// the tests below relied on when their cloud's catalog could not be read.
+fn platform(
+    id: PlatformId,
+    providers: Vec<Arc<dyn CapacityProvider>>,
+    hosts: Option<Registry>,
+) -> DefaultPlatform {
+    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(1)));
+    DefaultPlatform::new(id, providers, hosts, Arc::new(Catalogs::new()), clock)
+}
 
 /// The capabilities every host of the test pool reports and the pool books.
 fn facts() -> BTreeMap<String, String> {
@@ -98,8 +110,10 @@ impl CapacityProvider for Cloud {
         self.0.clone()
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Err(ProviderError::new("the cloud's API did not answer"))
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Err(ProviderError::new(
+            "the cloud's API did not answer",
+        ))))
     }
 
     fn capacity(&self) -> Capacity {
@@ -178,7 +192,7 @@ fn default_platform_can_ever_serve_follows_hosts_and_provider_caps() {
     let hosts = table(&["a"]);
     let registered: Arc<dyn CapacityProvider> = Arc::new(StaticCapacity::new(hosts.clone()));
     let id = PlatformId::new("ours");
-    let alone = DefaultPlatform::new(id.clone(), vec![registered.clone()], Some(hosts.clone()));
+    let alone = platform(id.clone(), vec![registered.clone()], Some(hosts.clone()));
     assert!(alone.can_ever_serve(&wanting(2, 0)));
     assert!(!alone.can_ever_serve(&wanting(8, 0)));
     assert!(!alone.can_ever_serve(&wanting(1, 1)));
@@ -195,17 +209,17 @@ fn default_platform_can_ever_serve_follows_hosts_and_provider_caps() {
         ..exact
     };
     assert!(!alone.can_ever_serve(&too_much_disk));
-    let both = DefaultPlatform::new(id.clone(), vec![registered, gpu_cloud()], Some(hosts));
+    let both = platform(id.clone(), vec![registered, gpu_cloud()], Some(hosts));
     assert!(both.can_ever_serve(&wanting(8, 1)));
     assert!(both.can_ever_serve(&wanting(2, 0)));
-    let cloud_only = DefaultPlatform::new(id.clone(), vec![gpu_cloud()], None);
+    let cloud_only = platform(id.clone(), vec![gpu_cloud()], None);
     assert!(cloud_only.can_ever_serve(&wanting(64, 1)));
     let macos = Requirements {
         os: Some("macos".to_owned()),
         ..wanting(1, 0)
     };
     assert!(!cloud_only.can_ever_serve(&macos));
-    let nothing = DefaultPlatform::new(id.clone(), Vec::new(), None);
+    let nothing = platform(id.clone(), Vec::new(), None);
     assert!(!nothing.can_ever_serve(&wanting(1, 0)));
     assert_eq!(both.id(), id);
     let caps = both.capabilities();
@@ -249,7 +263,7 @@ fn agrees(platform: &DefaultPlatform, hosts: &[HostView], providers: &[ProviderV
 #[test]
 fn default_platform_can_ever_serve_is_the_admission_function() {
     let id = PlatformId::new("ours");
-    let on = |hosts: &Registry| DefaultPlatform::new(id.clone(), Vec::new(), Some(hosts.clone()));
+    let on = |hosts: &Registry| platform(id.clone(), Vec::new(), Some(hosts.clone()));
     let clock = ManualClock::new(Timestamp::from_millis(1));
     let busy = table_on(&["a"], clock.clone());
     let request = Request {
@@ -298,7 +312,7 @@ fn default_platform_can_ever_serve_is_the_admission_function() {
     draining.release_host(&a).unwrap();
     let released = [view(HostState::Serving, false, true)];
     assert!(!agrees(&on(&draining), &released, &[]));
-    let cloud = DefaultPlatform::new(id.clone(), vec![gpu_cloud()], None);
+    let cloud = platform(id.clone(), vec![gpu_cloud()], None);
     let unread = ProviderView {
         kind_is_static: false,
         enabled: true,

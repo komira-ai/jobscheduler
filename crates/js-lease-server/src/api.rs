@@ -405,31 +405,20 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
     let request_id = body.request_id()?;
     let (request, ttl) = body.into_parts()?;
     let registry = shared.registry();
-    // Admission first, under the table lock; the catalogs, when the hosts alone admit
-    // nothing, are read with the lock let go, and the question is asked again (see
-    // `admit`). The second answer is never `ReadCatalogs`.
-    let mut providers = None;
-    let outcome = loop {
-        let mut table = shared.lock("wait-acquire").await;
-        let decision = shared.admit.decide(
-            &table,
-            registry.as_ref(),
-            request_id.as_ref(),
-            &request,
-            providers.as_deref(),
-        );
-        match decision {
-            Decision::Start => {
-                break match request_id {
-                    Some(id) => table.acquire_with_id(id, request, ttl),
-                    None => table.acquire(request, ttl),
-                };
-            }
-            Decision::Refuse => break Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
-            Decision::ReadCatalogs => drop(table),
-        }
-        providers = Some(shared.admit.read().await);
+    // Admission first, under the table lock: the hosts, and the catalogs as the cache holds
+    // them, which calls no provider (see `admit`).
+    let mut table = shared.lock("wait-acquire").await;
+    let decision = shared
+        .admit
+        .decide(&table, registry.as_ref(), request_id.as_ref(), &request);
+    let outcome = match decision {
+        Decision::Start => match request_id {
+            Some(id) => table.acquire_with_id(id, request, ttl),
+            None => table.acquire(request, ttl),
+        },
+        Decision::Refuse => Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
     };
+    drop(table);
     match outcome {
         Ok(lease) => {
             let granted = Granted {

@@ -17,6 +17,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 toml.workspace = true
 tracing.workspace = true
 ureq.workspace = true
@@ -33,6 +34,9 @@ rcgen.workspace = true
 # every log line installs a `log` sink to read them.
 log.workspace = true
 tracing-subscriber.workspace = true
+# The catalog runs its blocking API call on tokio's blocking pool; the tests drive it on a
+# multi-thread runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 # The test that pins what `RootCerts::WebPki` stands for.
 webpki-roots.workspace = true
 

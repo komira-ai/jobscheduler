@@ -50,6 +50,7 @@ fn offer(disk_gib: u64) -> Offer {
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
     }
 }
 

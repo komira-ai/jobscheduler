@@ -19,6 +19,8 @@ mod alerts;
 mod auth;
 mod binary;
 mod brake_reset;
+mod catalog_cache;
+mod catalog_config;
 mod config_brake;
 mod config_budget;
 mod config_file;

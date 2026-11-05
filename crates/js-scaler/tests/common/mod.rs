@@ -54,6 +54,7 @@ pub fn offer(id: &str, price: u64) -> Offer {
         price_cents_per_hour: Some(price),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
     }
 }
 

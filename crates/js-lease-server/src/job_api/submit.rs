@@ -24,9 +24,9 @@
 //!    repeated submit without an id makes a second job.
 //! 3. **Admission** (design section 5.6, step 2), only for a job that would be created:
 //!    [`Admission::can_ever_serve`] asks whether a host, or a catalog of a provider that
-//!    launches, could ever serve the job; the server's source reads the hosts and, only when
-//!    none could, the catalogs, holding no lock while it reads one, and a catalog that
-//!    cannot be read may offer. A job nothing could serve is the refusal `no-capable-host`
+//!    launches, could ever serve the job; the server's source reads the registry's hosts and
+//!    the catalogs as the server's catalog cache holds them, calling no provider, and a
+//!    catalog the cache has not read may offer. A job nothing could serve is the refusal `no-capable-host`
 //!    (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row, no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
 //!    store ([`js_jobs::JobStore::insert_queued`]); only after it returns is the answer
@@ -64,8 +64,8 @@ pub(super) const STATE_WRITE_FAILED: &str = "state-write-failed";
 #[tonic::async_trait]
 pub(crate) trait Admission: Send + Sync {
     /// `false` only when no host and no catalog could ever serve `wanted`: a busy or silent
-    /// host counts, a tainted or departing one does not, and a catalog that cannot be read
-    /// may offer.
+    /// host counts, a tainted or departing one does not, and a catalog not yet read may
+    /// offer.
     async fn can_ever_serve(&self, wanted: &Requirements) -> bool;
 }
 

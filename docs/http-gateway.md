@@ -261,8 +261,9 @@ answer from what the commit returned; neither holds anything of its own outside 
 3. **Admission**, only for a job that would be made: a job that no registered host (busy and
    silent hosts count, tainted and departing hosts do not) and no catalog of the pool's
    launching provider could ever serve is refused `no-capable-host`, and nothing is
-   recorded. The hosts are asked first, and the catalogs, with no lock held, only when no
-   host could; a catalog that cannot be read may offer, so the job is admitted.
+   recorded. The catalogs are read from the server's catalog cache, as for a lease, so a
+   submit calls no provider; a catalog the cache has not read (never fetched, or its fetch
+   failed) may offer, so the job is admitted.
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
    the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
    nothing was recorded. The call does not wait for placement: placement finds the queued job
