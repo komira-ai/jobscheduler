@@ -38,9 +38,13 @@ use js_jobs::{Constraints, DeclaredPort, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
-    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel,
-    JobNetwork, Labels, Os, Requirements, Resources, normalise_arch,
+    ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels,
+    Os, Requirements, Resources, normalise_arch,
 };
+// The network level a job asks a host for, by a name of its own: the type's own name followed
+// by a path separator reads as the server's network module to the source scan of design
+// section 8.6, which only the files that launch or check through a mode may name.
+use js_types::JobNetwork as Reach;
 
 /// The capability key a job's least ISA level is recorded under: the key a lease request
 /// names it by.
@@ -298,11 +302,11 @@ fn network(level: i32) -> Result<NetworkPolicy, Fault> {
 }
 
 /// The network level admission asks a host's ceiling to cover.
-pub(crate) fn job_network(policy: NetworkPolicy) -> JobNetwork {
+pub(crate) fn job_network(policy: NetworkPolicy) -> Reach {
     match policy {
-        NetworkPolicy::None => JobNetwork::None,
-        NetworkPolicy::AllowList => JobNetwork::AllowList,
-        NetworkPolicy::Open => JobNetwork::Open,
+        NetworkPolicy::None => Reach::None,
+        NetworkPolicy::AllowList => Reach::AllowList,
+        NetworkPolicy::Open => Reach::Open,
     }
 }
 

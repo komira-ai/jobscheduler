@@ -100,6 +100,9 @@ async fn a_retry_is_answered_in_whatever_state_the_job_is_now() {
     assert_eq!(rows(&rig.jobs), 1);
 }
 
+/// A change a conflict case makes to the job `x`.
+type Change = Box<dyn Fn(&mut v1::JobSpec)>;
+
 /// The job `x` every conflict case changes one field of: a network level, a port, an
 /// environment variable, a label and a file beside [`wire`]'s fields.
 fn conflicted() -> v1::JobSpec {
@@ -137,7 +140,7 @@ async fn same_id_different_job_is_a_conflict() {
             ..v1::Needs::default()
         })
     };
-    let changes: Vec<(&str, Box<dyn Fn(&mut v1::JobSpec)>)> = vec![
+    let changes: Vec<(&str, Change)> = vec![
         (
             "image",
             Box::new(|spec| spec.image = format!("team/app@sha256:{}", "b".repeat(64))),

@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use js_jobs::{Constraints, DeclaredPort, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
+use js_types::JobNetwork as Reach;
 use js_types::{
-    AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, JobNetwork, Labels, Requirements,
-    Resources,
+    AcceleratorNeed, ExecMode, ImageDigestRef, IsaLevel, Labels, Requirements, Resources,
 };
 
 use super::{Fault, ISA_LEVEL_KEY, Valid, job};
@@ -125,7 +125,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         isa_level: Some("x86-64-v3".parse::<IsaLevel>().unwrap()),
         exec: Some(ExecMode::Container),
         accelerator,
-        network: JobNetwork::Open,
+        network: Reach::Open,
         host_ports: vec![8080],
     };
     let expected = Valid {
@@ -165,15 +165,11 @@ fn what_a_job_leaves_out_is_recorded_as_its_default() {
     assert_eq!(checked.wanted.disk_bytes, None);
     assert_eq!(checked.wanted.accelerator, None);
     for (level, policy, network) in [
-        (
-            v1::NetworkLevel::None,
-            NetworkPolicy::None,
-            JobNetwork::None,
-        ),
+        (v1::NetworkLevel::None, NetworkPolicy::None, Reach::None),
         (
             v1::NetworkLevel::AllowList,
             NetworkPolicy::AllowList,
-            JobNetwork::AllowList,
+            Reach::AllowList,
         ),
     ] {
         let checked = valid(|spec| spec.network = level.into());
@@ -296,7 +292,7 @@ fn each_fault_names_its_field() {
     let longest = "a".repeat(63);
     let accepted = valid(|spec| spec.job_id = longest.clone());
     assert_eq!(accepted.id, Some(JobId::parse(&longest).unwrap()));
-    let cases: Vec<(Fault, Box<dyn FnOnce(&mut v1::JobSpec)>)> = vec![
+    let cases: Vec<(Fault, Change)> = vec![
         (
             Fault::Field("spec.image"),
             Box::new(|spec| spec.image = "registry.example/app:latest".to_owned()),
@@ -370,6 +366,9 @@ fn each_fault_names_its_field() {
     });
     assert_eq!(both, Fault::Field("spec.jobId"), "the first field is named");
 }
+
+/// A change a fault case makes to the job.
+type Change = Box<dyn FnOnce(&mut v1::JobSpec)>;
 
 /// The constraints changed by `change` from none.
 fn constraints(change: impl FnOnce(&mut v1::Constraints)) -> v1::Constraints {
