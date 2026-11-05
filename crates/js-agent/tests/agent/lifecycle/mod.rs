@@ -16,6 +16,7 @@ mod flags;
 mod held;
 mod layout;
 mod lease_dir;
+mod live_logs;
 mod logs;
 mod mounts;
 mod network;

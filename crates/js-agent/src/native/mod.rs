@@ -96,11 +96,12 @@
 //! start with one is refused `env-unsupported` at admission, before its image or body is
 //! looked at, and a run handed here with one fails before a user is made; the native body's
 //! own `env`, and a `run`'s, is applied), stage inputs or run in a subdirectory (a start
-//! that names inputs or a `cwd` is refused `native-unsupported`), adopt a run after the
-//! agent restarts (the journal ends it, and collects none of its outputs), stop a run softly
-//! (the helper only kills), bound a run while no agent runs (above), or grant the user's
-//! `/var/folders` entry (toolchains that need it get their temporary files from `TMPDIR`,
-//! which is inside the home).
+//! that names inputs or a `cwd` is refused `native-unsupported`), forward a declared port (a
+//! start that declares any is refused `ports-not-supported`, see `native/network.rs`), adopt
+//! a run after the agent restarts (the journal ends it, and collects none of its outputs),
+//! stop a run softly (the helper only kills), bound a run while no agent runs (above), or
+//! grant the user's `/var/folders` entry (toolchains that need it get their temporary files
+//! from `TMPDIR`, which is inside the home).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
@@ -109,6 +110,7 @@ mod bundle;
 mod files;
 mod journal;
 mod logs;
+mod network;
 mod outputs;
 mod pf;
 mod settings;
@@ -141,6 +143,7 @@ use js_types::LeaseId;
 use js_types::env::env_name_reserved;
 
 use crate::bundle::{Pinned, Placer};
+use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
     Runtime, RuntimeError, Status,
@@ -148,6 +151,7 @@ use crate::lifecycle::{
 
 pub use files::HandOver;
 pub use journal::Journal;
+pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
@@ -160,8 +164,9 @@ pub struct NativeConfig {
     /// Where the helper makes the home of a run's user (its `--homes`), canonical: a
     /// profile compares the path the kernel resolves, and `/var` is `/private/var`.
     pub homes: PathBuf,
-    /// The most network any run gets; a start asks for less or the same.
-    pub net: Net,
+    /// The most network a run may ask for (`--native-network`): a start above it is refused
+    /// (`network-above-ceiling`), never run with less.
+    pub network: Ceiling,
     /// The directories a start's program must lie under.
     pub tool_roots: Vec<PathBuf>,
     /// Paths no run may read, such as the agent's state and scratch roots.
@@ -177,8 +182,9 @@ pub struct NativeConfig {
     /// The most processes the run's user may have: the run's `RLIMIT_NPROC`. A fork bomb
     /// stops at it, and the helper's kill (which forks as root) is not held by it.
     pub max_processes: u32,
-    /// The check that the pf anchor of the pool is in force. Required when `net` is
-    /// [`Net::On`]: the runtime does not open without it.
+    /// The check that the pf anchor of the pool is in force. Required when `network` is
+    /// [`Ceiling::On`]: the runtime does not open without it. A ceiling of [`Ceiling::Open`]
+    /// has none: nothing filters its jobs.
     pub egress: Option<Arc<dyn Enforcer>>,
 }
 
@@ -257,7 +263,7 @@ impl NativeRuntime {
     /// A configured limit is zero or above the helper's cap (nothing is sent to the helper),
     /// the helper cannot be reached or its boot reset failed.
     pub fn open(helper: Client, config: NativeConfig, term: u64) -> Result<Self, RuntimeError> {
-        if config.net == Net::On && config.egress.is_none() {
+        if config.network == Ceiling::On && config.egress.is_none() {
             return Err(RuntimeError::new(
                 "--native-network: on needs the check of the pf anchor of the pool \
                  (--native-pf-uid-start and --native-pf-uid-count)",
@@ -457,12 +463,13 @@ impl NativeRuntime {
         }
     }
 
-    /// Whether the pf anchor of the pool is in force right now, when the cap lets a run
-    /// reach the network. Asked afresh at every call: a reload of the main ruleset can drop
-    /// the anchor at any time, so no answer is kept. The text is the first line of what the
-    /// provisioner said, with the flag that makes the check necessary.
+    /// Whether the pf anchor of the pool is in force right now, when the ceiling is `on`
+    /// (the one value whose jobs the anchor limits; an `open` ceiling has no filter to
+    /// check). Asked afresh at every call: a reload of the main ruleset can drop the anchor
+    /// at any time, so no answer is kept. The text is the first line of what the provisioner
+    /// said, with the flag that makes the check necessary.
     fn pf_in_force(&self) -> Result<(), RuntimeError> {
-        if self.config.net != Net::On {
+        if self.config.network != Ceiling::On {
             return Ok(());
         }
         // Fails closed: `open` refuses a cap of `on` with no check, and this does not rely
@@ -709,19 +716,23 @@ impl Runtime for NativeRuntime {
         false
     }
 
-    /// At the agent's start: with a cap of `on`, the pf anchor must be in force.
+    /// At the agent's start: with a ceiling of `on`, the pf anchor must be in force.
     fn check_egress(&self) -> Result<(), RuntimeError> {
         self.pf_in_force()
     }
 
-    /// Before every native start: a job that asks for the network (`on`) is refused unless
-    /// the pf anchor is in force now. A job that asks for less is not concerned, and a job
-    /// whose bundle lowers the network after this is still checked, which only refuses more.
+    /// Before every native start, after [`Runtime::check_native`] admitted its level: a job
+    /// that asks for the filtered network (`on`, the job level `allow-list`) on an agent
+    /// whose ceiling is `on` is refused unless the pf anchor is in force now. The check
+    /// follows the job: a job with no network, loopback only or `open` never asks pf and never
+    /// fails for a missing anchor. Under a ceiling of `open` an `on` job is not checked
+    /// either: that operator set no filter, which only the ceiling `on` asks for. A job whose
+    /// bundle lowers the network after this is still checked, which only refuses more.
     fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
-        if native.network != NetworkLevel::On {
-            return Ok(());
+        match network::needs_anchor(network::of_body(native.network)) {
+            true => self.pf_in_force(),
+            false => Ok(()),
         }
-        self.pf_in_force()
     }
 
     /// A start named by its image that reaches here is one this runtime cannot run: a
@@ -754,9 +765,18 @@ impl Runtime for NativeRuntime {
         self.bundles.is_some()
     }
 
+    /// Refuses, before anything is made: a level above the agent's ceiling
+    /// (`network-above-ceiling`; it is never run with less), then any declared port
+    /// (`ports-not-supported`: a Mac forwards none), then what this runtime cannot do yet.
     /// Outputs are collected when the run is removed; inputs and a working directory below
     /// `exec/` are not served yet.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
+        let refused = |why: NetworkRefusal| NativeRefusal {
+            code: why.code,
+            why: why.detail,
+        };
+        network::admit(self.config.network, network::of_body(native.network)).map_err(refused)?;
+        network::check_ports(&native.ports).map_err(refused)?;
         if !native.inputs.is_empty() || !native.cwd.is_empty() {
             return Err(NativeRefusal {
                 code: refusal::NATIVE_UNSUPPORTED,
@@ -838,8 +858,12 @@ fn argv_of(
             .collect(),
         read_denies: config.read_denies.clone(),
     };
+    // The policy never grants more than the ceiling. That is a defence in depth only: a
+    // start above the ceiling was refused by `check_native` before its user existed, so this
+    // narrowing lowers nothing the agent admitted. What can still lower the level is the
+    // bundle's `network_max` (`bundle::lower`), applied to `native` before this.
     let caps = Caps {
-        net: config.net.clone(),
+        net: config.network.net(),
         read_model: config.read_model,
     };
     let narrowing = Narrowing {
@@ -878,6 +902,7 @@ pub fn self_test(config: &NativeConfig, sandbox_exec: &Path) -> Result<(), Strin
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: NetworkLevel::Off,
+        ports: Vec::new(),
     };
     let argv = profile_argv(config, &probe, &config.homes).map_err(|why| why.0)?;
     let name = sandbox_exec.display();
@@ -913,12 +938,13 @@ fn fail(what: &dyn Display, why: &dyn Display) -> RuntimeError {
     RuntimeError::new(format!("{what}: {why}"))
 }
 
-/// The network level of a start as the profile's.
+/// The network level of a start as the profile's. `on` and `open` are one profile, with no
+/// network rule: the packet filter, which only `on` requires, is what tells them apart.
 fn net_of(level: NetworkLevel) -> Net {
     match level {
         NetworkLevel::Off => Net::Off,
         NetworkLevel::Loopback => Net::Loopback,
-        NetworkLevel::On => Net::On,
+        NetworkLevel::On | NetworkLevel::Open => Net::On,
     }
 }
 

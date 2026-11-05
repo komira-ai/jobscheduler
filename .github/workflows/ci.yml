@@ -739,6 +739,7 @@ jobs:
       # TEMPORARY, removed before this pull request is merged: print the lines of the lease
       # body's parser that the report counts as missed.
       - name: Missed lines of the lease body parser
+        if: ${{ always() }}
         run: |
           cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --branch --show-missing-lines | grep -E "Uncovered|js-lease-server/src/wire" || true
           cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --profile coverage --text --show-instantiations --output-path target/coverage/report.txt || true

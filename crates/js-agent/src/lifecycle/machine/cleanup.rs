@@ -78,12 +78,15 @@ impl Lifecycle {
                 if !job.silent && job.result.is_none() {
                     let mut result = job.report(how, status, cause_detail(cause));
                     // The container is still there: it is removed in the next stage. A log
-                    // that cannot be read costs the result its tail and nothing else.
+                    // that cannot be read costs the result its tail and nothing else. What the
+                    // capture saw of the streams is read beside it; it never waits for the
+                    // upload of live logs, which goes on after the cleanup.
                     if exit.is_some() {
                         match runtime.log_tail(&id) {
                             Ok(tail) => result.log_tail = tail,
                             Err(why) => job.note(code::LOGS_FAILED, why.to_string(), events),
                         }
+                        job.logs = runtime.logs_report(&id);
                     }
                     job.result = Some(result);
                     events.push(Event::ResultReady {

@@ -7,8 +7,14 @@
 //! `crates/<name>/Cargo.toml`, every `path` dependency of `[dependencies]` and of
 //! `[target.<cfg>.dependencies]`, transitively. The one target table it does not follow is
 //! the one whose key is exactly `cfg(target_os = "linux")` (code that is not built for
-//! macOS). Dev- and build-dependencies are not followed. A manifest that cannot be read is
-//! an error.
+//! macOS). Dev- and build-dependencies are not followed, and neither is an `optional`
+//! dependency of a crate nothing turns a feature of on: a crate with no non-empty `default`
+//! feature, that no crate read names with `features = [...]` or in a `crate/feature` entry
+//! of its own features (the walk repeats until that set stops growing). A build of the agent
+//! links such a dependency only through something outside these manifests, which the test
+//! `the_agent_and_the_helper_do_not_link_the_job_client` refuses for the job client
+//! (`js-client`'s `jobs`). A manifest that cannot be read is an
+//! error.
 //!
 //! **Which files.** [`check`] parses (with `syn`) the production source of those crates.
 //! The roots of a crate are the `[lib] path`, each `[[bin]] path`, and the files of the
@@ -234,8 +240,55 @@ pub fn crates(root: &Path) -> Result<BTreeSet<String>, Error> {
     Ok(closure(root)?.into_keys().collect())
 }
 
-/// The manifest of each crate of [`crates`], by crate.
+/// The manifest of each crate of [`crates`], by crate. An optional dependency is left out
+/// only while no crate read turns a feature of its crate on, so the walk is repeated with the
+/// crates whose features are turned on until that set stops growing.
 fn closure(root: &Path) -> Result<BTreeMap<String, toml::Table>, Error> {
+    let mut enabled = BTreeSet::new();
+    loop {
+        let manifests = walk(root, &enabled)?;
+        let now: BTreeSet<String> = manifests.values().flat_map(featured).collect();
+        match now == enabled {
+            true => return Ok(manifests),
+            false => enabled = now,
+        }
+    }
+}
+
+/// The crates whose features `table` turns on: a dependency given `features = [...]`, and a
+/// crate named before a `/` in a feature of `table` (`dep/feature`, `dep?/feature`).
+fn featured(table: &toml::Table) -> Vec<String> {
+    let given = dependency_tables(table)
+        .into_iter()
+        .flat_map(|dependencies| dependencies.iter())
+        .filter(|(_, dependency)| {
+            let features = dependency.get("features").and_then(toml::Value::as_array);
+            features.is_some_and(|features| !features.is_empty())
+        })
+        .map(|(name, dependency)| dependency_dir(name, dependency));
+    let forwarded = table
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|features| features.values())
+        .filter_map(toml::Value::as_array)
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .filter_map(|feature| feature.split_once('/'))
+        .map(|(dependency, _)| dependency.trim_end_matches('?').to_owned());
+    given.chain(forwarded).collect()
+}
+
+/// The directory a dependency is read from: the last part of its `path`, or its name.
+fn dependency_dir(name: &str, dependency: &toml::Value) -> String {
+    let path = dependency.get("path").and_then(toml::Value::as_str);
+    let dir = path.and_then(|path| Path::new(path).file_name());
+    dir.map_or(name.to_owned(), |dir| dir.to_string_lossy().into_owned())
+}
+
+/// The manifests of [`START_CRATES`] and of the crates they depend on, following an optional
+/// dependency of a crate in `enabled` or of a crate with a non-empty `default` feature.
+fn walk(root: &Path, enabled: &BTreeSet<String>) -> Result<BTreeMap<String, toml::Table>, Error> {
     let mut manifests = BTreeMap::new();
     let mut queue: Vec<String> = START_CRATES.map(str::to_owned).to_vec();
     while let Some(name) = queue.pop() {
@@ -249,15 +302,14 @@ fn closure(root: &Path) -> Result<BTreeMap<String, toml::Table>, Error> {
         })?;
         let table: toml::Table =
             toml::from_str(&text).map_err(|source| Error::Manifest { path: rel, source })?;
-        queue.extend(path_dependencies(&table));
+        queue.extend(path_dependencies(&table, enabled.contains(&name)));
         manifests.insert(name, table);
     }
     Ok(manifests)
 }
 
-/// The directory names of the `path` dependencies of the manifest `table` that are built
-/// for macOS: those of `[dependencies]` and of every target table but [`LINUX_ONLY`].
-fn path_dependencies(table: &toml::Table) -> Vec<String> {
+/// The `[dependencies]` table of `table` and that of every target table but [`LINUX_ONLY`].
+fn dependency_tables(table: &toml::Table) -> Vec<&toml::Table> {
     let mut tables: Vec<&toml::Value> = Vec::new();
     tables.extend(table.get("dependencies"));
     if let Some(targets) = table.get("target").and_then(toml::Value::as_table) {
@@ -267,10 +319,30 @@ fn path_dependencies(table: &toml::Table) -> Vec<String> {
             }
         }
     }
+    tables
+        .into_iter()
+        .filter_map(toml::Value::as_table)
+        .collect()
+}
+
+/// The directory names of the `path` dependencies of the manifest `table` that are built
+/// for macOS: those of [`dependency_tables`], without the `optional` ones unless the crate has
+/// a non-empty `default` feature or is `enabled` (a crate read turns a feature of it on).
+fn path_dependencies(table: &toml::Table, enabled: bool) -> Vec<String> {
+    let tables = dependency_tables(table);
+    let defaults = table
+        .get("features")
+        .and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|default| !default.is_empty());
     let mut names = Vec::new();
-    for dependencies in tables.into_iter().filter_map(toml::Value::as_table) {
+    for dependencies in tables {
         for dependency in dependencies.values() {
-            let path = dependency.get("path").and_then(toml::Value::as_str);
+            let optional = dependency.get("optional").and_then(toml::Value::as_bool) == Some(true);
+            let path = dependency
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .filter(|_| defaults | enabled | !optional);
             let name = path.and_then(|path| Path::new(path).file_name());
             names.extend(name.map(|name| name.to_string_lossy().into_owned()));
         }

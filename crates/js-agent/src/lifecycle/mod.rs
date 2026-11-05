@@ -68,6 +68,11 @@
 //! - **A job is confined to its limits.** Its wall time is counted on the agent's clock
 //!   from the moment its container started, and a job past it is stopped and reported
 //!   `timed_out`.
+//! - **Live logs are outside the job's critical path.** A job start's checked sink goes to
+//!   the runtime ([`RunSpec::log_sink`]; one that fails its check is dropped with a
+//!   `log-sink-ignored` note and the job starts as without one), and a runtime that uploads
+//!   (`crun`, [`crate::logs`]) does so on a thread of its own per job: the result, with its
+//!   tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot never wait for it.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each

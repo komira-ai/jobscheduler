@@ -589,7 +589,7 @@ Both are in [design/placement.md](design/placement.md). In short: the `Book(Dims
 against the pool's total yet still counted in the booking, with the agent's hard limit and the pressure backstop as protection and a
 rerun elsewhere as recovery, while a class that must have a free host to itself uses `BookAll` (and one that needs the host exclusive and quiet, `Whole`, 5.17). Named devices are assigned from `assignments`; at most one
 device lease per agent and whole-device GPUs only (D10). For a machine lease the consumer applies both inside its lease (9.1). A
-whole-node request reserves exactly one host once queued, by draining it (5.17, [whole-node.md](design/whole-node.md)); large non-whole requests have no reservation, and R1 forbids adding one.
+whole-node request reserves exactly one host once queued, by draining it (5.17, [whole-node.md](design/whole-node.md)); large non-whole requests have no reservation, and R1 forbids adding one. A large share job waits in the job queue the same way, unmarked (6.8).
 
 ### 6.5 Rank for elastic pools
 Spread is right for a fixed fleet. In any pool that scales, idle machines are terminated, so packing matters: it leaves hosts idle that
@@ -603,6 +603,20 @@ prove a host with one job while the host stays out of ordinary placement. One ru
 engines (the scheduler's round, and the lease server's placer under `--placement js-sched`). It refuses by name a host that is unknown, not
 serving, not cordoned, draining, mismatched or too small. Room, the load predicate and `memory_schedulable_percent` apply to a probe as to
 any request. See [design/placement.md](design/placement.md).
+
+### 6.8 Queued jobs and their allocations
+Under `--placement js-sched`, when the server holds the job and allocation tables (the job service, off by default; no default
+behaviour changes), the lease server's engine also places queued jobs (`crates/js-lease-server/src/sched/jobs.rs`). On each tick and
+after each heartbeat of a host that speaks the per-job messages it reads the live allocations and the queued jobs (higher priority
+first, then earlier submit, then job id) from the tables as they stand, so no queued job has to be presented again. It walks the
+queue in that order and the order is binding (`js_sched::walk_in_order`): a job that fits no host now closes to every job behind it
+each host it could use, so when a host frees the front job that fits it gets it. Each placement is one store transaction (the job
+placed, its allocation booked) before the host is told; a failed commit books nothing and the job stays queued. The engine counts
+job allocations and lease bookings side by side, so the two never overbook a host, and an allocation is freed only by the host's
+confirmation or the provider's absence (`crates/js-lease-server/src/job_alloc.rs`), which writes its usage history row in the same
+commit. A large share job has no mark, by design: work that is not behind it in the queue (a lease, or a more urgent job submitted
+later) can keep a host from ever having room for it, and it is placed the first time there is room. A whole-host job is not placed
+by this pass.
 
 ## 7. Request history and sizing
 

@@ -227,6 +227,7 @@ fn native_job_is_refused_while_the_agent_has_no_native_runtime() {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: js_agent_wire::NetworkLevel::Off,
+        ports: Vec::new(),
     });
     let events = h.start(spec);
     assert_eq!(names(&events), ["refused r1 native-unsupported"]);

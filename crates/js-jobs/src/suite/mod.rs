@@ -31,6 +31,7 @@ mod idempotency;
 mod lifecycle;
 mod paging;
 mod placement;
+mod queue;
 mod races;
 mod retention;
 mod rows;
@@ -43,6 +44,7 @@ pub use idempotency::*;
 pub use lifecycle::*;
 pub use paging::*;
 pub use placement::*;
+pub use queue::*;
 pub use races::*;
 pub use retention::*;
 pub use rows::*;
@@ -111,6 +113,9 @@ where
     the_tick_deletes_in_batches_and_leaves_what_it_cannot_read(backend);
     a_failed_sweep_or_raise_changes_nothing(backend);
     a_sweep_that_loses_to_a_raise_is_stale(backend);
+    queued_lists_the_queue_in_order(backend);
+    live_allocations_lists_every_booked_or_releasing_allocation(backend);
+    a_free_with_rows_beside_it_is_one_commit(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -188,6 +193,9 @@ macro_rules! job_store_tests {
             the_tick_deletes_in_batches_and_leaves_what_it_cannot_read,
             a_failed_sweep_or_raise_changes_nothing,
             a_sweep_that_loses_to_a_raise_is_stale,
+            queued_lists_the_queue_in_order,
+            live_allocations_lists_every_booked_or_releasing_allocation,
+            a_free_with_rows_beside_it_is_one_commit,
         );
     };
 }

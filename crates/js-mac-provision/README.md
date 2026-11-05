@@ -90,7 +90,9 @@ This crate renders, installs and checks the anchor; it does **not** gate jobs it
 gate is the macOS agent's (`js-agent`, `--native-network on` with the `--native-pf-*` flags,
 which carry the anchor, the uid range, the endpoints and the `pfctl` this crate was
 given). It calls `js_mac_provision::enforced(&Config) -> Result<(), ProvisionError>` **at
-agent start and before every job that asks for the network, and refuses on any error**: the
+agent start and before every job that asks for the filtered network (`allow-list`; an
+`open` job under `--native-network open` has no filter and is not checked), and refuses on
+any error**: the
 agent does not start, and the job is refused as `egress-unchecked` and creates nothing.
 `PfDisabled`, `NotReferenced` and `Drift` say it is not enforced; `Run`, `Failed` and `State`
 say it could not be told, which is a refusal too. The answer is never kept.

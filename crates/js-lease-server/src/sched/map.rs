@@ -137,17 +137,26 @@ fn family_of(text: &str) -> String {
 /// [`MapError::GpuClass`] when a `gpu.kind` capability names another family than the
 /// request's model or class.
 pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
-    let model = request
-        .capabilities
+    needs_of(&request.capabilities, &request.resources)
+}
+
+/// What a run asking for `capabilities` and `resources` requires of a node, as [`needs`]
+/// says: a lease's request and a queued job's constraints alike.
+///
+/// # Errors
+/// As [`needs`].
+pub(crate) fn needs_of(
+    capabilities: &js_types::Capabilities,
+    resources: &Resources,
+) -> Result<js_caps::Request, MapError> {
+    let model = capabilities
         .get(ACCEL_MODEL_KEY)
         .map(String::as_str)
-        .or_else(|| request.resources.gpu_class());
+        .or_else(|| resources.gpu_class());
     let kind = model.map(family_of);
-    let need = AcceleratorNeed::requested(&request.capabilities, &request.resources)
-        .map_err(RequestError::from)?;
+    let need = AcceleratorNeed::requested(capabilities, resources).map_err(RequestError::from)?;
     let stated: Vec<(&str, String)> = need.map(|need| need.to_capabilities()).unwrap_or_default();
-    let mut pairs: BTreeMap<&str, &str> = request
-        .capabilities
+    let mut pairs: BTreeMap<&str, &str> = capabilities
         .iter()
         .filter(|(key, _)| !ACCEL_KEYS.contains(&key.as_str()))
         .map(|(key, value)| (key.as_str(), value.as_str()))

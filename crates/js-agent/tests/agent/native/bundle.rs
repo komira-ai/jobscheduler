@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use js_agent::bundle::{Admission, Needs, Placer};
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime};
+use js_agent::native::{Ceiling, NativeConfig};
 use js_agent_wire::{NetworkLevel, Outcome, refusal};
 use js_bundle::DottedVersion;
 
@@ -35,6 +36,11 @@ impl Stored {
     }
 
     fn of(name: &str, spec: Spec) -> Self {
+        Self::built(name, spec, |_| {})
+    }
+
+    /// As [`Stored::of`], over a runtime whose configuration `adjust` has changed.
+    fn built(name: &str, spec: Spec, adjust: impl FnOnce(&mut NativeConfig)) -> Self {
         let dir = Scratch::new(&format!("native-bundle-{name}"));
         let src = dir.path("src");
         fs::create_dir(&src).unwrap();
@@ -46,7 +52,7 @@ impl Stored {
             fake,
             rt,
             dir: work,
-        } = Rig::new(name);
+        } = Rig::with(name, adjust);
         let rt = rt.with_bundles(Arc::clone(&store));
         Self {
             rig: Rig {
@@ -198,6 +204,36 @@ fn the_network_is_the_lowest_of_the_request_the_bundle_and_the_agent() {
         let profile = parse(&s.rig.fake.run_of("7.0").argv).profile;
         let said = format!("bundle {needed}, asked {asked:?}");
         assert_eq!(profile.contains(loopback), has_loopback, "{said}");
+    }
+}
+
+/// Asserts that a job admitted at `open` (under an `open` ceiling) whose bundle says its tools
+/// need no network (`network_max = off`) gets a profile with the network denied, and that the
+/// same job under a bundle that needs `on` gets the open profile. Catches the refusal of a job
+/// above the agent's ceiling replacing the bundle's lowering as well: the bundle's
+/// `network_max` is what its tools need, and it still lowers an admitted job.
+#[test]
+fn bundle_network_max_still_lowers_the_profile() {
+    for (n, (needed, denies)) in [("off", true), ("on", false)].into_iter().enumerate() {
+        let mut spec = Spec::standard();
+        spec.network_max = needed;
+        let mut s = Stored::built(&format!("open{n}"), spec, |config| {
+            config.network = Ceiling::Open;
+        });
+        let mut run = s.spec("r1", "@bundle/tool", &[]);
+        let Body::Native(body) = &mut run.body else {
+            panic!("a native body");
+        };
+        body.network = NetworkLevel::Open;
+        let admitted = s.rig.rt.check_native(body).map_err(|why| why.code);
+        assert_eq!(admitted, Ok(()), "open is admitted under open");
+        s.rig.rt.create_and_start(&run).unwrap();
+        let profile = parse(&s.rig.fake.run_of("7.0").argv).profile;
+        assert_eq!(
+            profile.contains("(deny network*)"),
+            denies,
+            "bundle {needed}"
+        );
     }
 }
 

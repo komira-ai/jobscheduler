@@ -50,6 +50,7 @@ fn spec() -> JobSpec {
             },
         ],
         network: NetworkLevel::Loopback,
+        ports: Vec::new(),
     });
     spec
 }

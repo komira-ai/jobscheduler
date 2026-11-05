@@ -343,12 +343,16 @@ async fn serve_jobs(
     let jobs = Arc::clone(jobs);
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
+    let placing = Arc::clone(agents);
     let served = blocking(move || {
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
         };
         let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+        // What the listing ended or freed, and the load the beat brought, can make room
+        // for a queued job: a pass places it, and its start rides on the host's next reply.
+        placing.place_jobs();
         (host, served)
     })
     .await;

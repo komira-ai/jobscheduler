@@ -13,10 +13,12 @@
 
 use std::collections::BTreeMap;
 
+use js_types::PortMap;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{Isolation, JobSpec};
 use crate::error::{Rule, ValidationError};
+use crate::network;
 use crate::refusal;
 use crate::run::{self, RunSpec};
 
@@ -26,9 +28,17 @@ pub const BUNDLE_PROGRAM_PREFIX: &str = "@bundle/";
 /// The most bytes an entrypoint name has.
 pub const BUNDLE_ENTRYPOINT_MAX: usize = 64;
 
-/// How much network a native job may use. The agent clamps it to what its own flag
-/// allows. An absent value is [`NetworkLevel::Off`]. It is not the level of a container job
-/// ([`js_types::JobNetwork`], `JobSpec::network`), which a native job leaves `none`.
+/// How much network a native job asks for. An absent value is [`NetworkLevel::Off`]. It is
+/// not the level of a container job ([`js_types::JobNetwork`], `JobSpec::network`), which a
+/// native job leaves `none`, but three of its values are that level on a Mac (design 5.8):
+/// `off` is `none`, `on` is `allow-list` and `open` is `open`.
+///
+/// A Mac agent refuses a start that asks for more than its `--native-network` allows
+/// (`network-above-ceiling`) and never runs it with less.
+///
+/// An agent from before [`NetworkLevel::Open`] reads `open` as a value it does not know: the
+/// start fails to decode (inside a reply it reads as [`crate::Command::Unknown`]) and runs
+/// nothing, so it never runs with no network or with a filter it was not asked for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkLevel {
@@ -37,8 +47,10 @@ pub enum NetworkLevel {
     Off,
     /// The loopback interface only.
     Loopback,
-    /// The network.
+    /// The network, limited to the endpoints of the pool's packet filter (`allow-list`).
     On,
+    /// The network with no filter (`open`): any address the Mac can reach.
+    Open,
 }
 
 /// Whether an input is changed by the job.
@@ -137,13 +149,24 @@ pub struct NativeSpec {
     /// The most network the job may use. Absent means none.
     #[serde(default)]
     pub network: NetworkLevel,
+    /// The ports the job declares ([`PortMap`]), bounded and checked as the `ports` of a
+    /// container job are (at most [`crate::limits::MAX_PORTS`], each port above zero, no
+    /// host port twice; refused `invalid-job` under `native.ports`). Left out when there
+    /// are none, so a body without ports is the text it was before the field.
+    ///
+    /// A Mac agent refuses a start that declares any (`ports-not-supported`): it forwards
+    /// no port yet. An agent from before the field ignores it, so a server sends a native
+    /// body with ports to no host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortMap>,
 }
 
 impl NativeSpec {
     /// Checks the body alone, without the job around it: the checks of [`RunSpec`], with
-    /// the field names `native.*`.
+    /// the field names `native.*`, then its declared ports.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        RunSpec::from(self.clone()).check(&run::NATIVE)
+        RunSpec::from(self.clone()).check(&run::NATIVE)?;
+        network::check_ports(&network::NATIVE_PORTS, &self.ports)
     }
 }
 

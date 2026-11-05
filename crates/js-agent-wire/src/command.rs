@@ -428,7 +428,7 @@ impl JobSpec {
             .map(|mount| (mount.root_name.as_str(), mount.rel.as_str()));
         check::distinct(mounts, places)?;
         files::validate_files(&self.files)?;
-        network::check_ports(&self.ports)?;
+        network::check_ports(&network::JOB_PORTS, &self.ports)?;
         check::labels(at.field("labels"), &self.labels)?;
         check::range(
             at.field("valid_for_ms"),

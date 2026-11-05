@@ -55,6 +55,7 @@ fn native(program: &str) -> NativeSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: NetworkLevel::Loopback,
+        ports: Vec::new(),
     }
 }
 
