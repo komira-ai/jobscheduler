@@ -111,7 +111,11 @@
 //! run's capture files are capped at `--log-file-cap` (other runs keep the capture's 1 MiB),
 //! an uploader ([`crate::logs`]) tails them from the start on its own thread, and the read of
 //! the end tells it the totals without waiting. [`Runtime::logs_report`] gives the totals and
-//! the bytes the capture dropped. A run adopted after a restart uploads nothing.
+//! the bytes the capture dropped. The uploader keeps a progress record (`logs-upload.json`, no
+//! secret) in the lease directory, and writes it no more once [`Runtime::remove`] removes the
+//! directory. A run adopted after a restart whose lease holds one is given an uploader made
+//! from it with the runtime's live logs, and one that ended meanwhile gets its finals and
+//! reports its `logs` (the module `adopt`); a run adopted without one uploads nothing.
 //!
 //! # GPUs
 //!
@@ -501,13 +505,14 @@ impl CrunRuntime {
         Ok(runtime)
     }
 
-    /// This runtime uploading the output of each run whose start carries a sink, with `logs`.
+    /// This runtime uploading the output of each run whose start carries a sink, with `logs`;
+    /// each run it adopted whose lease holds a progress record is given its uploader now
+    /// (the module `adopt`). Given once, after the runtime opened.
     #[must_use]
-    pub fn with_live_logs(self, logs: LiveLogs) -> Self {
-        Self {
-            logs: Some(logs),
-            ..self
-        }
+    pub fn with_live_logs(mut self, logs: LiveLogs) -> Self {
+        self.resume_uploads(&logs);
+        self.logs = Some(logs);
+        self
     }
 
     /// What the pass over the ledger at [`CrunRuntime::open`] did: the runs adopted and the
@@ -765,7 +770,8 @@ impl CrunRuntime {
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
         // The capture made both files before the supervisor said it was ready.
         let files = (stdout_path(&run.lease.dir), stderr_path(&run.lease.dir));
-        run.logs.start(self.logs.as_ref(), (&files.0, &files.1));
+        run.logs
+            .start(self.logs.as_ref(), (&files.0, &files.1), &run.lease.dir);
         run.backstop = run.cgroup.parent_ooms().ok();
         // The supervisor is on the sidecar before anything else is done, in the state still
         // starting, so a teardown at any point ends it. A failure to write is reported with
@@ -907,6 +913,9 @@ impl Runtime for CrunRuntime {
             }
         }
         run.net.release(&id.0);
+        // No progress record is written from here on: a file made in the lease directory while
+        // it is removed below would stop the removal.
+        run.logs.leave();
         oci.remove(&id.0)
             .map_err(|why| failed("delete the container", &why))?;
         run.cgroup

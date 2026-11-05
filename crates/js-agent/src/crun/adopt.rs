@@ -29,6 +29,13 @@
 //! job ran with no agent counts against it, and a job whose limit passed meanwhile is
 //! stopped at the first step after the adoption.
 //!
+//! A run whose lease directory holds the progress record of its live logs
+//! (`logs-upload.json`, [`crate::logs`]) gets an uploader made from it when the runtime is given
+//! its live logs ([`CrunRuntime::with_live_logs`]): a regular file of the agent's user, of a
+//! known version, whose prefix is the job's. One that ended while no agent ran is finishing at
+//! once, with the totals of its exit record. A record that fails a check is ignored with one
+//! warning, and the run is adopted as it would be without one: it uploads nothing.
+//!
 //! Every other lease of this agent is torn down and reported with its [`Reason`]: a sidecar
 //! of version 1, one whose container never started, one that failed a check, and a lease of
 //! this agent's name that has no sidecar at all. The sidecars and leases of other agents are
@@ -42,6 +49,7 @@ use std::path::Path;
 use js_contain::cgroup::LeaseCgroup;
 use js_contain::oci::{
     ExitRecord, end_supervisor, exit_record_path, read_exit_record, recorded_supervisor,
+    stderr_path, stdout_path,
 };
 use js_types::JobNetwork;
 
@@ -53,7 +61,7 @@ use super::spec::{adopted_spec, concluded};
 use super::{CrunError, CrunRuntime, Fault, Run, State, legacy_lease, net};
 use crate::cli_runtime::{NAME_PREFIX, agent_tag, container_name};
 use crate::lifecycle::{RunSpec, RuntimeError, label};
-use crate::logs::RunLogs;
+use crate::logs::{LiveLogs, RunLogs};
 
 /// The version 2 fields of a sidecar in the state running, all present.
 #[derive(Debug)]
@@ -311,8 +319,13 @@ impl CrunRuntime {
             .map_err(|why| Reason::Inconsistent(format!("the exit record: {why}")))?;
         run.state = match record {
             // A container that ended has no network left to take over: its result is kept
-            // whatever the egress, so it is reported.
-            Some(record) => self.ended_state(&run, &record),
+            // whatever the egress, so it is reported. Its uploader, if it gets one, finishes
+            // with the totals the supervisor counted.
+            Some(record) => {
+                let totals = (record.tail.stdout.total, record.tail.stderr.total);
+                run.logs = RunLogs::adopted(Some(totals));
+                self.ended_state(&run, &record)
+            }
             // One that may still run is wired, and an egress removed the wiring of every
             // earlier process when it started.
             None if self.egress.is_some() => {
@@ -325,6 +338,19 @@ impl CrunRuntime {
                 .map_err(Reason::Inconsistent)?,
         };
         Ok(run)
+    }
+
+    /// Gives each adopted run whose lease directory holds a progress record of this agent's
+    /// user its uploader, with `logs` (see [`RunLogs::resume`]): one that ended is finishing
+    /// at once. A run without a record, or with one that is ignored, has none.
+    pub(super) fn resume_uploads(&mut self, logs: &LiveLogs) {
+        let owner = rustix::process::geteuid().as_raw();
+        for run in self.runs.values_mut() {
+            let files = (stdout_path(&run.lease.dir), stderr_path(&run.lease.dir));
+            let job = (run.entry.run_id.as_str(), owner);
+            run.logs
+                .resume(logs, (&files.0, &files.1), &run.lease.dir, job);
+        }
     }
 
     /// Whether the paths `fields` records are the ones this runtime names for the lease of
@@ -374,8 +400,9 @@ impl CrunRuntime {
             // no job with a network; one that ended has no network to release.
             net: net::Net::asked(JobNetwork::None, Vec::new()),
             entry: entry.clone(),
-            // An adopted run gets no uploader: the sink came only in its start.
-            logs: RunLogs::default(),
+            // Its uploader, if its lease holds a progress record, comes with the runtime's live
+            // logs (`resume_uploads`); the sink came only in its start.
+            logs: RunLogs::adopted(None),
         }
     }
 

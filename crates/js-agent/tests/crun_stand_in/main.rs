@@ -24,6 +24,7 @@ mod logs;
 mod node;
 mod open;
 mod pins;
+mod resume;
 mod runs;
 mod stop;
 mod sweep;

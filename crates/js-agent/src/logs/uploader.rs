@@ -1,10 +1,11 @@
 //! The uploader of one job: a thread of its own that drives the job's [`Upload`], and the
 //! handle the runtime keeps.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -12,6 +13,7 @@ use std::thread::JoinHandle;
 use js_agent_wire::LogReport;
 
 use super::LiveLogs;
+use super::record::{Recorder, Streams};
 use super::sink::Sink;
 use super::stream::End;
 use super::upload::{Ends, Message, Next, Upload};
@@ -27,6 +29,7 @@ use super::wake::Wake;
 /// the files.
 pub struct Uploader {
     files: [Arc<File>; 2],
+    recorder: Recorder,
     mailbox: Arc<Mutex<Option<Message>>>,
     wake: Arc<dyn Wake>,
     thread: Option<JoinHandle<()>>,
@@ -39,9 +42,20 @@ impl std::fmt::Debug for Uploader {
     }
 }
 
+/// Where an uploader begins: the directory it keeps its progress record in (none keeps no
+/// record), and where each stream's upload is (the start of both for a job that starts, what
+/// the record said for one adopted after a restart).
+#[derive(Debug, Default)]
+pub(super) struct Origin {
+    /// The lease directory, where the record is kept.
+    pub(super) record: Option<PathBuf>,
+    /// Where each stream's upload is.
+    pub(super) streams: Streams,
+}
+
 impl Uploader {
     /// Opens `stdout` and `stderr` (the capture files of a run that has started) and starts the
-    /// thread that uploads them to `sink`.
+    /// thread that uploads them to `sink`, from the start of both and keeping no progress record.
     ///
     /// # Errors
     ///
@@ -51,9 +65,27 @@ impl Uploader {
         (stdout, stderr): (&Path, &Path),
         logs: &LiveLogs,
     ) -> io::Result<Self> {
-        let files = [Arc::new(File::open(stdout)?), Arc::new(File::open(stderr)?)];
+        Self::open(sink, (stdout, stderr), logs, Origin::default())
+    }
+
+    /// The one constructor of every uploader, at a job's start and at its adoption after a
+    /// restart: opens `stdout` and `stderr` and starts the thread that uploads them to `sink`
+    /// from `origin`. The thread writes the progress record (when `origin` names its directory)
+    /// before its first step.
+    ///
+    /// # Errors
+    ///
+    /// A file could not be opened.
+    pub(super) fn open(
+        sink: &Sink,
+        (stdout, stderr): (&Path, &Path),
+        logs: &LiveLogs,
+        origin: Origin,
+    ) -> io::Result<Self> {
+        let files = [Arc::new(capture(stdout)?), Arc::new(capture(stderr)?)];
         let mailbox = Arc::new(Mutex::new(None));
         let wake = (logs.wakes)();
+        let recorder = Recorder::new(origin.record, sink);
         let mut upload = Upload::new(
             sink.clone(),
             files.clone(),
@@ -63,6 +95,7 @@ impl Uploader {
                 Arc::clone(&logs.grant),
             ),
             logs.limits,
+            (recorder.clone(), origin.streams),
         );
         let (inbox, sleeper) = (Arc::clone(&mailbox), Arc::clone(&wake));
         let prefix = sink.prefix().as_str().to_owned();
@@ -71,6 +104,7 @@ impl Uploader {
         let thread = std::thread::spawn(move || {
             tracing::dispatcher::with_default(&dispatch, || {
                 let ran = catch_unwind(AssertUnwindSafe(|| {
+                    upload.begin();
                     while let Next::Sleep(until) = upload.step(take(&inbox)) {
                         sleeper.sleep_until(until);
                     }
@@ -86,6 +120,7 @@ impl Uploader {
         });
         Ok(Self {
             files,
+            recorder,
             mailbox,
             wake,
             thread: Some(thread),
@@ -93,14 +128,14 @@ impl Uploader {
         })
     }
 
-    /// [`Uploader::start`], or `None` with one warning naming the job's prefix and why.
-    #[must_use]
-    pub fn start_or_warn(
+    /// [`Uploader::open`], or `None` with one warning naming the job's prefix and why.
+    pub(super) fn open_or_warn(
         sink: &Sink,
         (stdout, stderr): (&Path, &Path),
         logs: &LiveLogs,
+        origin: Origin,
     ) -> Option<Self> {
-        Self::start(sink, (stdout, stderr), logs)
+        Self::open(sink, (stdout, stderr), logs, origin)
             .map_err(|why| {
                 warn(
                     sink.prefix().as_str(),
@@ -133,6 +168,13 @@ impl Uploader {
         }
     }
 
+    /// Writes no progress record from now on and removes the one written, before the lease
+    /// directory that holds it is removed; a write under way has ended when this returns. The
+    /// upload itself goes on.
+    pub(super) fn leave(&self) {
+        self.recorder.leave();
+    }
+
     /// Waits for the thread to end, for a caller that must know it has (a test). Whether it
     /// ended without a panic that escaped (the thread catches its own).
     pub fn join(mut self) -> bool {
@@ -160,6 +202,23 @@ impl Drop for Uploader {
 /// Logs `what` as a warning about the live logs of the job whose prefix is `prefix`.
 fn warn(prefix: &str, what: &str) {
     tracing::warn!(prefix, "live logs: {what}");
+}
+
+/// Opens the capture file `path` to read it. The lease directory is the job user's, who may put
+/// something else in the file's place while no agent runs: a link is refused, not followed, a
+/// pipe is opened without waiting for a writer, and anything but a regular file is refused.
+fn capture(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    match file.metadata()?.is_file() {
+        true => Ok(file),
+        false => Err(io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        ))),
+    }
 }
 
 /// The message the mailbox holds, taken.

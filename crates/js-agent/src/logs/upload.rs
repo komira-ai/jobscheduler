@@ -12,6 +12,7 @@ use js_logstore::{Stream, Transport, TransportError};
 
 use super::Limits;
 use super::grant::{HostGrant, epoch_ms};
+use super::record::{Recorder, Streams};
 use super::sink::Sink;
 use super::stream::{Action, End, Tail};
 
@@ -94,6 +95,8 @@ pub(super) struct Upload {
     limits: Limits,
     store: Option<Store<Port, Arc<dyn Clock>>>,
     streams: [Tail; 2],
+    /// The writer of the progress record.
+    recorder: Recorder,
     /// When the end's work is given up: [`Limits::budget`] after `finish`.
     deadline: Option<SystemTime>,
     /// Each stream's backoff (stdout, stderr).
@@ -113,12 +116,14 @@ enum Failure {
 }
 
 impl Upload {
-    /// The upload of the job whose sink is `sink`, tailing `files` (stdout, stderr).
+    /// The upload of the job whose sink is `sink`, tailing `files` (stdout, stderr) from where
+    /// `streams` says each is, and keeping its progress record with `recorder`.
     pub(super) fn new(
         sink: Sink,
         files: [Arc<File>; 2],
         (transport, clock, grant): (Arc<dyn Transport>, Arc<dyn Clock>, Arc<HostGrant>),
         limits: Limits,
+        (recorder, streams): (Recorder, Streams),
     ) -> Self {
         let [stdout, stderr] = files;
         let seed = sink
@@ -136,14 +141,27 @@ impl Upload {
             limits,
             store: None,
             streams: [
-                Tail::new(Stream::Stdout, stdout),
-                Tail::new(Stream::Stderr, stderr),
+                Tail::new(Stream::Stdout, stdout, streams.stdout),
+                Tail::new(Stream::Stderr, stderr, streams.stderr),
             ],
+            recorder,
             deadline: None,
             backoff: [Backoff::default(), Backoff::default()],
             turn: 0,
             seed,
         }
+    }
+
+    /// Writes the progress record as the upload begins, before its first step: a job adopted
+    /// after a restart that comes before its first put still has one.
+    pub(super) fn begin(&self) {
+        self.note();
+    }
+
+    /// Writes the progress record of where both streams are.
+    fn note(&self) {
+        self.recorder
+            .note(self.streams.each_ref().map(Tail::progress));
     }
 
     /// One step: takes the message when one has come (the end, or that the run was dropped
@@ -180,11 +198,22 @@ impl Upload {
             let Some((credential, generation)) = self.grant.current() else {
                 break;
             };
+            // The cut is on record before its put: a restart puts the same chunk again.
+            if let Action::Chunk { .. } = action {
+                self.note();
+            }
             let failure = match self.request(index, action, credential) {
                 Ok(()) => {
                     self.streams[index].succeeded(action);
                     self.backoff[index] = Backoff::default();
                     self.turn = 1 - index;
+                    // The deletes are recorded once the last is done, not one by one: a
+                    // restart deletes again what was deleted since, which changes nothing.
+                    let deleting =
+                        matches!(action, Action::Delete { .. }) && self.streams[index].deleting();
+                    if !deleting {
+                        self.note();
+                    }
                     continue;
                 }
                 Err(failure) => failure,
