@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use js_logstore::Stream;
 
 use super::chunker::{CutLimits, cut};
+use super::record::{Cut, Progress};
 
 /// What the uploader does next for a stream: one store request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,21 +63,40 @@ pub(super) struct Tail {
 }
 
 impl Tail {
-    /// The stream `stream`, read through `file`.
-    pub(super) fn new(stream: Stream, file: Arc<File>) -> Self {
+    /// The stream `stream`, read through `file`, from where `progress` says its upload is (the
+    /// start of the stream for a new job, a progress record's for an adopted one). What the file
+    /// holds past `next` is seen at the first poll, which is the first-byte time of those bytes;
+    /// a cut in flight is put again as it was cut.
+    pub(super) fn new(stream: Stream, file: Arc<File>, progress: Progress) -> Self {
         Self {
             stream,
             file,
-            seen: 0,
-            next: 0,
+            seen: progress.next,
+            next: progress.next,
             arrivals: VecDeque::new(),
-            cut: None,
-            put: VecDeque::new(),
+            cut: progress.cut.map(|cut| (cut.offset, cut.len)),
+            put: progress.chunks.into(),
             delete_failures: 0,
             end: None,
-            gap_put: false,
-            final_put: false,
+            gap_put: progress.gap_done,
+            final_put: progress.final_done,
         }
+    }
+
+    /// Where the stream's upload is, as its progress record says it.
+    pub(super) fn progress(&self) -> Progress {
+        Progress {
+            next: self.next,
+            cut: self.cut.map(|(offset, len)| Cut { offset, len }),
+            chunks: self.put.iter().copied().collect(),
+            gap_done: self.gap_put,
+            final_done: self.final_put,
+        }
+    }
+
+    /// Whether chunks put are still to be deleted.
+    pub(super) fn deleting(&self) -> bool {
+        !self.put.is_empty()
     }
 
     /// Reads the file's length and notes growth as an arrival at `now`.
