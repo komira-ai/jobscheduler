@@ -41,7 +41,7 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
   (`JobResultAck`) and `retired_acks`.
 - `Command`, tagged by `type`: `start` (`JobSpec`, keyed by run and lease), `stop` and `cancel` (by `run_id`), and the per-job
   `job_start` (`JobStartSpec`) and `job_stop` (by `job_id`). A tag this version does not know reads as `Command::Unknown`.
-- The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire` and filled by no agent or server yet: `JobStartSpec.log_sink` (where to upload one job's logs;
+- The live-log fields ([live-logs.md](live-logs.md), section 7), in `js-agent-wire`; the `crun` agent reads `log_sink` and `log_grant` and fills `log_grant_state` and `logs`, and no server sends a sink or a grant yet: `JobStartSpec.log_sink` (where to upload one job's logs;
   no secret), `HeartbeatReply.log_grant` (the host's upload credential), the heartbeat's `log_grant_state` (`stale`, `until_ms`) and
   `JobResult.logs` (each stream's length and dropped bytes). An agent announces them with the hello capability `log-upload`, and a
   server sends `log_sink` and `log_grant` only to an agent that reported it. Each is decoded as `load` is: a malformed value reads as

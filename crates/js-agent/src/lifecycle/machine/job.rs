@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    HeldRun, HeldState, Isolation, JobSpec, NativeSpec, Outcome, RunResult, Taint,
+    HeldRun, HeldState, Isolation, JobSpec, LogReport, NativeSpec, Outcome, RunResult, Taint,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,7 @@ use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec, Ticket};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, detail, label};
+use crate::logs::Sink;
 
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +36,22 @@ pub(super) enum Stage {
     Freed,
 }
 
+/// What a job start gives its run beyond the run start it stands for; nothing for a run
+/// start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Given {
+    /// The environment, by name in order ([`RunSpec::env`]).
+    pub(super) env: Vec<(String, String)>,
+    /// The checked live-log sink ([`RunSpec::log_sink`]).
+    pub(super) log_sink: Option<Sink>,
+}
+
 /// What a start that waits for its image keeps to finish starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Waiting {
     pub(super) spec: JobSpec,
-    /// The environment of a job start, empty for a run start ([`RunSpec::env`]).
-    pub(super) env: Vec<(String, String)>,
+    /// What a job start gives its run.
+    pub(super) given: Given,
     pub(super) mounts: Vec<ResolvedMount>,
     pub(super) slot: u32,
     /// The disk the run books.
@@ -238,6 +249,10 @@ pub(super) struct Job {
     /// step of its cleanup, removed once the checks have run).
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
+    /// What the runtime's capture saw of each stream, read with the result's tail: a job
+    /// keyed by job lists it in its result. `None` from a runtime that uploads no live logs,
+    /// for a run without a sink, and for a result read back from the state root.
+    pub(super) logs: Option<LogReport>,
     pub(super) findings: Vec<Finding>,
     /// When the container started, on the agent's monotonic clock, in microseconds (the
     /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
@@ -455,6 +470,7 @@ impl Job {
             host: spec.isolation == Isolation::Host,
             owed: false,
             result: None,
+            logs: None,
             findings: Vec::new(),
             started_usec: None,
             cgroup: None,
@@ -489,6 +505,7 @@ impl Job {
             host: false,
             owed: false,
             result: Some(result),
+            logs: None,
             findings: Vec::new(),
             started_usec: None,
             cgroup: None,
@@ -523,6 +540,7 @@ impl Job {
             host: may_change_host(found),
             owed: false,
             result: None,
+            logs: None,
             findings: Vec::new(),
             started_usec: now
                 .checked_sub(found.running_ms)
@@ -597,12 +615,13 @@ pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
 }
 
 /// The run of a start: the spec's own labels with the agent's over them, the body the
-/// start names, a container's or a native program's, and the environment of a job start
-/// (`env`, by name in order; empty for a run start). `made` is what the lifecycle made for
-/// the run: its resolved mounts, its scratch directory and its files directory.
+/// start names, a container's or a native program's, and what a job start gives it (`given`:
+/// its environment by name in order, and its live-log sink; nothing for a run start). `made`
+/// is what the lifecycle made for the run: its resolved mounts, its scratch directory and its
+/// files directory.
 pub(super) fn run_spec(
     (spec, keyed): (&JobSpec, Keyed),
-    env: &[(String, String)],
+    given: &Given,
     (mounts, scratch, files): (Vec<ResolvedMount>, PathBuf, Option<PathBuf>),
     slot: u32,
     disk_bytes: u64,
@@ -642,7 +661,7 @@ pub(super) fn run_spec(
                 args: spec.args.clone(),
             },
         },
-        env: env.to_vec(),
+        env: given.env.clone(),
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         pids: spec.limits.pids,
@@ -659,5 +678,6 @@ pub(super) fn run_spec(
             .bundle
             .clone()
             .or_else(|| spec.run.as_ref().map(|_| spec.image.clone())),
+        log_sink: given.log_sink.clone(),
     }
 }
