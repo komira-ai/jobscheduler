@@ -64,6 +64,7 @@
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
 //! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--max-job-wall <duration>` | the most a submitted job's wall limit may be, `30d` (the job service's `DEFAULT_MAX_JOB_WALL`, the longest `server.max_lease_wall` accepts): a whole count of days (`30d`) or a duration (`12h`, `90m`), at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag. A job asking for more is refused `wall-time-above-ceiling`. Read once at start; it does not read `server.max_lease_wall`. Without `--job-listen` it is checked and kept, and nothing reads it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
@@ -110,6 +111,7 @@
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
 //! # job_retention ("7d"): the flag's name, default and rules
+//! # max_job_wall ("30d"): the flag's name, default and rules
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
@@ -324,8 +326,12 @@
 //! its HTTP/JSON gateway (`js-api-gateway`, routes under `/v1/`, listed in
 //! `docs/http-gateway.md`). Both are behind one check of the bearer token of `--token-file`:
 //! without it a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
-//! request 401 with an empty body. Every call answers `UNIMPLEMENTED` (over HTTP, 501
-//! `{"error":"unimplemented"}`) until it is served. The port has the connection cap and the
+//! request 401 with an empty body. A request carries at most 64 KiB over either transport.
+//! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
+//! the registered hosts and the pool's catalog, committed before it answers; its wall limit
+//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
+//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
+//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
 //! timeouts of the other listeners, and stops with them. The lease routes are not served on
 //! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
 //! routes than the lease server's of those names, so the two cannot share a port while both

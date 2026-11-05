@@ -4,8 +4,9 @@
 //! (the HTTP/JSON routes of `js-api-gateway`). Both call the same [`JobApi`].
 //!
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
-//! file of its group serves it; the read group (`read.rs`) is served, and the fleet group's
-//! calls answer it until its context is given the server's handles (`fleet::Ctx::served`).
+//! file of its group serves it; the read group (`read.rs`) and the cancel group
+//! (`cancel.rs`) are served, and the submit and fleet groups' calls answer it until their
+//! contexts are given the server's handles (`submit::Ctx::served`, `fleet::Ctx::served`).
 //! The server builds the service from its state in one place, [`from_server`], and serves
 //! both transports on the port of `--job-listen` through [`port`] (`wiring.rs`).
 //!
@@ -34,11 +35,18 @@
 //! that one context. A new group (a file of its own, such as one for the logs) adds its file,
 //! its `mod` line, its field and its default here, and its builder in its file.
 //!
-//! The job service reads no provider catalog and holds no handle on the lease table or the
-//! registry: the server takes the table before the registry, and a call that held either
-//! while reading the store would add a third lock to that order. The fleet group reaches
-//! them only through the narrow traits of its context (`fleet::Hosts`), whose calls take and
-//! drop each lock in that order and return before the group reads the job tables.
+//! The job service holds no handle on the lease table or the registry: the server takes the
+//! table before the registry, and a call that held either while reading the store would add
+//! a third lock to that order. The fleet group reaches them only through the narrow traits
+//! of its context (`fleet::Hosts`), whose calls take and drop each lock in that order and
+//! return before the group reads the job tables. The submit group reads the registry's hosts
+//! and the providers' catalogs only through its admission trait (`submit::Admission`), whose
+//! call takes no lock while it reads a catalog and returns before the group writes the job
+//! tables.
+//!
+//! A request carries at most [`js_api_gateway::BODY_LIMIT`] (64 KiB) over either transport:
+//! the gateway answers a larger body 413 `request-too-large`, and the gRPC service decodes
+//! no larger message (`OUT_OF_RANGE`).
 
 use std::sync::Arc;
 
@@ -80,6 +88,8 @@ mod read_view_tests;
 mod scan_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod writes_rig;
 
 /// The message of the `UNIMPLEMENTED` status every call answers until its group serves it.
 const UNIMPLEMENTED: &str = "unimplemented";
@@ -123,7 +133,9 @@ pub(crate) fn grpc(api: Arc<JobApi>, token: Token) -> Bearer<JobServiceServer<Jo
 /// The gRPC service of any implementation of the job service, behind the bearer layer of
 /// `token`.
 fn grpc_over<T: JobService>(service: Arc<T>, token: Token) -> Bearer<JobServiceServer<T>> {
-    BearerLayer::new(token).layer(JobServiceServer::from_arc(service))
+    let server =
+        JobServiceServer::from_arc(service).max_decoding_message_size(js_api_gateway::BODY_LIMIT);
+    BearerLayer::new(token).layer(server)
 }
 
 /// The HTTP/JSON gateway of `api` (`js_api_gateway::router`) behind the bearer layer of

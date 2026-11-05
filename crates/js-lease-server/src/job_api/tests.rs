@@ -83,9 +83,9 @@ const REFUSED: [(&str, &str); 6] = [
 /// The gRPC service the methods are paths of.
 pub(super) const SERVICE: &str = "jobscheduler.v1.JobService";
 
-/// The methods a group serves (`read.rs`): they answer what the call answers, not
-/// `UNIMPLEMENTED`.
-const SERVED: [&str; 4] = ["GetJob", "ListJobs", "GetResult", "GetLogs"];
+/// The methods a group serves over a service built with every context at its default
+/// (`read.rs` and `cancel.rs`): they answer what the call answers, not `UNIMPLEMENTED`.
+const SERVED: [&str; 5] = ["GetJob", "ListJobs", "CancelJob", "GetResult", "GetLogs"];
 
 /// The time the services' clock reads, in milliseconds since the Unix epoch.
 const NOW_MS: u64 = 1_800_000_000_000;
@@ -399,7 +399,8 @@ async fn the_same_token_opens_both_transports() {
 /// group serves yet (all but [`SERVED`]) answers `UNIMPLEMENTED` over gRPC with the stubs' own
 /// message (not the generated default's, so a method added to the proto that reaches no stub
 /// of [`JobApi`] fails here) and 501 `unimplemented` over the gateway, both transports calling
-/// one [`JobApi`]. The served calls have tests of their own (`read_tests.rs`). The production
+/// one [`JobApi`]. The served calls have tests of their own (`read_tests.rs`,
+/// `submit_tests.rs`, `cancel_tests.rs`). The production
 /// builders `grpc` and `gateway` also refuse a request without the token
 /// (`UNAUTHENTICATED`, 401), as the recording tests show for the generic ones.
 #[tokio::test]
@@ -483,7 +484,10 @@ fn a_group_context_is_replaced_without_touching_the_others() {
         )
     );
     let api = api
-        .with_submit(submit::Ctx { mark: 2 })
+        .with_submit(submit::Ctx {
+            mark: 2,
+            ..submit::Ctx::default()
+        })
         .with_cancel(cancel::Ctx { mark: 3 })
         .with_fleet(fleet::Ctx::marked(4))
         .with_read(marked(5));

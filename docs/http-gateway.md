@@ -160,7 +160,9 @@ lease routes take, compared by the same code.
 Both transports are served on the port of `--job-listen` (off by default). Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
 directory serves it (the fleet calls, until the server gives their group its handles); the
-read calls are served (below):
+read calls, `SubmitJob` and `CancelJob` are served (below). A request carries at most 64 KiB
+over either transport: a larger gateway body is 413 `request-too-large`, and a larger gRPC
+message is not decoded (`OUT_OF_RANGE`).
 
 | calls | file |
 |---|---|
@@ -215,6 +217,65 @@ at the end of the table, where it carries no `nextPageToken`, or at that bound, 
 carries one even if it holds few jobs or none. The page token resumes after the last job or
 row the page read; a job submitted between pages appears on a later page if its id sorts
 after the token, and no job is listed twice.
+
+### Serving the submit and cancel calls
+
+`SubmitJob` (`submit.rs`, its checks in `validate.rs`) and `CancelJob` (`cancel.rs`) write the
+job tables. Each answers only after its one store transaction has committed, and builds its
+answer from what the commit returned; neither holds anything of its own outside the store.
+
+| case | gRPC | gateway |
+|---|---|---|
+| a field of the job that is not valid (the first, in the message's order) | `INVALID_ARGUMENT`, `field: <name>` | 400 `invalid-argument`, `field` `<name>` |
+| a wall limit that is absent or 0 | `INVALID_ARGUMENT` with the refusal | 400 `wall-time-not-positive`, `field` `spec.wallLimitSeconds` |
+| a wall limit above the server's ceiling | `INVALID_ARGUMENT` with the refusal | 400 `wall-time-above-ceiling`, `field` `spec.wallLimitSeconds` |
+| a job id that names a different job | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
+| a job nothing could ever serve | `FAILED_PRECONDITION` with the refusal | 422 `no-capable-host` |
+| `CancelJob` of an id with no job | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| a store that failed (the commit, or the read before it) | `INTERNAL`, `state-write-failed` | 500 `state-write-failed` |
+
+**`SubmitJob`**, in order:
+
+1. **Checks.** The image is pinned by digest (`NAME[:TAG]@sha256:<64 hex>`; a tag alone is
+   refused naming `spec.image`). The needs are a share of a host or the whole host alone; a
+   GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
+   table resolves (an unknown model passes through). The constraints are in the capability
+   vocabulary a lease request speaks: `os` `linux` or `macos`, any `arch` (`aarch64` is
+   recorded as `arm64`), an execution mode, an ISA level, and an accelerator that does not
+   contradict the class; the ISA level and the accelerator are recorded among the job's
+   capabilities, where placement reads them. The wall limit is present, above 0 and at most
+   the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
+   each port is 1 to 65535 and no host port is given twice (refused naming
+   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's run
+   files are; the labels as a lease's are. The job id is empty (the service mints one) or 1
+   to 63 bytes of letters, digits, `.`, `_` and `-`, else refused naming `spec.jobId`. A
+   refusal never repeats a value of the request. Every check runs before the id is looked
+   up, so a retry of a job the ceiling now refuses is refused, not answered.
+2. **Idempotency.** A job id the tables hold, with the same job (every field but the
+   priority, compared on the job as recorded), is answered with that job as it is now, in
+   whatever state, with its own priority, and the same answer as a new job's (OK, 201): a
+   retry cannot tell. A different job is `job-id-conflict`. An id is held for as long as its
+   job's row is: until the sweep on the server's tick deletes it once its retention window has
+   passed (seven days after it ended, by default); after that the id is free. A submit without
+   an id has one minted, so repeating it makes a second job.
+3. **Admission**, only for a job that would be made: a job that no registered host (busy and
+   silent hosts count, tainted and departing hosts do not) and no catalog of the pool's
+   launching provider could ever serve is refused `no-capable-host`, and nothing is
+   recorded. The hosts are asked first, and the catalogs, with no lock held, only when no
+   host could; a catalog that cannot be read may offer, so the job is admitted.
+4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
+   the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
+   nothing was recorded. The call does not wait for placement: placement finds the queued job
+   on its own pass.
+
+**`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
+cancelled at once (it has no allocation), with a result of reason cancelled and its retention
+end. A placed, starting or running job gets the cancel intent (`cancelRequested`) and nothing
+else: from that commit on its host is never sent its start, and its next heartbeat reply
+carries the stop, resent until the host stops listing the job; the job is cancelled when the
+host reports it stopped, or retires an id it never held. An ended job is answered unchanged
+in its state. A second cancel is the first: it commits nothing and answers the same. A failed
+commit is `state-write-failed` and the job is as it was.
 
 ### The fleet calls
 

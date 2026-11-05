@@ -4,7 +4,9 @@
 //! job store handle the server holds and the server's clock, and then gives each call group
 //! the context it needs, one builder call per group. A group task whose calls the server
 //! serves adds its `with_<group>` line here when the server handles that group's context
-//! needs exist. Today the read group's is: it reads host silence from the registry.
+//! needs exist. Today the read group's is (it reads host silence from the registry), and the
+//! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
+//! and the pool's launching providers). The cancel group needs nothing but the tables.
 //!
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
@@ -17,6 +19,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -25,18 +28,23 @@ use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
 use super::auth::is_grpc;
-use super::{Bearer, JobApi, gateway, grpc, read};
+use super::{Bearer, JobApi, gateway, grpc, read, submit};
+use crate::admit::JobAdmission;
 use crate::api::Shared;
 use crate::config::Token;
 
 /// The job service over the server's state: its job store and its clock, with each served
-/// group's context. `None` when the server holds no job store: the job service is off.
-pub(crate) fn from_server(state: &Shared) -> Option<JobApi> {
+/// group's context, a submitted job's wall limit held to `max_job_wall`. `None` when the
+/// server holds no job store: the job service is off.
+pub(crate) fn from_server(state: &Shared, max_job_wall: Duration) -> Option<JobApi> {
     let agents = state.agents()?;
     let jobs = agents.jobs.clone()?;
     let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
     let read = read::Ctx::default().with_silence(silence);
-    Some(JobApi::new(jobs, agents.clock.clone()).with_read(read))
+    let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
+    let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
+    let api = JobApi::new(jobs, agents.clock.clone());
+    Some(api.with_read(read).with_submit(submit))
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the

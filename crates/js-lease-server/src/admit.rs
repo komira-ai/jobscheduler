@@ -109,6 +109,38 @@ impl Admit {
     }
 }
 
+/// Admission of a submitted job (design section 5.6, step 2, `SubmitJob` step 3): the hosts
+/// that register (a job runs on no other host), and the pool's launching machine providers.
+///
+/// The hosts are read first, from the registry alone, whose lock each read takes and lets go
+/// at once; the lease table's lock is never taken. Only when no host could serve the job, and
+/// a provider launches, are the catalogs read ([`Admit::read`], on the pool for blocking
+/// calls), with no lock held. A catalog that cannot be read may offer.
+pub(crate) struct JobAdmission {
+    admit: Admit,
+    registry: Registry,
+}
+
+impl JobAdmission {
+    /// Admission over the hosts of `registry` and the launching providers of `admit`.
+    pub(crate) fn new(admit: Admit, registry: Registry) -> Self {
+        Self { admit, registry }
+    }
+}
+
+#[tonic::async_trait]
+impl crate::job_api::submit::Admission for JobAdmission {
+    async fn can_ever_serve(&self, wanted: &Requirements) -> bool {
+        let hosts: Vec<HostView> = self.registry.hosts().iter().map(registered).collect();
+        let by_hosts = can_ever_serve(wanted, &hosts, &[]) != Admission::Refuse;
+        if by_hosts | self.admit.launching.is_empty() {
+            return by_hosts;
+        }
+        let providers = self.admit.read().await;
+        can_ever_serve(wanted, &hosts, &providers) != Admission::Refuse
+    }
+}
+
 /// `provider` as admission sees it: enabled (no key turns a provider off), with `share` and
 /// `limits`, its capabilities, and its catalog. A provider that launches nothing (`static`)
 /// has no catalog, and none is read.

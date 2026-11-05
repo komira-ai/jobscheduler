@@ -8,8 +8,9 @@
 //!   list's first item, and the rest of the list goes before the arguments, so a command of
 //!   one item (what a submit records) reads back as it was given.
 //! - A file's contents are secret: every file is named, with empty contents.
-//! - The record keeps capabilities among its constraints that the message has no field for;
-//!   they are not shown.
+//! - The record keeps the ISA level and the accelerator a submit was given among its
+//!   capabilities, under the keys a lease request uses (`validate.rs`): they are shown in
+//!   their fields. Any other capability has no field and is not shown.
 //! - The host silence of a job (`host_silent_since_ms`) is not in the record: it is left
 //!   absent here, and the read calls set it from the registry (`read.rs`, "Host silence").
 
@@ -21,7 +22,12 @@ use js_jobs::{
 };
 use js_proto::v1;
 use js_state::StoreTime;
-use js_types::ExecMode;
+use js_types::{
+    ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ExecMode,
+};
+
+use crate::job_api::validate::ISA_LEVEL_KEY;
 
 /// `time` in milliseconds since the store clock's origin (the Unix epoch for the server's
 /// stores), the largest value when it does not fit.
@@ -109,6 +115,26 @@ fn needs(needs: &Needs) -> v1::Needs {
     }
 }
 
+/// The capability `key` of `spec`, when it holds one.
+fn capability(spec: &JobSpec, key: &str) -> Option<String> {
+    spec.constraints.capabilities.get(key).cloned()
+}
+
+/// The accelerator the `accelerator.*` capabilities of `spec` state; `None` when they state
+/// none.
+fn accelerator(spec: &JobSpec) -> Option<v1::Accelerator> {
+    let named = ACCEL_KEYS.iter().any(|key| capability(spec, key).is_some());
+    let number = |key| capability(spec, key).and_then(|text| text.parse().ok());
+    named.then(|| v1::Accelerator {
+        vendor: capability(spec, ACCEL_VENDOR_KEY),
+        model: capability(spec, ACCEL_MODEL_KEY),
+        count: number(ACCEL_COUNT_KEY),
+        memory_per_device_gib: number(ACCEL_MEMORY_GIB_KEY),
+        interconnect: capability(spec, ACCEL_INTERCONNECT_KEY),
+        form_factor: capability(spec, ACCEL_FORM_FACTOR_KEY),
+    })
+}
+
 /// The job `spec` of the job `id` with `priority`, as the job service shows it.
 fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
     let mut command = spec.command.iter().cloned();
@@ -125,10 +151,8 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             os: spec.constraints.os.clone().unwrap_or_default(),
             arch: spec.constraints.arch.clone().unwrap_or_default(),
             exec: exec(spec.constraints.exec).into(),
-            // A stored job holds no ISA level or accelerator of its own yet: no submit
-            // writes them, so the view shows neither.
-            isa_level: String::new(),
-            accelerator: None,
+            isa_level: capability(spec, ISA_LEVEL_KEY).unwrap_or_default(),
+            accelerator: accelerator(spec),
         }),
         wall_limit_seconds: Some(spec.wall_limit_secs),
         network: network(spec.network).into(),
