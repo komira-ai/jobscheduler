@@ -70,6 +70,9 @@ struct State {
     real: bool,
     /// The journal to look in when a `user-create` arrives.
     journal: Option<PathBuf>,
+    /// The file a `user-delete` reads before it deletes, and what it read there (`None`
+    /// inside when the file was not there).
+    read_at_delete: Option<(PathBuf, Option<Option<Vec<u8>>>)>,
 }
 
 struct Shared {
@@ -165,6 +168,21 @@ impl FakeHelper {
     /// From now on a `user-create` notes whether the journal at `path` names its lease.
     pub fn watch_journal(&self, path: &Path) {
         self.shared.lock().journal = Some(path.to_path_buf());
+    }
+
+    /// From now on a `user-delete` reads the file `path` before it deletes the user.
+    pub fn read_at_delete(&self, path: &Path) {
+        self.shared.lock().read_at_delete = Some((path.to_path_buf(), None));
+    }
+
+    /// What the last `user-delete` read at the path [`FakeHelper::read_at_delete`] named:
+    /// `None` when no `user-delete` came, `Some(None)` when the file was not there.
+    pub fn read_when_deleted(&self) -> Option<Option<Vec<u8>>> {
+        let state = self.shared.lock();
+        state
+            .read_at_delete
+            .as_ref()
+            .and_then(|(_, read)| read.clone())
     }
 
     /// Every request seen, in order.
@@ -308,6 +326,9 @@ fn serve(stream: &UnixStream, shared: &Shared) {
         Request::UserDelete { lease } => match shared.take(seen("user-delete", &lease)) {
             Some(reason) => refused(stream, reason),
             None => {
+                if let Some((path, read)) = shared.lock().read_at_delete.as_mut() {
+                    *read = Some(fs::read(&*path).ok());
+                }
                 let id = parse_lease(&lease).unwrap();
                 let existed = fs::remove_dir_all(shared.homes.join(user_name(id))).is_ok();
                 reply(stream, &Reply::Deleted { existed });

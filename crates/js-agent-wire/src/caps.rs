@@ -20,6 +20,12 @@ use crate::refusal;
 /// which bundles a Mac holds ([`bundle_capability`]).
 pub const ONE_JOB_CAPABILITY: &str = "one-job";
 
+/// The capability an agent reports, as `true`, when it uploads its jobs' output to an object
+/// store ([`crate::LogSink`]) and sends the live-log fields: `log_grant_state` in its
+/// heartbeat and `logs` in a job's result. A server sends a `log_sink` in a job start, and a
+/// `log_grant` in a reply, only to a host that reported it.
+pub const LOG_UPLOAD_CAPABILITY: &str = "log-upload";
+
 /// The read model the agent applies to a run's profile. An absent value is
 /// [`ReadModel::Open`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

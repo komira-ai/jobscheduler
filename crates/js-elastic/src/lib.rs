@@ -50,7 +50,8 @@ pub use answer::{
     Acquired, Claim, Extra, Held, HostStatus, Observed, Reason, Refusal, RefusalCode, Released,
 };
 pub use boot::{
-    Artifact, BootPlan, BootStep, CONTAINER_BIN, RUNTIME, SCRATCH_ROOT, STATE_ROOT, SlotName,
+    Artifact, BootPlan, BootStep, CONTAINER_BIN, ENGINE_OPT_IN, RUNTIME, SCRATCH_ROOT, STATE_ROOT,
+    SlotName,
 };
 pub use caps::{Capacity, ProviderCaps};
 pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};

@@ -154,6 +154,7 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         disk_gib: None,
         jobs: Vec::new(),
         retired_jobs: Vec::new(),
+        log_grant_state: None,
     }
 }
 

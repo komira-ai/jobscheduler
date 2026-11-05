@@ -40,6 +40,9 @@ fn containers(dir: &Scratch, state: &std::path::Path) -> Vec<String> {
     vec![
         "--scratch-root".to_owned(),
         scratch.display().to_string(),
+        "--runtime".to_owned(),
+        "docker".to_owned(),
+        "--allow-container-engine".to_owned(),
         "--container-bin".to_owned(),
         exec.display().to_string(),
         "--container-user".to_owned(),

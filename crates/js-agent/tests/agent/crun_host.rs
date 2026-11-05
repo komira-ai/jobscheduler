@@ -787,23 +787,12 @@ fn the_agent_refuses_the_crun_runtime_with_the_native_socket() {
 /// is.
 #[test]
 fn the_agent_refuses_the_docker_runtime_with_the_native_socket() {
-    let (ran, sent, _) = run_scripted(
-        &[
-            "--runtime",
-            "docker",
-            "--container-bin",
-            "/usr/bin/docker",
-            "--native-helper-socket",
-            "/native/helper.sock",
-            "--state-root",
-            "/s",
-            "--scratch-root",
-            "/r",
-        ],
-        &linux_host(),
-        vec![welcome(1)],
-        1,
-    );
+    let engine = ["--runtime", "docker", "--allow-container-engine"];
+    let socket = ["--native-helper-socket", "/native/helper.sock"];
+    let roots = ["--state-root", "/s", "--scratch-root", "/r"];
+    let bin = ["--container-bin", "/usr/bin/docker"];
+    let args = [&engine[..], &bin[..], &socket[..], &roots[..]].concat();
+    let (ran, sent, _) = run_scripted(&args, &linux_host(), vec![welcome(1)], 1);
     assert_eq!(ran.status(), code(2), "{}", ran.err);
     assert!(sent.borrow().is_empty());
     assert!(

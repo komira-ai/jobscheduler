@@ -14,6 +14,11 @@
 //! a reboot, and the agent's start-up sweep would remove what an earlier process left in
 //! it anyway (except the directories of runs it adopts). A tmpfs can be swapped to disk when
 //! the host has swap, so a host that handles these secrets runs with swap off or encrypted.
+//!
+//! A native agent (a Mac, which has no tmpfs) opens its root only when `--run-files-root` is
+//! given, as a [`DirLayout::Searchable`] one, and the root is wherever the operator put it:
+//! on disk unless the flag points at a RAM-backed volume. The native runtime hands a run's
+//! directory to the run's user before the program starts (`native/files.rs`).
 
 use std::fs;
 use std::io::{self, Write};
@@ -26,6 +31,62 @@ use super::scratch::{DirLayout, layout_dir, remove_entry, sweep_entries};
 
 /// Where `--run-files-root` points when the flag is not given.
 pub const DEFAULT_ROOT: &str = "/run/js-agent/files";
+
+/// What the agent runs, as far as its files root is concerned.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Runs {
+    /// Containers: the root is the flag's, or the default, in the runtime's layout.
+    Containers(DirLayout),
+    /// Native programs: the root is the flag's, searchable, and there is no default.
+    Native,
+    /// No jobs: no root.
+    None,
+}
+
+/// Opens the files root of an agent that `runs` jobs: the root `given` (`--run-files-root`),
+/// or for a container agent `default` when it can be made, and with it the warning of a
+/// default that could not be used. The root is swept at every start (everything in it
+/// that is not an adopted run's directory is removed) and its directories are the agent's
+/// to remove, so it may not be, hold or lie in any path of `others`, each with the words
+/// that name it: a sweep over the state root would delete the taint marker and the host
+/// credential, and a mount root that holds it would show every run's secrets to a job.
+///
+/// # Errors
+///
+/// A root that was given and cannot be opened or overlaps one of `others`. The default,
+/// which the operator did not name, only turns run files off, so it never changes which
+/// error an unrelated flag gets.
+pub(super) fn open_root(
+    given: Option<&Path>,
+    default: &Path,
+    runs: Runs,
+    others: &[(&str, &Path)],
+) -> Result<(Option<FilesRoot>, Option<String>), String> {
+    let root = match (given, runs) {
+        (_, Runs::None) | (None, Runs::Native) => return Ok((None, None)),
+        (Some(path), Runs::Native) => FilesRoot::open_with(path, DirLayout::Searchable)?,
+        (Some(path), Runs::Containers(layout)) => FilesRoot::open_with(path, layout)?,
+        (None, Runs::Containers(layout)) => match FilesRoot::open_with(default, layout) {
+            Ok(root) => root,
+            Err(why) => return Ok((None, Some(format!("run files unavailable: {why}")))),
+        },
+    };
+    let clash = others
+        .iter()
+        .find(|(_, other)| root.path().starts_with(other) || other.starts_with(root.path()));
+    let Some((flag, other)) = clash else {
+        return Ok((Some(root), None));
+    };
+    let why = format!(
+        "--run-files-root: is, holds or lies in the {flag} {}: the roots must be separate \
+         directories",
+        other.display()
+    );
+    match given {
+        Some(_) => Err(why),
+        None => Ok((None, Some(format!("run files unavailable: {why}")))),
+    }
+}
 
 /// The directory the runs' files directories are made in.
 #[derive(Debug, Clone, PartialEq, Eq)]

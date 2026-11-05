@@ -206,7 +206,76 @@
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
 //! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
-//! = ... }`. At most one elastic pool and one static pool are served in this version.
+//! = ... }`. Any number of elastic and joined pools may be declared, each with its own
+//! `join_token_file`, but this version starts only on a file with at most one pool that
+//! registers agents (an elastic or a joined pool): with more it refuses to start, naming the
+//! second, `several elastic pools are parsed; running them needs the ordered walk of design
+//! 5.6` ([`Config::resolve_file`] still reads such a file). At most one pool whose
+//! provider is the agentless `static` kind is served. That kind is deprecated: the
+//! `static` machine provider below is a different thing (hosts that run `js-agent` and
+//! register themselves), and a later version removes the agentless kind.
+//!
+//! ## Machine providers, platforms and pool settings
+//!
+//! A pool may name container platforms instead of a provider (design 4.2). A
+//! `[[machine_provider]]` has a `name` (the grammar of pool names) and a `kind`: `static`
+//! (the hosts that run `js-agent` and register themselves; no other key) or a provider kind
+//! compiled in, such as `lambdalabs`, whose other keys are that kind's, as under a pool's
+//! `provider` (`api_key_file` and the rest; secrets stay paths). `ec2` and `gce` are refused
+//! as not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
+//! (`kubernetes`, `cloud_run` and `ecs` are refused as not built), and its
+//! `machine_providers` lists declared machine providers first to last. A pool's `platforms`
+//! lists declared platforms first to last; it is refused beside `provider`. Each declared
+//! machine provider must be named by a platform, and each platform by a pool.
+//!
+//! ```toml
+//! [[machine_provider]]
+//! name = "rack"
+//! kind = "static"
+//!
+//! [[machine_provider]]
+//! name         = "lambda"
+//! kind         = "lambdalabs"
+//! api_key_file = "/run/credentials/js/lambda-key"
+//!
+//! [[platform]]
+//! name              = "ours"
+//! kind              = "default"
+//! machine_providers = ["rack", "lambda"]   # first to last
+//!
+//! [[pool]]
+//! name           = "gpu"
+//! class          = "whole-node"
+//! platforms      = ["ours"]
+//! max_machines   = 4          # max_instances is the same cap; give one
+//! max_queue_wait = "30m"      # default 1h
+//! start_timeout  = "15m"      # default 15m
+//! path_grace     = "15s"      # default 15s
+//! # max_spend_per_hour, max_spend_per_day and the other keys of an elastic pool as above
+//!
+//! [pool.provider_limits.lambda]
+//! allowed_instance_types   = ["gpu_1x_a10"]
+//! max_price_cents_per_hour = 200
+//! max_machines             = 2   # at most the pool's
+//! max_spot_machines        = 1   # at most this table's max_machines
+//! ```
+//!
+//! A pool with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables:
+//! a machine provider made from its provider table, the `static` machine provider, and a
+//! `default` platform naming the two, `static` first. Their names start with `+`, which no
+//! name in the file may hold. This version keeps the one fixed order of hosts, registered
+//! hosts first and then the elastic provider: a platform that lists a launching machine
+//! provider before `static` is refused, and a pool's platforms must reach exactly one
+//! machine provider that launches. `max_queue_wait`, `start_timeout` and `path_grace` (each
+//! a positive duration) and the `provider_limits` tables (for a launching machine provider
+//! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
+//! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
+//! below), and `path_grace` is how long a whole-node request of the pool waits once no host
+//! could serve it (the registry's `regain_grace` for that pool). Nothing enforces the rest
+//! yet: the job lifecycle ticks (design 6.1) will enforce `max_queue_wait` and
+//! `start_timeout`, and the pick of an offer (design 5.6, pass 2) the limits.
+//! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
+//! of a file, and [`Resolved::describe`] prints them.
 //!
 //! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
 //! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
@@ -218,8 +287,8 @@
 //! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
 //! shared pool token). It launches nothing: `launch`, `network`, `provider`,
 //! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle`, `max_age`, `min_host_lifetime` and `boot_timeout`
-//! are each refused naming the key. It is the pool that registers agents, so it excludes
-//! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
+//! are each refused naming the key. It registers agents, so the server starts only when it
+//! is the one pool that does, and `server.agent_listen` is required. One-time tokens for its nodes
 //! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
 //! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
 //! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
@@ -246,7 +315,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none); `resources` also take an optional `accelerator` object `{vendor?, model?, count?, memory_per_device_gib?, interconnect?, form_factor?}` (`interconnect` is `kind>=size`, `form_factor` is `sxm` or `pcie`; every field is optional and one left out matches anything; an unknown key in it is a 400 naming it). `gpus` and `gpu_class` work as before and are resolved through the alias table: a full spelling (`nvidia-a100-sxm4-80gb`) pins its variant, and a family name (`nvidia-a100`) matches every variant of the family. A body with only `gpus` and `gpu_class` is stored with no capability added; the need they state (the class as the model, `gpus` as the count) is derived when the lease is matched, never written. The object is stored as `accelerator.*` capabilities of the request (`accelerator.vendor`, `.model`, `.count`, `.memory-gib`, `.interconnect`, `.form-factor`), merged into the body's own `capabilities`; a body capability with another value for a key the object states is a 400 naming that key. `accelerator.*` capabilities the body names itself narrow the need of `gpus` and `gpu_class` and never drop it: a model and a count they leave out are the pair's, so a vendor alone keeps a full spelling's pin. The object alone books `count` devices of `model` (the class is the model as written); beside `gpus` and `gpu_class`, the object and any `accelerator.model` or `accelerator.count` capability must agree with them, the model by family and variant after resolution (a family name does not agree with a full spelling of it, nor one variant with another) and the count exactly, else 400 naming `accelerator`. A `count` above zero (in the object or as `accelerator.count`) without a model is 400 naming `accelerator.model`; a count above the GPUs the resources book is 400 naming `accelerator.count`; any `accelerator.*` capability that is not valid is 400 naming `accelerator`; a vendor alone books no GPU. A body with no `accelerator` and no `accelerator.*` capability is read as before. A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` and `accelerator` only to a server that has them. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused `no-fit` and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none); `resources` also take an optional `accelerator` object `{vendor?, model?, count?, memory_per_device_gib?, interconnect?, form_factor?}` (`interconnect` is `kind>=size`, `form_factor` is `sxm` or `pcie`; every field is optional and one left out matches anything; an unknown key in it is a 400 naming it). `gpus` and `gpu_class` work as before and are resolved through the alias table: a full spelling (`nvidia-a100-sxm4-80gb`) pins its variant, and a family name (`nvidia-a100`) matches every variant of the family. A body with only `gpus` and `gpu_class` is stored with no capability added; the need they state (the class as the model, `gpus` as the count) is derived when the lease is matched, never written. The object is stored as `accelerator.*` capabilities of the request (`accelerator.vendor`, `.model`, `.count`, `.memory-gib`, `.interconnect`, `.form-factor`), merged into the body's own `capabilities`; a body capability with another value for a key the object states is a 400 naming that key. `accelerator.*` capabilities the body names itself narrow the need of `gpus` and `gpu_class` and never drop it: a model and a count they leave out are the pair's, so a vendor alone keeps a full spelling's pin. The object alone books `count` devices of `model` (the class is the model as written); beside `gpus` and `gpu_class`, the object and any `accelerator.model` or `accelerator.count` capability must agree with them, the model by family and variant after resolution (a family name does not agree with a full spelling of it, nor one variant with another) and the count exactly, else 400 naming `accelerator`. A `count` above zero (in the object or as `accelerator.count`) without a model is 400 naming `accelerator.model`; a count above the GPUs the resources book is 400 naming `accelerator.count`; any `accelerator.*` capability that is not valid is 400 naming `accelerator`; a vendor alone books no GPU. A body with no `accelerator` and no `accelerator.*` capability is read as before. A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` and `accelerator` only to a server that has them. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -334,6 +403,31 @@
 //! retries is placed afresh, on a fresh host choice, as a new request; it does not get
 //! the refusal again. `no-capable-host` says no host of the pool could ever serve the
 //! request, as the pool stands.
+//!
+//! # Admission
+//!
+//! Every `POST /v1/leases` that does not repeat the `request_id` of a lease the table holds,
+//! and that keeps the start contract (a request that breaks it keeps its 422), is first
+//! admitted (design 5.6, step 2): it is accepted when a capable host exists, else
+//! when a launching machine provider of the pool may offer a machine for it, and otherwise
+//! refused at once with 409 `no-capable-host`, before anything is recorded: no lease id is
+//! taken, the lease file is not written, nothing is reserved and nothing waits, so the same
+//! request (or `request_id`) sent again after a host registers is admitted afresh. A host
+//! is capable when what the pool books of it holds the request and it reports the `os`,
+//! `arch`, `disk-gib`, `isa_level` and `exec` the request requires, as placement compares
+//! them, and it is neither tainted nor being released (leaving the pool): a busy, silent,
+//! cordoned or drain-marked host is capable, and so is one whose agent announced it is
+//! stopping, so a request that only has to wait is never refused for it. A provider may
+//! offer when the request is inside its capabilities and its catalog has an offer that fits
+//! the request
+//! (availability now is not asked) and the pool's `provider_limits` (an allowed instance
+//! type, at most the maximum price, an unpriced offer never under a price limit), with a
+//! share of machines above zero; a catalog that cannot be read may offer. The catalog is
+//! read once per admission, and only when no host is capable, with the table's lock let go.
+//! An admitted request is then started as before, so the start's own answers (`no-fit`,
+//! `no-capacity`, `unsupported-class` and the rest) are unchanged for it. This code was
+//! already in the documented 409 list, so a client needs no change: older servers answer it
+//! for some whole-node requests.
 //!
 //! The table sits behind one async mutex, taken for the table call alone and never held
 //! across an await. A table call is synchronous: it writes and syncs the lease file and
@@ -630,6 +724,7 @@
 //! renewed certificate is served while the whole-host reservations in memory stay.
 
 mod adapt;
+mod admit;
 mod agent_api;
 mod agent_pool;
 mod agent_state;
@@ -647,13 +742,20 @@ mod file;
 mod file_checks;
 mod flags;
 mod hosts;
+#[cfg(feature = "in-process")]
+pub mod in_process;
 mod io_timeout;
+mod job_alloc;
+mod job_start;
+mod job_store;
 mod join_api;
 mod join_tokens;
 mod kinds;
 mod layered;
 mod listener;
 pub mod network;
+mod per_job;
+mod platform;
 mod pool;
 mod rate;
 mod reservations;
@@ -690,12 +792,17 @@ pub use config::{
     Token, is_private_address, parse_duration,
 };
 pub use error::StartupError;
-pub use file::{BrakePlan, ElasticPlan, JoinedPool, Launch, NetworkPlan};
+pub use file::{
+    BrakePlan, ElasticPlan, JoinedPool, Launch, NetworkPlan, PoolSettings, ProviderLimits,
+    Resolved, ResolvedMachineProvider, ResolvedPlatform, ResolvedPool,
+};
 pub use kinds::{
-    BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
+    BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
+    SecretFiles,
 };
 #[doc(hidden)]
 pub use layered::LayeredProvider;
+pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
 pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{

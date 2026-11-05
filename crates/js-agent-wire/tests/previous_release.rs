@@ -11,7 +11,8 @@ mod common;
 use common::{heartbeat, job};
 use js_agent_wire::{
     Ack, BookedResources, Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, Hello, JobResult,
-    JobResultAck, JobStartSpec, Outcome, PER_JOB_CAPABILITY, ResultAck,
+    JobResultAck, JobStartSpec, LogGrant, LogGrantState, LogReport, LogSink, Outcome,
+    PER_JOB_CAPABILITY, ResultAck,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -146,6 +147,72 @@ mod previous {
         pub lease_id: String,
         pub outcome: String,
     }
+
+    /// The job start of an agent from before the live-log fields, the fields a test here
+    /// reads: it has no `log_sink` and ignores what it does not know.
+    #[derive(Debug, Deserialize)]
+    pub struct JobStartSpec {
+        pub job_id: String,
+        pub allocation_id: String,
+        #[serde(default)]
+        pub image: String,
+        #[serde(default)]
+        pub command: Vec<String>,
+        pub wall_ms: u64,
+    }
+
+    /// The per-job commands of that agent; any other reads as `Unknown`.
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum JobCommand {
+        JobStart(Box<JobStartSpec>),
+        JobStop {
+            job_id: String,
+        },
+        #[serde(other)]
+        Unknown,
+    }
+
+    /// The reply of that agent: its commands one by one, and the acknowledgements; no
+    /// `log_grant`.
+    #[derive(Debug, Deserialize)]
+    pub struct JobReply {
+        #[serde(default)]
+        pub commands: Vec<JobCommand>,
+        #[serde(default)]
+        pub job_acks: Vec<JobAck>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct JobAck {
+        pub job_id: String,
+        pub ack: String,
+    }
+
+    /// The heartbeat of that agent as its server read it: the jobs and their results,
+    /// with no `log_grant_state` and no `logs`.
+    #[derive(Debug, Deserialize)]
+    pub struct JobBeat {
+        pub host_id: String,
+        #[serde(default)]
+        pub jobs: Vec<JobListing>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct JobListing {
+        pub job_id: String,
+        pub state: String,
+        #[serde(default)]
+        pub result: Option<JobOutcome>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct JobOutcome {
+        pub job_id: String,
+        pub outcome: String,
+        #[serde(default)]
+        pub exit_code: Option<i32>,
+    }
 }
 
 fn job_start(id: &str) -> Command {
@@ -170,6 +237,7 @@ fn job_start(id: &str) -> Command {
         wall_ms: 60_000,
         network: Default::default(),
         ports: Vec::new(),
+        log_sink: None,
     }))
 }
 
@@ -245,6 +313,7 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
                 exit_code: Some(0),
                 detail: None,
                 log_tail: None,
+                logs: None,
             }),
         }],
         retired_jobs: vec!["job-2".into()],
@@ -270,4 +339,119 @@ fn previous_agent_wire_reads_the_new_wire_types_without_error() {
         ),
         ("run-1", "1-1", "timed_out")
     );
+}
+
+/// Asserts that an agent and a server from before the live-log fields read every message
+/// that carries them as they read it without: a reply whose job start carries a `log_sink`
+/// and which carries a `log_grant` decodes with the start, the stop beside it and the
+/// acknowledgement intact, and a heartbeat with a `log_grant_state` whose listing's result
+/// carries `logs` decodes with its jobs and result intact. Catches a log field that an
+/// older peer cannot skip, which would cost it the job start or the whole message.
+#[test]
+fn an_old_agent_ignores_log_sink() {
+    let Command::JobStart(mut spec) = job_start("build-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.log_sink = Some(LogSink {
+        endpoint: "https://store.example".into(),
+        region: "us-east-1".into(),
+        bucket: "logs".into(),
+        prefix: "js/build-42/".into(),
+        path_style: false,
+    });
+    assert_eq!(spec.log_sink_checked().map(|sink| sink.is_some()), Ok(true));
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "build-41".into(),
+            },
+        ],
+        job_acks: vec![JobResultAck {
+            job_id: "build-40".into(),
+            ack: Ack::Accepted,
+        }],
+        log_grant: Some(LogGrant {
+            access_key_id: "testkeyid-0001".into(),
+            secret_access_key: "secret".into(),
+            session_token: Some("token".into()),
+            expires_at_ms: 1_800_000_000_000,
+        }),
+        ..HeartbeatReply::default()
+    };
+    assert!(reply.validate().refused.is_empty());
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert!(wire["commands"][0].get("log_sink").is_some());
+    let old: previous::JobReply = serde_json::from_value(wire.clone()).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.allocation_id.as_str()),
+        ("build-42", "0123456789abcdef0123456789abcdef")
+    );
+    assert!(start.image.starts_with("ubuntu:24.04@sha256:"));
+    assert_eq!(
+        (start.command.clone(), start.wall_ms),
+        (vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "build-41")
+    );
+    assert_eq!(
+        (
+            old.job_acks[0].job_id.as_str(),
+            old.job_acks[0].ack.as_str()
+        ),
+        ("build-40", "ACCEPTED")
+    );
+    let v0: previous::HeartbeatReply = serde_json::from_value(wire).unwrap();
+    assert!(matches!(v0.commands[0], previous::Command::Unknown));
+
+    let beat = Heartbeat {
+        jobs: vec![HeldJob {
+            job_id: "build-42".into(),
+            state: HeldState::ExitedUnacked,
+            result: Some(JobResult {
+                job_id: "build-42".into(),
+                allocation_id: "0123456789abcdef0123456789abcdef".into(),
+                outcome: Outcome::Failed,
+                exit_code: Some(2),
+                detail: None,
+                log_tail: None,
+                logs: Some(LogReport {
+                    stdout_bytes: 100,
+                    stderr_bytes: 7,
+                    stdout_dropped: 0,
+                    stderr_dropped: 0,
+                }),
+            }),
+        }],
+        log_grant_state: Some(LogGrantState {
+            stale: true,
+            until_ms: None,
+        }),
+        ..heartbeat()
+    };
+    assert_eq!(beat.validate(), Ok(()));
+    let wire = serde_json::to_value(&beat).unwrap();
+    assert!(wire.get("log_grant_state").is_some());
+    let old: previous::JobBeat = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(old.host_id, "mac-01");
+    let listing = &old.jobs[0];
+    assert_eq!(
+        (listing.job_id.as_str(), listing.state.as_str()),
+        ("build-42", "exited_unacked")
+    );
+    let result = listing.result.as_ref().unwrap();
+    assert_eq!(
+        (
+            result.job_id.as_str(),
+            result.outcome.as_str(),
+            result.exit_code
+        ),
+        ("build-42", "failed", Some(2))
+    );
+    let v0: previous::Heartbeat = serde_json::from_value(wire).unwrap();
+    assert_eq!(v0.held.len(), 1);
 }

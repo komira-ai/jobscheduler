@@ -6,13 +6,18 @@
 //! ([`js_caps::DETECTED_KEYS`]), so a pool that requires them is not satisfied by a
 //! host's say-so:
 //!
-//! - `runtime` and `exec` are `container` for an agent given `--container-bin`. The hello
-//!   is sent only after the job half has started, which opened the program the flag names,
-//!   ran it (`--version`) and found Docker or Podman; an engine that does not run ends the
-//!   agent first, so no hello names a runtime that was not found. An agent that runs no
-//!   jobs (no `--container-bin`) reports neither.
-//! - `run-files` is `true` for an agent with a run files root (`--run-files-root`, on a
-//!   tmpfs): it writes a start's `files` and mounts them at `/run/js-files`. The server sends a start with files to a host that reports it only.
+//! - `runtime` and `exec` are `container` for an agent that runs container jobs: the engine
+//!   of `--runtime docker --container-bin`, or `crun`. The hello is sent only after the job
+//!   half has started, which for the engine opened the program the flag names, ran it
+//!   (`--version`) and found Docker or Podman; a runtime that does not start ends the agent
+//!   first, so no hello names a runtime that was not found. An agent that runs no jobs
+//!   (`--runtime none`) reports neither.
+//! - `run-files` is `true` for an agent with a run files root (`--run-files-root`): a
+//!   container agent's is on a tmpfs, and it writes a start's `files` and mounts them at
+//!   `/run/js-files`; a native agent's is where the operator put it, and it gives a run's
+//!   files to the run's user and names their directory in `JS_FILES_DIR`. A native agent
+//!   without the flag has no root and does not report it. The server sends a start with
+//!   files to a host that reports it only.
 //! - `scratch-quota` is `project` and `scratch-default-gib` is the GiB a run without
 //!   `disk_bytes` books, for an agent started with `--scratch-quota` whose scratch root
 //!   passed the probe (an agent whose root did not pass does not start). The server books
@@ -38,10 +43,14 @@
 //!   and stop and lists those jobs in `jobs` ([`js_agent_wire::PER_JOB_CAPABILITY`]), so a
 //!   server sends them only to a host that reports it. A native agent does not report it (a
 //!   job start carries an image, which it cannot run). An operator cannot set it either.
+//! - `start-fence` is `true` wherever `per-job` is: the agent judges a job start by its
+//!   fence (the job id with the allocation id), keeps the fences it retired in its state root,
+//!   and stops every job after a silence of the server
+//!   ([`js_agent_wire::START_FENCE_CAPABILITY`]). An operator cannot set it.
 
 use std::path::Path;
 
-use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY};
+use js_agent_wire::{Hello, NetworkCeiling, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
 use js_caps::{
     EXEC, FLAG_SET, GPU_PASSTHROUGH, GPU_TOOLKIT, RUN_FILES, RUNTIME, SCRATCH_DEFAULT_GIB,
     SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT,
@@ -65,7 +74,7 @@ impl ToolkitHook {
     ///
     /// The text names the flag: the path is not absolute, or `--container-bin` is not
     /// given (the toolkit is the container engine's, and an agent without one runs no
-    /// job).
+    /// engine job).
     pub(crate) fn from_cli(cli: &Cli) -> Result<Option<Self>, String> {
         let Some(path) = &cli.gpu_toolkit_hook else {
             return Ok(None);
@@ -83,23 +92,39 @@ impl ToolkitHook {
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs native
-/// jobs: `runtime` and `exec` are `sandbox-exec`. The hello is sent only after the job half
-/// has started, which asked the helper for its boot reset, so no hello names a mode the
-/// agent cannot serve. Returns the warnings the operator should read: none.
-pub(crate) fn report_native(hello: &mut Hello) -> Vec<String> {
+/// jobs: `runtime` and `exec` are `sandbox-exec`, and `run-files` when `run_files` (the
+/// agent has a files root). The hello is sent only after the job half has started, which
+/// asked the helper for its boot reset, so no hello names a mode the agent cannot serve.
+/// Returns the warnings the operator should read: none.
+pub(crate) fn report_native(hello: &mut Hello, run_files: bool) -> Vec<String> {
     let mode = ExecMode::SandboxExec.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
+    report_run_files(hello, run_files);
     Vec::new()
 }
 
-/// Says that the agent takes the job-keyed start and stop: every agent that runs containers
-/// does. A native agent does not say it: a job start carries an image, which its runtime
-/// cannot run.
+/// Says that the agent writes a start's run files, when it has a files root (`run_files`);
+/// an older agent would ignore them, and one without a root refuses them.
+fn report_run_files(hello: &mut Hello, run_files: bool) {
+    if run_files {
+        hello
+            .capabilities
+            .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    }
+}
+
+/// Says that the agent takes the job-keyed start and stop, and that it fences them (it
+/// refuses a start whose fence it retired and stops its jobs after a silence): every agent
+/// that runs containers does. A native agent says neither: a job start carries an image,
+/// which its runtime cannot run.
 fn report_per_job(hello: &mut Hello) {
     hello
         .capabilities
         .insert(PER_JOB_CAPABILITY.to_owned(), FLAG_SET.to_owned());
+    hello
+        .capabilities
+        .insert(START_FENCE_CAPABILITY.to_owned(), FLAG_SET.to_owned());
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs
@@ -119,13 +144,7 @@ pub(crate) fn report(
     hello.capabilities.insert(EXEC.to_owned(), mode);
     ceiling.insert_into(&mut hello.capabilities);
     report_per_job(hello);
-    // This agent writes a start's run files (when it has a files root); an older one
-    // would ignore them.
-    if run_files {
-        hello
-            .capabilities
-            .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
-    }
+    report_run_files(hello, run_files);
     if gpu_passthrough {
         hello
             .capabilities
@@ -228,6 +247,32 @@ mod tests {
         );
         assert!(!hello.capabilities.contains_key(GPU_TOOLKIT));
         hello
+    }
+
+    /// Asserts that `start-fence` is reported as `true`, beside `per-job`, by the hello of an
+    /// agent that runs containers (its lifecycle judges a job start by its fence and stops its
+    /// jobs after a silence), that the hello still validates, and that a native agent's hello
+    /// carries neither. It catches a server told of a fence an agent does not enforce (a
+    /// native agent, which takes no job start), and one never told that a container agent
+    /// enforces it.
+    #[test]
+    fn the_hello_reports_start_fence_only_when_enforced() {
+        let contained = reported(&Config::none());
+        let flag = |hello: &Hello, key: &str| hello.capabilities.get(key).cloned();
+        assert_eq!(
+            flag(&contained, START_FENCE_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(
+            flag(&contained, PER_JOB_CAPABILITY).as_deref(),
+            Some(FLAG_SET)
+        );
+        assert_eq!(contained.validate(), Ok(()));
+        let mut native = hello();
+        assert!(report_native(&mut native, true).is_empty());
+        assert_eq!(flag(&native, START_FENCE_CAPABILITY), None);
+        assert_eq!(flag(&native, PER_JOB_CAPABILITY), None);
+        assert_eq!(START_FENCE_CAPABILITY, "start-fence");
     }
 
     /// Catches a container agent that does not say its ceiling, says it under another key,

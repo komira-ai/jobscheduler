@@ -22,7 +22,8 @@ fn empty_reply() -> Value {
 }
 
 /// Asserts the whole path of a registered host through the lease API: before any host
-/// has registered a request has no capacity (not no-fit, since the pool's shape fits it);
+/// has registered a request is refused `no-capable-host` at admission (no host could serve
+/// it, and the pool launches nothing);
 /// after hello and heartbeat the host takes a lease through `POST /v1/leases`, the
 /// listing shows the lease on it, a second request has no capacity, and renew, release
 /// and a new lease on the freed host work as on a static host. It catches a registry that
@@ -32,7 +33,7 @@ async fn registered_host_is_leasable_through_post_leases() {
     let h = start_agents("agents_leasable", false).await;
     let none = h.call("POST", "/v1/leases", Some(&lease_body())).await;
     assert_eq!(none.status, 409, "{}", none.body);
-    assert_eq!(none.json(), json!({ "error": "no-capacity" }));
+    assert_eq!(none.json(), json!({ "error": "no-capable-host" }));
 
     let me = join(&h, "burst-1").await;
     assert_eq!(me.epoch, 1);

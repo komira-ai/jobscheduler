@@ -2,7 +2,7 @@
 //! cleanup in order.
 
 use super::Lifecycle;
-use super::job::{Cause, Stage, blind_taint, check_taint, cleanup_taint, outcome};
+use super::job::{Cause, Stage, blind_taint, cause_detail, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Config, Event, Finding, Finished, code};
 
@@ -76,7 +76,7 @@ impl Lifecycle {
                 // A result read back from the state root is the one to send: the exit of a
                 // container taken over after the agent had reported it makes no second.
                 if !job.silent && job.result.is_none() {
-                    let mut result = job.report(how, status, None);
+                    let mut result = job.report(how, status, cause_detail(cause));
                     // The container is still there: it is removed in the next stage. A log
                     // that cannot be read costs the result its tail and nothing else.
                     if exit.is_some() {
@@ -154,6 +154,17 @@ impl Lifecycle {
             match stage {
                 Stage::Removing(id) => match runtime.remove(&id) {
                     Ok(()) => {
+                        events.push(Event::ContainerRemoved {
+                            run_id: run_id.clone(),
+                        });
+                        job.stage = Stage::Scratch;
+                    }
+                    // Everything of the run is gone and only the copy of an output failed (a
+                    // link where an output was declared, an output over its cap): the host
+                    // holds nothing of the job, so it is a finding and not a taint, and the
+                    // cleanup goes on.
+                    Err(why) if why.is_outputs() => {
+                        job.note(code::OUTPUTS_FAILED, why.to_string(), events);
                         events.push(Event::ContainerRemoved {
                             run_id: run_id.clone(),
                         });
