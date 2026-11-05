@@ -127,6 +127,7 @@ pub(crate) fn start_of(
         wall_ms,
         network,
         ports,
+        log_sink: None,
     };
     start
         .validate()
