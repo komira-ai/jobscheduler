@@ -62,8 +62,8 @@
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs, with `--runtime docker --allow-container-engine` (on Linux without `--runtime` it is refused, since the runtime is then `crun`, which takes no engine flag); never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; every container gets network none (loopback only: a job that needs a network runs on `--runtime crun`, see `--egress`); a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--native-helper-socket <path>` | the Unix socket of the root helper `js-mac-session`: with it a Mac agent runs native jobs, each as a user the helper makes for the run, under a Seatbelt profile, and reports `runtime` and `exec` as `sandbox-exec` (see [`native`]); macOS only; the agent must run as root and checks at start that `sandbox-exec` applies a profile; needs `--scratch-root` and `--state-root`; not with `--container-bin`; the helper must be dedicated to this agent on a Mac used for native jobs only, started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes` (never the defaults of another helper), because the agent asks it for its boot reset, which ends the lease users of whoever used it before and clears the Mac's auto-login; native runs are NOT stopped when the agent stops, restarts or dies: the lease journal in the state root ends them when the agent next starts, or when the rescue of an agent whose worker died runs; until then they run on, and their wall limit and the silence bound (`--silence-stop`) are enforced only while an agent runs (the helper holds no deadline of a run's own, so a native run is unbounded while no agent runs); the profile does not deny System V or POSIX shared memory, semaphores or message queues, and the helper reuses uids, so what a run leaves in them can be read by a later run that gets the same uid: an open channel between runs on one Mac |
 //! | `--native-homes <path>` | the directory the helper makes its lease users' homes in (its `--homes`); by default `/Users`; it must exist; needs `--native-helper-socket` |
-//! | `--native-network <level>` | the most network a native run gets: `off` (the default), `loopback` or `on`; a start that asks for more is held to it; `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every job that asks for the network it checks again and refuses the job (`egress-unchecked`) if it is not; `loopback` is shared by every run of the Mac; needs `--native-helper-socket` |
-//! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise |
+//! | `--native-network <level>` | the most network a native job may ask for: `off` (the default), `loopback`, `on` or `open`; a job that asks for more is refused at start (`network-above-ceiling`), never run with less; a job's level maps onto these values (`none` is `off`, `allow-list` is `on`, `open` is `open`; `loopback` is a ceiling only, shared by every run of the Mac); `on` needs the pf anchor of `js-mac-provision` (the `--native-pf-*` flags below): the agent does not start with `on` unless the anchor is enforced, and before every `allow-list` job it checks again and refuses the job (`egress-unchecked`) if it is not; `open` allows the network with no filter and needs no anchor: the scheduler, the cloud metadata address and the rest of the network are reachable from the job, and a `--native-pf-*` flag beside it stops the agent at start; a start that declares ports is refused (`ports-not-supported`); the hello reports the value as `egress` (`none` for `off` and `loopback`); needs `--native-helper-socket` |
+//! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
 //! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
@@ -796,7 +796,7 @@ fn execute(
         .as_ref()
         .and_then(Settings::crun)
         .map(|plan| Arc::clone(&plan.logs.grant));
-    let reported = match (local.container.is_some(), local.native.is_some()) {
+    let reported = match (local.container.is_some(), local.native.as_ref()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
             toolkit.as_ref(),
@@ -805,11 +805,12 @@ fn execute(
             default_gib,
             (passthrough, &local.egress.ceiling(), log_grant.is_some()),
         )),
-        (false, true) => Some(contract::report_native(
+        (false, Some(native)) => Some(contract::report_native(
             &mut offer.hello,
             local.files.is_some(),
+            native.config().network,
         )),
-        (false, false) => None,
+        (false, None) => None,
     };
     if let Some(found) = reported {
         found.iter().for_each(|warning| {

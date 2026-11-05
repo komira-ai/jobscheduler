@@ -24,12 +24,14 @@
 //!   that default for such a run and places a job that sets `disk_bytes` only on a host
 //!   that reports `scratch-quota`.
 //! - `egress` is the ceiling of a container agent's jobs (`--egress`: `none`, `allow-list` or
-//!   `open`; always `none` for Docker and Podman, which refuse the other two), as
-//!   [`js_agent_wire::NetworkCeiling`] writes it. `egress-ports` is the host ports a job may
-//!   declare and the agent forwards (`--egress-forward-port`), reported only under a wired
-//!   ceiling that lists some (forwarding needs one). A server places a job that
-//!   asks for more than `none` only on a host whose `egress` covers it; an agent from before
-//!   the key reports none, which reads as `none`.
+//!   `open`; always `none` for Docker and Podman, which refuse the other two), and of a native
+//!   agent's (`--native-network`: `off` and `loopback` report `none`, `on` `allow-list`,
+//!   `open` `open`, never with ports), as [`js_agent_wire::NetworkCeiling`] writes it.
+//!   `egress-ports` is the host ports a job may declare and the agent forwards
+//!   (`--egress-forward-port`), reported only under a wired ceiling that lists some
+//!   (forwarding needs one). A server places a job that asks for more than `none` only on a
+//!   host whose `egress` covers it; an agent from before the key reports none, which reads
+//!   as `none`.
 //! - `gpu-passthrough` is `true` for a `--runtime crun` agent given `--gpu-device`, whose
 //!   flags passed the start check: its runtime gives a job the device nodes, the driver mounts
 //!   and the variables of the GPUs it booked. It is for the operator; a GPU job is placed by
@@ -61,6 +63,7 @@ use js_types::ExecMode;
 
 use crate::cli::Cli;
 use crate::facts::CommandRunner;
+use crate::native::Ceiling;
 
 /// The `PATH` the toolkit hook runs with; it inherits nothing else.
 const HOOK_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -94,15 +97,18 @@ impl ToolkitHook {
 }
 
 /// Adds the capabilities of the host contract to the hello of an agent that runs native
-/// jobs: `runtime` and `exec` are `sandbox-exec`, and `run-files` when `run_files` (the
-/// agent has a files root). The hello is sent only after the job half has started, which
-/// asked the helper for its boot reset, so no hello names a mode the agent cannot serve.
-/// Returns the warnings the operator should read: none.
-pub(crate) fn report_native(hello: &mut Hello, run_files: bool) -> Vec<String> {
+/// jobs: `runtime` and `exec` are `sandbox-exec`, `run-files` when `run_files` (the agent
+/// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
+/// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
+/// `open`), with no `egress-ports`, since a Mac forwards no port. The hello is sent only after
+/// the job half has started, which asked the helper for its boot reset, so no hello names a
+/// mode the agent cannot serve. Returns the warnings the operator should read: none.
+pub(crate) fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<String> {
     let mode = ExecMode::SandboxExec.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
     report_run_files(hello, run_files);
+    ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
 }
 
@@ -273,7 +279,7 @@ mod tests {
         );
         assert_eq!(contained.validate(), Ok(()));
         let mut native = hello();
-        assert!(report_native(&mut native, true).is_empty());
+        assert!(report_native(&mut native, true, Ceiling::Off).is_empty());
         assert_eq!(flag(&native, START_FENCE_CAPABILITY), None);
         assert_eq!(flag(&native, PER_JOB_CAPABILITY), None);
         assert_eq!(START_FENCE_CAPABILITY, "start-fence");
@@ -308,7 +314,7 @@ mod tests {
         let engine = reported(&Config::none());
         assert!(!engine.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
         let mut native = hello();
-        let _ = report_native(&mut native, false);
+        let _ = report_native(&mut native, false, Ceiling::Off);
         assert!(!native.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
         assert_eq!(LOG_UPLOAD_CAPABILITY, "log-upload");
     }
@@ -373,6 +379,34 @@ mod tests {
                 assert_eq!(hello.validate(), Ok(()));
             }
             assert_eq!(config("open", &[]).ceiling().level, JobNetwork::Open);
+        }
+    }
+
+    /// Catches a Mac agent that does not say its ceiling, says `loopback` as a level a job
+    /// could ask for, or claims ports it does not forward: the hello of a native agent says
+    /// `sandbox-exec`, and `egress` is `none` for `off` and `loopback`, `allow-list` for `on`
+    /// and `open` for `open`, never with `egress-ports`; the wire's reader reads each back as
+    /// written and every hello is valid.
+    #[test]
+    fn a_native_agent_advertises_its_ceiling_in_hello() {
+        let table = [
+            (Ceiling::Off, js_types::JobNetwork::None),
+            (Ceiling::Loopback, js_types::JobNetwork::None),
+            (Ceiling::On, js_types::JobNetwork::AllowList),
+            (Ceiling::Open, js_types::JobNetwork::Open),
+        ];
+        for (ceiling, level) in table {
+            let mut hello = hello();
+            assert!(report_native(&mut hello, false, ceiling).is_empty());
+            assert_eq!(hello.capabilities[EXEC], "sandbox-exec", "{ceiling}");
+            assert_eq!(hello.capabilities["egress"], level.name(), "{ceiling}");
+            assert!(
+                !hello.capabilities.contains_key("egress-ports"),
+                "{ceiling}"
+            );
+            let read = NetworkCeiling::from_capabilities(&hello.capabilities).map(|c| c.level);
+            assert_eq!(read, Ok(level), "{ceiling}");
+            assert_eq!(hello.validate(), Ok(()), "{ceiling}");
         }
     }
 }

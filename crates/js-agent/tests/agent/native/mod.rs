@@ -20,6 +20,7 @@ mod mac;
 mod mac_agent;
 #[cfg(target_os = "macos")]
 mod mac_pf;
+mod network;
 mod outputs;
 mod pf_gate;
 mod runtime;
@@ -32,9 +33,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{NativeConfig, NativeRuntime};
+use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 
 use crate::support::Scratch;
 use fake_helper::FakeHelper;
@@ -59,7 +60,7 @@ pub struct Rig {
 pub fn config(fake: &FakeHelper) -> NativeConfig {
     NativeConfig {
         homes: fake.homes().to_path_buf(),
-        net: Net::Loopback,
+        network: Ceiling::Loopback,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![AbsPath::parse("/srv/js-state").unwrap()],
         read_model: ReadModel::Open,
@@ -157,6 +158,7 @@ pub fn native(program: &str, args: &[&str]) -> NativeSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: NetworkLevel::Off,
+        ports: Vec::new(),
     }
 }
 

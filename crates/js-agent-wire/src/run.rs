@@ -163,6 +163,8 @@ impl RunSpec {
     }
 }
 
+/// The run of a native body. Its declared ports are not kept: a run has no field for them,
+/// and [`NativeSpec::validate`] checks them on its own.
 impl From<NativeSpec> for RunSpec {
     fn from(native: NativeSpec) -> Self {
         Self {
@@ -187,6 +189,8 @@ impl From<RunSpec> for NativeSpec {
             inputs: run.inputs,
             outputs: run.outputs,
             network: run.network,
+            // A run declares no ports: the one job definition has no field for them yet.
+            ports: Vec::new(),
         }
     }
 }

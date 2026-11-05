@@ -210,8 +210,9 @@ pub struct Seatbelt {
     /// builder reads the grants in it, so two orders are two configs and the canonical
     /// JSON keeps it.
     pub reads: Vec<ReadGrantKind>,
-    /// The highest network level the tools need. The agent clamps a job's request to
-    /// the lower of this and its own limit (`Ord` is the order: `Off` is lowest).
+    /// The highest network level the tools need (`Ord` is the order: `Off` is lowest). The
+    /// agent lowers the profile of a job it admitted to this; it is not the agent's own
+    /// limit (`--native-network`), above which a job is refused before it runs.
     pub network_max: NetworkLevel,
 }
 

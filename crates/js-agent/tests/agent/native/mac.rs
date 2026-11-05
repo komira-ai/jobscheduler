@@ -120,24 +120,27 @@ fn a_read_deny_is_the_profiles_not_the_file_modes() {
 
 const CONNECT: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(PeerAddr => "127.0.0.1", PeerPort => $ARGV[0]) ? 0 : 1)"#;
 
-/// Asserts the network clamp for real: a loopback connect succeeds when the start asks for
-/// loopback under a loopback cap, is refused when it asks for none, and is refused when the
-/// cap is none whatever the start asks. It catches a level that is not applied to the
-/// program, and a request that raises the cap.
+/// Asserts the network of the profile for real: a loopback connect succeeds when the start
+/// asks for loopback under a loopback ceiling, is refused when it asks for none, and is refused
+/// when the ceiling is none whatever the start asks. The runtime is driven directly, so this is
+/// the profile's own bound: an agent refuses such a start before it reaches the runtime
+/// (`check_native`), and the profile never grants more than the ceiling all the same. It
+/// catches a level that is not applied to the program, and a profile that grants more than the
+/// ceiling.
 #[test]
 fn a_loopback_connect_follows_the_lower_of_request_and_cap() {
+    use js_agent::native::Ceiling;
     use js_agent_wire::NetworkLevel;
-    use js_mac_pool::seatbelt::Net;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let cases = [
-        (Net::Loopback, NetworkLevel::Loopback, 0),
-        (Net::Loopback, NetworkLevel::Off, 1),
-        (Net::Off, NetworkLevel::On, 1),
+        (Ceiling::Loopback, NetworkLevel::Loopback, 0),
+        (Ceiling::Loopback, NetworkLevel::Off, 1),
+        (Ceiling::Off, NetworkLevel::On, 1),
     ];
     for (n, (cap, asked, code)) in cases.into_iter().enumerate() {
-        let mut rig = Rig::with(&format!("mac-net{n}"), |config| config.net = cap);
+        let mut rig = Rig::with(&format!("mac-net{n}"), |config| config.network = cap);
         rig.fake.real_runs();
         let mut body = super::native("/usr/bin/perl", &["-e", CONNECT, &port]);
         body.network = asked;

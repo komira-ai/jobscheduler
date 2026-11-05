@@ -58,6 +58,7 @@ fn native(env: BTreeMap<String, String>) -> JobSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: NetworkLevel::Off,
+        ports: Vec::new(),
     });
     spec
 }

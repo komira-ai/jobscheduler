@@ -94,6 +94,39 @@ grant the same way with a release from before the disclaim (one whose
 the helper and lists the directory. Remove the grant afterwards. `sudo launchctl procinfo <pid>` of a running job's
 process shows its `responsible pid` equal to its own pid.
 
+## Network
+
+A Mac has no network namespace, so a native job's network level maps onto the Seatbelt
+profile and the pool's pf anchor (`crates/js-mac-provision`, its README has the rules). The
+agent's ceiling is `--native-network`:
+
+| Job level | `--native-network` value | What the job gets | Needs |
+|---|---|---|---|
+| `none` | `off` (the default) | the profile denies the network | nothing |
+| `allow-list` | `on` | the profile allows the network; the anchor limits it to the listed endpoints | the anchor in force (the `--native-pf-*` flags), checked at start and before each `allow-list` job (`egress-unchecked`) |
+| `open` | `open` | the profile allows the network; nothing filters it | nothing; a `--native-pf-*` flag beside it stops the agent at start |
+
+`loopback` is a ceiling with no job level of its own: it admits a job with no network and a
+native body that asks for `loopback`, which every run of the Mac shares. A job that asks for
+more than the ceiling is refused at start (`network-above-ceiling`, before any user is made)
+and is never run with less. Jobs with no network, loopback only or `open` never ask `pfctl`.
+The hello reports the ceiling as `egress`: `none` for `off` and `loopback`, `allow-list` for
+`on`, `open` for `open`, and no `egress-ports`. A bundle's `seatbelt.network_max` is not a
+ceiling: it says what the bundle's tools need and lowers the profile of an admitted job to it.
+
+Known limits:
+
+- Declared ports are refused (`ports-not-supported`, before any user is made). The root test
+  `crates/js-agent/tests/native_inbound_pf/`, built by the manual workflow
+  `js-agent-native-inbound-pf-test` and run by an operator as root on a provisioned Mac, asks
+  whether the anchor filters inbound traffic to a pool uid's listener; the refusal stands
+  until it passes.
+- `open` leaves the network unfiltered: the scheduler, the cloud metadata address and every
+  other address the Mac reaches are reachable from the job.
+- DNS through the system resolver (mDNSResponder, a unix socket) is outside the filter.
+- pf matches `user` on TCP and UDP only, and loopback between pool users cannot be narrowed by
+  the sender's uid.
+
 ## Not done yet
 
 - The package is a workflow artifact for seven days, not a release asset: `release.yml` lists
