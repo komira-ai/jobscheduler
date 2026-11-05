@@ -1,8 +1,10 @@
 # Live logs: a job's output in an object store
 
-Status: **Planned.** Built so far, and used by nothing yet: the wire fields of section 7 (`js-agent-wire`, with the per-run capture
-file cap in `js-contain`), which no agent or server fills; the object-store client (`js-logstore`); the `[logs]` table of section 6,
-which the server reads and checks at start; and the mint of section 4 (`js-logmint`), which the server does not call. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
+in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
+start; the mint of section 4 (`js-logmint`), which the server does not call yet; and the agent's uploader of a `crun` job
+(`js-agent/src/logs`, without the progress record of 3.5: a restarted agent uploads nothing more for a job it adopted), which fills
+`log_grant_state` and `logs`. No server sends a sink or a grant yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design
@@ -455,7 +457,8 @@ The capture files are on the host's disk, in the lease directories: at the defau
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
 `js-proto` (with its comment, which today promises a running job's tail, rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
-credential table. Each new crate is added to `layers.toml` in the change that adds it.
+credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
+fields in `js-agent-wire`, and the agent's `logs` module without the progress record (the uploader and the end).
 
 **Later and open.**
 

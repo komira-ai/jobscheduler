@@ -1027,6 +1027,7 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-logstore",
  "js-mac-pool",
  "js-mac-provision",
  "js-mac-session",

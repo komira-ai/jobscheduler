@@ -106,6 +106,13 @@
 //! end, so it can be read again. A container never started, or still running, has an empty
 //! tail.
 //!
+//! A runtime given [`LiveLogs`] ([`CrunRuntime::with_live_logs`]) uploads the output of each
+//! run whose start carried a sink ([`RunSpec::log_sink`](crate::lifecycle::RunSpec)): the
+//! run's capture files are capped at `--log-file-cap` (other runs keep the capture's 1 MiB),
+//! an uploader ([`crate::logs`]) tails them from the start on its own thread, and the read of
+//! the end tells it the totals without waiting. [`Runtime::logs_report`] gives the totals and
+//! the bytes the capture dropped. A run adopted after a restart uploads nothing.
+//!
 //! # GPUs
 //!
 //! A runtime opened with a device list ([`CrunSettings::gpus`], from `--gpu-device`) runs GPU
@@ -138,6 +145,7 @@ mod ledger;
 #[cfg(test)]
 mod ledger_tests;
 mod net;
+mod pull;
 mod spec;
 #[cfg(test)]
 mod tests;
@@ -166,22 +174,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent_wire::{LogTail, NetworkCeiling};
+use js_agent_wire::{LogReport, LogTail, NetworkCeiling};
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner, Supervised};
+use js_contain::oci::{
+    GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner, Supervised, stderr_path, stdout_path,
+};
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
 use crate::cli_runtime::{Chown, container_name};
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
-    Body, Exit, FilesRoot, Found, Prefetcher, Prepared, PullFuture, RunHandle, RunSpec, Runtime,
-    RuntimeError, Status, Ticket, check_run_env, label,
+    Body, Exit, FilesRoot, Found, Prefetcher, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
+    Status, Ticket, check_run_env, label,
 };
+use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
+use pull::{ensure_image, pull};
 use spec::{concluded, container_spec, ctr_of, job_env, log_tail_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
@@ -364,6 +376,8 @@ struct Run {
     net: net::Net,
     /// The lease's sidecar as last written.
     entry: Entry,
+    /// Its live logs: the sink, then the uploader and the report.
+    logs: RunLogs,
 }
 
 /// A container runtime over `crun`.
@@ -387,6 +401,8 @@ pub struct CrunRuntime {
     runs: BTreeMap<String, Run>,
     ledger: Ledger,
     swept: SweepReport,
+    /// Live logs, when the runtime uploads them ([`CrunRuntime::with_live_logs`]).
+    logs: Option<LiveLogs>,
 }
 
 impl std::fmt::Debug for CrunRuntime {
@@ -477,11 +493,21 @@ impl CrunRuntime {
             runs: BTreeMap::new(),
             ledger,
             swept: SweepReport::default(),
+            logs: None,
         };
         // No container of this process exists yet: the runs of an earlier process of this
         // agent that still stand are adopted, and the rest of its leases are removed.
         runtime.swept = runtime.recover()?;
         Ok(runtime)
+    }
+
+    /// This runtime uploading the output of each run whose start carries a sink, with `logs`.
+    #[must_use]
+    pub fn with_live_logs(self, logs: LiveLogs) -> Self {
+        Self {
+            logs: Some(logs),
+            ..self
+        }
     }
 
     /// What the pass over the ledger at [`CrunRuntime::open`] did: the runs adopted and the
@@ -623,6 +649,7 @@ impl CrunRuntime {
                 state: State::Created,
                 net: net::Net::asked(spec.network, spec.ports.clone()),
                 entry,
+                logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
             },
         );
         Ok(name)
@@ -734,8 +761,11 @@ impl CrunRuntime {
         }
         let started = self
             .oci
-            .start_supervised(&run.spec, None)
+            .start_supervised(&run.spec, run.logs.file_cap(self.logs.as_ref()))
             .map_err(|why| RuntimeError::new(format!("start crun: {why}")))?;
+        // The capture made both files before the supervisor said it was ready.
+        let files = (stdout_path(&run.lease.dir), stderr_path(&run.lease.dir));
+        run.logs.start(self.logs.as_ref(), (&files.0, &files.1));
         run.backstop = run.cgroup.parent_ooms().ok();
         // The supervisor is on the sidecar before anything else is done, in the state still
         // starting, so a teardown at any point ends it. A failure to write is reported with
@@ -777,26 +807,11 @@ impl CrunRuntime {
             },
         };
         let (exit, tail) = concluded(ended, &captured, (&run.cgroup, run.cap, run.backstop));
+        run.logs.end((captured.stdout.total, captured.stderr.total));
         run.state = State::Ended(exit, tail);
         run.net.release(name);
         Status::Exited(exit)
     }
-}
-
-/// `image` in the store, fetched and unpacked if it is not, within `limit` for the whole.
-async fn ensure_image(oci: &Oci, image: &PinnedImage, limit: Duration) -> Result<(), String> {
-    let ensured = tokio::time::timeout(limit, oci.check_pinned(image)).await;
-    ensured
-        .map_err(|_| format!("pulling {} took longer than {limit:?}", image.reference))?
-        .map_err(|why| why.to_string())
-}
-
-/// The pull and unpack of `image`, with the limit of the whole.
-fn pull(oci: Arc<Oci>, image: String, limit: Duration) -> PullFuture {
-    Box::pin(async move {
-        let pinned = pinned(&image)?;
-        ensure_image(&oci, &pinned, limit).await
-    })
 }
 
 impl Runtime for CrunRuntime {
@@ -959,6 +974,10 @@ impl Runtime for CrunRuntime {
             State::Running { run, .. } => log_tail_of(&run.tail(), None),
             State::Ended(_, tail) => tail.clone(),
         }))
+    }
+
+    fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
+        self.runs.get(&id.0).and_then(|run| run.logs.report())
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
