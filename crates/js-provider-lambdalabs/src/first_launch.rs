@@ -731,7 +731,8 @@ mod tests {
     fn first_launch_writes_name_only_rows() {
         let row = allow_list_row("gpu_1x_a10");
         assert_eq!(row, "[[option]]\ninstance_type = \"gpu_1x_a10\"\n");
-        assert!(!row.contains("gpu_class") && !row.contains("gpus"), "{row}");
+        assert!(!row.contains("gpu_class"), "{row}");
+        assert!(!row.contains("gpus"), "{row}");
         let table = OptionTable::parse(&row).unwrap();
         assert_eq!(table.rows().len(), 1);
         assert_eq!(table.rows()[0].instance_type, "gpu_1x_a10");
