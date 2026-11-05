@@ -173,6 +173,28 @@ fn the_verb_refuses_a_descriptor_it_cannot_use() {
     assert!(!out.exists());
 }
 
+/// Asserts that the verb, given an `--out` it cannot write under (a file), exits 1 naming
+/// the first file it could not write.
+#[test]
+fn the_verb_names_a_file_it_cannot_write() {
+    let dir = scratch("unwritable");
+    let not_a_dir = dir.path().join("not-a-dir");
+    std::fs::write(&not_a_dir, b"").expect("the file");
+    let (code, said, err) = xtask(&[
+        "gen-job-surface",
+        "--out",
+        not_a_dir.to_str().expect("UTF-8"),
+    ]);
+    assert_eq!((code, said.as_str()), (Some(1), ""));
+    assert!(
+        err.starts_with(&format!(
+            "xtask: cannot write {}: ",
+            not_a_dir.join(CLIENT_FILE).display()
+        )),
+        "{err}"
+    );
+}
+
 /// Asserts that the verb, given a descriptor file, writes both files under `--out` (making
 /// their directories) as the generator renders them, and says so.
 #[test]

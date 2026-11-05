@@ -618,12 +618,27 @@ mod tests {
             Kind::F64,
             Kind::Text,
             Kind::Seconds,
+            Kind::Enum(SHADES),
+            Kind::Pair(&Kind::Text, &Kind::Text),
             Kind::File,
         ]
         .iter()
         .map(value_name)
         .collect();
-        assert_eq!(names, ["BOOL", "N", "X", "X", "TEXT", "DURATION", "PATH"]);
+        assert_eq!(
+            names,
+            [
+                "BOOL",
+                "N",
+                "X",
+                "X",
+                "TEXT",
+                "DURATION",
+                "NAME",
+                "KEY=VALUE",
+                "PATH"
+            ]
+        );
     }
 
     /// A command whose request has a `oneof` of two members, and a flag outside it.
@@ -735,7 +750,8 @@ mod tests {
 
     /// Asserts what a lost answer says by what the definition states of the call: may have
     /// taken effect when it states nothing, safe to repeat when it states the call changes
-    /// nothing or is idempotent; and that any other failure passes unchanged.
+    /// nothing or is idempotent, and with a retry key that the thing may exist and to run the
+    /// same command again with that key; and that any other failure passes unchanged.
     #[test]
     fn a_lost_answer_says_whether_the_call_is_safe_to_repeat() {
         let lost = || Failure::Unanswered("lost".to_owned());
@@ -759,6 +775,11 @@ mod tests {
                 Failure::NotSent("down".to_owned())
             ),
             "down"
+        );
+        let key = (&SHAPE[0].flags[2], "abc".to_owned());
+        assert_eq!(
+            unanswered(lost(), &bare(Idempotency::Unknown), Some(&key)).to_string(),
+            "the thing may exist; run the same command again with --thing-id abc"
         );
     }
 

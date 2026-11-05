@@ -350,4 +350,18 @@ mod tests {
         );
         assert_eq!(begun.load(Ordering::SeqCst), 0);
     }
+
+    /// Asserts that a write the stream accepts counts the `HEADERS` frame it carried.
+    #[test]
+    fn an_accepted_write_counts_its_headers_frame() {
+        let (client, _server) = tokio::io::duplex(1024);
+        let begun = Arc::new(AtomicU64::new(0));
+        let mut watched = Watched::new(Box::new(client), Arc::clone(&begun));
+        let mut bytes = vec![0; PREFACE];
+        bytes.extend(frame(HEADERS, 0));
+        let waker = std::task::Waker::noop();
+        let polled = Pin::new(&mut watched).poll_write(&mut Context::from_waker(waker), &bytes);
+        assert_eq!(format!("{polled:?}"), format!("Ready(Ok({}))", bytes.len()));
+        assert_eq!(begun.load(Ordering::SeqCst), 1);
+    }
 }

@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use prost::Message as _;
 use prost_types::field_descriptor_proto::{Label, Type};
+use prost_types::method_options::IdempotencyLevel;
 use prost_types::{
     DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet, MessageOptions,
-    MethodDescriptorProto, ServiceDescriptorProto,
+    MethodDescriptorProto, MethodOptions, ServiceDescriptorProto,
 };
 
 use super::{Args, generate, run};
@@ -237,6 +238,40 @@ fn the_retry_key_entry_fails_when_the_definition_loses_it() {
     );
     let spec = message("Spec", vec![field("job_id", 1, Type::Uint64, "")]);
     assert_eq!(service(vec![submit], vec![nested, spec]), lost);
+}
+
+/// Asserts that each call's `idempotency_level` option is read into the table: none set,
+/// `NO_SIDE_EFFECTS` and `IDEMPOTENT`, in the order of the calls.
+#[test]
+fn a_calls_idempotency_level_is_read_from_its_options() {
+    let with = |name: &str, level: IdempotencyLevel| {
+        let mut call = method(name, ".p.Empty");
+        call.options = Some(MethodOptions {
+            idempotency_level: Some(level.into()),
+            ..MethodOptions::default()
+        });
+        call
+    };
+    let calls = vec![
+        method("ListWidgets", ".p.Empty"),
+        with("GetGadget", IdempotencyLevel::NoSideEffects),
+        with("PutThing", IdempotencyLevel::Idempotent),
+    ];
+    let cli = generate(&set("p", calls, Vec::new()))
+        .map(|generated| generated.cli)
+        .unwrap_or_default();
+    let levels: Vec<&str> = cli
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("idempotency: "))
+        .collect();
+    assert_eq!(
+        levels,
+        [
+            "Idempotency::Unknown,",
+            "Idempotency::NoSideEffects,",
+            "Idempotency::Idempotent,"
+        ]
+    );
 }
 
 /// Asserts that a call whose request is a message of another package is refused by name:
