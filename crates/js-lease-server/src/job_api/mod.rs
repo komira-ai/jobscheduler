@@ -6,7 +6,8 @@
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
 //! file of its group serves it; the read group (`read.rs`) is served, and the fleet group's
 //! calls answer it until its context is given the server's handles (`fleet::Ctx::served`).
-//! Nothing mounts the two services yet: the listener does.
+//! The server builds the service from its state in one place, [`from_server`], and serves
+//! both transports on the port of `--job-listen` through [`port`] (`wiring.rs`).
 //!
 //! # One file per call group
 //!
@@ -21,7 +22,8 @@
 //!
 //! The [`JobService`] implementation below is one line per method, which hands the call to
 //! its group's function. Serving a call replaces the body of that function and changes
-//! nothing outside its file.
+//! nothing outside its file, except the group's one `with_<group>` line in [`from_server`]
+//! when its context needs handles of the server.
 //!
 //! # One context per group
 //!
@@ -63,8 +65,10 @@ pub(crate) mod fleet;
 pub(crate) mod read;
 pub(crate) mod submit;
 pub(crate) mod validate;
+mod wiring;
 
 pub(crate) use auth::{Bearer, BearerLayer};
+pub(crate) use wiring::{from_server, port};
 
 #[cfg(test)]
 mod read_list_tests;
