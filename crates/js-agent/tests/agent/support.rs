@@ -718,6 +718,7 @@ pub fn run_on_defaulted(
 }
 
 /// [`run`] with `args` exactly as given, as [`run_on_defaulted`].
+#[cfg(target_os = "linux")]
 pub fn run_defaulted(
     args: &[&str],
     host: &Host,
