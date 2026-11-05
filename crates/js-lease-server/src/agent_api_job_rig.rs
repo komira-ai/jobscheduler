@@ -171,6 +171,7 @@ impl Rig {
             disk_gib: None,
             jobs: agent.listing(),
             retired_jobs: agent.retired.iter().cloned().collect(),
+            log_grant_state: None,
         };
         let body = Bytes::from(serde_json::to_vec(&sent).unwrap());
         let agents = State(Arc::clone(&self.agents));
@@ -328,6 +329,7 @@ pub(crate) fn result(
             stderr: String::new(),
             truncated: false,
         }),
+        logs: None,
     }
 }
 
