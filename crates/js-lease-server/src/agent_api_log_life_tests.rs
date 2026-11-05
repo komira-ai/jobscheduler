@@ -155,7 +155,8 @@ async fn a_host_without_the_capability_gets_no_grant() {
 
 /// A heartbeat reporting `stale` while the agent holds the credential held here queues a mint
 /// in that tick, and the reply after it carries the new credential, with no wait for the
-/// half-life rule; ten such heartbeats in one tick mint once, and a second `stale` in the same
+/// half-life rule (the clock never moves, so the new credential expires at the same instant as
+/// the refused one, as two mints within one second of an STS do); ten such heartbeats in one tick mint once, and a second `stale` in the same
 /// tick mints nothing until the next tick. An agent reporting `stale` with no credential (it
 /// restarted) is sent the one held. Catches a stale agent left waiting, and a scheduler made
 /// to mint without bound.

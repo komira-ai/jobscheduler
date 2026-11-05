@@ -34,7 +34,12 @@
 //! credential held here ([`LogGrants::on_beat`]) when the agent's `log_grant_state.until_ms` is
 //! absent or earlier than its expiry: a new host's first reply after the mint, and every reply
 //! after a renewal, until a heartbeat reports that expiry. So a lost reply never loses a
-//! renewal, and a delivered credential is not sent again. An expired credential is never sent.
+//! renewal, and a delivered credential is not sent again. A credential minted for a `stale`
+//! report may expire at the same instant as the one it replaces (a frozen clock, or an STS
+//! that gives expiries in whole seconds), so the expiry cannot tell them apart: it is also
+//! sent while the agent reports `stale` and the key it holds is not the one its report was
+//! about; the agent stops reporting `stale` once it takes it. An expired credential is never
+//! sent.
 //!
 //! **Mint failures** (`Unavailable` and `Refused` alike: a refused mint is a configuration
 //! the operator can repair) are retried with a capped exponential backoff on the injected clock,
@@ -135,6 +140,9 @@ struct Host {
     retry_at_ms: u64,
     /// The tick in which a `stale` report last queued a mint.
     stale_tick: Option<u64>,
+    /// The access key id of the credential the last `stale` report that queued a mint was
+    /// about: one held that differs from it is the replacement, sent while the agent asks.
+    refused_key: Option<String>,
 }
 
 impl Host {
@@ -288,10 +296,18 @@ impl LogGrants {
             let ask = reported.stale & holds_ours & (host.stale_tick != Some(tick));
             host.want_unless(now, |_| !ask);
             host.stale_tick = ask.then_some(tick).or(host.stale_tick);
+            let refused = held
+                .as_ref()
+                .filter(|_| ask)
+                .map(|g| g.access_key_id.clone());
+            host.refused_key = refused.or(host.refused_key.take());
+            let refused_key = host.refused_key.as_deref();
             held.filter(|grant| {
-                reported
+                let newer = reported
                     .until_ms
-                    .is_none_or(|until| until < grant.expires_at_ms)
+                    .is_none_or(|until| until < grant.expires_at_ms);
+                let replaces = refused_key.is_some_and(|key| key != grant.access_key_id);
+                newer | (reported.stale & replaces)
             })
         };
         self.pump();
