@@ -67,7 +67,7 @@ fn the_view_keeps_ours_and_suspects_in_every_region_and_nothing_else() {
 fn a_failed_list_is_an_error_and_prices_come_by_type() {
     let fake = Arc::new(FakeLambda::new());
     fake.set_offers(vec![offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         Architecture::X86_64,
@@ -76,7 +76,7 @@ fn a_failed_list_is_an_error_and_prices_come_by_type() {
     let view = reader(&fake);
     fake.fail_next(Call::ListInstances, ApiError::Transport("down".to_owned()));
     assert!(view.tagged().is_err());
-    assert_eq!(view.prices().unwrap()["gpu_1x_sample"], 75);
+    assert_eq!(view.prices().unwrap()["gpu_1x_h100_sxm5"], 75);
     fake.fail_next(Call::InstanceTypes, ApiError::Transport("down".to_owned()));
     assert!(view.prices().is_err());
     // Reading is all the view did.

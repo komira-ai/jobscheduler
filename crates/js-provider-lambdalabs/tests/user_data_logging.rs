@@ -76,13 +76,13 @@ fn ask(acquire: &str) -> AcquireRequest {
         pool: "pool-a".to_owned(),
         lifetime: None,
         offer: Offer {
-            id: "gpu_1x_sample".to_owned(),
+            id: "gpu_1x_h100_sxm5".to_owned(),
             zone: Some("region-a".to_owned()),
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 512 << 30,
             accelerator: Some(accelerator_of(
-                &Model::parse("nvidia-sample").unwrap(),
+                &Model::parse("nvidia-h100-80gb-hbm3").unwrap(),
                 1,
                 None,
             )),
@@ -101,10 +101,7 @@ fn ask(acquire: &str) -> AcquireRequest {
 }
 
 fn table() -> OptionTable {
-    OptionTable::parse(
-        "[[option]]\ninstance_type = \"gpu_1x_sample\"\ngpu_class = \"nvidia-sample\"\ngpus = 1\n",
-    )
-    .unwrap()
+    OptionTable::parse("[[option]]\ninstance_type = \"gpu_1x_h100_sxm5\"\n").unwrap()
 }
 
 fn account_key(scheduler: SchedulerId) -> ElasticConfig {
@@ -172,7 +169,7 @@ fn the_payload_and_a_made_keys_private_half_are_in_no_log_line() {
         // The same payload through the in-memory account: its launch log and call log.
         let fake = Arc::new(FakeLambda::new());
         fake.set_offers(vec![InstanceTypeOffer {
-            name: "gpu_1x_sample".to_owned(),
+            name: "gpu_1x_h100_sxm5".to_owned(),
             description: String::new(),
             gpu_description: String::new(),
             price_cents_per_hour: 75,

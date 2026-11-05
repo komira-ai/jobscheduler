@@ -65,7 +65,7 @@ impl LambdaApi for Lagging {
 fn rig(max_machines: usize) -> (Arc<Lagging>, Arc<ManualClock>, LambdaProvider) {
     let fake = Arc::new(FakeLambda::new());
     fake.set_offers(vec![offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         js_provider_lambdalabs::Architecture::X86_64,

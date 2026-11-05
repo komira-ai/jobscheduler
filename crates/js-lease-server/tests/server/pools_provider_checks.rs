@@ -14,8 +14,7 @@ use serde_json::{Value, json};
 
 use crate::pools_support::{FakeCloud, Options, Rig};
 
-const TABLE: &str =
-    "[[option]]\ninstance_type = \"gpu_1x_a10\"\ngpu_class = \"nvidia-a10\"\ngpus = 1\n";
+const TABLE: &str = "[[option]]\ninstance_type = \"gpu_1x_a10\"\n";
 const RULESET: &str = "js-sched-noinbound";
 
 /// A server whose pool is the Lambda provider over an account that offers one A10 in one
@@ -113,9 +112,7 @@ async fn a_ruleset_with_a_rule_makes_the_pool_unavailable_before_any_acquire() {
 /// catches a typo the pool silently ignores.
 #[tokio::test]
 async fn a_typod_types_row_is_named_in_the_pool_reasons() {
-    let table = format!(
-        "{TABLE}[[option]]\ninstance_type = \"gpu_9x_x\"\ngpu_class = \"nvidia-a10\"\ngpus = 9\n"
-    );
+    let table = format!("{TABLE}[[option]]\ninstance_type = \"gpu_9x_x\"\n");
     let account = start("provider_checks_typo", &table).await;
     account.fake.add_ssh_key("only");
     let rig = &account.rig;

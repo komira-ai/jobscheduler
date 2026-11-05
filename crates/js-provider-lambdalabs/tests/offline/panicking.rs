@@ -68,7 +68,7 @@ impl LambdaApi for PanicsOnce {
 fn a_catalog_call_that_panics_is_an_error_and_the_provider_goes_on() {
     let fake = FakeLambda::new();
     fake.set_offers(vec![crate::rig::offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         js_provider_lambdalabs::Architecture::X86_64,

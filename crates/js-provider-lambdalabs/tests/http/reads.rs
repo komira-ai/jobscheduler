@@ -32,14 +32,14 @@ fn instance_types_come_back_ordered_with_gpu_facts_and_regions() {
         names,
         [
             "gpu_1x_arm_sample",
-            "gpu_1x_sample",
-            "gpu_8x_example",
+            "gpu_1x_h100_sxm5",
+            "gpu_8x_h100_sxm5",
             "gpu_odd_arch"
         ]
     );
     let sample = &offers[1];
-    assert_eq!(sample.description, "1x Sample GPU (24 GB)");
-    assert_eq!(sample.gpu_description, "Sample GPU (24 GB)");
+    assert_eq!(sample.description, "1x H100 (80 GB SXM5)");
+    assert_eq!(sample.gpu_description, "H100 (80 GB SXM5)");
     assert_eq!(
         (sample.price_cents_per_hour, sample.vcpus, sample.memory_gib),
         (75, 30, 200)
@@ -127,7 +127,7 @@ fn the_instance_list_keeps_every_row_in_the_order_given() {
     assert_eq!(first.hostname.as_deref(), Some("host-7"));
     assert_eq!(
         (first.region.as_str(), first.instance_type.as_str()),
-        ("region-a", "gpu_1x_sample")
+        ("region-a", "gpu_1x_h100_sxm5")
     );
     assert_eq!(first.tags.len(), 2);
     assert_eq!(
