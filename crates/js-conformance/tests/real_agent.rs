@@ -4,7 +4,6 @@
 //! here is scripted on the agent's side, so a command the registry sends that the agent
 //! would refuse, or a held list the registry misreads, fails here.
 
-use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -13,12 +12,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, Clock, Config, Exit, Found, Lifecycle, MountRoots, NoChecks, RunHandle, RunSpec,
-    Runtime, RuntimeError, ScratchRoot, StateRoot, Status,
+    Capacity, Config, Lifecycle, MountRoots, NoChecks, ScratchRoot, StateRoot,
 };
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, Isolation, JobSpec, Limits, Outcome, Phase,
 };
+use js_conformance::agent::memory::{Memory as Fake, Time};
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
@@ -94,86 +93,6 @@ fn job(run: &str) -> JobSpec {
         run: None,
         os: None,
         arch: None,
-    }
-}
-
-/// A runtime whose containers exist in memory and exit when the test says so or when they
-/// are stopped.
-#[derive(Clone, Default)]
-struct Fake(Rc<RefCell<World>>);
-
-#[derive(Default)]
-struct World {
-    containers: BTreeMap<String, (String, Option<Exit>)>,
-    next: u32,
-    created: Vec<String>,
-}
-
-impl Fake {
-    fn exit(&self, run: &str, code: i32) {
-        let mut world = self.0.borrow_mut();
-        let found = world.containers.values_mut().find(|(r, _)| r == run);
-        found.expect("no such container").1 = Some(Exit {
-            code,
-            oom_killed: false,
-        });
-    }
-
-    fn created(&self) -> Vec<String> {
-        self.0.borrow().created.clone()
-    }
-
-    fn alive(&self) -> usize {
-        self.0.borrow().containers.len()
-    }
-}
-
-impl Runtime for Fake {
-    fn create_and_start(&mut self, spec: &RunSpec) -> Result<RunHandle, RuntimeError> {
-        let mut world = self.0.borrow_mut();
-        world.next += 1;
-        let id = format!("c{}", world.next);
-        world.created.push(spec.run_id.clone());
-        world
-            .containers
-            .insert(id.clone(), (spec.run_id.clone(), None));
-        Ok(RunHandle(id))
-    }
-
-    fn poll(&mut self, id: &RunHandle) -> Result<Status, RuntimeError> {
-        let world = self.0.borrow();
-        Ok(match world.containers.get(&id.0) {
-            None => Status::Gone,
-            Some((_, exit)) => exit.map_or(Status::Running, Status::Exited),
-        })
-    }
-
-    fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
-        let mut world = self.0.borrow_mut();
-        if let Some((_, exit)) = world.containers.get_mut(&id.0) {
-            exit.get_or_insert(Exit {
-                code: 137,
-                oom_killed: false,
-            });
-        }
-        Ok(())
-    }
-
-    fn remove(&mut self, id: &RunHandle) -> Result<(), RuntimeError> {
-        self.0.borrow_mut().containers.remove(&id.0);
-        Ok(())
-    }
-
-    fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        Ok(Vec::new())
-    }
-}
-
-struct Time(Rc<Cell<u64>>);
-
-impl Clock for Time {
-    fn now_ms(&self) -> u64 {
-        self.0.get()
     }
 }
 

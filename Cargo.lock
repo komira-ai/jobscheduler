@@ -1689,6 +1689,7 @@ name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "js-agent",
  "js-agent-wire",
  "js-conformance",
  "js-lease",

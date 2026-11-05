@@ -34,6 +34,7 @@
 //! one, each line where it happened.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -45,7 +46,7 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
 
-use crate::agent::{AgentNode, AgentSpec};
+use crate::agent::{AgentKind, AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::Counters;
 use crate::front::{ClientPort, Front, LeaseFront};
@@ -162,6 +163,8 @@ pub struct Cell {
     applied: Applied,
     capacity: Resources,
     spec: ServerSpec,
+    /// The cell's directory, where each real agent makes its own.
+    dir: PathBuf,
     agents: usize,
     script: BTreeMap<(FarmTime, u64), Action>,
     scripted: u64,
@@ -178,8 +181,9 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir`, with
-    /// `faults` on the bus, no agent yet, and a [`LeaseFront`] as its client.
+    /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir` (and the
+    /// directories of any real agent), with `faults` on the bus, no agent yet, and a
+    /// [`LeaseFront`] as its client.
     ///
     /// # Errors
     ///
@@ -194,6 +198,7 @@ impl Cell {
             .shape()
             .resources()
             .map_err(StartupError::because("shape"))?;
+        let path = dir.path().to_path_buf();
         let server = ServerNode::start(&spec, dir)?;
         let mut sim = Sim::new(setup.seed, faults.clone());
         let mut trace = Trace::new("js-sim-cell");
@@ -218,6 +223,7 @@ impl Cell {
             applied: Applied::default(),
             capacity,
             spec,
+            dir: path,
             agents: 0,
             script: BTreeMap::new(),
             scripted: 0,
@@ -241,7 +247,7 @@ impl Cell {
     ///
     /// Never for fewer than a thousand million agents: the name is a host id.
     pub fn add_agent(&mut self) -> Result<HostId, IdError> {
-        self.add(None)
+        self.add(AgentKind::Fake(None))
     }
 
     /// Adds the next agent, whose agent lacks `defect`.
@@ -250,10 +256,20 @@ impl Cell {
     ///
     /// As [`Cell::add_agent`].
     pub fn add_broken_agent(&mut self, defect: Defect) -> Result<HostId, IdError> {
-        self.add(Some(defect))
+        self.add(AgentKind::Fake(Some(defect)))
     }
 
-    fn add(&mut self, defect: Option<Defect>) -> Result<HostId, IdError> {
+    /// Adds the next agent, whose process is the real agent lifecycle over an in-memory
+    /// runtime, with its directories in the cell's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cell::add_agent`].
+    pub fn add_real_agent(&mut self) -> Result<HostId, IdError> {
+        self.add(AgentKind::Real(self.dir.clone()))
+    }
+
+    fn add(&mut self, kind: AgentKind) -> Result<HostId, IdError> {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let spec = AgentSpec {
@@ -264,7 +280,7 @@ impl Cell {
             capabilities: self.spec.shape().capabilities.clone(),
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
-            defect,
+            kind,
         };
         let mut agent = AgentNode::new(spec, self.ledger.clone());
         agent.report_to(self.applied.clone());
