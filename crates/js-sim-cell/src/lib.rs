@@ -2,6 +2,9 @@
 //! under the [`js_sim`] kernel, many fake agents (or a few real ones) and a client driver, with properties
 //! checked after every step, and a builder in which a scenario reads top to bottom.
 //!
+//! How to run, write and read a scenario, and what the cell does not model, is in
+//! `docs/simulation.md` at the root of the repository.
+//!
 //! What it holds:
 //!
 //! - [`observe`]: the facts. What the client driver heard about each unit of work and
