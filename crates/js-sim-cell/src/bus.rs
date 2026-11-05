@@ -37,7 +37,7 @@ pub fn agent_name(index: usize) -> NodeId {
 pub struct CallId(pub u64);
 
 /// The agent routes a call can name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Route {
     /// `POST /v1/agent/hello`: a [`js_agent_wire::Hello`], answered by a
     /// [`js_agent_wire::Welcome`] or a refusal.
