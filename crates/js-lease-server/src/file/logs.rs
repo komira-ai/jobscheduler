@@ -97,8 +97,8 @@ pub struct ObjectStoreLogs {
     pub bucket: Bucket,
     /// The log prefix of `url`, with its trailing `/` (empty for none).
     pub prefix: LogPrefix,
-    /// The store agents put to and the server reads from: `endpoint` (by default the region's
-    /// AWS S3 endpoint), with `region`, the bucket and `path_style`.
+    /// The store agents put to and the server reads from: `endpoint` (required), with
+    /// `region`, the bucket and `path_style`.
     pub endpoint: Endpoint,
     /// `read_key_file`: the key that lists and gets under the prefix.
     pub read_key: AccessKey,
@@ -115,8 +115,7 @@ pub struct ObjectStoreLogs {
 pub enum Minting {
     /// `credentials = "sts"`: the store's STS `AssumeRole`.
     Sts {
-        /// `sts_endpoint`: by default `endpoint` when the file gives one, else the region's AWS
-        /// STS endpoint.
+        /// `sts_endpoint`: `endpoint` unless the file gives another.
         endpoint: StsEndpoint,
         /// `role_arn`: the role assumed.
         role_arn: RoleArn,
@@ -204,10 +203,9 @@ fn read_object_store(
     if !region_ok(&region) {
         return Err(s.fail("region", "must be 1 to 64 bytes of [a-z0-9-]"));
     }
-    let given_endpoint = s.string("endpoint")?;
-    let store_url = given_endpoint
-        .clone()
-        .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
+    // No default: the server names no cloud's host itself, so the store is the one the
+    // operator wrote.
+    let store_url = s.required_string("endpoint")?;
     let path_style = s.boolean("path_style")?.unwrap_or(false);
     let endpoint = Endpoint::parse(&store_url, &region, bucket.as_str(), path_style)
         .map_err(|err| s.fail("endpoint", &err.to_string()))?;
@@ -217,10 +215,7 @@ fn read_object_store(
         let reason = "must be sts: no other way of minting a host credential is built";
         return Err(s.fail("credentials", reason));
     }
-    let sts_url = s
-        .string("sts_endpoint")?
-        .or(given_endpoint)
-        .unwrap_or_else(|| format!("https://sts.{region}.amazonaws.com"));
+    let sts_url = s.string("sts_endpoint")?.unwrap_or(store_url);
     let sts_endpoint = StsEndpoint::parse(&sts_url, &region)
         .map_err(|err| s.fail("sts_endpoint", &err.to_string()))?;
     let role_arn = s.required_string("role_arn")?;

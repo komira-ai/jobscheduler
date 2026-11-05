@@ -155,11 +155,11 @@ refuses a longer session, and the refusal shows as a mint failure.
 sink            = "object_store"                        # "object_store" | "none"; default "none"
 url             = "s3://bucket/prefix"                  # required with object_store; the prefix is optional
 region          = "us-east-1"                           # required with object_store
-endpoint        = "https://objects.example"             # optional; default the region's AWS endpoint
+endpoint        = "https://objects.example"             # required: the store's URL; the server names no cloud's host by default
 path_style      = false                                 # optional; true for stores that need /bucket/key URLs
 read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
 credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
-sts_endpoint    = "https://objects.example"             # optional; default endpoint, or the region's AWS STS endpoint
+sts_endpoint    = "https://objects.example"             # optional; default endpoint
 role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts; its maximum session duration at least credential_ttl
 mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
 credential_ttl  = "1h"                                  # 15m to 12h

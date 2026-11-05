@@ -327,11 +327,11 @@ unknown key is refused. The example is in `configuration.md`, "Live logs". The k
 | `sink` | string | `"none"` | `"object_store"` or `"none"`. With `"none"`, any other key present is refused, naming the key. |
 | `url` | string | none | Required with `object_store`. `s3://BUCKET` or `s3://BUCKET/prefix`; the bucket 3 to 63 bytes of lower-case letters, digits, `.` and `-`; the prefix as section 2 says. |
 | `region` | string | none | Required with `object_store`. 1 to 64 bytes of `[a-z0-9-]`. Signs every request. |
-| `endpoint` | string | the region's AWS S3 endpoint | Optional. At most 512 bytes; `https`, or `http` to a loopback address; no path, query or user. The agent puts here and the server reads here. |
+| `endpoint` | string | none | Required with `object_store`: the server names no cloud's host by default. At most 512 bytes; `https`, or `http` to a loopback address; no path, query or user. The agent puts here and the server reads here. |
 | `path_style` | bool | `false` | Optional. `true` for stores that need `/bucket/key` URLs. |
 | `read_key_file` | path | none | Required with `object_store`. An owner-only file holding JSON `{"access_key_id": ..., "secret_access_key": ...}`: the read key of section 4 (list and get on the prefix). |
 | `credentials` | string | `"sts"` | How a host's credential is minted. `"sts"` is the only value. |
-| `sts_endpoint` | string | `endpoint` when set, else the region's AWS STS endpoint | Optional. The same URL rule as `endpoint`. |
+| `sts_endpoint` | string | `endpoint` | Optional. The same URL rule as `endpoint`. |
 | `role_arn` | string | none | Required with `sts`. An `arn:` value of at most 2,048 bytes: the role `AssumeRole` assumes (section 4). |
 | `mint_key_file` | path | none | Required with `sts`. An owner-only file, the same JSON as `read_key_file`: the key that calls `AssumeRole`. |
 | `credential_ttl` | duration | `"1h"` | From `"15m"` to `"12h"`. At most the role's maximum session duration, which the server cannot check at start: a longer one is refused by STS and reads as a mint failure. |

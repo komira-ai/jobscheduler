@@ -9,7 +9,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use clap::Parser;
 use js_lease_server::{Cli, Config, LogsConfig, Minting, ObjectStoreLogs};
 use rustix::process::{Pid, Signal, kill_process};
 
@@ -44,6 +43,7 @@ impl Logs {
             .set("sink", "\"object_store\"")
             .set("url", "\"s3://logs/js/live\"")
             .set("region", "\"us-east-1\"")
+            .set("endpoint", "\"https://objects.example\"")
             .set("read_key_file", &quoted(&read))
             .set("role_arn", "\"arn:aws:iam::example:role/js-logs\"")
             .set("mint_key_file", &quoted(&mint))
@@ -215,6 +215,10 @@ fn a_logs_table_is_checked_key_by_key() {
         (good.clone().set("url", "7"), "logs.url: must be a string".to_owned()),
         (good.clone().without("region"), "logs.region: required".to_owned()),
         (
+            good.clone().without("endpoint"),
+            "logs.endpoint: required".to_owned(),
+        ),
+        (
             good.clone().set("region", "\"US-EAST\""),
             "logs.region: must be 1 to 64 bytes of [a-z0-9-]".to_owned(),
         ),
@@ -373,9 +377,9 @@ fn a_logs_table_is_checked_key_by_key() {
 }
 
 /// Asserts what loads: the design's example (`docs/design/configuration.md`) with its two key
-/// files written; a table with only the required keys, whose defaults are the region's AWS S3
-/// and STS endpoints, virtual-host style, a TTL of one hour and 256 follows; an STS endpoint
-/// that defaults to `endpoint` when that is given, and one given apart; the bounds of the TTL
+/// files written; a table with only the required keys, whose defaults are the STS at
+/// `endpoint`, virtual-host style, a TTL of one hour and 256 follows; an STS endpoint given
+/// apart; the bounds of the TTL
 /// (15 minutes, 12 hours), of `max_follow` (1, 4096) and of a key file (an id of 128 bytes, a
 /// secret of 1024); a bucket with no prefix; and a prefix kept as written with its trailing
 /// `/` (`/a//b/` is refused, `a/b` kept). It catches a default that differs from the design,
@@ -410,15 +414,12 @@ fn a_good_logs_table_loads_with_its_defaults() {
     let least = sink(&scratch, &good.text());
     assert_eq!(least.bucket.as_str(), "logs");
     assert_eq!(least.prefix.as_str(), "js/live/");
-    assert_eq!(least.endpoint.host(), "logs.s3.us-east-1.amazonaws.com");
-    assert_eq!(
-        least.endpoint.url("/"),
-        "https://logs.s3.us-east-1.amazonaws.com/"
-    );
+    assert_eq!(least.endpoint.host(), "logs.objects.example");
+    assert_eq!(least.endpoint.url("/"), "https://logs.objects.example/");
     assert_eq!(
         sts(&least),
         (
-            "https://sts.us-east-1.amazonaws.com/".to_owned(),
+            "https://objects.example/".to_owned(),
             "arn:aws:iam::example:role/js-logs".to_owned(),
             "MINTKEYID".to_owned()
         )
