@@ -132,9 +132,9 @@ fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
             shared.clone(),
         ))
     });
-    for placer in &placer {
-        registry.set_placer(placer.clone());
-    }
+    placer
+        .iter()
+        .for_each(|placer| registry.set_placer(placer.clone()));
     let (store, jobs) = tables();
     let jobs = Arc::new(jobs);
     let agents = Agents::over(registry, &shared, dir.path());
