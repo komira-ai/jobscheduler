@@ -16,8 +16,10 @@
 //!
 //! A case panics when the provider breaks the rule. Every assertion message starts with
 //! the case's name, which is what a `should_panic(expected = ...)` test matches. No case
-//! reads a clock or waits: a rig whose provider spaces its launches in time sets the space
-//! to nothing.
+//! reads a clock or sleeps: a rig whose provider spaces its launches in time sets the space
+//! to nothing. A case awaits the catalog with [`block_on`], which parks the calling thread
+//! until the provider's future wakes it; a rig whose provider's catalog runs on an async
+//! runtime enters that runtime before the cases run.
 
 mod registered;
 
@@ -30,6 +32,8 @@ pub use registered::{
     registered_release_refuses_and_changes_nothing,
     registered_verify_instance_matches_only_a_bound_instance, run_all_registered,
 };
+
+pub use crate::wait::block_on;
 
 use crate::answer::{Acquired, Claim, Held, HostStatus, Observed, RefusalCode, Released};
 use crate::ids::{AcquireId, Hello, HostName, HostRef, SchedulerId};
@@ -621,7 +625,7 @@ pub fn capabilities_cover_every_offer_the_catalog_returns(rig: &mut dyn Rig) {
     const CASE: &str = "capabilities_cover_every_offer_the_catalog_returns";
     rig.make_room(1);
     let caps = rig.provider().capabilities();
-    let offers = rig.provider().catalog().unwrap_or_default();
+    let offers = block_on(rig.provider().catalog()).unwrap_or_default();
     assert!(!offers.is_empty(), "{CASE}: the rig's catalog has offers");
     for offer in &offers {
         assert!(caps.covers(offer), "{CASE}: {offer:?} is outside {caps:?}");

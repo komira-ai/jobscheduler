@@ -8,6 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{PRICE, START, cloud, launch, mins, offer, request, request_at, secs};
+use js_elastic::conformance::block_on;
 use js_elastic::{
     AcquireId, Acquired, CapacityProvider, Claim, HostRef, HostStatus, Reason, Refusal,
     RefusalCode, Released,
@@ -239,7 +240,7 @@ fn an_offer_the_catalog_does_not_list_is_refused_as_shape() {
     elsewhere.offer.zone = Some("z9".to_owned());
     assert_eq!(refused(&cloud.acquire(&elsewhere)), RefusalCode::Shape);
     assert_eq!(cloud.launched(), 0);
-    assert_eq!(cloud.catalog().unwrap(), vec![offer(Some(PRICE))]);
+    assert_eq!(block_on(cloud.catalog()).unwrap(), vec![offer(Some(PRICE))]);
     common::accepted(cloud.acquire(&request("a1")));
 }
 
@@ -565,7 +566,7 @@ fn a_list_with_lag_shows_the_cloud_as_it_was_that_long_ago() {
 fn every_call_is_recorded_in_order() {
     let cloud = cloud(Billing::Lambda);
     let id = launch(&cloud, "a1");
-    cloud.catalog().unwrap();
+    block_on(cloud.catalog()).unwrap();
     assert!(cloud.checks().is_empty());
     cloud.list().unwrap();
     cloud.host_prep(&offer(None));

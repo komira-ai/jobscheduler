@@ -750,7 +750,7 @@ impl ItemState {
                     state.lease = None;
                     state.host = None;
                 }
-                ClientEvent::Submitted | ClientEvent::Started => {}
+                ClientEvent::Submitted | ClientEvent::Pending { .. } | ClientEvent::Started => {}
             }
         }
         state

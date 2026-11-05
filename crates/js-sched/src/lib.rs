@@ -104,6 +104,10 @@
 //!   refusal `no-capable-host`.
 //! - the binding order of a queue of jobs ([`walk_in_order`]): an entry that waits closes
 //!   to the entries behind it every host it could use.
+//! - the choice of the machine provider and offer to acquire from when nothing can serve a
+//!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
+//!   limits and each provider's share, then price, fewest accelerators, least spare,
+//!   purchase order and offer id. Nothing calls it yet.
 //!
 //! Not yet: placement scoring beyond the spread (alignment, best fit), a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
@@ -115,6 +119,7 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod acquire;
 mod admission;
 pub mod admission_ever;
 mod backfill;

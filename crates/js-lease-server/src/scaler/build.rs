@@ -12,6 +12,7 @@ use js_types::ExecMode;
 use super::{Launcher, Live, RecordsFile, Scaler, UnremovedFile};
 use crate::adapt::SharedClock;
 use crate::agents::{Agents, state_path};
+use crate::catalogs::Catalogs;
 use crate::checks::Health;
 use crate::error::StartupError;
 use crate::file::{ElasticPlan, Launch};
@@ -35,6 +36,8 @@ pub(crate) struct Parts<'a> {
     pub(crate) first_start: bool,
     /// The pool's network mode, or why it could not be built.
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
+    /// The cache of the provider's catalog, which a refused launch invalidates.
+    pub(crate) catalogs: Arc<Catalogs>,
 }
 
 /// The network mode the scaler launches with. A pool in `plan` mode launches nothing, so
@@ -118,7 +121,8 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         plan.scheduler.clone(),
         url.to_owned(),
         plan.agent.clone(),
-    );
+    )
+    .with_catalogs(parts.catalogs);
     let registry = parts.agents.registry.clone();
     let live = Live::new(
         (parts.agents, plan.id.clone(), plan.scheduler.clone()),

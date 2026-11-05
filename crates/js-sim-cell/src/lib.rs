@@ -12,9 +12,10 @@
 //!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
 //!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
 //!   process, the processes it killed ([`Killed`]), and the server's list of hosts
-//!   ([`ServerView`]), gathered at one virtual time into [`Observations`]. The ledger
-//!   also keeps what the agents sent and were sent for the whole-host handshake
-//!   ([`ReadyReport`], [`StartSeen`], [`StopSeen`]).
+//!   ([`ServerView`]), with each booking it showed and for how long ([`Booking`]),
+//!   gathered at one virtual time into [`Observations`]. The ledger also keeps what the
+//!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
+//!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
 //!   step and once at the end, and the one-line [`Violation`] it reports. Eleven
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
@@ -49,8 +50,8 @@
 //!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
 //!   it.
 //! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
-//!   server and reports what it hears as [`ClientEvent`]s; [`LeaseFront`] does it as `js
-//!   run` does today. The client is not a bus node: the run loop polls it at exact virtual
+//!   server and reports what it hears as [`ClientEvent`]s, and keeps every answer it was
+//!   given raw ([`Answer`]); [`LeaseFront`] does it as `js run` does today. The client is not a bus node: the run loop polls it at exact virtual
 //!   times and its calls are never dropped.
 //! - [`cell`]: the run loop ([`Cell`]), which steps the kernel, runs the actions scripted
 //!   at virtual times, polls the client and checks the invariants after every step, with
@@ -60,11 +61,16 @@
 //!   ([`Cell::settle`]).
 //! - [`actions`]: what a scenario does at a virtual time, one [`Action`] per file.
 //! - [`scenario`]: the builder ([`Scenario`]): the world, the work, the actions, what is
-//!   expected ([`Expect`]) and the witnesses that show the situation happened, run over
-//!   seeds. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
+//!   expected ([`Expect`], at the end or at a virtual time) and the witnesses that show the
+//!   situation happened, run over seeds. An expectation may also name one of the client's
+//!   calls ([`Call`]) and read its raw answer, or read the server when it is judged: the
+//!   lease list ([`Listed`]), where a lease is booked ([`Booked`], [`HostRef`]), a
+//!   whole-node request's record ([`RecordFact`]), the wait list and the reservations. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
 //!   family (`tests/faults.rs`) runs agents that die and return or never return,
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
-//!   restart of the server and a forgotten host, each over sixteen seeds.
+//!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
+//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
+//!   path, and the ways its handshake fails, under every value of `--placement`.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
@@ -108,16 +114,19 @@ pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differ
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
-pub use front::{ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
+pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
+    AgentTruth, Ask, Booking, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
     Observations, ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand,
     StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
-pub use scenario::{Expect, HostIs, Passed, Scenario, ScenarioFailure, SeedRun};
+pub use scenario::{
+    Booked, Call, Expect, HostIs, HostRef, Listed, Passed, RecordFact, Scenario, ScenarioFailure,
+    SeedRun,
+};
 pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
 pub use work::Work;

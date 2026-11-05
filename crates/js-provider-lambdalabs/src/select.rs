@@ -130,6 +130,7 @@ pub(crate) fn offers(
                 price_cents_per_hour: Some(kind.price_cents_per_hour),
                 price_unit: PriceUnit::UsCents,
                 available: true,
+                purchase: None,
             })
         })
         .collect()

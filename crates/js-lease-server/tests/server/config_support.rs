@@ -5,8 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, CapacityProvider, Held, HostRef, Offer, ProviderError,
-    Released,
+    AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostRef, Offer,
+    ProviderError, Released,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
@@ -26,8 +26,8 @@ pub const OAUTH_SECRET: &str = "PLANTED-OAUTH-SECRET-VALUE";
 struct NullElastic;
 
 impl CapacityProvider for NullElastic {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(Vec::new())
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {

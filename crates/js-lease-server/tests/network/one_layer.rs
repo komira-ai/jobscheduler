@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPlan, BootStep, CapacityProvider, Held, HostName,
-    HostRef, Offer, PriceUnit, ProviderError, Released, SchedulerId, Secret,
+    AcquireId, AcquireRequest, Acquired, BootPlan, BootStep, CapacityProvider, CatalogFuture, Held,
+    HostName, HostRef, Offer, PriceUnit, ProviderError, Released, SchedulerId, Secret,
 };
 use js_lease_server::bootstrap::{BootSecrets, payload};
 use js_lease_server::network::{DefaultMode, NetworkMode};
@@ -35,8 +35,8 @@ struct Recorder {
 }
 
 impl CapacityProvider for Recorder {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(Vec::new())
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -119,6 +119,7 @@ fn offer() -> Offer {
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
     }
 }
 

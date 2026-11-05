@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, HostName, HostRef,
-    Offer, ProviderError, Reason, RefusalCode, Released, SchedulerId, Secret, SlotName,
+    AcquireId, AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CatalogFuture,
+    HostName, HostRef, Offer, ProviderError, Reason, RefusalCode, Released, SchedulerId, Secret,
+    SlotName,
 };
 use js_lease_server::network::{ApiFailure, Contribution, LaunchCtx, NetworkError, NetworkMode};
 use js_lease_server::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
@@ -29,8 +30,8 @@ struct Provider {
 }
 
 impl CapacityProvider for Provider {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(Vec::new())
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
     fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {

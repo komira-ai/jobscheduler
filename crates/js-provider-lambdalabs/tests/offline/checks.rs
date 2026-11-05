@@ -266,7 +266,7 @@ fn a_pass_of_checks_on_an_empty_account_only_reads() {
 fn a_types_row_the_catalog_drops_is_logged_by_name() {
     let table = format!("{TABLE}\n[[option]]\ninstance_type = \"gpu_9x_x\"\n");
     let rig = rig_with(config(5), &table);
-    let (offers, text) = warnings(|| rig.provider.catalog().unwrap());
+    let (offers, text) = warnings(|| crate::rig::catalog(&rig.provider).unwrap());
     assert_eq!(offers.len(), 3);
     assert!(
         text.contains("an instance type of the allow list is skipped: gpu_9x_x is not offered"),

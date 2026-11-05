@@ -1,8 +1,9 @@
 //! `request_id` on `POST /v1/leases`: a whole-node request waits for a host under it (the
 //! registry's wait list, reservation and drain, reached through the HTTP route), a repeat
-//! of the acquire answers the lease it made, the id outlives a restart, and a release of
-//! the waiting lease cancels its reservation. A body without the field is answered as
-//! before.
+//! of the acquire answers the lease it made, and the id outlives a restart. A body without
+//! the field is answered as before. That a release of the waiting lease cancels its
+//! reservation is a scenario of the simulation cell (`crates/js-sim-cell/tests/
+//! migrated_whole_host.rs`), under every placement and at scale.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -275,44 +276,6 @@ async fn request_id_survives_a_restart_and_rebinds() {
     assert_eq!(registry.dropped_reservations(), 0);
     assert_eq!(registry.queue_position(&request_id()), None);
     ready(&h, &me, &id).await;
-}
-
-/// Asserts that a release of a waiting lease cancels its request at once (design
-/// `whole-node.md` section 3). The host set aside for the request is listed with no mark
-/// and no `reserved_for` in the answer to the very next call, with no tick between, the
-/// wait list no longer holds the id and the registry holds no reservation. The host is
-/// back to serving: once settled, a new acquire under the same id (the id named a lease
-/// that is gone, so it names nothing now) is a new lease that takes the host at once. It
-/// catches a release that frees the lease and leaves the request waiting (the host would
-/// stay set aside, drained for no one, until `regain_grace`), and an id remembered after
-/// its lease.
-#[tokio::test]
-async fn release_of_a_pending_whole_node_lease_drops_the_reservation() {
-    let h = start("request_id_release").await;
-    let me = join(&h, "burst-1").await;
-    let busy = hold(&h, &me).await;
-    let id = pending(&h, &named()).await;
-    release(&h, &busy).await;
-    h.ticks.step().await;
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["reserved_for"], ID);
-
-    release(&h, &id).await;
-    let host = entry(&hosts(&h).await, "burst-1");
-    assert_eq!(
-        (host.get("mark"), host.get("reserved_for")),
-        (None, None),
-        "{host}"
-    );
-    let registry = h.running.registry().unwrap();
-    assert_eq!(registry.queue_position(&request_id()), None);
-    assert!(registry.reservations().is_empty());
-    assert!(lease_ids(&h).await.is_empty());
-
-    settle(&h, &me).await;
-    let again = pending(&h, &named()).await;
-    assert_ne!(again, id);
-    let reply = beat(&h, &me).await;
-    assert_eq!(reply.json()["exclusive"], json!(again), "{}", reply.body);
 }
 
 /// Asserts that a body without `request_id` is answered byte for byte as before: the 201

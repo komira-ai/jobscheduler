@@ -522,7 +522,7 @@ pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal
 pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   // unchanged
 
 pub trait CapacityProvider: Send + Sync {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;   // also the credential check
+    fn catalog(&self) -> CatalogFuture<'_>;                   // awaited; also the credential check; the scheduler reads it through a cache
     fn host_prep(&self, offer: &Offer) -> Vec<BootStep>;      // what this image lacks (7.3); data, from the offer only
     fn payload_limit(&self) -> usize;                         // bytes the cloud accepts
     fn acquire(&self, request: &AcquireRequest) -> Acquired;  // idempotent on request.acquire; delivers request.payload as is
@@ -1080,7 +1080,7 @@ released at `boot_timeout` (F22).
 
 1. A consumer's whole-node request finds no free host and waits in the registry; `Launchable` is true,
    so it is not refused `no-capable-host`.
-2. Next tick the scaler sees one uncovered request, takes offers from `catalog()`, picks the
+2. Next tick the scaler sees one uncovered request, takes offers from the catalog the checks last read, picks the
    cheapest fit, passes the caps and writes the Launching record (6.2).
 3. The shell mints the join token for `(pool, host name)` (7.2), gets the Tailscale key (8),
    renders the bootstrap (7.3), ensures the no-inbound ruleset exists in the region (5.3), and

@@ -1,6 +1,10 @@
 //! One launch: the boot plan of a machine, rendered with its secrets and handed to the
 //! provider. This is the only place that holds both a network mode and a provider; neither
 //! knows the other. The provider receives the payload and nothing else.
+//!
+//! It is also the one place the server receives a provider's answer to an acquire, so it
+//! hands each answer to the cache of the provider's catalog ([`Catalogs::acquired`]): a
+//! refusal for capacity or quota says the cached offers are out of date.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,6 +19,7 @@ use js_types::normalise_arch;
 use tracing::warn;
 
 use crate::bootstrap::{BootSecrets, payload};
+use crate::catalogs::Catalogs;
 use crate::network::{LaunchCtx, NetworkError, NetworkMode};
 
 /// How long the network mode's secret for one launch (a Tailscale key) stays valid.
@@ -31,11 +36,13 @@ pub struct Launcher {
     scheduler: SchedulerId,
     scheduler_url: String,
     agents: BTreeMap<String, Artifact>,
+    catalogs: Arc<Catalogs>,
 }
 
 impl Launcher {
     /// A launcher for the machines of `scheduler`: each is told to download the entry of `agents` for its offer's architecture, to
-    /// dial `scheduler_url`, and to join the network as `mode` says.
+    /// dial `scheduler_url`, and to join the network as `mode` says. Its provider's answers
+    /// go to no catalog cache until [`Launcher::with_catalogs`] gives it one.
     pub fn new(
         provider: Arc<dyn CapacityProvider>,
         mode: Arc<dyn NetworkMode>,
@@ -49,7 +56,17 @@ impl Launcher {
             scheduler,
             scheduler_url,
             agents,
+            catalogs: Arc::new(Catalogs::new()),
         }
+    }
+
+    /// This launcher, handing each answer its provider gives to an acquire to `catalogs`
+    /// ([`Catalogs::acquired`]), which invalidates the provider's cached catalog on a
+    /// refusal for capacity or quota.
+    #[must_use]
+    pub fn with_catalogs(mut self, catalogs: Arc<Catalogs>) -> Self {
+        self.catalogs = catalogs;
+        self
     }
 
     /// Launches the machine `plan` describes, booting with the join token `token`.
@@ -87,15 +104,19 @@ impl Launcher {
         let rendered = BootSecrets::new(token, contribution.secrets)
             .and_then(|secrets| payload(&boot, &secrets, limit));
         match rendered {
-            Ok(payload) => self.provider.acquire(&AcquireRequest {
-                acquire: plan.acquire.clone(),
-                pool: plan.pool.clone(),
-                name: host,
-                offer: plan.offer.clone(),
-                lifetime: plan.lifetime,
-                labels: Vec::new(),
-                payload,
-            }),
+            Ok(payload) => {
+                let answer = self.provider.acquire(&AcquireRequest {
+                    acquire: plan.acquire.clone(),
+                    pool: plan.pool.clone(),
+                    name: host,
+                    offer: plan.offer.clone(),
+                    lifetime: plan.lifetime,
+                    labels: Vec::new(),
+                    payload,
+                });
+                self.catalogs.acquired(&self.provider.id(), &answer);
+                answer
+            }
             Err(err) => Acquired::Refused(Refusal {
                 code: RefusalCode::Shape,
                 reason: Reason::Boot(err.to_string()),

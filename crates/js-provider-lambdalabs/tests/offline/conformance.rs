@@ -168,6 +168,11 @@ fn refusal_500() -> ApiError {
 /// case names the defect it catches in the provider (`js_elastic::conformance`).
 #[test]
 fn the_lambda_provider_passes_the_conformance_suite() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
     run_all(&mut LambdaRig(LambdaRig::fresh(1)));
 }
 
@@ -217,7 +222,7 @@ instance_type = "gpu_8x_a100"
         host_ports: true,
     };
     assert_eq!(rig.provider.capabilities(), expected);
-    let offers = rig.provider.catalog().unwrap();
+    let offers = crate::rig::catalog(&rig.provider).unwrap();
     assert_eq!(offers.len(), 2);
     assert!(offers.iter().all(|offer| expected.covers(offer)));
 }

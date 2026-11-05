@@ -12,6 +12,25 @@ pub enum PriceUnit {
     UsCents,
 }
 
+/// How a machine from an offer is bought: the purchase option a catalog states for it.
+/// A provider's configured `purchase` list orders these when offers tie on everything
+/// else (design 5.6, step 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Purchase {
+    /// Bought by the hour at the list price, kept until released.
+    OnDemand,
+    /// Spare capacity at a lower price, which the cloud may take back.
+    Spot,
+    /// Capacity reserved for a fixed block of time.
+    CapacityBlock,
+    /// Capacity held by a reservation the account already has.
+    Reserved,
+    /// A purchase option the catalog names that none of the others is, as the catalog
+    /// spells it.
+    Other(String),
+}
+
 /// The dimension of a [`Demand`] that an [`Offer`] fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dimension {
@@ -93,6 +112,9 @@ pub struct Offer {
     pub price_unit: PriceUnit,
     /// Whether the catalog has capacity for it now.
     pub available: bool,
+    /// How a machine from it is bought. `None`: the catalog does not say. It is not part
+    /// of the [fit](Self::fit).
+    pub purchase: Option<Purchase>,
 }
 
 impl Offer {
@@ -209,6 +231,7 @@ mod tests {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
         }
     }
 
@@ -274,6 +297,42 @@ mod tests {
         let mut arch_only = demand();
         arch_only.os = None;
         assert_eq!(mac.fit(&arch_only), Ok(()));
+    }
+
+    /// Asserts that an offer built without a purchase option holds `None`; that each
+    /// option set on an offer reads back from it and from its copy as the same option,
+    /// equal to itself and to no other (an `Other` by its spelling); and that the option
+    /// is not part of the fit. Catches a field that a copy drops, options that compare
+    /// equal across kinds, and a fit that refuses an offer for how it is bought.
+    #[test]
+    fn purchase_round_trips_and_defaults_to_none() {
+        assert_eq!(offer().purchase, None);
+        let options = [
+            Purchase::OnDemand,
+            Purchase::Spot,
+            Purchase::CapacityBlock,
+            Purchase::Reserved,
+            Purchase::Other("savings-plan".to_owned()),
+            Purchase::Other("preemptible".to_owned()),
+        ];
+        for (index, option) in options.iter().enumerate() {
+            let bought = Offer {
+                purchase: Some(option.clone()),
+                ..offer()
+            };
+            let copy = bought.clone();
+            assert_eq!(copy.purchase.as_ref(), Some(option));
+            assert_eq!(copy, bought);
+            assert_ne!(copy, offer());
+            assert_eq!(bought.fit(&demand()), Ok(()));
+            for (other, different) in options.iter().enumerate() {
+                assert_eq!(
+                    option == different,
+                    index == other,
+                    "{option:?} {different:?}"
+                );
+            }
+        }
     }
 
     /// Asserts that a job whose image is built for `macos`/`arm64` turns a demand that named

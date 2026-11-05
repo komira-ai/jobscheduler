@@ -5,11 +5,10 @@
 //!
 //! The hosts are read under the table lock, from the provider the table runs on (every
 //! host of the static pool and of the registry) and from the registry (taint, drain, cordon
-//! and silence). A catalog is a call that may take long, so it is never read with the lock
-//! held: [`Admit::decide`] answers [`Decision::ReadCatalogs`] when the hosts alone admit
-//! nothing and the pool has a provider that launches, the route lets the lock go, reads
-//! the catalogs ([`Admit::read`]) on the pool for blocking calls, and asks again under the
-//! lock with them.
+//! and silence). A launching provider's catalog is read from the server's cache
+//! ([`Catalogs::view`]), which the tick fills: the read calls no provider and answers at
+//! once, so it is made under the lock too. A catalog the cache has never fetched is
+//! [`CatalogView::Unread`], which counts as "may offer".
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -23,7 +22,7 @@ use js_sched::admission_ever::{
 use js_types::{HostId, LeaseId, Request, RequestId, Requirements};
 
 use crate::api::Table;
-use crate::util::blocking;
+use crate::catalogs::{Cached, Catalogs};
 
 /// A machine provider that launches for the pool, with what the pool lets it launch.
 #[derive(Clone)]
@@ -37,11 +36,13 @@ pub(crate) struct Launching {
     pub(crate) limits: PoolLimits,
 }
 
-/// The pool's side of admission: its launching machine providers. The hosts are read at
-/// each decision.
+/// The pool's side of admission: its launching machine providers and the cache of their
+/// catalogs. The hosts are read at each decision.
 #[derive(Clone, Default)]
 pub(crate) struct Admit {
     launching: Vec<Launching>,
+    /// The cache of the launching providers' catalogs; `None` with none.
+    cached: Option<Cached>,
 }
 
 /// What the route does with a request.
@@ -52,33 +53,32 @@ pub(crate) enum Decision {
     Start,
     /// Refuse it with `no-capable-host`, recording nothing.
     Refuse,
-    /// No host could serve it: read the catalogs, with the table lock let go, and ask again.
-    ReadCatalogs,
 }
 
 impl Admit {
-    /// Admission over `launching`, the pool's launching machine providers.
-    pub(crate) fn new(launching: Vec<Launching>) -> Self {
-        Self { launching }
+    /// Admission over `launching`, the pool's launching machine providers, whose catalogs
+    /// are read from `cached`.
+    pub(crate) fn new(launching: Vec<Launching>, cached: Cached) -> Self {
+        Self {
+            launching,
+            cached: Some(cached),
+        }
     }
 
-    /// What to do with `request`, under `request_id`, given the table (held by the caller),
-    /// the registry when agents register hosts, and `providers`: the catalogs once read
-    /// ([`Self::read`]), `None` before.
+    /// What to do with `request`, under `request_id`, given the table (held by the caller)
+    /// and the registry when agents register hosts.
     ///
     /// The table answers as before, and admission is not asked, for a request whose id
     /// names a lease the table holds (a repeat: admission never refuses a request it already
     /// took) and for one that breaks the start contract (its class, labels or wall time),
-    /// which keeps its own refusal. Otherwise [`can_ever_serve`] decides; before the
-    /// catalogs are read only the hosts are asked, and a refusal of a pool with a launching
-    /// provider asks for them.
+    /// which keeps its own refusal. Otherwise [`can_ever_serve`] decides over the hosts and
+    /// the launching providers, their catalogs as the cache holds them now.
     pub(crate) fn decide(
         &self,
         table: &Table,
         registry: Option<&Registry>,
         request_id: Option<&RequestId>,
         request: &Request,
-        providers: Option<&[ProviderView]>,
     ) -> Decision {
         let known = table.request_ids();
         let repeat = request_id.is_some_and(|id| known.iter().any(|(_, held)| held == id));
@@ -86,52 +86,48 @@ impl Admit {
         let contract = StartSpec::new(LeaseId::new(0, 0), request.clone(), &classes).is_ok();
         let hosts = host_views(table.provider().capacity(), registry);
         let wanted = Requirements::from_request(request);
-        let verdict = can_ever_serve(&wanted, &hosts, providers.unwrap_or_default());
-        let asked = providers.is_some() | self.launching.is_empty();
-        match (repeat | !contract, verdict, asked) {
-            (true, _, _) | (false, Admission::Accept(_), _) => Decision::Start,
-            (false, Admission::Refuse, true) => Decision::Refuse,
-            (false, Admission::Refuse, false) => Decision::ReadCatalogs,
+        let verdict = can_ever_serve(&wanted, &hosts, &self.providers());
+        match (repeat | !contract, verdict) {
+            (true, _) | (false, Admission::Accept(_)) => Decision::Start,
+            (false, Admission::Refuse) => Decision::Refuse,
         }
     }
 
-    /// The views of the launching providers, each catalog read once, on the pool for
-    /// blocking calls.
-    pub(crate) async fn read(&self) -> Vec<ProviderView> {
-        let launching = self.launching.clone();
-        blocking(move || {
-            launching
-                .iter()
-                .map(|one| provider_view(one.provider.as_ref(), one.share, one.limits.clone()))
-                .collect()
-        })
-        .await
+    /// The views of the launching providers, each catalog as the cache holds it now.
+    fn providers(&self) -> Vec<ProviderView> {
+        self.cached
+            .iter()
+            .flat_map(|cached| {
+                let now = cached.now();
+                self.launching
+                    .iter()
+                    .map(move |one| provider_view(one, cached.catalogs(), now))
+            })
+            .collect()
     }
 }
 
-/// `provider` as admission sees it: enabled (no key turns a provider off), with `share` and
-/// `limits`, its capabilities, and its catalog. A provider that launches nothing (`static`)
-/// has no catalog, and none is read.
+/// `one`'s provider as admission sees it at `now`: enabled (no key turns a provider off),
+/// with its share and limits, its capabilities, and its catalog as `catalogs` holds it. A
+/// provider that launches nothing (`static`) has no catalog, and none is read.
 pub(crate) fn provider_view(
-    provider: &dyn CapacityProvider,
-    share: u32,
-    limits: PoolLimits,
+    one: &Launching,
+    catalogs: &Catalogs,
+    now: js_elastic::Instant,
 ) -> ProviderView {
+    let provider = one.provider.as_ref();
     let launches = provider.can_launch();
     let catalog = match launches {
-        // TODO(js-catalog-cache): read the provider's cached catalog instead of calling it.
-        true => provider
-            .catalog()
-            .map_or(CatalogView::Unread, CatalogView::Offers),
+        true => catalogs.view(&provider.id(), now),
         false => CatalogView::Offers(Vec::new()),
     };
     ProviderView {
         kind_is_static: !launches,
         enabled: true,
-        share,
+        share: one.share,
         capabilities: provider.capabilities(),
         catalog,
-        limits,
+        limits: one.limits.clone(),
     }
 }
 
