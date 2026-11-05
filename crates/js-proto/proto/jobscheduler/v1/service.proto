@@ -16,6 +16,17 @@
 // the default its enum documents; in an answer it means what its enum documents. A refused
 // call answers a gRPC status, and a refused submit carries a Refusal (job.proto) in the
 // status details.
+//
+// HTTP routes. Each method carries a google.api.http option: the method and path under which
+// the HTTP/JSON gateway (crate js-api-gateway) serves it. The gateway's routes are generated
+// from these options alone, so a method appears over HTTP when it is annotated. A call that
+// changes state is a POST; a read is a GET. The gateway serves GET and POST only, a path
+// under /v1/ outside /v1/leases and /v1/agent, path variables that name string fields of the
+// request, and a body that is the whole request ("*") or none; its build fails on any other
+// option. A route is part of the public interface: it is changed by the same evolution rule
+// as a method. The gateway answers a call that succeeds 200, or the status the method's
+// http_success_status option names (SubmitJob: 201, also for a repeated submit, which
+// answers the same body).
 
 syntax = "proto3";
 
@@ -24,6 +35,14 @@ package jobscheduler.v1;
 import "jobscheduler/v1/fleet.proto";
 import "jobscheduler/v1/job.proto";
 import "jobscheduler/v1/usage.proto";
+import "google/api/annotations.proto";
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  // The HTTP status the HTTP/JSON gateway answers when the method succeeds: 200 or 201.
+  // Absent: 200.
+  uint32 http_success_status = 50100;
+}
 
 // The job service.
 service JobService {
@@ -31,36 +50,89 @@ service JobService {
   // but the priority) answers from the job already made, in whatever state it is now, so a
   // retry after a lost answer never runs the work twice. The job is recorded as queued
   // before the answer; the call never waits for placement. A refusal records nothing.
-  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {
+    option (google.api.http) = {
+      post: "/v1/jobs"
+      body: "*"
+    };
+    option (http_success_status) = 201;
+  }
   // Reads a job: its state, its host once placed, its times and its host's silence.
   // Changes nothing.
-  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse) {
+    option (google.api.http) = {
+      get: "/v1/jobs/{job_id}"
+    };
+  }
   // Lists jobs by state, label and the time they were queued, a page at a time. Changes
   // nothing.
-  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {
+    option (google.api.http) = {
+      get: "/v1/jobs"
+    };
+  }
   // Cancels a job. Idempotent on the job: cancelling twice is the same as once. A queued
   // job is cancelled at once; a placed, starting or running job is asked to stop and is
   // cancelled when its host reports it stopped; an ended job is unchanged.
-  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse) {
+    option (google.api.http) = {
+      post: "/v1/jobs/{job_id}:cancel"
+      body: "*"
+    };
+  }
   // Reads the result of an ended job, for the retention window after it ended. A job that
   // has not ended has no result, and the call is refused. Changes nothing.
-  rpc GetResult(GetResultRequest) returns (GetResultResponse);
+  rpc GetResult(GetResultRequest) returns (GetResultResponse) {
+    option (google.api.http) = {
+      get: "/v1/jobs/{job_id}/result"
+    };
+  }
   // Reads the log tail held so far, also for a running job, and for the retention window
   // after the job ended. Changes nothing.
-  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse) {
+    option (google.api.http) = {
+      get: "/v1/jobs/{job_id}/logs"
+    };
+  }
   // Lists the hosts, each with the resources booked on it. Changes nothing.
-  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse) {
+    option (google.api.http) = {
+      get: "/v1/hosts"
+    };
+  }
   // Takes a host out of placement for a time, or extends a cordon already there. A cordon
   // lapses unless it is extended. Jobs already on the host go on.
-  rpc CordonHost(CordonHostRequest) returns (CordonHostResponse);
+  rpc CordonHost(CordonHostRequest) returns (CordonHostResponse) {
+    option (google.api.http) = {
+      post: "/v1/hosts/{host_id}:cordon"
+      body: "*"
+    };
+  }
   // Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.
-  rpc UncordonHost(UncordonHostRequest) returns (UncordonHostResponse);
+  rpc UncordonHost(UncordonHostRequest) returns (UncordonHostResponse) {
+    option (google.api.http) = {
+      post: "/v1/hosts/{host_id}:uncordon"
+      body: "*"
+    };
+  }
   // Lists the pools. Changes nothing.
-  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse) {
+    option (google.api.http) = {
+      get: "/v1/pools"
+    };
+  }
   // Lists the machine providers. Changes nothing.
-  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse) {
+    option (google.api.http) = {
+      get: "/v1/providers"
+    };
+  }
   // Lists the ended bookings, a page at a time. Changes nothing.
-  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse) {
+    option (google.api.http) = {
+      get: "/v1/usage"
+    };
+  }
 }
 
 // The request of SubmitJob.

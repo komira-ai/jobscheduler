@@ -1,0 +1,27 @@
+// A method whose option at the number of google.api.http holds bytes that do not decode as a
+// google.api.HttpRule. It is compiled alone: it defines its own extension at that number.
+
+syntax = "proto3";
+
+package garbled;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  // Bytes at the number of google.api.http.
+  bytes not_a_rule = 72295728;
+}
+
+// The request.
+message Req {}
+
+// The response.
+message Resp {}
+
+// One method with the garbled option.
+service Garbled {
+  // The one method.
+  rpc Call(Req) returns (Resp) {
+    option (not_a_rule) = "\377";
+  }
+}

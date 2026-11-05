@@ -1,0 +1,106 @@
+// A service whose options the gateway serves, with one method left unannotated. The tests of
+// js-api-gateway read its routes with annotation::routes and decode queries against Req.
+
+syntax = "proto3";
+
+package gatewaytest;
+
+import "google/api/annotations.proto";
+import "jobscheduler/v1/service.proto";
+import "google/protobuf/any.proto";
+
+// A message inside the request.
+message Inner {
+  // A name.
+  string name = 1;
+}
+
+// The request of every method of the test services: a field of each kind a route reads.
+message Req {
+  // The id the paths name.
+  string id = 1;
+  // A list of text.
+  repeated string tags = 2;
+  // A number.
+  int32 count = 3;
+  // A message.
+  Inner inner = 4;
+  // A map of text.
+  map<string, string> labels = 5;
+  // A flag.
+  bool flag = 6;
+  // A list of flags.
+  repeated bool flags = 7;
+  // A map of flags.
+  map<string, bool> switches = 8;
+  // Another id.
+  string other_id = 9;
+  // Bytes, base64 in JSON and in a query.
+  bytes blob = 12;
+  // An optional unsigned 64-bit number, a decimal string in JSON.
+  optional uint64 big = 13;
+  // An optional signed 64-bit number.
+  optional int64 small = 14;
+  // A choice of one.
+  oneof choice {
+    // The left one.
+    string left = 10;
+    // The right one.
+    string right = 11;
+  }
+}
+
+// A message with an Any, which serializes only when its type is in the pool.
+message WithAny {
+  // The packed message.
+  google.protobuf.Any any = 1;
+}
+
+// The request of the method whose names have acronyms.
+message HTTPRequest {}
+
+// The response of every method of the test services.
+message Resp {}
+
+// A method whose names are acronyms, for the Rust names the code generator gives them.
+service Acronyms {
+  // A read.
+  rpc GetHTTPUsage(HTTPRequest) returns (Resp) {
+    option (google.api.http) = {
+      get: "/v1/http-usage"
+    };
+  }
+}
+
+// Methods with routes, and one without.
+service Good {
+  // A read of one thing.
+  rpc Read(Req) returns (Resp) {
+    option (google.api.http) = {
+      get: "/v1/things/{id}"
+    };
+    option (jobscheduler.v1.http_success_status) = 200;
+  }
+  // A listing.
+  rpc List(Req) returns (Resp) {
+    option (google.api.http) = {
+      get: "/v1/things"
+    };
+  }
+  // A change with a custom verb and a body, answered 201.
+  rpc Act(Req) returns (Resp) {
+    option (google.api.http) = {
+      post: "/v1/things/{id}:act"
+      body: "*"
+    };
+    option (jobscheduler.v1.http_success_status) = 201;
+  }
+  // No option: no route.
+  rpc Hidden(Req) returns (Resp);
+  // A change without a body, under a second variable.
+  rpc Other(Req) returns (Resp) {
+    option (google.api.http) = {
+      post: "/v1/things/{other_id}:other"
+    };
+  }
+}
