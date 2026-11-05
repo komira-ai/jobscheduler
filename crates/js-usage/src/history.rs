@@ -29,7 +29,9 @@
 //! removes the two together.
 //!
 //! **Reading.** A row is returned only if it decodes and its key is the one its own end and
-//! id give; any other row under the prefix is skipped and counted.
+//! id give; any other row under the prefix is skipped and counted. [`EndedHistory::range`]
+//! reads a window of ends; [`EndedHistory::page`] reads one page of a listing that comes
+//! back for the next, after a cursor ([`EndedKey`]) and with host and allocation filters.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -41,8 +43,10 @@ use js_types::{HostId, LeaseId};
 use crate::error::UsageError;
 use crate::key::ProfileKey;
 
+mod page;
 mod row;
 
+pub use page::{EndedKey, EndedPage, EndedQuery};
 pub use row::{ENDED_ROW_VERSION, EndedRowError};
 pub(crate) use row::{decode, encode};
 

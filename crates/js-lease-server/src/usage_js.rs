@@ -31,8 +31,8 @@ use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
-    EndedHistory, EndedRow, KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError,
-    ProfileKey, ProfileStore, Recorder, RunSeries,
+    EndedHistory, EndedPage, EndedQuery, EndedRow, KeyProfile, NodeBuffer, NodeSeries,
+    ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder, RunSeries,
 };
 use tracing::info;
 
@@ -257,6 +257,10 @@ impl UsageSink for NodeUsage {
         let history = EndedHistory::new(&*self.store);
         let read = history.range(from_ms, to_ms, limit).map_err(fault)?;
         Ok(read.rows)
+    }
+
+    fn ended_rows_after(&self, query: &EndedQuery) -> Result<EndedPage, UsageFault> {
+        EndedHistory::new(&*self.store).page(query).map_err(fault)
     }
 
     fn counters(&self) -> SinkCounters {

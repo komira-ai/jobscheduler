@@ -13,7 +13,7 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport, Timings};
-use js_provider::{Pool, RefusalCode};
+use js_provider::RefusalCode;
 use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
 use tokio::sync::{Mutex, MutexGuard};
@@ -24,7 +24,7 @@ use crate::admit::{Admit, Decision};
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
-use crate::hosts::HostList;
+use crate::hosts::listing;
 use crate::join_api;
 use crate::reservations::{self, Handed};
 use crate::run_api;
@@ -129,6 +129,11 @@ impl Shared {
         let table = self.table.lock().await;
         waiting.finish();
         table
+    }
+
+    /// The agent side; `None` without agent flags.
+    pub(crate) fn agents(&self) -> Option<&Arc<Agents>> {
+        self.agents.as_ref()
     }
 
     /// A handle on the agent registry; `None` without agent flags.
@@ -489,15 +494,7 @@ async fn list(State(shared): State<Arc<Shared>>) -> Response {
 /// state of their session. The table's lock is taken first and dropped, then the
 /// registry's; the order of the two never reverses.
 async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
-    let capacity = shared.table.lock().await.provider().capacity();
-    let list = match &shared.agents {
-        Some(agents) => {
-            let reserved = agents.registry.reserved();
-            HostList::of(capacity, agents.registry.hosts(), Some(&reserved))
-        }
-        None => HostList::of(capacity, Vec::new(), None),
-    };
-    json(StatusCode::OK, &list)
+    json(StatusCode::OK, &listing(&shared).await.0)
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@
 //! agent, item or host the step did not touch is not re-read, so a fact that is wrong
 //! there is caught at the step that touches it, not before. A step that touched the
 //! server reads the whole listing, at a cost in the hosts and bookings it lists; the
-//! cell is to re-read the listing at every client call and once per virtual second, not
+//! cell re-reads the listing at every client call and once per virtual second, not
 //! at every step. Only the end check scans everything.
 
 use std::collections::btree_map::Entry;
@@ -130,9 +130,8 @@ pub struct Violation {
     pub detail: String,
 }
 
-/// One line: `<invariant> at <virtual ms>: <detail>`. The scenario runner (a later part
-/// of the cell) is to add the
-/// scenario's name, its seed and the trace.
+/// One line: `<invariant> at <virtual ms>: <detail>`. A failing seed's
+/// [`crate::FailureReport`] adds the scenario's name, its seed and the trace.
 impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
