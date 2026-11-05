@@ -41,20 +41,24 @@ pub struct FailureReport {
 /// The report: a heading line, the hashes, then the trace lines.
 impl fmt::Display for FailureReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "scenario {} seed {} failed at check {}: {}",
-            self.scenario, self.seed, self.check, self.violation
-        )?;
-        writeln!(
-            f,
-            "trace hash {} (replayed: {})",
-            self.hash, self.replay_hash
-        )?;
-        writeln!(f, "last {} trace lines:", self.last_lines.len())?;
-        self.last_lines
+        let lines: Vec<String> = self
+            .last_lines
             .iter()
-            .try_for_each(|line| writeln!(f, "  {line}"))
+            .map(|line| format!("  {line}"))
+            .collect();
+        write!(
+            f,
+            "scenario {} seed {} failed at check {}: {}\ntrace hash {} (replayed: {})\n\
+             last {} trace lines:\n{}\n",
+            self.scenario,
+            self.seed,
+            self.check,
+            self.violation,
+            self.hash,
+            self.replay_hash,
+            self.last_lines.len(),
+            lines.join("\n"),
+        )
     }
 }
 
@@ -69,7 +73,8 @@ pub enum Failure {
 
 /// Runs `scenario` at `seed` until `end`: `build` makes the cell for a [`Setup`] (it adds
 /// the agents and scripts the actions), and is called again, with trace lines kept, when
-/// the run fails.
+/// the run fails. It is taken as a trait object, so one copy of this function serves
+/// every scenario.
 ///
 /// # Errors
 ///
@@ -79,7 +84,7 @@ pub fn run(
     scenario: &str,
     seed: u64,
     end: FarmTime,
-    build: impl Fn(Setup) -> Result<Cell, StartupError>,
+    build: &dyn Fn(Setup) -> Result<Cell, StartupError>,
 ) -> Result<Cell, Failure> {
     let mut cell = build(Setup::new(seed)).map_err(Failure::Start)?;
     let Err(violation) = cell.run_until(end) else {

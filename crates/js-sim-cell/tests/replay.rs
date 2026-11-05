@@ -99,7 +99,7 @@ fn failing(setup: Setup, seen: &Rc<RefCell<Vec<u64>>>) -> Result<Cell, StartupEr
 
 /// The hash of `seed`'s run to the horizon, which must hold.
 fn hash(seed: u64) -> TraceHash {
-    match run(SCENARIO, seed, ms(HORIZON_MS), build) {
+    match run(SCENARIO, seed, ms(HORIZON_MS), &build) {
         Ok(cell) => cell.trace_hash(),
         Err(failure) => panic!("seed {seed} failed: {failure:?}"),
     }
@@ -107,7 +107,9 @@ fn hash(seed: u64) -> TraceHash {
 
 /// The report of a run that fails at [`FAIL_AT_CHECK`].
 fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
-    match run(SCENARIO, seed, ms(HORIZON_MS), |setup| failing(setup, seen)) {
+    match run(SCENARIO, seed, ms(HORIZON_MS), &|setup| {
+        failing(setup, seen)
+    }) {
         Err(Failure::Violated(report)) => *report,
         Err(Failure::Start(err)) => panic!("the cell did not start: {err}"),
         Ok(_) => panic!("the made violation did not stop the run"),
@@ -123,7 +125,7 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 #[test]
 fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(spec().heartbeat_interval(), INTERVAL);
-    let first = run(SCENARIO, 7, ms(HORIZON_MS), build).expect("seed 7 runs");
+    let first = run(SCENARIO, 7, ms(HORIZON_MS), &build).expect("seed 7 runs");
     assert_eq!(first.trace_hash(), hash(7));
     let mut kept = build(Setup::new(7).with_trace_lines()).expect("the cell starts");
     kept.run_until(ms(HORIZON_MS)).expect("seed 7 runs");
@@ -244,12 +246,12 @@ fn the_run_loop_stops_at_the_first_violation_and_checks_after_every_step() {
 /// is lost or reported as a violation.
 #[test]
 fn a_server_that_refuses_its_configuration_is_a_failure_to_start() {
-    let empty = |setup| {
+    let empty = |setup: Setup| {
         // A burst of one, so the flags parse and the pool file is what is refused.
         let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), 0).hello_burst(1);
         Cell::new(setup, spec, scratch("empty"), Faults::default())
     };
-    match run(SCENARIO, 0, ms(HORIZON_MS), empty) {
+    match run(SCENARIO, 0, ms(HORIZON_MS), &empty) {
         Err(Failure::Start(err)) => assert_eq!(err.flag(), "--agent-pool-config", "{err}"),
         Err(other) => panic!("not a failure to start: {other:?}"),
         Ok(_) => panic!("a pool of no machines started"),
