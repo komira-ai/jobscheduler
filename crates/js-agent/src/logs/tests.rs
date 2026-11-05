@@ -954,7 +954,18 @@ fn a_run_holds_live_logs_only_with_a_sink_and_settings() {
         run.end((10, 10));
         assert_eq!(run.report(), None, "no uploader, no report");
     }
+    // The warning of a start that failed, read by a subscriber this time.
+    let lines = Lines::default();
+    let guard = lines.capture();
+    RunLogs::asked(Some(&logs), Some(&sink)).start(Some(&logs), paths);
+    drop(guard);
+    assert!(lines.text().contains("did not start"), "{}", lines.text());
     assert!(Uploader::start(&sink, paths, &logs).is_err());
+    // Standard output there, standard error not.
+    let stdout = host.dir.join("stdout-only");
+    File::create(&stdout).expect("stdout");
+    let half = (stdout.as_path(), missing.as_path());
+    assert!(Uploader::start(&sink, half, &logs).is_err());
 }
 
 /// Catches a production wake that sleeps through the end or past its time: a notified wake

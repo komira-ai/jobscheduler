@@ -45,7 +45,7 @@ impl Uploader {
     ///
     /// # Errors
     ///
-    /// A file could not be opened, or the thread could not be started.
+    /// A file could not be opened.
     pub fn start(
         sink: &Sink,
         (stdout, stderr): (&Path, &Path),
@@ -68,24 +68,22 @@ impl Uploader {
         let prefix = sink.prefix().as_str().to_owned();
         // The thread logs where its starter does.
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        let thread = std::thread::Builder::new()
-            .name("js-agent-logs".to_owned())
-            .spawn(move || {
-                tracing::dispatcher::with_default(&dispatch, || {
-                    let ran = catch_unwind(AssertUnwindSafe(|| {
-                        while let Next::Sleep(until) = upload.step(take(&inbox)) {
-                            sleeper.sleep_until(until);
-                        }
-                    }));
-                    if ran.is_err() {
-                        tracing::warn!(
-                            prefix = prefix.as_str(),
-                            "live logs: the uploader stopped on a panic; this job's upload ends here"
-                        );
+        let thread = std::thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let ran = catch_unwind(AssertUnwindSafe(|| {
+                    while let Next::Sleep(until) = upload.step(take(&inbox)) {
+                        sleeper.sleep_until(until);
                     }
-                    sleeper.ended();
-                });
-            })?;
+                }));
+                if ran.is_err() {
+                    tracing::warn!(
+                        prefix = prefix.as_str(),
+                        "live logs: the uploader stopped on a panic; this job's upload ends here"
+                    );
+                }
+                sleeper.ended();
+            });
+        });
         Ok(Self {
             files,
             mailbox,

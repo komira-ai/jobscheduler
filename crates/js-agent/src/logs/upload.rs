@@ -203,13 +203,12 @@ impl Upload {
                 if self.deadline.is_some() && !newer {
                     return Next::Done;
                 }
+                // Both streams wait for the backoff unless a newer credential is held, which
+                // `due` sees at once.
                 for backoff in &mut self.backoff {
                     backoff.failed(now, &self.limits, self.seed, Some(generation));
                 }
-                if newer {
-                    continue;
-                }
-                break;
+                continue;
             }
             if let Action::Delete { .. } = action {
                 self.streams[index].delete_failed(self.limits.delete_tries);
