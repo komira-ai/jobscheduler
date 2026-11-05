@@ -254,9 +254,10 @@ async fn serve_hello(
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
     agents.save_bindings().await;
-    if let Some(logs) = &agents.logs {
-        logs.on_hello(&hello.host_id, &hello.capabilities);
-    }
+    // A closure over the option, so the route has no arm that only a server with a sink
+    // takes: every test binary runs the same code of it.
+    let on_hello = |logs: &Arc<LogGrants>| logs.on_hello(&hello.host_id, &hello.capabilities);
+    agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
 }
@@ -329,13 +330,19 @@ async fn heartbeat(
 ///
 /// [`LOG_UPLOAD_CAPABILITY`]: js_agent_wire::LOG_UPLOAD_CAPABILITY
 fn uploading(agents: &Agents, host: &str) -> Option<Arc<LogGrants>> {
-    let grants = agents.logs.as_ref()?;
-    let reported = HostId::new(host)
+    let reported = |_: &&Arc<LogGrants>| reports_upload(agents, host);
+    agents.logs.as_ref().filter(reported).cloned()
+}
+
+/// Whether `host`'s last hello reported [`LOG_UPLOAD_CAPABILITY`].
+///
+/// [`LOG_UPLOAD_CAPABILITY`]: js_agent_wire::LOG_UPLOAD_CAPABILITY
+fn reports_upload(agents: &Agents, host: &str) -> bool {
+    HostId::new(host)
         .ok()
         .and_then(|host| agents.registry.own_host(&host))
         .and_then(|own| own.host.claim)
-        .is_some_and(|claim| logs::uploads(claim.capabilities()));
-    reported.then(|| Arc::clone(grants))
+        .is_some_and(|claim| logs::uploads(claim.capabilities()))
 }
 
 /// Adds the per-job half of the heartbeat to `reply` when the server holds the job tables

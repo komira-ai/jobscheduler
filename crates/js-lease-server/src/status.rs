@@ -401,9 +401,9 @@ pub(crate) fn page(view: &PoolsView, at: Timestamp) -> String {
     for pool in &view.pools {
         pool_section(&mut out, pool);
     }
-    if let Some(logs) = &view.logs {
-        logs_section(&mut out, logs);
-    }
+    view.logs
+        .iter()
+        .for_each(|logs| logs_section(&mut out, logs));
     out.push_str("</body></html>\n");
     out
 }

@@ -407,9 +407,9 @@ impl Agents {
         if let Some(usage) = &self.usage {
             usage.tick().await;
         }
-        if let Some(grants) = &self.logs {
-            grants.tick(&logs::uploading_hosts(&self.registry));
-        }
+        // A closure over the option, so every test binary runs the same code of the tick.
+        let tick = |grants: &Arc<LogGrants>| grants.tick(&logs::uploading_hosts(&self.registry));
+        self.logs.iter().for_each(tick);
     }
 
     /// Makes the file of bindings hold what the registry has bound, on the pool for
