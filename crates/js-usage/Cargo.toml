@@ -8,8 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# The Postgres backend of js-state, for tests/postgres_tail.rs. Off by default: the
-# `state-postgres` CI job turns it on.
+# The Postgres backend of js-state, for tests/postgres_tail.rs and tests/postgres_history.rs.
+# Off by default: the `state-postgres` CI job turns it on.
 postgres = ["js-state/postgres"]
 
 [dependencies]

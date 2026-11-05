@@ -18,6 +18,10 @@
 //! them. A write that fails keeps them for the next flush, is counted, and is logged once
 //! per run of failures.
 //!
+//! The history side: the record of each ended allocation is written under its key in
+//! [`EndedHistory`] (once: a row already there is kept), and the daily prune also removes the
+//! records older than `--history-retention-days`.
+//!
 //! One mutex guards the recorder and the buffer, and is held across the store's write in
 //! a flush: readings wait for it, which is cheap (a write of at most a day of minutes
 //! per node) and never happens on an async worker, since the server calls the sink on the
@@ -34,8 +38,8 @@ use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
-    KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore,
-    Recorder, RunSeries, StoreTailSink, TailFlush, TailSink,
+    EndedHistory, EndedRow, KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError,
+    ProfileKey, ProfileStore, Recorder, RunSeries, StoreTailSink, TailFlush, TailSink,
 };
 use tracing::{info, warn};
 
@@ -44,6 +48,7 @@ use crate::usage::{
     HostLimits, KeySource, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault,
     UsageSink,
 };
+use crate::usage_setup::DEFAULT_HISTORY_RETENTION_DAYS;
 
 /// How admission finds the profile name of a work key: the caller supplies it, since the
 /// name is the caller's (a key of its own estimator), not something the server derives from
@@ -60,6 +65,8 @@ pub(crate) fn no_names() -> NameMap {
 pub(crate) struct StoreSetup {
     pub(crate) db: PathBuf,
     pub(crate) profile_store_bytes: u64,
+    /// How many days a record of an ended allocation is kept (`--history-retention-days`).
+    pub(crate) history_retention_days: u64,
     /// How admission's curve reads find the profile of a work key.
     pub(crate) names: NameMap,
 }
@@ -82,10 +89,12 @@ fn sink_over(
     today: u64,
 ) -> Result<Arc<dyn UsageSink>, StartupError> {
     let usage = NodeUsage::over(store, setup.profile_store_bytes, today, setup.names.clone())
-        .map_err(StartupError::because("--usage-db"))?;
+        .map_err(StartupError::because("--usage-db"))?
+        .with_history_retention_days(setup.history_retention_days);
     info!(
         db = %setup.db.display(),
         profile_store_bytes = setup.profile_store_bytes,
+        history_retention_days = setup.history_retention_days,
         "usage is recorded"
     );
     Ok(Arc::new(usage))
@@ -111,6 +120,12 @@ impl KeySource for RegistryKeys {
 /// Minutes in a day.
 const MINUTES_PER_DAY: u64 = 1440;
 
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: u64 = 86_400_000;
+
+/// Milliseconds in a minute.
+const MILLIS_PER_MINUTE: u64 = 60_000;
+
 /// The node series over `store`.
 pub(crate) struct NodeUsage {
     store: Arc<dyn Store>,
@@ -121,6 +136,8 @@ pub(crate) struct NodeUsage {
     /// Whether the last write of the tail counters failed: a failure is logged when it
     /// starts a run of them, and the recovery when it ends one.
     tail_failing: AtomicBool,
+    /// How long a record of an ended allocation is kept, in milliseconds.
+    history_retention_ms: u64,
 }
 
 fn fault(err: impl std::fmt::Display) -> UsageFault {
@@ -148,7 +165,17 @@ impl NodeUsage {
                 profiles,
             }),
             tail_failing: AtomicBool::new(false),
+            history_retention_ms: DEFAULT_HISTORY_RETENTION_DAYS * MILLIS_PER_DAY,
         })
+    }
+
+    /// The same sink, keeping a record of an ended allocation for `days` days
+    /// ([`DEFAULT_HISTORY_RETENTION_DAYS`] unless set).
+    pub(crate) fn with_history_retention_days(self, days: u64) -> Self {
+        Self {
+            history_retention_ms: days.saturating_mul(MILLIS_PER_DAY),
+            ..self
+        }
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -230,6 +257,11 @@ impl UsageSink for NodeUsage {
     fn prune(&self, now_minute: u64) -> Result<(), UsageFault> {
         let series = NodeSeries::new(&*self.store);
         series.prune(now_minute).map_err(fault)?;
+        let now_ms = now_minute.saturating_mul(MILLIS_PER_MINUTE);
+        let history = EndedHistory::new(&*self.store);
+        history
+            .prune(now_ms, self.history_retention_ms)
+            .map_err(fault)?;
         let mut inner = self.inner();
         inner
             .profiles
@@ -260,6 +292,22 @@ impl UsageSink for NodeUsage {
 
     fn tail(&self) -> Option<Arc<dyn TailSink>> {
         Some(self.tail.clone())
+    }
+
+    fn allocation_ended(&self, row: &EndedRow) -> Result<(), UsageFault> {
+        let history = EndedHistory::new(&*self.store);
+        history.put(row).map(drop).map_err(fault)
+    }
+
+    fn ended_rows(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<EndedRow>, UsageFault> {
+        let history = EndedHistory::new(&*self.store);
+        let read = history.range(from_ms, to_ms, limit).map_err(fault)?;
+        Ok(read.rows)
     }
 
     fn counters(&self) -> SinkCounters {

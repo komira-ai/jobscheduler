@@ -27,8 +27,8 @@ thiserror.workspace = true
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-pool-static = { path = "../js-pool-static" }
 js-sim = { path = "../js-sim" }
-# tests/tail_store.rs keeps the tail counters in the in-memory fake store and in a
-# SQLite file in a scratch directory.
+# tests/tail_store.rs keeps the tail counters, and tests/history.rs writes the records of
+# ended leases, in the in-memory fake state store and in a SQLite file in a scratch directory.
 js-state = { path = "../js-state", features = ["test-support"] }
 js-testkit = { path = "../js-testkit" }
 serde_json.workspace = true

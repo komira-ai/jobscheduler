@@ -246,31 +246,39 @@ async fn dropped_readings_are_warned_once_for_a_host_and_minute() {
 }
 
 /// Asserts the flags: `--usage-db` defaults to `usage.db` beside `--state-file`, a given
-/// path is kept, `--usage-off` leaves no file, and `--profile-store-bytes` defaults to
-/// 256 MiB, takes a positive number, and refuses zero, text, and `--usage-off` together
-/// with `--usage-db`. It catches a default that lands in the working directory, a zero
-/// budget that would evict every profile it learns, and two flags that contradict.
+/// path is kept, `--usage-off` leaves no file, `--profile-store-bytes` defaults to 256 MiB,
+/// `--history-retention-days` to 90, each takes a positive number and refuses zero and
+/// text, and `--usage-off` is refused together with `--usage-db`. It catches a default
+/// that lands in the working directory, a zero budget that would evict every profile it
+/// learns, a zero retention that would prune every record the day it is written, and two
+/// flags that contradict.
 #[test]
 fn the_flags_decide_where_usage_lives_and_how_much_it_may_keep() {
     let scratch = Scratch::new("usage_flags");
     let default = config(base_args(&scratch)).unwrap();
     assert_eq!(default.usage_db(), Some(scratch.path("usage.db").as_path()));
     assert_eq!(default.profile_store_bytes(), 268_435_456);
+    assert_eq!(default.history_retention_days(), 90);
     let given = [
         "--usage-db",
         "/var/lib/js/u.db",
         "--profile-store-bytes",
         "1",
+        "--history-retention-days",
+        "1",
     ];
     let given = config(args_with(&scratch, &given)).unwrap();
     assert_eq!(given.usage_db(), Some(Path::new("/var/lib/js/u.db")));
     assert_eq!(given.profile_store_bytes(), 1);
+    assert_eq!(given.history_retention_days(), 1);
     let off = config(args_with(&scratch, &["--usage-off"])).unwrap();
     assert_eq!(off.usage_db(), None);
-    let refused: [&[&str]; 4] = [
+    let refused: [&[&str]; 6] = [
         &["--profile-store-bytes", "0"],
         &["--profile-store-bytes", "lots"],
         &["--profile-store-bytes", "-1"],
+        &["--history-retention-days", "0"],
+        &["--history-retention-days", "90d"],
         &["--usage-off", "--usage-db", "u.db"],
     ];
     for extra in refused {
@@ -867,4 +875,29 @@ async fn a_profile_is_kept_under_the_supplied_name_and_read_through_the_callers_
     assert!(curves.curve(&second).is_some());
     assert!(curves.curve(&WorkKey::new("Other", "aaaa/1")).is_none());
     assert_eq!(h.running.usage_counters().runs_learned, 3);
+}
+
+/// Asserts the wiring of the allocation history: a lease granted on an agent's host and
+/// released leaves one record of its booking, written by a tick, naming the lease and the
+/// host, and a second release leaves no second one. It catches a server whose registry
+/// was given no log (the record would never reach the sink) and one whose ticks never
+/// write the queue.
+#[tokio::test]
+async fn a_released_lease_leaves_one_record_of_its_allocation() {
+    let fake = Arc::new(Fake::default());
+    let h = start_usage("usage_history", &fake, &[]).await;
+    let me = join(&h, "burst-1").await;
+    beat(&h, &me, &[], &[]).await;
+    let lease = lease(&h).await;
+    let path = format!("/v1/leases/{lease}");
+    assert_eq!(h.call("DELETE", &path, None).await.status, 200);
+    h.ticks.step().await;
+    h.ticks.step().await;
+    h.call("DELETE", &path, None).await;
+    h.ticks.step().await;
+    let history = fake.history();
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0].id.as_str(), lease);
+    let host = history[0].host.as_ref().map(|host| host.as_str());
+    assert_eq!(host, Some("burst-1"));
 }
