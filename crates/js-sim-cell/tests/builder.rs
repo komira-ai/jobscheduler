@@ -88,6 +88,7 @@ fn a_witness_that_no_seed_satisfies_fails_the_scenario() {
         scenario,
         witness,
         seeds,
+        ..
     } = &failure
     else {
         panic!("not a witness failure: {failure}");
@@ -96,14 +97,24 @@ fn a_witness_that_no_seed_satisfies_fails_the_scenario() {
         (scenario.as_str(), witness.as_str(), *seeds),
         (name, "never", 2)
     );
-    assert_eq!(
-        failure.to_string(),
-        format!("scenario {name}: witness never held in none of 2 seeds")
-    );
     let passed = small(name)
         .try_run_seeds(2)
         .expect("passes without the witness");
     assert_eq!(passed.runs.len(), 2);
+    let counts: Vec<String> = Counter::ALL
+        .iter()
+        .map(|c| {
+            let total: u64 = passed.runs.iter().map(|run| run.counters.get(*c)).sum();
+            format!("{}={total}", c.name())
+        })
+        .collect();
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "scenario {name}: witness never held in none of 2 seeds; counted over them [{}]",
+            counts.join("; ")
+        )
+    );
 }
 
 /// Asserts that `run_seeds` fails its test with the failure as text.
@@ -324,12 +335,12 @@ fn kill_and_replace_actions_act_on_the_agents_they_name() {
     assert_eq!(*alive.0.borrow(), [false, true]);
 }
 
-/// Asserts that an item that asks for its own resources (half a core, 512 bytes, no GPU)
+/// Asserts that an item that asks for its own resources (half a core, 512 bytes, one GPU)
 /// in place of the default share is leased and run with them and succeeds. Catches a
 /// front that ignores `Work::needs` (the lease and the run ask for the default share).
 #[test]
 fn work_that_needs_its_own_resources_is_leased_and_run_with_them() {
-    let needs = Resources::new(500, 512, 0, None).expect("resources");
+    let needs = Resources::new(500, 512, 1, Some("nvidia-a100".to_owned())).expect("resources");
     let work = Work::run_for(RUN).needs(needs.clone());
     assert_eq!(work.resources(), &needs);
     assert_eq!(work.runs_for(), RUN);

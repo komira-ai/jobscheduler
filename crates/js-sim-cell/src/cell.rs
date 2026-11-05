@@ -414,11 +414,7 @@ impl Cell {
     /// Every agent's counts added together.
     #[must_use]
     pub fn total_counters(&self) -> Counters {
-        let mut total = Counters::default();
-        for counters in (0..self.agents).filter_map(|index| self.counters(index)) {
-            total.absorb(counters);
-        }
-        total
+        Counters::sum((0..self.agents).filter_map(|index| self.counters(index)))
     }
 
     /// Kills the process of agent `index`: it holds nothing and drops every input until

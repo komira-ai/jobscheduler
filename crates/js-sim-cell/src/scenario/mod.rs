@@ -37,13 +37,14 @@ use std::time::Duration;
 
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
+use js_sim::text::list;
 use js_sim::{Faults, TraceHash};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 
 use crate::actions::{Action, submit_work};
 use crate::cell::{Cell, Setup};
-use crate::counters::Counters;
+use crate::counters::{Counter, Counters};
 use crate::front::{FrontFactory, LeaseFront};
 use crate::replay::{self, Failure, FailureReport};
 use crate::server::{ServerSpec, Shape};
@@ -136,6 +137,8 @@ pub enum ScenarioFailure {
         witness: String,
         /// How many seeds ran.
         seeds: u64,
+        /// What the agents counted, added over every seed.
+        counted: Counters,
     },
 }
 
@@ -158,10 +161,17 @@ impl fmt::Display for ScenarioFailure {
                 scenario,
                 witness,
                 seeds,
-            } => write!(
-                f,
-                "scenario {scenario}: witness {witness} held in none of {seeds} seeds"
-            ),
+                counted,
+            } => {
+                let counts = list(&Counter::ALL, |c| {
+                    format!("{}={}", c.name(), counted.get(*c))
+                });
+                write!(
+                    f,
+                    "scenario {scenario}: witness {witness} held in none of {seeds} seeds; \
+                     counted over them {counts}"
+                )
+            }
         }
     }
 }
@@ -306,6 +316,7 @@ impl Scenario {
                 scenario: self.name.clone(),
                 witness: witness.name.clone(),
                 seeds,
+                counted: Counters::sum(runs.iter().map(|run| &run.counters)),
             }),
             None => Ok(Passed { runs }),
         }

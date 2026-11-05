@@ -18,6 +18,9 @@ use js_sim_cell::{Counter, Expect, Invariant, Scenario, ScenarioFailure, ServerS
 const INTERVAL: Duration = Duration::from_secs(1);
 const GRACE: Duration = Duration::from_secs(3);
 
+/// The stale start allows a longer silence: its bus delays a heartbeat by up to 4 s.
+const STALE_GRACE: Duration = Duration::from_secs(6);
+
 /// The repeated start: runs shorter than the interval, on a bus slower than the interval
 /// each way, so the heartbeat that leaves before the start arrives does not list the run
 /// and the server sends the start again (design section 8, row 31).
@@ -36,11 +39,11 @@ const STALE_RUNS: u32 = 16;
 const STALE_RUN: Duration = Duration::from_secs(30);
 const STALE_GIVE_UP: Duration = Duration::from_secs(300);
 const STALE_FAULTS_AT: Duration = Duration::from_secs(2);
-const STALE_MIN_DELAY: Duration = Duration::from_millis(800);
-const STALE_MAX_DELAY: Duration = Duration::from_millis(2_500);
-const STALE_REORDER_PERCENT: u32 = 50;
+const STALE_MIN_DELAY: Duration = Duration::from_millis(1_000);
+const STALE_MAX_DELAY: Duration = Duration::from_millis(4_000);
+const STALE_REORDER_PERCENT: u32 = 100;
 const STALE_CANCEL_AT: Duration = Duration::from_millis(6_500);
-const STALE_QUIET_AT: Duration = Duration::from_secs(20);
+const STALE_QUIET_AT: Duration = Duration::from_secs(30);
 const STALE_SETTLE: Duration = Duration::from_secs(120);
 const STALE_SEEDS: u64 = 8;
 
@@ -70,7 +73,7 @@ fn repeated_start(defect: Option<Defect>) -> Scenario {
 /// The stale-start scenario, with agents that lack `defect` or correct ones.
 fn stale_start(defect: Option<Defect>) -> Scenario {
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), STALE_HOSTS)
-        .heartbeat(INTERVAL, GRACE);
+        .heartbeat(INTERVAL, STALE_GRACE);
     let late = Faults {
         min_delay: STALE_MIN_DELAY,
         max_delay: STALE_MAX_DELAY,

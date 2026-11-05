@@ -65,9 +65,12 @@ pub trait Front {
     fn poll(&mut self, now: FarmTime, server: &mut dyn ClientPort) -> Vec<(ItemId, ClientEvent)>;
 }
 
+/// What a [`FrontFactory`] calls: a front for a cell of the server a spec describes.
+type MakeFront = dyn Fn(&ServerSpec) -> Box<dyn Front>;
+
 /// Makes the front of each seed's cell for the server it runs.
 #[derive(Clone)]
-pub struct FrontFactory(Rc<dyn Fn(&ServerSpec) -> Box<dyn Front>>);
+pub struct FrontFactory(Rc<MakeFront>);
 
 impl FrontFactory {
     /// A factory that makes each front with `make`.
