@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CheckResult, Held, HostRef,
-    Offer, PriceUnit, ProviderError, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, CheckResult,
+    Held, HostRef, Offer, PriceUnit, ProviderError, Released,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
 use js_lease::Booking;
@@ -59,7 +59,7 @@ impl CapacityProvider for Logged {
         self.cloud.capabilities()
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.cloud.catalog()
     }
 

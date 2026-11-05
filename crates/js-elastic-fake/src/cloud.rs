@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
-    EventStream, Held, Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError,
-    ProviderEvent, ReadHandle, Reason, Refusal, RefusalCode, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture,
+    CheckResult, Claim, EventStream, Held, Hello, HostRef, HostStatus, Observed, Offer,
+    ProviderCaps, ProviderError, ProviderEvent, ReadHandle, Reason, Refusal, RefusalCode, Released,
 };
 
 use js_types::ProviderId;
@@ -510,10 +510,13 @@ impl CapacityProvider for ElasticFake {
         }
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    /// The call is recorded and the offers are read when `catalog` is called, not when the
+    /// future is polled; the future is already complete.
+    fn catalog(&self) -> CatalogFuture<'_> {
         let mut state = self.state();
         state.calls.push(Call::Catalog);
-        Ok(state.offers.clone())
+        let answer = Ok(state.offers.clone());
+        Box::pin(std::future::ready(answer))
     }
 
     /// The caller's machines that have not ended, and what the quota leaves of it once

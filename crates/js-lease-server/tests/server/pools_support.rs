@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CheckResult, Held, HostRef,
-    Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
+    AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CatalogFuture, CheckResult,
+    Held, HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
@@ -148,16 +148,16 @@ impl FakeCloud {
 struct Handle(Arc<FakeCloud>);
 
 impl CapacityProvider for Handle {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.catalogs.fetch_add(1, Ordering::SeqCst);
         if self.0.panics.load(Ordering::SeqCst) {
             panic!("the fake cloud was told to panic");
         }
         if let Some(provider) = self.0.delegate.lock().unwrap().clone() {
-            return provider.catalog();
+            return Box::pin(async move { provider.catalog().await });
         }
         let answer = self.0.catalog.lock().unwrap().clone();
-        answer.map_err(ProviderError::new)
+        Box::pin(std::future::ready(answer.map_err(ProviderError::new)))
     }
 
     fn checks(&self) -> Vec<CheckResult> {

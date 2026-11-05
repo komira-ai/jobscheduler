@@ -4,16 +4,17 @@
 mod common;
 
 use common::{cloud, launch, request};
+use js_elastic::conformance::block_on;
 use js_elastic::{CapacityProvider, HostRef, ReadHandle};
 use js_elastic_fake::{Billing, Call};
 
 /// What code that only plans may do. It takes the read half, so it cannot be written to
 /// make a machine: there is no `acquire` on the type to call.
 fn plan(handle: &ReadHandle) -> (usize, usize, usize) {
-    let offers = handle.catalog().unwrap().len();
+    let offers = block_on(handle.catalog()).unwrap().len();
     let held = handle.list().unwrap().len();
     let checks = handle.checks().len();
-    handle.host_prep(&handle.catalog().unwrap()[0]);
+    handle.host_prep(&block_on(handle.catalog()).unwrap()[0]);
     handle.payload_limit();
     handle.unresolved();
     handle.is_gone(&HostRef("i".to_owned()));

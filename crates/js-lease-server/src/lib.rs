@@ -270,6 +270,8 @@
 //! max_price_cents_per_hour = 200
 //! max_machines             = 2   # at most the pool's
 //! max_spot_machines        = 1   # at most this table's max_machines
+//! catalog_refresh          = "1h" # default 1h; how long the cached catalog is used
+//! offer_cooldown           = "1h" # default 1h; how long a cooled-down offer is passed over
 //! ```
 //!
 //! A pool with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables:
@@ -282,12 +284,16 @@
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
-//! below), and `path_grace` is how long a whole-node request of the pool waits once no host
-//! could serve it (the registry's `regain_grace` for that pool). The job pass of the tick
-//! (design 6.1) ends a queued job of the job tables past the pool's `max_queue_wait` as
-//! `no-capacity`, and a placed or starting one past its `start_timeout` as `start-timeout`
-//! (a joined pool takes the defaults). Nothing enforces the limits yet: the pick of an offer
-//! (design 5.6, pass 2) will.
+//! below); `catalog_refresh` (a positive duration, one hour when not given; zero is
+//! refused) is how long the provider's cached catalog is used before the tick fetches it
+//! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
+//! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
+//! whole-node request of the pool waits once no host could serve it (the registry's
+//! `regain_grace` for that pool). The job pass of the tick (design 6.1) ends a queued job of
+//! the job tables past the pool's `max_queue_wait` as `no-capacity`, and a placed or
+//! starting one past its `start_timeout` as `start-timeout` (a joined pool takes the
+//! defaults). Nothing enforces the limits yet: the pick of an offer (design 5.6, pass 2)
+//! will.
 //! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
 //! of a file, and [`Resolved::describe`] prints them.
 //!
@@ -458,8 +464,13 @@
 //! the request
 //! (availability now is not asked) and the pool's `provider_limits` (an allowed instance
 //! type, at most the maximum price, an unpriced offer never under a price limit), with a
-//! share of machines above zero; a catalog that cannot be read may offer. The catalog is
-//! read once per admission, and only when no host is capable, with the table's lock let go.
+//! share of machines above zero; a catalog that has never been read may offer. Admission
+//! reads the catalog from the server's cache ([`Catalogs`]) under the table's lock and never
+//! calls the provider: the scaler's tick fetches a catalog before the first read, once its
+//! `catalog_refresh` has passed since the last one that came, and after the provider
+//! refused a launch for capacity or quota. A fetch that fails keeps the last catalog that
+//! came and is tried again at the next tick; until one has come (and after a restart) the
+//! catalog has never been read. A catalog that was read and is empty refuses.
 //! An admitted request is then started as before, so the start's own answers (`no-fit`,
 //! `no-capacity`, `unsupported-class` and the rest) are unchanged for it. This code was
 //! already in the documented 409 list, so a client needs no change: older servers answer it
@@ -781,6 +792,7 @@ mod api;
 pub mod bootstrap;
 mod brake_api;
 mod capacity;
+mod catalogs;
 mod checks;
 mod config;
 mod cordon;
@@ -845,6 +857,7 @@ use tokio::sync::mpsc;
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
+pub use catalogs::Catalogs;
 pub use config::{
     BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles,
     Token, is_private_address, parse_duration,

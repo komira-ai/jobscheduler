@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Held, HostRef, Observed, Offer,
-    PriceUnit, ProviderCaps, ProviderError, Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Held, HostRef,
+    Observed, Offer, PriceUnit, ProviderCaps, ProviderError, Released,
 };
 use js_lease_server::{BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, OwnerOnlyFiles};
 use js_types::{ExecMode, HostId, Model, ProviderId, RequestId, accelerator_of};
@@ -71,14 +71,16 @@ impl CapacityProvider for Handle {
         }
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
-        self.0
+        let answer = self
+            .0
             .catalog
             .lock()
             .unwrap()
             .clone()
-            .map_err(ProviderError::new)
+            .map_err(ProviderError::new);
+        Box::pin(std::future::ready(answer))
     }
 
     fn capacity(&self) -> Capacity {
@@ -361,12 +363,16 @@ async fn an_ordinary_request_with_no_request_id_still_gets_the_same_answers_as_b
     refused(&post(&h, &lease_body()).await, "no-capacity");
 }
 
-/// Asserts, through the route, that a pool with no host whose provider's catalog cannot
-/// be read admits the request (the start then answers `no-capacity`, the answer to retry,
-/// not `no-capable-host`), and so does a catalog whose one fitting offer is unavailable
-/// now; that a catalog that was read and is empty refuses `no-capable-host`; and that each
-/// request reads the catalog exactly once. Catches an unreadable catalog read as an empty
-/// one, and admission asking whether an offer is available now.
+/// Asserts, through the route, how admission reads the cached catalog and never the
+/// provider's: before any tick the catalog is unread and a request only a catalog could
+/// serve is admitted (the start answers `no-capacity`); after a tick whose fetch failed it
+/// is still unread, and that fetch is retried at the next tick; a tick that fetches an empty
+/// catalog makes the request `no-capable-host`, leaving the lease file as it was; that
+/// catalog is kept until the clock has moved past `catalog_refresh`, after which a tick
+/// fetches the one fitting offer, unavailable now, and the request is `no-capacity` again;
+/// and the cloud's reads move at ticks only, never across the posts. Catches an unreadable
+/// catalog read as an empty one, admission asking whether an offer is available now, and
+/// admission calling the provider.
 #[tokio::test]
 async fn an_unreadable_catalog_counts_as_may_offer() {
     let (h, cloud) = elastic("admission_unreadable", "gpu-host", &[]).await;
@@ -374,13 +380,26 @@ async fn an_unreadable_catalog_counts_as_may_offer() {
     cloud.set(Err("the cloud's API did not answer"));
     let reads = cloud.reads();
     refused(&post(&h, &request).await, "no-capacity");
+    refused(&post(&h, &request).await, "no-capacity");
+    assert_eq!(cloud.reads(), reads);
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 1);
+    refused(&post(&h, &request).await, "no-capacity");
     assert_eq!(cloud.reads(), reads + 1);
     cloud.set(Ok(Vec::new()));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
     let before = lease_file(&h);
     refused(&post(&h, &request).await, "no-capable-host");
     assert_eq!(cloud.reads(), reads + 2);
     assert_eq!(lease_file(&h), before);
     cloud.set(Ok(vec![a100(false)]));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
+    refused(&post(&h, &request).await, "no-capable-host");
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 3);
     refused(&post(&h, &request).await, "no-capacity");
     assert_eq!(cloud.reads(), reads + 3);
 }
@@ -394,10 +413,12 @@ async fn an_offer_outside_the_pool_limits_does_not_count() {
     let other = Some("[\"gpu_8x_a100\"]");
     let (h, cloud) = over("admission_limits_out", "gpu-host", &[], other).await;
     cloud.set(Ok(vec![a100(true)]));
+    h.ticks.step().await;
     refused(&post(&h, &one_gpu("gpu-host")).await, "no-capable-host");
     let allowed = Some("[\"gpu_1x_a100\"]");
     let (h, cloud) = over("admission_limits_in", "gpu-host", &[], allowed).await;
     cloud.set(Ok(vec![a100(true)]));
+    h.ticks.step().await;
     refused(&post(&h, &one_gpu("gpu-host")).await, "no-capacity");
 }
 

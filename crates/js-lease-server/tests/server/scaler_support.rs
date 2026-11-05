@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, Held, HostName, HostRef,
-    Offer, ProviderError, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostName,
+    HostRef, Offer, ProviderError, Released,
 };
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{
@@ -58,7 +58,7 @@ pub fn panic_on_list(scratch: &Scratch) {
 struct PanicOnList(Box<dyn CapacityProvider>);
 
 impl CapacityProvider for PanicOnList {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.catalog()
     }
 

@@ -274,7 +274,9 @@ fn a_types_row_the_catalog_drops_is_logged_by_name() {
         .with_max_level(tracing::Level::WARN)
         .with_writer(lines.clone())
         .finish();
-    let offers = tracing::subscriber::with_default(subscriber, || rig.provider.catalog().unwrap());
+    let offers = tracing::subscriber::with_default(subscriber, || {
+        crate::rig::catalog(&rig.provider).unwrap()
+    });
     assert_eq!(offers.len(), 3);
     let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
     assert!(text.contains("a types row is skipped"), "{text}");
