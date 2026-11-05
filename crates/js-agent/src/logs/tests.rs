@@ -950,14 +950,14 @@ fn a_run_holds_live_logs_only_with_a_sink_and_settings() {
     ] {
         let mut run = RunLogs::asked(logs, sink);
         assert_eq!(run.file_cap(logs), cap);
-        run.start(logs, paths);
+        run.start(logs, paths, &missing);
         run.end((10, 10));
         assert_eq!(run.report(), None, "no uploader, no report");
     }
     // The warning of a start that failed, read by a subscriber this time.
     let lines = Lines::default();
     let guard = lines.capture();
-    RunLogs::asked(Some(&logs), Some(&sink)).start(Some(&logs), paths);
+    RunLogs::asked(Some(&logs), Some(&sink)).start(Some(&logs), paths, &missing);
     drop(guard);
     assert!(lines.text().contains("did not start"), "{}", lines.text());
     assert!(Uploader::start(&sink, paths, &logs).is_err());

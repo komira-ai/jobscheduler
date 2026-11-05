@@ -1,7 +1,7 @@
 //! Where one job's logs go: the store and the job's prefix in it, checked once when the job
 //! starts.
 
-use js_agent_wire::JobStartSpec;
+use js_agent_wire::{JobStartSpec, LogSink};
 use js_logstore::{Endpoint, JobPrefix};
 
 /// The sink of a job start ([`js_agent_wire::LogSink`]) as the uploader uses it: the store's
@@ -23,14 +23,41 @@ impl Sink {
     ///
     /// The text of the note the job gets (`log-sink-ignored`).
     pub fn of_start(spec: &JobStartSpec) -> Result<Option<Self>, String> {
-        let Some(sink) = spec.log_sink_checked().map_err(|why| why.to_string())? else {
-            return Ok(None);
-        };
+        let sink = spec.log_sink_checked().map_err(|why| why.to_string())?;
+        sink.map(Self::of_wire).transpose()
+    }
+
+    /// The sink `sink` says, as a start or a progress record carries it.
+    ///
+    /// # Errors
+    ///
+    /// The store client cannot use it, named by field and rule (never a value).
+    pub(super) fn of_wire(sink: &LogSink) -> Result<Self, String> {
         let endpoint = Endpoint::parse(&sink.endpoint, &sink.region, &sink.bucket, sink.path_style)
             .map_err(|why| format!("log_sink: {why}"))?;
         let prefix =
             JobPrefix::parse(&sink.prefix).map_err(|why| format!("log_sink.prefix: {why}"))?;
-        Ok(Some(Self::new(endpoint, prefix)))
+        Ok(Self::new(endpoint, prefix))
+    }
+
+    /// The sink as a start carries it, for the progress record: the store's URL (its scheme
+    /// and authority, the bucket not in it), region, bucket, path style and the job's prefix.
+    /// [`Sink::of_wire`] of it is this sink.
+    pub(super) fn wire(&self) -> LogSink {
+        let endpoint = &self.endpoint;
+        let url = endpoint.url("");
+        // A virtual-host-style endpoint's host is the bucket, a dot and the authority.
+        let url = match endpoint.path_style() {
+            true => url,
+            false => url.replacen(&format!("://{}.", endpoint.bucket()), "://", 1),
+        };
+        LogSink {
+            endpoint: url,
+            region: endpoint.region().to_owned(),
+            bucket: endpoint.bucket().to_owned(),
+            prefix: self.prefix.as_str().to_owned(),
+            path_style: endpoint.path_style(),
+        }
     }
 
     /// The sink of the job whose prefix is `prefix` in the store at `endpoint`.

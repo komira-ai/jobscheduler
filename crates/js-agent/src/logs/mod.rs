@@ -62,17 +62,50 @@
 //!
 //! A run removed before its end was read (a removal that ends a running container, or a start
 //! that failed after the uploader started) drops the uploader without an end: its thread
-//! stops at its next step and closes the files.
+//! stops at its next step and closes the files. A panic in an uploader ends that job's upload
+//! with one warning and touches nothing else.
 //!
-//! # What this task leaves out
+//! # The progress record, and a restart
 //!
-//! An agent that restarts while a job runs adopts the job without an uploader: what the
-//! files hold is not lost, but nothing more of that job is uploaded and its finals are not
-//! written (the chunks put stay). A panic in an uploader ends that job's upload with one
-//! warning and touches nothing else.
+//! The uploader of a run keeps `logs-upload.json` in the lease directory (the module
+//! `record`), mode `0600`:
+//! `{"version":1,"sink":{"endpoint","region","bucket","prefix","path_style"},
+//! "streams":{"stdout":S,"stderr":S}}` with `S` =
+//! `{"next":N,"cut":null|{"offset":a,"len":n},"chunks":[offset,…],"gap_done":bool,
+//! "final_done":bool}`: the offset up to which the store holds the stream's chunks, the chunk
+//! being put, the offsets of the chunks put and not yet deleted, and whether the gap marker and
+//! the final are stored. It holds no secret: the sink names where the logs go, and the
+//! credential is the host's, in memory only.
+//!
+//! The uploader's thread, and nothing else, writes it whole (a temporary file renamed into
+//! place, no `fsync`): as it begins; before each chunk's put, naming the cut; after each put
+//! that succeeded (`next` advanced, the chunk listed, the cut cleared); after the gap marker and
+//! the final; and once the deletes are done. A write that fails is logged once, the record is
+//! removed, and the upload goes on without one (the job is never held by it). The runtime
+//! stops the writes and removes the record (`RunLogs::leave`) before it removes the lease
+//! directory, so the removal never meets a file being made in it, and a directory that outlives
+//! a removal that failed holds no record that lags behind the store; an uploader that is finishing keeps its state
+//! in memory and its handles open, as before.
+//!
+//! An agent that restarts adopts its jobs (`crun/adopt.rs`), and gives each whose lease holds
+//! a record its uploader (`RunLogs::resume`) through the constructor a start uses: a regular
+//! file of the agent's user, of version 1, whose prefix ends with the job's id. It goes on at
+//! the cut, if one was in flight (the same offset, length and bytes at the same key: a put
+//! that had gone through is overwritten with what it held), and else at `next`, reading the
+//! files from there: what the job wrote while no agent ran goes out as ordinary chunks, their
+//! first-byte time the first poll after the resume. A job that ended meanwhile is told its end
+//! at once, from the totals of its exit record, and finishes as above. Like every uploader it
+//! uses the host's credential: a restarted agent holds none, reports it stale in its first
+//! heartbeat (one state for the host, however many jobs it adopted), and the resumed uploaders
+//! put nothing until the server's grant comes. A record that is malformed, of another version,
+//! a link, another user's, or of another job's prefix is ignored with one warning, and the job
+//! is adopted without an uploader, as one with no record is. A restart after the lease
+//! directory was removed (and before the finals were written) finds no record: the chunks stay
+//! and the reader reads those.
 
 mod chunker;
 mod grant;
+mod record;
 mod sink;
 mod stream;
 mod upload;
@@ -81,6 +114,8 @@ mod wake;
 
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;
 
@@ -95,6 +130,7 @@ use js_logstore::{Clock, MAX_CHUNK_BYTES, MAX_PUT_BYTES, SystemClock, Transport,
 pub use chunker::{CutLimits, cut};
 pub use grant::{GRANT_STALE_MARGIN, HostGrant};
 pub use sink::Sink;
+use uploader::Origin;
 pub use uploader::Uploader;
 pub use wake::{ClockWake, ManualWake, Settled, Wake};
 
@@ -272,13 +308,16 @@ impl PartialEq for LogPlan {
 impl Eq for LogPlan {}
 
 /// What a run of the `crun` runtime holds of live logs: its sink while it is staged, its
-/// uploader once it has started, and the report once it has ended. A run of a runtime without
-/// [`LiveLogs`], or one whose start carried no sink, holds nothing and reports nothing.
+/// uploader once it has started (or once it was adopted with a progress record), and the report
+/// once it has ended. A run of a runtime without [`LiveLogs`], one whose start carried no sink,
+/// and one adopted without a record, hold nothing and report nothing.
 #[derive(Debug, Default)]
 pub struct RunLogs {
     sink: Option<Sink>,
     uploader: Option<Uploader>,
     report: Option<LogReport>,
+    /// The totals (stdout, stderr) of a run adopted after it ended, from its exit record.
+    ended: Option<(u64, u64)>,
 }
 
 impl RunLogs {
@@ -287,8 +326,52 @@ impl RunLogs {
     pub fn asked(logs: Option<&LiveLogs>, sink: Option<&Sink>) -> Self {
         Self {
             sink: logs.and(sink).cloned(),
-            uploader: None,
-            report: None,
+            ..Self::default()
+        }
+    }
+
+    /// The live logs of a run adopted after a restart, before [`RunLogs::resume`]: one that
+    /// ended while no agent ran carries the totals (stdout, stderr) its exit record gives.
+    pub(crate) fn adopted(ended: Option<(u64, u64)>) -> Self {
+        Self {
+            ended,
+            ..Self::default()
+        }
+    }
+
+    /// Gives an adopted run whose lease directory `lease` holds a progress record its
+    /// uploader over the capture files `stdout` and `stderr`, through the constructor a start
+    /// uses, going on from where the record says each stream is; a run that ended while no agent ran is told its end at once, and its
+    /// report is kept. A record that is not there leaves the run without one; one that is not
+    /// a regular file `owner` (the agent's user) owns, is not of the known version, or whose
+    /// prefix is not the job `run_id`'s, is ignored with one warning. The uploader has the
+    /// host's credential when the agent holds one, and waits for it otherwise.
+    pub(crate) fn resume(
+        &mut self,
+        logs: &LiveLogs,
+        (stdout, stderr): (&Path, &Path),
+        lease: &Path,
+        (run_id, owner): (&str, u32),
+    ) {
+        let (sink, streams) = match record::read(lease, run_id, owner) {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            Err(why) => {
+                tracing::warn!(
+                    run = run_id,
+                    "live logs: the progress record is ignored, and the job is adopted without \
+                     live logs: {why}"
+                );
+                return;
+            }
+        };
+        let origin = Origin {
+            record: Some(lease.to_owned()),
+            streams,
+        };
+        self.uploader = Uploader::open_or_warn(&sink, (stdout, stderr), logs, origin);
+        if let Some(totals) = self.ended {
+            self.end(totals);
         }
     }
 
@@ -301,12 +384,28 @@ impl RunLogs {
     }
 
     /// Starts the uploader of a run that has started, over its capture files `stdout` and
-    /// `stderr`. A run without a sink starts none; one that cannot be started is logged, and the
-    /// run goes on without live logs.
-    pub fn start(&mut self, logs: Option<&LiveLogs>, (stdout, stderr): (&Path, &Path)) {
-        self.uploader = logs
-            .zip(self.sink.take())
-            .and_then(|(logs, sink)| Uploader::start_or_warn(&sink, (stdout, stderr), logs));
+    /// `stderr`, keeping its progress record in the lease directory `lease`. A run without a
+    /// sink starts none; one that cannot be started is logged, and the run goes on without live
+    /// logs.
+    pub fn start(
+        &mut self,
+        logs: Option<&LiveLogs>,
+        (stdout, stderr): (&Path, &Path),
+        lease: &Path,
+    ) {
+        self.uploader = logs.zip(self.sink.take()).and_then(|(logs, sink)| {
+            let origin = Origin {
+                record: Some(lease.to_owned()),
+                ..Origin::default()
+            };
+            Uploader::open_or_warn(&sink, (stdout, stderr), logs, origin)
+        });
+    }
+
+    /// Stops the uploader's progress record, and removes it, before the lease directory that
+    /// holds it is removed; the upload goes on.
+    pub(crate) fn leave(&self) {
+        self.uploader.iter().for_each(Uploader::leave);
     }
 
     /// The run has ended with `totals` (stdout, stderr) bytes printed: the uploader is told
