@@ -4,6 +4,10 @@
 //! The certificate and key are one `CertifiedKey` behind a lock that the handshake reads
 //! once, so a handshake sees the old pair or the new pair and never one of each. A
 //! connection that is already open keeps what it negotiated.
+//!
+//! There are two acceptors over that one pair, so a reload reaches both: the lease and
+//! agent listeners' speaks HTTP/1.1 only, as it always has, and the job service's offers
+//! HTTP/2 (`h2`, which gRPC needs) before HTTP/1.1, the two its port serves.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -37,17 +41,19 @@ impl ResolvesServerCert for Current {
     }
 }
 
-/// The server's TLS: the acceptor for the listeners and the means to reload the pair.
+/// The server's TLS: the acceptors for the listeners and the means to reload the pair.
 pub(crate) struct Tls {
     files: TlsFiles,
     clock: SharedClock,
     current: Arc<Current>,
     acceptor: TlsAcceptor,
+    job_acceptor: TlsAcceptor,
 }
 
 impl Tls {
-    /// TLS serving the certificate chain and key in `files`, speaking HTTP/1.1 only. The
-    /// key file must be owner-only like the token file (see `read_private`).
+    /// TLS serving the certificate chain and key in `files`: HTTP/1.1 only on the lease and
+    /// agent listeners, HTTP/2 or HTTP/1.1 on the job service's. The key file must be
+    /// owner-only like the token file (see `read_private`).
     pub(crate) fn open(files: &TlsFiles, clock: SharedClock) -> Result<Self, StartupError> {
         let current = Arc::new(Current(RwLock::new(Arc::new(load(files)?))));
         let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
@@ -57,17 +63,25 @@ impl Tls {
             .with_no_client_auth()
             .with_cert_resolver(current.clone());
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut jobs = config.clone();
+        jobs.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(Self {
             files: files.clone(),
             clock,
             current,
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            job_acceptor: TlsAcceptor::from(Arc::new(jobs)),
         })
     }
 
-    /// The acceptor of the listeners; it follows every reload.
+    /// The acceptor of the lease and agent listeners; it follows every reload.
     pub(crate) fn acceptor(&self) -> TlsAcceptor {
         self.acceptor.clone()
+    }
+
+    /// The acceptor of the job service's listener; it follows every reload.
+    pub(crate) fn job_acceptor(&self) -> TlsAcceptor {
+        self.job_acceptor.clone()
     }
 
     /// Reads the files again and, when the pair is whole (the key owner-only and the key

@@ -38,6 +38,8 @@ mod elastic_fake_e2e;
 mod estimate_feed;
 mod gpu_path_pin;
 mod guard_names;
+mod job_listen;
+mod job_port;
 mod job_retention;
 mod joins;
 mod joins_credential;
