@@ -48,6 +48,8 @@ fn demand(need: Option<AcceleratorNeed>) -> Demand {
         isa_level: None,
         exec: None,
         accelerator: need,
+        network: Default::default(),
+        host_ports: Vec::new(),
     }
 }
 
