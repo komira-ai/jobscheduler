@@ -59,10 +59,16 @@
 //! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it), or nothing for an ended job or a second cancel |
 //! | [`JobStore::mark_releasing`] | put `alloc/<id>` at its version, or nothing when it is not booked |
 //! | [`JobStore::free`] | put `alloc/<id>` at its version, or nothing when it is freed |
+//! | [`JobStore::free_with`] | as [`JobStore::free`], with the caller's rows put beside it (the usage history row of the allocation) |
 //! | [`JobStore::end_and_free`] | put `job/<id>` at its version (ended as [`JobStore::end_job`] ends it) unless it has ended, and put `alloc/<id>` at its version (to freed) unless it is freed; nothing when both are so |
+//! | [`JobStore::end_and_free_with`] | as [`JobStore::end_and_free`], with the caller's rows put beside the free when it frees |
 //! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
 //! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
+//!
+//! Two reads serve the placement engine: [`JobStore::queued`], every queued job in queue
+//! order ([`queue_order`]: the higher priority first, then the earlier submit, then the job
+//! id), and [`JobStore::live_allocations`], every booked or releasing allocation.
 //!
 //! Times are the store's own clock ([`Store::now`](js_state::Store::now)); nothing here reads
 //! a system clock.
@@ -98,4 +104,6 @@ pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, Output, ResourceUsage, ResultReason, Retention,
     RetentionError, SWEEP_BATCH, sweep,
 };
-pub use store::{Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, SCHEMA_VERSION};
+pub use store::{
+    Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, SCHEMA_VERSION, queue_order,
+};

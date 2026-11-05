@@ -20,6 +20,9 @@ use crate::result::{JobEnd, Output, Retention};
 
 mod ending;
 mod hosts;
+mod queue;
+
+pub use queue::queue_order;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -77,6 +80,12 @@ pub struct JobStore<S, I = RandomIds> {
 /// `Err(error)` unless `ok`.
 fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
     if ok { Ok(()) } else { Err(error) }
+}
+
+/// `txn` with a put of each of `rows`, whatever its key holds.
+fn with_rows(txn: Txn, rows: Vec<(String, Vec<u8>)>) -> Txn {
+    rows.into_iter()
+        .fold(txn, |txn, (key, value)| txn.put(key, value, Cond::Any))
 }
 
 /// The schema version a `meta/jobs/schema` row holds.
@@ -191,7 +200,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    fn queued(&self, id: JobId, spec: JobSpec, priority: i32) -> JobRecord {
+    fn queued_record(&self, id: JobId, spec: JobSpec, priority: i32) -> JobRecord {
         JobRecord {
             id,
             spec,
@@ -234,7 +243,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         if let Some(found) = self.same_job(&id, &spec)? {
             return Ok(found);
         }
-        let record = self.queued(id, spec, priority);
+        let record = self.queued_record(id, spec, priority);
         let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
         match self.store.txn(txn)? {
             Ok(_) => Ok(Inserted {
@@ -252,7 +261,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
 
     fn insert_minted(&self, spec: &JobSpec, priority: i32) -> Result<Inserted, JobStoreError> {
         for _ in 0..MINT_TRIES {
-            let record = self.queued(JobId::minted(self.ids.mint()?), spec.clone(), priority);
+            let record =
+                self.queued_record(JobId::minted(self.ids.mint()?), spec.clone(), priority);
             let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
             if self.store.txn(txn)?.is_ok() {
                 return Ok(Inserted {
@@ -534,6 +544,22 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::NoAllocation`]; [`JobStoreError::Stale`]; as for any read and write.
     pub fn free(&self, id: &JobId, reason: EndReason) -> Result<AllocationRecord, JobStoreError> {
+        self.free_with(id, reason, &|_| Vec::new())
+    }
+
+    /// [`JobStore::free`], with the rows `beside` gives for the freed allocation written in
+    /// the same transaction, each as `(key, value)` whatever the key holds: the free and those
+    /// rows commit together or not at all. An allocation already freed is returned as it is,
+    /// and `beside` is not called: nothing is written.
+    ///
+    /// # Errors
+    /// As [`JobStore::free`].
+    pub fn free_with(
+        &self,
+        id: &JobId,
+        reason: EndReason,
+        beside: &dyn Fn(&AllocationRecord) -> Vec<(String, Vec<u8>)>,
+    ) -> Result<AllocationRecord, JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         if allocation.step == AllocationStep::Freed {
             return Ok(allocation);
@@ -549,7 +575,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             encode_allocation(&freed)?,
             Cond::Version(version),
         );
-        self.commit(id, txn)?;
+        self.commit(id, with_rows(txn, beside(&freed)))?;
         Ok(freed)
     }
 

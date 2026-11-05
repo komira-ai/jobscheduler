@@ -80,7 +80,7 @@ pub use fit::{DILATE_MINUTES, Fit, MIN_RUNS_FOR_CURVE, fit, p90};
 pub use history::{
     AllocationId, AllocationLog, BadAllocationId, Booked, DrainOutcome, ENDED_ID_PREFIX,
     ENDED_PREFIX, ENDED_ROW_VERSION, EndedHistory, EndedRead, EndedReason, EndedRow, EndedRowError,
-    MAX_ALLOCATION_ID_LEN, NoLog, Used, ended_id_key, ended_key,
+    MAX_ALLOCATION_ID_LEN, NoLog, Used, ended_id_key, ended_key, ended_writes,
 };
 pub use hub::{
     AcceptedResult, Beat, BeatLoad, DroppedReadings, FLUSH_EVERY_MINUTES, Finish, Flushed,

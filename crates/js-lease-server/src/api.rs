@@ -175,10 +175,10 @@ impl Shared {
     }
 
     /// Ticks the table, which writes the leases the tick changed and, when it changed, the
-    /// registry's reservation ledger as the tick's stops and presentations left it, in one
-    /// replace; then advances the agent registry (when the server has one) so its
-    /// reservations and prepare deadlines act on this tick, logs what changed and counts a
-    /// failed write. The table's lock is held for the tick alone.
+    /// registry's reservation ledger as the tick's stops and presentations left it, in one replace;
+    /// then advances the agent registry (when the server has one) so its reservations and prepare
+    /// deadlines act on this tick, logs what changed and counts a failed write; then runs a pass
+    /// over the queued jobs ([`Agents::place_jobs`]). The table's lock is held for the tick alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = {
             let mut table = self.table.lock().await;
@@ -200,6 +200,10 @@ impl Shared {
         self.record(&report, counts);
         if let Some(agents) = &self.agents {
             agents.refresh().await;
+            // The tick is a pass over the queued jobs too, whatever else freed room; it reads
+            // and writes the job tables, so it runs on the pool for blocking calls.
+            let placing = Arc::clone(agents);
+            crate::util::blocking(move || placing.place_jobs()).await;
         }
         report
     }

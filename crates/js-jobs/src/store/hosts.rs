@@ -4,7 +4,7 @@
 use js_state::{Cond, Store, Txn};
 use js_types::HostId;
 
-use super::{JobStore, allocation_at, ensure};
+use super::{JobStore, allocation_at, ensure, with_rows};
 use crate::codec::{encode_allocation, encode_job};
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
@@ -56,6 +56,23 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         end: JobEnd,
         reason: EndReason,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
+        self.end_and_free_with(id, end, reason, &|_| Vec::new())
+    }
+
+    /// [`JobStore::end_and_free`], with the rows `beside` gives for the freed allocation
+    /// written in the same transaction when this call frees it, each as `(key, value)`
+    /// whatever the key holds, as [`JobStore::free_with`] writes them. For an allocation
+    /// already freed `beside` is not called.
+    ///
+    /// # Errors
+    /// As [`JobStore::end_and_free`].
+    pub fn end_and_free_with(
+        &self,
+        id: &JobId,
+        end: JobEnd,
+        reason: EndReason,
+        beside: &dyn Fn(&AllocationRecord) -> Vec<(String, Vec<u8>)>,
+    ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
         let (job, job_version) = self.job_row(id)?;
         let (allocation, allocation_version) = self.allocation_row(id)?;
         let now = self.store.now();
@@ -94,6 +111,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 encode_allocation(&freed)?,
                 Cond::Version(allocation_version),
             );
+            txn = with_rows(txn, beside(&freed));
             freed
         };
         if !txn.ops().is_empty() {
