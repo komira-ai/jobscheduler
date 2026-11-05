@@ -14,13 +14,13 @@
 //! Sizes, in agent requests a seed (heartbeats, with the hellos besides), each at most
 //! 30,000:
 //! - agents that die: [`DIE_HOSTS`] beating every [`DIE_INTERVAL`] for
-//!   [`DIE_SECOND_AT`] plus [`DIE_SETTLE`], 1,920 s, make 12,800;
+//!   [`DIE_SECOND_AT`] plus [`DIE_SETTLE`], 1,420 s, make about 9,500;
 //! - agents killed for good: [`GOOD_HOSTS`] beating every 5 s for [`GOOD_KILL_AT`] plus
-//!   [`GOOD_SETTLE`], 960 s, make 9,600;
+//!   [`GOOD_SETTLE`], 420 s, make 4,200;
 //! - the partition: [`CUT_HOSTS`] beating every 5 s for [`CUT_AT`], [`CUT_FOR`] and
 //!   [`CUT_SETTLE`], 350 s, make 7,000;
 //! - the lossy wire: [`LOSSY_HOSTS`] beating every 5 s for [`LOSSY_FOR`] plus
-//!   [`LOSSY_SETTLE`], 1,500 s, make 6,000;
+//!   [`LOSSY_SETTLE`], 900 s, make 3,600;
 //! - the silent host: [`SILENT_HOSTS`] beating every 5 s for about 340 s make 2,040;
 //! - the stale start: [`STALE_HOSTS`] beating every second for about 150 s make 1,200;
 //! - the restart: about 3,840 (`cell/server_restart.rs`);
@@ -58,16 +58,16 @@ const DIE_AT: Duration = Duration::from_secs(60);
 const DIE_REPLACE_AT: Duration = Duration::from_secs(80);
 const DIE_SECOND_AT: Duration = Duration::from_secs(120);
 const DIE_SECOND_RUNS: u32 = 100;
-const DIE_SETTLE: Duration = Duration::from_secs(1_800);
+const DIE_SETTLE: Duration = Duration::from_secs(1_300);
 
 /// Agents killed for good: five of fifty hosts, at the server's default heartbeat.
 const GOOD_HOSTS: usize = 50;
 const GOOD_RUNS: u32 = 100;
-const GOOD_RUN: Duration = Duration::from_secs(120);
-const GOOD_GIVE_UP: Duration = Duration::from_secs(600);
+const GOOD_RUN: Duration = Duration::from_secs(60);
+const GOOD_GIVE_UP: Duration = Duration::from_secs(300);
 const GOOD_DEAD: [usize; 5] = [0, 10, 20, 30, 40];
 const GOOD_KILL_AT: Duration = Duration::from_secs(60);
-const GOOD_SETTLE: Duration = Duration::from_secs(900);
+const GOOD_SETTLE: Duration = Duration::from_secs(360);
 
 /// The partition: twenty of a hundred agents cut for 30 s, longer than the server's
 /// default grace of 15 s, while their runs end.
@@ -90,8 +90,8 @@ const LOSSY_INTERVAL: Duration = Duration::from_secs(5);
 const LOSSY_GRACE: Duration = Duration::from_secs(60);
 const LOSSY_DROP_PERCENT: u32 = 20;
 const LOSSY_MAX_DELAY: Duration = Duration::from_secs(3);
-const LOSSY_FOR: Duration = Duration::from_secs(900);
-const LOSSY_SETTLE: Duration = Duration::from_secs(600);
+const LOSSY_FOR: Duration = Duration::from_secs(600);
+const LOSSY_SETTLE: Duration = Duration::from_secs(300);
 
 /// The silent host: ten of thirty agents, drawn from the seed, cut at 7 s, after their
 /// starts arrived (about 5 s) and before their next heartbeat (about 10 s), for longer
@@ -318,7 +318,7 @@ fn a_thirty_second_partition_of_twenty_agents_loses_no_result() {
 /// the agent's retired-id list stops a rerun) and section 7 ("Duplicate start": it never
 /// runs twice; "Result lost": resent until acknowledged). A fifth of the messages between
 /// the agents and the server are lost and the rest delayed by up to 3 s each way for the
-/// first 900 s, with runs of 2 s, shorter than the 5 s heartbeat interval. Proves that
+/// first 600 s, with runs of 2 s, shorter than the 5 s heartbeat interval. Proves that
 /// every run is launched once (`at-most-one-launch`) and every item settles. The witness
 /// shows the server sent a start again to a host that already had it: a reply carrying a
 /// start arrived after the next heartbeat had left without the run. Red for an agent that

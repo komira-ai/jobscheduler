@@ -12,13 +12,10 @@
 #[path = "cell/support.rs"]
 mod support;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::time::Duration;
 
-use axum::Router;
 use js_sim::{Event, Faults, Node, NodeInput, Output};
-use js_sim_cell::actions::{agents, partition_agents, restart_server};
+use js_sim_cell::actions::{agents, partition_agents};
 use js_sim_cell::bus::{CallId, Route, agent_name};
 use js_sim_cell::server::JOIN_TOKEN;
 use js_sim_cell::{
@@ -34,11 +31,17 @@ use crate::support::{call, lease, ms, scratch, start_run};
 const RUN_MS: u64 = 10_000;
 const SETTLE: Duration = Duration::from_secs(60);
 
-/// The flag the server names when its lease file is still locked by another server.
-const LOCKED: &str = "--state-file";
+/// The flag a server of [`refusing`] is refused on.
+const REFUSED: &str = "--agent-pool-config";
 
 fn pool(hosts: usize) -> ServerSpec {
     ServerSpec::registered_pool("burst", Shape::gpu_host(), hosts)
+}
+
+/// A server the server refuses to start: a pool of no machines (with a burst of one, so
+/// the flags parse and the pool file is what is refused).
+fn refusing() -> ServerSpec {
+    pool(0).hello_burst(1)
 }
 
 /// A cell of `hosts` correct agents on the server's default heartbeat.
@@ -61,23 +64,21 @@ fn index_of(name: &str) -> usize {
     index.expect("a host named by its index")
 }
 
-/// An action that takes a clone of the server's agent router, which holds the lease
-/// table and its lock on the lease file, and keeps it for the life of the action.
-#[derive(Clone, Default)]
-struct HoldLeaseFile(Rc<RefCell<Option<Router>>>);
+/// An action that restarts the server with flags it refuses.
+#[derive(Clone)]
+struct RestartRefused;
 
-impl Action for HoldLeaseFile {
+impl Action for RestartRefused {
     fn run(&self, cell: &mut Cell) {
-        let server = cell.server().and_then(ServerNode::server);
-        *self.0.borrow_mut() = server.map(|server| server.agent_router());
+        cell.restart_server_with(&refusing());
     }
 }
 
-/// Asserts that a server node whose restart is refused (a router of the old server still
-/// holds the lease file) names the flag at fault and is down: an agent's call goes
-/// unanswered, a client's call is answered 503 with no body, a tick only arms the next,
-/// and the listing is empty; that a second restart, once the router is dropped, brings
-/// it up again over the same files, answering calls. Catches a restart that loses the
+/// Asserts that a server node whose restart is refused (its flags name a pool of no
+/// machines) names the flag at fault and is down: an agent's call goes unanswered, a
+/// client's call is answered 503 with no body, a tick only arms the next, and the
+/// listing is empty; that a second restart, with the server's own flags, brings it up
+/// again over the same files, answering calls. Catches a restart that loses the
 /// server's directory (the lease file a resumed boot requires), a node that answers while
 /// down, and one that cannot come back up.
 #[test]
@@ -86,9 +87,8 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     let server = ServerNode::start(&spec, scratch("restart-node")).expect("starts");
     let mut node = CellNode::Server(Box::new(server));
     let server = node.as_server_mut().expect("the server");
-    let held = server.server().expect("up").agent_router();
-    let refused = server.restart(&spec).expect_err("the lease file is locked");
-    assert_eq!(refused.flag(), LOCKED, "{refused}");
+    let refused = server.restart(&refusing()).expect_err("no pool to serve");
+    assert_eq!(refused.flag(), REFUSED, "{refused}");
     assert!(!server.is_up());
     assert!(server.server().is_none() && server.registry().is_none());
     assert_eq!(server.view(), ServerView::default());
@@ -118,7 +118,6 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     node.apply(input(5_000, Event::Timer { tag: 0 }));
     let outputs = node.take_outputs();
     assert!(matches!(outputs.as_slice(), [Output::Timer { tag: 0, .. }]));
-    drop(held);
     let server = node.as_server_mut().expect("the server");
     server.restart(&spec).expect("starts again");
     assert!(server.is_up());
@@ -126,21 +125,19 @@ fn a_server_whose_restart_is_refused_is_down_until_a_restart_succeeds() {
     assert_eq!(answer.status().as_u16(), 200, "{}", answer.body());
 }
 
-/// Asserts that a restart in a scenario that the server refuses (an action holds a router
-/// of the old server, so the lease file stays locked) fails the seed as a failure to
+/// Asserts that a restart in a scenario that the server refuses (an action restarts it
+/// with a pool of no machines) fails the seed as a failure to
 /// start, naming the scenario, the seed and the flag at fault, in place of the
 /// violations of the down server that follow it. Catches a refused restart that is lost,
 /// or reported as an invariant the scenario did not break.
 #[test]
 fn a_restart_the_server_refuses_fails_the_seed_as_a_failure_to_start() {
-    let hold = HoldLeaseFile::default();
     let failure = Scenario::new("a_refused_restart")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(pool(1))
         .hosts("burst", 1)
         .work(1, Work::run_for(Duration::from_millis(RUN_MS)))
-        .at(Duration::from_secs(20), hold.clone())
-        .at(Duration::from_secs(21), restart_server())
+        .at(Duration::from_secs(20), RestartRefused)
         .settle_within(SETTLE)
         .try_run_seeds(1)
         .expect_err("a refused restart fails the seed");
@@ -151,11 +148,10 @@ fn a_restart_the_server_refuses_fails_the_seed_as_a_failure_to_start() {
             error,
         } => assert_eq!(
             (scenario.as_str(), *seed, error.flag()),
-            ("a_refused_restart", 0, LOCKED)
+            ("a_refused_restart", 0, REFUSED)
         ),
         other => panic!("not a failure to start: {other}"),
     }
-    assert!(hold.0.borrow().is_some(), "the action held a router");
 }
 
 /// Asserts that a restart of the server in a cell keeps the agents, the client and the

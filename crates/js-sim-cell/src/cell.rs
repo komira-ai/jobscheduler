@@ -514,8 +514,16 @@ impl Cell {
     /// [`Cell::take_refused`].
     pub fn restart_server(&mut self) {
         let spec = self.spec.clone();
+        self.restart_server_with(&spec);
+    }
+
+    /// Restarts the server as [`Cell::restart_server`] does, with the flags `spec`
+    /// describes in place of the cell's (an operator who restarts the server with a
+    /// changed configuration). The cell's own spec, which the agents and the client were
+    /// made for, stays as it is.
+    pub fn restart_server_with(&mut self, spec: &ServerSpec) {
         let server = self.sim.nodes_mut().find_map(|(_, n)| n.as_server_mut());
-        match server.map(|server| server.restart(&spec)) {
+        match server.map(|server| server.restart(spec)) {
             Some(Err(error)) => {
                 self.record(format!("restart refused {}", error.flag()));
                 self.refused = self.refused.take().or(Some(error));

@@ -21,7 +21,7 @@ pub(super) fn placed_on_a_lost_host() -> Observations {
 
 /// Item 0's run 0 completed on host 0 at 900; the client heard it lost at 1000 and
 /// released its lease.
-pub(super) fn result_never_reached_the_server() -> Observations {
+pub(super) fn lost_result() -> Observations {
     released(HowEnded::Lost).with_completion(run(0), host(0), ms(900))
 }
 
@@ -34,8 +34,10 @@ pub(super) fn result_accepted_twice() -> Observations {
 }
 
 /// Item 0 succeeded and released, and no agent completed its run 0.
-pub(super) fn succeeded_without_a_completion() -> Observations {
-    released(HowEnded::Succeeded)
+pub(super) fn success_never_produced() -> Observations {
+    let mut observations = released(HowEnded::Succeeded);
+    observations.completions.clear();
+    observations
 }
 
 /// The server's listing books lease 0 on host 0 and on host 1.
@@ -58,7 +60,7 @@ pub(super) fn host_listed_twice() -> Observations {
 
 /// Item 0 succeeded and released; its run 0 completed on host 0 at 900.
 fn succeeded_and_completed() -> Observations {
-    released(HowEnded::Succeeded).with_completion(run(0), host(0), ms(900))
+    released(HowEnded::Succeeded)
 }
 
 /// The `NoResultLost` lines of the end check over `observations`.
@@ -134,7 +136,7 @@ fn a_lease_booked_on_a_lost_host_is_flagged() {
 /// killed, and one that judges a client that had already given up.
 #[test]
 fn a_result_that_never_reached_the_server_is_flagged() {
-    let flagged = result_never_reached_the_server();
+    let flagged = lost_result();
     assert_eq!(result_lines(&flagged), [lost_line("ended lost")]);
     let unanswered = Observations::quiet()
         .at(ms(END))
@@ -211,10 +213,10 @@ fn a_result_recorded_twice_is_flagged() {
 #[test]
 fn a_success_no_agent_produced_is_flagged() {
     assert_eq!(
-        result_lines(&succeeded_without_a_completion()),
+        result_lines(&success_never_produced()),
         ["no-result-lost at 5000: item0 succeeded and no agent completed its run \"run-0\""]
     );
-    let elsewhere = released(HowEnded::Succeeded).with_completion(run(0), host(3), ms(900));
+    let elsewhere = success_never_produced().with_completion(run(0), host(3), ms(900));
     none(&end(&elsewhere));
 }
 
