@@ -234,7 +234,9 @@ mint key (`mint_key_file`), with:
 - `DurationSeconds` = `credential_ttl` in seconds;
 - `Policy` = the session policy below.
 
-The answer's access key id, secret access key, session token and expiry are the credential.
+The answer's access key id, secret access key, session token and expiry are the credential. An answer whose credential expires within a
+minute, or lives less than half of the `DurationSeconds` asked (a store that shortens sessions), is refused and counts as a failed mint
+(section 5): the scheduler never hands out a credential about to die.
 
 **The session policy**, exactly, for the bucket `logs` and the prefix `js`:
 

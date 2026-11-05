@@ -335,6 +335,7 @@ fn a_logs_table_is_checked_key_by_key() {
         "not json".to_owned(),
         "[\"ID\", \"secret\"]".to_owned(),
         "{\"access_key_id\": \"ID\"}".to_owned(),
+        "{\"access_key_id\": \"ID\", \"other\": \"x\"}".to_owned(),
         "{\"secret_access_key\": \"secret\", \"other\": 1}".to_owned(),
         "{\"access_key_id\": \"ID\", \"secret_access_key\": \"secret\", \"other\": 1}".to_owned(),
         "{\"access_key_id\": 7, \"secret_access_key\": \"secret\"}".to_owned(),

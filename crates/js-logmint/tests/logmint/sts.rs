@@ -64,7 +64,7 @@ fn the_sts_request_is_signed_and_well_formed() {
     let unreserved = |b: u8| b.is_ascii_alphanumeric() || b"-._~=&%".contains(&b);
     assert!(body.bytes().all(unreserved), "{body}");
 
-    let headers = vec![(
+    let headers = [(
         "content-type".to_owned(),
         "application/x-www-form-urlencoded".to_owned(),
     )];

@@ -16,7 +16,7 @@ use js_logstore::Credential;
 use js_logstore::fake::{FakeStore, Policy};
 
 use crate::policy::policy;
-use crate::{MintError, MintRequest, Minter, Refusal};
+use crate::{MintError, MintRequest, Minter};
 
 /// The fake minter.
 #[derive(Debug)]
@@ -114,10 +114,14 @@ impl Minter for FakeMinter {
         if let Some(error) = state.failures.pop_front() {
             return Err(error);
         }
+        // The text is always one the fake reads; were it not, the credential would be
+        // issued with no action at all, so a test of its scope fails rather than passes.
         let text = policy(&request.bucket, &request.prefix);
-        let unreadable = MintError::Refused(Refusal::Answer("the fake cannot read the policy"));
-        let scope =
-            Policy::from_session_policy(&text, request.bucket.as_str()).ok_or(unreadable)?;
+        let nothing = Policy {
+            actions: Vec::new(),
+            prefix: String::new(),
+        };
+        let scope = Policy::from_session_policy(&text, request.bucket.as_str()).unwrap_or(nothing);
         let credential = self.store.issue_for(scope, request.ttl);
         state.minted.push(credential.access_key_id.clone());
         Ok(credential)
