@@ -145,3 +145,23 @@ or `expired` (410), `FAILED_PRECONDITION` with `not-finished` (409), `INTERNAL` 
 (400, where a message `field: <name>` gives the `field`). Every other status, and a refusal
 code this version does not know, is a 500 `internal`. The crate's goldens
 (`crates/js-api-gateway/tests/golden/`) hold the whole mapping.
+
+## The lease server's job service
+
+The lease server holds the job service in `crates/js-lease-server/src/job_api/`: one service
+object that both transports call, gRPC (the generated `JobService` server) and this gateway,
+with one bearer layer in front of both. A request that does not present
+`Authorization: Bearer <token>` with the server's token reaches no call: over gRPC it is
+answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The token is the one the
+lease routes take, compared by the same code.
+
+Nothing mounts the two transports yet, so no port serves them. Every call answers
+`UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
+directory serves it:
+
+| calls | file |
+|---|---|
+| `GetJob`, `ListJobs`, `GetResult`, `GetLogs` | `read.rs` |
+| `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
+| `CancelJob` | `cancel.rs` |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
