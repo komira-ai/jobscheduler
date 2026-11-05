@@ -9,7 +9,7 @@ use js_provider::{Candidate, HostBook};
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{Admission, Capabilities, HostId, LeaseId, ResourceClass, Resources, Shape};
 
-use super::record::Bound;
+use super::record::{Bound, Queue};
 use super::{HostState, Registry, State};
 use crate::lives;
 use crate::placer::ProbeHost;
@@ -316,6 +316,10 @@ impl Registry {
         let started = matches!(ack, StartAck::Started { .. });
         let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));
         let commit = [whole, fresh].into_iter().all(|ok| ok);
+        // When the request was first presented, read before it leaves the wait list.
+        let id = spec.request_id();
+        let since = id.and_then(|id| waiting.queue().find(|(queued, _)| *queued == id));
+        let since = since.map(|(_, since)| since);
         // A request that is placed, or whose lease had ended, waits no more.
         if [started & commit, ended].into_iter().any(|leaves| leaves) {
             spec.request_id().into_iter().for_each(|id| {
@@ -325,6 +329,12 @@ impl Registry {
         if let (StartAck::Started { host }, true) = (&ack, fresh) {
             let end = now.plus(wanted.max_wall);
             tail.started(marks.holder(host), spec.request_id());
+            let own_mark = id.is_some_and(|id| marks.holder(host) == Some(id));
+            let marked = id.is_some_and(|id| marks.ever_marked(id));
+            let queue = match whole {
+                true => Queue::whole(now, since, (own_mark, marked), requests.give_ups(&key)),
+                false => Queue::ORDINARY,
+            };
             let here = book.leases().remove(host).unwrap_or_default();
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
@@ -333,6 +343,7 @@ impl Registry {
                     lease,
                     end,
                     started_at: now.millis(),
+                    queue,
                 });
             });
         }

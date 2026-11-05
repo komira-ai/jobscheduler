@@ -12,7 +12,7 @@ use crate::runs::Runs;
 
 use super::exclusive::Exclusive;
 use super::reasons::{Cause, HostEffect};
-use super::requests::{Failure, Requests, Rules};
+use super::requests::{FailedPrepare, Failure, Requests, Rules};
 
 /// The parts of the state a failed prepare changes besides the host's own record.
 pub(crate) struct Ending<'a> {
@@ -30,6 +30,7 @@ impl Ending<'_> {
     /// reads `Absent` from now on, its runs are asked to stop, the host restores, the
     /// host takes the row's effect and the request counts one failure. `detail` is kept as
     /// received and read by nothing here. `taint` and `exclusive` are the host's record.
+    /// The failure is noted ([`Requests::note_failed`]) for the record of the booking's end.
     pub(crate) fn fail(
         &mut self,
         (taint, exclusive): (&mut Option<Taint>, &mut Exclusive),
@@ -49,6 +50,12 @@ impl Ending<'_> {
             max_replace: self.rules.max_replace,
         };
         self.requests.fail(&lease, cause, detail, failure);
+        self.requests.note_failed(FailedPrepare {
+            lease,
+            host: host.clone(),
+            at: self.now,
+            profile: self.runs.lease_profile(&lease),
+        });
         self.runs.stop_lease(&lease);
         *exclusive = exclusive.stopped();
         self.book.stop(&lease);

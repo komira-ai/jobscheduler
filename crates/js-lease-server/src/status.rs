@@ -43,100 +43,100 @@ pub(crate) struct Status {
 /// The reply of `GET /v1/pools`.
 #[derive(Debug, Serialize)]
 pub(crate) struct PoolsView {
-    pools: Vec<PoolView>,
+    pub(crate) pools: Vec<PoolView>,
     /// `server: warning: ...` lines, such as a listener on every interface.
-    warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// One pool.
 #[derive(Debug, Serialize)]
-struct PoolView {
-    name: String,
-    kind: String,
-    network: &'static str,
+pub(crate) struct PoolView {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) network: &'static str,
     /// The execution mode the hosts must report, or `none` for a pool that asked for none.
-    exec: String,
+    pub(crate) exec: String,
     /// The mode the pool is in now: `plan` once its `live_until` has passed, whatever the
     /// file says.
-    launch: &'static str,
+    pub(crate) launch: &'static str,
     /// When the pool's go ends, in milliseconds since the epoch, if the file sets one.
-    live_until_ms: Option<u64>,
+    pub(crate) live_until_ms: Option<u64>,
     /// The memory of the pool's floor, the percent of it the pool books and what that
     /// comes to.
-    memory: MemoryView,
-    state: State,
+    pub(crate) memory: MemoryView,
+    pub(crate) state: State,
     /// Why the pool is unavailable, one line for each check that failed.
-    reasons: Vec<String>,
-    credentials: Option<CheckView>,
-    network_check: Option<CheckView>,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) credentials: Option<CheckView>,
+    pub(crate) network_check: Option<CheckView>,
     /// The provider's own checks of the last pass.
-    provider_checks: Vec<NamedCheckView>,
-    instances: Instances,
-    blocked: Option<&'static str>,
-    no_offer: Option<NoOffer>,
-    last_launch: Option<LaunchView>,
-    machines: Vec<MachineView>,
-    orphans: Vec<OrphanView>,
+    pub(crate) provider_checks: Vec<NamedCheckView>,
+    pub(crate) instances: Instances,
+    pub(crate) blocked: Option<&'static str>,
+    pub(crate) no_offer: Option<NoOffer>,
+    pub(crate) last_launch: Option<LaunchView>,
+    pub(crate) machines: Vec<MachineView>,
+    pub(crate) orphans: Vec<OrphanView>,
     /// What an operator must act on, as the scaler's last tick left it: a stuck revoke or
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
-    alerts: Vec<String>,
+    pub(crate) alerts: Vec<String>,
     /// The server's time at the end of the scaler's last finished tick, in milliseconds;
     /// null before the first. A watcher outside the server reads it as the heartbeat.
-    last_tick_ms: Option<u64>,
+    pub(crate) last_tick_ms: Option<u64>,
     /// Whether the pool has a scaler: it ticks, so `last_tick_ms` is a heartbeat that must
     /// move. A pool without one (a plan-only or static pool) has no heartbeat.
-    scaler: bool,
-    next_launch: Option<NextLaunch>,
+    pub(crate) scaler: bool,
+    pub(crate) next_launch: Option<NextLaunch>,
 }
 
 /// One check.
 #[derive(Debug, Serialize)]
-struct CheckView {
-    ok: bool,
-    reason: Option<String>,
-    checked_at_ms: u64,
+pub(crate) struct CheckView {
+    pub(crate) ok: bool,
+    pub(crate) reason: Option<String>,
+    pub(crate) checked_at_ms: u64,
 }
 
 /// The newest launch of the pool.
 #[derive(Debug, Serialize)]
-struct LaunchView {
-    at_ms: u64,
+pub(crate) struct LaunchView {
+    pub(crate) at_ms: u64,
     /// `accepted` once the provider has given an id for the machine, `pending` before.
-    outcome: &'static str,
-    host: String,
+    pub(crate) outcome: &'static str,
+    pub(crate) host: String,
 }
 
 /// A machine the scheduler launched and still holds.
 #[derive(Debug, Serialize)]
-struct MachineView {
-    host: String,
-    state: Phase,
-    offer: String,
-    zone: Option<String>,
-    price_cents_per_hour: u64,
+pub(crate) struct MachineView {
+    pub(crate) host: String,
+    pub(crate) state: Phase,
+    pub(crate) offer: String,
+    pub(crate) zone: Option<String>,
+    pub(crate) price_cents_per_hour: u64,
     /// The provider's id for the machine, once the provider has given one: what a watcher
     /// outside the server matches the provider's list against.
-    provider_id: Option<String>,
+    pub(crate) provider_id: Option<String>,
 }
 
 /// A machine of the scheduler's that no record knew: counted, never released by the
 /// scaler.
 #[derive(Debug, Serialize)]
-struct OrphanView {
-    host: String,
-    provider_id: Option<String>,
+pub(crate) struct OrphanView {
+    pub(crate) host: String,
+    pub(crate) provider_id: Option<String>,
 }
 
 /// One of the provider's own checks.
 #[derive(Debug, Serialize)]
-struct NamedCheckView {
-    name: &'static str,
-    ok: bool,
-    reason: Option<String>,
+pub(crate) struct NamedCheckView {
+    pub(crate) name: &'static str,
+    pub(crate) ok: bool,
+    pub(crate) reason: Option<String>,
     /// What a check that held said, such as what a launch will make.
-    note: Option<String>,
-    checked_at_ms: u64,
+    pub(crate) note: Option<String>,
+    pub(crate) checked_at_ms: u64,
 }
 
 fn named_view(checked: Checked) -> NamedCheckView {
@@ -152,11 +152,11 @@ fn named_view(checked: Checked) -> NamedCheckView {
 /// The machines the scheduler holds. The spend is the stored price of the machines listed,
 /// not of the orphans.
 #[derive(Debug, Serialize)]
-struct Instances {
-    n: usize,
-    max: usize,
-    spend_cents_per_hour: u64,
-    max_spend_cents_per_hour: u64,
+pub(crate) struct Instances {
+    pub(crate) n: usize,
+    pub(crate) max: usize,
+    pub(crate) spend_cents_per_hour: u64,
+    pub(crate) max_spend_cents_per_hour: u64,
 }
 
 /// What the next launch is for: the first request on the wait list, else a request for
