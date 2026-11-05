@@ -9,7 +9,9 @@ use js_provider_lambdalabs::{
 };
 use js_types::{AcceleratorNeed, Model, Resources};
 
-use crate::rig::{INTERVAL, Rig, SCHEDULER, ask, host, id, live, offer, rig, rig_with, row, tag};
+use crate::rig::{
+    INTERVAL, Rig, SCHEDULER, ask, catalog, host, id, live, offer, rig, rig_with, row, tag,
+};
 
 /// A rig with one launched instance, `fake0001`.
 fn launched() -> Rig {
@@ -487,7 +489,7 @@ fn a_failed_read_of_the_types_is_an_error_and_not_an_empty_choice() {
 #[test]
 fn the_catalog_has_one_offer_per_region_with_capacity_and_the_facts_of_the_type() {
     let rig = rig(live(5));
-    let offers = rig.provider.catalog().unwrap();
+    let offers = catalog(&rig.provider).unwrap();
     let places: Vec<(&str, &str)> = offers
         .iter()
         .map(|o| (o.id.as_str(), o.zone.as_deref().unwrap()))
@@ -522,7 +524,7 @@ fn the_catalog_carries_every_architecture_and_leaves_the_choice_to_the_demand() 
             architecture,
             &["region-a"],
         )]);
-        let offers: Vec<Offer> = rig.provider.catalog().unwrap();
+        let offers: Vec<Offer> = catalog(&rig.provider).unwrap();
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].arch, name);
         assert_eq!(offers[0].os, "linux");
@@ -537,7 +539,7 @@ fn a_catalog_that_cannot_be_read_is_an_error_and_not_an_empty_catalog() {
     let down = ApiError::Transport("down".to_owned());
     rig.fake.fail_next(Call::InstanceTypes, down.clone());
     assert_eq!(
-        rig.provider.catalog(),
+        catalog(&rig.provider),
         Err(ProviderError::new(down.to_string()))
     );
 }

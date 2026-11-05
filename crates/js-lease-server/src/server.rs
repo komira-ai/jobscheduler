@@ -18,6 +18,7 @@ use crate::admit::{Admit, Launching};
 use crate::agents::{Agents, assemble};
 use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
+use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
 use crate::config::{Config, JobListen, Limits, TlsFiles, Token};
 use crate::error::StartupError;
@@ -134,6 +135,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         shared,
         scaler,
         checker,
+        cached,
         state_file,
     } = open(prepared, &clock, |table| {
         info!(
@@ -188,7 +190,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     let ticking = Ticking(tokio::spawn(tick_loop(
         shared.clone(),
         ticker,
-        scaler.clone(),
+        scaler.clone().map(|scaler| (scaler, cached)),
     )));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
@@ -236,14 +238,17 @@ pub(crate) struct Prepared {
     warnings: Vec<String>,
     status: bool,
     admit: Admit,
+    cached: Cached,
 }
 
 /// What a start has built once the lease table is open: the state the routes and the tick
-/// share, the elastic pool's scaler and its check loop, and the lease file.
+/// share, the elastic pool's scaler and its check loop, the cache of the launching
+/// providers' catalogs, and the lease file.
 pub(crate) struct Opened {
     pub(crate) shared: Arc<Shared>,
     pub(crate) scaler: Option<Scaler>,
     pub(crate) checker: Option<Checker>,
+    pub(crate) cached: Cached,
     pub(crate) state_file: PathBuf,
 }
 
@@ -288,7 +293,14 @@ pub(crate) fn prepare(
         share: plan.share,
         limits: plan.limits.clone(),
     });
-    let admit = Admit::new(launching.collect());
+    // The scaler's tick fetches the catalogs. An elastic plan comes only with a pool whose
+    // hosts register (agents), so a server with a catalog to fetch always has a scaler.
+    let catalogs = elastic.iter().fold(Catalogs::new(), |catalogs, plan| {
+        let provider = Arc::clone(&plan.provider);
+        catalogs.with(provider, plan.catalog_refresh, plan.offer_cooldown)
+    });
+    let cached = Cached::new(Arc::new(catalogs), clock.clone());
+    let admit = Admit::new(launching.collect(), cached.clone());
     let elastic = elastic.map(|mut plan| {
         let setup = Setup {
             advertise: advertise_url.clone(),
@@ -310,6 +322,7 @@ pub(crate) fn prepare(
                 first_start: boot == Boot::Initialise,
                 health: pool.health.clone(),
                 mode: pool.mode(),
+                catalogs: Arc::clone(cached.catalogs()),
             };
             Some(build(plan, parts)?)
         }
@@ -334,6 +347,7 @@ pub(crate) fn prepare(
         warnings,
         status,
         admit,
+        cached,
     };
     let listeners = Listeners {
         listen,
@@ -372,6 +386,7 @@ pub(crate) fn open(
         warnings,
         status: serves_status,
         admit,
+        cached,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
     if let Some(scaler) = &scaler {
@@ -415,6 +430,7 @@ pub(crate) fn open(
         shared,
         scaler,
         checker,
+        cached,
         state_file,
     })
 }
@@ -449,18 +465,24 @@ impl Drop for Alive {
 }
 
 /// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
-/// elastic pool when the server has one, forever; the caller aborts it. The scaler ticks on
-/// a task of its own (a provider's slow call must not hold back the table's lease expiry),
-/// so a tick is finished when both are done, or at once when the scaler is still busy with
+/// elastic pool when the server has one, with the cache of its provider's catalog, forever;
+/// the caller aborts it. The scaler ticks on a task of its own (a provider's slow call must
+/// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
+/// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
+/// table, the fetch and the scaler are done, or at once when the scaler is still busy with
 /// an earlier tick, which skips this one for it.
 ///
 /// A panic in the scaler ends its task, as one in the table ends this loop: `/healthz` then
 /// answers that the server is not ticking, and the supervisor of the process must restart
 /// it. The records are on disk before any call they describe, so a restart launches nothing
 /// twice.
-async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T, scaler: Option<Scaler>) {
+async fn tick_loop<T: Ticker>(
+    shared: Arc<Shared>,
+    mut ticker: T,
+    scaler: Option<(Scaler, Cached)>,
+) {
     let _alive = Alive(shared.clone());
-    let side = scaler.map(|scaler| ScalerLoop::spawn(shared.clone(), scaler));
+    let side = scaler.map(|(scaler, cached)| ScalerLoop::spawn(shared.clone(), scaler, cached));
     loop {
         let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
@@ -484,12 +506,13 @@ struct ScalerLoop {
 }
 
 impl ScalerLoop {
-    fn spawn(shared: Arc<Shared>, scaler: Scaler) -> Self {
+    fn spawn(shared: Arc<Shared>, scaler: Scaler, cached: Cached) -> Self {
         let (ticks, mut due) = mpsc::channel::<Tick>(1);
         let task = tokio::spawn(async move {
             let _alive = Alive(shared);
             loop {
                 let tick = or_pending(due.recv().await).await;
+                cached.refresh().await;
                 scaler.tick().await;
                 tick.finish();
             }

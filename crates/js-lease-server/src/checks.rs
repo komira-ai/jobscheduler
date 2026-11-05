@@ -4,9 +4,11 @@
 //! One task per pool waits on an injected [`Ticker`]. At each tick it asks whether a pass
 //! is due by the injected clock; if it is, it runs one pass and records the verdict. A pass
 //! asks the provider for its catalog (a refused key fails there) and checks what came
-//! back, and asks the network mode whether it can issue what a launch needs. The two
-//! halves run on the runtime's blocking pool, each with its own panic caught, and each call
-//! is bounded by the time limit of the client that makes it. A pass never exits the process
+//! back, and asks the network mode whether it can issue what a launch needs. The catalog
+//! asked for here is the provider's live answer: the cache that admission reads (the
+//! `catalogs` module) is filled by the tick, not by a pass. The two halves run on the
+//! runtime's blocking pool, each with its own panic caught, and each call is bounded by
+//! the time limit of the client that makes it. A pass never exits the process
 //! and never holds up a tick of the lease table: the loop is a task of its own.
 //!
 //! A pool begins `Checking` and stays so until one pass has been recorded. It is
@@ -26,6 +28,7 @@ use js_elastic::{CapacityProvider, CheckResult, Offer};
 use js_lease::{Clock, Timestamp};
 use js_types::normalise_arch;
 use serde::Serialize;
+use tokio::runtime::Handle;
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
@@ -171,13 +174,18 @@ struct Pass {
 
 /// The provider half: the catalog call is the credential check, the catalog it
 /// returns is checked against the pool's floor, and the provider's own checks run when the
-/// catalog could be had (a refused key would fail each of them the same way).
+/// catalog could be had (a refused key would fail each of them the same way). Runs on the
+/// blocking pool and awaits the catalog there, on `runtime`.
+///
+/// The catalog is the provider's live answer, not the server's cached one (the `catalogs`
+/// module): the point of the check is whether the credential works now.
 fn provider_checks(
+    runtime: &Handle,
     provider: &dyn CapacityProvider,
     floor: &Floor,
     pins: Option<&AgentPins>,
 ) -> Provided {
-    match provider.catalog() {
+    match runtime.block_on(provider.catalog()) {
         Err(error) => Provided {
             credentials: Err(format!("credentials: failed ({error})")),
             notes: Vec::new(),
@@ -271,8 +279,9 @@ async fn pass(
     pins: &Option<AgentPins>,
 ) -> Pass {
     let (provider, floor, pins) = (provider.clone(), floor.clone(), pins.clone());
+    let runtime = Handle::current();
     let provided =
-        spawn_blocking(move || provider_checks(provider.as_ref(), &floor, pins.as_ref()));
+        spawn_blocking(move || provider_checks(&runtime, provider.as_ref(), &floor, pins.as_ref()));
     let mode = mode.clone();
     let networked = spawn_blocking(move || network_check(&mode));
     let (provided, networked) = tokio::join!(provided, networked);

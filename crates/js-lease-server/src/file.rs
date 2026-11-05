@@ -227,6 +227,12 @@ pub struct ElasticPlan {
     pub(crate) share: u32,
     /// The pool's `provider_limits` on the provider, as admission reads them.
     pub(crate) limits: PoolLimits,
+    /// How long the provider's cached catalog is used before it is fetched again: its
+    /// `provider_limits` `catalog_refresh`.
+    pub(crate) catalog_refresh: Duration,
+    /// How long one of the provider's offers cools down: its `provider_limits`
+    /// `offer_cooldown`.
+    pub(crate) offer_cooldown: Duration,
 }
 
 impl ElasticPlan {
@@ -284,9 +290,10 @@ pub(crate) struct Registering {
 }
 
 impl Registering {
-    /// Gives the launching side the share and the limits admission reads, from the pool's
-    /// `provider_limits` (`limits`; a pool has one launching provider and a limit is refused
-    /// for any other, so it holds that provider's limits or none) and its `max_machines`.
+    /// Gives the launching side the share and the limits admission reads, and the refresh
+    /// and cool-down of the provider's catalog, from the pool's `provider_limits` (`limits`;
+    /// a pool has one launching provider and a limit is refused for any other, so it holds
+    /// that provider's limits or none) and its `max_machines`.
     fn admit(&mut self, limits: &BTreeMap<String, ProviderLimits>, max_machines: Option<u64>) {
         let limit = limits.values().next().cloned().unwrap_or_default();
         let share = limit.max_machines.or(max_machines).unwrap_or_default();
@@ -296,6 +303,8 @@ impl Registering {
                 allowed_instance_types: limit.allowed_instance_types.clone(),
                 max_price_cents_per_hour: limit.max_price_cents_per_hour,
             };
+            plan.catalog_refresh = limit.catalog_refresh;
+            plan.offer_cooldown = limit.offer_cooldown;
         });
     }
 }
@@ -864,6 +873,8 @@ impl Elastic<'_> {
             provider: Arc::from(built.provider),
             share: u32::try_from(max).unwrap_or(u32::MAX),
             limits: PoolLimits::default(),
+            catalog_refresh: ProviderLimits::default().catalog_refresh,
+            offer_cooldown: ProviderLimits::default().offer_cooldown,
         };
         Ok(Registering {
             plan: Some(plan),

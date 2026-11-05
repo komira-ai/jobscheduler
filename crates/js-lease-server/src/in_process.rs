@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::adapt::SharedClock;
 use crate::api::{Shared, agent_router, router};
+use crate::catalogs::Cached;
 use crate::checks::{Checker, Schedule};
 use crate::config::Config;
 use crate::error::StartupError;
@@ -42,6 +43,9 @@ use crate::server::{Opened, open, prepare};
 pub struct InProcess {
     shared: Arc<Shared>,
     scaler: Option<Scaler>,
+    /// The cache of the launching providers' catalogs, fetched at each tick before the
+    /// scaler's.
+    cached: Cached,
     /// The check loop of the elastic pool with its schedule, `None` without one. Held for
     /// the length of a tick, so two ticks never run at once.
     checks: Mutex<Option<Checks>>,
@@ -64,6 +68,7 @@ impl InProcess {
             shared,
             scaler,
             checker,
+            cached,
             ..
         } = open(prepared, &clock, |_| {})?;
         let checks = checker.map(|checker| Checks {
@@ -73,6 +78,7 @@ impl InProcess {
         Ok(Self {
             shared,
             scaler,
+            cached,
             checks: Mutex::new(checks),
         })
     }
@@ -93,16 +99,18 @@ impl InProcess {
 
     /// One tick, its parts in this order and each run to its end: the elastic pool's checks
     /// (a pass when one is due by the clock), then the lease table and the agent registry
-    /// (what the tick loop does at a tick), then the scaler. In the server the three run on
-    /// three tasks, and the scaler skips a tick while it is still busy with the one before;
-    /// this order is one of the interleavings those tasks allow, and the scaler is never
-    /// skipped. A second call waits for the first to finish.
+    /// (what the tick loop does at a tick), then the fetch of the catalogs that are due,
+    /// then the scaler. In the server the checks, the table and the fetch-then-scaler run
+    /// on three tasks, and the scaler's task skips a tick while it is still busy with the
+    /// one before; this order is one of the interleavings those tasks allow, and the fetch
+    /// and the scaler are never skipped. A second call waits for the first to finish.
     pub async fn tick(&self) {
         let mut checks = self.checks.lock().await;
         if let Some(Checks { checker, schedule }) = &mut *checks {
             checker.step(schedule).await;
         }
         self.shared.tick().await;
+        self.cached.refresh().await;
         if let Some(scaler) = &self.scaler {
             scaler.tick().await;
         }
