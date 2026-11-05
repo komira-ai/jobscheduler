@@ -1,21 +1,31 @@
-//! The run loop: the kernel, the real server, the agents, and a check after every step.
+//! The run loop: the kernel, the real server, the agents, the client, and a check after
+//! every step.
 //!
-//! A [`Cell`] owns the [`Sim`] of [`CellNode`]s, the [`Checker`] and the actions scripted
-//! at virtual times ([`Cell::at`]). [`Cell::run_until`] repeats, in this order: it reads
-//! the time of the kernel's next event and of the next scripted action; when the event
-//! comes first, or at the same time, it applies the event with [`Sim::step`]; otherwise it
-//! moves the clock to the action's time with [`Sim::run_until`] and runs the action. After
-//! every step and every action that changed something it builds what changed into the
-//! [`Observations`] (the agent the step fed, the ledger entries appended, the server's
-//! listing once per virtual second and at every client call) and calls
-//! [`Checker::step`]. It stops at the end time or at the first [`Violation`], which every
-//! later call returns again.
+//! A [`Cell`] owns the [`Sim`] of [`CellNode`]s, the [`Checker`], the actions scripted at
+//! virtual times ([`Cell::at`]) and the client driver ([`Front`]). [`Cell::run_until`]
+//! repeats, in this order: it reads the time of the kernel's next event, of the next
+//! scripted action and of the client's next poll ([`Front::next_poll`]); when the event
+//! comes first, or at the same time, it applies the event with [`Sim::step`]; otherwise,
+//! when the action comes first or at the same time as the poll, it moves the clock to the
+//! action's time with [`Sim::run_until`] and runs the action; otherwise it moves the clock
+//! to the poll's time and polls the client, which makes its calls to the server there and
+//! then. The client is polled at most once per virtual millisecond. After every step,
+//! every poll and every action that changed something it builds what changed into the
+//! [`Observations`] (the agent the step fed, the events the client heard, the ledger
+//! entries appended, the server's listing once per virtual second and at every client
+//! call or poll) and calls [`Checker::step`]. It stops at the end time or at the first
+//! [`Violation`], which every later call returns again.
+//!
+//! [`Cell::settle`] ends a scenario: it runs every scripted action, the ones actions
+//! script too, then the cell for the time it is given, and makes the end check
+//! ([`Checker::end`]).
 //!
 //! # The trace
 //!
 //! The cell writes a trace of its own, family `js-sim-cell`, beside the kernel's: what
 //! the kernel does not see (a process killed or replaced, the bus's faults changed, a
-//! client call and its status), what the server's listing says of each host when it
+//! client call and its status, an item submitted or cancelled and each event the client
+//! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
 //! changes, each launch in the ledger, and the violation that stopped the run. A line
 //! names hosts, statuses and counts; it never holds a token, a bearer, a session secret,
 //! a body or an id the server generated. The hash of a run ([`Cell::trace_hash`]) is the
@@ -30,7 +40,7 @@ use axum::body::Body;
 use axum::http::{Request, Response};
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
-use js_sim::{Chance, Faults, NodeId, Partition, Sim, Trace, TraceHash};
+use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 use js_types::{HostId, IdError, Resources};
@@ -38,11 +48,14 @@ use js_types::{HostId, IdError, Resources};
 use crate::agent::{AgentNode, AgentSpec};
 use crate::bus::{SERVER, agent_name};
 use crate::counters::Counters;
-use crate::invariant::{Checker, Touched, Violation};
+use crate::front::{ClientPort, Front, LeaseFront};
+use crate::invariant::{Checker, Invariant, Touched, Violation};
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
-use crate::observe::Observations;
+use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Observations};
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
+use crate::text;
+use crate::work::Work;
 
 /// How long an agent waits between two hellos that were not welcomed (design section
 /// 5.1: a one second base).
@@ -50,6 +63,9 @@ pub const HELLO_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often the run loop re-reads the server's listing when no client call does.
 pub const LISTING_EVERY: Duration = Duration::from_secs(1);
+
+/// The least time between two polls of the client.
+const POLL_GAP: Duration = Duration::from_millis(1);
 
 /// A scripted action: a change to the cell at a virtual time.
 type Action = Box<dyn FnOnce(&mut Cell)>;
@@ -100,8 +116,45 @@ impl Faulted {
     }
 }
 
+/// The client driver: the front, the number of the next item, and the earliest time of
+/// the next poll.
+struct Client {
+    front: Box<dyn Front>,
+    next_item: u32,
+    after: FarmTime,
+}
+
+impl Client {
+    /// When the next poll is due: when the front asks, but not before `after`.
+    fn due(&self) -> Option<FarmTime> {
+        let asked = self.front.next_poll();
+        asked.map(|at| at.max(self.after))
+    }
+}
+
+/// The server as a poll of the client calls it: each call through the client router at
+/// the poll's time, written down for the trace.
+struct Recording<'a> {
+    now: FarmTime,
+    server: Option<&'a mut ServerNode>,
+    lines: Vec<String>,
+}
+
+impl ClientPort for Recording<'_> {
+    fn call(&mut self, request: Request<Body>) -> Response<String> {
+        let method = request.method().as_str().to_owned();
+        let now = self.now;
+        let server = self.server.as_deref_mut();
+        let answer = server.map_or_else(Response::default, |s| s.client_call(now, request));
+        let status = answer.status().as_u16();
+        self.lines.push(format!("client {method} {status}"));
+        answer
+    }
+}
+
 /// The real lease server and its agents under the kernel, checked after every step.
 pub struct Cell {
+    seed: u64,
     sim: Sim<CellNode>,
     checker: Checker,
     observations: Observations,
@@ -112,6 +165,7 @@ pub struct Cell {
     agents: usize,
     script: BTreeMap<(FarmTime, u64), Action>,
     scripted: u64,
+    client: Client,
     hook: Option<Hook>,
     checks: u64,
     listed_at: Option<FarmTime>,
@@ -125,7 +179,7 @@ pub struct Cell {
 
 impl Cell {
     /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir`, with
-    /// `faults` on the bus and no agent yet.
+    /// `faults` on the bus, no agent yet, and a [`LeaseFront`] as its client.
     ///
     /// # Errors
     ///
@@ -150,7 +204,13 @@ impl Cell {
             merged = Some(Vec::new());
         }
         sim.add_node(SERVER, CellNode::Server(Box::new(server)));
+        let client = Client {
+            front: Box::new(LeaseFront::new(&spec)),
+            next_item: 0,
+            after: FarmTime::default(),
+        };
         let mut cell = Self {
+            seed: setup.seed,
             sim,
             checker: Checker::new(),
             observations: Observations::quiet(),
@@ -161,6 +221,7 @@ impl Cell {
             agents: 0,
             script: BTreeMap::new(),
             scripted: 0,
+            client,
             hook: None,
             checks: 0,
             listed_at: None,
@@ -242,7 +303,9 @@ impl Cell {
             }
             let event = self.sim.next_event_time();
             let action = self.script.first_key_value().map(|(&(at, _), _)| at);
-            let next = event.into_iter().chain(action).fold(end, FarmTime::min);
+            let poll = self.client.due();
+            let times = event.into_iter().chain(action).chain(poll);
+            let next = times.fold(end, FarmTime::min);
             if event == Some(next) {
                 self.sim.step();
                 let touched = self.touched_by_step();
@@ -253,11 +316,106 @@ impl Cell {
                 let act = first.remove();
                 self.sim.run_until(next);
                 act(self);
+            } else if poll == Some(next) {
+                self.sim.run_until(next);
+                self.poll();
             } else {
                 self.sim.run_until(end);
                 return Ok(());
             }
         }
+    }
+
+    /// Runs every scripted action, the ones an action scripts too, then the cell for
+    /// `within` more of virtual time, and makes the end check: [`Checker::end`] over what
+    /// the cell observes then, with the server's listing read again. The end of a fault
+    /// (a partition healed, the bus's faults put back) is an action, so `within` is
+    /// virtual time after the last fault ended, and after the last action of any kind.
+    ///
+    /// # Errors
+    ///
+    /// The first violation of a step or end invariant. A fault still active at the end
+    /// is a violation of [`Invariant::SettlesWhenQuiet`]: the scenario never went quiet.
+    pub fn settle(&mut self, within: Duration) -> Result<(), Violation> {
+        while let Some(&(last, _)) = self.script.last_key_value().map(|(key, _)| key) {
+            self.run_until(last)?;
+        }
+        let end = self.sim.now().saturating_add(within);
+        self.run_until(end)?;
+        self.reread();
+        self.observations.at = self.sim.now();
+        let at = self.observations.at;
+        let found = Checker::end(&self.observations, within).unwrap_or_else(|refused| {
+            let invariant = Invariant::SettlesWhenQuiet;
+            let detail = refused.to_string();
+            vec![Violation {
+                invariant,
+                at,
+                detail,
+            }]
+        });
+        self.stop_at(found.into_iter().next());
+        self.violation.clone().map_or(Ok(()), Err)
+    }
+
+    /// Makes `front` the cell's client, in place of the one it has. The old front is
+    /// dropped with every item it held: an item submitted before is never polled again
+    /// and never ends, so a scenario sets its front before it submits anything.
+    pub fn set_front(&mut self, front: Box<dyn Front>) {
+        self.client.front = front;
+    }
+
+    /// Submits one item of `work` now: the cell records what it asks for and that it was
+    /// submitted, hands it to the client, and checks. Items are numbered from zero.
+    pub fn submit(&mut self, work: &Work) -> ItemId {
+        let now = self.sim.now();
+        let item = ItemId(self.client.next_item);
+        self.client.next_item += 1;
+        let heard = vec![Heard {
+            at: now,
+            event: ClientEvent::Submitted,
+        }];
+        let record = ItemRecord {
+            ask: work.ask(now),
+            heard,
+        };
+        self.observations.items.insert(item, record);
+        self.client.front.submit(item, work, now);
+        let submitted = text::event(&ClientEvent::Submitted);
+        self.record(format!("client {} {submitted}", text::item(item)));
+        self.check(Touched::nothing().item(item));
+        item
+    }
+
+    /// Asks the client to cancel `item`, now.
+    pub fn cancel_item(&mut self, item: ItemId) {
+        let now = self.sim.now();
+        self.client.front.cancel(item, now);
+        self.record(format!("client {} cancel", text::item(item)));
+    }
+
+    /// The kernel's random source, from the seed: how a scenario draws a choice (which
+    /// agents, when) so that it follows the seed.
+    pub fn rng(&mut self) -> &mut SimRng {
+        self.sim.rng()
+    }
+
+    /// The seed the cell runs.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// How many agents the cell has added.
+    #[must_use]
+    pub fn agent_count(&self) -> usize {
+        self.agents
+    }
+
+    /// Every agent's counts added together.
+    #[must_use]
+    pub fn total_counters(&self) -> Counters {
+        Counters::sum((0..self.agents).filter_map(|index| self.counters(index)))
     }
 
     /// Kills the process of agent `index`: it holds nothing and drops every input until
@@ -484,6 +642,36 @@ impl Cell {
         self.listed_at = Some(now);
     }
 
+    /// Polls the client now: its calls go to the server, each is written into the trace,
+    /// then each event heard; the listing is read again and the cell checks.
+    fn poll(&mut self) {
+        let now = self.sim.now();
+        self.client.after = now.saturating_add(POLL_GAP);
+        let server = self.sim.nodes_mut().find_map(|(_, n)| n.as_server_mut());
+        let mut port = Recording {
+            now,
+            server,
+            lines: Vec::new(),
+        };
+        let heard = self.client.front.poll(now, &mut port);
+        for line in port.lines {
+            self.record(line);
+        }
+        let mut touched = Touched::nothing().server();
+        for (item, event) in heard {
+            self.record(format!(
+                "client {} {}",
+                text::item(item),
+                text::event(&event)
+            ));
+            let record = self.observations.items.entry(item).or_default();
+            record.heard.push(Heard { at: now, event });
+            touched = touched.item(item);
+        }
+        self.reread();
+        self.check(touched);
+    }
+
     /// Checks the step invariants over what `touched` names, after reading the ledger.
     fn check(&mut self, touched: Touched) {
         self.observations.at = self.sim.now();
@@ -503,7 +691,12 @@ impl Cell {
             .hook
             .as_mut()
             .and_then(|hook| hook(checks, &self.observations));
-        let first = found.or(hooked);
+        self.stop_at(found.or(hooked));
+    }
+
+    /// Keeps `first` as the violation that stops the run, unless one stopped it before,
+    /// and writes it into the trace.
+    fn stop_at(&mut self, first: Option<Violation>) {
         if let Some(violation) = &first {
             self.record(format!("violation {}", violation.invariant.name()));
         }

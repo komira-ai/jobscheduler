@@ -1,7 +1,8 @@
 //! Running a seed, and what a failing seed reports.
 //!
-//! A run is a function of its seed: [`run`] builds the cell for the seed, runs it with only
-//! its trace's hash kept, and on a violation builds and runs the same seed again with the
+//! A run is a function of its seed: [`run`] (or [`drive`], for a run that ends otherwise
+//! than at a fixed time) builds the cell for the seed, runs it with only its trace's hash
+//! kept, and on a violation builds and runs the same seed again with the
 //! trace kept as text. The [`FailureReport`] holds the scenario's name, the seed, the hash
 //! of the first run, the violation, the last [`REPORT_LINES`] lines of the second run and
 //! that run's hash, which equals the first unless something outside the seed (a clock, a
@@ -86,14 +87,31 @@ pub fn run(
     end: FarmTime,
     build: &dyn Fn(Setup) -> Result<Cell, StartupError>,
 ) -> Result<Cell, Failure> {
+    drive(scenario, seed, build, &|cell| cell.run_until(end))
+}
+
+/// Runs `scenario` at `seed` as [`run`] does, with `go` in place of the run to an end
+/// time: `go` runs the cell `build` made (to an end time, or to the end of the scenario
+/// and its end check, [`Cell::settle`]) and is called again on the second cell when the
+/// first fails.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn drive(
+    scenario: &str,
+    seed: u64,
+    build: &dyn Fn(Setup) -> Result<Cell, StartupError>,
+    go: &dyn Fn(&mut Cell) -> Result<(), Violation>,
+) -> Result<Cell, Failure> {
     let mut cell = build(Setup::new(seed)).map_err(Failure::Start)?;
-    let Err(violation) = cell.run_until(end) else {
+    let Err(violation) = go(&mut cell) else {
         return Ok(cell);
     };
     let (hash, check) = (cell.trace_hash(), cell.checks());
     drop(cell);
     let mut again = build(Setup::new(seed).with_trace_lines()).map_err(Failure::Start)?;
-    let _replayed = again.run_until(end);
+    let _replayed = go(&mut again);
     let lines = again.trace_lines().unwrap_or_default();
     let last_lines = lines[lines.len().saturating_sub(REPORT_LINES)..].to_vec();
     Err(Failure::Violated(Box::new(FailureReport {
