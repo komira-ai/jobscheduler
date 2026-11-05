@@ -6,6 +6,31 @@
 //! reaches an answer: a body that does not decode is answered with the route's
 //! `invalid-*` code, never with the decoder's message, which repeats the text it choked
 //! on.
+//!
+//! # Jobs keyed by job id
+//!
+//! When the server holds the job tables ([`Agents::jobs`]) and the host reported the hello
+//! capability [`js_agent_wire::PER_JOB_CAPABILITY`], the heartbeat reply also carries, after
+//! the registry has accepted the beat ([`crate::per_job`]):
+//!
+//! - `commands`: after the lease and run commands, a `job_stop` for each job of the host
+//!   with a cancel intent that has not ended, each listed job the store holds no live
+//!   allocation of on this host, and each listed job that ended without the host reporting
+//!   it; then a `job_start` for each job placed on the host that it does not list yet, with
+//!   the allocation's booked resources, the wall limit, the network level and the declared
+//!   ports, keyed by the job id and the allocation id. Each is resent until the listing
+//!   shows it taken; all of them together stay within `MAX_COMMANDS`.
+//! - `job_acks`: a verdict on each listed job result (`ACCEPTED` when this beat committed
+//!   the end, `DUPLICATE` when the job had already ended, `STALE` for a job the store holds
+//!   no live allocation of here, or an end its state cannot take).
+//! - `retired_acks`: every retired id the heartbeat listed, once its job is cancelled and
+//!   its allocation freed (or there was nothing to change).
+//!
+//! The listing's changes (a job starting, running or ended, an allocation freed once the
+//! host no longer lists an ended job) are committed before the reply is built. A commit that
+//! fails answers 500 `state-write-failed`, with nothing of the reply, and the agent reports
+//! again. A reply to any other agent, or from a server without the job tables, is the lease
+//! and run reply alone, as it was before these fields: they are left out when empty.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,14 +46,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, ProtocolRange, Welcome, refusal};
 use js_registry::{Credential, Refusal};
+use js_types::HostId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
+use crate::per_job::{self, JobReply};
 use crate::util::blocking;
+
+/// The code of the 500 a heartbeat is answered when a job or allocation change it reported
+/// could not be committed.
+const STATE_WRITE_FAILED: &str = "state-write-failed";
 
 mod own_host;
 
@@ -245,6 +277,7 @@ async fn heartbeat(
     } else if refused {
         agents.save_bindings().await;
     }
+    add_jobs(&agents, &heartbeat, &mut reply).await?;
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
@@ -258,6 +291,80 @@ async fn heartbeat(
         .await;
     }
     Ok(Json(reply))
+}
+
+/// Adds the per-job half of the heartbeat to `reply` when the server holds the job tables
+/// and the host reported [`PER_JOB_CAPABILITY`]; leaves it as it is otherwise. Its own
+/// function, so the heartbeat route stays the same for every test binary whatever the
+/// server holds.
+///
+/// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
+async fn add_jobs(
+    agents: &Arc<Agents>,
+    heartbeat: &Heartbeat,
+    reply: &mut HeartbeatReply,
+) -> Result<(), Refused> {
+    let Some(jobs) = &agents.jobs else {
+        return Ok(());
+    };
+    let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
+    if let Some(served) = serve_jobs(agents, jobs, heartbeat, room).await? {
+        reply.commands.extend(served.commands);
+        reply.job_acks = served.job_acks;
+        reply.retired_acks = served.retired_acks;
+    }
+    Ok(())
+}
+
+/// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
+/// room for `room` commands; `None` for any other host. The store is read and written on the
+/// pool for blocking calls. A failed read or commit is a 500 `state-write-failed`.
+///
+/// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
+async fn serve_jobs(
+    agents: &Arc<Agents>,
+    jobs: &Arc<ServerJobs>,
+    heartbeat: &Heartbeat,
+    room: usize,
+) -> Result<Option<JobReply>, Refused> {
+    let per_job = HostId::new(&heartbeat.host_id)
+        .ok()
+        .and_then(|host| agents.registry.own_host(&host))
+        .and_then(|own| own.host.claim.map(|claim| (own.host.id, claim)))
+        .filter(|(_, claim)| {
+            let reported = claim.capabilities().get(js_agent_wire::PER_JOB_CAPABILITY);
+            reported.map(String::as_str) == Some("true")
+        });
+    let Some((host, claim)) = per_job else {
+        return Ok(None);
+    };
+    let ceiling =
+        js_agent_wire::NetworkCeiling::from_capabilities(claim.capabilities()).unwrap_or_default();
+    let jobs = Arc::clone(jobs);
+    let listed = heartbeat.jobs.clone();
+    let retired = heartbeat.retired_jobs.clone();
+    let served = blocking(move || {
+        let context = per_job::BeatContext {
+            host: &host,
+            ceiling: &ceiling,
+        };
+        let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+        (host, served)
+    })
+    .await;
+    match served {
+        (host, Ok(served)) => {
+            agents.note_listing(&host, served.clean);
+            Ok(Some(served))
+        }
+        (host, Err(error)) => {
+            warn!(%host, %error, "a heartbeat's job listing could not be committed");
+            Err(Refused::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                STATE_WRITE_FAILED,
+            ))
+        }
+    }
 }
 
 /// The body of a request, or the refusal for a body that is over the cap (413) or could
@@ -379,6 +486,7 @@ mod tests {
             disk_gib: None,
             jobs: Vec::new(),
             retired_jobs: Vec::new(),
+            log_grant_state: None,
         };
         let hello: Hello = serde_json::from_value(json!({
             "protocol": { "min": 2, "max": 3 },
@@ -481,3 +589,15 @@ mod tests {
 #[cfg(test)]
 #[path = "agent_api_race_tests.rs"]
 mod race_tests;
+
+#[cfg(test)]
+#[path = "agent_api_job_rig.rs"]
+pub(crate) mod job_rig;
+
+#[cfg(test)]
+#[path = "agent_api_job_tests.rs"]
+mod job_tests;
+
+#[cfg(test)]
+#[path = "agent_api_job_cases.rs"]
+mod job_cases;

@@ -21,6 +21,11 @@ pub enum Defect {
     NeverFences,
     /// A result not yet acknowledged is forgotten when the connection drops.
     ForgetsUnackedResult,
+    /// A start whose fence was retired runs the job again.
+    RunsRetiredFence,
+    /// A retired fence is kept by the job alone, so the same job under a new allocation is
+    /// refused too.
+    FenceKeyedByJobAlone,
 }
 
 /// A correct in-process agent, or with one [`Defect`] a broken one.
@@ -39,6 +44,10 @@ pub struct FakeAgent {
     launches: BTreeMap<String, u32>,
     unacked: BTreeSet<String>,
     sent: Vec<String>,
+    /// The allocation each fenced job that runs was started under.
+    fences: BTreeMap<String, String>,
+    /// The fences of the fenced jobs that ended: a job with its allocation.
+    retired_fences: BTreeSet<(String, String)>,
 }
 
 impl FakeAgent {
@@ -64,6 +73,8 @@ impl FakeAgent {
             launches: BTreeMap::new(),
             unacked: BTreeSet::new(),
             sent: Vec::new(),
+            fences: BTreeMap::new(),
+            retired_fences: BTreeSet::new(),
         }
     }
 
@@ -125,6 +136,28 @@ impl AgentHarness for FakeAgent {
         Delivery::Delivered
     }
 
+    fn start_fenced(&mut self, job: &str, allocation: &str) -> Delivery {
+        if !self.connected {
+            return Delivery::Lost;
+        }
+        self.last_contact = self.now;
+        let fence = (job.to_string(), allocation.to_string());
+        let fenced = match self.lacks(Defect::FenceKeyedByJobAlone) {
+            true => self
+                .retired_fences
+                .iter()
+                .any(|(retired, _)| retired == job),
+            false => self.retired_fences.contains(&fence),
+        };
+        let refused = fenced && !self.lacks(Defect::RunsRetiredFence);
+        if !refused && !self.running.contains(job) {
+            *self.launches.entry(job.to_string()).or_insert(0) += 1;
+            self.running.insert(job.to_string());
+            self.fences.insert(fence.0, fence.1);
+        }
+        Delivery::Delivered
+    }
+
     fn cancel(&mut self, lease: &str) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
@@ -152,6 +185,9 @@ impl AgentHarness for FakeAgent {
 
     fn complete(&mut self, lease: &str) {
         self.running.remove(lease);
+        if let Some(allocation) = self.fences.remove(lease) {
+            self.retired_fences.insert((lease.to_string(), allocation));
+        }
         self.unacked.insert(lease.to_string());
         self.heartbeat();
     }

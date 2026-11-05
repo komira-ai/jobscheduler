@@ -13,6 +13,7 @@ use crate::error::{Rule, ValidationError};
 use crate::hello::Phase;
 use crate::limits;
 use crate::load::NodeLoad;
+use crate::log_sink::{self, LogGrant, LogGrantState};
 use crate::per_job::{self, HeldJob, JobResultAck};
 use crate::refusal;
 
@@ -264,6 +265,16 @@ pub struct Heartbeat {
     /// none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_jobs: Vec<String>,
+    /// What the agent holds of the host's log credential ([`LogGrantState`]): sent by an
+    /// agent that reported [`crate::LOG_UPLOAD_CAPABILITY`], per host, absent otherwise. Not
+    /// checked beyond decoding, and a value that does not decode reads as absent, so it never
+    /// refuses the heartbeat. A server from before the field ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub log_grant_state: Option<LogGrantState>,
 }
 
 /// The server's verdict on a [`RunResult`] (and, in a [`JobResultAck`], on a job's result).
@@ -321,6 +332,18 @@ pub struct HeartbeatReply {
     /// stops listing them. Absent means none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_acks: Vec<String>,
+    /// The host's log credential ([`LogGrant`]), one for every job on the host, sent only to
+    /// an agent that reported [`crate::LOG_UPLOAD_CAPABILITY`] and resent until the agent's
+    /// `log_grant_state` names it; absent when there is nothing to send. A value that does not
+    /// decode reads as absent, and a bad one is reported in [`ReplyCheck::log_grant`]: the
+    /// agent ignores it and acts on the rest of the reply. An agent from before the field
+    /// ignores it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "log_sink::lenient"
+    )]
+    pub log_grant: Option<LogGrant>,
 }
 
 impl HeldRun {
@@ -419,6 +442,7 @@ impl fmt::Debug for Heartbeat {
             .field("disk_gib", &self.disk_gib)
             .field("jobs", &self.jobs)
             .field("retired_jobs", &self.retired_jobs)
+            .field("log_grant_state", &self.log_grant_state)
             .finish()
     }
 }
@@ -519,6 +543,12 @@ pub struct ReplyCheck<'a> {
     /// none twice). When this is an error the agent ignores `retired_acks` and still acts
     /// on `commands`.
     pub retired_acks: Result<(), ValidationError>,
+    /// Whether `log_grant` is acceptable: `Ok` when there is none, and an error with
+    /// [`refusal::INVALID_LOG_CREDENTIAL`] naming the field when a field is empty, over its
+    /// cap ([`limits::MAX_LOG_CREDENTIAL_FIELD`], [`limits::MAX_LOG_SESSION_TOKEN`]) or holds a
+    /// byte other than printable ASCII, or the expiry is zero. When this is an error the
+    /// agent ignores `log_grant` and still acts on `commands` and the acknowledgements.
+    pub log_grant: Result<(), ValidationError>,
 }
 
 impl HeartbeatReply {
@@ -554,6 +584,9 @@ impl HeartbeatReply {
             exclusive: check::opt_ident(at.field("exclusive"), self.exclusive.as_ref()),
             job_acks: per_job::check_job_acks(at, &self.job_acks),
             retired_acks: per_job::check_ids(at.field("retired_acks"), &self.retired_acks),
+            log_grant: self.log_grant.as_ref().map_or(Ok(()), |grant| {
+                grant.check(At::new("log_grant", refusal::INVALID_LOG_CREDENTIAL))
+            }),
         }
     }
 

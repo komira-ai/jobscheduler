@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use js_contain::container::{ContainerLimits, ContainerSpec, Ended, HostMount};
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
 use js_contain::oci::{
-    Oci, OciConfig, RunEnd, exit_record_path, read_exit_record, recorded_supervisor, stdout_path,
-    supervisor_path,
+    Oci, OciConfig, RunEnd, exit_record_path, read_exit_record, recorded_supervisor, stderr_path,
+    stdout_path, supervisor_path,
 };
 use js_contain::subids::IdFiles;
 use js_testkit::spawn::install_copy;
@@ -94,16 +94,21 @@ impl Node {
 
     /// The container `lease-1-2` of this node.
     fn spec(&self) -> ContainerSpec {
-        let lease = self.dir.join("scratch/lease-1-2");
+        self.spec_of("lease-1-2")
+    }
+
+    /// The container `name` of this node, in a lease directory of its own.
+    fn spec_of(&self, name: &str) -> ContainerSpec {
+        let lease = self.dir.join("scratch").join(name);
         ContainerSpec {
-            name: "lease-1-2".to_owned(),
+            name: name.to_owned(),
             image: format!("registry.example/library/tool@sha256:{}", "a".repeat(64)),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             input_root: lease.join("root"),
             upper: lease.join("upper"),
             overlay_work: lease.join("work"),
             dir: lease,
-            cgroup_parent: "/js.slice/actions/lease-1-2".to_owned(),
+            cgroup_parent: format!("/js.slice/actions/{name}"),
             exec_root: "/job/root".to_owned(),
             working_directory: String::new(),
             env: Vec::new(),
@@ -136,7 +141,7 @@ async fn a_supervised_container_ends_with_its_code_and_output_in_its_record() {
     let node = Node::new("ends", "run-exit 3\nrun-out hello\nrun-err oops");
     let (oci, spec) = (node.oci(), node.spec());
     oci.create(&spec).await.expect("bundle");
-    let mut run = oci.start_supervised(&spec).expect("started");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
     assert_eq!(run.lease(), spec.dir);
     // The lease's directory names its supervisor, for a teardown that lost the ledger.
     assert_eq!(recorded_supervisor(&spec.dir), Some(run.id()));
@@ -167,16 +172,16 @@ async fn a_lease_is_started_once() {
     let node = Node::new("twice", "");
     let (oci, spec) = (node.oci(), node.spec());
     oci.create(&spec).await.expect("bundle");
-    let mut run = oci.start_supervised(&spec).expect("started");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
     run.wait().await;
 
     let why = oci
-        .start_supervised(&spec)
+        .start_supervised(&spec, None)
         .expect_err("the record is there");
     assert!(why.contains("an exit record is already there"), "{why}");
     std::fs::remove_file(exit_record_path(&spec.dir)).expect("remove the record");
     let why = oci
-        .start_supervised(&spec)
+        .start_supervised(&spec, None)
         .expect_err("the files are there");
     assert!(why.contains("did not say it is ready"), "{why}");
     assert_eq!(read_exit_record(&spec.dir), Ok(None));
@@ -190,7 +195,7 @@ async fn a_run_is_adopted_by_its_supervisor_id() {
     let node = Node::new("adopt", "run-exit 4\nrun-out kept");
     let (oci, spec) = (node.oci(), node.spec());
     oci.create(&spec).await.expect("bundle");
-    let mut run = oci.start_supervised(&spec).expect("started");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
     run.wait().await;
 
     let adopted = oci.adopt_supervised(&spec.dir, run.id());
@@ -217,7 +222,7 @@ async fn the_words_of_crun_are_read_for_a_supervised_run() {
     let node = Node::new("not-run", script);
     let (oci, spec) = (node.oci(), node.spec());
     oci.create(&spec).await.expect("bundle");
-    let mut run = oci.start_supervised(&spec).expect("started");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
     run.wait().await;
     assert_eq!(run.run_end(), RunEnd::Exited(1));
     assert_eq!(
@@ -241,8 +246,41 @@ async fn the_supervisor_file_is_made_new_and_never_written_through_a_link() {
     let target = node.dir.join("elsewhere");
     std::fs::write(&target, "kept").expect("target");
     std::os::unix::fs::symlink(&target, supervisor_path(&spec.dir)).expect("link");
-    let mut run = oci.start_supervised(&spec).expect("started");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
     assert_eq!(std::fs::read_to_string(&target).expect("target"), "kept");
     assert_eq!(recorded_supervisor(&spec.dir), Some(run.id()));
     run.wait().await;
+}
+
+/// Catches a supervisor started with the runtime's file cap in place of the run's: the
+/// supervisor of a run given a cap of 5 bytes keeps 5 bytes of each stream in the lease's
+/// files and records that they were cut, and the supervisor of a run given none keeps the
+/// runtime's (1 MiB, so all 17 bytes of each), while both tails hold the whole of what was
+/// printed.
+#[tokio::test]
+async fn the_supervisor_is_given_the_runs_cap() {
+    let node = Node::new("cap", "run-out 0123456789abcdef\nrun-err fedcba9876543210");
+    let oci = node.oci();
+    let read = |path: PathBuf| std::fs::read_to_string(path).expect("file");
+
+    let spec = node.spec_of("lease-1-5");
+    oci.create(&spec).await.expect("bundle");
+    let mut run = oci.start_supervised(&spec, Some(5)).expect("started");
+    run.wait().await;
+    assert_eq!(run.run_end(), RunEnd::Exited(0));
+    assert_eq!(read(stdout_path(&spec.dir)), "01234");
+    assert_eq!(read(stderr_path(&spec.dir)), "fedcb");
+    let tail = run.tail();
+    assert!(tail.stdout.file_cut && tail.stderr.file_cut);
+    assert_eq!(tail.stdout.bytes, b"0123456789abcdef\n");
+    assert_eq!((tail.stdout.total, tail.stderr.total), (17, 17));
+
+    let spec = node.spec_of("lease-1-6");
+    oci.create(&spec).await.expect("bundle");
+    let mut run = oci.start_supervised(&spec, None).expect("started");
+    run.wait().await;
+    assert_eq!(read(stdout_path(&spec.dir)), "0123456789abcdef\n");
+    assert_eq!(read(stderr_path(&spec.dir)), "fedcba9876543210\n");
+    let tail = run.tail();
+    assert!(!tail.stdout.file_cut && !tail.stderr.file_cut);
 }

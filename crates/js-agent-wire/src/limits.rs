@@ -16,7 +16,7 @@
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | `run` and native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
 //! | `run` and native `args` | as `args` |
-//! | `run` and native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
+//! | `run` and native `env`, and a job start's `env` (one check, [`crate::check_env`]) | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
 //! | `run` and native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
@@ -31,6 +31,9 @@
 //! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_DISK_BYTES`], [`MAX_DISK_GIB`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
+//! | log sink of a job start | `endpoint` [`MAX_LOG_ENDPOINT_LEN`] bytes; `region` [`MAX_LOG_REGION_LEN`] and `bucket` [`MAX_LOG_BUCKET_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric; `prefix` [`MAX_LOG_PREFIX_LEN`] bytes, for a job id of at most [`MAX_LOG_JOB_ID_LEN`] bytes |
+//! | log grant of a reply | `access_key_id`, `secret_access_key` [`MAX_LOG_CREDENTIAL_FIELD`] bytes; `session_token` [`MAX_LOG_SESSION_TOKEN`] bytes; printable ASCII, no space |
+//! | bodies | a heartbeat [`HEARTBEAT_BODY_BUDGET`] bytes, a heartbeat reply [`REPLY_BODY_BUDGET`] bytes |
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
 pub const MAX_ID_LEN: usize = 128;
@@ -45,14 +48,14 @@ pub const MAX_ARG_LEN: usize = 16 * 1024;
 pub const MAX_ARGS_TOTAL_BYTES: usize = 256 * 1024;
 /// Longest `program` of a run or a native job, in bytes.
 pub const MAX_PROGRAM_LEN: usize = 4096;
-/// Most environment entries on a run or a native job.
+/// Most environment entries on a run, a native job or a job start.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
 pub const MAX_ENV_KEY_LEN: usize = js_types::env::MAX_ENV_NAME_LEN;
 /// Longest environment variable value, in bytes.
 pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
-/// Most bytes the names and values of one run's or native job's environment may hold
-/// together.
+/// Most bytes the names and values of one run's, native job's or job start's environment
+/// may hold together.
 pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
 /// Most inputs on a run or a native job.
 pub const MAX_INPUTS: usize = 256;
@@ -206,3 +209,25 @@ pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// This is not a guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS` allow far
 /// more, and a beat over the server's limit is refused there.
 pub const HEARTBEAT_BODY_BUDGET: usize = 65_536;
+/// The body an agent reads for a heartbeat reply (or any other answer of the server), in
+/// bytes; the agent's client (`js-client`) reads no more. A [`crate::LogGrant`] at every cap
+/// is 4,464 bytes of it, and a test holds a busy reply with one to a quarter of it.
+pub const REPLY_BODY_BUDGET: usize = 1024 * 1024;
+
+/// Longest [`crate::LogSink::endpoint`], in bytes.
+pub const MAX_LOG_ENDPOINT_LEN: usize = 512;
+/// Longest [`crate::LogSink::region`], in bytes.
+pub const MAX_LOG_REGION_LEN: usize = 64;
+/// Longest [`crate::LogSink::bucket`], in bytes: the longest S3 bucket name.
+pub const MAX_LOG_BUCKET_LEN: usize = 63;
+/// Longest job id a [`crate::LogSink`] is accepted for, in bytes: the service's job id. A start
+/// of a longer id (the wire allows [`MAX_ID_LEN`]) runs without live logs.
+pub const MAX_LOG_JOB_ID_LEN: usize = 63;
+/// Longest [`crate::LogSink::prefix`], in bytes: a configured prefix of 512 bytes, `/`, a job
+/// id of [`MAX_LOG_JOB_ID_LEN`] bytes and the trailing `/`.
+pub const MAX_LOG_PREFIX_LEN: usize = 512 + 1 + MAX_LOG_JOB_ID_LEN + 1;
+/// Longest access key id or secret access key of a [`crate::LogGrant`], in bytes.
+pub const MAX_LOG_CREDENTIAL_FIELD: usize = 128;
+/// Longest session token of a [`crate::LogGrant`], in bytes. With it a grant at every cap is
+/// 4,464 bytes of JSON, far inside [`REPLY_BODY_BUDGET`].
+pub const MAX_LOG_SESSION_TOKEN: usize = 4096;

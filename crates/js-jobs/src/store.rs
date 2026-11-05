@@ -19,6 +19,7 @@ use crate::record::{
 use crate::result::{JobEnd, Output, Retention};
 
 mod ending;
+mod hosts;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;

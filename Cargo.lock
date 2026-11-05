@@ -1591,6 +1591,7 @@ name = "js-sched"
 version = "0.1.0"
 dependencies = [
  "js-caps",
+ "js-elastic",
  "js-sim",
  "js-sizing",
  "js-types",
@@ -1623,6 +1624,14 @@ dependencies = [
  "js-types",
  "rand_chacha",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "js-sim-cell"
+version = "0.1.0"
+dependencies = [
+ "js-sim",
+ "js-types",
 ]
 
 [[package]]

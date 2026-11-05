@@ -50,7 +50,8 @@ fn host_checked_by(answer: Result<&str, &str>) -> Host {
 }
 
 /// Asserts that an agent given `--container-bin` reports `runtime=container` and
-/// `exec=container` beside `os` and `arch`, that a host with two GPUs and no toolkit hook
+/// `exec=container` beside `os` and `arch` (and `per-job` with `start-fence`, the job keying
+/// and its fence), that a host with two GPUs and no toolkit hook
 /// reports no `gpu-toolkit`, and that the capability the server names in its refusal is
 /// printed. It catches an agent that does not say how it runs jobs (every pool with a mode
 /// would refuse it), one that claims a toolkit it never checked, and one that does not
@@ -70,6 +71,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "run-files": "true",
             "egress": "none",
             "per-job": "true",
+            "start-fence": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";

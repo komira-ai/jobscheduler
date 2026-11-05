@@ -255,7 +255,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
     };
     oci.create(&spec).await.unwrap();
     let (out_path, err_path) = (stdout_path(&lease), stderr_path(&lease));
-    let mut running = oci.start(&spec).unwrap();
+    let mut running = oci.start(&spec, None).unwrap();
     running.wait().await;
     let ended = oci.ended(&spec, &running).await;
     let stdout = fs::read_to_string(&out_path).unwrap_or_default();

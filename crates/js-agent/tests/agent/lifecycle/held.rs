@@ -45,6 +45,7 @@ fn start(job_id: &str) -> JobStartSpec {
         wall_ms: 60_000,
         network: Default::default(),
         ports: Vec::new(),
+        log_sink: None,
     }
 }
 
@@ -179,7 +180,7 @@ fn every_verdict_removes_the_files_and_a_further_restart_sends_nothing() {
         assert_eq!(names(&h.start(job("r1"))), ["skipped r1 Retired"]);
         assert_eq!(
             names(&h.apply(vec![job_start("j1")])),
-            ["skipped j1 Retired"]
+            ["skipped j1 FenceRetired"]
         );
         assert_eq!(h.fake.created().len(), 2, "{verdict}: nothing runs again");
     }

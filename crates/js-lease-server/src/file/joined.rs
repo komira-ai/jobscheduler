@@ -47,6 +47,7 @@ use js_types::{
     ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryPercent, ProviderId, Resources, Shape,
 };
 
+use super::platform::PATH_GRACE;
 use super::{Pool, Read, Registering, Section, registry_pool};
 use crate::agent_pool::{MAX_MACHINES, capabilities_fit, share_class, shipped_class};
 use crate::agent_tokens::AgentTokens;
@@ -260,12 +261,10 @@ impl JoinedPool {
         let shape = Shape::new(booked, self.capabilities.clone());
         let pool = registry_pool(
             &place,
-            id,
-            &class,
-            shape,
-            self.max_machines,
+            (id, &class, shape, self.max_machines),
             self.exec,
             self.memory_percent,
+            PATH_GRACE,
         )?;
         let pool = match &self.share_class {
             Some(name) => match share_class(name) {
