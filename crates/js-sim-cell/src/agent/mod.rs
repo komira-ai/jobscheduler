@@ -90,6 +90,7 @@ use js_types::{HostId, Resources};
 use crate::bus::{self, CallId, Msg, Route};
 use crate::counters::{Counter, Counters};
 use crate::ledger::Ledger;
+use crate::node::Applied;
 use crate::observe::AgentTruth;
 
 #[cfg(doc)]
@@ -136,6 +137,8 @@ pub struct AgentNode {
     spec: AgentSpec,
     process: Option<Process>,
     io: Io,
+    /// Where the node writes that it took an input, for the cell's run loop.
+    applied: Applied,
 }
 
 impl AgentNode {
@@ -157,7 +160,19 @@ impl AgentNode {
             process: Some(Process::new(&spec)),
             spec,
             io,
+            applied: Applied::default(),
         }
+    }
+
+    /// The host.
+    #[must_use]
+    pub fn host(&self) -> &HostId {
+        &self.spec.host
+    }
+
+    /// Makes the node write into `applied` each time it takes an input.
+    pub(crate) fn report_to(&mut self, applied: Applied) {
+        self.applied = applied;
     }
 
     /// Kills the agent process: everything it held is lost, and the node drops every
@@ -231,6 +246,7 @@ impl StateMachine for AgentNode {
     type Input = NodeInput<Msg>;
 
     fn apply(&mut self, input: NodeInput<Msg>) -> Vec<Effect> {
+        self.applied.agent(&self.spec.host);
         self.io.now = input.now;
         match input.event {
             Event::Start => self.on_tick(),

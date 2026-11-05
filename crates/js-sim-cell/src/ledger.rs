@@ -52,6 +52,17 @@ impl Ledger {
         self.0.borrow().launches.clone()
     }
 
+    /// The launches after the first `skip`, oldest first.
+    pub(crate) fn launches_after(&self, skip: usize) -> Vec<Launch> {
+        self.0
+            .borrow()
+            .launches
+            .iter()
+            .skip(skip)
+            .cloned()
+            .collect()
+    }
+
     /// Every completion, oldest first.
     #[must_use]
     pub fn completions(&self) -> Vec<Completion> {
