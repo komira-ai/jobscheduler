@@ -4,9 +4,9 @@
 //! (the HTTP/JSON routes of `js-api-gateway`). Both call the same [`JobApi`].
 //!
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
-//! file of its group serves it; the fleet group's calls do until its context is given the
-//! server's handles (`fleet::Ctx::served`). Nothing mounts the two services yet: the
-//! listener does.
+//! file of its group serves it; the read group (`read.rs`) is served, and the fleet group's
+//! calls answer it until its context is given the server's handles (`fleet::Ctx::served`).
+//! Nothing mounts the two services yet: the listener does.
 //!
 //! # One file per call group
 //!
@@ -66,6 +66,12 @@ pub(crate) mod validate;
 
 pub(crate) use auth::{Bearer, BearerLayer};
 
+#[cfg(test)]
+mod read_list_tests;
+#[cfg(test)]
+mod read_tests;
+#[cfg(test)]
+mod read_view_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]

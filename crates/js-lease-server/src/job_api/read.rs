@@ -1,22 +1,110 @@
-//! The read calls: `GetJob`, `ListJobs`, `GetResult` and `GetLogs`.
+//! The read calls: `GetJob`, `ListJobs`, `GetResult` and `GetLogs`, served from the job
+//! tables. The group's own state is [`Ctx`], set through [`JobApi::with_read`].
 //!
-//! Each call answers `UNIMPLEMENTED` until this file serves it; serving it changes this file
-//! alone. The group's own state is [`Ctx`], set through [`JobApi::with_read`].
+//! Every call reads the tables through [`Reads`], which offers the two reads they need (one
+//! job, one page of jobs) and no write, so no read call changes any state. None takes a lock:
+//! the service holds no handle on the lease table or the registry. Time is read from the
+//! service's clock, and only to tell an ended job whose retention end has passed.
+//!
+//! # Answers
+//!
+//! | case | gRPC | gateway |
+//! |---|---|---|
+//! | a `job_id` that is not a job id | `INVALID_ARGUMENT`, `field: jobId` | 400 `invalid-argument`, `field` `jobId` |
+//! | no row for the job: never submitted, or swept after its retention window | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+//! | `GetResult` or `GetLogs` of a job whose row is still there with its retention end passed (the sweep runs on the tick) | `NOT_FOUND`, `expired` | 410 `expired` |
+//! | `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
+//! | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
+//! | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+//!
+//! A swept job has no tombstone: it is the same unknown job as one that never existed.
+//! `GetJob` and `ListJobs` show a job until it is swept, its retention end passed or not.
+//!
+//! # `GetLogs` without a stream
+//!
+//! The request names the job only. The answer is the job's state and the tails of its
+//! result: for an ended job, the last 8 KiB of each stream it stored and whether either was
+//! cut; for a job that has not ended, and for one that ended without a result (lost, or
+//! failed to start), empty tails and `truncated` false, never an error. Live output is read
+//! with a stream.
+//!
+//! # `ListJobs`
+//!
+//! Filters: the states (any of them; a state this server does not know matches no job), the
+//! labels (every one, with the same value), and the time a job was queued, half-open:
+//! `queued_after_ms` is in, `queued_before_ms` is out. The jobs come in the order of the
+//! table's keys, which is the order of their ids. A page holds [`DEFAULT_PAGE_SIZE`] jobs
+//! when the request asks for 0, and at most [`MAX_PAGE_SIZE`]: a larger page size is cut
+//! to it, not refused.
+//!
+//! A call reads the table in windows of [`SCAN_WINDOW`] rows, keeps the jobs that pass every
+//! filter, and reads the next window until the page is full, the table ends, or it has read
+//! [`SCAN_BOUND`] rows. So a page is short only at the end of the table or at the bound,
+//! and a page cut at the bound carries a next page token although it may hold few jobs or
+//! none. When only one state is asked for, the table's scan filters by it.
+//!
+//! The page token is a key of the job table (`job/<id>`): the page's last job when the page
+//! filled inside a read, else the last row the call read. The next page starts after it; a
+//! token that is not such a key is refused. A job submitted or swept
+//! between pages is listed by a later page if its id sorts after the token, and no job is
+//! listed twice.
 
+use std::num::NonZeroUsize;
+
+use js_jobs::{JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
+use js_lease::Clock;
 use js_proto::v1::{
-    GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
+    self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, ListJobsRequest, ListJobsResponse,
 };
+use js_state::{ResumeToken, StoreTime};
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
+use crate::job_store::ServerJobs;
 
-/// The state of the read group. It holds nothing until the group is served.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) mod view;
+
+/// The page size of a listing that asks for 0.
+pub const DEFAULT_PAGE_SIZE: u32 = 100;
+
+/// The largest page of a listing: a request for more is answered this many at most.
+pub const MAX_PAGE_SIZE: u32 = 1000;
+
+/// The most rows one read of the table returns while a listing is served: the store's own
+/// page limit.
+pub const SCAN_WINDOW: NonZeroUsize = MAX_PAGE;
+
+/// The most rows one `ListJobs` call reads: ten windows.
+pub const SCAN_BOUND: NonZeroUsize = NonZeroUsize::MIN.saturating_add(9_999);
+
+/// The field a bad job id is named by: `job_id`, by its JSON name.
+const JOB_ID_FIELD: &str = "jobId";
+
+/// The field a bad page token is named by: `page_token`, by its JSON name.
+const PAGE_TOKEN_FIELD: &str = "pageToken";
+
+/// The state of the read group: how a listing reads the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ctx {
+    /// The most rows one read of the table returns: [`SCAN_WINDOW`].
+    pub(super) scan_window: NonZeroUsize,
+    /// The most rows one `ListJobs` call reads: [`SCAN_BOUND`].
+    pub(super) scan_bound: NonZeroUsize,
     /// A value only tests set, so that a test can tell a context it gave from the default.
     #[cfg(test)]
     pub(super) mark: u32,
+}
+
+impl Default for Ctx {
+    fn default() -> Ctx {
+        Ctx {
+            scan_window: SCAN_WINDOW,
+            scan_bound: SCAN_BOUND,
+            #[cfg(test)]
+            mark: 0,
+        }
+    }
 }
 
 impl JobApi {
@@ -27,34 +115,254 @@ impl JobApi {
     }
 }
 
-/// `GetJob`: not served yet.
+/// The answer to a job that has no row: `unknown-job`.
+fn unknown_job() -> Status {
+    Status::not_found("unknown-job")
+}
+
+/// The answer to a result or logs past the retention end: `expired`.
+fn expired() -> Status {
+    Status::not_found("expired")
+}
+
+/// The answer to the result of a job that has not ended: `not-finished`.
+fn not_finished() -> Status {
+    Status::failed_precondition("not-finished")
+}
+
+/// The answer to a request whose `field` (by its JSON name) is refused.
+fn invalid(field: &str) -> Status {
+    Status::invalid_argument(format!("field: {field}"))
+}
+
+/// The answer to a read of the store that failed. The cause is logged, never answered.
+fn read_failed(error: &js_jobs::JobStoreError) -> Status {
+    tracing::warn!(%error, "a read of the job tables failed");
+    Status::internal("internal")
+}
+
+/// The reads the read calls make of the job tables, and nothing else.
+struct Reads<'a>(&'a ServerJobs);
+
+impl Reads<'_> {
+    /// The job `text` names: refused when `text` is not a job id, `unknown-job` when there
+    /// is no row for it.
+    fn job(&self, text: &str) -> Result<JobRecord, Status> {
+        let id = JobId::parse(text).map_err(|_| invalid(JOB_ID_FIELD))?;
+        let found = self.0.get_job(&id).map_err(|error| read_failed(&error))?;
+        found.ok_or_else(unknown_job)
+    }
+
+    /// One window of the table: at most `window` rows after `resume`, keeping the jobs in
+    /// `state` when one is given.
+    fn window(
+        &self,
+        state: Option<JobState>,
+        resume: Option<&ResumeToken>,
+        window: NonZeroUsize,
+    ) -> Result<JobPage, Status> {
+        self.0
+            .list_jobs(state, resume, window)
+            .map_err(|error| read_failed(&error))
+    }
+}
+
+/// The service's clock, as a reading of the store's clock: both count from the Unix epoch.
+fn now(api: &JobApi) -> StoreTime {
+    StoreTime::from_duration(std::time::Duration::from_millis(api.clock.now().millis()))
+}
+
+/// `job`, unless it has ended and its retention end has passed at the service's clock: the
+/// same instant the sweep deletes it from.
+fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
+    match js_jobs::sweep([&job], now(api)).is_empty() {
+        true => Ok(job),
+        false => Err(expired()),
+    }
+}
+
+/// `GetJob`: the job's record, as long as its row exists.
 pub(super) async fn get_job(
-    _api: &JobApi,
-    _request: Request<GetJobRequest>,
+    api: &JobApi,
+    request: Request<GetJobRequest>,
 ) -> Result<Response<GetJobResponse>, Status> {
-    super::unimplemented()
+    let job = Reads(&api.jobs).job(&request.into_inner().job_id)?;
+    Ok(Response::new(GetJobResponse {
+        job: Some(view::job(&job)),
+    }))
 }
 
-/// `ListJobs`: not served yet.
-pub(super) async fn list_jobs(
-    _api: &JobApi,
-    _request: Request<ListJobsRequest>,
-) -> Result<Response<ListJobsResponse>, Status> {
-    super::unimplemented()
-}
-
-/// `GetResult`: not served yet.
+/// `GetResult`: the stored result of an ended job, until its retention end.
 pub(super) async fn get_result(
-    _api: &JobApi,
-    _request: Request<GetResultRequest>,
+    api: &JobApi,
+    request: Request<GetResultRequest>,
 ) -> Result<Response<GetResultResponse>, Status> {
-    super::unimplemented()
+    let job = Reads(&api.jobs).job(&request.into_inner().job_id)?;
+    let job = unexpired(api, job)?;
+    match job.state.is_ended() {
+        true => Ok(Response::new(GetResultResponse {
+            result: Some(view::result(&job)),
+        })),
+        false => Err(not_finished()),
+    }
 }
 
-/// `GetLogs`: not served yet.
+/// `GetLogs` without a stream: the job's state and its result's tails, until its retention
+/// end; empty tails while it has no result.
 pub(super) async fn get_logs(
-    _api: &JobApi,
-    _request: Request<GetLogsRequest>,
+    api: &JobApi,
+    request: Request<GetLogsRequest>,
 ) -> Result<Response<GetLogsResponse>, Status> {
-    super::unimplemented()
+    let job = Reads(&api.jobs).job(&request.into_inner().job_id)?;
+    let job = unexpired(api, job)?;
+    Ok(Response::new(tails(&job)))
+}
+
+/// The tails `GetLogs` answers for `job`: its result's, or none.
+fn tails(job: &JobRecord) -> GetLogsResponse {
+    let state = view::state(job.state).into();
+    match &job.result {
+        Some(result) => GetLogsResponse {
+            state,
+            stdout_tail: result.stdout_tail.as_bytes().to_vec(),
+            stderr_tail: result.stderr_tail.as_bytes().to_vec(),
+            truncated: result.truncated,
+        },
+        None => GetLogsResponse {
+            state,
+            ..GetLogsResponse::default()
+        },
+    }
+}
+
+/// What a listing keeps: the filters of a `ListJobs` request.
+struct Filter {
+    /// The states, as the values of the job service's enum; empty: every state.
+    states: Vec<i32>,
+    /// The labels every kept job carries with the same value.
+    labels: Vec<(String, String)>,
+    /// Kept: queued at or after this time, in milliseconds.
+    after: Option<u64>,
+    /// Kept: queued before this time, in milliseconds.
+    before: Option<u64>,
+}
+
+impl Filter {
+    /// Whether `job` passes every filter.
+    fn keeps(&self, job: &JobRecord) -> bool {
+        let queued = view::millis(job.submitted_at);
+        let state = i32::from(view::state(job.state));
+        let in_state = self.states.is_empty() || self.states.contains(&state);
+        let labelled = self
+            .labels
+            .iter()
+            .all(|(key, value)| job.spec.labels.get(key) == Some(value.as_str()));
+        let after = self.after.is_none_or(|after| queued >= after);
+        let before = self.before.is_none_or(|before| queued < before);
+        [in_state, labelled, after, before]
+            .into_iter()
+            .all(|kept| kept)
+    }
+
+    /// The one state the table's scan can filter by: the states ask for exactly one, and it
+    /// is one state of the table (failed to start is one per start failure there).
+    fn scan_state(&self) -> Option<JobState> {
+        let [one] = self.states.as_slice() else {
+            return None;
+        };
+        match v1::JobState::try_from(*one) {
+            Ok(v1::JobState::Queued) => Some(JobState::Queued),
+            Ok(v1::JobState::Placed) => Some(JobState::Placed),
+            Ok(v1::JobState::Starting) => Some(JobState::Starting),
+            Ok(v1::JobState::Running) => Some(JobState::Running),
+            Ok(v1::JobState::Succeeded) => Some(JobState::Succeeded),
+            Ok(v1::JobState::Failed) => Some(JobState::Failed),
+            Ok(v1::JobState::Cancelled) => Some(JobState::Cancelled),
+            Ok(v1::JobState::Lost) => Some(JobState::Lost),
+            Ok(v1::JobState::FailedToStart | v1::JobState::Unspecified) | Err(_) => None,
+        }
+    }
+}
+
+/// The page size a request for `asked` jobs gets.
+fn page_size(asked: u32) -> usize {
+    let size = match asked {
+        0 => DEFAULT_PAGE_SIZE,
+        asked => asked.min(MAX_PAGE_SIZE),
+    };
+    usize::try_from(size).unwrap_or(usize::MAX)
+}
+
+/// The place a page token names: empty for the first page, else the key of a job row.
+fn resume_of(token: &str) -> Result<Option<ResumeToken>, Status> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let id = token
+        .strip_prefix(keys::JOB)
+        .and_then(|id| JobId::parse(id).ok())
+        .ok_or_else(|| invalid(PAGE_TOKEN_FIELD))?;
+    Ok(Some(ResumeToken::after(keys::job(&id))))
+}
+
+/// The page token that resumes after the job `last`; none when there is no job.
+fn token_after(last: Option<&JobRecord>) -> Option<ResumeToken> {
+    last.map(|job| ResumeToken::after(keys::job(&job.id)))
+}
+
+/// `ListJobs`: a page of the jobs that pass the filters, in id order.
+pub(super) async fn list_jobs(
+    api: &JobApi,
+    request: Request<ListJobsRequest>,
+) -> Result<Response<ListJobsResponse>, Status> {
+    let request = request.into_inner();
+    let resume = resume_of(&request.page_token)?;
+    let size = page_size(request.page_size);
+    let filter = Filter {
+        states: request.states,
+        labels: request.labels.into_iter().collect(),
+        after: request.queued_after_ms,
+        before: request.queued_before_ms,
+    };
+    let (jobs, next) = list(&api.read, Reads(&api.jobs), &filter, resume, size)?;
+    Ok(Response::new(ListJobsResponse {
+        jobs: jobs.iter().map(view::job).collect(),
+        next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),
+    }))
+}
+
+/// Up to `size` jobs that `filter` keeps, from `resume` on, reading windows of the table
+/// until the page is full, the table ends, or the context's bound of rows is read; with the
+/// token of the next page, or none when the table has ended.
+fn list(
+    ctx: &Ctx,
+    reads: Reads<'_>,
+    filter: &Filter,
+    mut resume: Option<ResumeToken>,
+    size: usize,
+) -> Result<(Vec<JobRecord>, Option<ResumeToken>), Status> {
+    let scan_state = filter.scan_state();
+    let bound = ctx.scan_bound.get();
+    let mut read = 0;
+    let mut jobs = Vec::new();
+    loop {
+        let rest = NonZeroUsize::new(bound - read).unwrap_or(NonZeroUsize::MIN);
+        let window = ctx.scan_window.min(rest);
+        let page = reads.window(scan_state, resume.as_ref(), window)?;
+        for job in page.jobs.into_iter().filter(|job| filter.keeps(job)) {
+            if jobs.len() == size {
+                let next = token_after(jobs.last());
+                return Ok((jobs, next));
+            }
+            jobs.push(job);
+        }
+        let Some(next) = page.resume else {
+            return Ok((jobs, None));
+        };
+        read += window.get();
+        if jobs.len() == size || read >= bound {
+            return Ok((jobs, Some(next)));
+        }
+        resume = Some(next);
+    }
 }
