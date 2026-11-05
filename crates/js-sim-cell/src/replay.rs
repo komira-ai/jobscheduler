@@ -66,7 +66,9 @@ impl fmt::Display for FailureReport {
 /// Why a seed did not run to its end.
 #[derive(Debug)]
 pub enum Failure {
-    /// The cell could not be built: the server refused its configuration.
+    /// The cell could not be built: the server refused its configuration. Or the server
+    /// refused to start again after a restart ([`Cell::take_refused`]), which is reported
+    /// in place of any violation that followed it.
     Start(StartupError),
     /// An invariant did not hold.
     Violated(Box<FailureReport>),
@@ -79,8 +81,8 @@ pub enum Failure {
 ///
 /// # Errors
 ///
-/// [`Failure::Start`] when `build` fails, [`Failure::Violated`] when an invariant does not
-/// hold.
+/// [`Failure::Start`] when `build` fails or the server refuses a restart,
+/// [`Failure::Violated`] when an invariant does not hold.
 pub fn run(
     scenario: &str,
     seed: u64,
@@ -105,7 +107,11 @@ pub fn drive(
     go: &dyn Fn(&mut Cell) -> Result<(), Violation>,
 ) -> Result<Cell, Failure> {
     let mut cell = build(Setup::new(seed)).map_err(Failure::Start)?;
-    let Err(violation) = go(&mut cell) else {
+    let ran = go(&mut cell);
+    if let Some(refused) = cell.take_refused() {
+        return Err(Failure::Start(refused));
+    }
+    let Err(violation) = ran else {
         return Ok(cell);
     };
     let (hash, check) = (cell.trace_hash(), cell.checks());

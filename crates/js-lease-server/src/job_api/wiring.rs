@@ -4,7 +4,7 @@
 //! job store handle the server holds and the server's clock, and then gives each call group
 //! the context it needs, one builder call per group. A group task whose calls the server
 //! serves adds its `with_<group>` line here when the server handles that group's context
-//! needs exist. Today every group's context is its default, so there is no such line.
+//! needs exist. Today the read group's is: it reads host silence from the registry.
 //!
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
@@ -25,7 +25,7 @@ use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
 use super::auth::is_grpc;
-use super::{Bearer, JobApi, gateway, grpc};
+use super::{Bearer, JobApi, gateway, grpc, read};
 use crate::api::Shared;
 use crate::config::Token;
 
@@ -34,7 +34,9 @@ use crate::config::Token;
 pub(crate) fn from_server(state: &Shared) -> Option<JobApi> {
     let agents = state.agents()?;
     let jobs = agents.jobs.clone()?;
-    Some(JobApi::new(jobs, agents.clock.clone()))
+    let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
+    let read = read::Ctx::default().with_silence(silence);
+    Some(JobApi::new(jobs, agents.clock.clone()).with_read(read))
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the

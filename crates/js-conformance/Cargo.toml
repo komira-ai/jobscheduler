@@ -8,6 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The lifecycle's `Runtime` and `Clock`, which the in-memory runtime (`agent::memory`)
+# implements so the real lifecycle runs in one process.
+js-agent = { path = "../js-agent" }
 js-caps = { path = "../js-caps" }
 js-types = { path = "../js-types" }
 js-provider = { path = "../js-provider" }
@@ -18,7 +21,6 @@ js-state = { path = "../js-state", features = ["test-support"] }
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
-js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }

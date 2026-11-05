@@ -57,7 +57,13 @@ What is simulated:
   dropped message is a connection reset, a delay is a slow network and a partition is a
   cut link. Duplication and reordering are off unless a scenario turns them on.
 - the agents: the conformance suite's in-process agent (`FakeAgent`) behind the real
-  wire. It runs nothing; a run ends by itself after the time its `Work` names.
+  wire, the agent a cell runs by the hundred. It runs nothing; a run ends by itself after
+  the time its `Work` names. A host can instead run the real agent lifecycle of
+  `js-agent` (`Scenario::real_hosts`, `AgentKind::Real`) over an in-memory container
+  runtime (`js_conformance::agent::memory`), behind the same wire and session code: its
+  heartbeats are built by the lifecycle and every reply is handed to it, and its runs end
+  the same way. It is for a handful of hosts, since it writes its held list to disk at
+  every step, and the agreement family holds the fake to it.
 - time: virtual. The server reads a manual clock that the node sets to the kernel's time
   before every input. Usage recording, whose store reads the system's clock, is off.
 - the clients: `LeaseFront` turns each unit of `Work` into the calls `js run` makes today
@@ -97,9 +103,13 @@ with `#[path = ...]`; they are not binaries of their own.
 |---|---|---|
 | `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
+| `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a run it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
+| `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
 | `builder` | `tests/builder.rs` | The scenario builder and the lease front, each shown to fail when it should. |
 | `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire. |
 | `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server. |
+| `real_agent` | `tests/real_agent.rs` | The real agent node (the lifecycle of `js-agent` over the in-memory runtime) against the same scripted stand-in. |
+| `agreement` | `tests/agreement.rs` | The agreement family: each scenario run with every agent fake and again with every agent real, and the client's outcome of every item compared seed by seed. |
 | `invariants` | `tests/invariants.rs` | Each invariant over hand-built observations, with negative cases it must flag and correct siblings it must not. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
@@ -191,21 +201,26 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
 
 - the world: `.server(ServerSpec::registered_pool(pool, Shape::gpu_host(), count))`,
   `.hosts(pool, count)` for correct agents, `.broken_hosts(pool, count, defect)` for
-  agents that lack a behaviour (a `js_conformance::agent::Defect`), `.bus(faults)` for the
+  agents that lack a behaviour (a `js_conformance::agent::Defect`), `.real_hosts(pool,
+  count)` for hosts running the real agent lifecycle, `.bus(faults)` for the
   bus's faults at the start, `.front(factory)` for a client other than `LeaseFront`, and
   `.scratch(env!("CARGO_TARGET_TMPDIR"))` for the server's files;
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
 - the actions, at a virtual time after the start, with `.at(after, action)`:
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`,
-  `partition_agents(agents, lasting)` and `set_bus_faults(faults)`. Agents are named by
+  `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
+  `set_bus_faults(faults)` and `restart_server()` (the server started again over its
+  files with `--boot resume`). Agents are named by
   the index they were added at (`agents(0..10)`), or drawn from the seed when the action
   runs (`drawn_agents(10)`);
 - what is expected beyond the invariants: `Expect::all_items_terminal()`,
-  `Expect::terminal_count(n, how)` and `Expect::host_state(index, state)`, judged once per
+  `Expect::terminal_count(n, how)`, `Expect::host_state(index, state)` and
+  `Expect::launched_on(&agents, after)` (each of those hosts launched a run at or after
+  `after`, by the launch ledger), judged once per
   seed after the end check;
 - witnesses: `.witness(name, |counters| ...)`, a predicate over the agents' counters
   (`start_repeated`, `start_after_stop`, `start_dropped_late`, `result_resent`,
-  `reply_invalid`) added over one seed, which at least one seed must satisfy. A witness
+  `reply_invalid`, `cut_with_unlisted_run`, `unknown_host`) added over one seed, which at least one seed must satisfy. A witness
   shows that the situation the scenario is about happened, so a scenario that passes
   because nothing happened fails instead;
 - `.settle_within(d)`: the virtual time the cell runs after the last action before the
@@ -241,11 +256,13 @@ submission order.
 
 | invariant | the property | what a violation says | checked |
 |---|---|---|---|
-| `no-double-booking` | By the agents' own truth, no agent runs more than its capacity, no run is run by two agents at once, and no host runs a run of another lease while a whole-host item holds a lease on it. | `host h003 runs [run "a"; run "b"] needing res(cpu=2000 mem=2048 gpus=2) beyond its capacity res(cpu=8000 mem=17179869184 gpus=1) (over on gpus)`, or `run "a" runs on host h001 and on host h004`, or `host h002 runs run "a" of lease 1.7 while whole-host item3 holds lease 1.5 there` | every step |
+| `no-double-booking` | By the agents' own truth, no agent runs more than its capacity, no run is run by two agents at once, and no host runs a run of another lease while a whole-host item holds a lease on it. By the server's listing, a lease is booked on one host only, the host it was first booked on (across a restart too), and no host is listed twice. | `host h003 runs [run "a"; run "b"] needing res(cpu=2000 mem=2048 gpus=2) beyond its capacity res(cpu=8000 mem=17179869184 gpus=1) (over on gpus)`, or `run "a" runs on host h001 and on host h004`, or `host h002 runs run "a" of lease 1.7 while whole-host item3 holds lease 1.5 there`, or `lease 1.7 is booked on host h004, and was booked on host h001 first`, or `host h001 is listed twice` | every step |
 | `at-most-one-launch` | Summed over the cell's launch ledger, each run is launched at most once, across agent deaths and replacements. | `run "a" launched on host h001 at 64010, already launched on host h001 at 12010` | every step |
 | `one-terminal-answer` | Once the client has heard a terminal answer for an item, it hears no other terminal answer and no start for it. | `item3 heard terminal(failed) at 70000 after terminal(succeeded) at 65000` | every step |
 | `settles-when-quiet` | Once no fault has been active for the scenario's settle time, every item is terminal (giving up counts), the client holds no lease, and no host's listing books a lease whose run still runs. | `item3 is not terminal`, `item3 still holds lease 1.7` or `host h002 still books lease 1.7` | at the end |
+| `no-lease-on-a-lost-host` | A host the server lists as lost takes no new lease: no client is told an item was placed on it, and the listing never shows a lease booked on it for the first time. | `item3 was placed on host h002 at 64000 while the server lists it lost` or `lease 1.7 is booked on host h002 while the server lists it lost` | every step |
 | `bookings-match-agents` | At the end, the server's listing books nothing on a host that its agent does not run, and no agent runs a run that the listing does not book: the leak detector. | `host h002 books lease 1.7 and its agent runs no run of it` or `host h002 runs run "a" of lease 1.7 and the server books no such lease there` | at the end |
+| `no-result-lost` | From the cell's own ledger of completions and the verdicts the agents read, never the server's record: no run's result is accepted twice; every run an agent completed ends `succeeded` for its client, unless the client had its answer before the completion or the agent was killed between the completion and the first verdict on it; and no client hears `succeeded` for a run no agent completed. | `run "a" was accepted twice: on host h001 at 64010 and on host h001 at 69010`, `run "a" completed on host h001 at 64010 and item3 ended lost`, or `item3 succeeded and no agent completed its run "a"` | at the end |
 
 The step invariants are checked after every kernel step, every poll of the client and
 every client call; the end invariants once, after the scenario has been quiet (no partition, no
@@ -315,6 +332,8 @@ The cell writes its own lines, `<t> cell ...`, for what the kernel does not see:
 | `<t> cell client item<n> cancel` | the scenario asked the client to cancel an item |
 | `<t> cell client <METHOD> <status>` | a client call to the server and its status |
 | `<t> cell kill <host>`, `<t> cell replace <host>` | an agent's process was killed, or a new one started |
+| `<t> cell gone <host>` | the agent killed just before was killed for good: its host is gone, not a fault |
+| `<t> cell restart server`, `<t> cell restart refused <flag>` | the server was stopped and started again over its files (`--boot resume`), or it refused to start again, naming the flag at fault |
 | `<t> cell faults delay=<min>..<max>ms [<kinds>]` | the bus's faults changed; the kinds are among `drop`, `duplicate` and `reorder` |
 | `<t> cell listing <host> live\|lost leases=<n> aside=<bool>` | the server's listing of a host changed |
 | `<t> cell listing <host> forgotten` | the server no longer lists the host |
@@ -340,21 +359,25 @@ agent counts it as `result_resent`, the counter the lossy scenario's witness rea
 
 `crates/js-sim-cell/tests/golden/trace-hashes.txt` pins the trace hash of seeded runs:
 family `js-sim-cell` holds the sixteen seeds of the replay scenario of `tests/replay.rs`,
-and family `smoke` the first four seeds of the lossy agent wire. A trace hash covers the
+family `smoke` the first four seeds of the lossy agent wire, family `real_agent` the
+first two seeds of the agreement family's world without faults, run with real agents, and
+family `faults` the first four seeds of the restart of the server with runs in flight
+(`tests/cell/server_restart.rs`). A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
 own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 
-`replay`'s tests `pinned_seeds_match_the_golden_file` and
-`the_smoke_scenario_matches_the_golden_file` fail on a moved hash and print the command
+`replay`'s tests `pinned_seeds_match_the_golden_file`,
+`the_smoke_scenario_matches_the_golden_file` and
+`the_real_agent_scenario_matches_the_golden_file` fail on a moved hash and print the command
 that regenerates the lines:
 
 ```sh
 cargo test -p js-sim-cell --test replay -- --ignored regenerate_golden_hashes
 ```
 
-It rewrites the lines of both families and leaves the rest of the file alone. Regenerate
+It rewrites the lines of every family and leaves the rest of the file alone. Regenerate
 only on purpose, and say in the pull request why each moved line moved: which decision
 changed, or which trace text.
 
@@ -367,8 +390,9 @@ model:
   each, in order, on one connection, so the default bus (`Faults::default()`) never
   duplicates or reorders. A scenario that models a request retried over a second
   connection turns `reorder` or `duplicate` on for itself, with `.bus(...)` or
-  `set_bus_faults`. Today one scenario does: `an_agent_that_never_retires_a_stopped_run`
-  in `tests/broken_agent.rs` turns `reorder` on for every message from 2 s to 30 s. None
+  `set_bus_faults`. Today two scenarios do: `an_agent_that_never_retires_a_stopped_run`
+  in `tests/broken_agent.rs` and `a_stale_start_after_a_stop_does_not_run` in
+  `tests/faults.rs` turn `reorder` on for every message from 2 s to 30 s. None
   turns `duplicate` on. A result or a stop sent again is covered by the server's HTTP
   tests (`crates/js-lease-server/tests/server/runs.rs`).
 - **Lost client answers.** The client's calls are never dropped, delayed or reordered;
@@ -400,9 +424,29 @@ and how much of each. A row not listed has no scenario.
 
 | row | scenario | family file | what the scenario shows |
 |---|---|---|---|
+| 3 | `a_restart_of_the_server_with_runs_in_flight_double_books_nothing` | `tests/cell/server_restart.rs` | The server is stopped and started again over its lease file (`--boot resume`) with runs in flight; nothing is launched twice, no lease moves host, no host takes a new lease while it runs a run of before the restart, and everything settles. What becomes of the runs in flight (the row's subject) is not asserted: as built they are forgotten. |
+| 4 | `ten_of_two_hundred_agents_die_mid_run` | `tests/faults.rs` | Ten of two hundred agents die with their state and new processes say hello holding nothing; every item is terminal, nothing runs twice, and the replaced hosts take work again (`launched_on`). That the runs become lost with no result is not asserted. |
+| 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
 | 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval on a bus slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
+| 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a run no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the run is never run on another host. The start timeout of the row is not built and not asserted. |
+| 38 | `a_stale_start_after_a_stop_does_not_run` | `tests/faults.rs` | The stale-start situation of the row below (the same settings), over sixteen seeds with every invariant of the fault family on. |
 | 38 | `an_agent_that_never_retires_a_stopped_run` | `tests/broken_agent.rs` | Every item is cancelled while its start is still on the bus, and a start arrives after the stop that follows it; agents that do not retire the stopped run fail `at-most-one-launch`, correct agents pass with the witness `start_after_stop` held. That the allocation is freed in the same commit is not asserted. |
+| 41 | `agents_killed_for_good_leave_no_booking_once_clients_release` | `tests/faults.rs` | Five of fifty agents die for good; their hosts read lost and take no new lease, and once the clients give up and release, nothing stays booked on them. |
 
-The partition scenario of `tests/smoke.rs` cuts agents off while they run, which is the
-situation of rows 4 and 35, but it asserts only what the server as built and the design
-both promise (the invariants and every item terminal), so it covers neither row.
+The partition scenario of `tests/smoke.rs` cuts agents off while they run, but asserts only
+what the server as built and the design both promise (the invariants and every item
+terminal). `a_thirty_second_partition_of_twenty_agents_loses_no_result` and
+`a_forgotten_host_that_comes_back_is_seated_once` in `tests/faults.rs` cover section 7's
+"Result lost" and section 6.3's retention, which are not rows of section 8.
+
+The agreement family (`tests/agreement.rs`, its world in `tests/cell/real_agents.rs`)
+checks every invariant of `Invariant::ALL` on both sides of each comparison, and beyond
+them that each item's terminal is the same with fake and with real agents. It runs five
+situations over eight seeds: no fault, a lossy wire (15% of messages dropped for 300 s,
+witness `result_resent`), two of six agents cut off for 30 s, two agents killed and
+replaced mid-run, and the stale start of `tests/broken_agent.rs` (witness
+`start_after_stop`). It covers no row by itself: it shows that the fake answers as the
+real agent does in the situations of section 7 ("Result lost", "Duplicate start", "Stop
+of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
+containers and retired list died with the agent), so a scenario that pins either row
+with fake agents is held to the real one there.

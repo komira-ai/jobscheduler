@@ -154,8 +154,11 @@ platform that lists a launching machine provider before `static` is refused (`ma
 whose instance type is not allowed, whose price is above the maximum, or that has no price under a maximum does not admit a request, and
 a provider whose `max_machines` (else the pool's) is zero admits none. `path_grace` is how long a waiting whole-node request of the pool
 keeps its place once no host could serve it, after which it is refused `no-capable-host` (it is the registry's `regain_grace` for the
-pool). Nothing acts on the rest yet: the job lifecycle ticks (design 6.1) will end a job that waits past `max_queue_wait` or does not
-start within `start_timeout`, and the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit
+pool). The job pass of the tick (design 6.1, step 1) ends a job of the server's job tables that waits past `max_queue_wait` (counted
+from when it was queued) as `no-capacity`, and a placed or starting one that has not started within `start_timeout` (counted from its
+placement) as `start-timeout`; each deadline is held to at least the server's boot plus 120 s, so an outage fails no job at the first
+tick. A joined pool has neither key and takes the defaults. Nothing acts on the limits yet: the pick of an offer when a pool acquires a
+machine (design 5.6, pass 2) will read them. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 

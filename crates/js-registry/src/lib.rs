@@ -43,8 +43,8 @@
 //!   it can say hello for `max_machines` made-up ids and keep them live with the
 //!   sessions it was issued, or refill the pool every grace plus retention. The
 //!   transport must rate-limit hellos per credential, and per-host credentials (design
-//!   D18) close it; the registry has no per-credential cap. A booked host is never
-//!   forgotten.
+//!   D18) close it; the registry has no per-credential cap. A booked host, or one its
+//!   placer holds work on ([`Placer::holds_work_on`]), is never forgotten.
 //! - **Booked shape.** A host is booked as the pool's configured shape
 //!   ([`PoolConfig::new`]), and the host's claim only has to offer at least that. A
 //!   claim bigger than the pool's shape is never leased out, so an agent cannot inflate

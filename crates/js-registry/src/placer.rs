@@ -136,4 +136,13 @@ pub trait Placer: Send + Sync {
     fn ended(&self, lease: LeaseId) {
         let _ = lease;
     }
+
+    /// Whether the placer books work on `host` that the registry's book does not hold (a
+    /// job's allocation): such a host is not forgotten however long it is silent, since only
+    /// its own confirmation or the provider's absence frees that work. Asked under the
+    /// registry's lock. The default, `false`, holds nothing there.
+    fn holds_work_on(&self, host: &HostId) -> bool {
+        let _ = host;
+        false
+    }
 }

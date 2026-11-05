@@ -1,9 +1,13 @@
-//! The cell's agent: the conformance suite's in-process agent ([`FakeAgent`]) behind the
-//! real wire of `js-agent-wire`, as a [`js_sim::Node`] the kernel can run by the hundred.
+//! The cell's agent, behind the real wire of `js-agent-wire`, as a [`js_sim::Node`]: one of
+//! two kinds ([`AgentKind`]). The fake is the conformance suite's in-process agent
+//! ([`FakeAgent`]), which the kernel can run by the hundred: it is the scale agent. The
+//! real one is the lifecycle of `js-agent` over an in-memory runtime (module `real`), for
+//! a handful of hosts, against which the fake is held (`tests/agreement.rs`).
 //!
-//! [`AgentNode`] builds the hello and heartbeat bodies a real agent builds, checks every
-//! answer with the wire's own `validate()` before it acts on any field, and turns every
-//! command into the [`FakeAgent`] call that models it. The check is by part, as the wire's
+//! [`AgentNode`] builds the hello and heartbeat bodies a real agent builds and checks every
+//! answer with the wire's own `validate()` before it acts on any field. The session below
+//! is the same for both kinds. A fake's node turns every command into the [`FakeAgent`]
+//! call that models it. The check is by part, as the wire's
 //! `ReplyCheck` says. A body that does not decode, and a welcome that fails its check, are
 //! ignored whole. A heartbeat reply's refused commands are skipped, and so are its
 //! acknowledgements when they fail their check. The valid commands beside them still
@@ -23,10 +27,25 @@
 //! The [`FakeAgent`] is keyed by the run id: the wire's start, stop, cancel, result and
 //! acknowledgement all name the run, so the run id is what the fake calls a lease.
 //!
-//! It is built with [`FakeAgent::with_window`]`(None)`: the wire carries no self-fence
+//! The fake is built with [`FakeAgent::with_window`]`(None)`: the wire carries no self-fence
 //! and the real agent has none either (design section 8, row 5). A broken one
-//! ([`AgentSpec::defect`]) is [`FakeAgent::broken`]; the node never advances the fake's
-//! clock, so its fence window never acts.
+//! ([`AgentKind::Fake`] with a defect) is [`FakeAgent::broken`]; the node never advances
+//! the fake's clock, so its fence window never acts.
+//!
+//! # The real agent
+//!
+//! A real agent's node builds the hello as for the fake, from the host's shape, with the
+//! held runs the lifecycle lists. Each heartbeat's held runs and results are the
+//! lifecycle's, after it took a step; each 200 reply is handed to the lifecycle whole
+//! (`Lifecycle::apply`), less any start the cell cannot account for, and the lifecycle
+//! takes a step. A container the lifecycle created is a launch; a result the reply's
+//! acknowledgement ended is acknowledged with its verdict. The lifecycle's clock is the
+//! kernel's time of the input being applied. The fake's connection calls
+//! (`disconnect`, `reconnect`, `contact`, `heartbeat`) have no counterpart: the real
+//! lifecycle learns nothing from a lost answer and keeps no self-fence. It counts what
+//! the fake's node counts, except [`Counter::StartDroppedLate`]: the real agent counts a
+//! start's validity from the arrival of its reply, which the node hands over on arrival,
+//! so none is ever late.
 //!
 //! # The session
 //!
@@ -39,6 +58,8 @@
 //! ends the session: the agent says hello again at once when a heartbeat of the session
 //! was answered 200, and an interval later otherwise, so a server that welcomes and at
 //! once refuses is not asked in a loop (design section 5.1).
+//! A 409 `unknown-host`, the answer of a server that has forgotten the host, counts in
+//! [`Counter::UnknownHost`].
 //!
 //! Every call carries the join token of [`AgentSpec::join_token`] as its bearer. The hello
 //! does not ask for a host credential (`accepts_host_credential` is false), so the agent
@@ -62,24 +83,35 @@
 //!
 //! A start of the image [`SIM_RUN_IMAGE`] whose first argument is a number of
 //! milliseconds ends by itself that long after its launch: the node arms a timer and calls
-//! [`AgentHarness::complete`], and the run's result rides in every heartbeat until an
-//! answer acknowledges it. Any other start runs until it is stopped. A stopped or
-//! cancelled run sends no result. The resources a run holds are its start's `limits` (and
+//! [`AgentHarness::complete`] (a real agent's container exits with status 0), and the
+//! run's result rides in every heartbeat until an answer acknowledges it. Any other start
+//! runs until it is stopped. A stopped or cancelled run of the fake sends no result; the
+//! real agent reports a stopped run killed, and a cancelled one not at all. The resources a run holds are its start's `limits` (and
 //! one GPU per index it names).
+//!
+//! The process remembers every run a hello or heartbeat it sent listed as held, so the
+//! cell can tell a run the server cannot have seen listed ([`AgentNode::runs_unlisted`]).
+//! Every verdict it reads on a result, held or not, is written into the cell's
+//! [`Ledger`] ([`crate::Acked`]).
 //!
 //! # Processes
 //!
-//! The node is a host. Its agent process holds the [`FakeAgent`], its session and its
-//! timers; [`AgentNode::kill`] discards the process and the node then drops every input,
-//! and [`AgentNode::replace`] starts a new process with empty state, which says hello
-//! again at the node's next tick (the node ticks every [`AgentSpec::hello_interval`]
+//! The node is a host. Its agent process holds the agent (the [`FakeAgent`], or the
+//! lifecycle with its runtime and directories), its session and its timers; [`AgentNode::kill`] discards the process and the node then drops every input,
+//! and [`AgentNode::replace`] starts a new process with empty state (a real one gets a
+//! new runtime and new directories), which says hello again at the node's next tick (the node ticks every [`AgentSpec::hello_interval`]
 //! while it has no process). The cell's [`Ledger`] and the node's [`Counters`] are kept
 //! outside the process, so neither is reset by a replacement.
+//!
+//! A real agent whose directories cannot be made private, or whose lifecycle does not
+//! start, is a host with no process: it never says hello. One whose directories cannot be
+//! made at all panics, as the cell's test directories do.
 //!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use js_conformance::agent::Defect;
@@ -99,6 +131,7 @@ use js_agent_wire::RETRY_AFTER_CAP;
 use js_conformance::agent::{AgentHarness, FakeAgent};
 
 mod process;
+mod real;
 
 pub(crate) use process::lease_id;
 use process::{Answer, Process};
@@ -108,8 +141,19 @@ use process::{Answer, Process};
 pub const SIM_RUN_IMAGE: &str =
     "sim-run@sha256:5151515151515151515151515151515151515151515151515151515151515151";
 
+/// Which agent a node runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentKind {
+    /// The conformance suite's [`FakeAgent`], lacking the [`Defect`] when one is named:
+    /// the scale agent.
+    Fake(Option<Defect>),
+    /// The real lifecycle of `js-agent` over an in-memory runtime, its scratch and state
+    /// roots made in directories of their own under this one.
+    Real(PathBuf),
+}
+
 /// What an agent node is: its host and what the host offers, the pool it joins with the
-/// token it presents, and whether its agent lacks a behaviour.
+/// token it presents, and which agent it runs.
 ///
 /// It has no `Debug`: it holds the join token.
 #[derive(Clone)]
@@ -129,8 +173,8 @@ pub struct AgentSpec {
     /// How long the agent waits between two hellos that were not welcomed, and between
     /// two ticks of a host with no process.
     pub hello_interval: Duration,
-    /// The one behaviour the agent lacks, or `None` for a correct agent.
-    pub defect: Option<Defect>,
+    /// The agent: a fake (correct, or lacking one behaviour) or the real one.
+    pub kind: AgentKind,
 }
 
 /// One host of the cell with its agent process.
@@ -158,7 +202,7 @@ impl AgentNode {
             ledger,
         };
         Self {
-            process: Some(Process::new(&spec)),
+            process: Process::new(&spec),
             spec,
             io,
             applied: Applied::default(),
@@ -185,7 +229,7 @@ impl AgentNode {
     /// Starts a new agent process on this host with empty state, in place of any process
     /// it has. It says hello at the node's next tick.
     pub fn replace(&mut self) {
-        self.process = Some(Process::new(&self.spec));
+        self.process = Process::new(&self.spec);
     }
 
     /// The ground truth of the agent process, or `None` while the host has none.
@@ -200,6 +244,19 @@ impl AgentNode {
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.io.counters
+    }
+
+    /// Whether the agent process runs a run that no hello or heartbeat it sent listed
+    /// as held, so the server cannot have seen it listed; `false` while the host has no
+    /// process.
+    #[must_use]
+    pub fn runs_unlisted(&self) -> bool {
+        self.process.as_ref().is_some_and(Process::runs_unlisted)
+    }
+
+    /// Adds one to `counter`.
+    pub(crate) fn count(&mut self, counter: Counter) {
+        self.io.bump(counter);
     }
 
     /// The node's tick: the process says hello or sends a heartbeat, and the next tick is
@@ -249,6 +306,9 @@ impl StateMachine for AgentNode {
     fn apply(&mut self, input: NodeInput<Msg>) -> Vec<Effect> {
         self.applied.agent(&self.spec.host);
         self.io.now = input.now;
+        if let Some(process) = &self.process {
+            process.at(input.now);
+        }
         match input.event {
             Event::Start => self.on_tick(),
             Event::Timer { tag } => self.on_timer(tag),

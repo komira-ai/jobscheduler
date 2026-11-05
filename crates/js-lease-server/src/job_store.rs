@@ -49,7 +49,9 @@ pub(crate) struct JobStoreSetup {
 /// The suffix of the job store's file, after the lease file's name.
 pub(crate) const SUFFIX: &str = ".jobs";
 
-/// Opens the job store beside the lease file `state_file`, as `setup` says. A file that
+/// Opens the job store beside the lease file `state_file`, as `setup` says, and raises its
+/// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
+/// ticks. A file that
 /// cannot be made owner-only or opened as a state store (a directory in its place, another
 /// process holding it, a file that is not a state store) is a refused start naming the flag
 /// of the job service's address.
@@ -66,9 +68,15 @@ pub(crate) fn open(
     let store = SqliteStore::open(&path, clock, Options::default())
         .map_err(StartupError::because(setup.flag))?;
     let store: Arc<dyn Store> = Arc::new(store);
+    let boot = store.now();
     let jobs =
         JobStore::new(Arc::new(store), RandomIds).map_err(StartupError::because(setup.flag))?;
-    info!(file = %path.display(), "the job store is open");
+    // Before the first tick: an outage longer than a queue wait, a start timeout or a
+    // retention window fails, ends or deletes nothing at that tick (design 6.7, step 7).
+    let raised = jobs
+        .raise_at_boot(boot)
+        .map_err(StartupError::because(setup.flag))?;
+    info!(file = %path.display(), raised, "the job store is open");
     Ok(Arc::new(jobs.with_retention(setup.retention)))
 }
 
@@ -117,6 +125,33 @@ mod tests {
         let second = open(&state, setup(259_200)).err().unwrap();
         assert_eq!(second.flag(), "--job-listen");
         assert!(second.reason().contains("leases.toml.jobs"), "{second}");
+    }
+
+    /// Asserts that opening the store is the boot: a queued job written before it is given a
+    /// deadline floor of at least the open plus the grace, and a second open (a restart) keeps
+    /// a floor of at least the first. It catches a store opened without the raise, so the
+    /// first tick after an outage would fail every queued job that waited through it.
+    #[test]
+    fn opening_the_store_raises_the_deadlines_for_the_boot() {
+        let dir = scratch("boot");
+        let state = dir.path().join("leases.toml");
+        let jobs = open(&state, setup(60)).unwrap();
+        let id = js_jobs::JobId::parse("job-q").unwrap();
+        let new = js_jobs::NewJob {
+            id: Some(id.clone()),
+            spec: crate::agent_api::job_rig::spec(),
+            priority: 0,
+        };
+        let queued = jobs.insert_queued(new).unwrap().record;
+        assert_eq!(queued.deadline_floor, None);
+        drop(jobs);
+        let floor = |jobs: &ServerJobs| jobs.get_job(&id).unwrap().unwrap().deadline_floor;
+        let reopened = open(&state, setup(60)).unwrap();
+        let first = floor(&reopened).unwrap();
+        assert!(first >= queued.submitted_at.saturating_add(js_jobs::BOOT_GRACE));
+        drop(reopened);
+        let again = open(&state, setup(60)).unwrap();
+        assert!(floor(&again).unwrap() >= first);
     }
 
     /// Asserts that a directory where the store's file goes (which no user, root included,
