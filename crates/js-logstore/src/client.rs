@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 use crate::clock::Clock;
 use crate::credential::{Credential, Endpoint};
@@ -103,27 +104,10 @@ impl<T: Transport, C: Clock> Store<T, C> {
     /// [`StoreError::TooLarge`] for a body over [`MAX_PUT_BYTES`] and [`StoreError::Invalid`]
     /// for a bad key or metadata, both before any request; otherwise the store's refusal.
     pub fn put(&self, key: &str, body: Vec<u8>, metadata: &Metadata) -> Result<(), StoreError> {
-        if body.len() > MAX_PUT_BYTES {
-            return Err(StoreError::TooLarge {
-                len: body.len(),
-                max: MAX_PUT_BYTES,
-            });
-        }
-        check_key(key)?;
-        let mut headers = vec![(
-            "content-type".to_owned(),
-            "application/octet-stream".to_owned(),
-        )];
-        for (name, value) in metadata {
-            check_metadata(name, value)?;
-            headers.push((format!("{META}{name}"), value.clone()));
-        }
+        let headers = put_headers(key, body.len(), metadata)?;
         let path = self.endpoint.object_path(key);
         let response = self.send(Method::Put, &path, &[], headers, &["content-type"], body)?;
-        match response.status {
-            200..=299 => Ok(()),
-            status => Err(refusal(status, &response.body)),
-        }
+        put_answer(&response)
     }
 
     /// Deletes `key`. A key that does not exist is success (S3 answers 204, some stores 404
@@ -136,11 +120,7 @@ impl<T: Transport, C: Clock> Store<T, C> {
         check_key(key)?;
         let path = self.endpoint.object_path(key);
         let response = self.send(Method::Delete, &path, &[], Vec::new(), &[], Vec::new())?;
-        match response.status {
-            200..=299 => Ok(()),
-            404 if missing_key(&response.body) => Ok(()),
-            status => Err(refusal(status, &response.body)),
-        }
+        delete_answer(&response)
     }
 
     /// Reads `len` bytes of `key` from `start` (fewer when the object ends first), with the
@@ -155,22 +135,10 @@ impl<T: Transport, C: Clock> Store<T, C> {
     /// the range asked for; otherwise the store's refusal.
     pub fn get_range(&self, key: &str, start: u64, len: u64) -> Result<Option<Object>, StoreError> {
         check_key(key)?;
-        let last = match (1..=MAX_GET_BYTES).contains(&len) {
-            true => start.checked_add(len - 1),
-            false => None,
-        }
-        .ok_or(StoreError::Invalid(
-            "a range is 1 to MAX_GET_BYTES bytes and ends at most at u64::MAX",
-        ))?;
-        let headers = vec![("range".to_owned(), format!("bytes={start}-{last}"))];
+        let headers = vec![("range".to_owned(), range_header(start, len)?)];
         let path = self.endpoint.object_path(key);
         let response = self.send(Method::Get, &path, &[], headers, &["range"], Vec::new())?;
-        match response.status {
-            206 => ranged(response, start).map(Some),
-            404 if missing_key(&response.body) => Ok(None),
-            416 => Err(StoreError::OutOfRange),
-            status => Err(refusal(status, &response.body)),
-        }
+        get_answer(response, start)
     }
 
     /// Lists at most `max_keys` keys under `prefix` in ascending order, after `start_after`
@@ -187,23 +155,10 @@ impl<T: Transport, C: Clock> Store<T, C> {
         start_after: Option<&str>,
         max_keys: u32,
     ) -> Result<Page, StoreError> {
-        if !(1..=MAX_LIST_KEYS).contains(&max_keys) {
-            return Err(StoreError::Invalid("max_keys is 1 to MAX_LIST_KEYS"));
-        }
-        let mut query = vec![
-            ("list-type".to_owned(), "2".to_owned()),
-            ("max-keys".to_owned(), max_keys.to_string()),
-            ("prefix".to_owned(), prefix.to_owned()),
-        ];
-        if let Some(after) = start_after {
-            query.push(("start-after".to_owned(), after.to_owned()));
-        }
+        let query = list_query(prefix, start_after, max_keys)?;
         let path = self.endpoint.bucket_path();
         let response = self.send(Method::Get, &path, &query, Vec::new(), &[], Vec::new())?;
-        match response.status {
-            200 => parse_page(&response.body, prefix, start_after, max_keys),
-            status => Err(refusal(status, &response.body)),
-        }
+        list_answer(&response, prefix, start_after, max_keys)
     }
 
     /// Signs and sends one request.
@@ -218,11 +173,7 @@ impl<T: Transport, C: Clock> Store<T, C> {
     ) -> Result<HttpResponse, StoreError> {
         let credential = self.credential().clone();
         let now = self.clock.now();
-        if credential.is_expired(now) {
-            return Err(StoreError::Expired {
-                code: String::new(),
-            });
-        }
+        check_live(&credential, now)?;
         let host = self.endpoint.host();
         let unsigned = Unsigned {
             method: method.as_str(),
@@ -238,11 +189,7 @@ impl<T: Transport, C: Clock> Store<T, C> {
             service: "s3",
         };
         let signed = sign(&unsigned, &credential, &scope, now);
-        let query_text = canonical_query(query);
-        let url = match query_text.is_empty() {
-            true => self.endpoint.url(path),
-            false => format!("{}?{query_text}", self.endpoint.url(path)),
-        };
+        let url = request_url(&self.endpoint, path, query);
         headers.push(("host".to_owned(), host));
         headers.extend(signed.headers);
         let request = HttpRequest {
@@ -252,6 +199,125 @@ impl<T: Transport, C: Clock> Store<T, C> {
             body,
         };
         self.transport.send(request).map_err(transport)
+    }
+}
+
+// The checks and the reading of answers are plain functions, not methods of the generic
+// `Store`: each is then one function however many transports call it.
+
+/// Refuses a credential expired at `now`, before anything is signed or sent.
+fn check_live(credential: &Credential, now: SystemTime) -> Result<(), StoreError> {
+    match credential.is_expired(now) {
+        true => Err(StoreError::Expired {
+            code: String::new(),
+        }),
+        false => Ok(()),
+    }
+}
+
+/// The URL of `path` on `endpoint`, with `query` canonically encoded when there is one.
+fn request_url(endpoint: &Endpoint, path: &str, query: &[(String, String)]) -> String {
+    let query_text = canonical_query(query);
+    match query_text.is_empty() {
+        true => endpoint.url(path),
+        false => format!("{}?{query_text}", endpoint.url(path)),
+    }
+}
+
+/// The headers of a put of `len` bytes at `key` with `metadata`, after the checks made before
+/// any request.
+fn put_headers(
+    key: &str,
+    len: usize,
+    metadata: &Metadata,
+) -> Result<Vec<(String, String)>, StoreError> {
+    if len > MAX_PUT_BYTES {
+        return Err(StoreError::TooLarge {
+            len,
+            max: MAX_PUT_BYTES,
+        });
+    }
+    check_key(key)?;
+    let mut headers = vec![(
+        "content-type".to_owned(),
+        "application/octet-stream".to_owned(),
+    )];
+    for (name, value) in metadata {
+        check_metadata(name, value)?;
+        headers.push((format!("{META}{name}"), value.clone()));
+    }
+    Ok(headers)
+}
+
+/// What the answer to a put says.
+fn put_answer(response: &HttpResponse) -> Result<(), StoreError> {
+    match response.status {
+        200..=299 => Ok(()),
+        status => Err(refusal(status, &response.body)),
+    }
+}
+
+/// What the answer to a delete says.
+fn delete_answer(response: &HttpResponse) -> Result<(), StoreError> {
+    match response.status {
+        200..=299 => Ok(()),
+        404 if missing_key(&response.body) => Ok(()),
+        status => Err(refusal(status, &response.body)),
+    }
+}
+
+/// The `range` header of a read of `len` bytes from `start`.
+fn range_header(start: u64, len: u64) -> Result<String, StoreError> {
+    let last = match (1..=MAX_GET_BYTES).contains(&len) {
+        true => start.checked_add(len - 1),
+        false => None,
+    }
+    .ok_or(StoreError::Invalid(
+        "a range is 1 to MAX_GET_BYTES bytes and ends at most at u64::MAX",
+    ))?;
+    Ok(format!("bytes={start}-{last}"))
+}
+
+/// What the answer to a read from `start` says.
+fn get_answer(response: HttpResponse, start: u64) -> Result<Option<Object>, StoreError> {
+    match response.status {
+        206 => ranged(response, start).map(Some),
+        404 if missing_key(&response.body) => Ok(None),
+        416 => Err(StoreError::OutOfRange),
+        status => Err(refusal(status, &response.body)),
+    }
+}
+
+/// The ListObjectsV2 query of a listing, after the check made before any request.
+fn list_query(
+    prefix: &str,
+    start_after: Option<&str>,
+    max_keys: u32,
+) -> Result<Vec<(String, String)>, StoreError> {
+    if !(1..=MAX_LIST_KEYS).contains(&max_keys) {
+        return Err(StoreError::Invalid("max_keys is 1 to MAX_LIST_KEYS"));
+    }
+    let mut query = vec![
+        ("list-type".to_owned(), "2".to_owned()),
+        ("max-keys".to_owned(), max_keys.to_string()),
+        ("prefix".to_owned(), prefix.to_owned()),
+    ];
+    if let Some(after) = start_after {
+        query.push(("start-after".to_owned(), after.to_owned()));
+    }
+    Ok(query)
+}
+
+/// What the answer to a listing says.
+fn list_answer(
+    response: &HttpResponse,
+    prefix: &str,
+    start_after: Option<&str>,
+    max_keys: u32,
+) -> Result<Page, StoreError> {
+    match response.status {
+        200 => parse_page(&response.body, prefix, start_after, max_keys),
+        status => Err(refusal(status, &response.body)),
     }
 }
 
