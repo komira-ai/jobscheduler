@@ -30,6 +30,7 @@
 //! must satisfy. A negative case (an agent that lacks a behaviour) is not vacuous when its
 //! correct twin's witness holds.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -43,27 +44,39 @@ use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
 
 use crate::actions::{Action, submit_work};
+use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
 use crate::front::{FrontFactory, LeaseFront};
-use crate::replay::{self, Failure, FailureReport};
+use crate::observe::ItemId;
+use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape};
 use crate::work::Work;
 
 mod expect;
 
+pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
 
 /// How long a scenario runs after its last action unless [`Scenario::settle_within`]
 /// says otherwise.
 pub const DEFAULT_SETTLE: Duration = Duration::from_secs(600);
 
+/// Which agent a group of hosts runs.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// The fake, lacking the defect when one is named.
+    Fake(Option<Defect>),
+    /// The real agent lifecycle.
+    Real,
+}
+
 /// Hosts of one kind the scenario adds, in order.
 #[derive(Clone)]
 struct Hosts {
     pool: String,
     count: usize,
-    defect: Option<Defect>,
+    kind: Kind,
 }
 
 /// A named predicate over a seed's counters.
@@ -97,6 +110,8 @@ pub struct SeedRun {
     pub hash: TraceHash,
     /// Its agents' counts added together.
     pub counters: Counters,
+    /// What the client heard of each item by the end.
+    pub outcomes: BTreeMap<ItemId, Outcome>,
 }
 
 /// Every seed of a scenario passed: the runs, in seed order.
@@ -210,25 +225,30 @@ impl Scenario {
         self
     }
 
-    /// This scenario, with `count` more hosts of `pool` with correct agents.
+    /// This scenario, with `count` more hosts of `pool` with correct fake agents: the
+    /// scale agent.
     #[must_use]
     pub fn hosts(self, pool: &str, count: usize) -> Self {
-        self.add_hosts(pool, count, None)
+        self.add_hosts(pool, count, Kind::Fake(None))
     }
 
-    /// This scenario, with `count` more hosts of `pool` whose agents lack `defect`.
+    /// This scenario, with `count` more hosts of `pool` whose fake agents lack `defect`.
     #[must_use]
     pub fn broken_hosts(self, pool: &str, count: usize, defect: Defect) -> Self {
-        self.add_hosts(pool, count, Some(defect))
+        self.add_hosts(pool, count, Kind::Fake(Some(defect)))
     }
 
-    fn add_hosts(mut self, pool: &str, count: usize, defect: Option<Defect>) -> Self {
+    /// This scenario, with `count` more hosts of `pool` whose agents are the real agent
+    /// lifecycle over an in-memory runtime. For a handful of hosts: each writes its held
+    /// list into a directory of its own at every step.
+    #[must_use]
+    pub fn real_hosts(self, pool: &str, count: usize) -> Self {
+        self.add_hosts(pool, count, Kind::Real)
+    }
+
+    fn add_hosts(mut self, pool: &str, count: usize, kind: Kind) -> Self {
         let pool = pool.to_owned();
-        self.hosts.push(Hosts {
-            pool,
-            count,
-            defect,
-        });
+        self.hosts.push(Hosts { pool, count, kind });
         self
     }
 
@@ -338,6 +358,7 @@ impl Scenario {
                 seed,
                 hash: cell.trace_hash(),
                 counters: cell.total_counters(),
+                outcomes: agreement::outcomes(cell.observations()),
             }),
         }
     }
@@ -351,6 +372,25 @@ impl Scenario {
             },
             Failure::Violated(report) => ScenarioFailure::Violated(report),
         }
+    }
+
+    /// The scenario's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The last [`REPORT_LINES`] lines of `seed`'s trace, from the seed run again to its
+    /// end with its trace kept (whether it passes or not); none when its cell does not
+    /// start.
+    pub(crate) fn last_lines(&self, seed: u64) -> Vec<String> {
+        let built = self.build(Setup::new(seed).with_trace_lines());
+        let lines = built.map(|mut cell| {
+            let _ = cell.settle(self.settle_within);
+            let lines = cell.trace_lines().unwrap_or_default();
+            let start = lines.len().saturating_sub(REPORT_LINES);
+            lines[start..].to_vec()
+        });
+        lines.unwrap_or_default()
     }
 
     /// The cell of one seed: the server, the front, the hosts in order, and the actions.
@@ -378,9 +418,10 @@ impl Scenario {
             return Err(StartupError::new("hosts", why));
         }
         for _ in 0..hosts.count {
-            let added = match hosts.defect {
-                Some(defect) => cell.add_broken_agent(defect),
-                None => cell.add_agent(),
+            let added = match hosts.kind {
+                Kind::Fake(Some(defect)) => cell.add_broken_agent(defect),
+                Kind::Fake(None) => cell.add_agent(),
+                Kind::Real => cell.add_real_agent(),
             };
             added.map_err(StartupError::because("hosts"))?;
         }
