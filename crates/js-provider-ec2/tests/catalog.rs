@@ -699,12 +699,12 @@ fn the_purchase_finding_is_enforced() {
 /// The fake of the ordering test, its answers added in the order `forward` says.
 fn ordered(forward: bool) -> Arc<FakeEc2> {
     let fake = Arc::new(FakeEc2::new());
-    let mut types = vec![a100_type("p9.24xlarge"), grace_type("p9e-sample.36xlarge")];
+    let mut types = [a100_type("p9.24xlarge"), grace_type("p9e-sample.36xlarge")];
     let mut zones: Vec<(&str, &str)> = Vec::new();
     for name in ["p9.24xlarge", "p9e-sample.36xlarge"] {
         zones.extend(ZONES.iter().map(|zone| (name, *zone)));
     }
-    let mut blocks = vec![
+    let mut blocks = [
         block("cb-2", "p9e-sample.36xlarge", ZONES[1], 1, "10"),
         block("cb-1", "p9e-sample.36xlarge", ZONES[1], 1, "10"),
         block("cb-3", "p9e-sample.36xlarge", ZONES[0], 1, "10"),

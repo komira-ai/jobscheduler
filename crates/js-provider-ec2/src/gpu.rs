@@ -110,6 +110,16 @@ mod tests {
     use super::*;
     use crate::model::{ArchName, InstanceType, InstanceTypeInfo};
 
+    /// The accelerators of `count` GPUs of the table spelling `spelling`, as the
+    /// translation builds them.
+    fn known(spelling: &str, count: u32, memory_mib: u64) -> Accelerator {
+        accelerator_of(
+            &Model::parse(spelling).unwrap(),
+            count,
+            Some(memory_mib * MIB),
+        )
+    }
+
     fn gpu(manufacturer: &str, name: &str, count: u32, memory_mib: u64) -> GpuInfo {
         GpuInfo {
             name: name.to_owned(),
@@ -151,9 +161,12 @@ mod tests {
             let variant = resolved.variant.unwrap();
             assert_eq!(variant.memory_per_device, memory_mib * MIB, "{spelling}");
             let source = gpu(manufacturer, name, 4, memory_mib);
-            let Gpus::Known(accelerator) = translate(std::slice::from_ref(&source)) else {
-                panic!("{spelling} is not translated through its row");
-            };
+            let accelerator = known(spelling, 4, memory_mib);
+            assert_eq!(
+                translate(std::slice::from_ref(&source)),
+                Gpus::Known(accelerator.clone()),
+                "{spelling} is translated through its row"
+            );
             assert_eq!(accelerator.model, resolved.model);
             assert_eq!(accelerator.variant.as_ref().unwrap().as_str(), spelling);
             assert_eq!(accelerator.vendor.as_str(), "nvidia");
@@ -173,11 +186,16 @@ mod tests {
             assert_eq!(machine.offer.accelerator, Some(accelerator));
             assert_eq!(machine.unknown_gpu, None);
         }
-        let a100 = |memory_mib| match translate(&[gpu("nvidia", "a100", 8, memory_mib)]) {
-            Gpus::Known(accelerator) => accelerator,
-            other => panic!("{other:?}"),
+        let a100 = |memory_mib, spelling| {
+            let accelerator = known(spelling, 8, memory_mib);
+            assert_eq!(
+                translate(&[gpu("nvidia", "a100", 8, memory_mib)]),
+                Gpus::Known(accelerator.clone())
+            );
+            accelerator
         };
-        let (small, large) = (a100(40960), a100(81920));
+        let small = a100(40960, "nvidia-a100-sxm4-40gb");
+        let large = a100(81920, "nvidia-a100-sxm4-80gb");
         assert_eq!(small.model.as_str(), "nvidia-a100");
         assert_eq!(large.model, small.model);
         assert_eq!(small.memory_per_device, Some(40 << 30));
@@ -192,16 +210,20 @@ mod tests {
     /// family name itself, and so resolves to the family with no variant).
     #[test]
     fn a_gpu_that_misses_a_row_on_any_key_passes_through() {
-        let unknown = |gpu: GpuInfo| match translate(&[gpu]) {
-            Gpus::Unknown(accelerator) => accelerator,
-            other => panic!("{other:?}"),
+        let unknown = |source: GpuInfo, spelling: &str| {
+            let accelerator = accelerator_of(
+                &Model::parse(spelling).unwrap(),
+                source.count,
+                Some(source.memory_mib * MIB),
+            );
+            assert_eq!(translate(&[source]), Gpus::Unknown(accelerator.clone()));
+            accelerator
         };
-        let other_maker = unknown(gpu("Habana", "A100", 1, 40960));
-        assert_eq!(other_maker.model.as_str(), "habana-a100");
-        let other_name = unknown(gpu("NVIDIA", "L40S", 4, 45776));
-        assert_eq!(other_name.model.as_str(), "nvidia-l40s");
+        let other_maker = unknown(gpu("Habana", "A100", 1, 40960), "habana-a100");
+        assert_eq!(other_maker.vendor.as_str(), "habana");
+        let other_name = unknown(gpu("NVIDIA", "L40S", 4, 45776), "nvidia-l40s");
         assert_eq!(other_name.memory_per_device, Some(45776 * MIB));
-        let other_size = unknown(gpu("NVIDIA", "A100", 8, 40536));
+        let other_size = unknown(gpu("NVIDIA", "A100", 8, 40536), "nvidia-a100");
         assert_eq!(other_size.model.as_str(), "nvidia-a100");
         assert_eq!(other_size.variant, None);
         assert_eq!(other_size.memory_per_device, Some(40536 * MIB));
@@ -232,10 +254,7 @@ mod tests {
         assert_eq!(translate(&[]), Gpus::None);
         assert_eq!(translate(&[gpu("—", "", 1, 1)]), Gpus::Unnamed);
         let first = translate(&[gpu("NVIDIA", "T4", 1, 16384), gpu("NVIDIA", "M60", 2, 8192)]);
-        let Gpus::Unknown(accelerator) = first else {
-            panic!("{first:?}");
-        };
-        assert_eq!(accelerator.model.as_str(), "nvidia-t4");
-        assert_eq!(accelerator.count, 1);
+        let t4 = accelerator_of(&Model::parse("nvidia-t4").unwrap(), 1, Some(16384 * MIB));
+        assert_eq!(first, Gpus::Unknown(t4));
     }
 }

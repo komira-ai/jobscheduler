@@ -146,12 +146,12 @@ pub(crate) fn offers_for(
             PurchaseKind::OnDemand => offers.extend(
                 sale.zones
                     .iter()
-                    .map(|zone| sold(*kind, *zone, sale.on_demand)),
+                    .map(|zone| sold(*kind, zone, sale.on_demand)),
             ),
             PurchaseKind::Spot => offers.extend(
                 sale.zones
                     .iter()
-                    .map(|zone| sold(*kind, *zone, sale.spot.get(zone).copied())),
+                    .map(|zone| sold(*kind, zone, sale.spot.get(zone).copied())),
             ),
             PurchaseKind::CapacityBlock => {
                 offers.extend(sale.blocks.iter().map(|(offering, upfront)| Offer {
