@@ -14,6 +14,7 @@ use crate::observe::ItemId;
 mod agent_prepare_delay;
 mod agent_refuses_prepare;
 mod agent_silent_on_prepare;
+mod cancel_when_set_aside;
 mod cancel_work;
 mod kill_agents;
 mod kill_agents_for_good;
@@ -25,8 +26,9 @@ mod set_bus_faults;
 mod submit_work;
 
 pub use agent_prepare_delay::{AgentPrepareDelay, agent_prepare_delay};
-pub use agent_refuses_prepare::{AgentRefusesPrepare, agent_refuses_prepare};
+pub use agent_refuses_prepare::{AgentRefusesPrepare, REFUSAL_REASONS, agent_refuses_prepare};
 pub use agent_silent_on_prepare::{AgentSilentOnPrepare, agent_silent_on_prepare};
+pub use cancel_when_set_aside::{CancelWhenSetAside, cancel_when_set_aside};
 pub use cancel_work::{CancelWork, cancel_work};
 pub use kill_agents::{KillAgents, kill_agents};
 pub use kill_agents_for_good::{KillAgentsForGood, kill_agents_for_good};

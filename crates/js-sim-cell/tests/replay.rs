@@ -24,6 +24,13 @@
 //! whole-host decisions under any placement moves a hash; the replay test runs one of its
 //! seeds twice under each placement.
 //!
+//! And one scenario of the whole-host fault family, family `whole_host_faults`: the
+//! cancelled whole-host request (`cell/whole_host_cancel.rs`, one host, about 180 agent
+//! requests a seed) over [`WHOLE_FAULTS_SEEDS`] seeds under each value of `--placement`,
+//! so a change to how the server drops a cancelled request's place or mark, or to the
+//! action that cancels it once it is marked, moves a hash; the replay test runs one of
+//! its seeds twice under each placement.
+//!
 //! And one scenario with real agents, family `real_agent`: the agreement family's world
 //! without faults (`cell/real_agents.rs`, six real agents, about 1,200 agent requests a
 //! seed) over [`REAL_SEEDS`] seeds, so a change to a decision of the real agent lifecycle
@@ -44,6 +51,8 @@ mod server_restart;
 mod support;
 #[path = "cell/whole_host.rs"]
 mod whole_host;
+#[path = "cell/whole_host_cancel.rs"]
+mod whole_host_cancel;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -97,6 +106,11 @@ const SMOKE_FAMILY: &str = "smoke";
 /// and the family they are kept under.
 const WHOLE_SEEDS: u64 = 2;
 const WHOLE_FAMILY: &str = "whole_host";
+
+/// How many seeds of the cancelled whole-host request the golden file pins under each
+/// placement, and the family they are kept under.
+const WHOLE_FAULTS_SEEDS: u64 = 2;
+const WHOLE_FAULTS_FAMILY: &str = "whole_host_faults";
 
 /// How many seeds of the scenario with real agents the golden file pins, and the family
 /// they are kept under.
@@ -173,7 +187,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// run did what the scenario asks (the lease's run launched once, its agent listed live at
 /// the end), so the hash covers a run that reached the server. The same for a seed of the
 /// scenario with real agents, run twice, whose items all succeed, and for one seed of the
-/// whole-host scenario run twice under each placement. Catches a handler path that reads a
+/// whole-host scenario and one of the cancelled whole-host request, each run twice under
+/// each placement. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
 /// whose lines depend on whether they are kept. Also that a seed of the fault scenario of
@@ -200,6 +215,10 @@ fn a_seed_replays_to_the_same_trace_hash() {
         let scenario = whole_host::fifty_whole_host_requests(*placement);
         let once = scenario.run_seeds(1).runs[0].hash;
         let again = scenario.run_seeds(1).runs[0].hash;
+        assert_eq!(once, again, "{}", whole_host::spelled(*placement));
+        let cancel = whole_host_cancel::a_cancelled_request(*placement);
+        let once = cancel.run_seeds(1).runs[0].hash;
+        let again = cancel.run_seeds(1).runs[0].hash;
         assert_eq!(once, again, "{}", whole_host::spelled(*placement));
     }
 
@@ -316,6 +335,9 @@ fn regenerate_golden_hashes() {
     golden().regenerate(&golden_runs()).unwrap();
     golden_of(SMOKE_FAMILY).regenerate(&smoke_runs()).unwrap();
     golden_of(WHOLE_FAMILY).regenerate(&whole_runs()).unwrap();
+    golden_of(WHOLE_FAULTS_FAMILY)
+        .regenerate(&whole_faults_runs())
+        .unwrap();
     golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
     golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
 }
@@ -342,6 +364,30 @@ fn whole_runs() -> Vec<(String, TraceHash)> {
 #[test]
 fn the_whole_host_scenario_matches_the_golden_file_under_every_placement() {
     golden_of(WHOLE_FAMILY).assert_matches(&whole_runs());
+}
+
+/// The hash of each pinned seed of the cancelled whole-host request under each placement,
+/// which must pass.
+fn whole_faults_runs() -> Vec<(String, TraceHash)> {
+    let mut runs = Vec::new();
+    for placement in Placement::value_variants() {
+        let scenario = whole_host_cancel::a_cancelled_request(*placement);
+        let placement = whole_host::spelled(*placement);
+        for run in scenario.run_seeds(WHOLE_FAULTS_SEEDS).runs {
+            runs.push((format!("{placement}/seed-{}", run.seed), run.hash));
+        }
+    }
+    runs
+}
+
+/// Asserts that the hashes of the pinned seeds of the cancelled whole-host request, under
+/// every placement, equal the golden file's (family `whole_host_faults`). Catches any
+/// change to how the server drops a cancelled whole-host request's place and mark under
+/// a placement, to the client's cancel of a pending lease, or to the trace text, and a
+/// run that differs between processes.
+#[test]
+fn the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement() {
+    golden_of(WHOLE_FAULTS_FAMILY).assert_matches(&whole_faults_runs());
 }
 
 /// Asserts that a run stopped by a violation reports the scenario, the seed, the trace

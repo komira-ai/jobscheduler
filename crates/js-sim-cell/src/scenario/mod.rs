@@ -37,8 +37,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use js_conformance::agent::Defect;
-use js_lease_server::StartupError;
+use js_lease_server::{Placement, StartupError};
 use js_sim::text::list;
 use js_sim::{Faults, TraceHash};
 use js_testkit::dir::TestDir;
@@ -56,6 +57,7 @@ use crate::work::Work;
 
 mod expect;
 mod launched_on;
+mod tries;
 
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
@@ -224,6 +226,20 @@ impl Scenario {
     #[must_use]
     pub fn server(mut self, spec: ServerSpec) -> Self {
         self.server = spec;
+        self
+    }
+
+    /// This scenario under the server's `placement` (`--placement`, as
+    /// [`ServerSpec::placement`] sets it), its name followed by `-` and the placement as
+    /// the server's command line spells it, so that the runs of one scenario under each
+    /// placement are named apart in a failure and in the golden file. After
+    /// [`Scenario::server`], which would put the default back.
+    #[must_use]
+    pub fn under(mut self, placement: Placement) -> Self {
+        let spelled = placement.to_possible_value();
+        let spelled = spelled.map(|value| value.get_name().to_owned());
+        self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
+        self.server = self.server.placement(placement);
         self
     }
 

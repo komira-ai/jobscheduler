@@ -5,15 +5,16 @@ use std::time::Duration;
 
 use js_agent_wire::Phase;
 use js_registry::{HostState, HostView};
+use js_sim::text::list;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
 use crate::bus::agent_name;
 use crate::cell::Cell;
-use crate::observe::{ClientEvent, HowEnded, ItemRecord};
+use crate::observe::{ClientEvent, HowEnded, ItemId, ItemRecord};
 use crate::server::ServerNode;
 
-use super::launched_on;
+use super::{launched_on, tries};
 
 /// How the server's listing shows a host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +47,11 @@ enum Wanted {
     HeldAndReleased(usize),
     EveryHostServing,
     Launched(Vec<usize>, FarmTime),
+    NotServing(Vec<usize>),
+    Tries(ItemId, usize),
+    HeldAfterFailedTry(usize),
+    KeptOff(Duration),
+    HeldAfterRuns(ItemId),
 }
 
 impl Expect {
@@ -91,6 +97,46 @@ impl Expect {
         Self(Wanted::Launched(agents.to_vec(), at))
     }
 
+    /// The server's listing shows every agent's host serving (as
+    /// [`Expect::every_host_serving`] reads it) but the hosts of `agents` (by index), and
+    /// none of those: how a scenario states that a refusal took hosts out of service (a
+    /// `host-unsafe` refusal taints the host for good).
+    #[must_use]
+    pub fn serving_but(agents: &[usize]) -> Self {
+        Self(Wanted::NotServing(agents.to_vec()))
+    }
+
+    /// The client was answered pending ([`crate::ClientEvent::Pending`]) under exactly
+    /// `count` leases for `item`: its request made that many tries.
+    #[must_use]
+    pub fn tries(item: ItemId, count: usize) -> Self {
+        Self(Wanted::Tries(item, count))
+    }
+
+    /// At least `count` items were granted a lease after a try of theirs failed: a try
+    /// the server's listing booked and stopped booking, and the item was not granted.
+    #[must_use]
+    pub fn held_after_a_failed_try(count: usize) -> Self {
+        Self(Wanted::HeldAfterFailedTry(count))
+    }
+
+    /// No try of an item was booked on a host where an earlier try of the same item
+    /// failed sooner than `backoff` after the listing stopped booking the failed one (to
+    /// within one read of the listing, [`crate::cell::LISTING_EVERY`]): a failed host is
+    /// left out of the request's next tries for the pool's `reserve_backoff`.
+    #[must_use]
+    pub fn kept_off_a_failed_host(backoff: Duration) -> Self {
+        Self(Wanted::KeptOff(backoff))
+    }
+
+    /// `item` was granted a lease, and every run launched on its host before the grant
+    /// had completed by then, by the cell's ledger: the host was held only after the
+    /// runs that were on it ended.
+    #[must_use]
+    pub fn held_after_the_runs_on_its_host(item: ItemId) -> Self {
+        Self(Wanted::HeldAfterRuns(item))
+    }
+
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
     /// as `<statement>: wanted <w>, got <g>`.
     #[must_use]
@@ -133,6 +179,39 @@ impl Expect {
             }
             Wanted::Launched(agents, after) => {
                 let [name, wanted, got] = launched_on::judged(agents, *after, cell.ledger());
+                (name, wanted, got)
+            }
+            Wanted::NotServing(agents) => {
+                let hosts = cell.server().map(ServerNode::hosts).unwrap_or_default();
+                let listed_serving = |name: &String| {
+                    let mut listed = hosts.iter();
+                    listed.any(|host| (host.id.as_str() == name.as_str()) & serving(host))
+                };
+                let names = (0..cell.agent_count()).map(|i| agent_name(i).as_str().to_owned());
+                let not: Vec<String> = names.filter(|name| !listed_serving(name)).collect();
+                let wanted = agents.iter().map(|i| agent_name(*i).as_str().to_owned());
+                let wanted: Vec<String> = wanted.collect();
+                let name = "hosts-not-serving".to_owned();
+                (
+                    name,
+                    list(&wanted, String::clone),
+                    list(&not, String::clone),
+                )
+            }
+            Wanted::Tries(item, count) => {
+                let [name, wanted, got] = tries::judged_tries(observations, *item, *count);
+                (name, wanted, got)
+            }
+            Wanted::HeldAfterFailedTry(count) => {
+                let [name, wanted, got] = tries::judged_held_after_failure(observations, *count);
+                (name, wanted, got)
+            }
+            Wanted::KeptOff(backoff) => {
+                let [name, wanted, got] = tries::judged_kept_off(observations, *backoff);
+                (name, wanted, got)
+            }
+            Wanted::HeldAfterRuns(item) => {
+                let [name, wanted, got] = tries::judged_held_after_runs(observations, *item);
                 (name, wanted, got)
             }
         };
