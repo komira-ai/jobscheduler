@@ -88,7 +88,10 @@ impl Shape {
 /// The heartbeat interval and grace are the server's defaults (5 s and 15 s) unless
 /// [`ServerSpec::heartbeat`] says otherwise, and hosts are forgotten after the
 /// registry's default `lost_retention` unless [`ServerSpec::lost_retention`] says
-/// otherwise. Usage recording is off (`--usage-off`): its store reads the system's clock
+/// otherwise. A whole-node pool sets the whole-node keys only that
+/// [`ServerSpec::prepare_timeout`], [`ServerSpec::reserve_backoff`] and
+/// [`ServerSpec::max_replace`] set; each other takes the server's default. Usage recording
+/// is off (`--usage-off`): its store reads the system's clock
 /// and commits on a thread of its own, so a run would depend on both. The pool's class is
 /// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]), and placement
 /// (`--placement`) is the default, `registry`, unless [`ServerSpec::placement`] says
@@ -104,6 +107,8 @@ pub struct ServerSpec {
     interval: Duration,
     grace: Duration,
     lost_retention: Duration,
+    /// The whole-node keys the pool file sets, by name, each as the file spells its value.
+    whole_keys: BTreeMap<&'static str, String>,
     /// Whether the server boots over the lease file a server before it left
     /// (`--boot resume`), rather than a first boot (`--boot initialise`).
     resume: bool,
@@ -124,6 +129,7 @@ impl ServerSpec {
             interval: Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS),
             grace: Duration::from_millis(DEFAULT_GRACE_MS),
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
+            whole_keys: BTreeMap::new(),
             resume: false,
         }
     }
@@ -131,7 +137,9 @@ impl ServerSpec {
     /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
     /// each of `hosts` hosts that register with [`JOIN_TOKEN`]: every lease of it holds a
     /// host whole, and is held only once the host's agent reported it ready. The pool
-    /// sets no whole-node key, so each takes the server's default.
+    /// sets no whole-node key, so each takes the server's default, until
+    /// [`ServerSpec::prepare_timeout`], [`ServerSpec::reserve_backoff`] or
+    /// [`ServerSpec::max_replace`] sets one.
     #[must_use]
     pub fn whole_node_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
         Self {
@@ -169,6 +177,33 @@ impl ServerSpec {
     #[must_use]
     pub fn lost_retention(mut self, retention: Duration) -> Self {
         self.lost_retention = retention;
+        self
+    }
+
+    /// This server, failing a whole-node lease whose host's agent has not reported ready
+    /// `timeout` after the commit (the pool key `prepare_timeout`; the server refuses
+    /// zero).
+    #[must_use]
+    pub fn prepare_timeout(self, timeout: Duration) -> Self {
+        self.whole_key("prepare_timeout", millis(timeout))
+    }
+
+    /// This server, leaving the host of a failed prepare out of the request's next
+    /// placements for `backoff` (the pool key `reserve_backoff`; the server refuses zero).
+    #[must_use]
+    pub fn reserve_backoff(self, backoff: Duration) -> Self {
+        self.whole_key("reserve_backoff", millis(backoff))
+    }
+
+    /// This server, refusing a whole-node request for good once `tries` of its prepares
+    /// have failed (the pool key `max_replace`; the server refuses zero).
+    #[must_use]
+    pub fn max_replace(self, tries: u32) -> Self {
+        self.whole_key("max_replace", tries.to_string())
+    }
+
+    fn whole_key(mut self, key: &'static str, value: String) -> Self {
+        self.whole_keys.insert(key, value);
         self
     }
 
@@ -225,9 +260,13 @@ impl ServerSpec {
             .capabilities
             .iter()
             .map(|(k, v)| format!("{} = {}\n", quoted(k), quoted(v)));
+        let whole = self
+            .whole_keys
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}\n"));
         format!(
             "name = {}\nclass = {}\nmax_machines = {}\nheartbeat_interval = \"{}ms\"\n\
-             grace = \"{}ms\"\nlost_retention = \"{}ms\"\n\n[shape]\ncpu_millis = {}\n\
+             grace = \"{}ms\"\nlost_retention = \"{}ms\"\n{}\n[shape]\ncpu_millis = {}\n\
              memory_bytes = {}\ngpus = {}\n{}\n[capabilities]\n{}",
             quoted(&self.pool),
             quoted(self.class),
@@ -235,6 +274,7 @@ impl ServerSpec {
             self.interval.as_millis(),
             self.grace.as_millis(),
             self.lost_retention.as_millis(),
+            whole.collect::<String>(),
             shape.cpu_millis,
             shape.memory_bytes,
             shape.gpus,
@@ -303,6 +343,11 @@ impl ServerSpec {
 /// `initialise`.
 fn boot(resume: bool) -> &'static str {
     if resume { "resume" } else { "initialise" }
+}
+
+/// `duration` as the pool file spells a duration: whole milliseconds, quoted.
+fn millis(duration: Duration) -> String {
+    quoted(&format!("{}ms", duration.as_millis()))
 }
 
 /// `text` as a TOML basic string, which the JSON string grammar is a part of.

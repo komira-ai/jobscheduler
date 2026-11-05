@@ -7,7 +7,7 @@
 //! | lease | `<term>.<sequence>` |
 //! | run | `run "<id>"`, the id quoted and escaped |
 //! | item | `item<n>` |
-//! | client event | `submitted`, `queued`, `placed <host>`, `started`, `terminal <how>`, `release-sent`, `released`; never the ids the client learned |
+//! | client event | `submitted`, `pending`, `queued`, `placed <host>`, `started`, `terminal <how>`, `release-sent`, `released`; never the ids the client learned |
 //! | resources | `res(cpu=<n> mem=<n> gpus=<n>)`, the three axes a host is booked on |
 
 use js_types::{HostId, LeaseId, Resources};
@@ -38,6 +38,7 @@ pub(crate) fn item(item: ItemId) -> String {
 pub(crate) fn event(event: &ClientEvent) -> String {
     match event {
         ClientEvent::Submitted => "submitted".to_owned(),
+        ClientEvent::Pending { .. } => "pending".to_owned(),
         ClientEvent::Queued { .. } => "queued".to_owned(),
         ClientEvent::Placed { host: on } => format!("placed {}", host(on)),
         ClientEvent::Started => "started".to_owned(),

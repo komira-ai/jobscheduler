@@ -20,6 +20,11 @@
 //! invariants read only those. The cell writes [`ClientEvent::Submitted`] itself when it
 //! submits an item.
 //!
+//! A front also keeps every answer it was given, raw ([`Answer`]: the call, its time, its
+//! status and its body), for one purpose only: an expectation that carries what a test
+//! of the server's HTTP surface asserted about a status or an error body
+//! ([`crate::Expect::answer`]). No invariant reads them.
+//!
 //! [`LeaseFront`] is the one front here. A front is chosen by a [`FrontFactory`] (the
 //! scenario builder takes one; [`LeaseFront::factory`] is the default), so a second front
 //! is added beside the first without editing it.
@@ -36,7 +41,48 @@ use crate::work::Work;
 
 mod lease;
 
+pub(crate) use lease::listed;
 pub use lease::{LeaseFront, POLL_EVERY, REQUEST_PREFIX};
+
+/// What a front's call was for, as its [`Answer`] names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CallKind {
+    /// The acquire of a lease.
+    Acquire,
+    /// A read of the lease list, for a pending lease.
+    List,
+    /// The run queued on a held lease.
+    Queue,
+    /// A read of the run.
+    Read,
+    /// The stop of the run, for a cancel.
+    Cancel,
+    /// The release of the lease.
+    Release,
+}
+
+impl CallKind {
+    /// A stable kebab-case name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        ["acquire", "list", "queue", "read", "cancel", "release"][self as usize]
+    }
+}
+
+/// One answer a front was given, as it came.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer {
+    /// The item the call was made for.
+    pub item: ItemId,
+    /// What the call was for.
+    pub kind: CallKind,
+    /// The virtual time of the call.
+    pub at: FarmTime,
+    /// The status.
+    pub status: u16,
+    /// The body, as text.
+    pub body: String,
+}
 
 /// The server's client router, as a front calls it: one request, answered at once.
 pub trait ClientPort {
@@ -63,6 +109,9 @@ pub trait Front {
     /// Makes the calls due at `now` through `server`, and returns every event heard, in
     /// the order heard.
     fn poll(&mut self, now: FarmTime, server: &mut dyn ClientPort) -> Vec<(ItemId, ClientEvent)>;
+
+    /// Every answer the front was given, in the order given.
+    fn answers(&self) -> &[Answer];
 }
 
 /// What a [`FrontFactory`] calls: a front for a cell of the server a spec describes.

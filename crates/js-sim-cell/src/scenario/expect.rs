@@ -1,19 +1,30 @@
 //! What a scenario may state beyond the invariants: a small closed set, judged once per
-//! seed after the end check.
+//! seed after the end check ([`super::Scenario::expect`]) or at a virtual time
+//! ([`super::Scenario::expect_at`]).
+//!
+//! The first six, and the five whole-host statements from [`Expect::serving_but`] on
+//! (`tries.rs`), read what the cell observed. [`Expect::answer`] reads an answer the
+//! client kept (`answer.rs`), and the seven from [`Expect::listed`] on read the server at
+//! the moment they are judged (`facts.rs`): the facts the server's own HTTP tests read,
+//! so a test moved onto the cell asserts what it asserted.
 
 use std::time::Duration;
 
 use js_agent_wire::Phase;
-use js_registry::{HostState, HostView};
+use js_registry::{HostState, HostView, RequestKey};
+use js_sim::text::list;
 use js_types::HostId;
 use js_types::sched::FarmTime;
+use serde_json::Value;
 
 use crate::bus::agent_name;
 use crate::cell::Cell;
-use crate::observe::{ClientEvent, HowEnded, ItemRecord};
+use crate::observe::{ClientEvent, HowEnded, ItemId, ItemRecord};
 use crate::server::ServerNode;
 
-use super::launched_on;
+use super::answer::{self, Call};
+use super::facts::{self, Booked, Fact, Listed, RecordFact};
+use super::{launched_on, tries};
 
 /// How the server's listing shows a host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,31 +51,44 @@ pub struct Expect(Wanted);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Wanted {
+    Seen(Seen),
+    Answer(Call, u16, Option<Value>),
+    Fact(Fact),
+}
+
+/// A statement over what the cell observed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Seen {
     AllTerminal,
     Count(usize, HowEnded),
     Host(usize, HostIs),
     HeldAndReleased(usize),
     EveryHostServing,
     Launched(Vec<usize>, FarmTime),
+    NotServing(Vec<usize>),
+    Tries(ItemId, usize),
+    HeldAfterFailedTry(usize),
+    KeptOff(Duration),
+    HeldAfterRuns(ItemId),
 }
 
 impl Expect {
     /// Every item submitted has a terminal answer (one the client gave up on counts).
     #[must_use]
     pub fn all_items_terminal() -> Self {
-        Self(Wanted::AllTerminal)
+        Self(Wanted::Seen(Seen::AllTerminal))
     }
 
     /// Exactly `count` items ended `how`.
     #[must_use]
     pub fn terminal_count(count: usize, how: HowEnded) -> Self {
-        Self(Wanted::Count(count, how))
+        Self(Wanted::Seen(Seen::Count(count, how)))
     }
 
     /// The server's listing shows agent `index`'s host (`h000` is 0) as `state`.
     #[must_use]
     pub fn host_state(index: usize, state: HostIs) -> Self {
-        Self(Wanted::Host(index, state))
+        Self(Wanted::Seen(Seen::Host(index, state)))
     }
 
     /// Exactly `count` items were held and released: the client heard each placed on a
@@ -72,14 +96,14 @@ impl Expect {
     /// answered.
     #[must_use]
     pub fn held_and_released(count: usize) -> Self {
-        Self(Wanted::HeldAndReleased(count))
+        Self(Wanted::Seen(Seen::HeldAndReleased(count)))
     }
 
     /// The server's listing shows every agent's host live and serving: its last phase
     /// `serving`, nothing booked, not releasing, not set aside and not tainted.
     #[must_use]
     pub fn every_host_serving() -> Self {
-        Self(Wanted::EveryHostServing)
+        Self(Wanted::Seen(Seen::EveryHostServing))
     }
 
     /// Every agent of `agents` (by index, `h000` is 0) launched at least one run at or
@@ -88,55 +112,209 @@ impl Expect {
     #[must_use]
     pub fn launched_on(agents: &[usize], after: Duration) -> Self {
         let at = FarmTime::default().saturating_add(after);
-        Self(Wanted::Launched(agents.to_vec(), at))
+        Self(Wanted::Seen(Seen::Launched(agents.to_vec(), at)))
+    }
+
+    /// The server's listing shows every agent's host serving (as
+    /// [`Expect::every_host_serving`] reads it) but the hosts of `agents` (by index), and
+    /// none of those: how a scenario states that a refusal took hosts out of service (a
+    /// `host-unsafe` refusal taints the host for good).
+    #[must_use]
+    pub fn serving_but(agents: &[usize]) -> Self {
+        Self(Wanted::Seen(Seen::NotServing(agents.to_vec())))
+    }
+
+    /// The client was answered pending ([`crate::ClientEvent::Pending`]) under exactly
+    /// `count` leases for `item`: its request made that many tries.
+    #[must_use]
+    pub fn tries(item: ItemId, count: usize) -> Self {
+        Self(Wanted::Seen(Seen::Tries(item, count)))
+    }
+
+    /// At least `count` items were granted a lease after a try of theirs failed: a try
+    /// the server's listing booked and stopped booking, and the item was not granted.
+    #[must_use]
+    pub fn held_after_a_failed_try(count: usize) -> Self {
+        Self(Wanted::Seen(Seen::HeldAfterFailedTry(count)))
+    }
+
+    /// No try of an item was booked on a host where an earlier try of the same item
+    /// failed sooner than `backoff` after the listing stopped booking the failed one (to
+    /// within one read of the listing, [`crate::cell::LISTING_EVERY`]): a failed host is
+    /// left out of the request's next tries for the pool's `reserve_backoff`.
+    #[must_use]
+    pub fn kept_off_a_failed_host(backoff: Duration) -> Self {
+        Self(Wanted::Seen(Seen::KeptOff(backoff)))
+    }
+
+    /// `item` was granted a lease, and every run launched on its host before the grant
+    /// had completed by then, by the cell's ledger: the host was held only after the
+    /// runs that were on it ended.
+    #[must_use]
+    pub fn held_after_the_runs_on_its_host(item: ItemId) -> Self {
+        Self(Wanted::Seen(Seen::HeldAfterRuns(item)))
+    }
+
+    /// The answer to `call` was `status`, with `body` (compared as JSON) when one is
+    /// given: how a scenario carries a statement about an HTTP status or an error body.
+    /// It reads the answers the client kept ([`Cell::answers`]); a call not made is
+    /// `no-answer`.
+    #[must_use]
+    pub fn answer(call: Call, status: u16, body: Option<Value>) -> Self {
+        Self(Wanted::Answer(call, status, body))
+    }
+
+    /// The lease list, as a client reads it when this is judged, shows the lease the
+    /// answer to `call` named as `listed`. A call not made, or answered with no lease, is
+    /// `no-lease`; a list that cannot be read (the server is down) is `unread`.
+    #[must_use]
+    pub fn listed(call: Call, listed: Listed) -> Self {
+        Self(Wanted::Fact(Fact::Listed(call, listed)))
+    }
+
+    /// The lease list, as a client reads it when this is judged, lists no lease at all.
+    #[must_use]
+    pub fn no_leases_listed() -> Self {
+        Self(Wanted::Fact(Fact::NoLeasesListed))
+    }
+
+    /// The agent registry books the lease the answer to `call` named as `booked` says,
+    /// when this is judged: the host whose heartbeat reply names a committed whole-node
+    /// lease in `exclusive` is the host it is booked on.
+    #[must_use]
+    pub fn booked(call: Call, booked: Booked) -> Self {
+        Self(Wanted::Fact(Fact::Booked(call, booked)))
+    }
+
+    /// The agent registry's record of the whole-node request `key` names (its request id,
+    /// or its content when it was asked for under none) shows `fact`, when this is
+    /// judged ([`js_registry::Registry::request_record`]).
+    #[must_use]
+    pub fn request_record(key: impl Into<RequestKey>, fact: RecordFact) -> Self {
+        Self(Wanted::Fact(Fact::Record(key.into(), fact)))
+    }
+
+    /// The whole-node request under the request id `request` waits on the wait list at
+    /// `position` (zero is next), or not at all for `None`, when this is judged
+    /// ([`js_registry::Registry::queue_position`]).
+    #[must_use]
+    pub fn waiting(request: &str, position: Option<usize>) -> Self {
+        Self(Wanted::Fact(Fact::Waiting(request.to_owned(), position)))
+    }
+
+    /// The agent registry sets no host aside for any request, when this is judged
+    /// ([`js_registry::Registry::reservations`]).
+    #[must_use]
+    pub fn no_reservations() -> Self {
+        Self(Wanted::Fact(Fact::NoReservations))
+    }
+
+    /// The server's listing shows agent `index`'s host set aside for the request under
+    /// the request id `request`, or not set aside and reserved for no request for
+    /// `None`, when this is judged (the listing's `mark` and `reserved_for`).
+    #[must_use]
+    pub fn set_aside(index: usize, request: Option<&str>) -> Self {
+        let request = request.map(str::to_owned);
+        Self(Wanted::Fact(Fact::SetAside(index, request)))
     }
 
     /// `None` when `cell` meets the statement; otherwise what it wanted and what it got,
-    /// as `<statement>: wanted <w>, got <g>`.
+    /// as `<statement>: wanted <w>, got <g>`. A statement about the server reads it now,
+    /// the lease list through the client router (a call the trace shows).
     #[must_use]
-    pub fn unmet(&self, cell: &Cell) -> Option<String> {
-        let observations = cell.observations();
-        let items = observations.items.values();
+    pub fn unmet(&self, cell: &mut Cell) -> Option<String> {
         let (name, wanted, got) = match &self.0 {
-            Wanted::AllTerminal => {
-                let ended = items.filter(|record| ended(record).is_some()).count();
-                let wanted = observations.items.len();
-                (
-                    "all-items-terminal".to_owned(),
-                    wanted.to_string(),
-                    ended.to_string(),
-                )
-            }
-            Wanted::Count(count, how) => {
-                let ended = items.filter(|record| ended(record) == Some(*how)).count();
-                let name = format!("terminal-count({})", how.name());
-                (name, count.to_string(), ended.to_string())
-            }
-            Wanted::Host(index, state) => {
-                let host = HostId::new(agent_name(*index).as_str()).ok();
-                let listed = host.as_ref().and_then(|h| observations.server.hosts.get(h));
-                let lost = [HostIs::Live, HostIs::Lost];
-                let is = listed.map_or(HostIs::Absent, |l| lost[usize::from(l.lost)]);
-                let name = format!("host-state(h{index:03})");
-                (name, state.name().to_owned(), is.name().to_owned())
-            }
-            Wanted::HeldAndReleased(count) => {
-                let both = items.filter(|record| held_and_released(record)).count();
-                let name = "held-and-released".to_owned();
-                (name, count.to_string(), both.to_string())
-            }
-            Wanted::EveryHostServing => {
-                let hosts = cell.server().map(ServerNode::hosts).unwrap_or_default();
-                let serving = hosts.iter().filter(|host| serving(host)).count();
-                let name = "every-host-serving".to_owned();
-                (name, cell.agent_count().to_string(), serving.to_string())
-            }
-            Wanted::Launched(agents, after) => {
-                let [name, wanted, got] = launched_on::judged(agents, *after, cell.ledger());
+            Wanted::Answer(call, status, body) => {
+                let [name, wanted, got] =
+                    answer::judged(call, *status, body.as_ref(), cell.answers());
                 (name, wanted, got)
             }
+            Wanted::Fact(fact) => {
+                let [name, wanted, got] = facts::judged(fact, cell);
+                (name, wanted, got)
+            }
+            Wanted::Seen(seen) => observed(seen, cell),
         };
         (wanted != got).then(|| format!("{name}: wanted {wanted}, got {got}"))
+    }
+}
+
+/// The statement, what it wanted and what it got, of one of the statements over what
+/// `cell` observed.
+fn observed(seen: &Seen, cell: &Cell) -> (String, String, String) {
+    let observations = cell.observations();
+    let items = observations.items.values();
+    match seen {
+        Seen::AllTerminal => {
+            let ended = items.filter(|record| ended(record).is_some()).count();
+            let wanted = observations.items.len();
+            (
+                "all-items-terminal".to_owned(),
+                wanted.to_string(),
+                ended.to_string(),
+            )
+        }
+        Seen::Count(count, how) => {
+            let ended = items.filter(|record| ended(record) == Some(*how)).count();
+            let name = format!("terminal-count({})", how.name());
+            (name, count.to_string(), ended.to_string())
+        }
+        Seen::Host(index, state) => {
+            let host = HostId::new(agent_name(*index).as_str()).ok();
+            let listed = host.as_ref().and_then(|h| observations.server.hosts.get(h));
+            let lost = [HostIs::Live, HostIs::Lost];
+            let is = listed.map_or(HostIs::Absent, |l| lost[usize::from(l.lost)]);
+            let name = format!("host-state(h{index:03})");
+            (name, state.name().to_owned(), is.name().to_owned())
+        }
+        Seen::HeldAndReleased(count) => {
+            let both = items.filter(|record| held_and_released(record)).count();
+            let name = "held-and-released".to_owned();
+            (name, count.to_string(), both.to_string())
+        }
+        Seen::EveryHostServing => {
+            let hosts = cell.server().map(ServerNode::hosts).unwrap_or_default();
+            let serving = hosts.iter().filter(|host| serving(host)).count();
+            let name = "every-host-serving".to_owned();
+            (name, cell.agent_count().to_string(), serving.to_string())
+        }
+        Seen::Launched(agents, after) => {
+            let [name, wanted, got] = launched_on::judged(agents, *after, cell.ledger());
+            (name, wanted, got)
+        }
+        Seen::NotServing(agents) => {
+            let hosts = cell.server().map(ServerNode::hosts).unwrap_or_default();
+            let listed_serving = |name: &String| {
+                let mut listed = hosts.iter();
+                listed.any(|host| (host.id.as_str() == name.as_str()) & serving(host))
+            };
+            let names = (0..cell.agent_count()).map(|i| agent_name(i).as_str().to_owned());
+            let not: Vec<String> = names.filter(|name| !listed_serving(name)).collect();
+            let wanted = agents.iter().map(|i| agent_name(*i).as_str().to_owned());
+            let wanted: Vec<String> = wanted.collect();
+            let name = "hosts-not-serving".to_owned();
+            (
+                name,
+                list(&wanted, String::clone),
+                list(&not, String::clone),
+            )
+        }
+        Seen::Tries(item, count) => {
+            let [name, wanted, got] = tries::judged_tries(observations, *item, *count);
+            (name, wanted, got)
+        }
+        Seen::HeldAfterFailedTry(count) => {
+            let [name, wanted, got] = tries::judged_held_after_failure(observations, *count);
+            (name, wanted, got)
+        }
+        Seen::KeptOff(backoff) => {
+            let [name, wanted, got] = tries::judged_kept_off(observations, *backoff);
+            (name, wanted, got)
+        }
+        Seen::HeldAfterRuns(item) => {
+            let [name, wanted, got] = tries::judged_held_after_runs(observations, *item);
+            (name, wanted, got)
+        }
     }
 }
 

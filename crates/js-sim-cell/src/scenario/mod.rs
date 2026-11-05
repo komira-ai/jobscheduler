@@ -14,22 +14,25 @@
 //!
 //! A scenario states its world (the server, the hosts, the bus's faults at the start, the
 //! client's [`FrontFactory`]), what happens and when ([`Scenario::work`] at time zero,
-//! [`Action`]s at virtual times), and what it expects beyond the invariants ([`Expect`],
-//! and [`Scenario::witness`]). Every invariant of [`crate::Invariant::ALL`] is checked in
+//! [`Action`]s at virtual times), and what it expects beyond the invariants ([`Expect`]
+//! at the end, or at a virtual time with [`Scenario::expect_at`], and
+//! [`Scenario::witness`]). Every invariant of [`crate::Invariant::ALL`] is checked in
 //! every scenario: the step invariants after every step, the end invariants once
 //! [`Scenario::settle_within`] after the last action ([`Cell::settle`]).
 //!
 //! [`Scenario::run_seeds`] runs seeds `0..n` in order, each in a cell of its own built
 //! from the same data, and stops at the first failure: a violation, reported by
 //! [`crate::FailureReport`] (the scenario, the seed, the trace hash, the invariant and the
-//! last forty trace lines); an [`Expect`] a seed does not meet; or, once every seed has
-//! run, a witness no seed satisfied.
+//! last forty trace lines); an [`Expect`] a seed does not meet (the first one judged at a
+//! virtual time that was not met, else the first judged at the end); or, once every seed
+//! has run, a witness no seed satisfied.
 //!
 //! A witness is how a scenario shows that the situation it is about happened: a predicate
 //! over the [`Counters`] of all a seed's agents added together, which at least one seed
 //! must satisfy. A negative case (an agent that lacks a behaviour) is not vacuous when its
 //! correct twin's witness holds.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
@@ -37,8 +40,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use js_conformance::agent::Defect;
-use js_lease_server::StartupError;
+use js_lease_server::{Placement, StartupError};
 use js_sim::text::list;
 use js_sim::{Faults, TraceHash};
 use js_testkit::dir::TestDir;
@@ -54,11 +58,16 @@ use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape};
 use crate::work::Work;
 
+mod answer;
 mod expect;
+mod facts;
 mod launched_on;
+mod tries;
 
+pub use answer::Call;
 pub(crate) use expect::ended;
 pub use expect::{Expect, HostIs};
+pub use facts::{Booked, HostRef, Listed, RecordFact};
 
 /// How long a scenario runs after its last action unless [`Scenario::settle_within`]
 /// says otherwise.
@@ -81,6 +90,9 @@ struct Hosts {
     kind: Kind,
 }
 
+/// What a seed's statements judged at a virtual time found unmet, in the order judged.
+type Unmet = Rc<RefCell<Vec<String>>>;
+
 /// A named predicate over a seed's counters.
 #[derive(Clone)]
 struct Witness {
@@ -98,6 +110,7 @@ pub struct Scenario {
     bus: Faults,
     actions: Vec<(FarmTime, Rc<dyn Action>)>,
     expects: Vec<Expect>,
+    timed: Vec<(FarmTime, Expect)>,
     witnesses: Vec<Witness>,
     settle_within: Duration,
     front: FrontFactory,
@@ -206,6 +219,7 @@ impl Scenario {
             bus: Faults::default(),
             actions: Vec::new(),
             expects: Vec::new(),
+            timed: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
             front: LeaseFront::factory(),
@@ -224,6 +238,20 @@ impl Scenario {
     #[must_use]
     pub fn server(mut self, spec: ServerSpec) -> Self {
         self.server = spec;
+        self
+    }
+
+    /// This scenario under the server's `placement` (`--placement`, as
+    /// [`ServerSpec::placement`] sets it), its name followed by `-` and the placement as
+    /// the server's command line spells it, so that the runs of one scenario under each
+    /// placement are named apart in a failure and in the golden file. After
+    /// [`Scenario::server`], which would put the default back.
+    #[must_use]
+    pub fn under(mut self, placement: Placement) -> Self {
+        let spelled = placement.to_possible_value();
+        let spelled = spelled.map(|value| value.get_name().to_owned());
+        self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
+        self.server = self.server.placement(placement);
         self
     }
 
@@ -282,6 +310,17 @@ impl Scenario {
     #[must_use]
     pub fn expect(mut self, expect: Expect) -> Self {
         self.expects.push(expect);
+        self
+    }
+
+    /// This scenario, expecting `expect` of every seed at `after` the start: judged at that
+    /// virtual time, after the kernel's events of that time and every action scripted
+    /// for it, and before the client's calls of that time. A statement about the server
+    /// reads it then; one about what the cell observed reads what it had observed by then.
+    #[must_use]
+    pub fn expect_at(mut self, after: Duration, expect: Expect) -> Self {
+        let at = FarmTime::default().saturating_add(after);
+        self.timed.push((at, expect));
         self
     }
 
@@ -359,11 +398,14 @@ impl Scenario {
     }
 
     fn run_seed(&self, seed: u64) -> Result<SeedRun, ScenarioFailure> {
-        let build = |setup: Setup| self.build(setup);
+        let timed = Unmet::default();
+        let build = |setup: Setup| self.build(setup, &timed);
         let settle = |cell: &mut Cell| cell.settle(self.settle_within);
         let ran = replay::drive(&self.name, seed, &build, &settle);
-        let cell = ran.map_err(|failure| self.failed(seed, failure))?;
-        let unmet = self.expects.iter().find_map(|expect| expect.unmet(&cell));
+        let mut cell = ran.map_err(|failure| self.failed(seed, failure))?;
+        let first = timed.borrow().first().cloned();
+        let at_end = |cell: &mut Cell| self.expects.iter().find_map(|e| e.unmet(cell));
+        let unmet = first.or_else(|| at_end(&mut cell));
         match unmet {
             Some(detail) => Err(ScenarioFailure::Unmet {
                 scenario: self.name.clone(),
@@ -399,7 +441,7 @@ impl Scenario {
     /// end with its trace kept (whether it passes or not); none when its cell does not
     /// start.
     pub(crate) fn last_lines(&self, seed: u64) -> Vec<String> {
-        let built = self.build(Setup::new(seed).with_trace_lines());
+        let built = self.build(Setup::new(seed).with_trace_lines(), &Unmet::default());
         let lines = built.map(|mut cell| {
             let _ = cell.settle(self.settle_within);
             let lines = cell.trace_lines().unwrap_or_default();
@@ -409,8 +451,10 @@ impl Scenario {
         lines.unwrap_or_default()
     }
 
-    /// The cell of one seed: the server, the front, the hosts in order, and the actions.
-    fn build(&self, setup: Setup) -> Result<Cell, StartupError> {
+    /// The cell of one seed: the server, the front, the hosts in order, the actions, and
+    /// the statements judged at a virtual time, each writing what it finds unmet into
+    /// `unmet`.
+    fn build(&self, setup: Setup, unmet: &Unmet) -> Result<Cell, StartupError> {
         let unnamed = StartupError::new("scratch", "the scenario names no scratch directory");
         let root = self.scratch.as_ref().ok_or(unnamed)?;
         let name = format!("{}-{}", self.name, setup.seed());
@@ -423,6 +467,14 @@ impl Scenario {
         for (at, action) in &self.actions {
             let action = Rc::clone(action);
             cell.at(*at, move |cell| action.run(cell));
+        }
+        for (at, expect) in &self.timed {
+            let (at, expect, unmet) = (*at, expect.clone(), Rc::clone(unmet));
+            cell.at(at, move |cell| {
+                let found = expect.unmet(cell);
+                let found = found.map(|detail| format!("at {} ms {detail}", at.as_millis()));
+                unmet.borrow_mut().extend(found);
+            });
         }
         Ok(cell)
     }

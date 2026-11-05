@@ -6,6 +6,16 @@ use super::{Action, Agents};
 use crate::agent::Prepare;
 use crate::cell::Cell;
 
+/// Every reason an agent can refuse a prepare with, in the order the wire lists them: what
+/// a scenario that refuses for each reason runs over.
+pub const REFUSAL_REASONS: [RefusalReason; 5] = [
+    RefusalReason::NotQuiet,
+    RefusalReason::NoiseOverBound,
+    RefusalReason::SetupFailed,
+    RefusalReason::HostUnsafe,
+    RefusalReason::Unsupported,
+];
+
 /// Makes the agents refuse every whole-host lease they are told to prepare for, with
 /// `reason` ([`Prepare::Refuse`]), from their next heartbeat on.
 #[derive(Clone, Debug)]
