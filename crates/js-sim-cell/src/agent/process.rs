@@ -15,7 +15,7 @@ use js_types::{LeaseId, Resources};
 use super::{AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
 use crate::counters::Counter;
-use crate::ledger::Completion;
+use crate::ledger::{Acked, Completion};
 use crate::observe::{AgentTruth, Launch, RunId, Running, Verdict};
 
 /// The agent version every hello names.
@@ -132,6 +132,9 @@ pub(super) struct Process {
     stopped: BTreeSet<String>,
     /// Every run whose result was sent at least once.
     reported: BTreeSet<String>,
+    /// Every run a hello or heartbeat of the process listed as held: what the server can
+    /// have seen listed.
+    listed: BTreeSet<String>,
     completed: BTreeMap<RunId, FarmTime>,
     acknowledged: BTreeMap<RunId, Verdict>,
     /// Whether the agent was told its connection dropped and not yet that it is back.
@@ -152,6 +155,7 @@ impl Process {
             run_timers: BTreeMap::new(),
             stopped: BTreeSet::new(),
             reported: BTreeSet::new(),
+            listed: BTreeSet::new(),
             completed: BTreeMap::new(),
             acknowledged: BTreeMap::new(),
             disconnected: false,
@@ -175,6 +179,13 @@ impl Process {
             completed: self.completed.clone(),
             acknowledged: self.acknowledged.clone(),
         }
+    }
+
+    /// Whether the process runs a run that no hello or heartbeat it sent listed, so the
+    /// server cannot have seen it listed.
+    pub(super) fn runs_unlisted(&self) -> bool {
+        let running = self.agent.observed().running;
+        running.iter().any(|run| !self.listed.contains(run))
     }
 
     /// The process's tick: a hello while not welcomed, else a heartbeat. Returns when the
@@ -227,7 +238,7 @@ impl Process {
             gpu_devices: Vec::new(),
             labels: spec.labels.clone(),
             phase: Phase::Serving,
-            held: self.held(),
+            held: self.list(),
             accepts_host_credential: false,
         };
         // A wire type always encodes; were it not to, the empty body would be refused.
@@ -255,7 +266,7 @@ impl Process {
             epoch: session.epoch,
             session: session.secret.clone(),
             phase: Phase::Serving,
-            held: self.held(),
+            held: self.list(),
             results: self.results(io),
             taint: None,
             exclusive_ready: None,
@@ -293,6 +304,14 @@ impl Process {
             state,
         });
         held.collect()
+    }
+
+    /// What a hello or heartbeat lists as held ([`Process::held`]), noted as listed.
+    fn list(&mut self) -> Vec<HeldRun> {
+        let held = self.held();
+        let names = held.iter().map(|run| run.run_id.clone());
+        self.listed.extend(names);
+        held
     }
 
     /// The results not yet acknowledged, counting each one sent before.
@@ -361,7 +380,12 @@ impl Process {
     fn beat_answered(&mut self, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
             200 => self.act(&answer.body, &spec.capacity, io),
-            409 => self.session_lost(spec, io),
+            409 => {
+                if is_code(&answer.body, refusal::UNKNOWN_HOST) {
+                    io.bump(Counter::UnknownHost);
+                }
+                self.session_lost(spec, io);
+            }
             403 if is_code(&answer.body, refusal::SESSION_MISMATCH) => self.session_lost(spec, io),
             _ => {}
         }
@@ -393,7 +417,7 @@ impl Process {
         }
         if check.acks.is_ok() {
             for ack in &reply.result_acks {
-                self.ack(ack);
+                self.ack(ack, io);
             }
         }
     }
@@ -453,12 +477,18 @@ impl Process {
         self.agent.cancel(run);
     }
 
-    fn ack(&mut self, ack: &ResultAck) {
+    fn ack(&mut self, ack: &ResultAck, io: &mut Io) {
         let Some(verdict) = verdict(ack.ack) else {
             return;
         };
+        let run = RunId::new(ack.run_id.clone());
+        io.ledger.acked(Acked {
+            run: run.clone(),
+            host: io.host.clone(),
+            verdict,
+            at: io.now,
+        });
         if self.agent.unacked().contains(&ack.run_id) {
-            let run = RunId::new(ack.run_id.clone());
             self.acknowledged.insert(run, verdict);
         }
         self.agent.ack(&ack.run_id);

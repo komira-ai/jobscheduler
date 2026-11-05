@@ -51,6 +51,7 @@ use crate::server::{ServerSpec, Shape};
 use crate::work::Work;
 
 mod expect;
+mod launched_on;
 
 pub use expect::{Expect, HostIs};
 

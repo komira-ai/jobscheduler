@@ -18,6 +18,9 @@ use js_types::{HostId, LeaseId, Resources};
 // The boundary cases, a module of this test binary (not a test target of its own).
 #[path = "invariants/boundaries.rs"]
 mod boundaries;
+// The invariants of the fault family, a module of this test binary too.
+#[path = "invariants/faults.rs"]
+mod faults;
 
 const GIB: u64 = 1 << 30;
 
@@ -284,6 +287,18 @@ const NEGATIVE_CASES: &[NegativeCase] = &[
     (Invariant::SettlesWhenQuiet, host_booked_at_end),
     (Invariant::BookingsMatchAgents, booking_no_agent_holds),
     (Invariant::BookingsMatchAgents, run_nothing_books),
+    (Invariant::NoDoubleBooking, faults::lease_on_two_hosts),
+    (Invariant::NoDoubleBooking, faults::host_listed_twice),
+    (Invariant::NoLeaseOnALostHost, faults::placed_on_a_lost_host),
+    (
+        Invariant::NoResultLost,
+        faults::result_never_reached_the_server,
+    ),
+    (Invariant::NoResultLost, faults::result_accepted_twice),
+    (
+        Invariant::NoResultLost,
+        faults::succeeded_without_a_completion,
+    ),
 ];
 
 /// What a case of the table is flagged for: the step check over everything, and the end
@@ -963,6 +978,8 @@ fn names_are_stable_and_distinct() {
             ("one-terminal-answer", Checked::EveryStep),
             ("settles-when-quiet", Checked::AtEnd),
             ("bookings-match-agents", Checked::AtEnd),
+            ("no-lease-on-a-lost-host", Checked::EveryStep),
+            ("no-result-lost", Checked::AtEnd),
         ]
     );
     let ends: Vec<&str> = HowEnded::ALL.iter().map(|h| h.name()).collect();

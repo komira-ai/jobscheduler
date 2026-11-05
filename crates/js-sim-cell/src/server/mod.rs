@@ -17,6 +17,17 @@
 //! virtual time, through the client router, which the bus never drops.
 //!
 //! The lease file, the pool file and the token files live in a [`TestDir`] the node owns.
+//!
+//! # A restart
+//!
+//! [`ServerNode::restart`] stops the server and starts it again over the same directory,
+//! as an operator restarts the process: it drops the routers and the in-process server
+//! ([`InProcess::shutdown`]), which unlocks the lease file, and starts a new one with
+//! `--boot resume` on the same clock, keeping the node, its runtime, its tick and its
+//! count of calls. What the new server holds is what the old one wrote. A server that
+//! refuses to start again leaves the node down: a call from an agent goes unanswered, a
+//! client's call is answered 503, a tick does nothing, and the listing is empty, until a
+//! restart succeeds.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -24,10 +35,10 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{Method, Request, Response};
+use axum::http::{Method, Request, Response, StatusCode};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
-use js_lease_server::{SharedClock, StartupError};
+use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostState, HostView, Registry};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
@@ -60,18 +71,50 @@ struct CallKey {
     status: u16,
 }
 
-/// The real lease server as a kernel node.
-pub struct ServerNode {
+/// The server while it runs: its two routers and the in-process server they serve.
+struct Up {
     agent: Router,
     client: Router,
     server: InProcess,
+}
+
+impl Up {
+    /// Starts the server `config` describes on `clock`, inside `runtime`.
+    fn start(config: Config, clock: &ManualClock, runtime: &Runtime) -> Result<Self, StartupError> {
+        let server = {
+            let _entered = runtime.enter();
+            InProcess::start(config, SharedClock::new(clock.clone()))?
+        };
+        Ok(Self {
+            agent: server.agent_router(),
+            client: server.client_router(),
+            server,
+        })
+    }
+
+    /// Drops the routers, then the server: the lease file is unlocked once this returns.
+    fn shutdown(self) {
+        let Self {
+            agent,
+            client,
+            server,
+        } = self;
+        drop((agent, client));
+        server.shutdown();
+    }
+}
+
+/// The real lease server as a kernel node.
+pub struct ServerNode {
+    /// The server, or `None` while it is down: after a restart it refused.
+    up: Option<Up>,
     runtime: Runtime,
     clock: ManualClock,
     tick: Duration,
     out: Vec<Output<Msg>>,
     calls: BTreeMap<CallKey, u64>,
-    /// Dropped last: the server's files.
-    _dir: TestDir,
+    /// Dropped last: the server's files, which a restart starts over.
+    dir: TestDir,
 }
 
 impl ServerNode {
@@ -87,41 +130,65 @@ impl ServerNode {
         let tick = config.tick_period();
         let mut build = tokio::runtime::Builder::new_current_thread();
         let runtime = build.build().map_err(StartupError::because("runtime"))?;
-        let server = {
-            let _entered = runtime.enter();
-            InProcess::start(config, SharedClock::new(clock.clone()))?
-        };
+        let up = Up::start(config, &clock, &runtime)?;
         Ok(Self {
-            agent: server.agent_router(),
-            client: server.client_router(),
-            server,
+            up: Some(up),
             runtime,
             clock,
             tick,
             out: Vec::new(),
             calls: BTreeMap::new(),
-            _dir: dir,
+            dir,
         })
     }
 
+    /// Stops the server and starts it again over the same directory, with `spec`'s
+    /// flags and `--boot resume`, on the node's clock (see the module doc). Restarting a
+    /// node that is down only starts it.
+    ///
+    /// # Errors
+    ///
+    /// When the new server refuses to start, naming the flag at fault; the node is then
+    /// down.
+    pub fn restart(&mut self, spec: &ServerSpec) -> Result<(), StartupError> {
+        if let Some(up) = self.up.take() {
+            up.shutdown();
+        }
+        let config = spec
+            .clone()
+            .resuming()
+            .config(self.dir.path(), &self.clock)?;
+        self.up = Some(Up::start(config, &self.clock, &self.runtime)?);
+        Ok(())
+    }
+
+    /// Whether the server runs: `false` after a restart it refused.
+    #[must_use]
+    pub fn is_up(&self) -> bool {
+        self.up.is_some()
+    }
+
     /// One call through the client router at virtual time `now`, run to its end. The
-    /// answer's body is read as text.
+    /// answer's body is read as text. A server that is down answers 503 with no body.
     pub fn client_call(&mut self, now: FarmTime, request: Request<Body>) -> Response<String> {
         self.clock.set(wall_time(now));
-        self.runtime.block_on(call(self.client.clone(), request))
+        let Some(up) = &self.up else {
+            return down();
+        };
+        self.runtime.block_on(call(up.client.clone(), request))
     }
 
-    /// The server: its registry, scaler and counts.
+    /// The server: its registry, scaler and counts; `None` while it is down.
     #[must_use]
-    pub fn server(&self) -> &InProcess {
-        &self.server
+    pub fn server(&self) -> Option<&InProcess> {
+        self.up.as_ref().map(|up| &up.server)
     }
 
-    /// The agent registry; `None` for a server without registration, which a cell's
-    /// server never is.
+    /// The agent registry; `None` while the server is down, and for a server without
+    /// registration, which a cell's server never is.
     #[must_use]
     pub fn registry(&self) -> Option<Registry> {
-        self.server.registry()
+        self.server().and_then(InProcess::registry)
     }
 
     /// Every host the registry lists, in id order.
@@ -132,7 +199,7 @@ impl ServerNode {
             .unwrap_or_default()
     }
 
-    /// The registry's listing as the cell observes it.
+    /// The registry's listing as the cell observes it, in the registry's order.
     #[must_use]
     pub fn view(&self) -> ServerView {
         let hosts = self.hosts().into_iter().map(|host| {
@@ -143,9 +210,7 @@ impl ServerNode {
             };
             (host.id, listed)
         });
-        ServerView {
-            hosts: hosts.collect(),
-        }
+        ServerView::from_listing(hosts)
     }
 
     /// How many calls from `from` on `route` were answered `status`.
@@ -159,14 +224,18 @@ impl ServerNode {
         self.calls.get(&key).copied().unwrap_or(0)
     }
 
-    /// Answers an agent's call; anything but a call is ignored.
+    /// Answers an agent's call; anything but a call, and any call while the server is
+    /// down, is ignored.
     fn on_message(&mut self, from: NodeId, msg: Msg) {
-        let Msg::Request {
-            id,
-            route,
-            bearer,
-            body,
-        } = msg
+        let (
+            Some(up),
+            Msg::Request {
+                id,
+                route,
+                bearer,
+                body,
+            },
+        ) = (&self.up, msg)
         else {
             return;
         };
@@ -177,7 +246,7 @@ impl ServerNode {
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap_or_default();
-        let answer = self.runtime.block_on(call(self.agent.clone(), request));
+        let answer = self.runtime.block_on(call(up.agent.clone(), request));
         let status = answer.status().as_u16();
         let header = answer.headers().get(RETRY_AFTER);
         let seconds = header.and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
@@ -212,7 +281,9 @@ impl StateMachine for ServerNode {
         match input.event {
             Event::Start => self.arm(),
             Event::Timer { .. } => {
-                self.runtime.block_on(self.server.tick());
+                if let Some(up) = &self.up {
+                    self.runtime.block_on(up.server.tick());
+                }
                 self.arm();
             }
             Event::Message { from, msg } => self.on_message(from, msg),
@@ -226,6 +297,13 @@ impl ServerNode {
     pub(crate) fn take_outputs(&mut self) -> Vec<Output<Msg>> {
         std::mem::take(&mut self.out)
     }
+}
+
+/// The answer of a server that is down: 503, with no body.
+fn down() -> Response<String> {
+    let mut answer = Response::new(String::new());
+    *answer.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    answer
 }
 
 /// `request` answered by `router`, called as a service, with the body read as text.

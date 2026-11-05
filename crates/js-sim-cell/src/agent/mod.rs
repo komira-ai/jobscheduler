@@ -39,6 +39,8 @@
 //! ends the session: the agent says hello again at once when a heartbeat of the session
 //! was answered 200, and an interval later otherwise, so a server that welcomes and at
 //! once refuses is not asked in a loop (design section 5.1).
+//! A 409 `unknown-host`, the answer of a server that has forgotten the host, counts in
+//! [`Counter::UnknownHost`].
 //!
 //! Every call carries the join token of [`AgentSpec::join_token`] as its bearer. The hello
 //! does not ask for a host credential (`accepts_host_credential` is false), so the agent
@@ -66,6 +68,11 @@
 //! answer acknowledges it. Any other start runs until it is stopped. A stopped or
 //! cancelled run sends no result. The resources a run holds are its start's `limits` (and
 //! one GPU per index it names).
+//!
+//! The process remembers every run a hello or heartbeat it sent listed as held, so the
+//! cell can tell a run the server cannot have seen listed ([`AgentNode::runs_unlisted`]).
+//! Every verdict it reads on a result, held or not, is written into the cell's
+//! [`Ledger`] ([`crate::Acked`]).
 //!
 //! # Processes
 //!
@@ -200,6 +207,19 @@ impl AgentNode {
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.io.counters
+    }
+
+    /// Whether the agent process runs a run that no hello or heartbeat it sent listed
+    /// as held, so the server cannot have seen it listed; `false` while the host has no
+    /// process.
+    #[must_use]
+    pub fn runs_unlisted(&self) -> bool {
+        self.process.as_ref().is_some_and(Process::runs_unlisted)
+    }
+
+    /// Adds one to `counter`.
+    pub(crate) fn count(&mut self, counter: Counter) {
+        self.io.bump(counter);
     }
 
     /// The node's tick: the process says hello or sends a heartbeat, and the next tick is

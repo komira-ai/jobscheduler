@@ -89,6 +89,9 @@ pub struct ServerSpec {
     interval: Duration,
     grace: Duration,
     lost_retention: Duration,
+    /// Whether the server boots over the lease file a server before it left
+    /// (`--boot resume`), rather than a first boot (`--boot initialise`).
+    resume: bool,
 }
 
 impl ServerSpec {
@@ -104,6 +107,7 @@ impl ServerSpec {
             interval: Duration::from_millis(DEFAULT_HEARTBEAT_INTERVAL_MS),
             grace: Duration::from_millis(DEFAULT_GRACE_MS),
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
+            resume: false,
         }
     }
 
@@ -130,6 +134,14 @@ impl ServerSpec {
     #[must_use]
     pub fn hello_burst(mut self, burst: usize) -> Self {
         self.hello_burst = burst;
+        self
+    }
+
+    /// This server, booting over the lease file a server before it left in the same
+    /// directory (`--boot resume`): how [`super::ServerNode::restart`] starts it again.
+    #[must_use]
+    pub(crate) fn resuming(mut self) -> Self {
+        self.resume = true;
         self
     }
 
@@ -189,8 +201,9 @@ impl ServerSpec {
     }
 
     /// Writes the pool file and the two token files into `dir` and returns the server's
-    /// command line: the lease file in `dir`, a first boot, registration into the pool
-    /// with [`JOIN_TOKEN`], the hello burst, and usage off.
+    /// command line: the lease file in `dir`, a first boot (or a resumed one, for a
+    /// server started again), registration into the pool with [`JOIN_TOKEN`], the hello
+    /// burst, and usage off.
     ///
     /// # Errors
     ///
@@ -211,7 +224,7 @@ impl ServerSpec {
         )?;
         let flags: [(&str, OsString); 6] = [
             ("--state-file", dir.join("leases.toml").into_os_string()),
-            ("--boot", "initialise".into()),
+            ("--boot", boot(self.resume).into()),
             ("--token-file", token),
             ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
@@ -238,6 +251,12 @@ impl ServerSpec {
         let config = Config::from_cli(cli)?;
         Ok(config.with_monotonic(Arc::new(Virtual(clock.clone()))))
     }
+}
+
+/// The `--boot` value: `resume` over the lease file a server before left, else
+/// `initialise`.
+fn boot(resume: bool) -> &'static str {
+    if resume { "resume" } else { "initialise" }
 }
 
 /// `text` as a TOML basic string, which the JSON string grammar is a part of.

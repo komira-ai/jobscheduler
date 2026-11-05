@@ -122,7 +122,8 @@ fn agents_register_through_the_real_hello_and_are_listed_by_the_registry() {
         .sum();
     assert_eq!(refused, 0);
     assert_eq!(cell.observations().server.hosts.len(), REGISTER_HOSTS);
-    assert_eq!(cell.server().expect("a server").server().agent_errors(), 0);
+    let server = cell.server().expect("a server").server();
+    assert_eq!(server.map(|server| server.agent_errors()), Some(0));
 }
 
 /// Asserts that with a burst of one the real limiter refuses one of two hellos with a wait
