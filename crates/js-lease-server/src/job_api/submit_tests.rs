@@ -2,7 +2,7 @@
 //! agent rig's server (its placement pass and its fake agent) or by the job tables directly.
 //! The rig's registry, server and store read one manual clock; nothing sleeps.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
@@ -104,7 +104,7 @@ async fn a_retry_is_answered_in_whatever_state_the_job_is_now() {
 /// environment variable, a label and a file beside [`wire`]'s fields.
 fn conflicted() -> v1::JobSpec {
     v1::JobSpec {
-        env: HashMap::from([("MODE".to_owned(), "fast".to_owned())]),
+        env: BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]),
         network: v1::NetworkLevel::AllowList.into(),
         ports: vec![v1::PortForward {
             host_port: 8080,
@@ -114,7 +114,7 @@ fn conflicted() -> v1::JobSpec {
             name: "token".to_owned(),
             contents: "a".to_owned(),
         }],
-        labels: HashMap::from([("team".to_owned(), "build".to_owned())]),
+        labels: BTreeMap::from([("team".to_owned(), "build".to_owned())]),
         ..wire("x")
     }
 }
@@ -534,7 +534,7 @@ async fn the_answer_shows_the_job_as_recorded() {
 async fn a_request_above_64_kib_is_refused() {
     let (_, writes) = over_fake(Fixed::new(true)).await;
     let big = v1::JobSpec {
-        env: HashMap::from([("BIG".to_owned(), "x".repeat(70 * 1024))]),
+        env: BTreeMap::from([("BIG".to_owned(), "x".repeat(70 * 1024))]),
         ..wire("job-big")
     };
     let status = writes.submit_grpc(&big).await.unwrap_err();

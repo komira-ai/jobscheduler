@@ -99,14 +99,19 @@ pub(crate) fn job(spec: Option<&v1::JobSpec>, ceiling: Duration) -> Result<Valid
         exec: kept.exec,
         accelerator,
         network: job_network(network),
-        host_ports: ports.iter().map(|port| port.host).collect(),
+        host_ports: ports
+            .iter()
+            .map(|port| port.host)
+            .collect::<BTreeSet<u16>>()
+            .into_iter()
+            .collect(),
     };
     let command = Some(spec.command.clone()).filter(|command| !command.is_empty());
     let job = JobSpec {
         image,
         command: command.into_iter().collect(),
         args: spec.args.clone(),
-        env: spec.env.clone().into_iter().collect(),
+        env: spec.env.clone(),
         needs: resources.needs(),
         constraints: Constraints {
             os: kept.os,
@@ -178,26 +183,32 @@ fn resources(needs: Option<&v1::Needs>, constraints: &v1::Constraints) -> Result
             false => Err(Fault::Field("spec.needs")),
         };
     }
+    // The accelerator's model is the class only of a job that counts GPUs: a class without
+    // a count is refused by name, a model without one asks for no GPU.
     let model = constraints
         .accelerator
         .as_ref()
-        .and_then(|accelerator| accelerator.model.clone());
+        .and_then(|accelerator| accelerator.model.clone())
+        .filter(|_| needs.gpus > 0);
     let class = Some(needs.gpu_class.clone())
         .filter(|class| !class.is_empty())
         .or(model);
-    let class = match (needs.gpus, class) {
-        (0, _) if !needs.gpu_class.is_empty() => return Err(Fault::Field("spec.needs.gpus")),
-        (0, _) => None,
-        (_, None) => return Err(Fault::Field("spec.needs.gpuClass")),
-        (_, Some(class)) => Some(class),
-    };
-    let resources = Resources::new(
+    let resources = match Resources::new(
         needs.cpu_millis,
         needs.memory_bytes,
         needs.gpus.into(),
         class,
-    )
-    .map_err(|_| Fault::Field("spec.needs.gpuClass"))?;
+    ) {
+        Ok(resources) => resources,
+        // A class with no GPU, or GPUs of no class.
+        Err(_) => {
+            let field = match needs.gpus {
+                0 => "spec.needs.gpus",
+                _ => "spec.needs.gpuClass",
+            };
+            return Err(Fault::Field(field));
+        }
+    };
     Ok(Asked::Shape(
         resources.with_disk_bytes(needs.disk_bytes.unwrap_or(0)),
     ))
@@ -333,9 +344,8 @@ fn files(files: &[v1::JobFile]) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
 }
 
 /// The labels, checked as a lease's are.
-fn labels(labels: &std::collections::HashMap<String, String>) -> Result<Labels, Fault> {
-    let labels: BTreeMap<String, String> = labels.clone().into_iter().collect();
-    Labels::from_caller(&labels).map_err(|_| Fault::Field("spec.labels"))
+fn labels(labels: &BTreeMap<String, String>) -> Result<Labels, Fault> {
+    Labels::from_caller(labels).map_err(|_| Fault::Field("spec.labels"))
 }
 
 #[cfg(test)]

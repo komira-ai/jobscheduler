@@ -27,12 +27,9 @@ fn max_job_wall_flag_and_config_key_agree() {
         Some(month),
         "the flag's default"
     );
+    // The file's `[server]` table sets `max_lease_wall = "2h"`: the job ceiling does not
+    // follow it.
     assert_eq!(from_file("").ok(), Some(month), "the key's default");
-    assert_eq!(
-        from_file("max_lease_wall = \"2h\"").ok(),
-        Some(month),
-        "the lease ceiling is not the job ceiling"
-    );
     for (text, secs) in [("90m", 5400), ("12h", 43_200), ("3d", 259_200), ("1s", 1)] {
         let want = Some(Duration::from_secs(secs));
         let flag = format!("--max-job-wall={text}");

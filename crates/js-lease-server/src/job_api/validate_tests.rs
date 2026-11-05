@@ -1,7 +1,7 @@
 //! The checks of a submitted job (`validate.rs`), called directly: what a valid job becomes,
 //! and the field each fault names, first fault first.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{Constraints, DeclaredPort, JobId, JobSpec, Needs, NetworkPolicy};
@@ -50,7 +50,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
         form_factor: Some("sxm".to_owned()),
     };
     let checked = valid(|spec| {
-        spec.env = HashMap::from([("MODE".to_owned(), "fast".to_owned())]);
+        spec.env = BTreeMap::from([("MODE".to_owned(), "fast".to_owned())]);
         spec.needs = Some(v1::Needs {
             cpu_millis: 4000,
             memory_bytes: 8 << 30,
@@ -76,7 +76,7 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             contents: "secret".to_owned(),
         }];
         spec.priority = 7;
-        spec.labels = HashMap::from([("team".to_owned(), "build".to_owned())]);
+        spec.labels = BTreeMap::from([("team".to_owned(), "build".to_owned())]);
     });
     let resources = Resources::new(4000, 8 << 30, 2, Some("nvidia-a100".to_owned()))
         .unwrap()
@@ -357,7 +357,7 @@ fn each_fault_names_its_field() {
         (
             Fault::Field("spec.labels"),
             Box::new(|spec| {
-                spec.labels = HashMap::from([("jobscheduler.dev/run".to_owned(), "x".to_owned())])
+                spec.labels = BTreeMap::from([("jobscheduler.dev/run".to_owned(), "x".to_owned())])
             }),
         ),
     ];
@@ -384,4 +384,15 @@ fn forward(host: u32, container: u32) -> v1::PortForward {
         host_port: host,
         container_port: container,
     }
+}
+
+/// Asserts that admission is asked for the host ports sorted, each once, whatever order the
+/// job declares them in, while the job records them as declared. It catches requirements
+/// that break their documented order, which a host's ceiling check reports from.
+#[test]
+fn admission_is_asked_for_the_host_ports_in_order() {
+    let checked = valid(|spec| spec.ports = vec![forward(9000, 90), forward(8000, 80)]);
+    assert_eq!(checked.wanted.host_ports, [8000, 9000]);
+    let declared: Vec<u16> = checked.spec.ports.iter().map(|port| port.host).collect();
+    assert_eq!(declared, [9000, 8000]);
 }

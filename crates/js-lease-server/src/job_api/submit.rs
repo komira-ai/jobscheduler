@@ -104,6 +104,12 @@ impl Ctx {
 }
 
 impl Ctx {
+    /// The default context with `mark` set, for a test that tells one context from another.
+    #[cfg(test)]
+    pub(super) fn marked(mark: u32) -> Ctx {
+        Ctx { mark, served: None }
+    }
+
     /// The ceiling of a served context; `None` when the call is not served.
     #[cfg(test)]
     pub(super) fn ceiling(&self) -> Option<Duration> {
