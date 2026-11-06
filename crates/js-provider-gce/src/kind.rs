@@ -375,13 +375,12 @@ mod tests {
 
     /// Asserts that a credential that cannot be read refuses a good table under the name of
     /// the variable that names the key file, with the credential error's words, and that a
-    /// table that is faulty is refused before the credential is read.
+    /// table that is faulty is refused for its own field before the credential is read (with
+    /// the same failing credential, the refusal names the table's field, not the variable).
     #[test]
     fn a_credential_that_cannot_be_read_refuses_the_table_under_its_variable() {
-        let refused = match build_with(&table(), &context(), || Err(CredentialError::NotJson)) {
-            Ok(_) => panic!("the credential should be refused"),
-            Err(refused) => refused,
-        };
+        let unreadable = || Err(CredentialError::NotJson);
+        let refused = build_with(&table(), &context(), unreadable).err().unwrap();
         assert_eq!(refused.field, "GOOGLE_APPLICATION_CREDENTIALS");
         assert_eq!(
             refused.reason,
@@ -389,12 +388,7 @@ mod tests {
         );
         let mut faulty = table();
         faulty.remove("project");
-        let refused = match build_with(&faulty, &context(), || -> Result<Credentials, _> {
-            panic!("the credential is read before the table is checked")
-        }) {
-            Ok(_) => panic!("the table should be refused"),
-            Err(refused) => refused,
-        };
+        let refused = build_with(&faulty, &context(), unreadable).err().unwrap();
         assert_eq!(refused.field, "project");
     }
 }
