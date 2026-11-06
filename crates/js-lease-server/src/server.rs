@@ -220,9 +220,9 @@ pub(crate) struct Listeners {
     agent_listen: Option<SocketAddr>,
     job_listen: Option<JobListen>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
-    max_job_wall: Duration,
+    pub(crate) max_job_wall: Duration,
     /// The clients the job service's bearer layer admits, as the tick reloads them.
-    clients: LiveClients,
+    pub(crate) clients: LiveClients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
