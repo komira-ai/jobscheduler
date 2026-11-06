@@ -171,6 +171,8 @@ The pool carries the host. For Lambda that is the provider table (instance types
 and nothing about an image, since Lambda has none; the stock image plus the template of 7.3
 is the host. For AWS the `ec2` kind's table carries `images`, one image id per architecture
 (`js-provider-ec2`); that is the only place an AMI appears anywhere. A launch template is not built.
+For GCP the `gce` kind's table carries `project`, `zones`, `purchase`, `network`, `subnetwork`, `images` (one image path or
+family per architecture) and `allowed_machine_types` (`js-provider-gce`); there is no key for a credential.
 
 ### 3.3 Providers
 
@@ -388,7 +390,7 @@ VPN setup gives the host a route to `advertise_url` (section 7); Lambda pools us
 
 An AWS pool puts `images = { arm64 = "ami-0abc..." }` (and `x86_64`) inside its provider
 table, beside `region`; that is the only place an AMI appears. A `launch_template` key is not
-built. The `ec2` kind is built (`crates/js-provider-ec2`): `gce` is refused as not built.
+built. The `ec2` kind (`crates/js-provider-ec2`) and the `gce` kind (`crates/js-provider-gce`) are built.
 
 ### 4.3 Where each noun lives
 
@@ -413,7 +415,7 @@ message naming pool and field:
 |---|---|
 | file missing or unreadable | `--config /etc/js.toml: cannot read: No such file` |
 | unknown table or field anywhere | `pool "gpu": provider.api_keyfile: unknown field; known: api_key_file, regions, types, ssh_key, api_url` |
-| unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: ec2, lambdalabs, static` |
+| unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: ec2, gce, lambdalabs, static` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
 | type name not 1 to 64 lower case letters, digits or `_`; a type twice; a type the provider crate's table does not know (the pool would have no floor); types of two gpu models in one pool | `pool "gpu": provider.types[1].name: ...` |
 | elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
@@ -454,7 +456,7 @@ pub struct BuildCtx<'a> { pub pool: &'a str, pub scheduler: &'a SchedulerId,
     pub clock: Arc<dyn Clock>, pub files: &'a dyn SecretFiles }  // files: owner-only reads; tests inject
 pub struct KindError { pub field: String, pub reason: String }
 impl Kinds {
-    pub fn standard() -> Self;   // "static", "lambdalabs", "ec2"
+    pub fn standard() -> Self;   // "static", "lambdalabs", "ec2", "gce"
     pub fn build(&self, kind: &str, table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError>;
 }
 ```

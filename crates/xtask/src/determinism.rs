@@ -81,6 +81,7 @@ pub const CRATES: &[&str] = &[
     "js-proto",
     "js-provider",
     "js-provider-ec2",
+    "js-provider-gce",
     "js-provider-lambdalabs",
     "js-registry",
     "js-scaler",
@@ -866,6 +867,13 @@ pub const ALLOWED: &[Allowed] = &[
         token: Token::InstantNow,
         sites: 1,
         reason: "the EC2 provider's clock for its live API guards; the cell's pools are static and call no provider",
+    },
+    Allowed {
+        file: "crates/js-provider-gce/src/clock.rs",
+        item: "SystemClock::new",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "the Compute Engine provider's clock for its live API guards; the cell's pools are static and call no provider",
     },
     Allowed {
         file: "crates/js-provider-lambdalabs/src/clock.rs",

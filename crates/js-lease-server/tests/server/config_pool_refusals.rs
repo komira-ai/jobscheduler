@@ -84,7 +84,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     assert_eq!(
         elastic(&scratch, &lambda),
-        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, ec2, lambdalabs, static"
+        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, ec2, gce, lambdalabs, static"
     );
     for mode in ["none", "script"] {
         let pool = PoolText::elastic(&scratch).set("network", &format!("{{ kind = {mode:?} }}"));
@@ -115,7 +115,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     let mut names = Kinds::standard().names();
     names.sort_unstable();
-    assert_eq!(names, ["ec2", "lambdalabs", "static"]);
+    assert_eq!(names, ["ec2", "gce", "lambdalabs", "static"]);
 }
 
 /// Asserts the unknown fields of a provider table and of a network table, each naming

@@ -1,11 +1,15 @@
-//! The calls the catalog makes: a narrow, read-only port over the Compute Engine API and
-//! the Cloud Billing Catalog API.
+//! The calls the provider makes: a narrow port over the Compute Engine API and the Cloud
+//! Billing Catalog API. The catalog side reads; the launch side inserts, reads, lists and
+//! deletes instances and reads the zone operations they answer with.
 
 use std::fmt;
 
 use js_elastic::Purchase;
 
 use crate::error::{ApiError, SettingsError};
+use crate::launch::{
+    InsertRequest, Instance, InstanceRef, ListFilter, Operation, OperationRef, Page,
+};
 use crate::model::{
     AcceleratorTypeInfo, MachineTypeInfo, Project, QuotaMetric, Region, SkuPrice, Zone,
 };
@@ -21,6 +25,16 @@ pub enum Method {
     Prices,
     /// [`GceApi::region_quotas`]: Compute Engine `regions.get`.
     RegionQuotas,
+    /// [`GceApi::insert_instance`]: Compute Engine `instances.insert`.
+    InsertInstance,
+    /// [`GceApi::get_instance`]: Compute Engine `instances.get`.
+    GetInstance,
+    /// [`GceApi::delete_instance`]: Compute Engine `instances.delete`.
+    DeleteInstance,
+    /// [`GceApi::list_instances`]: Compute Engine `instances.aggregatedList`.
+    ListInstances,
+    /// [`GceApi::get_operation`]: Compute Engine `zoneOperations.get`.
+    GetOperation,
 }
 
 impl Method {
@@ -31,6 +45,11 @@ impl Method {
             Self::AcceleratorTypes => "acceleratorTypes.aggregatedList",
             Self::Prices => "services.skus.list",
             Self::RegionQuotas => "regions.get",
+            Self::InsertInstance => "instances.insert",
+            Self::GetInstance => "instances.get",
+            Self::DeleteInstance => "instances.delete",
+            Self::ListInstances => "instances.aggregatedList",
+            Self::GetOperation => "zoneOperations.get",
         }
     }
 }
@@ -81,13 +100,14 @@ impl PurchaseKind {
     }
 }
 
-/// The read-only calls of the catalog. Every call blocks, answers or fails within the
-/// client's bound, and makes exactly one request, or one walk over every page of one list
-/// that it hides: a list is never cut short in silence (a walk that ends early, or an
-/// aggregated list that names an unreachable scope, is [`ApiError::Incomplete`]), nothing
-/// is retried here, and a failure is never an empty answer. No call creates or changes
-/// anything; inserting and deleting instances belong to the port's launch side, which this
-/// crate does not hold.
+/// The calls of the provider. Every call blocks, answers or fails within the client's
+/// bound ([`ApiError::Timeout`] when it runs out), and makes exactly one request; a catalog
+/// list is one walk over every page that it hides, never cut short in silence (a walk that
+/// ends early, or an aggregated list that names an unreachable scope, is
+/// [`ApiError::Incomplete`]). Nothing is retried here, and a failure is never an empty
+/// answer. The catalog's calls only read. The launch side, the last five calls, holds no
+/// logic: one call of the cloud each, and [`GceApi::insert_instance`] and
+/// [`GceApi::delete_instance`] are the only calls that change anything.
 pub trait GceApi: Send + Sync {
     /// Every machine type of `project` in each of `zones`, one record per type and zone
     /// (`machineTypes.aggregatedList`, every page).
@@ -131,4 +151,49 @@ pub trait GceApi: Send + Sync {
         project: &Project,
         region: &Region,
     ) -> Result<Vec<QuotaMetric>, ApiError>;
+
+    /// Inserts one instance (`instances.insert` with the request's `requestId`) and answers
+    /// the zone operation the cloud started for it. A repeat with the same `requestId`
+    /// within the cloud's window answers the first insert's operation and inserts nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read. A name taken already
+    /// is the reason `alreadyExists` ([`ApiError::is_already_exists`]). A failure that is
+    /// not a cloud answer (a timeout, a transport error) may have inserted the instance.
+    fn insert_instance(&self, request: &InsertRequest) -> Result<Operation, ApiError>;
+
+    /// Reads one instance (`instances.get`).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read. An instance the cloud
+    /// does not know is the reason `notFound` ([`ApiError::is_not_found`]).
+    fn get_instance(&self, instance: &InstanceRef) -> Result<Instance, ApiError>;
+
+    /// Deletes one instance (`instances.delete`) and answers the zone operation the cloud
+    /// started for it.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read; an instance the cloud
+    /// does not know is the reason `notFound`.
+    fn delete_instance(&self, instance: &InstanceRef) -> Result<Operation, ApiError>;
+
+    /// One page of the instances of every zone of the project that carry the filter's
+    /// labels (`instances.aggregatedList` with a label `filter` and the page token), of
+    /// every status the cloud still shows. The caller asks for the next page with
+    /// [`Page::next_page_token`].
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read.
+    fn list_instances(&self, filter: &ListFilter) -> Result<Page<Instance>, ApiError>;
+
+    /// Reads one zone operation (`zoneOperations.get`).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read.
+    fn get_operation(&self, operation: &OperationRef) -> Result<Operation, ApiError>;
 }
