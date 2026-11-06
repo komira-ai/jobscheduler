@@ -16,12 +16,15 @@ use std::time::Duration;
 /// The pool of these tests: four machines at most, the day capped at 600 cents (ten
 /// machine-hours at a cent a minute), a host released after 5 quiet minutes. The failure brake
 /// is out of reach (a trip after a thousand failures in a row): the scripted refusals here
-/// would trip it, and these tests are about the cap.
+/// would trip it, and these tests are about the cap. A quota refusal passes the offer over
+/// for ten minutes, the length of the pool's first cooldown, which a quota refusal started
+/// before pass 2 failed over.
 fn capped() -> Settings {
     Settings {
         idle: minutes(5),
         max_spend_per_day: 600,
         boot_fail_trip_after: 1000,
+        quota_backoff: minutes(10),
         ..settings("gpu")
     }
 }

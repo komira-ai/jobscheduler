@@ -2,9 +2,10 @@
 
 Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
 in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
-start; the mint of section 4 (`js-logmint`), which the server does not call yet; and the agent's uploader of a `crun` job
-(`js-agent/src/logs`, without the progress record of 3.5: a restarted agent uploads nothing more for a job it adopted), which fills
-`log_grant_state` and `logs`. No server sends a sink or a grant yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+start; the mint of section 4 (`js-logmint`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
+credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
+stored with the result); and the agent's uploader of a `crun` job (`js-agent/src/logs`, without the progress record of 3.5: a
+restarted agent uploads nothing more for a job it adopted), which fills `log_grant_state` and `logs`. Nothing reads a log yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design

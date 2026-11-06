@@ -31,6 +31,29 @@
 //! fails answers 500 `state-write-failed`, with nothing of the reply, and the agent reports
 //! again. A reply to any other agent, or from a server without the job tables, is the lease
 //! and run reply alone, as it was before these fields: they are left out when empty.
+//!
+//! # Live logs
+//!
+//! With `[logs] sink = "object_store"` ([`crate::logs`]), and only to a host whose last hello
+//! reported the capability [`js_agent_wire::LOG_UPLOAD_CAPABILITY`]:
+//!
+//! - a hello the registry accepted queues the mint of the host's upload credential, after the
+//!   binding is written (one credential for every job of the host);
+//! - each `job_start` carries `log_sink`: the store's URL, region, bucket and style and the
+//!   job's own prefix `prefix/job_id/`, with no secret. It is checked as the agent checks it
+//!   ([`js_agent_wire::JobStartSpec::log_sink_checked`]) and left out when it fails, and is
+//!   left out for a job id the object layout builds no prefix for. It never waits for a
+//!   credential: the agent keeps the output in its capture files until one arrives. It rides
+//!   in the start, which is resent until the host lists the job;
+//! - the reply carries `log_grant`, the host's credential, when the heartbeat's
+//!   `log_grant_state.until_ms` is absent or earlier than the credential's expiry: resent until
+//!   a heartbeat reports that expiry, and never sent once it has. A heartbeat only reads what
+//!   is held in memory and queues a mint when none is held (or when the agent reports `stale`
+//!   while it holds the credential held here); it never waits for a mint and never calls the
+//!   minter.
+//!
+//! A server with `sink = "none"`, and a host that did not report the capability, sends
+//! neither field, and the reply is byte for byte what it was before them.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -57,6 +80,7 @@ use crate::api::{BODY_LIMIT, bearer};
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
+use crate::logs::{self, LogGrants};
 use crate::per_job::{self, JobReply};
 use crate::util::blocking;
 
@@ -232,6 +256,10 @@ async fn serve_hello(
     let credential_issued = issued.is_some();
     welcome.host_credential = issued;
     agents.save_bindings().await;
+    // A closure over the option, so the route has no arm that only a server with a sink
+    // takes: every test binary runs the same code of it.
+    let on_hello = |logs: &Arc<LogGrants>| logs.on_hello(&hello.host_id, &hello.capabilities);
+    agents.logs.iter().for_each(on_hello);
     info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
 }
@@ -279,7 +307,10 @@ async fn heartbeat(
     } else if refused {
         agents.save_bindings().await;
     }
-    add_jobs(&agents, &heartbeat, &mut reply).await?;
+    let logs = uploading(&agents, &heartbeat.host_id);
+    add_jobs(&agents, &heartbeat, logs.clone(), &mut reply).await?;
+    reply.log_grant =
+        logs.and_then(|logs| logs.on_beat(&heartbeat.host_id, heartbeat.log_grant_state));
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
@@ -295,22 +326,44 @@ async fn heartbeat(
     Ok(Json(reply))
 }
 
+/// The host credentials of live logs, when the server has a sink and `host`'s last hello
+/// reported [`LOG_UPLOAD_CAPABILITY`]; `None` otherwise, and the reply then carries no log
+/// field.
+///
+/// [`LOG_UPLOAD_CAPABILITY`]: js_agent_wire::LOG_UPLOAD_CAPABILITY
+fn uploading(agents: &Agents, host: &str) -> Option<Arc<LogGrants>> {
+    let reported = |_: &&Arc<LogGrants>| reports_upload(agents, host);
+    agents.logs.as_ref().filter(reported).cloned()
+}
+
+/// Whether `host`'s last hello reported [`LOG_UPLOAD_CAPABILITY`].
+///
+/// [`LOG_UPLOAD_CAPABILITY`]: js_agent_wire::LOG_UPLOAD_CAPABILITY
+fn reports_upload(agents: &Agents, host: &str) -> bool {
+    HostId::new(host)
+        .ok()
+        .and_then(|host| agents.registry.own_host(&host))
+        .and_then(|own| own.host.claim)
+        .is_some_and(|claim| logs::uploads(claim.capabilities()))
+}
+
 /// Adds the per-job half of the heartbeat to `reply` when the server holds the job tables
 /// and the host reported [`PER_JOB_CAPABILITY`]; leaves it as it is otherwise. Its own
 /// function, so the heartbeat route stays the same for every test binary whatever the
-/// server holds.
+/// server holds. The starts carry a log sink when `logs` is given ([`uploading`]).
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
 async fn add_jobs(
     agents: &Arc<Agents>,
     heartbeat: &Heartbeat,
+    logs: Option<Arc<LogGrants>>,
     reply: &mut HeartbeatReply,
 ) -> Result<(), Refused> {
     let Some(jobs) = &agents.jobs else {
         return Ok(());
     };
     let room = js_agent_wire::limits::MAX_COMMANDS.saturating_sub(reply.commands.len());
-    if let Some(served) = serve_jobs(agents, jobs, heartbeat, room).await? {
+    if let Some(served) = serve_jobs(agents, jobs, heartbeat, logs, room).await? {
         reply.commands.extend(served.commands);
         reply.job_acks = served.job_acks;
         reply.retired_acks = served.retired_acks;
@@ -319,14 +372,16 @@ async fn add_jobs(
 }
 
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
-/// room for `room` commands; `None` for any other host. The store is read and written on the
-/// pool for blocking calls. A failed read or commit is a 500 `state-write-failed`.
+/// room for `room` commands, its starts carrying the sinks of `logs`; `None` for any other
+/// host. The store is read and written on the pool for blocking calls. A failed read or
+/// commit is a 500 `state-write-failed`.
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
 async fn serve_jobs(
     agents: &Arc<Agents>,
     jobs: &Arc<ServerJobs>,
     heartbeat: &Heartbeat,
+    logs: Option<Arc<LogGrants>>,
     room: usize,
 ) -> Result<Option<JobReply>, Refused> {
     let per_job = HostId::new(&heartbeat.host_id)
@@ -354,6 +409,7 @@ async fn serve_jobs(
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
+            logs: logs.as_deref(),
         };
         // The first listing after a hello loses the jobs that ran and are not listed: their
         // container went with the agent (design section 6.7, step 6). The listing's commit
@@ -624,3 +680,11 @@ mod job_tests;
 #[cfg(test)]
 #[path = "agent_api_job_cases.rs"]
 mod job_cases;
+
+#[cfg(test)]
+#[path = "agent_api_log_tests.rs"]
+mod log_tests;
+
+#[cfg(test)]
+#[path = "agent_api_log_life_tests.rs"]
+mod log_life_tests;
