@@ -99,7 +99,8 @@ fn one_comparison_serves_both_transports_and_the_lease_routes() {
 }
 
 /// What the job service must not name: a clock read of its own (it takes the server's
-/// clock) and the provider types (it reads no provider catalog).
+/// clock) and the provider types (it reaches a catalog only through the submit group's
+/// admission trait, which the server implements outside `job_api`).
 const FORBIDDEN: [&str; 4] = [
     "SystemTime",
     "Instant::now",

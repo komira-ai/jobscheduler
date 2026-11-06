@@ -174,7 +174,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     // The job service, when it is on: the server holds its one job store exactly when
     // `--job-listen` is given, so the listener and the service are there together.
     let job = job_listener
-        .zip(job_api::from_server(&shared))
+        .zip(job_api::from_server(&shared, listeners.max_job_wall))
         .map(|((listener, addr), api)| {
             let (stop, stopped) = oneshot::channel::<()>();
             let slots = Arc::new(Slots::new(limits.max_connections));
@@ -216,6 +216,8 @@ pub(crate) struct Listeners {
     bound: Option<std::net::TcpListener>,
     agent_listen: Option<SocketAddr>,
     job_listen: Option<JobListen>,
+    /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
+    max_job_wall: Duration,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -283,6 +285,7 @@ pub(crate) fn prepare(
         monotonic,
         alerts,
         alert_repeat,
+        max_job_wall,
         ..
     } = config;
     let bookings =
@@ -355,6 +358,7 @@ pub(crate) fn prepare(
         bound,
         agent_listen,
         job_listen,
+        max_job_wall,
         tls,
         limits,
     };

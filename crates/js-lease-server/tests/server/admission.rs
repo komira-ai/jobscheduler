@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hello_body, session, start_agents};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
-use crate::support::{Harness, Reply, Scratch, lease_body, request};
+use crate::support::{Harness, Reply, Scratch, TOKEN, lease_body, request};
 
 /// The clouds of these tests, by the path of the key file that names them: a kind is a
 /// plain function, so a test leaves its cloud here for the kind to find.
@@ -177,6 +177,17 @@ async fn over(
     more: &[(&str, &str)],
     allowed: Option<&str>,
 ) -> (Harness, Arc<Cloud>) {
+    over_serving(name, class, more, (allowed, "")).await
+}
+
+/// [`over`], with `serving` added to the `[server]` table (such as the job service's
+/// address).
+async fn over_serving(
+    name: &str,
+    class: &str,
+    more: &[(&str, &str)],
+    (allowed, serving): (Option<&str>, &str),
+) -> (Harness, Arc<Cloud>) {
     let scratch = Scratch::new(name);
     let cloud = Cloud::new();
     let key = scratch.write("cloud-key", "unused", 0o600);
@@ -213,10 +224,8 @@ async fn over(
         }
         None => String::new(),
     };
-    let head = server(
-        &scratch,
-        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"",
-    );
+    let listen = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
+    let head = server(&scratch, &format!("{listen}{serving}"));
     let text = format!("{}\n{tables}", file(&head, &[&pool]));
     let path = scratch.write("js.toml", &text, 0o644);
     let kinds = kinds().with("admission-cloud", admission_cloud);
@@ -399,6 +408,65 @@ async fn an_unreadable_catalog_counts_as_may_offer() {
     h.ticks.step().await;
     assert_eq!(cloud.reads(), reads + 3);
     refused(&post(&h, &request).await, "no-capacity");
+    assert_eq!(cloud.reads(), reads + 3);
+}
+
+/// `SubmitJob` of the job `id` through the job service's gateway on `h`'s job port: 1.5 cores
+/// and 1 GiB, no GPU, for ten minutes.
+async fn submit(h: &Harness, id: &str) -> Reply {
+    let body = json!({
+        "spec": {
+            "jobId": id,
+            "image": format!("team/app@sha256:{}", "a".repeat(64)),
+            "command": "run",
+            "needs": { "cpuMillis": "1500", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "600",
+        }
+    });
+    let job = h.running.job_addr().unwrap();
+    let body = body.to_string().into_bytes();
+    request(job, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await
+}
+
+/// Asserts, through the job service's port of a server whose pool launches on the test's
+/// cloud and has no host, that a submitted job is admitted over the pool's cached catalog as
+/// a lease is: before any fetch, and after a fetch that failed, the catalog is unread and may
+/// offer, so the job is queued (201); once a tick has fetched an empty catalog the job is
+/// refused `no-capable-host` (422) and nothing is recorded, so the job is unknown; once a tick
+/// past `catalog_refresh` has fetched an offer that fits, unavailable now, the same job is
+/// admitted. The cloud is read at ticks only, never by a submit. It catches an unreadable
+/// catalog read as empty, a job service that admits over the hosts alone, and a submit that
+/// calls the provider.
+#[tokio::test]
+async fn a_submitted_job_is_admitted_over_the_catalog() {
+    let jobs = "\njob_listen = \"127.0.0.1:0\"";
+    let (h, cloud) = over_serving("admission_jobs", "gpu-host", &[], (None, jobs)).await;
+    cloud.set(Err("the cloud's API did not answer"));
+    let reads = cloud.reads();
+    let queued = submit(&h, "job-unfetched").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
+    assert_eq!(queued.json()["job"]["state"], "JOB_STATE_QUEUED");
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 1);
+    let queued = submit(&h, "job-unread").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
+    cloud.set(Ok(Vec::new()));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
+    let refused = submit(&h, "job-empty").await;
+    assert_eq!(
+        (refused.status, refused.json()),
+        (422, json!({ "error": "no-capable-host" }))
+    );
+    let job = h.running.job_addr().unwrap();
+    let unknown = request(job, "GET", "/v1/jobs/job-empty", Some(TOKEN), None).await;
+    assert_eq!(unknown.status, 404, "{}", unknown.body);
+    cloud.set(Ok(vec![a100(false)]));
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 3);
+    let offered = submit(&h, "job-empty").await;
+    assert_eq!(offered.status, 201, "{}", offered.body);
     assert_eq!(cloud.reads(), reads + 3);
 }
 

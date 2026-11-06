@@ -98,6 +98,12 @@ impl Shared {
         self
     }
 
+    /// The admission of lease requests: the pool's launching providers, which a submitted
+    /// job is admitted over too.
+    pub(crate) fn admit(&self) -> &Admit {
+        &self.admit
+    }
+
     /// The same state serving the brake reset route for `scaler`.
     #[must_use]
     pub(crate) fn with_scaler(mut self, scaler: Option<Scaler>) -> Self {

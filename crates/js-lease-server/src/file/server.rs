@@ -10,8 +10,8 @@ use js_lease::Settings;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, JOB_RETENTION_MUST, JobListen, Limits, Placement, TlsFiles, Token,
-    parse_job_retention, parse_token,
+    BootMode, CpuSlack, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST, Placement,
+    TlsFiles, Token, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -57,6 +57,7 @@ const SERVER_KEYS: &[&str] = &[
     "max_spend_since_go_total",
     "job_retention",
     "job_listen",
+    "max_job_wall",
 ];
 
 /// What the `[server]` table says.
@@ -81,6 +82,8 @@ pub(crate) struct Server {
     pub(crate) alerts: Option<AlertKeys>,
     /// `job_retention`: how long an ended job is kept; seven days unless the file sets it.
     pub(crate) job_retention: Retention,
+    /// `max_job_wall`: the most a submitted job's wall limit may be, when the file sets it.
+    pub(crate) max_job_wall: Option<Duration>,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -239,6 +242,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let totals = super::budget::read_totals(&mut s)?;
     let alerts = read_alerts(&mut s)?;
     let job_retention = read_job_retention(&mut s)?;
+    let max_job_wall = read_max_job_wall(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -267,7 +271,18 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         totals,
         alerts,
         job_retention,
+        max_job_wall,
     })
+}
+
+/// The `max_job_wall` key, read as `--max-job-wall` is; `None` when the file does not give
+/// it. A refusal says what the value must be and does not repeat it.
+fn read_max_job_wall(s: &mut Section) -> Result<Option<Duration>, StartupError> {
+    let Some(text) = s.string("max_job_wall")? else {
+        return Ok(None);
+    };
+    let wall = parse_max_job_wall(&text).map_err(|_| s.fail("max_job_wall", MAX_JOB_WALL_MUST))?;
+    Ok(Some(wall))
 }
 
 /// The `job_retention` key, read as `--job-retention` is; [`Retention::DEFAULT`] when the
