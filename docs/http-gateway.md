@@ -27,9 +27,12 @@ the gateway and the gRPC service together on a port of their own, `--job-listen`
 
 ## Routes
 
-The table is `js_api_gateway::ROUTES`, in the order of the service definition; a test of the
-crate fails when this page differs from it.
+The table is `js_api_gateway::ROUTES`, in the order of the service definition, which the
+gateway's build reads from the `google.api.http` options. `cargo xtask gen-job-surface --out .`
+writes it between the markers below, and `cargo xtask gen-job-surface --check --out .` (run by
+`cargo test -p xtask --test job_surface`) fails naming this page when it differs.
 
+<!-- gen-job-surface routes begin -->
 | route | method of `JobService` | success |
 |---|---|---|
 | `POST /v1/jobs` | `SubmitJob` | 201 |
@@ -44,6 +47,7 @@ crate fails when this page differs from it.
 | `GET /v1/pools` | `ListPools` | 200 |
 | `GET /v1/providers` | `ListProviders` | 200 |
 | `GET /v1/usage` | `GetUsage` | 200 |
+<!-- gen-job-surface routes end -->
 
 A call that succeeds answers its response with the status of the last column: 200, or the
 status the method's `http_success_status` option names. A submit answers 201, also when it is
@@ -231,10 +235,15 @@ This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost` an
 reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
 the line is the record of who cancelled.
 
-Both transports are served on the port of `--job-listen` (off by default). Every call answers
-`UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it; the read calls, `SubmitJob`, `CancelJob` and the fleet calls are served
-(below). A request carries at most 64 KiB over either transport: a larger gateway body is 413
+Both transports are served on the port of `--job-listen` (off by default). The paragraph
+between the markers below is written by `cargo xtask gen-job-surface` from the server's list
+of the calls it serves, which a test of the server holds to what its service answers:
+
+<!-- gen-job-surface served begin -->
+The server serves every call of the service (`js_lease_server::SERVED_CALLS`).
+<!-- gen-job-surface served end -->
+
+A request carries at most 64 KiB over either transport: a larger gateway body is 413
 `request-too-large`, and a larger gRPC message is not decoded (`OUT_OF_RANGE`).
 
 | calls | file |
@@ -357,7 +366,9 @@ commit is `state-write-failed` and the job is as it was.
 
 The service's calls that are not about one job are an operator's view of the fleet. They
 take the same bearer token as the job calls, and only a client of the role `operator` may call
-them: any other client is answered `PERMISSION_DENIED` `operator-only` (403).
+them: any other client is answered `PERMISSION_DENIED` `operator-only` (403). This is what
+`fleet.rs` does with the server's handles; whether the server serves these calls is the
+generated paragraph above.
 
 - `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
   the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or
