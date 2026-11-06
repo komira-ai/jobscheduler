@@ -29,6 +29,8 @@ use super::wake::Wake;
 /// the files.
 pub struct Uploader {
     files: [Arc<File>; 2],
+    /// The most bytes of each file the upload reads.
+    cap: u64,
     recorder: Recorder,
     mailbox: Arc<Mutex<Option<Message>>>,
     wake: Arc<dyn Wake>,
@@ -43,14 +45,19 @@ impl std::fmt::Debug for Uploader {
 }
 
 /// Where an uploader begins: the directory it keeps its progress record in (none keeps no
-/// record), and where each stream's upload is (the start of both for a job that starts, what
-/// the record said for one adopted after a restart).
+/// record), where each stream's upload is (the start of both for a job that starts, what
+/// the record said for one adopted after a restart), and how much of each file it reads.
 #[derive(Debug, Default)]
 pub(super) struct Origin {
     /// The lease directory, where the record is kept.
     pub(super) record: Option<PathBuf>,
     /// Where each stream's upload is.
     pub(super) streams: Streams,
+    /// The most bytes of each file the upload reads; `None` reads all of it. A capture that
+    /// stops at its cap (`crun`'s) needs none; the files of a runtime that has no such capture
+    /// (the native runtime's, which the job writes itself) are read up to the run's file cap,
+    /// and what lies past it counts as dropped.
+    pub(super) cap: Option<u64>,
 }
 
 impl Uploader {
@@ -86,9 +93,10 @@ impl Uploader {
         let mailbox = Arc::new(Mutex::new(None));
         let wake = (logs.wakes)();
         let recorder = Recorder::new(origin.record, sink);
+        let cap = origin.cap.unwrap_or(u64::MAX);
         let mut upload = Upload::new(
             sink.clone(),
-            files.clone(),
+            (files.clone(), cap),
             (
                 Arc::clone(&logs.transport),
                 Arc::clone(&logs.clock),
@@ -120,6 +128,7 @@ impl Uploader {
         });
         Ok(Self {
             files,
+            cap,
             recorder,
             mailbox,
             wake,
@@ -148,11 +157,11 @@ impl Uploader {
     /// Tells the thread that the job has ended with `totals` (stdout, stderr) bytes printed,
     /// as the capture counted them once its drain was over, and returns what the result
     /// reports: each stream's total, and the bytes the capture could not keep (the total less
-    /// the file's length). It does not wait for the thread.
+    /// the file's length, the length counted up to the cap). It does not wait for the thread.
     pub fn finish(&self, (stdout, stderr): (u64, u64)) -> LogReport {
         let [out, err] =
             [(&self.files[0], stdout), (&self.files[1], stderr)].map(|(file, total)| {
-                let length = file.metadata().map_or(0, |meta| meta.len());
+                let length = file.metadata().map_or(0, |meta| meta.len().min(self.cap));
                 End {
                     length,
                     dropped: total.saturating_sub(length),

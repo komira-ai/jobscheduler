@@ -3,7 +3,7 @@
 //! `resources.accelerator` object, and a host whose hello predates the accelerator.
 //!
 //! These run on the default placement (the registry). The scheduler's mapping of the same
-//! need is covered in process, in `src/sched/map.rs`.
+//! need is covered in process, in `crates/js-sched-placer/src/map.rs`.
 
 use serde_json::{Value, json};
 

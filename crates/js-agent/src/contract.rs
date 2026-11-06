@@ -100,7 +100,8 @@ impl ToolkitHook {
 /// jobs: `runtime` and `exec` are `sandbox-exec`, `run-files` when `run_files` (the agent
 /// has a files root), and `egress` is the agent's `--native-network` ceiling as a job level
 /// ([`Ceiling::advertised`]: `off` and `loopback` are `none`, `on` is `allow-list`, `open` is
-/// `open`), with no `egress-ports`, since a Mac forwards no port. The hello is sent only after
+/// `open`), with no `egress-ports`, since a Mac forwards no port, and `log-upload`, since the
+/// native runtime uploads live logs (`native/logs.rs`). The hello is sent only after
 /// the job half has started, which asked the helper for its boot reset, so no hello names a
 /// mode the agent cannot serve. Returns the warnings the operator should read: none.
 pub(crate) fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling) -> Vec<String> {
@@ -108,6 +109,10 @@ pub(crate) fn report_native(hello: &mut Hello, run_files: bool, ceiling: Ceiling
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
     report_run_files(hello, run_files);
+    // The native runtime uploads the live logs of every run whose start carries a sink.
+    hello
+        .capabilities
+        .insert(LOG_UPLOAD_CAPABILITY.to_owned(), FLAG_SET.to_owned());
     ceiling.advertised().insert_into(&mut hello.capabilities);
     Vec::new()
 }
@@ -139,7 +144,8 @@ fn report_per_job(hello: &mut Hello) {
 /// containers. `scratch_default_gib` is the default of an agent whose scratch quota is on;
 /// `gpu_passthrough` says the runtime gives jobs the GPUs they book, `ceiling` is the most
 /// network its jobs may ask for, and `log_upload` says the runtime uploads live logs (the
-/// `crun` runtime), reported as `log-upload`. Returns the warnings the operator should read.
+/// `crun` runtime; a native agent reports it through [`report_native`]), reported as
+/// `log-upload`. Returns the warnings the operator should read.
 pub(crate) fn report(
     hello: &mut Hello,
     hook: Option<&ToolkitHook>,
@@ -287,11 +293,11 @@ mod tests {
     }
 
     /// Asserts that `log-upload` is in the hello of an agent whose runtime uploads live logs
-    /// (the `crun` agent reports with `log_upload` set) and in no other: not an engine
-    /// agent's, not a native agent's. It catches a server that sends a sink to an agent that
-    /// cannot upload, and one never told that a crun agent can.
+    /// (the `crun` agent reports with `log_upload` set, and a native agent always) and in no
+    /// other: not an engine agent's. It catches a server that sends a sink to an agent that
+    /// cannot upload, and one never told that a crun or a native agent can.
     #[test]
-    fn the_agent_reports_log_upload_only_on_the_crun_runtime() {
+    fn the_agent_reports_log_upload_on_the_crun_and_native_runtimes_only() {
         let ceiling = Config::none().ceiling();
         let mut crun = hello();
         assert!(
@@ -315,8 +321,15 @@ mod tests {
         let engine = reported(&Config::none());
         assert!(!engine.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
         let mut native = hello();
-        let _ = report_native(&mut native, false, Ceiling::Off);
-        assert!(!native.capabilities.contains_key(LOG_UPLOAD_CAPABILITY));
+        assert!(report_native(&mut native, false, Ceiling::Off).is_empty());
+        assert_eq!(
+            native
+                .capabilities
+                .get(LOG_UPLOAD_CAPABILITY)
+                .map(String::as_str),
+            Some(FLAG_SET)
+        );
+        assert_eq!(native.validate(), Ok(()));
         assert_eq!(LOG_UPLOAD_CAPABILITY, "log-upload");
     }
 

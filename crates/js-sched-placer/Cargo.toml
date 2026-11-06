@@ -1,0 +1,30 @@
+[package]
+name = "js-sched-placer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# What a test reads of the placer and its engine (the fallback counters, the engines built,
+# the scheduler and what it books). The crate's own unit tests have it through `cfg(test)`;
+# a crate whose tests read the placer turns it on in its own `[dev-dependencies]` entry.
+test-support = []
+
+[dependencies]
+js-agent-wire = { path = "../js-agent-wire" }
+js-caps = { path = "../js-caps" }
+js-jobs = { path = "../js-jobs" }
+js-lease = { path = "../js-lease" }
+js-provider = { path = "../js-provider" }
+js-registry = { path = "../js-registry" }
+js-sched = { path = "../js-sched" }
+js-state = { path = "../js-state" }
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
