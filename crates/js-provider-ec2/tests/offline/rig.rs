@@ -12,10 +12,10 @@ use js_elastic::{
     SchedulerId,
 };
 use js_provider_ec2::{
-    ApiError, ArchName, BlockOffering, DescribeFilter, Ec2Api, Ec2CatalogSettings, Ec2Config,
-    Ec2Provider, FakeEc2, GpuInfo, ImageId, Images, Instance, InstanceId, InstanceState,
-    InstanceType, InstanceTypeInfo, ManualClock, PurchaseKind, QuotaFamily, Region, RunRequest,
-    Tag, TypePrice, VcpuQuota, Zone, ZoneOffering, ZonePrice,
+    ApiError, ArchName, BlockOffering, BlockPurchase, CapacityReservation, DescribeFilter, Ec2Api,
+    Ec2CatalogSettings, Ec2Config, Ec2Provider, FakeEc2, GpuInfo, ImageId, Images, Instance,
+    InstanceId, InstanceState, InstanceType, InstanceTypeInfo, ManualClock, PurchaseKind,
+    QuotaFamily, Region, RunRequest, Tag, TypePrice, VcpuQuota, Zone, ZoneOffering, ZonePrice,
 };
 use js_types::ExecMode;
 
@@ -176,6 +176,17 @@ impl Ec2Api for Account {
         }
     }
 
+    fn purchase_capacity_block(
+        &self,
+        request: &BlockPurchase,
+    ) -> Result<CapacityReservation, ApiError> {
+        self.fake.purchase_capacity_block(request)
+    }
+
+    fn capacity_reservations(&self, tags: &[Tag]) -> Result<Vec<CapacityReservation>, ApiError> {
+        self.fake.capacity_reservations(tags)
+    }
+
     fn terminate_instances(&self, ids: &[InstanceId]) -> Result<(), ApiError> {
         self.fake.terminate_instances(ids)?;
         if self.vanish.load(Ordering::SeqCst) {
@@ -316,6 +327,58 @@ pub fn offer(id: &str, arch: &str) -> Offer {
         purchase: Some(js_elastic::Purchase::OnDemand),
         quota: None,
         block: None,
+    }
+}
+
+/// The id of the rig's Capacity Block offering.
+pub const BLOCK_OFFERING: &str = "cb-0123456789abcdef0";
+
+/// When the rig's block starts, in seconds since the epoch.
+pub const BLOCK_START: u64 = 1_800_000_000;
+
+/// How long the rig's block lasts, in minutes (one day).
+pub const BLOCK_MINUTES: u64 = 1440;
+
+/// When the rig's block ends, in seconds since the epoch.
+pub const BLOCK_END: u64 = BLOCK_START + BLOCK_MINUTES * 60;
+
+/// The Capacity Block offering of [`CPU_TYPE`] in [`ZONE`] the account can be given.
+pub fn block_offering() -> BlockOffering {
+    BlockOffering {
+        id: BLOCK_OFFERING.to_owned(),
+        instance_type: InstanceType(CPU_TYPE.to_owned()),
+        zone: Zone(ZONE.to_owned()),
+        instance_count: 1,
+        start_unix_seconds: BLOCK_START,
+        duration_minutes: BLOCK_MINUTES,
+        upfront_fee: "100.00".to_owned(),
+        currency: "USD".to_owned(),
+    }
+}
+
+/// The offer the catalog makes of [`block_offering`].
+pub fn block_offer() -> Offer {
+    Offer {
+        purchase: Some(js_elastic::Purchase::CapacityBlock),
+        block: Some(js_elastic::BlockTerms {
+            offering: BLOCK_OFFERING.to_owned(),
+            start_unix_seconds: BLOCK_START,
+            duration_minutes: BLOCK_MINUTES,
+            upfront_cents: 10_000,
+            instances: 1,
+        }),
+        ..offer(
+            &format!("{CPU_TYPE}/capacity-block/{BLOCK_OFFERING}"),
+            "x86_64",
+        )
+    }
+}
+
+/// An acquire of the rig's scheduler for [`block_offer`].
+pub fn ask_block(acquire: &str) -> AcquireRequest {
+    AcquireRequest {
+        offer: block_offer(),
+        ..ask(acquire)
     }
 }
 

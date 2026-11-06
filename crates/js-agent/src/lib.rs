@@ -288,6 +288,7 @@ pub mod flags_file;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 mod host;
+mod identity;
 #[cfg(target_os = "linux")]
 pub mod image;
 pub mod integrity;
@@ -332,6 +333,7 @@ pub use facts::{
     Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, StoreView, offer};
+pub use identity::{IdentityFlags, IdentitySourceKind};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};

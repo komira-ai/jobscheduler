@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use js_elastic::SignedIdentity;
 use js_types::{
     ACCEL_KEYS, Accelerator, HostId, Model, ProviderId, Resources, Shape, TypeError, accelerator_of,
 };
@@ -274,8 +275,8 @@ impl GpuDevice {
 }
 
 /// Where a launched instance says it runs: the provider's id and the instance id the
-/// provider gave it. The proof of that identity travels in the transport, not here; the
-/// server matches the two against the instance it launched.
+/// provider gave it. The server matches the two against the instance it launched. The
+/// cloud's proof of the machine, when the agent reads one, is [`Hello::identity`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceIdentity {
     /// The provider's id, as in `js-types` provider ids.
@@ -284,8 +285,10 @@ pub struct InstanceIdentity {
     pub instance_id: String,
 }
 
-/// The first message of a session, agent to server (design 5.2). Proof of admission is
-/// not a field: it travels in the transport's headers.
+/// The first message of a session, agent to server (design 5.2). Proof of admission (the
+/// join token or the host credential) is not a field: it travels in the transport's
+/// headers. The cloud's signed identity of the machine, which is public data, is
+/// [`Hello::identity`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     /// The majors the agent speaks (see [`crate::protocol`]). Absent means major 1.
@@ -324,6 +327,60 @@ pub struct Hello {
     /// one, or one with no state root) goes on with its join token. Absent means false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub accepts_host_credential: bool,
+    /// The cloud's signed identity of the machine, as its metadata service served it to
+    /// the agent: on EC2 the instance identity document and its signature, on Compute
+    /// Engine the identity token as the `document` and an empty `signature`. Absent when
+    /// the agent reads none (the default, and every agent that predates the field). On the
+    /// wire it is `{"document": .., "signature": ..}`, both strings.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "signed_identity"
+    )]
+    pub identity: Option<SignedIdentity>,
+}
+
+/// The wire form of [`Hello::identity`]: the object `{"document", "signature"}`. The type is
+/// `js-elastic`'s, which has no serde form of its own; the names are fixed here, with the
+/// wire, so a rename there cannot move them.
+mod signed_identity {
+    use js_elastic::SignedIdentity;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize)]
+    struct Sent<'a> {
+        document: &'a str,
+        signature: &'a str,
+    }
+
+    #[derive(Deserialize)]
+    struct Read {
+        document: String,
+        signature: String,
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<SignedIdentity>,
+        out: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_ref()
+            .map(|identity| Sent {
+                document: &identity.document,
+                signature: &identity.signature,
+            })
+            .serialize(out)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        input: D,
+    ) -> Result<Option<SignedIdentity>, D::Error> {
+        let read = Option::<Read>::deserialize(input)?;
+        Ok(read.map(|read| SignedIdentity {
+            document: read.document,
+            signature: read.signature,
+        }))
+    }
 }
 
 /// Whether `value` is false: a hello that does not ask for a credential does not carry the
@@ -396,8 +453,9 @@ impl Hello {
 
     /// Checks the hello against every bound of [`crate::limits`]: the protocol range, the
     /// ids, the shape, GPU facts, labels and capabilities (the network ceiling among them, as
-    /// [`NetworkCeiling::from_capabilities`] reads it), and the held runs (no run id
-    /// twice). The server calls it on every hello before it looks at the pool or the
+    /// [`NetworkCeiling::from_capabilities`] reads it), the held runs (no run id twice) and
+    /// the size of the signed identity (its signature is the provider's to check). The
+    /// server calls it on every hello before it looks at the pool or the
     /// credential; `validate` reads no state.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.negotiate()?;
@@ -418,7 +476,11 @@ impl Hello {
         self.check_gpu_devices(at.field("gpu_devices"))?;
         self.check_accelerator(at)?;
         check::labels(at.field("labels"), &self.labels)?;
-        crate::heartbeat::check_held(at.field("held"), &self.held)
+        crate::heartbeat::check_held(at.field("held"), &self.held)?;
+        match &self.identity {
+            Some(identity) => check_identity(at, identity),
+            None => Ok(()),
+        }
     }
 
     fn check_capabilities(&self, at: At) -> Result<(), ValidationError> {
@@ -469,6 +531,34 @@ impl InstanceIdentity {
         check::ident(provider, &self.provider)?;
         ProviderId::new(&self.provider).map_err(|_| provider.fail(Rule::BadChars))?;
         check::ident(at.field("instance.instance_id"), &self.instance_id)
+    }
+}
+
+/// A signed identity: a document of 1 to [`limits::MAX_IDENTITY_DOCUMENT_LEN`] bytes and a
+/// signature of at most [`limits::MAX_IDENTITY_SIGNATURE_LEN`] (empty for a token that
+/// carries its own). Their bytes are the cloud's, as served (an EC2 document is JSON over
+/// several lines), so only their size is checked here; the provider checks the signature.
+fn check_identity(at: At, identity: &SignedIdentity) -> Result<(), ValidationError> {
+    let document = at.field("identity.document");
+    if identity.document.is_empty() {
+        return Err(document.fail(Rule::Empty));
+    }
+    let signature = at.field("identity.signature");
+    let sizes = [
+        (
+            document,
+            identity.document.len(),
+            limits::MAX_IDENTITY_DOCUMENT_LEN,
+        ),
+        (
+            signature,
+            identity.signature.len(),
+            limits::MAX_IDENTITY_SIGNATURE_LEN,
+        ),
+    ];
+    match sizes.into_iter().find(|(_, len, max)| len > max) {
+        Some((field, _, _)) => Err(field.fail(Rule::TooLong)),
+        None => Ok(()),
     }
 }
 

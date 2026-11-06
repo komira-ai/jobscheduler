@@ -1113,6 +1113,8 @@ dependencies = [
  "js-mac-session",
  "js-oci",
  "js-provider",
+ "js-provider-ec2",
+ "js-provider-gce",
  "js-registry",
  "js-testkit",
  "js-treestore",
@@ -1130,6 +1132,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
@@ -1141,6 +1144,7 @@ name = "js-agent-wire"
 version = "0.1.0"
 dependencies = [
  "cap",
+ "js-elastic",
  "js-types",
  "proptest",
  "serde",
@@ -1854,6 +1858,8 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-conformance",
+ "js-elastic",
+ "js-elastic-fake",
  "js-jobs",
  "js-lease",
  "js-lease-server",
@@ -1864,6 +1870,7 @@ dependencies = [
  "js-types",
  "serde_json",
  "tokio",
+ "toml",
  "tower",
 ]
 

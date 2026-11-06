@@ -299,6 +299,7 @@ fn record(name: &str, phase: Phase) -> Record {
         clean_lists: 0,
         last_clean: None,
         seen_live: true,
+        ends_at: None,
     }
 }
 

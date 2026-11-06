@@ -3,8 +3,9 @@
 
 use js_elastic::{AcquireId, SchedulerId};
 use js_provider_ec2::{
-    Action, ApiError, ClientToken, DescribeFilter, Ec2Api, FakeEc2, ImageId, Instance, InstanceId,
-    InstanceState, InstanceType, LaunchPurchase, Region, RunRequest, Tag, UserData, Zone,
+    Action, ApiError, BlockOffering, BlockPurchase, CapacityReservationId, ClientToken,
+    DescribeFilter, Ec2Api, FakeEc2, ImageId, Instance, InstanceId, InstanceState, InstanceType,
+    LaunchPurchase, Region, ReservationState, RunRequest, Tag, UserData, Zone,
 };
 
 fn tag(key: &str, value: &str) -> Tag {
@@ -316,4 +317,111 @@ fn an_empty_read_is_one_page() {
         Err(ApiError::Incomplete)
     );
     assert_eq!(fake.describe_instances(&by_tags(&[])), Ok(Vec::new()));
+}
+
+/// A block offering of `duration_minutes` from `start_unix_seconds`.
+fn offering(start_unix_seconds: u64, duration_minutes: u64) -> BlockOffering {
+    BlockOffering {
+        id: "cb-0123456789abcdef0".to_owned(),
+        instance_type: InstanceType("p5.48xlarge".to_owned()),
+        zone: Zone("zone-a1".to_owned()),
+        instance_count: 1,
+        start_unix_seconds,
+        duration_minutes,
+        upfront_fee: "1.00".to_owned(),
+        currency: "USD".to_owned(),
+    }
+}
+
+/// A purchase of the offering of [`offering`] with these tags.
+fn purchase(tags: &[(&str, &str)]) -> BlockPurchase {
+    BlockPurchase {
+        offering: "cb-0123456789abcdef0".to_owned(),
+        tags: tags.iter().map(|(k, v)| tag(k, v)).collect(),
+    }
+}
+
+/// Asserts that a purchase of an offered block makes a reservation with a new id, lasting
+/// from the offering's start for its length, active unless purchases are set to another
+/// state, that it is recorded in order with its tags, that a repeat buys another, and that a
+/// purchase of an offering the account does not offer is refused with
+/// `InvalidParameterValue` and records nothing.
+#[test]
+fn a_purchase_makes_a_reservation_that_ends_with_the_block() {
+    let fake = FakeEc2::new();
+    fake.add_block_offering(offering(1_000, 2));
+    let buy = purchase(&[("k", "v")]);
+    let first = fake.purchase_capacity_block(&buy).unwrap();
+    assert_eq!(first.state, ReservationState::Active);
+    assert_eq!(first.end_unix_seconds, 1_120);
+    fake.buy_blocks_as(ReservationState::Scheduled);
+    let second = fake.purchase_capacity_block(&buy).unwrap();
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.state, ReservationState::Scheduled);
+    assert_eq!(fake.reservations(), [first, second]);
+    assert_eq!(fake.purchases(), [buy.clone(), buy]);
+
+    let unknown = BlockPurchase {
+        offering: "cb-0000000000000000f".to_owned(),
+        tags: Vec::new(),
+    };
+    assert_eq!(
+        fake.purchase_capacity_block(&unknown),
+        Err(ApiError::answered("InvalidParameterValue"))
+    );
+    assert_eq!(fake.purchases().len(), 2);
+}
+
+/// Asserts that a read of reservations answers those that carry every tag asked for, all of
+/// them for no tags, that a state set by id shows in the next read and an unknown id changes
+/// nothing, and that a scripted failure of either call is answered before it takes effect
+/// while a lost answer to a purchase leaves the reservation made.
+#[test]
+fn reservations_are_read_by_tags_and_failures_are_scripted() {
+    let fake = FakeEc2::new();
+    fake.add_block_offering(offering(0, 60));
+    let one = fake
+        .purchase_capacity_block(&purchase(&[("a", "1"), ("b", "2")]))
+        .unwrap();
+    let two = fake
+        .purchase_capacity_block(&purchase(&[("a", "2")]))
+        .unwrap();
+    let by_one = fake.capacity_reservations(&[tag("a", "1")]).unwrap();
+    assert_eq!(by_one, std::slice::from_ref(&one));
+    assert_eq!(
+        fake.capacity_reservations(&[tag("a", "1"), tag("a", "2")])
+            .unwrap(),
+        []
+    );
+    assert_eq!(fake.capacity_reservations(&[]).unwrap(), [one, two.clone()]);
+
+    fake.set_reservation_state(&two.id, ReservationState::Expired);
+    fake.set_reservation_state(
+        &CapacityReservationId::new("cr-0000000000000ffff").unwrap(),
+        ReservationState::Failed,
+    );
+    let states: Vec<ReservationState> = fake
+        .reservations()
+        .into_iter()
+        .map(|reservation| reservation.state)
+        .collect();
+    assert_eq!(
+        states,
+        [ReservationState::Active, ReservationState::Expired]
+    );
+
+    fake.fail_next(Action::DescribeCapacityReservations, ApiError::Timeout);
+    assert_eq!(fake.capacity_reservations(&[]), Err(ApiError::Timeout));
+    fake.fail_next(Action::PurchaseCapacityBlock, ApiError::Timeout);
+    assert_eq!(
+        fake.purchase_capacity_block(&purchase(&[])),
+        Err(ApiError::Timeout)
+    );
+    assert_eq!(fake.reservations().len(), 2);
+    fake.lose_after_next(Action::PurchaseCapacityBlock, ApiError::Timeout);
+    assert_eq!(
+        fake.purchase_capacity_block(&purchase(&[])),
+        Err(ApiError::Timeout)
+    );
+    assert_eq!(fake.reservations().len(), 3);
 }

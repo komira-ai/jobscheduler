@@ -34,6 +34,7 @@ mod flags;
 mod flags_file;
 #[cfg(target_os = "linux")]
 mod helper_modes;
+mod identity;
 #[cfg(target_os = "linux")]
 mod image_budget;
 mod integrity;

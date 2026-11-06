@@ -3,14 +3,20 @@
 //! no account id, key or endpoint, and answers every region it is asked for with the same
 //! data (the calls it records say which region was asked). It also holds the instances of
 //! the launch side: the ones this fake launched and the ones someone else did, which a
-//! tag read shows and a launch with a repeated client token does not duplicate.
+//! tag read shows and a launch with a repeated client token does not duplicate. It holds
+//! the capacity reservations a purchase of an offering added with
+//! [`FakeEc2::add_block_offering`] makes; a repeat of a purchase buys another, as the cloud's
+//! does.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::api::{Action, Ec2Api, PurchaseKind};
 use crate::error::ApiError;
-use crate::launch::{DescribeFilter, Instance, InstanceId, InstanceState, RunRequest};
+use crate::launch::{
+    BlockPurchase, CapacityReservation, CapacityReservationId, DescribeFilter, Instance,
+    InstanceId, InstanceState, ReservationState, RunRequest, Tag,
+};
 use crate::model::{
     BlockOffering, InstanceType, InstanceTypeInfo, Region, TypePrice, VcpuQuota, Zone,
     ZoneOffering, ZonePrice,
@@ -51,6 +57,10 @@ struct State {
     fail_page: Option<usize>,
     read_after_terminate: VecDeque<ApiError>,
     read_armed: VecDeque<ApiError>,
+    reserved: Vec<(CapacityReservation, Vec<Tag>)>,
+    purchases: Vec<BlockPurchase>,
+    next_reservation: u64,
+    bought_as: Option<ReservationState>,
 }
 
 /// Records a call of `action` and takes the failure scripted for it: the next call of any
@@ -95,6 +105,27 @@ impl State {
         self.run_requests.push(request.clone());
         self.launched += 1;
         vec![id]
+    }
+
+    /// Buys the offering `purchase` names, if the account offers it: the reservation
+    /// lasts from the offering's start for its length, in the state set for purchases.
+    fn buy(&mut self, purchase: &BlockPurchase) -> Result<CapacityReservation, ApiError> {
+        let offering = self
+            .blocks
+            .iter()
+            .find(|offering| offering.id == purchase.offering)
+            .ok_or_else(|| ApiError::answered("InvalidParameterValue"))?;
+        let end = offering.start_unix_seconds + offering.duration_minutes * 60;
+        let reservation = CapacityReservation {
+            id: CapacityReservationId::numbered(self.next_reservation),
+            state: self.bought_as.clone().unwrap_or(ReservationState::Active),
+            end_unix_seconds: end,
+        };
+        self.next_reservation += 1;
+        self.reserved
+            .push((reservation.clone(), purchase.tags.clone()));
+        self.purchases.push(purchase.clone());
+        Ok(reservation)
     }
 }
 
@@ -257,6 +288,41 @@ impl FakeEc2 {
     pub fn remove_instance(&self, id: &InstanceId) -> &Self {
         self.state().instances.retain(|instance| instance.id != *id);
         self
+    }
+
+    /// Makes every purchase from now on come back in `state` instead of active.
+    pub fn buy_blocks_as(&self, state: ReservationState) -> &Self {
+        self.state().bought_as = Some(state);
+        self
+    }
+
+    /// Puts the reservation `id` in `state`; nothing happens when there is none.
+    pub fn set_reservation_state(
+        &self,
+        id: &CapacityReservationId,
+        state: ReservationState,
+    ) -> &Self {
+        self.state()
+            .reserved
+            .iter_mut()
+            .filter(|(reservation, _)| reservation.id == *id)
+            .for_each(|(reservation, _)| reservation.state = state.clone());
+        self
+    }
+
+    /// Every purchase that took effect, in order (one whose answer was lost is in it; one
+    /// that failed before it landed is not).
+    pub fn purchases(&self) -> Vec<BlockPurchase> {
+        self.state().purchases.clone()
+    }
+
+    /// Every reservation the fake holds, in the order they were made.
+    pub fn reservations(&self) -> Vec<CapacityReservation> {
+        self.state()
+            .reserved
+            .iter()
+            .map(|(reservation, _)| reservation.clone())
+            .collect()
     }
 
     /// Every instance the fake holds, in order.
@@ -433,5 +499,31 @@ impl Ec2Api for FakeEc2 {
             state.read_armed.push_back(error);
         }
         finish(&mut state, Action::TerminateInstances, ())
+    }
+
+    fn purchase_capacity_block(
+        &self,
+        request: &BlockPurchase,
+    ) -> Result<CapacityReservation, ApiError> {
+        let mut state = self.state();
+        if let Some(error) = begin(&mut state, Action::PurchaseCapacityBlock) {
+            return Err(error);
+        }
+        let reservation = state.buy(request)?;
+        finish(&mut state, Action::PurchaseCapacityBlock, reservation)
+    }
+
+    fn capacity_reservations(&self, tags: &[Tag]) -> Result<Vec<CapacityReservation>, ApiError> {
+        let mut state = self.state();
+        if let Some(error) = begin(&mut state, Action::DescribeCapacityReservations) {
+            return Err(error);
+        }
+        let rows = state
+            .reserved
+            .iter()
+            .filter(|(_, held)| tags.iter().all(|tag| held.contains(tag)))
+            .map(|(reservation, _)| reservation.clone())
+            .collect();
+        finish(&mut state, Action::DescribeCapacityReservations, rows)
     }
 }

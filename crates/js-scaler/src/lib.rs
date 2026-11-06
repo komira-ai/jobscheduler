@@ -110,6 +110,17 @@
 //!   hear from is left to the silence rules above. Each launch also carries
 //!   [`Settings::lifetime`] in [`AcquirePlan::lifetime`]: `max_age` plus the ceiling plus
 //!   the prepare timeout, `unknown_hold` and a margin, which a provider with a native limit enforces in the cloud.
+//! * Machines in a reserved block of time. When the provider states the end of the block a
+//!   machine runs in (`Held::ends_unix_seconds`, in its answer to an acquire and in each
+//!   list), the scaler keeps it in [`Record::ends_at`]. Until that instant the machine is
+//!   not drained as idle and not retired at `max_age`: the block is paid for to its end. A
+//!   machine that cannot serve (its hello was below its offer) is still drained. From the
+//!   instant on, the rules above apply as for any machine, and a machine of the block that
+//!   the list shows terminated or preempted, or that a notice names, is released with no
+//!   strike on the brake and no cooldown, whatever phase it was in: the cloud took it back
+//!   as planned. The same loss before the end is counted as it is for any machine. The end
+//!   is never written to the records file; the first list after a restart states it again.
+//!   The scaler does not ask a provider for a block: the offer it sends carries none.
 //!
 //! * Machines the scaler does not release. An orphan (a listed machine no record knows, or
 //!   one a launch answer named and could not confirm released) is counted and reported and
@@ -129,6 +140,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![forbid(unsafe_code)]
 
+mod block;
 mod brake;
 mod budget;
 mod caps;

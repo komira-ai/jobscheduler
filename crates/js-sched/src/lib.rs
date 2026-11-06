@@ -77,6 +77,11 @@
 //!   ([`admit_probe`]) refuses it at once, by name, on an unknown, not serving, open,
 //!   draining, mismatched or too small worker, and room and the load predicate apply to
 //!   it as to any request;
+//! - host end times ([`Event::HostEnd`]): a worker whose host is taken back at a time (a
+//!   reserved block, say) takes an operation only if its max wall time ends by then, or it
+//!   has none; the wall time is cut to the time left ([`Scheduler::max_wall`]), a hold on
+//!   the worker is held no later than the end, and a worker that ends before a request
+//!   could run is not held for it;
 //! - a finished operation is kept for [`FINISHED_RETENTION`] after its waiters are
 //!   answered, then dropped;
 //! - memory kills (failure classes, 6.1): an action that passed its own memory limit

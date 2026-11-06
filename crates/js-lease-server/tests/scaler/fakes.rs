@@ -273,6 +273,7 @@ impl Effects for Handle {
             offer: plan.offer.id.clone(),
             zone: plan.offer.zone.clone(),
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         };
         world.machines.push(held.clone());
         Acquired::Accepted {
@@ -693,6 +694,7 @@ pub fn record(name: &str, phase: Phase) -> Record {
         // A machine the step has seen live already: a step that sees it live again has
         // nothing new to write down.
         seen_live: true,
+        ends_at: None,
     }
 }
 

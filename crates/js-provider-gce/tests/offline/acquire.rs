@@ -27,7 +27,7 @@ use crate::rig::{
 };
 
 /// The machine of an answer that must be `Accepted`.
-fn accepted(answer: Acquired) -> Held {
+pub fn accepted(answer: Acquired) -> Held {
     match answer {
         Acquired::Accepted { held, .. } => held,
         other => panic!("not accepted: {other:?}"),

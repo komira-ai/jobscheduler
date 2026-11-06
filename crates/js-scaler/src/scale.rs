@@ -344,9 +344,15 @@ impl Pass<'_> {
 
     /// Whether `record`'s machine has reached the pool's `max_age`, counted from its launch.
     /// The launch time is in the records, so a restart does not start it again, and the
-    /// time the scaler was down counts: the cloud bills through it.
+    /// time the scaler was down counts: the cloud bills through it. A machine in a block
+    /// that has not ended is not aged: the block is paid for, so it runs to its end.
     pub(crate) fn aged(&self, record: &Record, settings: &Settings) -> bool {
-        settings.aged(record.launched_at, self.now)
+        [
+            settings.aged(record.launched_at, self.now),
+            !record.block_running(self.now),
+        ]
+        .into_iter()
+        .all(|ok| ok)
     }
 
     /// Drains a registered host that has been quiet for `idle` (and has lived
@@ -390,9 +396,13 @@ impl Pass<'_> {
             {
                 let since = *self.quiet.entry(name.clone()).or_insert(self.now);
                 let grown = self.now.since(launched) >= pool.settings.min_host_lifetime;
-                let ripe = [self.now.since(since) >= pool.settings.idle, grown]
-                    .into_iter()
-                    .all(|ok| ok);
+                let ripe = [
+                    self.now.since(since) >= pool.settings.idle,
+                    grown,
+                    !record.block_running(self.now),
+                ]
+                .into_iter()
+                .all(|ok| ok);
                 if [condemned, ripe].into_iter().any(|ok| ok) {
                     self.go(i, Phase::Draining);
                     // A condemned host is also marked for release at once: each call is
@@ -722,6 +732,7 @@ impl Pass<'_> {
             clean_lists: 0,
             last_clean: None,
             seen_live: false,
+            ends_at: None,
         };
         (!repeat).then_some(record).ok_or(Blocked::Entropy)
     }

@@ -1,7 +1,7 @@
 //! What must always be true of the cell: the seven properties of "exactly once, nothing
 //! double-booked, nothing lost", the four of a whole host held, drained and served
-//! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), and the
-//! [`Checker`] that tests them.
+//! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), the five
+//! of an elastic pool's cloud (`elastic.rs`), and the [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -42,6 +42,7 @@ use crate::observe::{
 };
 use crate::text;
 
+mod elastic;
 mod jobs;
 mod results;
 mod whole;
@@ -164,11 +165,32 @@ pub enum Invariant {
     /// result is accepted twice among the verdicts the agents read: the server stores each
     /// result once.
     ResultKeptUntilAcknowledged,
+    /// Step check. At every step, the elastic pool's cloud runs no more of this
+    /// scheduler's machines (launched by an acquire, not foreign) than the pool's
+    /// `max_instances`, as the cell reads the cloud itself, not the scheduler's own account.
+    InstancesWithinLimits,
+    /// Step check. Every release in the recording wrapper's calls names a machine this
+    /// scheduler launched (one an acquire was answered with, or a list showed), never a
+    /// foreign one.
+    OnlyOwnMachinesReleased,
+    /// Step check. Once the pool's brake reads tripped (the scaler's state, read after every
+    /// tick), the recording wrapper's calls gain no acquire until the operator resets the
+    /// brake or it no longer reads tripped.
+    NoAcquireWhilePlanOnly,
+    /// Step check. After the cloud answered an acquire with a 429 (a deferral of
+    /// [`js_elastic_fake::THROTTLE_WAIT`]), as the recording wrapper's calls show it, no
+    /// acquire of the pool is made within that wait of virtual time.
+    ThrottleHonoured,
+    /// End check. Once quiet, every machine this scheduler launched has joined and been
+    /// released, is gone, or was preempted: none the cloud still runs is without work (its
+    /// agent runs no run and no job) and without a drain (the server's listing shows its
+    /// host neither drained nor being released).
+    LaunchedMachinesSettle,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 16] = [
+    pub const ALL: [Invariant; 21] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -185,6 +207,11 @@ impl Invariant {
         Invariant::FreedOnlyWhenConfirmed,
         Invariant::NoStartWithoutAllocation,
         Invariant::ResultKeptUntilAcknowledged,
+        Invariant::InstancesWithinLimits,
+        Invariant::OnlyOwnMachinesReleased,
+        Invariant::NoAcquireWhilePlanOnly,
+        Invariant::ThrottleHonoured,
+        Invariant::LaunchedMachinesSettle,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -207,6 +234,11 @@ impl Invariant {
             Invariant::FreedOnlyWhenConfirmed => "freed-only-when-confirmed",
             Invariant::NoStartWithoutAllocation => "no-start-without-allocation",
             Invariant::ResultKeptUntilAcknowledged => "result-kept-until-acknowledged",
+            Invariant::InstancesWithinLimits => "instances-within-limits",
+            Invariant::OnlyOwnMachinesReleased => "only-own-machines-released",
+            Invariant::NoAcquireWhilePlanOnly => "no-acquire-while-plan-only",
+            Invariant::ThrottleHonoured => "throttle-honoured",
+            Invariant::LaunchedMachinesSettle => "launched-machines-settle",
         }
     }
 
@@ -226,10 +258,15 @@ impl Invariant {
             | Invariant::LostIsTerminal
             | Invariant::FreedOnlyWhenConfirmed
             | Invariant::NoStartWithoutAllocation
-            | Invariant::ResultKeptUntilAcknowledged => Checked::EveryStep,
+            | Invariant::ResultKeptUntilAcknowledged
+            | Invariant::InstancesWithinLimits
+            | Invariant::OnlyOwnMachinesReleased
+            | Invariant::NoAcquireWhilePlanOnly
+            | Invariant::ThrottleHonoured => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
-            | Invariant::NoResultLost => Checked::AtEnd,
+            | Invariant::NoResultLost
+            | Invariant::LaunchedMachinesSettle => Checked::AtEnd,
         }
     }
 }
@@ -390,6 +427,8 @@ pub struct Checker {
     ordinary: BTreeSet<LeaseId>,
     /// What the job invariants have read.
     jobs: jobs::Indices,
+    /// What the invariants of the elastic pool's cloud have read.
+    cloud: elastic::Indices,
 }
 
 impl Checker {
@@ -434,6 +473,7 @@ impl Checker {
         self.read_starts(observations, &mut found);
         self.read_stops(observations, &mut found);
         self.jobs.step(observations, touched, &mut found);
+        self.cloud.step(observations, &mut found);
         found.list
     }
 
@@ -501,6 +541,7 @@ impl Checker {
             }
         }
         results::check(observations, &mut found);
+        elastic::settle(observations, &mut found);
         Ok(found.list)
     }
 

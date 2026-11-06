@@ -3,6 +3,7 @@
 //! provider over it.
 
 mod acquire;
+mod block;
 mod config;
 mod conformance;
 mod fake;

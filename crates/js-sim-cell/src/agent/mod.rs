@@ -134,6 +134,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use js_agent_wire::InstanceIdentity;
 use js_conformance::agent::Defect;
 use js_sim::{Event, Node, NodeId, NodeInput, Output};
 use js_types::sched::{Effect, FarmTime, StateMachine};
@@ -198,6 +199,10 @@ pub struct AgentSpec {
     pub hello_interval: Duration,
     /// The agent: a fake (correct, or lacking one behaviour) or the real one.
     pub kind: AgentKind,
+    /// The instance a launched machine's hello names (its pool and its name), which its
+    /// one-time join token is bound to; `None` for a host that joins with the pool's
+    /// shared token.
+    pub instance: Option<InstanceIdentity>,
 }
 
 /// One host of the cell with its agent process.
@@ -237,6 +242,12 @@ impl AgentNode {
     #[must_use]
     pub fn host(&self) -> &HostId {
         &self.spec.host
+    }
+
+    /// What the node is: its host, its pool, its join token and its hello.
+    #[must_use]
+    pub fn spec(&self) -> &AgentSpec {
+        &self.spec
     }
 
     /// Makes the node write into `applied` each time it takes an input.
