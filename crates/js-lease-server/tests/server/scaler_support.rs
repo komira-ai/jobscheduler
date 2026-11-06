@@ -137,6 +137,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         .cloned();
     if let Some(cloud) = elastic {
         return Ok(Built::Elastic(ElasticBuilt {
+            idle_costs: false,
             provider: Box::new(cloud),
             floor: Floor {
                 gpus: 1,

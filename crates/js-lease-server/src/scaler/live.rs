@@ -393,6 +393,7 @@ mod tests {
         let hello = js_elastic::Hello {
             name: name("a1"),
             instance_id: None,
+            identity: None,
         };
         assert_eq!(live.provider.verify_instance(&hello), None);
     }

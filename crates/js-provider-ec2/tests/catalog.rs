@@ -794,7 +794,9 @@ fn reads_only(action: Action) -> bool {
         | Action::GetProducts
         | Action::DescribeSpotPriceHistory
         | Action::GetServiceQuota
-        | Action::DescribeCapacityBlockOfferings => true,
+        | Action::DescribeCapacityBlockOfferings
+        | Action::DescribeInstances => true,
+        Action::RunInstances | Action::TerminateInstances => false,
     }
 }
 
@@ -809,6 +811,12 @@ fn fake_and_port_are_read_only() {
     catalog(&fake, settings(&["on-demand", "spot", "capacity-block"]));
     let calls = fake.calls();
     assert!(calls.iter().all(|call| reads_only(call.action)));
+    assert!(!reads_only(Action::RunInstances));
+    assert!(!reads_only(Action::TerminateInstances));
+    assert_eq!(Action::RunInstances.name(), "RunInstances");
+    assert_eq!(Action::DescribeInstances.name(), "DescribeInstances");
+    assert_eq!(Action::TerminateInstances.name(), "TerminateInstances");
+    assert_eq!(Action::TerminateInstances.to_string(), "TerminateInstances");
     assert!(calls.iter().all(|call| call.region.as_str() == REGION));
     let actions: Vec<&str> = calls.iter().map(|call| call.action.name()).collect();
     assert_eq!(
@@ -949,6 +957,8 @@ fn an_error_is_classified_by_its_code() {
         ApiError::Transport(String::new()),
         ApiError::Unreadable(String::new()),
         ApiError::Incomplete,
+        ApiError::Timeout,
+        ApiError::NoCredential,
     ] {
         assert_eq!(codeless.code(), None);
     }

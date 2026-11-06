@@ -1,0 +1,10 @@
+{
+  "accountId" : "000000000000",
+  "architecture" : "arm64",
+  "availabilityZone" : "zone-a1",
+  "imageId" : "ami-0123456789abcdef0",
+  "instanceId" : "i-0123456789abcdef0",
+  "instanceType" : "g5g.xlarge",
+  "pendingTime" : "2026-09-02T00:00:00Z",
+  "region" : "region-a"
+}

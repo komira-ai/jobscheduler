@@ -385,7 +385,7 @@ fn a_platform_kind_not_built_is_refused() {
             format!("platform \"later\": kind: {kind:?} is not built in this version")
         );
     }
-    for kind in ["ec2", "gce"] {
+    for kind in ["gce"] {
         let table = format!(
             "[[machine_provider]]\nname = \"cloud\"\nkind = {}\n",
             quote(kind)
@@ -404,6 +404,92 @@ fn a_platform_kind_not_built_is_refused() {
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),
         "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, lambdalabs, listed, static"
+    );
+}
+
+/// The `ec2` machine provider `cloud` with the region and the one image the kind needs,
+/// then the platform `ours` naming `rack` and it.
+fn ec2_tables(extra: &str) -> Vec<String> {
+    vec![
+        rack(),
+        format!(
+            "[[machine_provider]]\nname = \"cloud\"\nkind = \"ec2\"\nregion = \"region-a\"\n\
+             images = {{ arm64 = \"ami-0123456789abcdef0\" }}\n{extra}"
+        ),
+        platform("ours", &["rack", "cloud"]),
+    ]
+}
+
+/// Asserts that a pool on an `ec2` machine provider is refused without `idle`, `max_age`,
+/// `min_host_lifetime` and the server `max_lease_wall`, as a pool with GPUs is, though the
+/// kind's floor reports no GPU. It catches an `ec2` pool that can launch GPU instances
+/// with no bound on how long a host lives.
+#[test]
+fn ec2_pool_needs_the_lifetime_keys() {
+    let scratch = Scratch::new("platform_ec2_lifetime");
+    for key in ["idle", "max_age", "min_host_lifetime"] {
+        let pool = on(&["ours"], &scratch).without(key);
+        let text = doc(&scratch, &ec2_tables(""), &[&pool]);
+        let path = scratch.write("js.toml", &text, 0o644);
+        let said = Config::resolve_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock())
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            said,
+            format!(
+                "pool \"gpu\": {key}: required of a pool with accelerators: an idle host costs money by the hour, so the file names how long it may live"
+            )
+        );
+    }
+}
+
+/// Loads the file of the pool `gpu` on the platform `ours` with `tables`, through the
+/// kinds the server ships.
+fn through_standard_kinds(scratch: &Scratch, tables: &[String]) -> Result<Resolved, StartupError> {
+    let text = doc(scratch, tables, &[&on(&["ours"], scratch)]);
+    let path = scratch.write("js.toml", &text, 0o644);
+    Config::resolve_file(&path, &Kinds::standard(), &OwnerOnlyFiles, clock())
+}
+
+/// Asserts that a `[[machine_provider]]` of kind `ec2` with a region and an image is built
+/// by the kinds the server ships and launches machines, that a key the kind does not know
+/// (a credential among them) is refused naming the key and the known ones, and that `gce`
+/// is still refused as not built. It catches an `ec2` kind that is not registered, or one
+/// still on the list of kinds not built, and a credential key that is read as nothing.
+#[test]
+fn kind_ec2_builds_and_gce_is_still_refused() {
+    let scratch = Scratch::new("platform_ec2");
+    let built = match through_standard_kinds(&scratch, &ec2_tables("")) {
+        Ok(resolved) => resolved,
+        Err(err) => panic!("the ec2 kind should build: {err}"),
+    };
+    let cloud = &built.machine_providers[1];
+    assert_eq!((cloud.name.as_str(), cloud.kind.as_str()), ("cloud", "ec2"));
+    assert!(cloud.launches());
+    assert_eq!(
+        built.pool("gpu").unwrap().platforms,
+        vec![PlatformId::new("ours")]
+    );
+    let said = through_standard_kinds(&scratch, &ec2_tables("secret_access_key = \"x\"\n"))
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        said,
+        "machine_provider \"cloud\": secret_access_key: unknown field; known: region, purchase, images, allowed_instance_types, capacity_block_hours"
+    );
+    let gce = vec![
+        rack(),
+        "[[machine_provider]]\nname = \"cloud\"\nkind = \"gce\"\n".to_owned(),
+        platform("ours", &["rack", "cloud"]),
+    ];
+    assert_eq!(
+        through_standard_kinds(&scratch, &gce)
+            .err()
+            .unwrap()
+            .to_string(),
+        "machine_provider \"cloud\": kind: \"gce\" is not built in this version"
     );
 }
 
