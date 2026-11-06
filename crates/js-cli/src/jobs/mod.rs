@@ -2,22 +2,32 @@
 //! call of the job service. The table of commands, [`surface`], and the dispatcher that
 //! sends a request through the client are generated from the service definition by
 //! `cargo xtask gen-job-surface` (`generated.rs`); this module interprets the table and
-//! names no call, so a call added to the definition becomes a command with no code here.
+//! names no call, so a call added to the definition becomes a command with no code here
+//! (the hand-written commands below are the exception).
 //!
 //! A command's flags are built into its request one flag at a time: each flag's value is
 //! put at its field's path in a JSON object, read as the request message (proto3 JSON, by
 //! the descriptor set of `js-proto`) and encoded, and the encodings are joined, which in
 //! protobuf is the request with every field set. A value the message refuses is a usage
 //! error naming its flag.
+//!
+//! Three commands of the `job` group are written by hand, not generated, because each is a
+//! loop over several calls rather than one call: `job wait` (`wait.rs`), `job follow`
+//! (`follow.rs`) and `job run` (`run.rs`). [`tree`] adds them to the generated groups and
+//! [`chosen`] finds them; the loops themselves are `js_client::jobs`'s, and these files only
+//! read the flags, print, and map the outcome to the exit status.
 
+mod follow;
+mod run;
 mod text;
+mod wait;
 
 pub(crate) use text::lines as text_lines;
 
 mod generated;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValuesParser, TypedValueParser, ValueParser};
 use clap::{Arg, ArgAction, ArgMatches};
@@ -27,6 +37,7 @@ use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use serde_json::{Map, Value as Json};
 
+use crate::Services;
 use crate::cli::parse_duration;
 use crate::failure::{Failure, exit};
 use crate::render::Render;
@@ -147,6 +158,31 @@ pub fn commands(surface: &'static [Command]) -> Vec<clap::Command> {
         .map(|group| group_command(group, surface))
         .collect()
 }
+
+/// The job command groups of `js`: those [`commands`] builds from the generated table, with
+/// the hand-written `job wait`, `job follow` and `job run` added to the `job` group.
+pub(crate) fn tree() -> Vec<clap::Command> {
+    let groups = commands(surface()).into_iter();
+    groups
+        .map(|group| match group.get_name() {
+            "job" => group.subcommands(hand_written()),
+            _ => group,
+        })
+        .collect()
+}
+
+/// The hand-written commands of the `job` group. `job run` takes the flags of `job submit`,
+/// from the table.
+fn hand_written() -> Vec<clap::Command> {
+    let submit = surface().iter().filter(|command| command.path == SUBMIT);
+    [wait::command(), follow::command()]
+        .into_iter()
+        .chain(submit.map(run::command))
+        .collect()
+}
+
+/// The words of the command whose flags `job run` takes.
+const SUBMIT: [&str; 2] = ["job", "submit"];
 
 /// The group `group`: its subcommands, or the one-word command itself.
 fn group_command(group: &'static str, surface: &'static [Command]) -> clap::Command {
@@ -319,14 +355,49 @@ fn checked<T: std::str::FromStr>(text: &str) -> Option<Json> {
     text.parse::<T>().ok().map(|_| Json::from(text))
 }
 
-/// The command of `matches` (the parsed command line) when it is a job command, with the
-/// matches of its own words.
-pub(crate) fn chosen(matches: &ArgMatches) -> Option<(&'static Command, &ArgMatches)> {
+/// A job command of the parsed command line, with the matches of its own words.
+pub(crate) enum Chosen<'a> {
+    /// A command of the generated table.
+    Generated(&'static Command, &'a ArgMatches),
+    /// `job wait`.
+    Wait(&'a ArgMatches),
+    /// `job follow`.
+    Follow(&'a ArgMatches),
+    /// `job run`.
+    Run(&'a ArgMatches),
+}
+
+/// The job command of `matches` (the parsed command line), if it names one.
+pub(crate) fn chosen(matches: &ArgMatches) -> Option<Chosen<'_>> {
     let (words, own) = words(matches);
-    let found = surface()
-        .iter()
-        .find(|command| command.path == words.as_slice());
-    found.map(|command| (command, own))
+    match words.as_slice() {
+        ["job", "wait"] => Some(Chosen::Wait(own)),
+        ["job", "follow"] => Some(Chosen::Follow(own)),
+        ["job", "run"] => Some(Chosen::Run(own)),
+        _ => surface()
+            .iter()
+            .find(|command| command.path == words.as_slice())
+            .map(|command| Chosen::Generated(command, own)),
+    }
+}
+
+/// Runs the job command `chosen`, with the global flags of `globals`.
+pub(crate) fn execute(
+    chosen: Chosen<'_>,
+    globals: &ArgMatches,
+    render: Render,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: Services,
+) -> Result<u8, Failure> {
+    match chosen {
+        Chosen::Generated(command, own) => {
+            run(command, globals, own, render, out, err, &services.dialer)
+        }
+        Chosen::Wait(own) => wait::run(globals, own, render, out, &services),
+        Chosen::Follow(own) => follow::run(globals, own, render, out, err, &services),
+        Chosen::Run(own) => run::run(globals, own, render, out, err, services),
+    }
 }
 
 /// The subcommand words of `matches` and the matches of the last.
@@ -353,13 +424,81 @@ pub(crate) fn run(
     err: &mut dyn Write,
     dialer: &Dialer,
 ) -> Result<u8, Failure> {
-    let server = globals
-        .get_one::<String>("server")
-        .ok_or_else(|| Failure::flag("--server", "is required"))?;
-    let token_file = globals
-        .get_one::<PathBuf>("token_file")
-        .ok_or_else(|| Failure::flag("--token-file", "is required"))?;
-    let ca_cert = globals.get_one::<PathBuf>("ca_cert").map(PathBuf::as_path);
+    let connection = Connection::of(globals, dialer)?;
+    let (encoded, key) = request(command, args, render, err)?;
+    let pool = pool()?;
+    let response = message(&pool, command.response)?;
+    let mut sink = |answer: &[u8]| print(&response, answer, render, out);
+    let sent = runtime()?.block_on(async {
+        let mut client = connection.client().await?;
+        generated::dispatch(&mut client, command.rpc, &encoded, &mut sink).await
+    });
+    sent.map_err(|failure| unanswered(failure, command, key.as_ref()))?;
+    Ok(exit::OK)
+}
+
+/// A command's retry key: its flag and the value sent.
+pub(crate) type Key = (&'static Flag, String);
+
+/// The global flags a job command connects with, and how it dials.
+pub(crate) struct Connection<'a> {
+    server: &'a str,
+    token_file: &'a Path,
+    ca_cert: Option<&'a Path>,
+    dialer: &'a Dialer,
+}
+
+impl<'a> Connection<'a> {
+    /// The connection the global flags of `globals` name, through `dialer`.
+    pub(crate) fn of(globals: &'a ArgMatches, dialer: &'a Dialer) -> Result<Self, Failure> {
+        let server = globals
+            .get_one::<String>("server")
+            .ok_or_else(|| Failure::flag("--server", "is required"))?;
+        let token_file = globals
+            .get_one::<PathBuf>("token_file")
+            .ok_or_else(|| Failure::flag("--token-file", "is required"))?;
+        let ca_cert = globals.get_one::<PathBuf>("ca_cert").map(PathBuf::as_path);
+        Ok(Self {
+            server,
+            token_file,
+            ca_cert,
+            dialer,
+        })
+    }
+
+    /// A client over a connection of its own; nothing is dialled until its first call.
+    pub(crate) async fn client(&self) -> Result<JobClient, Failure> {
+        let client = JobClient::connect_via(
+            self.server,
+            self.token_file,
+            self.ca_cert,
+            REQUEST_LIMIT,
+            self.dialer.clone(),
+        );
+        Ok(client.await?)
+    }
+}
+
+/// The runtime a job command runs its calls on: one thread, with tokio's timer.
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, Failure> {
+    // Building a runtime with no worker threads fails only when the system is out of file
+    // descriptors, which no test can arrange; its error is made up front.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()
+        .ok_or(Failure::Server("cannot start the client".to_owned()))
+}
+
+/// The encoded request of `command` that the flags of `args` build, and its retry key. A
+/// retry key not given is drawn and printed on `err` first: nothing is sent unless it was
+/// printed.
+pub(crate) fn request(
+    command: &'static Command,
+    args: &ArgMatches,
+    render: Render,
+    err: &mut dyn Write,
+) -> Result<(Vec<u8>, Option<Key>), Failure> {
     let pool = pool()?;
     let request = message(&pool, command.request)?;
     let mut values = Vec::new();
@@ -387,23 +526,7 @@ pub(crate) fn run(
                 "cannot print the drawn id, so nothing was sent: {why}"
             ))
         })?;
-    let response = message(&pool, command.response)?;
-    let mut sink = |answer: &[u8]| print(&response, answer, render, out);
-    // Building a runtime with no worker threads fails only when the system is out of file
-    // descriptors, which no test can arrange; its error is made up front.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()
-        .ok_or(Failure::Server("cannot start the client".to_owned()))?;
-    let sent = runtime.block_on(async {
-        let mut client =
-            JobClient::connect_via(server, token_file, ca_cert, REQUEST_LIMIT, dialer.clone())
-                .await?;
-        generated::dispatch(&mut client, command.rpc, &encoded, &mut sink).await
-    });
-    sent.map_err(|failure| unanswered(failure, command, key.as_ref()))?;
-    Ok(exit::OK)
+    Ok((encoded, key))
 }
 
 /// The values given to `flag`, as proto3 JSON: the field's value, or `None` when the flag
@@ -447,10 +570,7 @@ fn field(request: &MessageDescriptor, flag: &Flag, value: Json) -> Result<Vec<u8
 
 /// The command's retry key and its value: the one given, or 128 random bits in
 /// hexadecimal.
-fn retry_key(
-    command: &'static Command,
-    args: &ArgMatches,
-) -> Result<Option<(&'static Flag, String)>, Failure> {
+fn retry_key(command: &'static Command, args: &ArgMatches) -> Result<Option<Key>, Failure> {
     let flag = command
         .retry_key
         .and_then(|key| command.flags.iter().find(|flag| flag.field == key));
@@ -486,7 +606,7 @@ fn fresh_id(drawn: Result<[u8; 16], getrandom::Error>) -> Result<String, Failure
 /// What to say when the answer was lost after the request was sent: with a retry key, that
 /// the thing may exist and the command is run again with that key; without one, whether the
 /// definition says the call is safe to repeat. Any other failure is unchanged.
-fn unanswered(failure: Failure, command: &Command, key: Option<&(&Flag, String)>) -> Failure {
+pub(crate) fn unanswered(failure: Failure, command: &Command, key: Option<&Key>) -> Failure {
     let group = command.path.first().copied().unwrap_or_default();
     match (failure, key, command.idempotency) {
         (Failure::Unanswered(_), Some((flag, id)), _) => Failure::Unanswered(format!(
@@ -517,7 +637,7 @@ fn print(
 }
 
 /// Writes `text` to `to` and flushes it.
-fn show(to: &mut dyn Write, text: &str) -> std::io::Result<()> {
+pub(crate) fn show(to: &mut dyn Write, text: &str) -> std::io::Result<()> {
     to.write_all(text.as_bytes())?;
     to.flush()
 }

@@ -22,8 +22,9 @@ const LEASE: [&[&str]; 7] = [
     &["lease", "native"],
 ];
 
-/// The program and the job commands, whose help is held to `goldens/job_help/`.
-const JOB: [&[&str]; 17] = [
+/// The program and the job commands, whose help is held to `goldens/job_help/`: the
+/// generated ones, and the hand-written `job wait`, `job follow` and `job run`.
+const JOB: [&[&str]; 20] = [
     &[],
     &["job"],
     &["job", "submit"],
@@ -32,6 +33,9 @@ const JOB: [&[&str]; 17] = [
     &["job", "cancel"],
     &["job", "result"],
     &["job", "logs"],
+    &["job", "wait"],
+    &["job", "follow"],
+    &["job", "run"],
     &["host"],
     &["host", "list"],
     &["host", "cordon"],

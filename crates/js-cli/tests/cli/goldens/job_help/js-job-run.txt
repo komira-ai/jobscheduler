@@ -1,0 +1,116 @@
+Submits a job, writes its output as it runs, and exits with a status that says how it ended. Takes the flags of `js job submit`. The submit names its job id (--id, or one js draws and prints on stderr first), and is sent again with that id, up to three times in all, when its answer is lost, so it makes one job at most. Then the job's stdout and stderr are written to js's own as the job writes them (as `js job follow` writes them), while the job is read until it has ended (as `js job wait` reads it); the end is printed on stderr, `job <id> <end>`, once both streams are written to their end. A call of the wait that fails ends js at once with 15. The first SIGINT, SIGTERM or SIGHUP before the job has ended cancels it and js goes on waiting for the end; a second one ends js at once. Written by hand, not generated from the job service.
+
+Usage: js job run [OPTIONS]
+
+Options:
+      --server <URL>
+          The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
+
+      --token-file <PATH>
+          A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
+
+      --ca-cert <PATH>
+          A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
+
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --id <TEXT>
+          The job's id: 1 to 63 bytes of letters, digits, dot, underscore and dash (the service checks it). Not given: js draws one and prints it on stderr before it submits. A lost answer to the submit is sent again with this id, and the same command run again with it after exit 9 is answered from the job already made.
+
+      --spec.args <TEXT>
+          The arguments the program is started with, in order. Repeat for more.
+
+      --spec.command <TEXT>
+          The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob.
+
+      --spec.constraints.accelerator.count <N>
+          The least number of devices.
+
+      --spec.constraints.accelerator.form-factor <TEXT>
+          The form factor: sxm or pcie.
+
+      --spec.constraints.accelerator.interconnect <TEXT>
+          The least interconnect, as kind>=size.
+
+      --spec.constraints.accelerator.memory-per-device-gib <N>
+          The least memory of each device, in whole GiB.
+
+      --spec.constraints.accelerator.model <TEXT>
+          The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.
+
+      --spec.constraints.accelerator.vendor <TEXT>
+          The vendor, such as nvidia.
+
+      --spec.constraints.arch <TEXT>
+          The CPU architecture: x86_64 or arm64. aarch64 is accepted and stored as arm64 (design section 3.8). Empty: any.
+
+      --spec.constraints.exec <NAME>
+          The mode the host runs jobs in. Unspecified: either.
+          
+          [possible values: unspecified, container, sandbox-exec]
+
+      --spec.constraints.isa-level <TEXT>
+          The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A host is capable when it reports that level or a higher one of the same architecture. Empty: any.
+
+      --spec.constraints.os <TEXT>
+          The operating system: linux or macos. Empty: any.
+
+      --spec.env <KEY=VALUE>
+          The environment of the job, by variable name. KEY=VALUE; repeat for more.
+
+      --spec.files-file <PATH>
+          The files the host writes for the job before it starts. Read from a file holding the field's value in proto3 JSON.
+
+      --spec.image <TEXT>
+          The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The service rejects an image without a digest.
+
+      --spec.labels <KEY=VALUE>
+          The client's labels, by key. A listing can filter by them. KEY=VALUE; repeat for more.
+
+      --spec.needs.cpu-millis <N>
+          CPU, in thousandths of a core.
+
+      --spec.needs.disk-bytes <N>
+          Scratch disk, in bytes. Absent: none is asked for.
+
+      --spec.needs.gpu-class <TEXT>
+          The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class. It is resolved through the alias table like Accelerator.model.
+
+      --spec.needs.gpus <N>
+          The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no Constraints.accelerator, keeps the meaning it has always had: the class is read through the alias table of design section 3.8, so a full spelling pins its variant and a family name such as nvidia-a100 matches every variant of it.
+
+      --spec.needs.memory-bytes <N>
+          Memory, in bytes.
+
+      --spec.needs.whole-host <BOOL>
+          The job needs the whole host: it is placed only on a host that holds no other job, and a host is drained for it (design section 5.4). The other needs still bound which hosts are capable.
+
+      --spec.network <NAME>
+          What the job may reach over the network. Unspecified: none.
+          
+          [possible values: unspecified, none, allow-list, open]
+
+      --spec.ports-file <PATH>
+          The host ports forwarded to the job. Empty: none, and no inbound path to the job. Read from a file holding the field's value in proto3 JSON.
+
+      --spec.priority <N>
+          The job's priority among queued jobs. 0 when not given. A resubmit that differs from the job already made only in its priority is the same job (design section 5.3).
+
+      --spec.wall-limit-seconds <DURATION>
+          The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling). A duration: 90, 90s, 15m or 2h.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Exit status:
+  0             the job succeeded: it exited with code 0
+  10            the job failed: it exited with another code, or was stopped for its memory
+  11            the job was cancelled
+  12            the job timed out: it was stopped at its wall limit
+  13            the job was lost: its container is gone and no result exists
+  14            the job failed to start
+  15            how the job ended could not be told: a call failed (js does not retry it), or the job is in a state this js does not know
+  1, 3, 4, 9    the submit failed, as for js job submit; with 9 the job may exist, and the same command with the same --id is safe to run again
+  129, 130, 143 a second SIGHUP, SIGINT or SIGTERM ended js before the job ended; the job may still be running
+  2             a flag is wrong

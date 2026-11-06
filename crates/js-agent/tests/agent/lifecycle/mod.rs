@@ -2,7 +2,9 @@
 //! cleanup, driven in memory. The runtime is a fake that exits, fails and records when a
 //! test says so, the clock moves only when a test moves it, and the scratch directories and
 //! mount roots are real directories under the target directory. Nothing sleeps, nothing
-//! waits, no process starts, so there is no hang to guard.
+//! waits, no process starts, so there is no hang to guard. The one exception is
+//! `live_logs::s3_compat`, whose uploaders wait for the answers of the S3-compatible test
+//! store; its tests are `#[ignore]`d, and CI's `test` job, which runs the store, runs them.
 
 mod adopt;
 mod blind_cgroup;

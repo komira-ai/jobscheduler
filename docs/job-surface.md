@@ -18,6 +18,16 @@ the connection and the classification of failures in js-client (`jobs/mod.rs`, `
 `jobs/error.rs`) and the interpreter in js-cli (`jobs/mod.rs`, `jobs/text.rs`), which builds
 the commands from the table and names no call.
 
+Three commands are written by hand because each is a loop over several calls, not one call:
+`js job wait` (reads the job until it has ended and exits with a status that says how),
+`js job follow` (writes a stream of the job's output to its end) and `js job run` (submits,
+follows both streams, waits, and cancels on a signal). Their loops are js-client's
+(`jobs/loops.rs`: `wait_for_terminal`, `follow_logs`, `submit_retrying`, over the `JobCalls`
+trait and an injected `Waiter`); js-cli's `jobs/wait.rs`, `jobs/follow.rs` and `jobs/run.rs`
+read their flags, print, and map the job's end to the exit status. `job run` takes the
+flags of `job submit` from the table, so a field added to `SubmitJobRequest` is a flag of
+both. Their help is held to goldens beside the generated commands'.
+
 ## Adding a call
 
 1. Add the `rpc` and its messages to the `.proto` files, under the evolution rule in the

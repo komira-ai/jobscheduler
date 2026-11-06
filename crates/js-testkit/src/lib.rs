@@ -16,6 +16,9 @@
 //! - `oci_registry` (feature `oci-registry`): the registry in this process that js-oci's own
 //!   tests pull from (TLS on a loopback socket, with a token challenge, redirects and
 //!   tampered bytes on demand), for the tests of a crate that pulls through js-oci.
+//! - [`s3`]: the S3-compatible store with STS that the live-log tests write to, named by
+//!   `JS_TEST_S3_URL` and `JS_TEST_S3_REGION` (a test without them fails), and unique names
+//!   for what a test puts there.
 //! - [`dir`]: a scratch directory a test owns and that is removed on drop.
 //! - [`port`]: loopback ports a test can rely on (dead ones, and ones held until used).
 //! - [`forked`]: a child held between `fork` and `exec`, to show what a lock or a file
@@ -71,6 +74,7 @@ pub mod oci_registry;
 pub mod port;
 pub mod probe;
 pub mod reaped;
+pub mod s3;
 pub mod shm;
 pub mod spawn;
 pub mod switch;

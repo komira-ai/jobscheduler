@@ -10,7 +10,7 @@ use crate::events::{ForwardedSignal, Signaller};
 
 /// Installs handlers for SIGINT, SIGTERM and SIGHUP and reports every delivery to
 /// `signaller` from a detached thread. The handlers stay installed for the life of the
-/// process, which is the life of one `lease run`. A signal that arrives before the
+/// process, which is the life of one `lease run` or `job run`. A signal that arrives before the
 /// first report is read is held, not lost.
 pub(crate) fn install(signaller: Signaller) -> io::Result<()> {
     let kinds = [
