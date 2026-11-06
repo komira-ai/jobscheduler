@@ -16,7 +16,8 @@
 //! that it pulls the image again the next time it is asked for. When the store cannot be
 //! brought within its budget by evicting every image that may be evicted, nothing is
 //! evicted: the pull fails with [`NoCapacity`], and the image it brought is removed again
-//! (unless a lease holds it), so the store holds what it held before. A pull of an image
+//! (unless a lease holds it), so the store holds what it held before, except after a
+//! removal the store refused partway (below). A pull of an image
 //! the store held already adds no bytes and never fails for the budget: it evicts what the
 //! store is over by when that can be done, and nothing when it cannot.
 //!

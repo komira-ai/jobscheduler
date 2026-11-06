@@ -356,7 +356,10 @@ pub struct Cli {
     /// The most GiB the unpacked images of `--runtime crun` (the store beside the scratch
     /// root) may take together. A pull that would take the store over it first evicts the
     /// images used least recently, never one a run holds; one that cannot fit even so fails
-    /// as `no-capacity`, and the store keeps what it held. The disk the agent offers
+    /// as `no-capacity`, evicting nothing, and the image it brought is removed again. Only
+    /// when the store refuses a removal partway (another agent on the store took the image
+    /// meanwhile) does such a failed pull leave the images it evicted before evicted. The
+    /// disk the agent offers
     /// (`disk-gib`) is reduced by the part of the budget the store does not hold yet. Above
     /// 0; by default there is no budget and no image is evicted. Needs `--runtime crun`.
     #[arg(long, value_name = "GIB")]

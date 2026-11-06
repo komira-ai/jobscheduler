@@ -29,6 +29,9 @@ pub(super) struct CrunMachine {
     /// The live-log capture cap (`--log-file-cap`) of the crun settings of every runtime
     /// opened, in order.
     pub(super) log_file_caps: Arc<Mutex<Vec<u64>>>,
+    /// The image budget (`--image-budget-gib`, in bytes) of the crun settings of every runtime
+    /// opened, in order.
+    pub(super) image_budgets: Arc<Mutex<Vec<Option<u64>>>>,
 }
 
 impl CrunMachine {
@@ -43,6 +46,7 @@ impl CrunMachine {
             fake: FakeMachine::new(),
             stops: Arc::default(),
             log_file_caps: Arc::default(),
+            image_budgets: Arc::default(),
         })
     }
 }
@@ -105,6 +109,8 @@ impl Machine for CrunMachine {
         if let Backend::Container(settings) = build.backend {
             let caps = settings.crun().map(|plan| plan.logs.file_cap);
             self.log_file_caps.lock().expect("caps").extend(caps);
+            let budgets = settings.crun().map(|plan| plan.image_budget);
+            self.image_budgets.lock().expect("budgets").extend(budgets);
         }
         let (inner, warnings) = self.system.runtime(build)?;
         let stops = self.stops.clone();
