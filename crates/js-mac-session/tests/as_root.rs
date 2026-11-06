@@ -23,7 +23,14 @@
 //! is served, the baseline before any lease user exists) is done then and kept for the
 //! tests that read it. Every other test makes its own leases (term = a number of its
 //! own), ends them, and ends them also when it fails, so one red test does not fail the
-//! others. Every lease user gets the next uid of the range: [`Mac::create`] checks it.
+//! others. The helper's pool holds one user per uid of the range (`kbf-lease-pool-<n>`,
+//! uid [`FIRST_UID`] + n), made by its first boot reset; every lease gets a pool user's
+//! uid: [`Mac::create`] checks it.
+//!
+//! Some tests here still expect `user-delete` to delete the lease's user and to refuse
+//! while a process of it runs, as it did before the pool; with the pool it resets the
+//! user (killing what runs), and only replaces it when the reset is not clean. Those
+//! expectations wait for a run on a Mac to be rewritten.
 //!
 //! Every test is `#[ignore]`: each needs root and changes this machine. Build the test
 //! binary as an ordinary user (`cargo test -p js-mac-session --test as_root --no-run`) and
@@ -352,8 +359,6 @@ struct Mac {
     runner: Runner,
     serial: String,
     process: Mutex<Option<Child>>,
-    /// The uid the next lease user must get.
-    next_uid: Mutex<u32>,
     first: FirstContact,
 }
 
@@ -419,7 +424,6 @@ impl Mac {
             runner,
             serial,
             process: Mutex::new(None),
-            next_uid: Mutex::new(FIRST_UID),
             first: FirstContact::empty(),
         };
         let pubkey = mac.client(&["pubkey", "07"]);
@@ -463,6 +467,8 @@ impl Mac {
         args.extend([
             "--uid-range".to_owned(),
             format!("{FIRST_UID}-{LAST_UID}"),
+            "--pool-size".to_owned(),
+            (LAST_UID - FIRST_UID + 1).to_string(),
             "--daemon-requirement".to_owned(),
             format!("cdhash H\"{}\"", self.genuine),
             "--kcpassword".to_owned(),
@@ -557,7 +563,6 @@ impl Mac {
     /// `user-create` for `lease` (with a gate grant), which must give the next uid.
     #[track_caller]
     fn create(&self, lease: &str, grant: Option<&str>) -> Lease<'_> {
-        let mut next = self.next_uid.lock().unwrap_or_else(PoisonError::into_inner);
         let mut args = vec!["create", SOCKET, lease];
         args.extend(grant);
         let out = self.client(&args);
@@ -568,11 +573,9 @@ impl Mac {
             id: lease.to_owned(),
             uid,
         };
-        let want = *next;
-        *next = want.max(uid + 1);
-        assert_eq!(
-            uid, want,
-            "lease {lease}: uids go in order from {FIRST_UID}, a deleted one's never again"
+        assert!(
+            (FIRST_UID..=LAST_UID).contains(&uid),
+            "lease {lease}: uid {uid} is not a pool user's ({FIRST_UID}-{LAST_UID})"
         );
         made
     }
@@ -694,8 +697,9 @@ struct Lease<'a> {
 }
 
 impl Lease<'_> {
+    /// The lease's pool user: the slot is the uid's place in the range.
     fn name(&self) -> String {
-        format!("kbf-lease-{}", self.id.replace('.', "-"))
+        format!("kbf-lease-pool-{}", self.uid - FIRST_UID)
     }
 
     fn uid(&self) -> String {

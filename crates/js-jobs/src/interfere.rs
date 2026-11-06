@@ -126,6 +126,10 @@ impl<S: Store> Store for Interfere<S> {
         self.inner.changes(after, limit)
     }
 
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        self.inner.trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.inner.reap_expired()
     }
@@ -161,6 +165,25 @@ mod tests {
             .txn(Txn::new().put(key, "v", Cond::Any))
             .map(|committed| committed.expect("no precondition"))
             .map(drop)
+    }
+
+    // Catches a wrapper that does not pass a feed trim to the store it wraps: the rows go
+    // from the wrapped store, and the count is the store's.
+    #[test]
+    fn a_feed_trim_reaches_the_wrapped_store() {
+        let store = wrapped();
+        put(&store, "a").expect("put");
+        put(&store, "b").expect("put");
+        assert_eq!(store.trim_feed(Revision(1)), Ok(1));
+        assert_eq!(
+            store.changes(Revision::ZERO, 10),
+            Err(StoreError::StaleCursor {
+                after: Revision::ZERO,
+                floor: Revision(1),
+            })
+        );
+        let left = store.changes(Revision(1), 10).map(|page| page.rows.len());
+        assert_eq!(left, Ok(1));
     }
 
     // Catches a wrapper that fails the wrong commit, fails more than one, or lets the failed

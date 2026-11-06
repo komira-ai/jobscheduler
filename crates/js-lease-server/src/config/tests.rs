@@ -1,6 +1,7 @@
 //! Unit tests of the configuration: the token and its file, the default limits and a pool's
 //! prepare timeout.
 
+use super::agent_setup::with_whole_node;
 use super::*;
 
 /// Asserts that a token compares equal only to itself and prints without its bytes.

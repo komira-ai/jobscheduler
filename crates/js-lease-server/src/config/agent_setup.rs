@@ -1,13 +1,16 @@
-//! What the configuration decided for the agents that register hosts: [`AgentSetup`], and
-//! the clock and id source its job store is opened on ([`Config::with_job_sources`]).
+//! What the configuration decided for the agents that register hosts: [`AgentSetup`], the
+//! clock and id source its job store is opened on ([`Config::with_job_sources`]), and what
+//! the registered pool's file decides about whole-node leases ([`with_pool_settings`]).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_registry::PoolConfig;
+use js_lease::Settings;
+use js_registry::{PoolConfig, WholeNodeConfig};
 
 use super::{Config, CpuSlack, Hosts, Placement};
 use crate::agent_tokens::AgentTokens;
+use crate::error::StartupError;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{JobSources, JobStoreSetup, ServerIds};
 use crate::rate::HelloLimit;
@@ -60,4 +63,35 @@ impl Config {
         }
         self
     }
+}
+
+/// `settings` with what the registered pool's file decides about whole-node leases: the
+/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
+/// (the lease table counts it; the registry counts the same figure per commit). A pool
+/// without whole-node settings, or no registered pool, leaves `settings` as the flags
+/// made them.
+pub(super) fn with_pool_settings(
+    settings: Settings,
+    hosts: &Hosts,
+) -> Result<Settings, StartupError> {
+    match hosts {
+        Hosts::Layered { agents, .. } => {
+            let whole = agents.pool.whole_node();
+            let settings = with_whole_node(settings, whole)?;
+            Ok(crate::reservations::with_restart_grace(settings, whole))
+        }
+        Hosts::Static(_) => Ok(settings),
+    }
+}
+
+pub(super) fn with_whole_node(
+    settings: Settings,
+    whole: Option<&WholeNodeConfig>,
+) -> Result<Settings, StartupError> {
+    let Some(whole) = whole else {
+        return Ok(settings);
+    };
+    settings
+        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
+        .map_err(|err| StartupError::new("--agent-pool-config", err))
 }

@@ -21,7 +21,7 @@ use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
 use crate::job_expiry::JobLimits;
-use crate::job_store::{self, ServerJobs};
+use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::logs::{self, LogGrants};
@@ -76,6 +76,9 @@ pub(crate) struct Agents {
     /// jobs, and its job listing is committed ([`crate::per_job`]); without them, and for any
     /// other host, the reply is the lease and run reply alone.
     pub(crate) jobs: Option<Arc<ServerJobs>>,
+    /// The job store's change feed, trimmed on each tick ([`Agents::job_pass`]); held with
+    /// the job tables.
+    pub(crate) job_feed: Option<FeedTrim>,
     /// The registry's placer under `--placement js-sched`, which also places the queued jobs
     /// when the job tables are held ([`Agents::place_jobs`]); `None` under the registry's
     /// placement, which places no job.
@@ -194,9 +197,12 @@ pub(crate) fn assemble_placed(
             }
             let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
             // The one job store of the server, when the job service is on.
-            let jobs = match jobs {
-                Some(setup) => Some(job_store::open(state_file, setup, &job_sources)?),
-                None => None,
+            let (jobs, job_feed) = match jobs {
+                Some(setup) => {
+                    let opened = job_store::open(state_file, setup, &job_sources)?;
+                    (Some(opened.jobs), Some(opened.feed))
+                }
+                None => (None, None),
             };
             let agents = Agents {
                 registry,
@@ -210,6 +216,7 @@ pub(crate) fn assemble_placed(
                 errors: AtomicU64::new(0),
                 usage,
                 jobs,
+                job_feed,
                 placer: placer.clone(),
                 unclean: Mutex::default(),
                 logs,
@@ -256,6 +263,7 @@ impl Agents {
             errors: AtomicU64::new(0),
             usage: None,
             jobs: None,
+            job_feed: None,
             placer: None,
             unclean: Mutex::default(),
             logs: None,
@@ -269,6 +277,16 @@ impl Agents {
     pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
         Self {
             jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// This agent side trimming the job store's feed through `feed` on each tick, for a test
+    /// of the job pass.
+    #[cfg(test)]
+    pub(crate) fn with_job_feed(self, feed: FeedTrim) -> Self {
+        Self {
+            job_feed: Some(feed),
             ..self
         }
     }

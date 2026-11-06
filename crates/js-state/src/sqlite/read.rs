@@ -153,7 +153,8 @@ fn nothing() {}
 ///
 /// The head and the rows come from one deferred read transaction, which in WAL mode
 /// pins the snapshot at its first read: the rows never run past the head, so a short page
-/// can end at the head without skipping a row that committed after it was read.
+/// can end at the head without skipping a row that committed after it was read. The
+/// feed's floor (see [`Store::trim_feed`]) comes from the same snapshot.
 pub(super) fn changes_after_head(
     conn: &mut Connection,
     after: Revision,
@@ -169,6 +170,19 @@ pub(super) fn changes_after_head(
     let bounds = [to_sql(after.0), to_sql(limit as u64)];
     let page = statement.query_map(bounds, change_of)?;
     let rows = page.collect::<rusqlite::Result<Vec<Change>>>()?;
+    // The floor is read in the same snapshot as the head and the rows, so a trim that
+    // commits meanwhile is in none of the three. Every revision takes exactly one feed
+    // row here, so the rows trimmed away are those below the oldest one kept: the floor
+    // is one below it, or the head when the feed is empty.
+    let oldest: Option<i64> =
+        tx.query_row("SELECT min(revision) FROM feed", [], |row| row.get(0))?;
+    let floor = oldest.map_or_else(|| uint(head), |oldest| uint(oldest).saturating_sub(1));
+    if after.0 < floor {
+        return Err(StoreError::StaleCursor {
+            after,
+            floor: Revision(floor),
+        });
+    }
     // A full page resumes after its last row; a short one has reached the head, and every
     // revision up to it has committed (there is one writer).
     let cursor = if rows.len() >= limit {

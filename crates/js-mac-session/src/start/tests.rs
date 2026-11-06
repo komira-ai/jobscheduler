@@ -47,6 +47,8 @@ fn args(dir: &Path, group: &str) -> Args {
         &dir.join("state").to_string_lossy(),
         "--uid-range",
         "700-709",
+        "--pool-size",
+        "10",
         "--homes",
         &dir.to_string_lossy(),
         "--daemon-requirement",
@@ -75,6 +77,7 @@ fn the_flags_default_to_the_design() {
     );
     assert_eq!(args.socket_group, "_kbf");
     assert_eq!(args.uid_range.to_string(), "600-699");
+    assert_eq!(args.pool_size, crate::lease::PoolSize::new(100).unwrap());
     assert_eq!(args.lease_gid, STAFF_GID);
     assert_eq!(args.homes, PathBuf::from("/Users"));
     assert_eq!(args.grant_keys, None);
@@ -330,4 +333,18 @@ fn the_serial_comes_from_its_ioreg_line() {
 fn main_serves_only_on_macos() {
     let dir = scratch("start-main");
     assert_eq!(main(&args(&dir, "g")), ExitCode::from(2));
+}
+
+/// Catches: a pool started that holds more users than the uid range has uids (two slots
+/// would share a uid, or one would have none), before anything is made.
+#[test]
+fn a_pool_larger_than_the_uid_range_stops_the_start() {
+    let dir = scratch("start-pool-fits");
+    let mut args = args(&dir, &my_group().0);
+    args.pool_size = crate::lease::PoolSize::new(11).unwrap();
+    assert_eq!(
+        prepared(&args).err(),
+        Some("a pool of 11 users does not fit the uid range 700-709, which holds 10".to_owned())
+    );
+    assert!(!dir.join("state").exists());
 }
