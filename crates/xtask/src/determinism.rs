@@ -85,6 +85,7 @@ pub const CRATES: &[&str] = &[
     "js-registry",
     "js-scaler",
     "js-sched",
+    "js-sched-placer",
     "js-sim",
     "js-sim-cell",
     "js-sizing",
@@ -92,6 +93,7 @@ pub const CRATES: &[&str] = &[
     "js-testkit",
     "js-treestore",
     "js-types",
+    "js-update-hook",
     "js-usage",
     "js-vm-lease",
     "js-whole",
@@ -761,13 +763,6 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the agent program's clock; the cell gives the agent lifecycle its virtual clock in place of System",
     },
     Allowed {
-        file: "crates/js-agent/src/update_hook/ports.rs",
-        item: "SystemClock::now_ms",
-        token: Token::SystemTimeNow,
-        sites: 1,
-        reason: "the update hook's wall clock behind its Clock port; the cell runs no update hook",
-    },
-    Allowed {
         file: "crates/js-agent/src/usage/clock.rs",
         item: "MonotonicClock::new",
         token: Token::InstantNow,
@@ -941,5 +936,12 @@ pub const ALLOWED: &[Allowed] = &[
         token: Token::SystemTimeNow,
         sites: 1,
         reason: "the tree store's default wall clock, which its Config replaces; the cell uses no tree store",
+    },
+    Allowed {
+        file: "crates/js-update-hook/src/ports.rs",
+        item: "SystemClock::now_ms",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the update hook's wall clock behind its Clock port; the cell runs no update hook",
     },
 ];
