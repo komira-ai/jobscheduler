@@ -43,9 +43,9 @@ fn scrubbed_record_codec_round_trip() {
     let row = job_row(&scrubbed);
     assert_eq!(decode_job(&row), Ok(scrubbed.clone()));
     assert_eq!(
-        field_of(&row, 43),
+        field_of(&row, 44),
         Some(framed(&[b"inputs/upload", &UPLOAD_TARGET_SHA256])),
-        "the digests are tag 43, a map of name to 32 bytes"
+        "the digests are tag 44, a map of name to 32 bytes"
     );
     assert_eq!(
         field_of(&row, 19),
@@ -61,16 +61,16 @@ fn scrubbed_record_codec_round_trip() {
     let again = decode_job(&row).map(|job| job_row(&job));
     assert_eq!(again, Ok(row.clone()));
 
-    // A row from before the digests: contents and no tag 43, read as unscrubbed even though
+    // A row from before the digests: contents and no tag 44, read as unscrubbed even though
     // the job has ended.
-    let before = without(&row, 43);
+    let before = without(&row, 44);
     let before = with(&before, 19, &framed(&[b"inputs/upload", b"upload-target"]));
     assert_eq!(
         decode_job(&before).map(|job| job.spec.files),
         Ok(full_spec().files)
     );
 
-    // A row an older build rewrote: it read no files, wrote an empty tag 19, and carried 43.
+    // A row an older build rewrote: it read no files, wrote an empty tag 19, and carried 44.
     let rewritten = with(&row, 19, &[]);
     assert_eq!(decode_job(&rewritten), Ok(scrubbed.clone()));
 
@@ -104,20 +104,20 @@ fn a_file_digest_field_that_is_not_valid_is_refused_by_tag() {
     let cases: [(&[u8], u16, DecodeError); 4] = [
         (
             &framed(&[b"a", &short]),
-            43,
-            DecodeError::BadLength { tag: 43 },
+            44,
+            DecodeError::BadLength { tag: 44 },
         ),
         (
             &framed(&[b"a", &digest, b"a", &digest]),
-            43,
-            DecodeError::BadValue { tag: 43 },
+            44,
+            DecodeError::BadValue { tag: 44 },
         ),
         (
             &framed(&[&[0xff], &digest]),
-            43,
-            DecodeError::NotUtf8 { tag: 43 },
+            44,
+            DecodeError::NotUtf8 { tag: 44 },
         ),
-        (&[0, 0, 0, 9], 43, DecodeError::BadValue { tag: 43 }),
+        (&[0, 0, 0, 9], 44, DecodeError::BadValue { tag: 44 }),
     ];
     for (value, tag, error) in cases {
         assert_eq!(decode_job(&with(&row, tag, value)), Err(error), "{value:?}");

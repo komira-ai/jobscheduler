@@ -1,5 +1,6 @@
 //! The job start a host is sent for one placement: the job as its record holds it, with what
-//! its allocation booked and its id ([`start_of`]).
+//! its allocation booked and its id ([`start_of`]), and the job's log sink when the host
+//! uploads live logs.
 //!
 //! A start the wire cannot carry is not sent ([`Unsendable`]): the job then waits as placed,
 //! and the start timeout ends it. Nothing here guesses a value the records do not hold: a GPU
@@ -63,8 +64,11 @@ pub(crate) fn job_network(policy: NetworkPolicy) -> Level {
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
 /// image, the command then its arguments, the environment, the files, what the
 /// allocation booked, the wall limit, the network level and the declared ports, keyed by the
-/// job id and the allocation id. The start is checked as the agent checks it
-/// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned.
+/// job id and the allocation id, and the job's log sink when `context` has sinks (the host
+/// uploads live logs). The start is checked as the agent checks it
+/// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned; a
+/// sink that fails the agent's check ([`JobStartSpec::log_sink_checked`]) is left out and the
+/// start is sent without it, since a sink never refuses a start.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -124,7 +128,8 @@ pub(crate) fn start_of(
         .wall_limit_secs
         .checked_mul(1000)
         .ok_or(Unsendable::WallLimit)?;
-    let start = JobStartSpec {
+    let log_sink = context.logs.and_then(|logs| logs.sink_for(job.id.as_str()));
+    let mut start = JobStartSpec {
         job_id: job.id.to_string(),
         allocation_id: allocation.allocation_id.to_string(),
         image: format!("{}@{}", spec.image.name(), spec.image.digest()),
@@ -138,8 +143,10 @@ pub(crate) fn start_of(
         wall_ms,
         network,
         ports,
-        log_sink: None,
+        log_sink,
     };
+    let sink_ok = start.log_sink_checked().is_ok();
+    start.log_sink = start.log_sink.filter(|_| sink_ok);
     start
         .validate()
         .and_then(|()| start.require_pinned())

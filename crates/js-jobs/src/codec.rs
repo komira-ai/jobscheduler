@@ -109,7 +109,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -133,10 +133,13 @@ pub(crate) mod job_tag {
     pub const DEADLINE_FLOOR: u16 = 41;
     /// The name of the client that submitted the job (text).
     pub const CLIENT: u16 = 42;
+    /// The lengths of its output streams: standard output's bytes, standard error's, then the
+    /// bytes each dropped (four u64).
+    pub const RESULT_LOGS: u16 = 43;
     /// The SHA-256 of each file's contents (map of text to 32 bytes), once the job has ended:
     /// in place of [`FILES`], so a row with it holds no contents. A row a build before this
     /// field rewrote holds it beside an empty [`FILES`].
-    pub const FILE_DIGESTS: u16 = 43;
+    pub const FILE_DIGESTS: u16 = 44;
 }
 
 /// The tags of an allocation row.

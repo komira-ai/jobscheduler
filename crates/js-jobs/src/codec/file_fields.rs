@@ -1,6 +1,6 @@
 //! The file fields of a job row: tag 19, the files' contents while the job is live, or tag
-//! 43, the SHA-256 of each once it has ended ([`JobFiles`]). A row holds one of them; a row
-//! written before tag 43 holds tag 19 alone and reads as live files, whatever the job's state.
+//! 44, the SHA-256 of each once it has ended ([`JobFiles`]). A row holds one of them; a row
+//! written before tag 44 holds tag 19 alone and reads as live files, whatever the job's state.
 
 use std::collections::BTreeMap;
 
