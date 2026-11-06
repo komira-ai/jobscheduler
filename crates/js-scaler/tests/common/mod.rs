@@ -372,5 +372,6 @@ pub fn record(phase: Phase, price: u64, launched: u64) -> Record {
         clean_lists: 0,
         last_clean: None,
         seen_live: false,
+        ends_at: None,
     }
 }

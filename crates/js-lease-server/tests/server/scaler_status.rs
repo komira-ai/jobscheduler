@@ -43,6 +43,7 @@ fn record(pool: &str, (name, cloud): (&str, Option<&str>), phase: Phase, at: u64
         clean_lists: 0,
         last_clean: None,
         seen_live: false,
+        ends_at: None,
     }
 }
 
