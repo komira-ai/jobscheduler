@@ -240,7 +240,7 @@ fn a_probe_of_a_token_whose_process_is_gone_is_free() {
     assert_eq!(probe(&db), LockState::Free);
     std::fs::write(lock_file(&db), "2147483647").expect("a token with no stamp");
     assert_eq!(probe(&db), LockState::Free);
-    for unreadable in ["not-a-pid@1", "0@1", "99999999999@1"] {
+    for unreadable in ["not-a-pid@1", "0@1", "-1@1", "99999999999@1"] {
         std::fs::write(lock_file(&db), unreadable).expect("an unreadable token");
         assert_eq!(holder_of(probe(&db)), unreadable);
     }

@@ -44,14 +44,17 @@ const UNLOCK: &str = "SELECT pg_advisory_unlock($1)";
 /// The backend that holds the writer lock in the connection's database, and when that
 /// backend started, in microseconds since the Unix epoch. A single-`bigint` advisory key
 /// is split into `classid` (its high 32 bits) and `objid` (its low 32 bits), with
-/// `objsubid` 1. `backend_start` is NULL when the probing role may not see the holder's
+/// `objsubid` 1; the writer holds it exclusive (a shared or transaction-level lock taken
+/// on the key by some other client is not the writer). `backend_start` is NULL when the probing role may not see the holder's
 /// session (another role, without `pg_read_all_stats`).
 const HOLDER: &str = "SELECT l.pid, (extract(epoch FROM a.backend_start) * 1000000)::bigint \
                       FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid \
-                      WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1 \
+                      WHERE l.locktype = 'advisory' AND l.mode = 'ExclusiveLock' \
+                      AND l.granted AND l.objsubid = 1 \
                       AND l.database = \
                       (SELECT oid FROM pg_database WHERE datname = current_database()) \
-                      AND ((l.classid::bigint << 32) | l.objid::bigint) = $1";
+                      AND ((l.classid::bigint << 32) | l.objid::bigint) = $1 \
+                      ORDER BY l.pid LIMIT 1";
 
 /// Why an acquire on a schema older than version 2 is refused.
 const NO_TABLE: &str = "the state schema has no writer generation table (it is older than \

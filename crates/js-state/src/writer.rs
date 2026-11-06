@@ -152,8 +152,12 @@ impl WriterLock {
     /// On Postgres it reads `pg_locks` on a connection of its own. On SQLite it reads the
     /// token in `<file>.lock`: no lock file, an empty one, or a token whose process does
     /// not exist (a holder that ended without emptying it) is [`LockState::Free`]. A SQLite
-    /// holder that has taken the `flock` but not yet written its token, or one of a release
-    /// that wrote none, also reads as free.
+    /// holder that has taken the `flock` but not yet written its token, one whose drop has
+    /// emptied the token but not yet unlocked, or one of a release that wrote none, also
+    /// reads as free. Process ids are those of the probing process's pid namespace, so a
+    /// SQLite probe runs in the holder's; a token left by a holder that ended without its
+    /// drop, whose process id another process has since taken, reads as held until the
+    /// next holder overwrites it.
     ///
     /// # Errors
     /// [`ProbeFailed`] when the server cannot be reached or refuses the login or the query,

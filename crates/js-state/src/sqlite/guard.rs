@@ -236,7 +236,8 @@ pub(super) fn recorded(
 /// anything: `None` when nobody may hold the lock (no lock file, an empty one, or a token
 /// whose process is gone), else the token ([`live_holder`]). The answer can be stale the
 /// moment it is given, and a holder that has taken the `flock` but not yet written its
-/// token (or one of a release that wrote none) reads as `None`.
+/// token, or one whose drop has emptied the file but not yet unlocked it (or one of a
+/// release that wrote none), reads as `None`.
 ///
 /// # Errors
 /// The file's name cannot be resolved, or the lock file cannot be read.
@@ -258,15 +259,24 @@ pub(crate) fn recorded_holder(db: &Path) -> Result<Option<String>, SqliteError> 
 
 /// The holder `token` names, unless it names nobody: `None` for an empty token and for
 /// one whose process id (the text before the first `@`) is a process that does not
-/// exist. A token whose process id cannot be read is kept as it is: it cannot be shown
-/// to be stale, so it is not reported free.
+/// exist. A token whose process id cannot be read (not a number, or not above 0) is kept
+/// as it is: it cannot be shown to be stale, so it is not reported free. Process ids are
+/// those of the probing process's pid namespace, so the probe runs in the holder's; and a
+/// holder that ended without its drop, whose id another process has since taken (after a
+/// reboot, say), reads as held until that process ends or the next holder overwrites the
+/// token.
 pub(super) fn live_holder(token: &str) -> Option<String> {
     let holder = token.trim();
     if holder.is_empty() {
         return None;
     }
     let pid = holder.split('@').next().unwrap_or_default();
-    match pid.parse::<i32>().ok().and_then(Pid::from_raw) {
+    match pid
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .and_then(Pid::from_raw)
+    {
         Some(pid) if test_kill_process(pid) == Err(Errno::SRCH) => None,
         _ => Some(holder.to_owned()),
     }
@@ -306,7 +316,9 @@ impl StoreLock {
     /// creating or changing anything: an absent lock file is a lock nobody holds (a store
     /// creates it before it opens the file). The answer can be stale the moment it is
     /// given, so only a plan uses it; a change takes the lock. A directory that does not
-    /// exist has no lock file either.
+    /// exist has no lock file either. It answers by trying the lock, so a writer starting
+    /// in that instant can be refused; [`crate::WriterLock::probe`] reads the holder's token
+    /// instead and never takes it.
     ///
     /// # Errors
     /// The file's name cannot be resolved, the lock file cannot be opened, or the lock
