@@ -89,8 +89,14 @@ prost-types = "0.14.4"
 protox = "0.10.0"
 # The simulation kernel's seeded random stream (js-sim).
 rand_chacha = "0.10.0"
+# The XML answers of the EC2 Query API (js-provider-ec2); in the lock already through plist,
+# so the lock gains no package.
+quick-xml = { version = "0.42.0", default-features = false }
 # Test certificates only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# Verifies the signature of an EC2 instance identity document (js-provider-ec2); in the lock
+# already through rustls, so the lock gains no package.
+ring = "0.17.14"
 runc = { version = "0.3.0", features = ["async"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
 # format and WAL behaviour do not depend on the host's libsqlite3. No default features: no

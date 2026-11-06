@@ -19,6 +19,7 @@
 //! | file | calls |
 //! |---|---|
 //! | `read.rs` | `GetJob`, `ListJobs`, `GetResult`, `GetLogs` |
+//! | `logs.rs` | `GetLogs` with a stream, which `read.rs` hands it after reading the job's row |
 //! | `submit.rs` | `SubmitJob` (with `validate.rs`, the checks of a submitted job) |
 //! | `cancel.rs` | `CancelJob` |
 //! | `fleet.rs` | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` |
@@ -93,6 +94,7 @@ use roles::{Caller, admitted, caller_of};
 mod auth;
 pub(crate) mod cancel;
 pub(crate) mod fleet;
+pub(crate) mod logs;
 pub(crate) mod read;
 pub(crate) mod roles;
 pub(crate) mod submit;
@@ -112,6 +114,12 @@ mod conformance_tests;
 #[cfg(test)]
 #[path = "fenced_tests.rs"]
 mod fenced_tests;
+#[cfg(test)]
+mod logs_follow_tests;
+#[cfg(test)]
+mod logs_rig;
+#[cfg(test)]
+mod logs_tests;
 #[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
@@ -143,6 +151,7 @@ pub struct JobApi {
     submit: submit::Ctx,
     cancel: cancel::Ctx,
     fleet: fleet::Ctx,
+    logs: logs::Ctx,
     /// Trips when the job tables answer that this process is no longer their writer; with
     /// the server it is the agent side's ([`crate::fence`]), so the server stops.
     fence: Fence,
@@ -160,6 +169,7 @@ impl JobApi {
             submit: submit::Ctx::default(),
             cancel: cancel::Ctx::default(),
             fleet: fleet::Ctx::default(),
+            logs: logs::Ctx::default(),
             fence: Fence::new(),
         }
     }

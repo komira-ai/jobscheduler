@@ -245,6 +245,7 @@ impl CrunRuntime {
         let swept = swept?;
         let mut report = swept.report;
         for (name, run) in swept.adopted {
+            self.images.lease(&name, &run.spec.image_digest);
             self.runs.insert(name, run);
         }
         self.remove_unrecorded(&mut report);
@@ -581,6 +582,7 @@ impl CrunRuntime {
         }
         // Last: the image may go only once nothing of the lease can use it.
         let unpinned = self.oci.unpin_image(name);
+        self.images.release(name);
         step(
             "remove the image's pin",
             unpinned.as_ref().err().map(ToString::to_string),

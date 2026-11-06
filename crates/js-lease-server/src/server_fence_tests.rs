@@ -1,6 +1,6 @@
 //! A state store with a newer writer (`StoreError::Fenced`) ends the server: the tick loop,
-//! the final tick of a shutdown and the exit status. Nothing waits on time: ticks are stepped
-//! by the test and the clocks are manual.
+//! the final tick of a shutdown and the exit status; so does a lost writer lock, at shutdown.
+//! Nothing waits on time: ticks are stepped by the test and the clocks are manual.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -21,6 +21,7 @@ use crate::api::Shared;
 use crate::config::{Cli, Config, parse_token};
 use crate::error::Failure;
 use crate::job_expiry::JobLimits;
+use crate::store::{LockLost, LockWatch};
 use crate::ticker::{ChannelTicker, channel_ticker};
 
 /// A century, which carries a manual clock past any wait a queued job is held to.
@@ -56,7 +57,12 @@ fn shared_with(rig: &Rig, dir: &TestDir, agents: Option<Arc<Agents>>) -> Arc<Sha
 
 /// The tick loop of `shared` as the server runs it, on a task.
 fn spawn_ticking(shared: &Arc<Shared>, ticker: ChannelTicker) -> JoinHandle<()> {
-    let ticking = Box::pin(tick_loop(Arc::clone(shared), ticker, None));
+    let ticking = Box::pin(tick_loop(
+        Arc::clone(shared),
+        ticker,
+        None,
+        LockWatch::new(),
+    ));
     tokio::spawn(until_fenced(Arc::clone(shared), ticking))
 }
 
@@ -202,6 +208,21 @@ async fn a_fenced_shutdown_runs_no_final_tick_and_is_an_error() {
     running.fenced().await;
     let stopped = running.shutdown().await.unwrap_err();
     assert_eq!(stopped.to_string(), FENCED);
+    assert_eq!(jobs.get_job(&id).unwrap().unwrap().state, JobState::Queued);
+}
+
+/// Asserts that a stop after the store's writer lock was lost runs no final tick (the queued
+/// job past its wait stays queued), that the loss is announced to [`Running::lock_lost`], and
+/// that the stop is an error that is the loss. It catches a shutdown that writes after the
+/// lock was lost, and one that says nothing of why it stopped.
+#[tokio::test]
+async fn a_shutdown_after_a_lost_writer_lock_runs_no_final_tick_and_is_the_loss() {
+    let (running, jobs, id, _dir) = started("lock_lost_shutdown").await;
+    let lost = LockLost::from(StoreError::Failed("the lock's session is gone".to_owned()));
+    running.lock_watch.lose(lost.clone());
+    assert_eq!(running.lock_lost().await, lost);
+    let stopped = running.shutdown().await.unwrap_err();
+    assert_eq!(stopped.to_string(), lost.to_string());
     assert_eq!(jobs.get_job(&id).unwrap().unwrap().state, JobState::Queued);
 }
 

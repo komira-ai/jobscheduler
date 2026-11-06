@@ -8,8 +8,9 @@ mod common;
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_proto::refusal::{refusal_of, refusal_status};
 use js_proto::v1::{
-    GetLogsResponse, Job, JobResult, JobSpec, JobState, JobTimes, ListJobsRequest, NetworkLevel,
-    Refusal, RefusalCode, ResourceUsage, StartFailureCode, SubmitJobRequest,
+    GetLogsRequest, GetLogsResponse, Job, JobResult, JobSpec, JobState, JobTimes, ListJobsRequest,
+    LogGap, LogStream, NetworkLevel, Refusal, RefusalCode, ResourceUsage, StartFailureCode,
+    SubmitJobRequest,
 };
 use prost::Message;
 use prost::encoding::{WireType, encode_key, encode_varint};
@@ -376,6 +377,7 @@ fn results_at_their_boundaries_round_trip() {
         stdout_tail: binary_tail(),
         stderr_tail: Vec::new(),
         truncated: true,
+        ..GetLogsResponse::default()
     };
     let decoded = GetLogsResponse::decode(logs.encode_to_vec().as_slice()).expect("decodes");
     assert_eq!(decoded.stdout_tail.len(), TAIL_CAP);
@@ -455,4 +457,206 @@ fn the_client_field_is_additive_in_the_proto() {
         ListJobsRequest::decode(filter.encode_to_vec().as_slice()).expect("decodes"),
         filter
     );
+}
+
+/// `GetLogsRequest` as the previous schema defined it: the job id alone.
+#[derive(Clone, PartialEq, Message)]
+struct OldGetLogsRequest {
+    #[prost(string, tag = "1")]
+    job_id: String,
+}
+
+/// `GetLogsResponse` as the previous schema defined it: the state and the two tails.
+#[derive(Clone, PartialEq, Message)]
+struct OldGetLogsResponse {
+    #[prost(enumeration = "JobState", tag = "1")]
+    state: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    stdout_tail: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    stderr_tail: Vec<u8>,
+    #[prost(bool, tag = "4")]
+    truncated: bool,
+}
+
+/// Asserts that the stream reading of GetLogs is additive. The field golden holds every new
+/// row. Messages of the previous schema, written by hand, decode as the new messages with
+/// every new field at its default; the new messages holding only old fields encode to
+/// exactly the old bytes; a new message with every new field set decodes under the old
+/// types to exactly the old fields. The bytes of the new fields are pinned by hand: stream
+/// is field 2 (`0x10`), from_offset 3 (`0x18`, here 2^53 + 1 in eight bytes, present when 0),
+/// max_bytes 4 (`0x20`, present when 0), follow 5 (present when false), and on the response
+/// data 5, offset 6, next_offset 7, gaps 8 (a nested message), eof 9 and first_byte_at_ms 10.
+/// The enum numbers are 0, 1 and 2, and a number it does not name reads as unspecified.
+/// Catches a renumbered, retyped or removed new field, a new field that changes what an old
+/// client sends or reads, and from_offset, max_bytes, follow or first_byte_at_ms losing their
+/// presence.
+#[test]
+fn the_proto_change_is_additive() {
+    let rows = include_str!("golden/fields.txt");
+    for row in [
+        "LogStream.LOG_STREAM_UNSPECIFIED = 0",
+        "LogStream.LOG_STREAM_STDOUT = 1",
+        "LogStream.LOG_STREAM_STDERR = 2",
+        "GetLogsRequest.job_id = 1 : string",
+        "GetLogsRequest.stream = 2 : LogStream",
+        "GetLogsRequest.from_offset = 3 : optional uint64",
+        "GetLogsRequest.max_bytes = 4 : optional uint32",
+        "GetLogsRequest.follow = 5 : optional bool",
+        "LogGap.offset = 1 : uint64",
+        "LogGap.length = 2 : uint64",
+        "GetLogsResponse.truncated = 4 : bool",
+        "GetLogsResponse.data = 5 : bytes",
+        "GetLogsResponse.offset = 6 : uint64",
+        "GetLogsResponse.next_offset = 7 : uint64",
+        "GetLogsResponse.gaps = 8 : repeated LogGap",
+        "GetLogsResponse.eof = 9 : bool",
+        "GetLogsResponse.first_byte_at_ms = 10 : optional uint64",
+    ] {
+        assert!(rows.lines().any(|line| line == row), "{row}");
+    }
+
+    // The request: old bytes decode with the new fields at their defaults, and back.
+    let old_request = OldGetLogsRequest {
+        job_id: "j".to_owned(),
+    };
+    let old_bytes = old_request.encode_to_vec();
+    assert_eq!(old_bytes, [0x0a, 0x01, b'j']);
+    let request = GetLogsRequest::decode(old_bytes.as_slice()).expect("old bytes decode");
+    assert_eq!(
+        request,
+        GetLogsRequest {
+            job_id: "j".to_owned(),
+            stream: LogStream::Unspecified.into(),
+            from_offset: None,
+            max_bytes: None,
+            follow: None,
+        }
+    );
+    assert_eq!(request.stream(), LogStream::Unspecified);
+    assert_eq!(request.encode_to_vec(), old_bytes);
+
+    // The request with every new field set: pinned bytes, and an old reader skips them.
+    let full = GetLogsRequest {
+        job_id: "j".to_owned(),
+        stream: LogStream::Stdout.into(),
+        from_offset: Some((1 << 53) + 1),
+        max_bytes: Some(0),
+        follow: Some(true),
+    };
+    let mut bytes = old_bytes.clone();
+    bytes.extend_from_slice(&[0x10, 0x01]);
+    bytes.extend_from_slice(&[0x18, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10]);
+    bytes.extend_from_slice(&[0x20, 0x00]);
+    bytes.extend_from_slice(&[0x28, 0x01]);
+    assert_eq!(full.encode_to_vec(), bytes);
+    assert_eq!(
+        GetLogsRequest::decode(bytes.as_slice()).expect("decodes"),
+        full
+    );
+    assert_eq!(
+        OldGetLogsRequest::decode(bytes.as_slice()).expect("an old reader decodes"),
+        old_request
+    );
+    let unlimited = GetLogsRequest {
+        max_bytes: None,
+        ..full.clone()
+    };
+    assert_ne!(unlimited.encode_to_vec(), bytes);
+    assert!(
+        !unlimited
+            .encode_to_vec()
+            .windows(2)
+            .any(|w| w == [0x20, 0x00])
+    );
+    let zeros = GetLogsRequest {
+        from_offset: Some(0),
+        follow: Some(false),
+        ..GetLogsRequest::default()
+    };
+    assert_eq!(zeros.encode_to_vec(), [0x18, 0x00, 0x28, 0x00]);
+    let stderr = GetLogsRequest {
+        stream: LogStream::Stderr.into(),
+        ..GetLogsRequest::default()
+    };
+    assert_eq!(stderr.encode_to_vec(), [0x10, 0x02]);
+
+    // The response: old bytes decode with the new fields at their defaults, and back.
+    let old_response = OldGetLogsResponse {
+        state: JobState::Running.into(),
+        stdout_tail: b"o".to_vec(),
+        stderr_tail: b"e".to_vec(),
+        truncated: true,
+    };
+    let old_bytes = old_response.encode_to_vec();
+    assert_eq!(
+        old_bytes,
+        [0x08, 0x04, 0x12, 0x01, b'o', 0x1a, 0x01, b'e', 0x20, 0x01]
+    );
+    let response = GetLogsResponse::decode(old_bytes.as_slice()).expect("old bytes decode");
+    assert_eq!(
+        response,
+        GetLogsResponse {
+            state: JobState::Running.into(),
+            stdout_tail: b"o".to_vec(),
+            stderr_tail: b"e".to_vec(),
+            truncated: true,
+            data: Vec::new(),
+            offset: 0,
+            next_offset: 0,
+            gaps: Vec::new(),
+            eof: false,
+            first_byte_at_ms: None,
+        }
+    );
+    assert_eq!(response.encode_to_vec(), old_bytes);
+
+    // The response with every new field set: pinned bytes, and an old reader skips them.
+    let full = GetLogsResponse {
+        data: b"ab".to_vec(),
+        offset: 3,
+        next_offset: 5,
+        gaps: vec![LogGap {
+            offset: 1,
+            length: 2,
+        }],
+        eof: true,
+        first_byte_at_ms: Some(7),
+        ..response
+    };
+    let mut bytes = old_bytes;
+    bytes.extend_from_slice(&[0x2a, 0x02, b'a', b'b']);
+    bytes.extend_from_slice(&[0x30, 0x03, 0x38, 0x05]);
+    bytes.extend_from_slice(&[0x42, 0x04, 0x08, 0x01, 0x10, 0x02]);
+    bytes.extend_from_slice(&[0x48, 0x01, 0x50, 0x07]);
+    assert_eq!(full.encode_to_vec(), bytes);
+    assert_eq!(
+        GetLogsResponse::decode(bytes.as_slice()).expect("decodes"),
+        full
+    );
+    assert_eq!(
+        OldGetLogsResponse::decode(bytes.as_slice()).expect("an old reader decodes"),
+        old_response
+    );
+    let zero = GetLogsResponse {
+        first_byte_at_ms: Some(0),
+        ..GetLogsResponse::default()
+    };
+    assert_eq!(zero.encode_to_vec(), [0x50, 0x00]);
+    assert_eq!(GetLogsResponse::default().encode_to_vec(), Vec::<u8>::new());
+
+    // The enum: its numbers, its names, and an unnamed number read as unspecified.
+    assert_eq!(
+        [LogStream::Unspecified, LogStream::Stdout, LogStream::Stderr].map(|s| s as i32),
+        [0, 1, 2]
+    );
+    assert_eq!(LogStream::Stdout.as_str_name(), "LOG_STREAM_STDOUT");
+    assert_eq!(LogStream::Stderr.as_str_name(), "LOG_STREAM_STDERR");
+    assert!(LogStream::try_from(3).is_err());
+    let unnamed = GetLogsRequest {
+        stream: 3,
+        ..GetLogsRequest::default()
+    };
+    assert_eq!(unnamed.stream(), LogStream::Unspecified);
+    assert_eq!(unnamed.encode_to_vec(), [0x10, 0x03]);
 }

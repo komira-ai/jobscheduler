@@ -13,6 +13,17 @@ const A: &str =
 const B: &str =
     "registry.example/b@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+/// What `prepare` answers for `A` naming `ticket`, once the pull of that ticket has ended:
+/// asked again (yielding between asks) while it says the pull goes on.
+fn answer_of(prefetcher: &Prefetcher, ticket: Ticket) -> Prepared {
+    loop {
+        match prefetcher.prepare(A, Some(ticket)) {
+            Prepared::Pending(_) => std::thread::yield_now(),
+            done => return done,
+        }
+    }
+}
+
 fn failed(text: &str) -> Prepared {
     Prepared::Failed(js_agent::lifecycle::RuntimeError::new(text))
 }
@@ -80,8 +91,8 @@ fn a_pull_under_way_blocks_neither_the_caller_nor_another_image() {
 }
 
 /// A failed pull is reported to every call that names its ticket (every run that waited on
-/// it), not once: each waiter hears `Failed`, with the reason, every time it asks. A call
-/// that names no ticket starts a new pull, which can succeed.
+/// it), not once: two waiters both hear `Failed`, with the reason. A call that names no
+/// ticket starts a new pull, which can succeed.
 #[test]
 fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
     let pulls = Arc::new(AtomicUsize::new(0));
@@ -100,10 +111,9 @@ fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
     let Prepared::Pending(ticket) = prefetcher.prepare(A, None) else {
         panic!("not pending");
     };
-    // The failure is offered before anyone asks again. `wait` names no ticket, so asking with
-    // it after the failure would start a new pull: the waiters here name their ticket.
-    prefetcher.wait_offered(1);
-    assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
+    // The first waiter names the ticket, as a run that waited on the pull does: `wait` names
+    // none, and once the failed pull has ended before it asks, it would start a new one.
+    assert_eq!(answer_of(&prefetcher, ticket), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(pulls.load(Ordering::SeqCst), 1);

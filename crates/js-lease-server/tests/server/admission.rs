@@ -129,6 +129,7 @@ fn admission_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, Ki
         .get(path.unwrap_or_default())
         .cloned();
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(Handle(cloud.unwrap())),
         floor: Floor {
             gpus: 1,

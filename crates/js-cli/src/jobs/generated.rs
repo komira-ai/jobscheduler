@@ -111,14 +111,18 @@ pub(crate) const SURFACE: &[Command] = &[
     Command {
         path: &["job", "logs"],
         rpc: "GetLogs",
-        doc: "Reads the log tail held so far, also for a running job, and for the retention window after the job ended. Changes nothing.",
+        doc: "Reads a job's output. Without a stream: the job's state and its result's tails. With a stream: one page of that stream's bytes from an offset, read from the log store, while the job runs and for the retention window after it ended, optionally waiting a bounded time for new bytes. Changes nothing.",
         idempotency: Idempotency::Unknown,
         request: "jobscheduler.v1.GetLogsRequest",
         response: "jobscheduler.v1.GetLogsResponse",
         streaming: false,
         retry_key: None,
         flags: &[
-            Flag { name: "job-id", field: &["job_id"], kind: Kind::Text, repeated: false, required: true, oneof: None, doc: "The id of the job whose log tail to read." },
+            Flag { name: "job-id", field: &["job_id"], kind: Kind::Text, repeated: false, required: true, oneof: None, doc: "The id of the job whose output to read." },
+            Flag { name: "stream", field: &["stream"], kind: Kind::Enum(&[("unspecified", "LOG_STREAM_UNSPECIFIED"), ("stdout", "LOG_STREAM_STDOUT"), ("stderr", "LOG_STREAM_STDERR")]), repeated: false, required: false, oneof: None, doc: "The stream to read. Unspecified: the result's tails, and the other fields below are not read." },
+            Flag { name: "from-offset", field: &["from_offset"], kind: Kind::U64, repeated: false, required: false, oneof: None, doc: "The offset of the first byte wanted, counted from the stream's first byte. Absent: 0. Past the length of an ended job's stream: refused, OUT_OF_RANGE." },
+            Flag { name: "max-bytes", field: &["max_bytes"], kind: Kind::U32, repeated: false, required: false, oneof: None, doc: "The most bytes of data in the answer. Absent: 262144 (256 KiB). A larger value than 1048576 (1 MiB) is cut to it; 0 is refused." },
+            Flag { name: "follow", field: &["follow"], kind: Kind::Bool, repeated: false, required: false, oneof: None, doc: "Whether to wait, up to 20 seconds, for new bytes when none are there yet, then answer; an answer at the cap has no data. Absent: false. A job that has ended answers at once." },
         ],
     },
     Command {

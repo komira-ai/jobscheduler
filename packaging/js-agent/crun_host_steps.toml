@@ -41,5 +41,5 @@ function = "step_apparmor"
 
 [[step]]
 name = "unit"
-what = "`/etc/systemd/system/js-agent-crun.service` (with `--server`, `--pool` and `--job-user` written in) and `/etc/tmpfiles.d/js-agent-crun.conf`"
+what = "`/etc/systemd/system/js-agent-crun.service` (with `--server`, `--pool` and `--job-user` written in), `/etc/systemd/system/js-agent-crun-gpu.service` (the GPU flags' oneshot, see [GPU hosts](#gpu-hosts)) and `/etc/tmpfiles.d/js-agent-crun.conf`"
 function = "step_files"

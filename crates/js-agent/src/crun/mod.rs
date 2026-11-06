@@ -82,7 +82,9 @@
 //! (one `stat` for an image that is there, a pull otherwise: single flight with the
 //! prefetcher's), and reads the image's config from the file the image source kept
 //! ([`RegistryImages::keeping_configs`](crate::image::RegistryImages::keeping_configs),
-//! [`config_dir`]).
+//! [`config_dir`]). With an image budget ([`CrunSettings::image_budget`]) both pulls count
+//! the image against it and evict the images used least recently to fit; a run's lease
+//! holds its image against eviction until the run is removed (the module `budget`).
 //!
 //! # Stop, kill and the end
 //!
@@ -141,6 +143,9 @@
 mod adopt;
 #[cfg(test)]
 mod adopt_tests;
+mod budget;
+#[cfg(test)]
+mod budget_tests;
 mod claim;
 mod dirs;
 mod fault;
@@ -155,6 +160,7 @@ mod spec;
 mod tests;
 mod wire;
 
+pub use dirs::hand_over_no_follow;
 use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, project_of, take_dir};
 use fault::Fault;
 pub(crate) use net::port_of;
@@ -197,7 +203,7 @@ use crate::lifecycle::{
 use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
-use pull::{ensure_image, pull};
+use pull::Images;
 use spec::{concluded, container_spec, ctr_of, job_env, log_tail_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
@@ -254,6 +260,8 @@ pub struct CrunSettings {
     pub egress: Option<Arc<dyn EgressPort>>,
     /// The GPUs a run is given, when the agent passes them (`--gpu-device`).
     pub gpus: Option<GpuSettings>,
+    /// The most bytes the unpacked images may take (`--image-budget-gib`); none for no budget.
+    pub image_budget: Option<u64>,
 }
 
 /// What a runtime does that a test replaces: giving a file away and reading the clock.
@@ -281,21 +289,6 @@ impl Default for Hooks {
             call_limit: CALL_LIMIT,
         }
     }
-}
-
-/// Gives the file or directory `path` to `uid` and `gid` by the descriptor of what it opens,
-/// without following a link: a path replaced by a link is refused, and what is given is what
-/// was opened.
-///
-/// # Errors
-/// The system's reason: the path is not there, is a link, or may not be given away.
-pub fn hand_over_no_follow(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    use rustix::fs::{Mode, OFlags, fchown};
-    use rustix::process::{Gid, Uid};
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    rustix::fs::open(path, flags, Mode::empty())
-        .and_then(|fd| fchown(&fd, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))))
-        .map_err(io::Error::from)
 }
 
 fn system_now_ms() -> u64 {
@@ -387,6 +380,8 @@ struct Run {
 /// A container runtime over `crun`.
 pub struct CrunRuntime {
     oci: Arc<Oci>,
+    /// The image store as the pulls and the leases use it, within the image budget.
+    images: Arc<Images>,
     pulls: Prefetcher,
     rt: TokioRuntime,
     cgroups: CgroupSettings,
@@ -476,13 +471,19 @@ impl CrunRuntime {
             why,
         })?;
         let ledger = Ledger::open(&settings.scratch, &settings.host_id)?;
-        let pulling = Arc::clone(&oci);
-        let limit = hooks.pull_limit;
-        let pulls = Prefetcher::new(settings.pull_threads, move |image| {
-            pull(Arc::clone(&pulling), image, limit)
-        })?;
+        let images = Images::of(
+            &oci,
+            &settings.scratch,
+            hooks.pull_limit,
+            settings.image_budget,
+        );
+        let pulling = Arc::clone(&images);
+        let pulls = Prefetcher::new(settings.pull_threads, move |image| pulling.pull(image))?;
+        let forgetter = pulls.forgetter();
+        images.on_evict(Box::new(move |digest| forgetter.forget_digest(digest)));
         let mut runtime = Self {
             oci,
+            images,
             pulls,
             rt,
             cgroups,
@@ -673,10 +674,9 @@ impl CrunRuntime {
         // Before the image is made sure of: from then on no agent on the store removes it
         // until the lease is torn down.
         self.oci.pin_image(image, name)?;
-        let limit = self.hooks.pull_limit;
-        self.rt
-            .block_on(ensure_image(&self.oci, image, limit))
-            .map_err(Fault::Image)?;
+        self.images.lease(name, &image.digest);
+        let ensure = || self.rt.block_on(self.images.ensure(image));
+        ensure().map_err(Fault::Image)?;
         if !config_path(&self.configs, &image.digest).exists() {
             // An image an earlier daemon (or a source that keeps no configs) unpacked has
             // no config to run it by: it is fetched again, and the source keeps the config
@@ -686,9 +686,7 @@ impl CrunRuntime {
             self.rt.block_on(self.oci.remove_image(image))?;
             self.pulls.forget(given);
             self.oci.pin_image(image, name)?;
-            self.rt
-                .block_on(ensure_image(&self.oci, image, limit))
-                .map_err(Fault::Image)?;
+            ensure().map_err(Fault::Image)?;
         }
         let rootfs = js_contain::oci::image::published_root(&self.store, &image.digest);
         gpu.check_targets(&rootfs).map_err(Fault::Gpu)?;
@@ -928,6 +926,7 @@ impl Runtime for CrunRuntime {
         }
         oci.unpin_image(&id.0)
             .map_err(|why| failed("remove the image's pin", &why))?;
+        self.images.release(&id.0);
         self.ledger
             .forget(&id.0)
             .map_err(|why| failed("remove the lease's sidecar", &why))?;

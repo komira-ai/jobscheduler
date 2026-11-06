@@ -34,6 +34,7 @@ fn hello(name: &str, instance: Option<&HostRef>) -> Hello {
     Hello {
         name: name.to_owned(),
         instance_id: instance.map(ToString::to_string),
+        identity: None,
     }
 }
 
