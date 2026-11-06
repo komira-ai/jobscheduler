@@ -532,9 +532,11 @@ mod request_id_tests;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]
+mod status_logs_tests;
+#[cfg(test)]
 mod whole_restart_tests;
 #[cfg(test)]
-mod whole_view_tests;
+pub(crate) mod whole_view_tests;
 
 #[cfg(test)]
 mod tests {

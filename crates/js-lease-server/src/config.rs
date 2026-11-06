@@ -50,7 +50,7 @@ pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 pub(crate) use store::{StoreNames, StoreSetting};
 pub use tokens::Token;
-pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
+pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -414,8 +414,9 @@ pub struct Config {
     pub(crate) settings: Settings,
     pub(crate) tick: Duration,
     pub(crate) token: Token,
-    /// The clients of the job service, the token of `--token-file` among them.
-    pub(crate) clients: Clients,
+    /// The clients of the job service, the token of `--token-file` among them, behind the
+    /// handle the bearer layer reads and the tick reloads.
+    pub(crate) clients: LiveClients,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
@@ -468,7 +469,7 @@ impl Config {
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
-        let clients = tokens::from_flags(&token, &cli)?;
+        let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &clients)?;
         let settings = with_pool_settings(settings, &hosts)?;
@@ -856,7 +857,7 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
 
 /// The sources of hosts the flags name. At least one is required; the shared join token
 /// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
+fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
         .as_ref()
@@ -871,7 +872,7 @@ fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
         (tokens, Some(pool)) => {
             let tokens = match tokens {
                 Some(path) => AgentTokens::open(path, clients)?,
-                None => AgentTokens::none(),
+                None => AgentTokens::none(clients),
             };
             let pool = agent_pool::read(pool)?;
             cli.placement.check(&pool, "--placement")?;

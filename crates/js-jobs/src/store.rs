@@ -197,7 +197,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// With an id: when a job with that id exists, the same job (every field of the spec;
     /// the priority and the client are not compared) is answered from the stored record, in
     /// whatever state it is now and with the client that recorded it, with `created: false`;
-    /// a different one is [`JobStoreError::JobIdConflict`].
+    /// a different one is [`JobStoreError::JobIdConflict`]. The files of an ended job are
+    /// digests ([`crate::JobFiles`]), so for one the submitted files are compared by the
+    /// SHA-256 of each, with the same names.
     /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
     /// times.
     ///
@@ -251,7 +253,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             return Ok(None);
         };
         ensure(
-            record.spec == *spec,
+            record.spec.same_job_as(spec),
             JobStoreError::JobIdConflict { id: id.clone() },
         )?;
         Ok(Some(Inserted {

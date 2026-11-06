@@ -39,6 +39,7 @@ use crate::record::{
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 
+mod file_fields;
 mod result_fields;
 
 /// The format byte of the rows this build writes.
@@ -82,7 +83,8 @@ pub(crate) mod job_tag {
     pub const NETWORK: u16 = 17;
     /// The declared ports (u16 host and u16 container per port).
     pub const PORTS: u16 = 18;
-    /// The files (map of text to bytes).
+    /// The files' contents (map of text to bytes), while the job is live. A row holds this
+    /// or [`FILE_DIGESTS`], never both with a file in each.
     pub const FILES: u16 = 19;
     /// The labels (map of text).
     pub const LABELS: u16 = 20;
@@ -107,7 +109,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_USAGE`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -131,6 +133,13 @@ pub(crate) mod job_tag {
     pub const DEADLINE_FLOOR: u16 = 41;
     /// The name of the client that submitted the job (text).
     pub const CLIENT: u16 = 42;
+    /// The lengths of its output streams: standard output's bytes, standard error's, then the
+    /// bytes each dropped (four u64).
+    pub const RESULT_LOGS: u16 = 43;
+    /// The SHA-256 of each file's contents (map of text to 32 bytes), once the job has ended:
+    /// in place of [`FILES`], so a row with it holds no contents. A row a build before this
+    /// field rewrote holds it beside an empty [`FILES`].
+    pub const FILE_DIGESTS: u16 = 44;
 }
 
 /// The tags of an allocation row.
@@ -328,10 +337,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
         })
         .collect();
     row.put(t::PORTS, ports);
-    row.put(
-        t::FILES,
-        map(spec.files.iter().map(|(k, v)| (k.as_bytes(), v.as_slice()))),
-    );
+    file_fields::put_files(row, &spec.files);
     row.put(
         t::LABELS,
         map(spec
@@ -601,18 +607,6 @@ fn text_map_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<String, String>, Dec
     no_repeats(tag, count, map)
 }
 
-fn files_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<String, Vec<u8>>, DecodeError> {
-    let pairs = pairs_of(tag, &value)?;
-    let count = pairs.len();
-    let map: BTreeMap<String, Vec<u8>> = pairs
-        .into_iter()
-        .map(|(key, value)| -> Result<(String, Vec<u8>), DecodeError> {
-            Ok((text_of(tag, key.to_vec())?, value.to_vec()))
-        })
-        .collect::<Result<_, DecodeError>>()?;
-    no_repeats(tag, count, map)
-}
-
 fn ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<DeclaredPort>, DecodeError> {
     let ports = value.chunks_exact(4);
     ports
@@ -852,7 +846,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let wall_limit_secs = fields.need(t::WALL_LIMIT_SECS, u64_of)?;
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();
     let ports = fields.opt(t::PORTS, ports_of)?.unwrap_or_default();
-    let files = fields.opt(t::FILES, files_of)?.unwrap_or_default();
+    let files = file_fields::take_files(fields)?;
     let labels = fields.opt(t::LABELS, labels_of)?.unwrap_or_default();
     Ok(JobSpec {
         image,

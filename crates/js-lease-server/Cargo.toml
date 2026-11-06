@@ -72,6 +72,10 @@ js-elastic-fake = { path = "../js-elastic-fake" }
 js-provider-fake = { path = "../js-provider-fake" }
 # The store wrapper that fails a commit (`interfere`), for the heartbeat's failed-commit tests.
 js-jobs = { path = "../js-jobs", features = ["test-support"] }
+# The fake minter and the fake object store the host credentials of live logs are minted
+# from and tried against (src/agent_api_log_tests.rs, src/logs/tests.rs).
+js-logmint = { path = "../js-logmint", features = ["fake"] }
+js-logstore = { path = "../js-logstore", features = ["fake"] }
 # `test-database`: a Postgres database of its own for each store test (tests/server/store.rs).
 js-state = { path = "../js-state", features = ["test-database", "test-support"] }
 js-testkit = { path = "../js-testkit" }

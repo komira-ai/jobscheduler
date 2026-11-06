@@ -190,7 +190,7 @@ fn serving_with(
     };
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     let (source, agents) =
-        assemble(config.hosts, config.usage, &clock, &config.state_file).unwrap();
+        assemble(config.hosts, config.usage, &clock, &config.state_file, None).unwrap();
     let seated = source.provider(&restored).unwrap();
     assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
     let agents = agents.unwrap();
@@ -448,7 +448,8 @@ fn started(
         None => config,
     };
     let bookings = read_bookings(&config.state_file).unwrap();
-    let (source, agents) = assemble(config.hosts, config.usage, clock, &config.state_file).unwrap();
+    let (source, agents) =
+        assemble(config.hosts, config.usage, clock, &config.state_file, None).unwrap();
     let seated = source.provider(&bookings).unwrap();
     assert!(seated.unseated.is_empty(), "{:?}", seated.unseated);
     let provider = BoxedPool(seated.provider);
@@ -511,7 +512,7 @@ fn refused(name: &str, extra: &[&str], spoil: impl Fn(&Path)) -> String {
     let config = config(dir.path(), extra);
     spoil(dir.path());
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
-    let assembled = assemble(config.hosts, config.usage, &clock, &config.state_file);
+    let assembled = assemble(config.hosts, config.usage, &clock, &config.state_file, None);
     match assembled {
         Err(err) => err.to_string(),
         Ok(_) => panic!("{name}: assembled"),

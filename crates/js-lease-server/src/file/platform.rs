@@ -227,12 +227,14 @@ impl Resolved {
                 let types = limit.allowed_instance_types.as_deref().unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "pool {}: provider_limits {name}: allowed_instance_types {}; max_price_cents_per_hour {}; max_machines {}; max_spot_machines {}; catalog_refresh {}; offer_cooldown {}",
+                    "pool {}: provider_limits {name}: allowed_instance_types {}; max_price_cents_per_hour {}; max_machines {}; max_spot_machines {}; quota_backoff {}; acquire_retry {}; catalog_refresh {}; offer_cooldown {}",
                     pool.name,
                     listed(types),
                     shown(limit.max_price_cents_per_hour),
                     shown(limit.max_machines),
                     shown(limit.max_spot_machines),
+                    span(limit.quota_backoff),
+                    span(limit.acquire_retry),
                     span(limit.catalog_refresh),
                     span(limit.offer_cooldown)
                 );
