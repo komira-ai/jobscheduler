@@ -157,7 +157,7 @@ async fn each_client_token_is_accepted_and_names_its_client() {
 async fn an_unknown_or_removed_token_is_refused_with_no_handler_run() {
     let rig = ClientsRig::new("revoked");
     let both = rig.client_flags(&[("ci", CI), ("ops", OPS)]);
-    let before = rig.from_flags(&both).expect("the flags start").clients;
+    let before = rig.config_of_flags(&both).expect("the flags start").clients;
     let recording = Recording::new();
     let channel = connect(grpc_over(recording.clone(), before)).await;
     let answer = call(&channel, "GetJob", Some(&format!("Bearer {OPS}"))).await;
@@ -172,7 +172,10 @@ async fn an_unknown_or_removed_token_is_refused_with_no_handler_run() {
     );
 
     let kept = rig.client_flags(&[("ci", CI)]);
-    let after = rig.from_flags(&kept).expect("the restart starts").clients;
+    let after = rig
+        .config_of_flags(&kept)
+        .expect("the restart starts")
+        .clients;
     let recording = Recording::new();
     let channel = connect(grpc_over(recording.clone(), after.clone())).await;
     let router = gateway_over(recording.clone(), after);
@@ -374,13 +377,21 @@ async fn the_token_never_appears_in_debug_errors_or_logs() {
         ),
         (joined, "the two must differ"),
     ] {
-        let said = rig.from_flags(&extra).err().expect("refused").to_string();
+        let said = rig
+            .config_of_flags(&extra)
+            .err()
+            .expect("refused")
+            .to_string();
         assert!(said.contains(wants), "{wants}: {said}");
         printed.push(said);
     }
     let tables = rig.client_tables(&[("marker", MARKER), ("copy", MARKER)]);
     let text = rig.file("job_listen = \"127.0.0.1:0\"", &tables);
-    let said = rig.from_file(&text).err().expect("refused").to_string();
+    let said = rig
+        .config_of_file(&text)
+        .err()
+        .expect("refused")
+        .to_string();
     let wants = "client \"copy\": token_file: holds the same token as [[client]] \"marker\"";
     assert!(said.starts_with(wants), "{said}");
     printed.push(said);

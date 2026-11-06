@@ -138,11 +138,11 @@ fn flag_and_config_table_agree() {
     let rig = ClientsRig::new("agree");
     let clients = [("ci", CI), ("ops.team_1-A", OPS)];
     let by_flag = rig
-        .from_flags(&rig.client_flags(&clients))
+        .config_of_flags(&rig.client_flags(&clients))
         .expect("the flags start");
     let tables = rig.client_tables(&clients);
     let text = rig.file("job_listen = \"127.0.0.1:0\"", &tables);
-    let by_file = rig.from_file(&text).expect("the file starts");
+    let by_file = rig.config_of_file(&text).expect("the file starts");
     for config in [&by_flag, &by_file] {
         assert_eq!(
             format!("{:?}", config.clients),
@@ -177,9 +177,9 @@ fn flag_and_config_table_agree() {
 #[test]
 fn token_file_alone_behaves_as_before() {
     let rig = ClientsRig::new("alone");
-    let by_flag = rig.from_flags(&[]).expect("the flags start");
+    let by_flag = rig.config_of_flags(&[]).expect("the flags start");
     let text = rig.file("job_listen = \"127.0.0.1:0\"", "");
-    let by_file = rig.from_file(&text).expect("the file starts");
+    let by_file = rig.config_of_file(&text).expect("the file starts");
     for config in [&by_flag, &by_file] {
         assert_eq!(format!("{:?}", config.clients), r#"Clients(["default"])"#);
         assert_eq!(
@@ -193,14 +193,20 @@ fn token_file_alone_behaves_as_before() {
 
 /// The flag and the message of the refusal of a start from the flags with `extra`.
 fn flag_refusal(rig: &ClientsRig, extra: &[OsString]) -> (&'static str, String) {
-    let err = rig.from_flags(extra).err().expect("the start is refused");
+    let err = rig
+        .config_of_flags(extra)
+        .err()
+        .expect("the start is refused");
     (err.flag(), err.to_string())
 }
 
 /// The message of the refusal of a start from the file with `server` lines and `tables`.
 fn file_refusal(rig: &ClientsRig, server: &str, tables: &str) -> String {
     let text = rig.file(server, tables);
-    let err = rig.from_file(&text).err().expect("the start is refused");
+    let err = rig
+        .config_of_file(&text)
+        .err()
+        .expect("the start is refused");
     assert_eq!(err.flag(), "--config");
     err.to_string()
 }
@@ -376,7 +382,10 @@ fn config_is_validated_naming_the_entry() {
         refused.push(message);
     }
     let untabled = format!("client = 7\n{}", rig.file(serves, ""));
-    let err = rig.from_file(&untabled).err().map(|err| err.to_string());
+    let err = rig
+        .config_of_file(&untabled)
+        .err()
+        .map(|err| err.to_string());
     let said = "client: must be an array of tables, written [[client]]";
     assert_eq!(err.as_deref(), Some(said));
     let open_line = format!("token_file = {:?}", open.display().to_string());
