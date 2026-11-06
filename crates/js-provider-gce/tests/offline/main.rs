@@ -2,6 +2,7 @@
 //! they make, the label marks, the settings and the `gce` kind, the in-memory project, the
 //! identity check, and the provider over them.
 
+mod accelerators;
 mod acquire;
 mod conformance;
 mod fake;
