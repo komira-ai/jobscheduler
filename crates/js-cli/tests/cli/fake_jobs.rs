@@ -11,9 +11,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Frame;
 use js_client::jobs::{Dialer, Io};
+use js_conformance::jobs::ReferenceJobs;
+use js_proto::v1::job_service_server::JobServiceServer;
 use tokio::io::DuplexStream;
 use tokio::task::AbortHandle;
 use tonic::body::Body;
@@ -51,12 +53,22 @@ pub struct Fake {
     answers: Arc<Mutex<BTreeMap<String, Vec<Answer>>>>,
     seen: Arc<Mutex<Vec<Seen>>>,
     tasks: Arc<Mutex<Vec<AbortHandle>>>,
+    backing: Option<ReferenceJobs>,
 }
 
 impl Fake {
     /// A fake that answers every call with an empty message.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fake that answers the calls with no scripted answer as `jobs` does, the in-memory
+    /// service the job-service conformance suite holds to the real one.
+    pub fn serving(jobs: ReferenceJobs) -> Self {
+        Self {
+            backing: Some(jobs),
+            ..Self::default()
+        }
     }
 
     /// Answers the next calls of `method` (`SubmitJob`) with `answers`, in order; the last
@@ -89,14 +101,14 @@ impl Fake {
         })
     }
 
-    /// The answer to the next call of `path`.
-    fn next_answer(&self, path: &str) -> Answer {
+    /// The scripted answer to the next call of `path`, if any is scripted.
+    fn next_answer(&self, path: &str) -> Option<Answer> {
         let mut answers = self.answers.lock().unwrap();
-        let queue = answers.entry(path.to_owned()).or_default();
+        let queue = answers.get_mut(path)?;
         match queue.len() {
-            0 => Answer::Message(Vec::new()),
-            1 => queue[0].clone(),
-            _ => queue.remove(0),
+            0 => None,
+            1 => Some(queue[0].clone()),
+            _ => Some(queue.remove(0)),
         }
     }
 }
@@ -151,8 +163,8 @@ impl Service<http::Request<Body>> for Fake {
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
-            let body = request
-                .into_body()
+            let (parts, request_body) = request.into_parts();
+            let body = request_body
                 .collect()
                 .await
                 .map(|b| b.to_bytes())
@@ -163,7 +175,19 @@ impl Service<http::Request<Body>> for Fake {
                 authorization,
                 message,
             });
-            Ok(match fake.next_answer(&path) {
+            let answer = match fake.next_answer(&path) {
+                Some(answer) => answer,
+                None => match &fake.backing {
+                    Some(jobs) => {
+                        let forwarded =
+                            http::Request::from_parts(parts, Body::new(Full::new(body)));
+                        let mut service = JobServiceServer::new(jobs.clone());
+                        return service.call(forwarded).await;
+                    }
+                    None => Answer::Message(Vec::new()),
+                },
+            };
+            Ok(match answer {
                 Answer::Message(bytes) => ok(bytes),
                 Answer::Status(code, message) => Status::new(code, message).into_http(),
                 Answer::Refused(code, detail) => {

@@ -115,7 +115,9 @@ impl Writer for StoreWriter {
 /// help, so it is dropped like a row the scheduler cannot use.
 pub(crate) const fn classify(error: &StateError) -> Attempt {
     match error {
-        StateError::Store(StoreError::Failed(_)) => Attempt::Transient,
+        StateError::Store(StoreError::Failed(_) | StoreError::Disconnected(_)) => {
+            Attempt::Transient
+        }
         StateError::Missing(_) | StateError::Conflict(_) => Attempt::Stale,
         StateError::StaleOwner(_) => Attempt::Disowned,
         StateError::Store(StoreError::Fenced) => Attempt::Superseded,

@@ -5,7 +5,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_logmint::{Bucket, LogPrefix, MintRequest, RoleArn, StsEndpoint, StsMinter};
+use js_logmint::{
+    Bucket, LogPrefix, MintRequest, PresignedPrefixMinter, RoleArn, StsEndpoint, StsMinter,
+};
 use js_logstore::fake::FakeStore;
 use js_logstore::{
     Credential, Endpoint, HttpRequest, HttpResponse, ManualClock, Store, StoreError, Transport,
@@ -91,6 +93,12 @@ impl Rig {
     /// A minter that signs with the rig's mint key.
     pub fn minter(&self) -> RigMinter {
         self.minter_with(self.mint_key.clone())
+    }
+
+    /// A prefix-grant minter deriving from a new signing key of the fake store, on the rig's
+    /// clock.
+    pub fn presigned_minter(&self) -> PresignedPrefixMinter<Arc<ManualClock>> {
+        PresignedPrefixMinter::new(self.clock.clone(), self.fake.prefix_signing_key())
     }
 
     /// A minter that signs with `key`.

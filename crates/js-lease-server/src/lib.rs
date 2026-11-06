@@ -332,9 +332,10 @@
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
 //! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
-//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
-//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
+//! held to `--max-job-wall`), `CancelJob`, and the reads; so are the fleet calls
+//! (`ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`), over
+//! the server's hosts, the status of its pools and its usage store. The answers of each call
+//! are in `docs/http-gateway.md`. The port has the connection cap and the
 //! timeouts of the other listeners, and stops with them. The lease routes are not served on
 //! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
 //! routes than the lease server's of those names, so the two cannot share a port while both
@@ -800,6 +801,7 @@ mod checks;
 mod config;
 mod cordon;
 mod error;
+mod fence;
 mod file;
 mod file_checks;
 mod flags;
@@ -967,16 +969,18 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
     let running = start(config, SharedClock::new(SystemClock), ticker).await?;
     let _ = writeln!(out, "listening on {}", running.addr());
     let _ = out.flush();
-    let mut stopping = std::pin::pin!(termination());
-    loop {
-        tokio::select! {
-            stopped = &mut stopping => {
-                stopped.map_err(Failure::Runtime)?;
-                break;
-            }
-            _ = hangup.recv() => {
-                // The refusal is logged by the reload; the old pair stays.
-                let _ = running.reload_tls();
+    {
+        let mut stopping = std::pin::pin!(server::stop_or_fence(&running, termination()));
+        loop {
+            tokio::select! {
+                stopped = &mut stopping => {
+                    stopped.map_err(Failure::Runtime)?;
+                    break;
+                }
+                _ = hangup.recv() => {
+                    // The refusal is logged by the reload; the old pair stays.
+                    let _ = running.reload_tls();
+                }
             }
         }
     }

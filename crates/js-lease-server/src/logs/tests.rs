@@ -196,14 +196,14 @@ fn a_logs_table_builds_the_grants_it_names() {
     };
     let logs = crate::file::LogsConfig::ObjectStore(Box::new(table));
     let grants = from_config(&logs, &clock).unwrap();
-    let sink = grants.sink_for("build-42").unwrap();
+    let sink = grants.sink_for("host-a", "build-42").unwrap();
     assert_eq!(
         sink,
         LogSink {
             endpoint: LOG_ENDPOINT.to_owned(),
             region: LOG_REGION.to_owned(),
             bucket: LOG_BUCKET.to_owned(),
-            prefix: "a/b/build-42/".to_owned(),
+            prefix: format!("a/b/{}/build-42/", js_logmint::host_segment("host-a")),
             path_style: false,
         }
     );
@@ -211,4 +211,48 @@ fn a_logs_table_builds_the_grants_it_names() {
     assert_eq!(grants.counters(), LogCounters::default());
     let now = StoreClock(clock).now();
     assert_eq!(now, UNIX_EPOCH + Duration::from_millis(START_MS));
+}
+
+/// A `presigned_prefix` table builds grants whose minter derives a prefix grant from the
+/// table's signing key with no call: the credential minted for `host-a` is a grant of exactly
+/// the prefix its jobs' sinks are under, in the table's bucket, expiring at the server's clock
+/// plus `credential_ttl`; a job of `host-b` is under another prefix. It catches a server that
+/// grants one prefix and places jobs under another.
+#[test]
+fn a_presigned_prefix_table_grants_each_host_the_prefix_of_its_jobs() {
+    let clock = clock();
+    let key = br#"{"access_key_id": "SIGNKEY", "secret_access_key": "signing-secret"}"#;
+    let key = AccessKey::parse(key).unwrap();
+    let table = ObjectStoreLogs {
+        bucket: Bucket::new(LOG_BUCKET).unwrap(),
+        prefix: LogPrefix::new(LOG_PREFIX).unwrap(),
+        endpoint: Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap(),
+        read_key: key.clone(),
+        minting: crate::file::Minting::PresignedPrefix { key },
+        credential_ttl: LOG_TTL,
+        max_follow: 256,
+    };
+    let logs = crate::file::LogsConfig::ObjectStore(Box::new(table));
+    let grants = from_config(&logs, &clock).unwrap();
+    let request = MintRequest {
+        bucket: grants.scope.bucket.clone(),
+        prefix: grants.scope.prefix.clone(),
+        host: "host-a".to_owned(),
+        ttl: grants.scope.ttl,
+    };
+    let credential = grants.minter.mint(&request).unwrap();
+    let grant =
+        js_logstore::PrefixGrant::parse(credential.session_token.as_deref().unwrap()).unwrap();
+    assert_eq!(grant.signing_key_id(), "SIGNKEY");
+    assert_eq!(grant.bucket(), LOG_BUCKET);
+    let expires = UNIX_EPOCH + Duration::from_millis(START_MS) + LOG_TTL;
+    assert_eq!(grant.expires_at(), expires);
+    let sink = grants.sink_for("host-a", "build-42").unwrap();
+    assert_eq!(sink.prefix, format!("{}build-42/", grant.prefix()));
+    let other = grants.sink_for("host-b", "build-43").unwrap();
+    assert!(
+        !other.prefix.starts_with(grant.prefix()),
+        "{}",
+        other.prefix
+    );
 }

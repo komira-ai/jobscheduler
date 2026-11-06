@@ -28,6 +28,7 @@ tonic.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 hyper.workspace = true
+js-conformance = { path = "../js-conformance" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }

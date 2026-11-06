@@ -7,7 +7,7 @@ use super::{
     CONNECT_LIMIT, Kind, MIN_SUPPORTED, Migration, SchemaError, Supported, connect_settings,
     embedded, extend, judge, latest, latest_of,
 };
-use crate::postgres::PostgresConfig;
+use crate::postgres::{PostgresConfig, Timeouts};
 
 fn expand(body: &str) -> Result<Migration, SchemaError> {
     Migration::new(2, "t", &format!("-- kbf-migration: expand\n{body}"))
@@ -372,19 +372,35 @@ fn a_unique_index_on_a_table_with_a_quoted_name_is_refused() {
 }
 
 /// Catches a bounded call that can wait for ever on a server that accepts the connection
-/// and never answers: the bounded call carries a connect timeout of exactly 10 s, and an
-/// unbounded call (`apply`) carries none.
+/// and never answers: the bounded call carries a connect timeout of exactly 10 s whatever the
+/// configuration's is, and an unbounded call (`apply`) carries the configuration's own, none
+/// when it has none.
 ///
 /// Catches: the `connect_timeout` call removed; `CONNECT_LIMIT` made 3000 s; the
 /// bound applied to the unbounded call.
 #[test]
-fn a_bounded_call_connects_with_the_limit_and_an_unbounded_one_does_not() {
-    let config = PostgresConfig::parse("postgres:///kbf?host=/run/postgresql").expect("parses");
+fn a_bounded_call_connects_with_the_limit_and_an_unbounded_one_with_the_configurations() {
+    let config = PostgresConfig::parse("postgres:///kbf?host=/run/postgresql&connect_timeout=3")
+        .expect("parses");
     assert_eq!(CONNECT_LIMIT, Duration::from_secs(10));
-    let bounded = connect_settings(&config.pg, Some(Duration::from_secs(1)));
-    assert_eq!(bounded.get_connect_timeout(), Some(&CONNECT_LIMIT));
+    let bounded = connect_settings(config.dial_ddl(), Some(Duration::from_secs(1)));
+    assert_eq!(bounded.pg.get_connect_timeout(), Some(&CONNECT_LIMIT));
     assert_eq!(
-        connect_settings(&config.pg, None).get_connect_timeout(),
+        connect_settings(config.dial_ddl(), None)
+            .pg
+            .get_connect_timeout(),
+        Some(&Duration::from_secs(3))
+    );
+    let unlimited = PostgresConfig::parse("postgres:///kbf?host=/run/postgresql")
+        .expect("parses")
+        .with_timeouts(Timeouts {
+            connect: None,
+            ..Timeouts::default()
+        });
+    assert_eq!(
+        connect_settings(unlimited.dial_ddl(), None)
+            .pg
+            .get_connect_timeout(),
         None
     );
 }

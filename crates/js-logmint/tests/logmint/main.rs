@@ -7,6 +7,7 @@
 mod fake;
 mod names;
 mod policy;
+mod presigned;
 mod scope;
 mod sts;
 mod sts_answers;
