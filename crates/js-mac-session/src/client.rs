@@ -6,6 +6,7 @@ use std::io;
 use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::helper::POOL_EXHAUSTED;
 use crate::proto::{self, Call, Limits, PoolState, Reply, Request, Session};
@@ -37,6 +38,19 @@ impl fmt::Display for ClientError {
 }
 
 impl std::error::Error for ClientError {}
+
+impl ClientError {
+    /// Whether the helper refused the request as one it cannot read: a helper from before a
+    /// verb or an optional field refuses a request that names it (`bad request: unknown
+    /// variant` or `unknown field`) and does nothing else, so the caller may send what that
+    /// helper knows instead.
+    #[must_use]
+    pub fn unknown_to_helper(&self) -> bool {
+        matches!(self, Self::Refused(reason)
+            if reason.starts_with("bad request: ")
+                && (reason.contains("unknown variant") || reason.contains("unknown field")))
+    }
+}
 
 impl From<io::Error> for ClientError {
     fn from(why: io::Error) -> Self {
@@ -179,8 +193,70 @@ impl Client {
             env: env.to_vec(),
             session,
             limits,
+            deadline_ms: None,
         };
-        match self.call(&request, &fds)? {
+        self.started(&request, &fds)
+    }
+
+    /// [`Self::run_limited`] outside any login session, with the run's own `deadline`
+    /// after its start: the helper ends the lease's processes once it passes, whether or not
+    /// this connection is still open. A helper from before the deadline refuses the request
+    /// and starts nothing ([`ClientError::unknown_to_helper`]).
+    ///
+    /// # Errors
+    /// The call failed or was refused.
+    pub fn run_bounded(
+        &self,
+        lease: &str,
+        (argv, env): (&[String], &[(String, String)]),
+        fds: [BorrowedFd<'_>; 4],
+        limits: Option<Limits>,
+        deadline: Duration,
+    ) -> Result<Running, ClientError> {
+        let request = Request::Run {
+            lease: lease.to_owned(),
+            argv: argv.to_vec(),
+            env: env.to_vec(),
+            session: Session::Background,
+            limits,
+            deadline_ms: Some(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+        };
+        self.started(&request, &fds)
+    }
+
+    /// `watch`: the last process `run` started for the lease, found again; [`Running::wait`]
+    /// reports how it ends.
+    ///
+    /// # Errors
+    /// The call failed or was refused (the helper has no run of the lease, or predates the
+    /// verb: [`ClientError::unknown_to_helper`]).
+    pub fn watch(&self, lease: &str) -> Result<Running, ClientError> {
+        let request = Request::Watch {
+            lease: lease.to_owned(),
+        };
+        self.started(&request, &[])
+    }
+
+    /// `stop`: `SIGTERM` to the lease's run, and the lease's processes killed if it has not
+    /// ended after `grace`; returns once that is done.
+    ///
+    /// # Errors
+    /// The call failed or was refused (a helper that predates the verb:
+    /// [`ClientError::unknown_to_helper`]).
+    pub fn stop(&self, lease: &str, grace: Duration) -> Result<(), ClientError> {
+        let request = Request::Stop {
+            lease: lease.to_owned(),
+            grace_ms: u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+        };
+        match self.call(&request, &[])?.1 {
+            Reply::Killed => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Sends `request`, which starts or finds a process, and returns it.
+    fn started(&self, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<Running, ClientError> {
+        match self.call(request, fds)? {
             (stream, Reply::Started { pid }) => Ok(Running { stream, pid }),
             (_, other) => Err(unexpected(other)),
         }
@@ -202,10 +278,7 @@ impl Client {
             argv: argv.to_vec(),
             env: env.to_vec(),
         };
-        match self.call(&request, &fds)? {
-            (stream, Reply::Started { pid }) => Ok(Running { stream, pid }),
-            (_, other) => Err(unexpected(other)),
-        }
+        self.started(&request, &fds)
     }
 
     /// `role-session-ready`: whether the standing VM user's GUI session is up.

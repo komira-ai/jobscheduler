@@ -362,7 +362,9 @@ impl Record {
 pub enum CooldownReason {
     /// A boot failed.
     BootFailed,
-    /// The provider's quota was reached.
+    /// The provider's quota was reached. Written by earlier releases, which cooled a pool on
+    /// a `quota` refusal; this release passes the instance type over instead and writes it
+    /// no more, and still reads it.
     Quota,
     /// The provider refused the request.
     Denied,
@@ -404,8 +406,9 @@ pub struct Go {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Brake {
-    /// The failures since the last success or reset: a refusal of the kinds `Quota`, `Denied`
-    /// and `Shape`, a boot that failed, and a spot preemption.
+    /// The failures since the last success or reset: a refusal of the kinds `Denied` and
+    /// `Shape`, a boot that failed, and a spot preemption. A `Quota` refusal counted in
+    /// earlier releases and counts no more: pass 2 passes the instance type over instead.
     pub failures: u32,
     /// When the count reached the pool's limit and the pool was tripped to `Plan`, if it was.
     /// The pool launches nothing while this is set, whatever its `launch` and `live_until`

@@ -54,7 +54,8 @@ pub struct Settings {
     /// How long past `boot_timeout` a join token lives, so a host that boots at the very
     /// limit still finds its token alive.
     pub token_margin: Duration,
-    /// How long the pool launches nothing after a boot failure, a quota or a refusal.
+    /// How long the pool launches nothing after a boot failure or a `denied` or `shape`
+    /// refusal.
     pub boot_fail_cooldown: Duration,
     /// The longest that cooldown grows to: it doubles with each failure in a row, from
     /// `boot_fail_cooldown`, and stops here (never below `boot_fail_cooldown` itself). The server's file allows 10
@@ -118,10 +119,25 @@ pub struct Settings {
     /// The highest price per hour, in cents, the pool may launch at, from the provider's
     /// `provider_limits`; an offer at exactly this price is inside. `None`: any price.
     pub max_price_cents_per_hour: Option<u64>,
+    /// How long, after the provider refused an acquire for `quota`, pass 2 passes over that
+    /// instance type in that region (its `provider_limits` `quota_backoff`; design 5.6,
+    /// step 5). [`QUOTA_BACKOFF`] by default.
+    pub quota_backoff: Duration,
+    /// How long a request waits before pass 2 asks again once every offer was refused or
+    /// passed over for it (its `provider_limits` `acquire_retry`). A completed catalog
+    /// refresh of the pool ([`crate::PoolInput::catalog_refreshed`]) ends the wait at once.
+    /// [`ACQUIRE_RETRY`] by default.
+    pub acquire_retry: Duration,
 }
 
 /// The default of [`Settings::provider`], for settings no server has named a provider in.
 pub const UNNAMED_PROVIDER: ProviderId = ProviderId::known("unnamed");
+
+/// The default of [`Settings::quota_backoff`]: one hour.
+pub const QUOTA_BACKOFF: Duration = Duration::from_secs(3600);
+
+/// The default of [`Settings::acquire_retry`]: 60 seconds.
+pub const ACQUIRE_RETRY: Duration = Duration::from_secs(60);
 
 /// The default of [`Settings::lifetime_margin`]: 10 minutes.
 const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -141,7 +157,8 @@ pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
     /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
-    /// minutes, `unknown_hold` 30 minutes and `max_step` 1; [`UNNAMED_PROVIDER`], with no
+    /// minutes, `unknown_hold` 30 minutes, `max_step` 1, `quota_backoff` one hour and
+    /// `acquire_retry` 60 seconds; [`UNNAMED_PROVIDER`], with no
     /// share and no `provider_limits` on its offers.
     #[must_use]
     pub fn new(
@@ -176,6 +193,8 @@ impl Settings {
             provider_share: None,
             allowed_instance_types: None,
             max_price_cents_per_hour: None,
+            quota_backoff: QUOTA_BACKOFF,
+            acquire_retry: ACQUIRE_RETRY,
         }
     }
 }
@@ -264,7 +283,8 @@ pub enum Blocked {
     ListFailed,
     /// A boot failed lately.
     BootFailed,
-    /// A provider answered that the account's limit was reached.
+    /// A provider answered that the account's limit was reached: shown for a cooldown an
+    /// earlier release wrote. This release passes the instance type over instead.
     Quota,
     /// A provider answered that the request was not made.
     Denied,

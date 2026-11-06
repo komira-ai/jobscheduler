@@ -145,6 +145,7 @@ pub fn pool(settings: Settings) -> PoolInput {
         offers: vec![offer("a10", 60)],
         held: Some(Vec::new()),
         unresolved: Vec::new(),
+        catalog_refreshed: false,
     }
 }
 
@@ -186,6 +187,7 @@ pub fn input(pool: PoolInput) -> Input {
         entropy: Vec::new(),
         budgets: Budgets::default(),
         brake_resets: Vec::new(),
+        reclaimed: Vec::new(),
     }
 }
 
@@ -229,6 +231,7 @@ impl Rig {
         self.input.acquired.clear();
         self.input.released.clear();
         self.input.not_found.clear();
+        self.input.reclaimed.clear();
         self.input.entropy.clear();
         actions
     }

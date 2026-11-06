@@ -348,7 +348,7 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
     let booted = rebooted(&rig, "gate");
     let reply = |outcome: Outcome| match outcome {
         Outcome::Reply(reply) => reply,
-        Outcome::Running(child) => panic!("a process started: {child:?}"),
+        other => panic!("not a reply: {other:?}"),
     };
     let lease = || "2.1".to_owned();
     let create = Request::UserCreate {
@@ -382,6 +382,7 @@ fn nothing_but_the_boot_reset_is_served_before_it() {
         env: Vec::new(),
         session: crate::proto::Session::Background,
         limits: None,
+        deadline_ms: None,
     };
     assert!(matches!(
         booted.helper.handle(run, fds(&booted.dir)),

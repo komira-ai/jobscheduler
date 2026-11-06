@@ -551,7 +551,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
     let lease = || "10.1".to_owned();
     let reply = |outcome: Outcome| match outcome {
         Outcome::Reply(reply) => reply,
-        Outcome::Running(child) => panic!("a process started: {child:?}"),
+        other => panic!("not a reply: {other:?}"),
     };
     let create = Request::UserCreate {
         lease: lease(),
@@ -574,6 +574,7 @@ fn requests_are_routed_and_stray_descriptors_refused() {
         env: Vec::new(),
         session: crate::proto::Session::Background,
         limits: None,
+        deadline_ms: None,
     };
     let Outcome::Running(mut child) = rig.helper.handle(run.clone(), fds(rig.dir.path())) else {
         panic!("run did not start");

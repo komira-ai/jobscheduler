@@ -67,6 +67,7 @@ mod alert;
 mod build;
 mod complete;
 mod effects;
+mod events;
 mod launch;
 mod live;
 mod store;
@@ -74,6 +75,7 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -85,8 +87,9 @@ use js_scaler::{
     AcquireResult, Action, Budgets, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
     Settings, State, launchable, step,
 };
+use js_sched::failover::Refused;
 use js_types::ExecMode;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::util::blocking;
@@ -128,6 +131,9 @@ struct Memory {
     /// The alerts that hold now, by key, with their text.
     alerts: BTreeMap<String, String>,
     save_errors: u64,
+    /// The count of completed catalog fetches the last tick saw
+    /// ([`Effects::catalog_fetches`]).
+    catalog_fetches: u64,
 }
 
 /// What a tick's calls answered, for the next tick's input.
@@ -160,6 +166,13 @@ struct Core {
     /// The next tick takes them and puts them back if its records were not written, so a
     /// request is dropped only by a restart before the write; asking again is harmless.
     brake_resets: Mutex<BTreeSet<String>>,
+    /// Whether the provider's notice stream is open (the `events` module).
+    listen: Mutex<events::Listen>,
+    /// The provider ids of reclaimed machines that no tick has written records for yet. The
+    /// next tick takes them and puts them back if its records were not written.
+    reclaimed: Mutex<BTreeSet<String>>,
+    /// The reclaim notices that named no machine of the records, since the scaler started.
+    reclaims_ignored: AtomicU64,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -221,6 +234,7 @@ impl Scaler {
             unremoved_failed: false,
             alerts: BTreeMap::new(),
             save_errors: 0,
+            catalog_fetches: 0,
         };
         let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
         let core = Core {
@@ -237,6 +251,9 @@ impl Scaler {
             last: Arc::new(Mutex::new(None)),
             sink: OnceLock::new(),
             brake_resets: Mutex::new(BTreeSet::new()),
+            listen: Mutex::new(events::Listen::Closed),
+            reclaimed: Mutex::new(BTreeSet::new()),
+            reclaims_ignored: AtomicU64::new(0),
         };
         Self {
             core: Arc::new(core),
@@ -328,10 +345,28 @@ impl Scaler {
         })
     }
 
-    /// One tick, on the pool for blocking calls.
+    /// One tick, on the pool for blocking calls. Before it, the provider's notice stream is
+    /// opened if it is not open and the provider sends notices (the `events` module).
     pub async fn tick(&self) {
         let core = Arc::clone(&self.core);
-        blocking(move || core.tick()).await;
+        blocking(move || {
+            core.listen();
+            core.tick();
+        })
+        .await;
+    }
+
+    /// Whether the scaler holds the provider's notice stream open: `false` before the first
+    /// tick, for a provider that sends no notices, and after a stream ended until the next
+    /// tick opens it again.
+    pub fn notices_open(&self) -> bool {
+        self.core.notices_open()
+    }
+
+    /// How many reclaim notices named no machine of the scaler's records since it started.
+    /// Such a notice changes nothing.
+    pub fn reclaims_ignored(&self) -> u64 {
+        self.core.reclaims_ignored.load(Ordering::Relaxed)
     }
 
     /// Asks for the failure brake of `pool` to be reset at the next tick: its count, its trip
@@ -391,7 +426,13 @@ impl Core {
         work.unremoved_failed = false;
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
+        let fetches = self.effects.catalog_fetches();
+        let refreshed = fetches != work.catalog_fetches;
+        work.catalog_fetches = fetches;
         let mut input = self.input(&work, now);
+        for pool in &mut input.pools {
+            pool.catalog_refreshed = refreshed;
+        }
         let asked = std::mem::take(
             &mut *self
                 .brake_resets
@@ -399,14 +440,27 @@ impl Core {
                 .unwrap_or_else(PoisonError::into_inner),
         );
         input.brake_resets = asked.iter().cloned().collect();
+        let reclaimed = std::mem::take(
+            &mut *self
+                .reclaimed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        input.reclaimed = reclaimed.iter().cloned().collect();
         let (next, actions) = step(work.state.clone(), &input, now);
         let Some(answers) = self.run(&mut work, actions) else {
-            // The records were not written, so the reset is not made: ask again.
+            // The records were not written, so the reset is not made and the reclaims are
+            // not acted on: ask again.
             let mut again = self
                 .brake_resets
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             again.extend(asked);
+            let mut pending = self
+                .reclaimed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            pending.extend(reclaimed);
             *self.memory() = work;
             return;
         };
@@ -495,6 +549,9 @@ impl Core {
         for name in &next.silent_released {
             warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
+        for refused in &next.refusals {
+            log_refusal(refused);
+        }
         let pending = (&memory.unrevoked, &memory.unremoved);
         let found = alert::alerts((next, input), now, &self.settings, pending);
         for (key, message) in &found {
@@ -558,6 +615,7 @@ impl Core {
                 offers,
                 held,
                 unresolved: self.effects.unresolved(),
+                catalog_refreshed: false,
             }],
             waiting: waiting.into_iter().map(view::waiting).collect(),
             hosts: hosts.collect(),
@@ -568,6 +626,7 @@ impl Core {
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
             budgets: self.budgets.clone(),
             brake_resets: Vec::new(),
+            reclaimed: Vec::new(),
         }
     }
 
@@ -654,4 +713,30 @@ fn tail(bytes: &[u8; 32]) -> [u8; 16] {
     let mut out = [0; 16];
     out.copy_from_slice(&bytes[16..]);
     out
+}
+
+/// The log line of one refused acquire: the provider, offer and zone and the code, and for
+/// `quota` the instance type and region passed over and until when (milliseconds since the
+/// epoch, as the scaler's clock reads them).
+fn log_refusal(refused: &Refused) {
+    let zone = refused.zone.as_deref().unwrap_or("-");
+    match &refused.passed_over {
+        Some((over, until)) => info!(
+            provider = %refused.provider,
+            offer = %refused.offer,
+            zone = %zone,
+            code = ?refused.code,
+            instance_type = %over.instance_type,
+            region = %over.region.as_deref().unwrap_or("-"),
+            until_ms = until.millis(),
+            "acquire refused: the instance type is passed over in the region until the time given"
+        ),
+        None => info!(
+            provider = %refused.provider,
+            offer = %refused.offer,
+            zone = %zone,
+            code = ?refused.code,
+            "acquire refused: the next zone, offer or provider is asked"
+        ),
+    }
 }

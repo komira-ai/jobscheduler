@@ -63,8 +63,8 @@ fn function<'a>(source: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-/// Asserts that the bearer layer (`auth.rs`, its `client`) reads the header with `bearer`
-/// and compares the token with every client's by `Clients::identify`, as the lease routes'
+/// Asserts that the bearer layer (`auth.rs`, its `caller`) reads the header with `bearer`
+/// and compares the token with every client's in force by `Clients::identify`, as the lease routes'
 /// middleware (`api.rs`, its `authenticate`) reads it with `bearer` and compares it by
 /// `Token::matches`; and that no file of `job_api` holds another call of either or any other
 /// comparison of a token, so both transports go through the one comparison. Each check is
@@ -77,10 +77,10 @@ fn one_comparison_serves_both_transports() {
         names.contains(&"auth.rs") && names.contains(&"mod.rs"),
         "{names:?}"
     );
-    let auth = function(include_str!("auth.rs"), "client");
+    let auth = function(include_str!("auth.rs"), "caller");
     assert!(auth.contains(".and_then(bearer)"), "{auth}");
     assert!(
-        auth.contains("clients.identify(given.as_bytes())"),
+        auth.contains("clients.now().identify(given.as_bytes())"),
         "{auth}"
     );
     let lease = function(include_str!("../api.rs"), "authenticate");

@@ -2,7 +2,8 @@
 //! Seatbelt profile, through the root helper `js-mac-session`.
 //!
 //! The helper owns everything that needs root. One run uses four of its verbs, each on a
-//! connection of its own:
+//! connection of its own (and `stop` and `watch`, under *Stops and deadlines* and in the
+//! journal's paragraph below):
 //!
 //! 1. `user-create` makes the run's user, a fresh one named for the run's lease id
 //!    (`<term>.<sequence>`: the term is drawn when the runtime is made and the sequence
@@ -25,8 +26,13 @@
 //!    waits on it, and [`Runtime::poll`] reads what it found, so it never blocks.
 //!    A start with run files (`RunSpec::files`, written by the lifecycle into the agent's
 //!    `--run-files-root`) has their directory given to the user before this, `0500` with
-//!    its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it
-//!    (`native/files.rs`).
+//!    its files `0400`; the profile denies writes there and `JS_FILES_DIR` names it. Its
+//!    mount inputs, which the lifecycle resolved below the agent's mount roots
+//!    (`RunSpec::mounts`), are copied to their `dest` below `exec/` and given to the user
+//!    the same way, and the profile denies writes there too (`native/files.rs`). The
+//!    working directory is `exec/` or, with a `cwd`, the directory it names below `exec/`,
+//!    made when it is not there; a `cwd` that leaves `exec/` (absolute, `..`, or a link
+//!    that resolves outside) fails the start before `run` (`native/cwd.rs`).
 //! 4. `kill-uid` ends every process of the user, not only the one started (a job may
 //!    detach children), and boots out the user's launchd domains so launchd restarts
 //!    none of its per-user agents; `user-delete` removes the user and sweeps its home and
@@ -44,13 +50,18 @@
 //! the run.
 //!
 //! A lease is written to the [`Journal`] (in the state root, synced) before `user-create` is
-//! sent and marked done once its user is deleted or a failed start was undone. A process
-//! that ends with runs going leaves them in the journal; [`Runtime::reclaim`] ends them
-//! (kill, then delete) when the next worker starts and when the rescue of a dead worker
-//! runs. A helper that restarted under the runtime refuses every verb until its boot reset
-//! has run again; the next start, stop or removal asks for it. The helper sets the largest
-//! file and the most processes the user may have on each run, so a run cannot fill the disk
-//! through its output or the process table with a fork bomb.
+//! sent, with a run record once the helper has started its process (`native/journal.rs`),
+//! and marked done once its user is deleted or a failed start was undone. A process that
+//! ends with runs going leaves them in the journal. The runtime of the next process adopts
+//! each one that has a run record ([`Runtime::list_labelled`], `native/adopt.rs`): the
+//! helper's `watch` finds its process again, and the run is polled, stopped and removed as
+//! any other (its outputs collected at the removal); one the helper no longer has is listed
+//! ended. [`Runtime::reclaim`] ends (kill, then delete) the leases with no run record, when
+//! the next worker starts and when the rescue of a dead worker runs. A helper that restarted
+//! under the runtime refuses every verb until its boot reset has run again; the next start,
+//! stop or removal asks for it. The helper sets the largest file and the most processes the
+//! user may have on each run, so a run cannot fill the disk through its output or the
+//! process table with a fork bomb.
 //!
 //! # Privacy grants (TCC)
 //!
@@ -80,43 +91,49 @@
 //! the native body. A start named by its image without a `run`, or on a runtime with no
 //! store, is refused `image-unsupported-here`.
 //!
-//! # While no agent runs
+//! # Stops and deadlines
 //!
-//! The wall limit of a native run and the silence bound (`--silence-stop`) are counted by
-//! the agent's lifecycle and enforced through [`Runtime::stop`], which is `kill-uid` here: a
-//! silence stops every native run the agent holds as a server's stop does, at once, with
-//! no grace. The helper holds no deadline of a run's own (its `run` verb takes the program,
-//! its environment and the file-size and process limits, and nothing ends the process but
-//! `kill-uid`), so while the agent is down, has stopped or is restarting, a native run
-//! goes on with no bound until an agent starts again: the journal then ends it (see
-//! above). A deadline the helper enforces by itself is a change to the helper, not made
-//! here.
+//! [`Runtime::stop`] is the helper's `stop`: `SIGTERM` to the run's process group, and
+//! `kill-uid` only if the process has not ended once the grace has passed, so a job may
+//! flush. A start whose labels carry the job's wall limit asks the helper's `run` to hold a
+//! deadline of that limit and the agent's stop grace, which the helper enforces by itself
+//! (`kill-uid`): while an agent runs, its lifecycle has stopped the job by then; while the
+//! agent is down, has stopped or is restarting, the run still ends at it. The silence bound
+//! (`--silence-stop`) is the agent's alone. A helper from before `stop` and the deadline
+//! refuses either as a request it cannot read; the runtime then kills at once for a stop and
+//! starts the run without the deadline, so the agent's wall limit is the run's only bound
+//! again (`native/bound.rs`).
 //!
-//! What this runtime does not do yet: carry a job start's environment (`RunSpec::env`: a
-//! start with one is refused `env-unsupported` at admission, before its image or body is
-//! looked at, and a run handed here with one fails before a user is made; the native body's
-//! own `env`, and a `run`'s, is applied), stage inputs or run in a subdirectory (a start
-//! that names inputs or a `cwd` is refused `native-unsupported`), forward a declared port (a
-//! start that declares any is refused `ports-not-supported`, see `native/network.rs`), adopt
-//! a run after the agent restarts (the journal ends it, and collects none of its outputs),
-//! stop a run softly (the helper only kills), bound a run while no agent runs (above), or
+//! The environment of a run is the agent's (the body's own `env`, or the bundle's rules
+//! applied to it, then `TMPDIR` and `JS_FILES_DIR`) with a job start's environment
+//! (`RunSpec::env`) laid over it: the job's value wins where both name a variable. It travels
+//! to the helper in the `env` of the `run` request, never on the command line, whose
+//! arguments every user of the Mac can read (`native/env.rs`).
+//!
+//! What this runtime does not do yet: stage a `stage` input (this agent keeps no stage
+//! trees: a start that names one is refused `native-unsupported`), forward a declared port (a
+//! start that declares any is refused `ports-not-supported`, see `native/network.rs`), or
 //! grant the user's `/var/folders` entry (toolchains that need it get their temporary files
 //! from `TMPDIR`, which is inside the home).
 //!
 //! The runtime builds on every platform so that its rules are tested on Linux; only a
 //! macOS agent makes one.
 
+mod adopt;
+mod bound;
 mod bundle;
+mod cwd;
+mod env;
 mod files;
 mod journal;
 mod logs;
 mod network;
 mod outputs;
 mod pf;
+mod profile;
 mod settings;
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io;
@@ -124,35 +141,31 @@ use std::os::fd::AsFd as _;
 use std::os::unix::fs::{PermissionsExt as _, chown};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_agent_wire::{
-    BUNDLE_PROGRAM_PREFIX, LogTail, NativeSpec, NetworkLevel, OutputSpec, refusal,
-};
-use js_mac_pool::seatbelt::{
-    AbsPath, Caps, Narrowing, Net, Policy, Profile, ReadModel, SlotLayout,
-};
+use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, InputRef, LogTail, NativeSpec, OutputSpec, refusal};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
-use js_mac_session::disclaim::Program;
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
 use js_mac_session::lease::{Dotted, user_name};
-use js_mac_session::proto::{Limits, Session};
+use js_mac_session::proto::Limits;
 use js_types::LeaseId;
-use js_types::env::env_name_reserved;
 
 use crate::bundle::{Pinned, Placer};
 use crate::egress::NetworkRefusal;
 use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
-    Runtime, RuntimeError, Status,
+    Runtime, RuntimeError, Status, check_run_env,
 };
 
 pub use files::HandOver;
-pub use journal::Journal;
+pub use journal::{Journal, RunRecord};
 pub use network::Ceiling;
 pub use pf::{Enforcer, PfFlags, PfPolicy, ProvisionError};
+pub use profile::{profile_argv, self_test};
 pub use settings::{
     DEFAULT_HOMES, DEFAULT_MAX_FILE_MIB, DEFAULT_MAX_PROCESSES, DEFAULT_TOOL_ROOTS, NativeFlags,
     NativeSettings,
@@ -203,6 +216,10 @@ struct Run {
     ended: Option<Status>,
     /// The exit, or `None` when the helper's connection ended without one.
     waiter: Receiver<Option<Exit>>,
+    /// The run's labels, as its start had them.
+    labels: BTreeMap<String, String>,
+    /// When the run started, in milliseconds since the Unix epoch.
+    started_ms: u64,
     /// The trees of the run's bundle, pinned until the run is removed.
     _pinned: Option<Pinned>,
 }
@@ -247,6 +264,27 @@ pub struct NativeRuntime {
     reset_needed: bool,
     /// Gives a run's files to its user.
     hand_over: HandOver,
+    /// The wall clock, in milliseconds since the Unix epoch: when a run started, and so how
+    /// long an adopted one has run.
+    now_ms: Clock,
+    /// The grace the lifecycle gives a run it stops, added to the deadline the helper holds.
+    stop_grace: Duration,
+    /// The helper refused a deadline or `stop` as a request it cannot read: it predates them,
+    /// and neither is sent to it again (`native/bound.rs`).
+    old_helper: AtomicBool,
+}
+
+/// A wall clock: milliseconds since the Unix epoch.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The system's wall clock.
+fn system_clock() -> Clock {
+    Arc::new(|| {
+        let since = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+    })
 }
 
 impl NativeRuntime {
@@ -299,7 +337,28 @@ impl NativeRuntime {
             journal,
             reset_needed: false,
             hand_over: files::lchown(),
+            now_ms: system_clock(),
+            stop_grace: Duration::ZERO,
+            old_helper: AtomicBool::new(false),
         })
+    }
+
+    /// The same runtime, reading the wall clock from `now_ms`. For tests; an agent never
+    /// calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock(self, now_ms: Clock) -> Self {
+        Self { now_ms, ..self }
+    }
+
+    /// The same runtime, with `grace` as the grace the lifecycle gives a run it stops: the
+    /// deadline the helper holds for a run is its wall limit and this grace.
+    #[must_use]
+    pub fn with_stop_grace(self, grace: Duration) -> Self {
+        Self {
+            stop_grace: grace,
+            ..self
+        }
     }
 
     /// The same runtime, giving a run's files to its user through `hand_over` in place of
@@ -362,14 +421,18 @@ impl NativeRuntime {
     ) -> Result<Run, RuntimeError> {
         let home = self.config.homes.join(user_name(id));
         let (exec, tmp) = (home.join("exec"), home.join("tmp"));
-        let dirs = [&exec, &tmp]
-            .into_iter()
-            .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
-            .collect::<Result<Vec<File>, RuntimeError>>()?;
-        // The files go to the user before any process of it exists.
+        for dir in [&exec, &tmp] {
+            make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why))?;
+        }
+        // The files and the inputs go to the user before any process of it exists.
         if let Some(dir) = &spec.files {
             files::hand_over(dir, uid, &self.hand_over).map_err(|why| fail(&"the files", &why))?;
         }
+        let make = |path: &Path| make_dir(path, uid).map(drop);
+        files::stage_inputs(&exec, &spec.mounts, uid, (&self.hand_over, &make))
+            .map_err(|why| fail(&"an input", &why))?;
+        let cwd = cwd::open(&exec, &native.cwd, &make)
+            .map_err(|why| RuntimeError::new(why.to_string()))?;
         let (native, mut env) = match &pinned {
             Some(pinned) => {
                 let prepared = bundle::prepare(pinned, native, &home, (uid, &tmp))
@@ -382,13 +445,25 @@ impl NativeRuntime {
                 };
                 (body, prepared.env)
             }
-            None => (native.clone(), plain_env(native, &tmp)),
+            None => (native.clone(), env::plain(native, &tmp)),
         };
         let files = spec.files.as_deref();
         if let Some(dir) = files {
             env.push((files::FILES_DIR_ENV.to_owned(), dir.display().to_string()));
         }
-        let argv = argv_of(&self.config, &native, &home, files)?;
+        // Written by no run: its files and its inputs, each named for an error.
+        let read_only: Vec<(&str, PathBuf)> = files
+            .map(|dir| ("the files", dir.to_path_buf()))
+            .into_iter()
+            .chain(
+                spec.mounts
+                    .iter()
+                    .map(|input| ("an input", files::input_dest(&exec, input))),
+            )
+            .collect();
+        // The job start's environment last, over the agent's: its values win.
+        let env = env::with_job(env, &spec.env);
+        let argv = profile::argv_of(&self.config, &native, &home, &read_only)?;
         let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
             .into_iter()
             .map(|name| {
@@ -400,19 +475,26 @@ impl NativeRuntime {
             logs[0].as_fd(),
             logs[1].as_fd(),
             logs[2].as_fd(),
-            dirs[0].as_fd(),
+            cwd.as_fd(),
         ];
-        let running = self
-            .helper
-            .run_limited(
-                lease,
-                &argv,
-                &env,
-                fds,
-                Session::Background,
-                Some(self.limits),
-            )
+        let (running, deadline_ms) = self
+            .start((spec, lease), (&argv, &env), fds)
             .map_err(|why| fail(&"run", &why))?;
+        let record = RunRecord {
+            pid: running.pid,
+            started_ms: (self.now_ms)(),
+            deadline_ms,
+            labels: spec.labels.clone(),
+            scratch: spec.scratch.clone(),
+            home: home.clone(),
+            outputs: native.outputs.clone(),
+            bundle: spec.bundle.clone(),
+        };
+        // A record that cannot be written costs only the adoption: the next process ends
+        // the run, as it did before runs were recorded.
+        if let Err(why) = self.journal.started(lease, &record) {
+            tracing::warn!("native {lease}: the run is not recorded for adoption: {why}");
+        }
         let (sender, waiter) = channel();
         thread::spawn(move || {
             let _ = sender.send(running.wait().ok().map(exit_of));
@@ -424,6 +506,8 @@ impl NativeRuntime {
             collected: None,
             ended: None,
             waiter,
+            labels: record.labels,
+            started_ms: record.started_ms,
             _pinned: pinned,
         })
     }
@@ -511,38 +595,12 @@ impl NativeRuntime {
     }
 }
 
-/// The environment of a run that pins no bundle: the job's own, then `TMPDIR`.
-fn plain_env(native: &NativeSpec, tmp: &Path) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = native
-        .env
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    env.push(("TMPDIR".to_owned(), tmp.display().to_string()));
-    env
-}
-
 /// Asks the helper for its boot reset; one that ran already is as good as one that ran now.
 fn reset(helper: &Client) -> Result<(), RuntimeError> {
     match helper.boot_reset(&[]) {
         Ok(_) => Ok(()),
         Err(ClientError::Refused(why)) if why == RESET_ALREADY => Ok(()),
         Err(why) => Err(fail(&"the boot reset", &why)),
-    }
-}
-
-/// Refuses a body whose environment names a variable a job may not set
-/// ([`js_types::env::env_name_reserved`]: the names that steer a shell, the agent's own
-/// names, and the prefixes of the loader, the sandbox and imported shell functions). No
-/// shell of the agent's reads the environment any more, but the program a job names may be
-/// one. The wire checks these too; this is the last check before a user is made, for a
-/// body that did not pass through it.
-fn check_env(native: &NativeSpec) -> Result<(), RuntimeError> {
-    match native.env.keys().find(|name| env_name_reserved(name)) {
-        Some(name) => Err(RuntimeError::new(format!(
-            "native.env: {name} is a reserved name"
-        ))),
-        None => Ok(()),
     }
 }
 
@@ -575,12 +633,9 @@ impl Runtime for NativeRuntime {
         let Body::Native(native) = &spec.body else {
             return Err(RuntimeError::new("this runtime runs native bodies only"));
         };
-        if !spec.env.is_empty() {
-            return Err(RuntimeError::new(
-                "this runtime does not carry a job start's environment",
-            ));
-        }
-        check_env(native)?;
+        check_run_env(&spec.env)?;
+        env::check_body(native)?;
+        cwd::check(&native.cwd).map_err(|why| RuntimeError::new(why.to_string()))?;
         self.ready()?;
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
@@ -636,12 +691,11 @@ impl Runtime for NativeRuntime {
         Ok(run.ended.unwrap_or(Status::Running))
     }
 
-    /// Kills at once: the helper's only way to end a user's processes is `SIGKILL`, so
-    /// `grace` is not used.
-    fn stop(&mut self, id: &RunHandle, _grace: Duration) -> Result<(), RuntimeError> {
+    /// The helper's `stop`: `SIGTERM` to the run's process group, `kill-uid` once `grace`
+    /// has passed; `kill-uid` at once on a helper from before `stop` (`native/bound.rs`).
+    fn stop(&mut self, id: &RunHandle, grace: Duration) -> Result<(), RuntimeError> {
         self.ready()?;
-        let killed = self.helper.kill_uid(&id.0);
-        self.ended(killed, "kill-uid")
+        self.soft_stop(id, grace)
     }
 
     /// Kills, copies the run's outputs (once: a removal that is tried again does not copy
@@ -668,8 +722,17 @@ impl Runtime for NativeRuntime {
         }
     }
 
+    /// Ends the leases an earlier process left that have no run to adopt (a start that died
+    /// before the helper started its process, or a journal from before run records); a lease
+    /// with a run record is left for [`Runtime::list_labelled`].
     fn reclaim(&mut self) -> Vec<String> {
-        let live = match self.journal.live() {
+        let live = self.journal.live().and_then(|live| {
+            let runs = self.journal.runs()?;
+            Ok(live
+                .into_iter()
+                .filter(move |lease| !runs.contains_key(lease)))
+        });
+        let live = match live {
             Ok(live) => live,
             Err(why) => return vec![format!("native: cannot read the lease journal: {why}")],
         };
@@ -699,9 +762,11 @@ impl Runtime for NativeRuntime {
         lines
     }
 
-    /// Lists nothing: a run is not adopted by a later process of the agent.
+    /// Every run this runtime holds, those an earlier process started adopted first
+    /// (`native/adopt.rs`).
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        Ok(Vec::new())
+        self.adopt_all()?;
+        Ok(self.found())
     }
 
     fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
@@ -748,19 +813,6 @@ impl Runtime for NativeRuntime {
         })
     }
 
-    /// A job start's environment would be set in the native process, which this runtime
-    /// does not do yet: a start with one is refused before anything is made, never run
-    /// without it.
-    fn check_env(&self, env: &[(String, String)]) -> Result<(), NativeRefusal> {
-        match env.is_empty() {
-            true => Ok(()),
-            false => Err(NativeRefusal {
-                code: refusal::ENV_UNSUPPORTED,
-                why: "this agent does not carry a job start's environment".to_owned(),
-            }),
-        }
-    }
-
     /// With a bundle store, the image of a start with a `run` is the bundle it runs from.
     fn runs_image_runs(&self) -> bool {
         self.bundles.is_some()
@@ -768,9 +820,10 @@ impl Runtime for NativeRuntime {
 
     /// Refuses, before anything is made: a level above the agent's ceiling
     /// (`network-above-ceiling`; it is never run with less), then any declared port
-    /// (`ports-not-supported`: a Mac forwards none), then what this runtime cannot do yet.
-    /// Outputs are collected when the run is removed; inputs and a working directory below
-    /// `exec/` are not served yet.
+    /// (`ports-not-supported`: a Mac forwards none), then a `stage` input
+    /// (`native-unsupported`: this agent keeps no stage trees), then a working directory
+    /// whose text leaves `exec/` (`invalid-job`). Mount inputs are staged into `exec/` when
+    /// the run starts and outputs are collected when it is removed.
     fn check_native(&self, native: &NativeSpec) -> Result<(), NativeRefusal> {
         let refused = |why: NetworkRefusal| NativeRefusal {
             code: why.code,
@@ -778,12 +831,20 @@ impl Runtime for NativeRuntime {
         };
         network::admit(self.config.network, network::of_body(native.network)).map_err(refused)?;
         network::check_ports(&native.ports).map_err(refused)?;
-        if !native.inputs.is_empty() || !native.cwd.is_empty() {
+        if native
+            .inputs
+            .iter()
+            .any(|input| matches!(input, InputRef::Stage { .. }))
+        {
             return Err(NativeRefusal {
                 code: refusal::NATIVE_UNSUPPORTED,
-                why: "this agent stages no inputs and runs in no subdirectory yet".to_owned(),
+                why: "this agent keeps no stage trees: only mount inputs are staged".to_owned(),
             });
         }
+        cwd::check(&native.cwd).map_err(|why| NativeRefusal {
+            code: refusal::INVALID_JOB,
+            why: why.to_string(),
+        })?;
         if native.program.starts_with(BUNDLE_PROGRAM_PREFIX) {
             return match self.bundles {
                 Some(_) => Ok(()),
@@ -818,109 +879,6 @@ fn limits_of(config: &NativeConfig) -> Result<Limits, RuntimeError> {
         .map_err(|why| fail(&"the limits", &why))
 }
 
-/// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
-/// whose home is `home`: `sandbox-exec`, the profile, the program and its arguments.
-///
-/// No shell is in the command line. The helper sets the run's limits in the
-/// child before it executes `sandbox-exec`, and `sandbox-exec` is the first program of the
-/// command, so nothing the job's environment steers runs outside the profile and the
-/// environment does not enter the command line at all.
-///
-/// # Errors
-///
-/// The policy or the profile cannot be built, or `native.program` is not an absolute path.
-/// The environment is not read here: [`NativeRuntime`] checks it before it makes a user.
-pub fn profile_argv(
-    config: &NativeConfig,
-    native: &NativeSpec,
-    home: &Path,
-) -> Result<Vec<String>, RuntimeError> {
-    argv_of(config, native, home, None)
-}
-
-/// [`profile_argv`] for a run whose files are in `files`: the profile denies writes there
-/// as it does to an input. Reads are open under the only read model that has a profile
-/// ([`ReadModel::Open`]), and the agent refuses at start a files root that a read deny
-/// covers, so the run reads its files.
-fn argv_of(
-    config: &NativeConfig,
-    native: &NativeSpec,
-    home: &Path,
-    files: Option<&Path>,
-) -> Result<Vec<String>, RuntimeError> {
-    let run = AbsPath::new(home).map_err(|why| fail(&home.display(), &why))?;
-    let inputs = files.map(AbsPath::new).transpose();
-    let layout = SlotLayout {
-        run,
-        uid_entry: None,
-        inputs: inputs
-            .map_err(|why| fail(&"the files", &why))?
-            .into_iter()
-            .collect(),
-        read_denies: config.read_denies.clone(),
-    };
-    // The policy never grants more than the ceiling. That is a defence in depth only: a
-    // start above the ceiling was refused by `check_native` before its user existed, so this
-    // narrowing lowers nothing the agent admitted. What can still lower the level is the
-    // bundle's `network_max` (`bundle::lower`), applied to `native` before this.
-    let caps = Caps {
-        net: config.network.net(),
-        read_model: config.read_model,
-    };
-    let narrowing = Narrowing {
-        net: Some(net_of(native.network)),
-        ..Narrowing::default()
-    };
-    let policy = Policy::base(layout, caps)
-        .and_then(|policy| policy.narrowed(narrowing))
-        .map_err(|why| fail(&"the policy", &why))?;
-    let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
-    let program =
-        AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
-    let argv = profile.argv(&program, &args);
-    Ok(argv
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect())
-}
-
-/// Runs `/usr/bin/true` under the profile of `config` with `sandbox_exec`, as the agent:
-/// whether the Mac has a `sandbox-exec` that accepts the profile this runtime builds. An
-/// agent that fails it must not say `exec = sandbox-exec`, or every job it takes would
-/// fail.
-///
-/// # Errors
-///
-/// What failed, for the operator: the profile cannot be built, the program cannot be run,
-/// or it refused the profile.
-pub fn self_test(config: &NativeConfig, sandbox_exec: &Path) -> Result<(), String> {
-    let probe = NativeSpec {
-        program: "/usr/bin/true".to_owned(),
-        args: Vec::new(),
-        env: BTreeMap::new(),
-        cwd: String::new(),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        network: NetworkLevel::Off,
-        ports: Vec::new(),
-    };
-    let argv = profile_argv(config, &probe, &config.homes).map_err(|why| why.0)?;
-    let name = sandbox_exec.display();
-    let out = Program::new(sandbox_exec, &argv[1..])
-        .env_clear()
-        .output()
-        .map_err(|why| format!("{name}: {why}"))?;
-    match out.status.success() {
-        true => Ok(()),
-        false => Err(format!(
-            "{name} refused the profile ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-    }
-}
-
 /// The post-job check of a native agent. A Mac has no `/proc` for the container agent's
 /// checks to read; what a run leaves behind is the helper's to find, and `user-delete`
 /// refuses while any process of the user remains and sweeps what the user owns, so a run
@@ -937,16 +895,6 @@ impl CheckHook for NativeChecks {
 /// An error of `what`, for the operator's log.
 fn fail(what: &dyn Display, why: &dyn Display) -> RuntimeError {
     RuntimeError::new(format!("{what}: {why}"))
-}
-
-/// The network level of a start as the profile's. `on` and `open` are one profile, with no
-/// network rule: the packet filter, which only `on` requires, is what tells them apart.
-fn net_of(level: NetworkLevel) -> Net {
-    match level {
-        NetworkLevel::Off => Net::Off,
-        NetworkLevel::Loopback => Net::Loopback,
-        NetworkLevel::On | NetworkLevel::Open => Net::On,
-    }
 }
 
 /// How a process ended, as a container's exit is told: a process that a signal ended has

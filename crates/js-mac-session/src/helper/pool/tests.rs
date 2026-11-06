@@ -648,7 +648,7 @@ fn pool_verbs_are_routed_and_answer_each_slot() {
     rig.helper.user_create("80.1", None).unwrap();
     let reply = |request| match rig.helper.handle(request, Vec::new()) {
         Outcome::Reply(reply) => reply,
-        Outcome::Running(child) => panic!("{child:?}"),
+        other => panic!("{other:?}"),
     };
     let want = Reply::Pool(Box::new(PoolState {
         size: 3,

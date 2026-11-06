@@ -103,7 +103,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M400,843.0 L340,843.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
 <text x="370" y="837.0" class="t-r lbl" text-anchor="middle">fails</text>
 <rect x="790" y="918" width="300" height="68" rx="5" class="box-gd"/>
-<text x="940.0" y="940.0" class="t-m" text-anchor="middle">not built: stage inputs / collect</text>
-<text x="940.0" y="956.0" class="t-m" text-anchor="middle">outputs, adopt after restart, soft stop,</text>
+<text x="940.0" y="940.0" class="t-m" text-anchor="middle">not built: stage inputs (no store</text>
+<text x="940.0" y="956.0" class="t-m" text-anchor="middle">of stage trees),</text>
 <text x="940.0" y="972.0" class="t-m" text-anchor="middle">VM runtime</text>
 </svg>

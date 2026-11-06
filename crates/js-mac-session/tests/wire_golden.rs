@@ -41,6 +41,7 @@ fn requests() -> Vec<(Request, &'static str)> {
                 env: vec![(s("A"), s("b"))],
                 session: Session::Background,
                 limits: None,
+                deadline_ms: None,
             },
             r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[["A","b"]]}"#,
         ),
@@ -51,6 +52,7 @@ fn requests() -> Vec<(Request, &'static str)> {
                 env: Vec::new(),
                 session: Session::Gui,
                 limits: None,
+                deadline_ms: None,
             },
             r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"session":"gui"}"#,
         ),
@@ -64,8 +66,31 @@ fn requests() -> Vec<(Request, &'static str)> {
                     file_bytes: 1_048_576,
                     processes: 512,
                 }),
+                deadline_ms: None,
             },
             r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"limits":{"file_bytes":1048576,"processes":512}}"#,
+        ),
+        (
+            Request::Run {
+                lease: s("3.7"),
+                argv: vec![s("/bin/true")],
+                env: Vec::new(),
+                session: Session::Background,
+                limits: None,
+                deadline_ms: Some(60_000),
+            },
+            r#"{"verb":"run","lease":"3.7","argv":["/bin/true"],"env":[],"deadline_ms":60000}"#,
+        ),
+        (
+            Request::Watch { lease: s("3.7") },
+            r#"{"verb":"watch","lease":"3.7"}"#,
+        ),
+        (
+            Request::Stop {
+                lease: s("3.7"),
+                grace_ms: 5000,
+            },
+            r#"{"verb":"stop","lease":"3.7","grace_ms":5000}"#,
         ),
         (
             Request::SessionReady { lease: s("3.7") },
