@@ -813,7 +813,7 @@ On the agent, the whole-host prepare is: the reply names an `exclusive` allocati
 
 ### 6.5 The scaler
 
-`js-scaler` is a pure function `step(state, input, now) -> (state, actions)`. The shell in the server snapshots the registry and the provider's list, calls it, and performs actions in order. `Save` comes first whenever the step changed the records or the hold-save timer is due (`js-scaler/src/scale.rs`): all records are written whole to the `.scaler` file before any provider call.
+`js-scaler` is a pure function `step(state, input, now) -> (state, actions)`. The shell in the server reads the job tables (queued jobs, then live allocations), snapshots the registry and the provider's list, calls it, and performs actions in order. Demand is the registry's waiting whole-node requests and the queued jobs without an allocation (a whole-host job asks for the pool's floor), a host is busy while a live allocation or a lease is on it (the lease side goes with the lease API), and a job the step launched a machine for is held to that machine until it is placed or the machine cannot take it. `Save` comes first whenever the step changed the records or the hold-save timer is due (`js-scaler/src/scale.rs`): all records are written whole to the `.scaler` file before any provider call.
 
 A step: reset brakes, end go if the pool is plan-only, reconcile, cover waiting demand (a mark, a free host, or a booting machine), undrain, drop unwanted, then launch up to a per-step limit to the cheapest priced offer that fits, if `launch = live` and every cap holds (instances, hourly, daily and total spend, boot-failure cooldown). Idle hosts drain and then release.
 
