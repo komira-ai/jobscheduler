@@ -462,6 +462,61 @@ impl HostBooking {
     }
 }
 
+/// What keeps a whole-host job off a host ([`MarkRecord::exclusions`]), and until when: the
+/// kinds of js-sched's `Bar`, with its ends on the store's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exclusion {
+    /// The back-off after a hold the job gave up at its deadline, until the instant given
+    /// (exclusive).
+    Backoff(StoreTime),
+    /// A hard exclusion until the instant given (exclusive).
+    Until(StoreTime),
+    /// A hard exclusion that never ends.
+    ForLife,
+}
+
+/// The mark of a queued whole-host job (design section 5.4): the host it holds while that host
+/// drains, when the mark was made, its deadline, the end of the host's tail when it was made,
+/// and the hosts the job is kept off, each with its end. It is the row `mark/<id>`, one per
+/// job, written with [`crate::JobStore::put_mark`]. The failed-prepare count of a job is not
+/// here: it belongs to the job's row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkRecord {
+    /// The job that holds the mark; the row's key is the job's.
+    pub job: JobId,
+    /// The held host.
+    pub host: HostId,
+    /// When the mark was made.
+    pub made: StoreTime,
+    /// When the hold is given up if the host is still busy; raised at boot to at least the
+    /// boot plus [`crate::BOOT_GRACE`] ([`crate::JobStore::raise_at_boot`]).
+    pub deadline: StoreTime,
+    /// The end of the host's tail when the mark was made: when the job is expected to start
+    /// there. `None`: not known.
+    pub tail_end: Option<StoreTime>,
+    /// The hosts the job may not mark, each with what keeps it off and until when.
+    pub exclusions: BTreeMap<HostId, Exclusion>,
+    /// Fields a later build wrote, kept for the next write of the row.
+    pub(crate) carried: Carried,
+}
+
+impl MarkRecord {
+    /// The mark of `job` on `host`, made at `made`, given up at `deadline`, with no tail end
+    /// known and no exclusions.
+    #[must_use]
+    pub fn new(job: JobId, host: HostId, made: StoreTime, deadline: StoreTime) -> MarkRecord {
+        MarkRecord {
+            job,
+            host,
+            made,
+            deadline,
+            tail_end: None,
+            exclusions: BTreeMap::new(),
+            carried: Carried::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

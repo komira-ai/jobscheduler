@@ -13,6 +13,10 @@ pub const JOB: &str = "job/";
 /// allocation is one read, not a scan.
 pub const ALLOCATION: &str = "alloc/";
 
+/// `mark/<id>`: the mark of the queued whole-host job with that id, found from its job without
+/// a scan. No `idx/` space names it.
+pub const MARK: &str = "mark/";
+
 /// `meta/jobs/schema`: the schema version of the job and allocation rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
@@ -27,6 +31,12 @@ pub fn job(id: &JobId) -> String {
 #[must_use]
 pub fn allocation(id: &JobId) -> String {
     format!("{ALLOCATION}{id}")
+}
+
+/// The key of the mark of the job `id`.
+#[must_use]
+pub fn mark(id: &JobId) -> String {
+    format!("{MARK}{id}")
 }
 
 /// `idx/`: the secondary key spaces. Each entry is a key with an empty value, written in the
@@ -197,9 +207,12 @@ mod tests {
             "idx/job/due/00000000000000000009j-1",
             "idx/alloc/host/host-a",
             "job/j-1",
+            "mark/j-1",
         ] {
             assert_eq!(indexed_row(other), None, "{other}");
         }
         assert_eq!(unread("meta/jobs/schema"), None);
+        assert_eq!(mark(&job), "mark/j-1");
+        assert_eq!(unread(&mark(&job)), None, "a mark row has no unread entry");
     }
 }

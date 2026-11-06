@@ -1,5 +1,5 @@
-//! The job table and the allocation table, as typed records over the `js-state`
-//! [`Store`](js_state::Store) (design sections 3.2, 5.3, 6.2 and 10).
+//! The job table, the allocation table and the mark table, as typed records over the
+//! `js-state` [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
 //! **allocation** is the scheduler's private record that resources on one host are booked
@@ -8,7 +8,11 @@
 //! store's allocation retention after its free (fourteen days unless
 //! [`JobStore::with_allocation_retention`] sets another), after which [`JobStore::tick`]
 //! deletes its row. The usage history of an allocation is its `usage/ended` row, which
-//! neither retention deletes.
+//! neither retention deletes. A **mark** is the host a queued whole-host job holds while
+//! that host drains, with the hosts it is kept off ([`MarkRecord`]): written only for a job
+//! that is queued and needs the whole host ([`JobStore::put_mark`]), and deleted with the job's
+//! end in one transaction ([`JobStore::end_and_unmark`]) or on its own
+//! ([`JobStore::delete_mark`]).
 //!
 //! # Results and retention
 //!
@@ -32,7 +36,9 @@
 //! [`JobStore::raise_at_boot`] commits that raise, and in the same transaction gives every
 //! queued, placed or starting job a deadline floor ([`JobRecord::deadline_floor`]) of at least
 //! the boot plus [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout
-//! may end it, so an outage longer than either fails no job at the first tick.
+//! may end it, so an outage longer than either fails no job at the first tick; and it raises
+//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so an outage longer than a
+//! hold gives up none at the first round.
 //!
 //! # Keys
 //!
@@ -40,6 +46,7 @@
 //! |---|---|
 //! | `job/<id>` | the job's [`JobRecord`] |
 //! | `alloc/<id>` | the [`AllocationRecord`] of the job `<id>`: one allocation per job at a time, found from its job without a scan |
+//! | `mark/<id>` | the [`MarkRecord`] of the queued whole-host job `<id>`: one mark per job at a time, found from its job without a scan; a store written before marks has none and opens unchanged |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
 //! | `idx/job/due/<end>/<id>` | empty: the job has ended, `<end>` its retention end's nanoseconds on the store's clock as twenty digits (zero for an ended row without one) |
@@ -92,7 +99,10 @@
 //! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
 //! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version; then delete up to [`SWEEP_BATCH`] freed `alloc/<id>` rows past the allocation retention, at their versions, in one transaction |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
-//! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, at its version, or nothing when none is |
+//! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, and each `mark/<id>` whose deadline it raises, at its version, or nothing when none is |
+//! | [`JobStore::put_mark`] | check `job/<id>` at its version (queued, whole host), put `mark/<id>` if absent or at its version |
+//! | [`JobStore::delete_mark`] | delete `mark/<id>` at its version, or nothing when there is none |
+//! | [`JobStore::end_and_unmark`] | as [`JobStore::end_job`] (nothing for an ended job), and delete `mark/<id>` at its version, or check it absent; nothing when the job has ended and has no mark |
 //!
 //! Two reads serve the placement engine: [`JobStore::queued`], every queued job in queue
 //! order ([`queue_order`]: the higher priority first, then the earlier submit, then the job
@@ -134,8 +144,9 @@ pub use ids::{
     MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, FileDigest,
-    HostBooking, JobFiles, JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, Exclusion,
+    FileDigest, HostBooking, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs,
+    NetworkPolicy, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

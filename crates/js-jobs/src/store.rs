@@ -1,4 +1,4 @@
-//! [`JobStore`]: the job and allocation tables over a state [`Store`].
+//! [`JobStore`]: the job, allocation and mark tables over a state [`Store`].
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -20,6 +20,7 @@ use crate::result::{JobEnd, Output, Retention};
 mod ending;
 mod hosts;
 mod index;
+mod marks;
 mod queue;
 
 pub use index::Backfill;
