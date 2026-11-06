@@ -1,13 +1,16 @@
 //! The `catalog_refresh` and `offer_cooldown` keys of a pool's `provider_limits`: their
 //! defaults, the values a file gives, and the refusal of a zero, read through
-//! [`Config::resolve_file`].
+//! [`Config::resolve_file`]; and the limits the scaler's pick of an offer is given.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_lease_server::{Config, OwnerOnlyFiles, Resolved, StartupError};
+use js_registry::{PoolConfig, Registry};
+use js_types::{ProviderId, ResourceClass, Resources, Shape};
 
 use crate::config_support::{
-    API_KEY, PoolText, clock, file, kinds, quote, quoted, server_with_agents,
+    API_KEY, PoolText, clock, file, kinds, load, quote, quoted, server_with_agents,
 };
 use crate::support::Scratch;
 
@@ -105,4 +108,43 @@ fn catalog_refresh_and_offer_cooldown_default_to_one_hour() {
     assert_eq!(read(&scratch, refresh), (Duration::from_secs(90), hour));
     let cooldown = "{ lambda = { offer_cooldown = \"10m\" } }";
     assert_eq!(read(&scratch, cooldown), (hour, Duration::from_secs(600)));
+}
+
+/// A registry of the whole-node pool `gpu`, for the scaler settings a plan gives.
+fn registry() -> Registry {
+    let resources = Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap();
+    let shape = Shape::new(resources, BTreeMap::new());
+    let name = ProviderId::new("gpu").unwrap();
+    Registry::new(
+        PoolConfig::new(name, ResourceClass::whole_node(), shape, 4),
+        clock(),
+    )
+}
+
+/// Asserts that the scaler settings a loaded plan gives carry what the pick of an offer
+/// (design 5.6, pass 2) reads of the pool's launching provider: its id, its `max_machines`
+/// share, its `allowed_instance_types` and its `max_price_cents_per_hour`; and that with no
+/// such keys the share is the pool's `max_machines` and no type or price is limited.
+/// Catches limits that admission reads and the scaler's pick does not.
+#[test]
+fn the_scaler_settings_carry_the_providers_limits() {
+    let scratch = Scratch::new("catalog_config_scaler_limits");
+    let limits = "{ lambda = { allowed_instance_types = [\"gpu_1x_a10\"], max_price_cents_per_hour = 150, max_machines = 3 } }";
+    let config = load(&scratch, &limited(&scratch, limits)).unwrap();
+    let plan = config.elastic_pool().unwrap();
+    let settings = plan.scaler_settings(&registry());
+    assert_eq!(settings.provider, plan.provider().id());
+    assert_eq!(settings.provider_share, Some(3));
+    assert_eq!(
+        settings.allowed_instance_types,
+        Some(vec!["gpu_1x_a10".to_owned()])
+    );
+    assert_eq!(settings.max_price_cents_per_hour, Some(150));
+
+    let refresh = "{ lambda = { catalog_refresh = \"2h\" } }";
+    let config = load(&scratch, &limited(&scratch, refresh)).unwrap();
+    let settings = config.elastic_pool().unwrap().scaler_settings(&registry());
+    assert_eq!(settings.provider_share, Some(4));
+    assert_eq!(settings.allowed_instance_types, None);
+    assert_eq!(settings.max_price_cents_per_hour, None);
 }

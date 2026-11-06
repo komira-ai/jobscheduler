@@ -68,7 +68,8 @@ impl ElasticPlan {
     }
 }
 
-/// The scaler settings the pool's plan gives: the design's defaults besides the plan's own.
+/// The scaler settings the pool's plan gives: the design's defaults besides the plan's own,
+/// and what pass 2 of placement reads of the pool's launching provider.
 fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     let mut settings = Settings::new(
         &plan.name,
@@ -92,6 +93,14 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     settings.max_lease_wall = plan.max_lease_wall;
     // A whole-node lease's wall time starts after the pool's prepare timeout.
     settings.prepare_timeout = Duration::from_millis(whole.prepare_timeout_ms);
+    // Pass 2 of placement (design 5.6, step 5) reads the pool's one launching provider:
+    // its id, its share of the pool and its `provider_limits`, as admission reads them.
+    settings.provider = plan.provider.id();
+    settings.provider_share = Some(plan.share);
+    settings
+        .allowed_instance_types
+        .clone_from(&plan.limits.allowed_instance_types);
+    settings.max_price_cents_per_hour = plan.limits.max_price_cents_per_hour;
     settings
 }
 

@@ -1651,6 +1651,7 @@ version = "0.1.0"
 dependencies = [
  "js-elastic",
  "js-elastic-fake",
+ "js-sched",
  "js-types",
  "serde",
  "serde_json",

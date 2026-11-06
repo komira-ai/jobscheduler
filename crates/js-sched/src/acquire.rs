@@ -4,8 +4,9 @@
 //! [`pick`] answers that question and nothing else. Before asking it, the caller has
 //! established that nothing can serve the job now: no free capable host in any machine
 //! provider of the pool (pass 1 found none), and no machine already booting that can serve
-//! it. [`pick`] does not check either, and a caller that asks it while one exists launches a
-//! machine for a job that did not need one.
+//! it. [`needs_acquire`] is that gate, kept apart from [`pick`]: [`pick`] does not check
+//! either, and a caller that asks it while one exists launches a machine for a job that did
+//! not need one.
 //!
 //! Everything comes in as values ([`AcquireInput`], one [`ProviderView`] per machine
 //! provider, in the pool's order): the job's demand, the pool's limits, the machines the pool
@@ -17,6 +18,20 @@
 
 use js_elastic::{Demand, Offer, Purchase};
 use js_types::ProviderId;
+
+/// Whether pass 2 runs for a job (design 5.6, step 5, first sentence): only when no free
+/// capable host exists in any machine provider of the pool and no machine on its way can
+/// serve the job.
+///
+/// `free_capable_hosts` counts the free hosts of every provider that fit the job, not those
+/// of one provider. `booting_machines_that_fit` counts the machines on their way whose offer,
+/// the one each was acquired for, fits the job ([`Offer::fit`]); a booting machine whose offer
+/// does not fit is not counted, and does not hold the job back. One of either is enough to
+/// serve the job without a new machine.
+#[must_use]
+pub fn needs_acquire(free_capable_hosts: usize, booting_machines_that_fit: usize) -> bool {
+    free_capable_hosts.saturating_add(booting_machines_that_fit) == 0
+}
 
 /// What pass 2 is asked about one job.
 #[derive(Debug, Clone, Copy)]
