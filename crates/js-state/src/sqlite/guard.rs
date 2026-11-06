@@ -6,12 +6,12 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read as _};
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::io::Errno;
 use rustix::process::{Pid, test_kill_process};
 
 use super::SqliteError;
+use crate::{Clock as _, SystemClock};
 
 /// Filesystem type numbers (`statfs` `f_type`) of network filesystems, with their names.
 const NETWORK_FILESYSTEMS: &[(u32, &str)] = &[
@@ -190,10 +190,10 @@ impl Drop for LockFile {
 /// The token a holder writes into its lock file: this process's id and the time it took
 /// the lock, in microseconds since the Unix epoch, as `<pid>@<micros>`. Opaque to readers
 /// but for the process id before the `@`, which [`live_holder`] checks.
+/// The time is read from [`SystemClock`], the store's wall clock, whose origin is the
+/// Unix epoch.
 fn holder_token() -> String {
-    let since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+    let since_epoch = SystemClock::default().now().as_duration();
     format!("{}@{}\n", std::process::id(), since_epoch.as_micros())
 }
 
