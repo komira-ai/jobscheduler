@@ -44,7 +44,10 @@ pub(super) struct End {
 pub(super) struct Tail {
     pub(super) stream: Stream,
     file: Arc<File>,
-    /// The file's length at the last poll.
+    /// The most bytes of the file the upload reads: what lies past it is never seen, as
+    /// bytes past a capture's cap never reach its file.
+    cap: u64,
+    /// The file's length at the last poll, at most `cap`.
     seen: u64,
     /// The offset of the first byte not yet put: where the next chunk begins.
     next: u64,
@@ -66,11 +69,13 @@ impl Tail {
     /// The stream `stream`, read through `file`, from where `progress` says its upload is (the
     /// start of the stream for a new job, a progress record's for an adopted one). What the file
     /// holds past `next` is seen at the first poll, which is the first-byte time of those bytes;
-    /// a cut in flight is put again as it was cut.
-    pub(super) fn new(stream: Stream, file: Arc<File>, progress: Progress) -> Self {
+    /// a cut in flight is put again as it was cut. Only the first `cap` bytes of the file are
+    /// read.
+    pub(super) fn new(stream: Stream, file: Arc<File>, progress: Progress, cap: u64) -> Self {
         Self {
             stream,
             file,
+            cap,
             seen: progress.next,
             next: progress.next,
             arrivals: VecDeque::new(),
@@ -99,9 +104,12 @@ impl Tail {
         !self.put.is_empty()
     }
 
-    /// Reads the file's length and notes growth as an arrival at `now`.
+    /// Reads the file's length, up to the cap, and notes growth as an arrival at `now`.
     pub(super) fn poll(&mut self, now: SystemTime) {
-        let length = self.file.metadata().map_or(self.seen, |meta| meta.len());
+        let length = self
+            .file
+            .metadata()
+            .map_or(self.seen, |meta| meta.len().min(self.cap));
         if length > self.seen {
             self.arrivals.push_back((self.seen, now));
             self.seen = length;

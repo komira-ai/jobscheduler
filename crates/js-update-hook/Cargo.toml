@@ -1,0 +1,26 @@
+[package]
+name = "js-update-hook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The parts of a host updater's hook that do not depend on the service it updates: the exit
+# status and the last line of a step, the step names, the locked state directory and its
+# record, the unit managers (`systemctl`, `launchctl`), the release link, the clock and the
+# kill points. js-agent's `update-hook` verb is built on it.
+
+[dependencies]
+# `fs`: the state directory is opened, locked, read and written through descriptors.
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+
+[lints]
+workspace = true

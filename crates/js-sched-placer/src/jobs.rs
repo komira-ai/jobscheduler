@@ -3,7 +3,7 @@
 //!
 //! Under `--placement js-sched`, with the job tables, the server runs a **pass** over the
 //! queue on each tick and after each heartbeat of a host that speaks the per-job messages
-//! ([`Agents::place_jobs`]): a job end, a cancel, a confirmed container, a host that joins
+//! (the server's `Agents::place_jobs`): a job end, a cancel, a confirmed container, a host that joins
 //! and a heartbeat that changes a host's load all come to the server as one of those. A pass
 //! ([`SchedPlacer::place_jobs`]):
 //!
@@ -13,7 +13,7 @@
 //! 2. **Brings the engine's bookings to the allocation table** ([`Engine::sync_jobs`]): the
 //!    allocation table is the one record of what a job books on a host: its resources and
 //!    its host ports. A booking freed (by the host's confirmation or the provider's absence,
-//!    [`crate::job_alloc`]) is let go, with its ports; a booking the engine does not hold
+//!    the server's `job_alloc`) is let go, with its ports; a booking the engine does not hold
 //!    (after a restart) is taken up before anything is placed, with the ports the table
 //!    records for it, so it is never offered again and its job is never placed twice. Booked
 //!    and releasing allocations both book, and both hold their ports until freed.
@@ -38,7 +38,7 @@
 //!    is booked, the job stays queued and the next pass places it.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
-//! ([`crate::per_job`]): so the server's [`JobStarts`] is [`NoStarts`], and a placement
+//! (the server's `per_job`): so the server's [`JobStarts`] is [`NoStarts`], and a placement
 //! whose start was never delivered (the server stopped after the commit) is started from the
 //! table after a restart all the same.
 //!
@@ -52,31 +52,53 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{NetworkCeiling, Phase};
-use js_jobs::{AllocationRecord, Booked, JobId, JobRecord, JobStoreError, Needs};
-use js_lease::{Clock, Timestamp};
+use js_jobs::{
+    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError, Needs,
+    NetworkPolicy,
+};
+use js_lease::Timestamp;
 use js_registry::{HostState, HostView};
-use js_sched::ceiling::{ceiling_of, within_ceiling};
+use js_sched::ceiling::within_ceiling;
 use js_sched::{Event, Prediction, Request};
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey};
 use js_types::{HostId, JobNetwork, Resources};
 use tracing::warn;
 
-use super::super::map::{self, MapError};
-use super::super::place::SchedPlacer;
 use super::{Engine, Placed, recovered_as};
-use crate::agents::Agents;
-use crate::fence::is_fenced;
-use crate::job_start::job_network;
-use crate::job_store::ServerJobs;
-use crate::metrics::MetricsSink;
+use crate::map::{self, MapError};
+use crate::place::SchedPlacer;
+
+/// The network level a job's policy asks for.
+pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
+    match policy {
+        NetworkPolicy::None => JobNetwork::None,
+        NetworkPolicy::AllowList => JobNetwork::AllowList,
+        NetworkPolicy::Open => JobNetwork::Open,
+    }
+}
+
+/// What a pass tells the server's metrics: each committed placement, with how long its job
+/// waited since its submit, and each placement whose commit failed.
+pub trait PassMetrics {
+    /// A queued job was placed, `waited` after it was submitted.
+    fn job_placed(&self, waited: Duration);
+    /// A placement's commit failed: its write did not land.
+    fn store_write_failed(&self);
+}
+
+/// Whether `error` says the state store has a newer writer, so this server commits nothing
+/// more.
+fn is_fenced(error: &JobStoreError) -> bool {
+    matches!(error, JobStoreError::Store(js_state::StoreError::Fenced))
+}
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
 /// none is a lease of the registry's (term 1) or one taken up (term 0).
-const JOB_TERM: u64 = 2;
+pub const JOB_TERM: u64 = 2;
 
 /// A job allocation the engine holds.
 #[derive(Debug, Clone)]
-pub(crate) struct JobHold {
+pub struct JobHold {
     /// Its host.
     host: HostId,
     /// What it books there.
@@ -103,12 +125,12 @@ struct Walker {
 
 impl Engine {
     /// Whether the engine holds a job allocation on `host`.
-    pub(crate) fn holds_jobs_on(&self, host: &HostId) -> bool {
+    pub fn holds_jobs_on(&self, host: &HostId) -> bool {
         self.jobs.values().any(|hold| hold.host == *host)
     }
 
     /// The engine's leases of the job allocations it holds on `host`.
-    pub(super) fn job_leases_on<'a>(
+    pub fn job_leases_on<'a>(
         &'a self,
         host: &'a HostId,
     ) -> impl Iterator<Item = SchedLeaseId> + 'a {
@@ -168,7 +190,7 @@ impl Engine {
     /// another host, is let go; one the scheduler gave up (its host silent past the engine's
     /// grace) is taken up again, since silence frees nothing; one the engine does not hold
     /// (the table's after a restart) is taken up.
-    pub(crate) fn sync_jobs(&mut self, live: &[AllocationRecord]) {
+    pub fn sync_jobs(&mut self, live: &[AllocationRecord]) {
         let live: BTreeMap<&JobId, &AllocationRecord> = live
             .iter()
             .map(|allocation| (&allocation.job, allocation))
@@ -204,7 +226,7 @@ impl Engine {
     /// Lets go of the allocation of `job`: its placement was not committed, or the table no
     /// longer holds it live. Its booking is free again. A job the engine does not hold
     /// changes nothing.
-    pub(crate) fn job_failed(&mut self, job: &JobId) {
+    pub fn job_failed(&mut self, job: &JobId) {
         let placed = self.jobs.remove(job).map(|hold| hold.placed);
         placed.into_iter().for_each(|placed| self.release(placed));
     }
@@ -225,7 +247,7 @@ impl Engine {
     /// closes the host to the jobs behind it as a job waiting for room does. A job that books the
     /// whole host is not walked, nor is one whose constraints are no platform requirements
     /// (logged): neither closes a host.
-    pub(crate) fn walk_jobs(
+    pub fn walk_jobs(
         &mut self,
         queued: &[JobRecord],
         open: &BTreeMap<HostId, NetworkCeiling>,
@@ -351,7 +373,7 @@ fn walker(job: &JobRecord) -> Option<Walker> {
 ///
 /// # Errors
 /// As [`map::needs_of`].
-fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, MapError> {
+pub fn job_request(job: &JobRecord, resources: &Resources) -> Result<Request, MapError> {
     let constraints = &job.spec.constraints;
     let mut capabilities = constraints.capabilities.clone();
     let named = [("os", &constraints.os), ("arch", &constraints.arch)];
@@ -393,14 +415,14 @@ fn booking(booked: Booked) -> (js_types::sched::Resources, bool) {
 
 /// Where the start of each committed placement goes: a host is told of a placement only
 /// through this, and only after the store reported the commit.
-pub(crate) trait JobStarts {
+pub trait JobStarts {
     /// The placement of `job` on `host` is committed.
     fn placed(&self, job: &JobId, host: &HostId);
 }
 
 /// The server's [`JobStarts`]: it hands nothing on, since a host's start is built from the
-/// job table on its next heartbeat ([`crate::per_job`]).
-pub(crate) struct NoStarts;
+/// job table on its next heartbeat (the server's `per_job`).
+pub struct NoStarts;
 
 impl JobStarts for NoStarts {
     fn placed(&self, _: &JobId, _: &HostId) {}
@@ -418,11 +440,11 @@ impl SchedPlacer {
     /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A commit the
     /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
     /// there: a store with a newer writer commits nothing more.
-    pub(crate) fn place_jobs(
+    pub fn place_jobs<S: js_state::Store, I: IdSource>(
         &self,
-        jobs: &ServerJobs,
+        jobs: &JobStore<S, I>,
         open: &BTreeMap<HostId, NetworkCeiling>,
-        (starts, metrics): (&dyn JobStarts, &dyn MetricsSink),
+        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
         let live = jobs.live_allocations()?;
@@ -461,7 +483,7 @@ impl SchedPlacer {
 /// Whether the host `view` may take a job at `now`: the registry hears it, it serves, it is
 /// not tainted, not set aside (for a whole-node request, or to be scaled away), not still
 /// clearing its last lease and not cordoned.
-pub(crate) fn open_to_jobs(view: &HostView, now: Timestamp) -> bool {
+pub fn open_to_jobs(view: &HostView, now: Timestamp) -> bool {
     let checks = [
         view.state == HostState::Live,
         view.phase == Phase::Serving,
@@ -473,54 +495,17 @@ pub(crate) fn open_to_jobs(view: &HostView, now: Timestamp) -> bool {
     checks.into_iter().all(|ok| ok)
 }
 
-impl Agents {
-    /// One pass over the queued jobs ([`SchedPlacer::place_jobs`]) on the hosts the registry
-    /// would let take a job now, when this server holds the job tables and places with
-    /// `js-sched` (`--placement js-sched`); otherwise nothing, so no job is placed under the
-    /// registry's placement. A failed read of the tables is logged; the next pass reads them
-    /// again, unless the store said it has a newer writer, which trips the fence
-    /// ([`crate::fence`]).
-    pub(crate) fn place_jobs(&self) {
-        let (Some(jobs), Some(placer)) = (&self.jobs, &self.placer) else {
-            return;
-        };
-        let now = self.clock.now();
-        let hosts = self.registry.hosts().into_iter();
-        let open = hosts.filter(|view| open_to_jobs(view, now)).map(|view| {
-            // The ceiling is read again on every pass, from the hello the host last said; a
-            // host whose hello is not held (after a restart) advertises none.
-            let claim = view.claim.as_ref();
-            let ceiling = claim.map(|claim| ceiling_of(claim.capabilities()));
-            (view.id, ceiling.unwrap_or_default())
-        });
-        if let Err(error) =
-            placer.place_jobs(jobs, &open.collect(), (&NoStarts, self.meter().sink()))
-        {
-            self.fence.note(&error);
-            warn!(%error, "the queued jobs could not be read; the next pass places them");
-        }
-    }
-}
-
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SchedPlacer {
     /// What the engine's scheduler books on `host`: its leases and job allocations.
-    pub(crate) fn booked_on(&self, host: &str) -> Option<js_types::sched::Resources> {
+    pub fn booked_on(&self, host: &str) -> Option<js_types::sched::Resources> {
         let worker = js_types::sched::WorkerId::new(host);
         self.engine().sched.booked(&worker)
     }
 
     /// How many operations wait in the engine's scheduler: a job a pass did not place leaves
     /// none behind, so none holds or marks a host.
-    pub(crate) fn waiting(&self) -> usize {
+    pub fn waiting(&self) -> usize {
         self.engine().sched.queued_len()
     }
 }
-
-#[cfg(test)]
-#[path = "jobs_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "jobs_ports_tests.rs"]
-mod ports_tests;

@@ -15,7 +15,9 @@
 //! the listing: the agent cannot say what it holds.
 //!
 //! An adopted run whose start pinned a bundle has its bundle pinned again for it; a pin that
-//! fails is only logged (the run goes on, as it did before the restart).
+//! fails is only logged (the run goes on, as it did before the restart). One whose scratch
+//! directory holds a live-log progress record, on a runtime with live logs, has its upload go
+//! on from the record (`native/logs.rs`).
 
 use std::sync::mpsc::channel;
 use std::thread;
@@ -23,8 +25,8 @@ use std::thread;
 use js_mac_session::client::ClientError;
 
 use super::journal::RunRecord;
-use super::{NativeRuntime, Run, exit_of, fail};
-use crate::lifecycle::{Found, RunHandle, RuntimeError, Status};
+use super::{NativeRuntime, Run, exit_of, fail, logs};
+use crate::lifecycle::{Found, RunHandle, RuntimeError, Status, label};
 
 impl NativeRuntime {
     /// Takes over the run of every live lease the journal has a run record of and this
@@ -62,6 +64,8 @@ impl NativeRuntime {
             }
         };
         let pinned = self.repin(lease, record.bundle.as_deref());
+        let run_id = record.labels.get(label::RUN).map(String::as_str);
+        let logs = logs::adopted(self.logs.as_ref(), &record.scratch, run_id);
         Ok(Run {
             scratch: record.scratch,
             home: record.home,
@@ -72,6 +76,7 @@ impl NativeRuntime {
             labels: record.labels,
             started_ms: record.started_ms,
             _pinned: pinned,
+            logs,
         })
     }
 

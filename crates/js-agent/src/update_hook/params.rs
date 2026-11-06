@@ -44,8 +44,7 @@ pub const CORDON_LEASE_KEY: &str = "cordon_lease_secs";
 /// The key of the longest a cordon may be held from its first placement.
 pub const CORDON_MAX_KEY: &str = "cordon_max_secs";
 
-/// The time between two looks at the host while a step waits for it to hold no lease.
-pub const POLL_SECS: u64 = 10;
+pub use js_update_hook::POLL_SECS;
 
 /// The shortest cordon lease: three polls, so that a renewal (due when less than half of it is
 /// left) always has polls to be made in.

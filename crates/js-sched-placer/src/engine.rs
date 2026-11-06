@@ -1,4 +1,4 @@
-//! The one `js-sched` scheduler a [`super::place::SchedPlacer`] keeps for the life of the
+//! The one `js-sched` scheduler a [`crate::place::SchedPlacer`] keeps for the life of the
 //! server, and the picture of the registry's books it keeps beside it.
 //!
 //! The engine learns the registry's books from the registry's own events, not from a
@@ -56,10 +56,10 @@ use js_types::sched::{
 };
 use js_types::{HostId, LeaseId, Shape};
 
-use super::map::{self, MapError};
+use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
-pub(crate) mod jobs;
+pub mod jobs;
 
 /// The term the engine grants leases in. A lease it places is numbered `TERM-<seq>`, with
 /// the sequence of the registry's lease, so the tie-break between equal hosts (a hash of
@@ -69,30 +69,30 @@ const TERM: u64 = 1;
 
 /// How the engine is built: the settings of the server's configuration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Settings {
+pub struct Settings {
     /// Whether a start may backfill a host set aside, and up to which wall time.
-    pub(crate) backfill: Backfill,
+    pub backfill: Backfill,
     /// The load settings, CPU slack included (`--cpu-slack`).
-    pub(crate) load: LoadConfig,
+    pub load: LoadConfig,
     /// The share of each host's memory the engine may book (`memory_schedulable_percent`).
-    pub(crate) memory: MemoryPercent,
+    pub memory: MemoryPercent,
 }
 
 /// The scheduler form of a host: its capacity and the capabilities its node report gives.
-pub(crate) type Node = (js_types::sched::Resources, NodeCaps);
+pub type Node = (js_types::sched::Resources, NodeCaps);
 
 /// A lease of the registry, or a job's allocation, the engine holds.
 #[derive(Debug, Clone, Copy)]
-struct Placed {
+pub struct Placed {
     /// The engine's lease.
-    lease: SchedLeaseId,
+    pub lease: SchedLeaseId,
     /// The engine's operation.
-    operation: OperationId,
+    pub operation: OperationId,
 }
 
 /// The scheduler and what ties it to the registry's books.
 #[derive(Debug)]
-pub(crate) struct Engine {
+pub struct Engine {
     sched: Scheduler,
     /// Every host the engine was told of, with the shape the registry books it as.
     hosts: BTreeMap<HostId, Shape>,
@@ -125,7 +125,7 @@ impl Engine {
     /// An engine built with `settings` over `every`, the hosts the registry lists with
     /// the leases on each, at `now`. Every host with a scheduler form is a worker; every
     /// lease is taken up on its host, as a lease recovered after a restart is.
-    pub(crate) fn build(settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
+    pub fn build(settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
         let mut sched = Scheduler::new(TERM)
             .with_backfill(settings.backfill)
             .with_load_config(settings.load)
@@ -172,7 +172,7 @@ impl Engine {
     /// readings' leases are named as the new engine numbers them. Every host in `every`
     /// is then heard from at `now`, without load: the registry lists it, so it is live,
     /// whatever the age of its last reading.
-    pub(crate) fn rebuild(&self, settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
+    pub fn rebuild(&self, settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
         let listed: BTreeSet<&HostId> = every.iter().map(|candidate| &candidate.host).collect();
         let mut replay: Vec<(FarmTime, &HostId, &NodeLoad)> = self
             .readings
@@ -200,7 +200,7 @@ impl Engine {
     /// `host` is no longer listed by the registry: it is forgotten, worker and all, unless
     /// the engine still holds a lease there (it then waits for the next rebuild) or a job's
     /// allocation (which only its host's confirmation or the provider's absence frees).
-    pub(crate) fn host_gone(&mut self, host: &HostId) {
+    pub fn host_gone(&mut self, host: &HostId) {
         let leased = self.on.get(host).is_some_and(|leases| !leases.is_empty());
         if leased | self.holds_jobs_on(host) {
             return;
@@ -213,7 +213,7 @@ impl Engine {
     }
 
     /// Feeds `event` at `now`, or at the last time fed if that is later.
-    fn feed(&mut self, now: FarmTime, event: Event) -> Vec<Effect> {
+    pub fn feed(&mut self, now: FarmTime, event: Event) -> Vec<Effect> {
         self.now = self.now.max(now);
         feed(&mut self.sched, self.now, event)
     }
@@ -233,7 +233,7 @@ impl Engine {
     /// Takes up `spec`'s lease, which the registry booked on `candidate` without the
     /// engine placing it (the fallback of a start the engine cannot describe): it is held
     /// there as a lease recovered after a restart is, booking what the registry books.
-    pub(crate) fn adopt(&mut self, candidate: &Candidate, spec: &StartSpec) {
+    pub fn adopt(&mut self, candidate: &Candidate, spec: &StartSpec) {
         // A lease that books the whole host is taken up as a request that owns its worker.
         let held = js_provider::Held {
             lease: spec.lease(),
@@ -254,7 +254,7 @@ impl Engine {
     /// `host` said hello, booked as `shape`: a worker up, of the capacity and caps the
     /// shape gives. A shape with no scheduler form is remembered, and the host is no
     /// worker: a start offered it falls back ([`Engine::nodes`]).
-    pub(crate) fn host_up(&mut self, host: &HostId, shape: &Shape, now: FarmTime) {
+    pub fn host_up(&mut self, host: &HostId, shape: &Shape, now: FarmTime) {
         if let Ok((capacity, caps)) = map::host(shape) {
             let up = Event::WorkerUp {
                 worker: map::worker(host),
@@ -275,7 +275,7 @@ impl Engine {
     /// for a beat; the reading's leases are named as the engine numbers them, and a lease the
     /// engine does not hold is left out of it. The scheduler takes no heartbeat of a host that is
     /// no worker of it.
-    pub(crate) fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
+    pub fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
         let here = self.on.get(host);
         let ours = |lease: &SchedLeaseId| {
             let registry = LeaseId::new(lease.term, lease.seq);
@@ -317,7 +317,7 @@ impl Engine {
 
     /// The registry stopped `lease`: the engine releases it, whether it still holds it or
     /// gave it up and waits with it. A lease the engine does not know changes nothing.
-    pub(crate) fn ended(&mut self, lease: LeaseId) {
+    pub fn ended(&mut self, lease: LeaseId) {
         let found = self
             .on
             .iter_mut()
@@ -330,7 +330,7 @@ impl Engine {
     }
 
     /// Lets go of what `placed` holds in the scheduler: its booking and its operation.
-    fn release(&mut self, placed: Placed) {
+    pub fn release(&mut self, placed: Placed) {
         let queued = self.sched.unplace(placed.lease).unwrap_or(placed.operation);
         let _ = self.sched.forget_queued(queued);
     }
@@ -339,7 +339,7 @@ impl Engine {
     /// start numbered `sequence` could book: each is a worker of the shape the registry
     /// books it as, and holds exactly the registry's leases there, none given up; and the
     /// lease the engine would grant for the start is not one it holds.
-    pub(crate) fn agrees(&self, open: &[Candidate], sequence: u64) -> bool {
+    pub fn agrees(&self, open: &[Candidate], sequence: u64) -> bool {
         let fresh = !self.back.contains_key(&SchedLeaseId::new(TERM, sequence));
         fresh && open.iter().all(|candidate| self.agrees_on(candidate))
     }
@@ -369,7 +369,7 @@ impl Engine {
     ///
     /// # Errors
     /// [`MapError`] of the first host that has none.
-    pub(crate) fn nodes(open: &[Candidate]) -> Result<Vec<Node>, MapError> {
+    pub fn nodes(open: &[Candidate]) -> Result<Vec<Node>, MapError> {
         open.iter()
             .map(|candidate| map::host(&candidate.shape))
             .collect()
@@ -388,7 +388,7 @@ impl Engine {
     ///
     /// # Errors
     /// [`MapError`] when the request has no scheduler form.
-    pub(crate) fn grant(
+    pub fn grant(
         &mut self,
         spec: &StartSpec,
         (open, nodes): (&[Candidate], Vec<Node>),
@@ -465,7 +465,7 @@ impl Engine {
     /// and is charged `charge`, held to the workers `only`, and runs one placement round:
     /// the lease and the worker it was placed on, or `None` when it was placed nowhere (it
     /// is then still queued, and the caller forgets it).
-    fn place_one(
+    pub fn place_one(
         &mut self,
         (operation, request): (OperationId, Request),
         (max_wall, charge): (std::time::Duration, Prediction),
@@ -509,15 +509,25 @@ impl Engine {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Engine {
+    /// The engine's scheduler, for a test that reads it.
+    pub fn sched(&self) -> &Scheduler {
+        &self.sched
+    }
+
+    /// The engine's scheduler, for a test that drives it.
+    pub fn sched_mut(&mut self) -> &mut Scheduler {
+        &mut self.sched
+    }
+
     /// The scheduler's load view of `host`.
-    pub(crate) fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
+    pub fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
         self.sched.load_view(&js_types::sched::WorkerId::new(host))
     }
 
     /// How many hosts the engine keeps, as hosts, workers and kept readings: the largest.
-    pub(crate) fn hosts_kept(&self) -> usize {
+    pub fn hosts_kept(&self) -> usize {
         let workers = self
             .hosts
             .keys()

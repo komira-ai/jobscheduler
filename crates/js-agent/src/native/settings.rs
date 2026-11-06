@@ -11,6 +11,7 @@ use super::NativeConfig;
 use super::network::Ceiling;
 use super::pf::{Enforcer, PfFlags, PfPolicy};
 use crate::bundle::Placer;
+use crate::logs::{DEFAULT_FILE_CAP, LogPlan};
 
 /// Where the helper makes lease users' homes unless `--native-homes` says otherwise.
 pub const DEFAULT_HOMES: &str = "/Users";
@@ -58,6 +59,8 @@ pub struct NativeSettings {
     config: NativeConfig,
     sandbox_exec: PathBuf,
     bundles: Option<Arc<Placer>>,
+    /// Live logs: the file cap of a run with a sink and the host's credential.
+    logs: LogPlan,
 }
 
 impl NativeSettings {
@@ -176,6 +179,7 @@ impl NativeSettings {
             },
             sandbox_exec: PathBuf::from(SANDBOX_EXEC),
             bundles: None,
+            logs: LogPlan::new(DEFAULT_FILE_CAP),
         }))
     }
 
@@ -204,6 +208,21 @@ impl NativeSettings {
             bundles: Some(placer),
             ..self
         })
+    }
+
+    /// The same settings with `file_cap` (`--log-file-cap`) as the most bytes of each log file
+    /// of a run with a sink that its uploader reads.
+    #[must_use]
+    pub fn with_log_file_cap(mut self, file_cap: u64) -> Self {
+        self.logs.file_cap = file_cap;
+        self
+    }
+
+    /// Live logs: the file cap of a run with a sink, and the cell of the host's credential,
+    /// which the session fills from the heartbeat replies and the runtime's uploaders read.
+    #[must_use]
+    pub fn logs(&self) -> &LogPlan {
+        &self.logs
     }
 
     /// The bundle store of the runtime, if there is one.
