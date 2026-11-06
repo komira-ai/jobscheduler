@@ -96,8 +96,8 @@ async fn sqlite_is_refused_unless_the_dev_flag_is_set() {
         )
     );
     let gated = format!("store = {path}\nallow_sqlite_store = true");
-    let config = file_config(&scratch, &static_file(&scratch, &gated)).unwrap();
-    let h = Harness::over(scratch, config).await;
+    let checked = file_config(&scratch, &static_file(&scratch, &gated)).unwrap();
+    let h = Harness::over(scratch, checked).await;
     assert!(h.running.store().is_some());
     h.running.shutdown().await.unwrap();
 
@@ -257,8 +257,8 @@ async fn a_store_with_an_elastic_pool_refuses_with_the_not_available_message() {
     let args = replace(args, "--listen", listen.local_addr().unwrap().to_string());
     let (_ticks, ticker) = js_lease_server::channel_ticker();
     let (_checks, checks) = js_lease_server::channel_ticker();
-    let config = config(args).unwrap();
-    let refused = js_lease_server::start_with_checks(config, clock(), ticker, checks).await;
+    let checked = config(args).unwrap();
+    let refused = js_lease_server::start_with_checks(checked, clock(), ticker, checks).await;
     let refused = refused.err().unwrap();
     assert_eq!(refused.flag(), "--store");
     assert!(
@@ -280,8 +280,8 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
     fs::create_dir(sqlite_db(&scratch)).unwrap();
     let args = sqlite_args_over(&scratch, &scratch);
     let (_ticks, ticker) = js_lease_server::channel_ticker();
-    let config = config(args).unwrap();
-    let refused = js_lease_server::start(config, clock(), ticker).await;
+    let checked = config(args).unwrap();
+    let refused = js_lease_server::start(checked, clock(), ticker).await;
     let refused = refused.err().unwrap();
     assert_eq!(refused.flag(), "--store");
     let db = sqlite_db(&scratch).display().to_string();
