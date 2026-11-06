@@ -185,9 +185,10 @@ fn a_dry_run_logs_the_launch_once_and_sends_nothing() {
 }
 
 /// Asserts that an offer the provider does not launch is refused as a shape error with
-/// nothing sent: one with no zone, one that is not on demand or spot (a Capacity Block, or
-/// no purchase stated), and one of an instance type the allow list leaves out; and that an
-/// allowed type, and a spot offer, are launched, a spot offer as spot.
+/// nothing sent: one with no zone, one that is not on demand, spot or a Capacity Block
+/// with terms (a Capacity Block with no terms, or no purchase stated), and one of an
+/// instance type the allow list leaves out; and that an allowed type, and a spot offer,
+/// are launched, a spot offer as spot.
 #[test]
 fn an_offer_the_provider_does_not_launch_is_refused_as_shape() {
     let rig = rig(live(5));

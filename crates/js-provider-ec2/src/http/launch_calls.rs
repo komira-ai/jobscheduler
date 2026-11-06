@@ -1,19 +1,25 @@
-//! The launch side over EC2: `RunInstances`, `DescribeInstances` and
-//! `TerminateInstances`. The cloud's XML is read into the records of [`crate::launch`].
+//! The launch side over EC2: `RunInstances`, `DescribeInstances`, `TerminateInstances`,
+//! `PurchaseCapacityBlock` and `DescribeCapacityReservations`. The cloud's XML is read into
+//! the records of [`crate::launch`].
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use super::catalog_calls::unix_seconds;
 use super::xml::{Node, unreadable};
 use super::{Form, HttpEc2};
 use crate::error::ApiError;
 use crate::launch::{
-    DescribeFilter, ImageId, Instance, InstanceId, InstanceState, LaunchPurchase, RunRequest, Tag,
+    BlockPurchase, CapacityReservation, CapacityReservationId, DescribeFilter, ImageId, Instance,
+    InstanceId, InstanceState, LaunchPurchase, ReservationState, RunRequest, Tag,
 };
 use crate::model::{InstanceType, Zone};
 
 /// The page size asked of `DescribeInstances` by tag (it may not be given with ids).
 const INSTANCES_PAGE: &str = "500";
+
+/// The page size asked of `DescribeCapacityReservations`.
+const RESERVATIONS_PAGE: &str = "500";
 
 impl HttpEc2 {
     /// `RunInstances` for one instance: the ids the answer names.
@@ -38,8 +44,19 @@ impl HttpEc2 {
         if !request.user_data.is_empty() {
             form = form.with("UserData", STANDARD.encode(request.user_data.expose()));
         }
-        if request.purchase == LaunchPurchase::Spot {
-            form = form.with("InstanceMarketOptions.MarketType", "spot");
+        match &request.purchase {
+            LaunchPurchase::OnDemand => {}
+            LaunchPurchase::Spot => {
+                form = form.with("InstanceMarketOptions.MarketType", "spot");
+            }
+            LaunchPurchase::CapacityBlock(reservation) => {
+                form = form
+                    .with("InstanceMarketOptions.MarketType", "capacity-block")
+                    .with(
+                        "CapacityReservationSpecification.CapacityReservationTarget.CapacityReservationId",
+                        reservation.as_str(),
+                    );
+            }
         }
         let answer = self.query(self.region.as_str(), &form)?;
         answer
@@ -76,6 +93,53 @@ impl HttpEc2 {
         })
     }
 
+    /// `PurchaseCapacityBlock` for a Linux block, tagged as the request says: the
+    /// reservation the answer holds. The call has no client token.
+    pub(super) fn purchase_block(
+        &self,
+        request: &BlockPurchase,
+    ) -> Result<CapacityReservation, ApiError> {
+        let form = Form::new("PurchaseCapacityBlock")
+            .with("CapacityBlockOfferingId", &request.offering)
+            .with("InstancePlatform", "Linux/UNIX")
+            .with("TagSpecification.1.ResourceType", "capacity-reservation");
+        let form = request
+            .tags
+            .iter()
+            .enumerate()
+            .fold(form, |form, (index, tag)| {
+                let number = index + 1;
+                form.with(format!("TagSpecification.1.Tag.{number}.Key"), &tag.key)
+                    .with(format!("TagSpecification.1.Tag.{number}.Value"), &tag.value)
+            });
+        let answer = self.query(self.region.as_str(), &form)?;
+        let reserved = answer
+            .at("capacityReservation")
+            .ok_or_else(|| unreadable("capacityReservation is missing"))?;
+        reservation(reserved)
+    }
+
+    /// `DescribeCapacityReservations` for the reservations that carry `tags`, every page.
+    pub(super) fn read_reservations(
+        &self,
+        tags: &[Tag],
+    ) -> Result<Vec<CapacityReservation>, ApiError> {
+        let form = tags.iter().enumerate().fold(
+            Form::new("DescribeCapacityReservations").with("MaxResults", RESERVATIONS_PAGE),
+            |form, (index, tag)| {
+                let number = index + 1;
+                form.with(format!("Filter.{number}.Name"), format!("tag:{}", tag.key))
+                    .with(format!("Filter.{number}.Value.1"), &tag.value)
+            },
+        );
+        self.listing(self.region.as_str(), &form, |answer| {
+            answer
+                .items("capacityReservationSet")
+                .map(reservation)
+                .collect()
+        })
+    }
+
     /// `TerminateInstances` for `ids`. The answer is not read: a success is all it says.
     pub(super) fn terminate(&self, ids: &[InstanceId]) -> Result<(), ApiError> {
         let form = ids
@@ -86,6 +150,17 @@ impl HttpEc2 {
             });
         self.ec2(self.region.as_str(), &form).map(|_| ())
     }
+}
+
+/// The reservation a `capacityReservation` element, or an `item` of
+/// `capacityReservationSet`, describes. An unknown state is read as it is spelled.
+fn reservation(item: &Node) -> Result<CapacityReservation, ApiError> {
+    Ok(CapacityReservation {
+        id: CapacityReservationId::new(item.required("capacityReservationId")?)
+            .ok_or_else(|| unreadable("capacityReservationId is not a capacity reservation id"))?,
+        state: ReservationState::parse(item.required("state")?),
+        end_unix_seconds: unix_seconds(item.required("endDate")?, "endDate")?,
+    })
 }
 
 /// The instance id `text`.
