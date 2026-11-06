@@ -17,7 +17,7 @@ use std::io::Write;
 use std::pin::pin;
 
 use clap::ArgMatches;
-use js_client::jobs::{Piece, Waiter, follow_logs, submit_retrying, wait_for_terminal};
+use js_client::jobs::{Piece, WaitError, Waiter, follow_logs, submit_retrying, wait_for_terminal};
 use js_proto::v1::{LogStream, SubmitJobRequest};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -144,17 +144,15 @@ impl Run<'_> {
                 self.follow(&mut stderr, LogStream::Stderr, err, err),
             )
         };
-        tokio::pin!(wait, follows);
         // The streams are written to their end once the job has ended, but a wait that
         // fails ends the run at once: the streams would go on until the job ends, and a
-        // signal would cancel nothing.
-        let (waited, drained) = tokio::select! {
-            waited = &mut wait => (waited, false),
-            _ = &mut follows => (wait.await, true),
-        };
-        if waited.is_ok() && !drained {
+        // signal would cancel nothing. `try_join!` is that: both run together, a failed
+        // wait drops the follows, and the same result comes whichever finishes first.
+        let waited = tokio::try_join!(wait, async {
             follows.await;
-        }
+            Ok::<(), WaitError>(())
+        })
+        .map(|(outcome, ())| outcome);
         ended(&self.job, waited, self.render, &mut **err.borrow_mut())
     }
 
