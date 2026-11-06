@@ -1,9 +1,11 @@
 //! `js-vmm`: the VM helper for macOS VM leases.
 //!
-//! Today it holds the feasibility probes of the design's gates (`probe`, `probe-bench`) and
-//! the base-image builder (`image base`). The logic that decides each verdict is plain
-//! Rust over the [`system::System`] trait and runs in unit tests on any OS; the one place
-//! that calls Virtualization.framework is `vz` (macOS only), reached through `real`.
+//! It holds the feasibility probes of the design's gates (`probe`, `probe-bench`), the
+//! base-image builder (`image base`), and the lifecycle of a lease's VM that the host agent
+//! drives ([`lease`]: clone, boot, exec through the guest agent, destroy; the real driver is
+//! [`lease_system`]). The logic that decides each verdict is plain Rust over the
+//! [`system::System`] trait and runs in unit tests on any OS; the one place that calls
+//! Virtualization.framework is `vz` (macOS only), reached through `real`.
 
 // Moved unchanged from a workspace that does not set `missing_docs`: public fields,
 // variants and functions are undocumented. Remove this once they are documented
@@ -22,6 +24,7 @@ pub mod guest_command;
 pub mod harvest;
 pub mod hostfs;
 pub mod image;
+pub mod lease_system;
 pub mod matrix;
 pub mod offline_put;
 pub mod prime;

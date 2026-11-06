@@ -22,7 +22,7 @@ use crate::support::{
 };
 
 /// A private directory `name` under `dir`.
-pub(super) fn private(dir: &Scratch, name: &str) -> String {
+pub(crate) fn private(dir: &Scratch, name: &str) -> String {
     let path = dir.path(name);
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -30,7 +30,7 @@ pub(super) fn private(dir: &Scratch, name: &str) -> String {
 }
 
 /// The flags of a native agent over `fake` with its state and scratch roots in `dir`.
-pub(super) fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
+pub(crate) fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
     vec![
         "--native-helper-socket".to_owned(),
         fake.socket().display().to_string(),
@@ -45,7 +45,7 @@ pub(super) fn native_flags(dir: &Scratch, fake: &FakeHelper) -> Vec<String> {
 
 /// Runs the whole agent on `host` with `extra` flags until the server's first answer
 /// (`answer`); returns what it printed and the hello it sent (`null` for none).
-pub(super) fn hello_on(
+pub(crate) fn hello_on(
     host: &Host,
     extra: &[String],
     answer: crate::support::Reply,

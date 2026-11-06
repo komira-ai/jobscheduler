@@ -1,0 +1,30 @@
+[package]
+name = "js-vm-lease"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The lifecycle of a lease's VM as the host agent drives it: the `VmDriver` seam and its
+# types, and the line protocol (`protocol`) over which the agent drives the one real driver,
+# which runs in the signed `js-vmm` binary (`js-vmm lease`). It starts no program, so the
+# agent may link it.
+
+[features]
+# The `fake` module: a recording in-memory driver, for the tests of what drives one. The
+# crate's own tests turn it on through the `[dev-dependencies]` entry below; a crate that
+# drives VMs turns it on in its own `[dev-dependencies]` entry.
+fake = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+js-vm-lease = { path = ".", features = ["fake"] }
+
+[lints]
+workspace = true
