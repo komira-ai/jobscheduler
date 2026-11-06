@@ -134,7 +134,8 @@ pub struct Engine {
     round: Option<js_registry::WholeRound>,
     /// The sequence the next lease of a whole-node request gets, in [`whole::WHOLE_TERM`].
     whole_seq: u64,
-    /// The hosts the engine cordons because the registry stands them lost or cordoned.
+    /// The hosts the engine cordons because the registry stands them lost, or would not book
+    /// them now while they carry nothing.
     cordoned: BTreeSet<HostId>,
     /// The hosts the engine gives a phase other than serving because the registry stands
     /// them tainted (quarantined) or leaving (draining).

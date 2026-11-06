@@ -84,11 +84,13 @@ fn waiting(name: &str, since: u64) -> WaitingWhole {
     }
 }
 
-/// A round of `waiting` over `hosts`, standing as given.
+/// A round of `waiting` over `hosts`, standing as given; a live host is one the registry
+/// would book (a busy one too: the engine reads only whether an idle host is bookable).
 fn round(waiting: Vec<WaitingWhole>, hosts: &[(&str, Standing)]) -> WholeRound {
     let hosts = hosts.iter().map(|(name, standing)| WholeHost {
         id: host(name),
         standing: *standing,
+        open: *standing == Standing::Live,
     });
     WholeRound {
         settings: settings(),
@@ -275,7 +277,8 @@ fn the_registrys_standing_moves_a_grant_at_once() {
     assert!(e.sched.cordon(&a).is_none());
     let d = map::worker(&host("d"));
     assert!(e.sched.cordon(&d).is_some());
-    assert_eq!(e.cordoned, BTreeSet::from([host("d")]));
+    // The leaving `c` and the cordoned `d` carry nothing the registry would book.
+    assert_eq!(e.cordoned, BTreeSet::from([host("c"), host("d")]));
     // Once the queue is empty the engine lets go of the cordons and phases it set.
     e.whole_round(round(Vec::new(), &others), at(4_000));
     e.whole_round(round(Vec::new(), &others), at(5_000));
@@ -283,6 +286,30 @@ fn the_registrys_standing_moves_a_grant_at_once() {
     let b = map::worker(&host("b"));
     assert_eq!(e.sched.phase(&b), Some(&NodePhase::Serving));
     assert!(e.cordoned.is_empty() & e.phased.is_empty());
+}
+
+/// Catches: a host the registry would not book now (restoring after a whole-node lease, a
+/// run still listed) granted to a request, which would then wait on it, perhaps for good,
+/// while it could drain another; and a request's own host taken from it while the host
+/// is restoring. The idle `a` is not bookable: `r` is granted nothing, and marks the busy
+/// `b` after `drain_after`. `b`'s lease ends while `b` is not yet bookable: `r` is granted
+/// `b`, which it held. Once `a` is bookable it is no longer kept from the engine's requests.
+#[test]
+fn a_host_the_registry_would_not_book_is_granted_to_no_new_request() {
+    let hosts = live(&["a", "b"]);
+    let mut e = engine(&[("a", &[]), ("b", &[1])]);
+    let mut shut = round(vec![waiting("r", 0)], &hosts);
+    shut.hosts[0].open = false;
+    assert!(e.whole_round(shut.clone(), at(1_000)).is_empty());
+    let a = map::worker(&host("a"));
+    assert!(e.sched.cordon(&a).is_some());
+    assert_eq!(held(&e.whole_round(shut.clone(), at(11_000))), ["r@b"]);
+    e.ended(LeaseId::new(1, 1));
+    shut.hosts[1].open = false;
+    assert_eq!(held(&e.whole_round(shut, at(12_000))), ["r@b*"]);
+    let marks = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(13_000));
+    assert_eq!(held(&marks), ["r@b*"]);
+    assert!(e.sched.cordon(&a).is_none() & e.cordoned.is_empty());
 }
 
 /// Catches: the hosts a request's failed prepares left out offered to it (as a mark or a

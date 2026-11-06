@@ -137,7 +137,7 @@ impl Registry {
             hosts,
         };
         let placer = self.shared.placer.get();
-        let round = placer.map(|placer| (placer, self.round_of(state, settings, now)));
+        let round = placer.map(|placer| (placer, self.round_of(state, &pass)));
         let placed = round.and_then(|(placer, round)| Some((placer.whole_round(&round)?, round)));
         if let Some((marks, round)) = placed {
             let presented = round.waiting.into_iter().map(|waiting| waiting.id);
@@ -160,7 +160,8 @@ impl Registry {
 
     /// What a placer that keeps the whole-node queue reads of the registry's books for one
     /// pass ([`WholeRound`]).
-    fn round_of(&self, state: &State, settings: &WholeNodeConfig, now: Timestamp) -> WholeRound {
+    fn round_of(&self, state: &State, pass: &Pass<'_>) -> WholeRound {
+        let (settings, now) = (pass.settings, pass.now);
         let grace = self.grace_ms();
         let waiting = state.waiting.waiting().map(|(id, request, since)| {
             let key = RequestKey::from(id);
@@ -176,9 +177,16 @@ impl Registry {
         });
         let waiting: Vec<WaitingWhole> = waiting.collect();
         let presented: BTreeSet<RequestId> = waiting.iter().map(|w| w.id.clone()).collect();
+        let open: BTreeSet<&HostId> = pass
+            .hosts
+            .iter()
+            .filter(|f| f.open)
+            .map(|f| &f.id)
+            .collect();
         let hosts = state.records.iter().map(|(id, record)| WholeHost {
             id: id.clone(),
             standing: standing(record, now, grace),
+            open: open.contains(id),
         });
         let source = self.shared.lives.get().map(|lives| &**lives);
         let booked = state.book.leases().into_values().flatten();

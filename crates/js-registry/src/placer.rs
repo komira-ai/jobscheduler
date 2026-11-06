@@ -46,7 +46,8 @@ pub enum Standing {
     /// It has not been heard within the pool's grace (or never, since it was seated): it
     /// may come back, and holds no request until it does.
     Lost,
-    /// It is live and an operator's cordon has not lapsed: it holds no request until then.
+    /// It is live and an operator's cordon has not lapsed: it takes no start until then,
+    /// and may still be set aside for a request, as a busy host may.
     Cordoned,
     /// It is live: it may hold a request.
     Live,
@@ -59,6 +60,9 @@ pub struct WholeHost {
     pub id: HostId,
     /// How the registry stands it.
     pub standing: Standing,
+    /// Whether the registry would book a whole-node lease on it now: live, serving, clean,
+    /// not cordoned, staying, clear of any whole-node lease, and with no lease or run on it.
+    pub open: bool,
 }
 
 /// A whole-node request on the registry's wait list that has been presented since the

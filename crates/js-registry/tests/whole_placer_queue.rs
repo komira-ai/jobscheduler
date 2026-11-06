@@ -13,11 +13,12 @@ use std::time::Duration;
 use js_agent_wire::DEFAULT_GRACE_MS;
 use js_lease::{ExclusionEnd, Held, Queued, ReservationRecord, Timestamp};
 use js_provider::{Candidate, StartAck, StartSpec};
+use js_registry::PoolConfig;
 use js_registry::{
     Exclusion, MarkedTails, Placer, ProfileLives, Reservation, Restored, Standing, WaitingWhole,
     WholeHost, WholeNodeConfig, WholeRound,
 };
-use js_types::RequestId;
+use js_types::{ProviderId, RequestId};
 use js_usage::ProfileKey;
 use support::world::*;
 use support::*;
@@ -72,6 +73,12 @@ impl ProfileLives for Table {
     }
 }
 
+/// Cordons `name` for ten minutes: the registry books nothing on it until then.
+fn cordon(w: &World, name: &str) {
+    let ten = Duration::from_secs(600);
+    w.fx.registry.cordon(&host(name), ten).unwrap();
+}
+
 /// `hosts` with the default whole-node settings and the queue placer set.
 fn world(hosts: &[&str]) -> (World, Arc<Queue>) {
     let w = World::new(hosts, plain);
@@ -94,18 +101,18 @@ fn mark(name: &str, on: &str, at: u64, assigned: bool) -> Reservation {
 
 /// Catches: the registry running its own pass beside the placer's (it would assign the
 /// quiet `b`), the placer's mark not shown, or the placer handed a request in another
-/// shape than the registry holds it. `a` is busy and the placer marks it for `r`: the
+/// shape than the registry holds it. `a` is cordoned and the placer marks it for `r`: the
 /// registry shows that mark, holds `a` for `r` (whose start books nothing while `a` is
-/// busy), and hands the placer `r` with its wall time, first presentation and mark.
+/// cordoned), and hands the placer `r` with its wall time, first presentation and mark.
 #[test]
 fn the_registry_shows_the_placers_marks_and_runs_no_pass_of_its_own() {
     let (mut w, queue) = world(&["a", "b"]);
-    assert_eq!(started_on(&w.share(1, 900)), Some("a"));
+    cordon(&w, "a");
     let since = w.now();
     let drain = mark("r", "a", since.millis(), false);
     queue.answer(drain.clone());
     assert_eq!(w.ask(2, "r"), no_capacity());
-    assert_eq!(w.reservations(), [drain.clone()]);
+    assert_eq!(w.reservations(), std::slice::from_ref(&drain));
     let first = WaitingWhole {
         id: id("r"),
         max_wall: Duration::from_secs(600),
@@ -115,7 +122,7 @@ fn the_registry_shows_the_placers_marks_and_runs_no_pass_of_its_own() {
         mark: None,
     };
     let round = queue.last();
-    assert_eq!(round.waiting, [first.clone()]);
+    assert_eq!(round.waiting, std::slice::from_ref(&first));
     assert_eq!(round.settings, WholeNodeConfig::dedicated(4));
     assert!(round.outside.is_empty() & round.lives.is_empty());
     w.step(5_000);
@@ -143,6 +150,7 @@ fn a_request_commits_on_the_host_set_aside_and_then_leaves_the_round() {
     w.fx.registry.advance();
     assert_eq!(queue.count(), asked + 1);
     assert!(queue.last().waiting.is_empty());
+    cordon(&w, "a");
     queue.answer(mark("s", "a", w.now().millis(), false));
     w.ask(3, "s");
     let shown = vec![("s".to_string(), "a".to_string())];
@@ -155,15 +163,21 @@ fn a_request_commits_on_the_host_set_aside_and_then_leaves_the_round() {
 
 /// Catches: a host handed to the placer as able to hold a request when the registry would
 /// not let it (tainted, leaving, lost or cordoned), or the reasons read in another order.
-/// Each host stands as the registry stands it, in host order.
+/// Each host stands as the registry stands it, in host order, and only the live idle one
+/// is open.
 #[test]
 fn the_round_stands_each_host_as_the_registry_does() {
-    let (mut w, queue) = world(&["a", "b", "c", "d", "e"]);
+    let name = ProviderId::new("builders").unwrap();
+    let config = PoolConfig::new(name, whole(), world_shape(), 5);
+    let config = config
+        .with_whole_node(WholeNodeConfig::dedicated(5))
+        .unwrap();
+    let mut w = World::of(config, &["a", "b", "c", "d", "e"]);
+    let queue = Arc::new(Queue::default());
+    w.fx.registry.set_placer(queue.clone());
     w.taint("b");
     w.fx.registry.retire(&host("c")).unwrap();
-    w.fx.registry
-        .cordon(&host("d"), Duration::from_secs(600))
-        .unwrap();
+    cordon(&w, "d");
     w.silent.insert("e".to_owned());
     w.step(DEFAULT_GRACE_MS + 5_000);
     w.fx.registry.advance();
@@ -179,6 +193,8 @@ fn the_round_stands_each_host_as_the_registry_does() {
         .map(|(name, standing)| WholeHost {
             id: host(name),
             standing: *standing,
+            // Only the live host, which carries nothing, would take a whole-node lease.
+            open: *standing == Standing::Live,
         })
         .collect();
     assert_eq!(queue.last().hosts, expected);

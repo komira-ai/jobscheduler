@@ -16,8 +16,12 @@
 //!    (cancelled, a `DELETE` of its pending lease, not presented within `regain_grace`):
 //!    [`Scheduler::cancel_whole`] drops its mark, or its pending grant, at once.
 //! 3. Follows how the registry stands each host: a tainted host is quarantined and a
-//!    leaving one draining in the engine, and a lost or cordoned one is cordoned, so none
-//!    is marked or granted and a mark on it moves; a pending grant there is put back.
+//!    leaving one draining in the engine, and a lost one is cordoned, so none is marked or
+//!    granted, a mark on it moves and a pending grant there is put back. A host the
+//!    registry would not book now and that carries nothing (restoring after a whole-node
+//!    lease, a run still listed, cordoned by an operator) is cordoned too, unless one of
+//!    the engine's requests holds it: it is granted to no other request until the registry
+//!    would book it, while a mark or pending grant already on it stays.
 //! 4. Holds the hosts of [`WholeRound::outside`] outside its queue
 //!    ([`Scheduler::reserve_outside`]), with their tails, for backfill.
 //! 5. Queues each newly presented request as a whole-machine operation, in the order of the
@@ -164,9 +168,15 @@ impl Engine {
     /// Follows how the registry stands each of `hosts` (step 3 of the module
     /// documentation).
     fn stand(&mut self, hosts: &[js_registry::WholeHost], now: FarmTime) {
+        let own = self.whole_hosts();
         for host in hosts {
             let worker = map::worker(&host.id);
-            let cordon = matches!(host.standing, Standing::Lost | Standing::Cordoned);
+            // A host the registry would not book now that carries nothing (restoring after
+            // a whole-node lease, a run still listed, cordoned by an operator) is granted to
+            // no request until it would; one a request already holds stays held.
+            let idle = self.sched.leases_on(&worker).is_empty() & !own.contains(&host.id);
+            let lost = host.standing == Standing::Lost;
+            let cordon = lost | (idle & !host.open);
             let cordoned = self.cordoned.contains(&host.id);
             if cordon & !cordoned {
                 self.cordoned.insert(host.id.clone());
@@ -207,9 +217,10 @@ impl Engine {
                 self.feed(now, Event::Phase { worker, phase });
             }
         }
+        let gone = [Standing::Lost, Standing::Tainted, Standing::Leaving];
         let off: BTreeSet<WorkerId> = hosts
             .iter()
-            .filter(|host| host.standing != Standing::Live)
+            .filter(|host| gone.contains(&host.standing))
             .map(|host| map::worker(&host.id))
             .collect();
         self.unplace_whole_where(|worker| off.contains(worker));
