@@ -15,7 +15,6 @@ use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 
-use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -27,6 +26,7 @@ use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
 use crate::job_expiry::JobLimits;
+use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
@@ -43,6 +43,7 @@ mod resolve;
 mod retention;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
+use agent_setup::with_pool_settings;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
@@ -601,6 +602,7 @@ impl Config {
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
                     jobs: server.agents.job_store(server.job_store_windows()),
+                    job_sources: JobSources::default(),
                 });
                 (
                     Hosts::Layered {
@@ -861,34 +863,6 @@ impl Config {
     }
 }
 
-/// `settings` with what the registered pool's file decides about whole-node leases: the
-/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
-/// (the lease table counts it; the registry counts the same figure per commit). A pool
-/// without whole-node settings, or no registered pool, leaves `settings` as the flags
-/// made them.
-fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
-    match hosts {
-        Hosts::Layered { agents, .. } => {
-            let whole = agents.pool.whole_node();
-            let settings = with_whole_node(settings, whole)?;
-            Ok(crate::reservations::with_restart_grace(settings, whole))
-        }
-        Hosts::Static(_) => Ok(settings),
-    }
-}
-
-fn with_whole_node(
-    settings: Settings,
-    whole: Option<&WholeNodeConfig>,
-) -> Result<Settings, StartupError> {
-    let Some(whole) = whole else {
-        return Ok(settings);
-    };
-    settings
-        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
-        .map_err(|err| StartupError::new("--agent-pool-config", err))
-}
-
 /// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
@@ -935,6 +909,7 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                     max_lease_wall: None,
                     job_limits: JobLimits::default(),
                     jobs: listen::job_store(cli),
+                    job_sources: JobSources::default(),
                 }),
             })
         }

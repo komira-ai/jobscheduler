@@ -169,7 +169,8 @@ fn a_queued_job_needs_no_re_presentation() {
         js_state::fake::Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store;
-    let jobs = js_jobs::JobStore::new(Arc::new(dynamic), js_jobs::RandomIds).unwrap();
+    let jobs =
+        js_jobs::JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     let (fill, _) = placed(&jobs, "job-fill", "host-a", sized(8), booked(8));
     queue(&jobs, "job-z-first", 10, 0);
     assert_eq!(pass(&placer, &jobs, &["host-a"]), NONE);

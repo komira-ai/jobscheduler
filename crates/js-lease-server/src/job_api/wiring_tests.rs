@@ -9,6 +9,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use js_jobs::{JobId, NewJob};
 use js_lease::{Boot, Clock, LeaseTable, ManualClock, Settings, Timestamp};
+use js_proto::v1::ListPoolsRequest;
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
@@ -20,6 +21,8 @@ use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::Agents;
 use crate::api::Shared;
 use crate::config::{Token, parse_token};
+use crate::job_api::fleet;
+use crate::status::Status;
 
 /// The time the server's clock reads, in milliseconds since the Unix epoch.
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -33,7 +36,20 @@ fn token() -> Token {
 
 /// A server state in `dir` whose agent side holds `jobs` (when given), or that has no agent
 /// side at all when `agents` is false.
-fn state(dir: &TestDir, agents: bool, jobs: Option<Arc<crate::job_store::ServerJobs>>) -> Shared {
+fn state(
+    dir: &TestDir,
+    agents: bool,
+    jobs: Option<Arc<crate::job_store::ServerJobs>>,
+) -> Arc<Shared> {
+    Arc::new(bare_state(dir, agents, jobs))
+}
+
+/// The state of [`state`], not yet shared, for a test that gives it more.
+fn bare_state(
+    dir: &TestDir,
+    agents: bool,
+    jobs: Option<Arc<crate::job_store::ServerJobs>>,
+) -> Shared {
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
     let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
     let pool = PoolConfig::new(
@@ -119,6 +135,35 @@ fn without_a_job_store_the_server_builds_no_job_service() {
     assert!(from_server(&state(&dir, true, None), WALL).is_none());
     let other = scratch("no_agents");
     assert!(from_server(&state(&other, false, None), WALL).is_none());
+}
+
+/// Asserts that the fleet group of the job service built from the server's state is served
+/// over the server's own handles: its hosts are the state itself, its pools the very status
+/// the state holds, and it has no usage history when the state has no usage side. A state
+/// given no status of its pools is served all the same, over the status of no pool:
+/// `ListPools` answers an empty list, not `UNIMPLEMENTED`. It catches a service built
+/// without its fleet group, or over a copy of the server's state or of its pools' status.
+#[tokio::test]
+async fn the_fleet_group_is_served_over_the_servers_own_handles() {
+    let dir = scratch("fleet_handles");
+    let (_, jobs) = tables();
+    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
+    let pools = Arc::new(Status::new(None, None, None, Vec::new(), clock));
+    let given = bare_state(&dir, true, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
+    let served = Arc::new(given);
+    let api = from_server(&served, WALL).expect("the server holds a job store");
+    let hosts: Arc<dyn fleet::Hosts> = served.clone();
+    assert_eq!(api.fleet, fleet::Ctx::served(hosts, pools, None));
+
+    let other = scratch("fleet_no_status");
+    let (_, jobs) = tables();
+    let bare = state(&other, true, Some(Arc::new(jobs)));
+    assert!(bare.pools().is_none());
+    let api = from_server(&bare, WALL).expect("the server holds a job store");
+    assert_ne!(api.fleet, fleet::Ctx::default());
+    let listed = fleet::list_pools(&api, tonic::Request::new(ListPoolsRequest::default())).await;
+    let listed = listed.expect("ListPools is served").into_inner();
+    assert!(listed.pools.is_empty(), "{listed:?}");
 }
 
 /// The status, the `grpc-status` header (absent for a plain HTTP answer) and the body of
