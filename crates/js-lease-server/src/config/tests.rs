@@ -1,6 +1,8 @@
 //! Unit tests of the configuration: the token and its file, the default limits and a pool's
 //! prepare timeout.
 
+use js_registry::WholeNodeConfig;
+
 use super::agent_setup::with_whole_node;
 use super::*;
 
