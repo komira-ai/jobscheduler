@@ -1312,6 +1312,7 @@ dependencies = [
  "js-state",
  "js-testkit",
  "js-types",
+ "sha2 0.11.1",
  "thiserror",
  "tracing",
  "tracing-subscriber",

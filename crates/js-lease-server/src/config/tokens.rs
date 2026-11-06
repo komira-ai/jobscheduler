@@ -10,9 +10,17 @@
 //! takes says neither whether nor which client the token is; and every digest has one
 //! length, so neither does the token's length. No `Debug` of this module prints a token or a
 //! digest.
+//!
+//! Each client has a role ([`Role`]): `client`, the default of a named client, or `operator`,
+//! which `default` always has. The set is held behind one shared handle ([`LiveClients`]):
+//! the bearer layer reads the set in force at each request, and [`LiveClients::reload`] reads
+//! every named client's token file again and replaces the set only when every file is still
+//! valid. The names, roles and paths are the configuration's, read once at start; the token
+//! of `default` is the lease routes' token, read once at start with them.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use js_jobs::ClientName;
 use js_registry::Credential;
@@ -87,59 +95,144 @@ fn digest(token: &[u8]) -> Vec<u8> {
     Sha256::digest(token).to_vec()
 }
 
-/// One client: its name, the entry of the configuration that gave it (for the refusals that
-/// name it), and the digest of its token.
+/// What a client may call on the job service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// Submits jobs, and reads and cancels only the jobs it submitted; no fleet call. The
+    /// role of a named client whose entry gives none.
+    Client,
+    /// Every call, on every job: the fleet calls, and the reads and cancels of any job. The
+    /// role of `default`, whose token is the lease routes'.
+    Operator,
+}
+
+impl Role {
+    /// What an entry's role must be, for the refusals.
+    pub(crate) const MUST: &'static str = "must be \"client\" or \"operator\"";
+
+    /// The role `text` names: `client` or `operator`, exactly; `None` for anything else.
+    pub(crate) fn parse(text: &str) -> Option<Role> {
+        match text {
+            "client" => Some(Role::Client),
+            "operator" => Some(Role::Operator),
+            _ => None,
+        }
+    }
+
+    /// The role's name, as an entry gives it and a log line says it.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Role::Client => "client",
+            Role::Operator => "operator",
+        }
+    }
+}
+
+/// One client: its name, its role, the entry of the configuration that gave it (for the
+/// refusals that name it), the digest of its token, and the file its token is read from
+/// again (`None` for `default`, whose token is read once at start).
 #[derive(Clone)]
 struct Client {
     name: ClientName,
+    role: Role,
     place: String,
     digest: Vec<u8>,
+    file: Option<PathBuf>,
 }
 
 /// The clients of the job service: the client named `default`, whose token is the one of
 /// `--token-file` (`server.client_token_file`), and each named client, in the order the
 /// configuration gives them. No two have one name or one token. Its `Debug` prints the names
-/// only.
+/// and roles only.
 #[derive(Clone)]
 pub(crate) struct Clients {
     each: Vec<Client>,
 }
 
 impl Clients {
-    /// The client named `default` alone, whose token is `token`, given by `place` (the
-    /// entry a refusal names it by).
+    /// The client named `default` alone, an operator, whose token is `token`, given by
+    /// `place` (the entry a refusal names it by).
     pub(crate) fn only(token: &Token, place: &str) -> Clients {
         let default = Client {
             name: ClientName::default_client(),
+            role: Role::Operator,
             place: place.to_owned(),
             digest: digest(&token.0),
+            file: None,
         };
         Clients {
             each: vec![default],
         }
     }
 
-    /// Adds the client `name`, whose token is `token`, given by `place`. Refused when an
-    /// earlier client has the name or the token.
-    pub(crate) fn add(
-        &mut self,
-        name: ClientName,
-        token: &Token,
-        place: String,
-    ) -> Result<(), Taken> {
+    /// Adds the client `entry` names, whose token is `token`, read from the entry's file.
+    /// Refused when an earlier client has the name or the token.
+    pub(crate) fn add(&mut self, entry: Entry, token: &Token) -> Result<(), Taken> {
         let digest = digest(&token.0);
-        if let Some(other) = self.each.iter().find(|client| client.name == name) {
+        if let Some(other) = self.each.iter().find(|client| client.name == entry.name) {
             return Err(Taken::Name(other.place.clone()));
         }
         if let Some(other) = self.holder(&digest) {
             return Err(Taken::Token(other.to_owned()));
         }
         self.each.push(Client {
-            name,
-            place,
+            name: entry.name,
+            role: entry.role,
+            place: entry.place,
             digest,
+            file: Some(entry.file),
         });
         Ok(())
+    }
+
+    /// The same clients, each named client's token read again from its file by `read`:
+    /// `default` and every name, role and order kept. Refused, naming the client's entry and
+    /// never the token, when a file cannot be read or holds no valid token, when two clients
+    /// would hold one token, or when `taken` says a token is not a client's to hold (it
+    /// gives the reason); nothing is replaced then.
+    pub(crate) fn reread(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
+        taken: &dyn Fn(&Token) -> Option<String>,
+    ) -> Result<Clients, String> {
+        let mut again = Clients {
+            each: Vec::with_capacity(self.each.len()),
+        };
+        for client in &self.each {
+            let Some(file) = &client.file else {
+                again.each.push(client.clone());
+                continue;
+            };
+            let place = &client.place;
+            let token = token_at(file, read).map_err(|reason| format!("{place}: {reason}"))?;
+            if let Some(reason) = taken(&token) {
+                return Err(format!("{place}: {reason}"));
+            }
+            let entry = Entry {
+                name: client.name.clone(),
+                role: client.role,
+                place: place.clone(),
+                file: file.clone(),
+            };
+            again
+                .add(entry, &token)
+                .map_err(|taken| format!("{place}: {taken}"))?;
+        }
+        Ok(again)
+    }
+
+    /// Whether `other` holds the same tokens, in the same order: of a set and its
+    /// [`Clients::reread`], which keeps every name, role and place, the tokens alone can
+    /// differ.
+    fn same_as(&self, other: &Clients) -> bool {
+        let digests = |clients: &Clients| -> Vec<Vec<u8>> {
+            clients
+                .each
+                .iter()
+                .map(|client| client.digest.clone())
+                .collect()
+        };
+        digests(self) == digests(other)
     }
 
     /// The entry of the client whose token is `token`, if one's is.
@@ -155,9 +248,9 @@ impl Clients {
             .map(|client| client.place.as_str())
     }
 
-    /// The client whose token `given` is, if it is one's: the digest of `given` is compared
-    /// with every client's, in constant time each, whichever matches.
-    pub(crate) fn identify(&self, given: &[u8]) -> Option<ClientName> {
+    /// The client whose token `given` is, with its role, if it is one's: the digest of
+    /// `given` is compared with every client's, in constant time each, whichever matches.
+    pub(crate) fn identify(&self, given: &[u8]) -> Option<(ClientName, Role)> {
         self.identify_with(given, |known, presented| known.ct_eq(presented).into())
     }
 
@@ -167,12 +260,12 @@ impl Clients {
         &self,
         given: &[u8],
         mut same: impl FnMut(&[u8], &[u8]) -> bool,
-    ) -> Option<ClientName> {
+    ) -> Option<(ClientName, Role)> {
         let presented = digest(given);
         let mut found = None;
         for client in &self.each {
             if same(client.digest.as_slice(), presented.as_slice()) {
-                found = Some(client.name.clone());
+                found = Some((client.name.clone(), client.role));
             }
         }
         found
@@ -214,12 +307,66 @@ impl fmt::Display for Taken {
 
 impl fmt::Debug for Clients {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names: Vec<&str> = self
+        let names: Vec<(&str, &str)> = self
             .each
             .iter()
-            .map(|client| client.name.as_str())
+            .map(|client| (client.name.as_str(), client.role.as_str()))
             .collect();
         f.debug_tuple("Clients").field(&names).finish()
+    }
+}
+
+/// A named client as its entry of the configuration gives it: the name, the role, the entry
+/// a refusal names it by, and the file of its token.
+#[derive(Debug, Clone)]
+pub(crate) struct Entry {
+    /// The client's name.
+    pub(crate) name: ClientName,
+    /// What it may call.
+    pub(crate) role: Role,
+    /// The entry of the configuration, as a refusal names it.
+    pub(crate) place: String,
+    /// The file its token is read from, at start and at every reload.
+    pub(crate) file: PathBuf,
+}
+
+/// The clients in force, behind one handle every holder shares: the bearer layer reads the
+/// set at each request ([`LiveClients::now`]), so a reload takes effect from the next
+/// request. Its `Debug` is the set's.
+#[derive(Clone)]
+pub(crate) struct LiveClients(Arc<RwLock<Arc<Clients>>>);
+
+impl LiveClients {
+    /// The handle on `clients`.
+    pub(crate) fn new(clients: Clients) -> LiveClients {
+        LiveClients(Arc::new(RwLock::new(Arc::new(clients))))
+    }
+
+    /// The set in force.
+    pub(crate) fn now(&self) -> Arc<Clients> {
+        Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Reads every named client's token file again by `read` ([`Clients::reread`], with
+    /// `taken` the tokens no client may hold) and, when every file is valid, puts the new
+    /// set in force; whether its tokens differ from the set it replaced. A refusal keeps the
+    /// set in force, whole, and says why, naming the entry and never the token.
+    pub(crate) fn reload(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
+        taken: &dyn Fn(&Token) -> Option<String>,
+    ) -> Result<bool, String> {
+        let again = self.now().reread(read, taken)?;
+        let mut held = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let changed = !held.same_as(&again);
+        *held = Arc::new(again);
+        Ok(changed)
+    }
+}
+
+impl fmt::Debug for LiveClients {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.now().fmt(f)
     }
 }
 
@@ -227,32 +374,47 @@ impl fmt::Debug for Clients {
 const FLAG: &str = "--client-token";
 
 /// What an entry of `--client-token` must be.
-const ENTRY_MUST: &str =
-    "must be NAME=PATH, with NAME 1 to 40 bytes of letters, digits, '.', '_' and '-'";
+const ENTRY_MUST: &str = "must be NAME=PATH or NAME:ROLE=PATH, with NAME 1 to 40 bytes of \
+     letters, digits, '.', '_' and '-' and ROLE \"client\" or \"operator\"";
+
+/// The name, role and path an entry of `--client-token` gives: `NAME=PATH` (the role
+/// `client`) or `NAME:ROLE=PATH`. A name holds no `:`, so the first `:` before the `=` ends
+/// it.
+fn entry_of(entry: &str) -> Option<(ClientName, Role, &Path)> {
+    let (head, path) = entry.split_once('=')?;
+    let (name, role) = match head.split_once(':') {
+        Some((name, role)) => (name, Role::parse(role)?),
+        None => (head, Role::Client),
+    };
+    Some((ClientName::parse(name).ok()?, role, Path::new(path)))
+}
 
 /// The clients the flags give: the client named `default`, whose token is `default` (the
-/// token of `--token-file`), and one per `--client-token NAME=PATH`, in order, each read from
-/// its file with the checks of `--token-file`. An entry that is not `NAME=PATH` with a valid name is
-/// refused by its position, without repeating it (a token pasted in its place is never
-/// printed); any other refusal names the entry by its name. Named clients need the job
-/// service, which alone takes them: without `--job-listen` the flag is refused.
+/// token of `--token-file`), and one per `--client-token NAME[:ROLE]=PATH`, in order, each
+/// read from its file with the checks of `--token-file`. An entry that is not of that form,
+/// with a valid name and role, is refused by its position, without repeating it (a token
+/// pasted in its place is never printed); any other refusal names the entry by its name.
+/// Named clients need the job service, which alone takes them: without `--job-listen` the
+/// flag is refused.
 pub(crate) fn from_flags(default: &Token, cli: &Cli) -> Result<Clients, StartupError> {
     let mut clients = Clients::only(default, "the client of --token-file");
     if !cli.client_token.is_empty() && cli.job_listen.is_none() {
         return Err(StartupError::new(FLAG, "requires --job-listen"));
     }
     for (at, entry) in cli.client_token.iter().enumerate() {
-        let parsed = entry
-            .split_once('=')
-            .and_then(|(name, path)| Some((ClientName::parse(name).ok()?, Path::new(path))));
-        let Some((name, path)) = parsed else {
+        let Some((name, role, path)) = entry_of(entry) else {
             let reason = format!("entry {}: {ENTRY_MUST}", at + 1);
             return Err(StartupError::new(FLAG, reason));
         };
         let named = |reason: String| StartupError::new(FLAG, format!("{name}: {reason}"));
         let token = token_at(path, read_private_reason).map_err(named)?;
-        let place = format!("--client-token {name}");
-        let added = clients.add(name.clone(), &token, place);
+        let entry = Entry {
+            name: name.clone(),
+            role,
+            place: format!("--client-token {name}"),
+            file: path.to_path_buf(),
+        };
+        let added = clients.add(entry, &token);
         added.map_err(|taken| named(taken.to_string()))?;
     }
     Ok(clients)
