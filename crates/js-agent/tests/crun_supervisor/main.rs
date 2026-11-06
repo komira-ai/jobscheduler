@@ -3,9 +3,11 @@
 //! other test of the crun runtime runs the delegate step in its process, which moves the process
 //! into the leaf and enables the controllers, and this test needs a process nothing has done that to.
 //! The tests are `#[ignore]`d; the crun-runtime workflow runs them in their own step. The module
-//! `unit` holds the test of the packaged unit's kill settings, which starts units of its own.
+//! `unit` holds the test of the packaged unit's kill settings, which starts units of its own, and
+//! `gpu_unit` the test of the GPU oneshot that writes the unit's `--gpu-*` drop-in before it starts.
 #![cfg(target_os = "linux")]
 
+mod gpu_unit;
 mod unit;
 
 /// Proves, in a real systemd unit started as the packaged unit is (`Delegate=yes` and

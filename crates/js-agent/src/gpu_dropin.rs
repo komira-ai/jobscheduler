@@ -20,9 +20,11 @@
 //!    `--gpu-device` for each other node, the driver's `lib64` and `bin` below `--driver-root`
 //!    as `--gpu-mount`s at [`LIB_TARGET`] and [`BIN_TARGET`], and `LD_LIBRARY_PATH` and `PATH`
 //!    as `--gpu-env`s;
-//! 5. parses the whole command line as the agent does and checks its GPU flags with
-//!    [`GpuPassthrough::from_cli`], against the GPU indices `nvidia-smi -L` listed (the ones the
-//!    agent checks at start) or, without that list, the ones the nodes name;
+//! 5. reads each node the flags name below `--dev-root` (as the agent reads them in `/dev` at
+//!    start: a character device), for the GPU indices `nvidia-smi -L` listed (the ones the agent
+//!    checks at start) or, without that list, the ones the nodes name; then parses the whole
+//!    command line as the agent does and checks its GPU flags with
+//!    [`GpuPassthrough::from_cli`];
 //! 6. writes the drop-in, `[Service]` with an `ExecStart=` reset and the command line, to a
 //!    temporary file beside `--out` that is then renamed over it.
 //!
@@ -41,7 +43,9 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::Cli;
-use crate::crun::{GpuPassthrough, INDEX, ReadNode};
+use js_contain::container::DeviceNode;
+
+use crate::crun::{GpuFlagError, GpuPassthrough, INDEX, NodeError, ReadNode};
 
 /// The verb: `js-agent crun-gpu-dropin`.
 pub(crate) const VERB: &str = "crun-gpu-dropin";
@@ -79,8 +83,8 @@ struct Args {
     /// The unit whose `ExecStart=` the drop-in extends.
     #[arg(long, default_value = "/etc/systemd/system/js-agent-crun.service")]
     unit: PathBuf,
-    /// The directory the nodes are listed in. The flags name `/dev`, and the check reads the
-    /// nodes there.
+    /// The directory the nodes are listed and read in (`/dev` on a host). The flags name them
+    /// below `/dev`.
     #[arg(long, default_value = "/dev")]
     dev_root: PathBuf,
     /// The directory holding the driver's `lib64` and `bin`.
@@ -336,7 +340,13 @@ fn generate(
         )
     })?;
     let indices: Vec<u32> = indices.into_iter().collect();
-    GpuPassthrough::from_cli(&cli, &indices, host.read).map_err(|why| why.to_string())?;
+    // The nodes are read where they were listed: in the dev root, which is `/dev` on a host.
+    let gpu_nodes = indices.iter().map(|i| format!("nvidia{i}"));
+    for node in gpu_nodes.chain(nodes.common.iter().cloned()) {
+        (host.read)(&args.dev_root.join(node))
+            .map_err(|why| GpuFlagError::Node(why).to_string())?;
+    }
+    GpuPassthrough::from_cli(&cli, &indices, read_already).map_err(|why| why.to_string())?;
     let command = line.join(" ");
     write_atomic(&args.out, &dropin(&command))
         .map_err(|why| format!("{}: {why}", args.out.display()))?;
@@ -413,6 +423,19 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     temp.push(".new");
     std::fs::write(&temp, text)?;
     std::fs::rename(&temp, path)
+}
+
+/// The reader [`GpuPassthrough::from_cli`] is given: each node was read in the dev root before,
+/// so this one accepts the `/dev` path the flag names.
+fn read_already(path: &Path) -> Result<DeviceNode, NodeError> {
+    Ok(DeviceNode {
+        path: path.to_string_lossy().into_owned(),
+        major: 0,
+        minor: 0,
+        uid: 0,
+        gid: 0,
+        mode: 0,
+    })
 }
 
 /// Removes a drop-in an earlier run wrote, so the unit is as it is without one.

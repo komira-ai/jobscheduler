@@ -350,18 +350,25 @@ fn flags_the_check_refuses_write_nothing_and_exit_1() {
     assert!(!temp.exists(), "a partial file is left");
 }
 
-/// A node the check cannot read as a character device is refused the same way.
+/// A node the check cannot read as a character device is refused the same way. The node is
+/// read where it was listed, in the dev root: with the host's own reader, the fake `/dev`'s plain
+/// files are refused by their path there.
 #[test]
 fn a_node_that_is_not_a_device_is_refused() {
     let rig = Rig::new("dropin-not-node", &["nvidia0"]);
-    let ran = rig.run_host(&rig.args(&[]), absent_smi, no_node);
-    assert_eq!(ran.code, status(1));
-    assert_eq!(
-        ran.err,
-        "crun-gpu-dropin: --gpu-device: /dev/nvidia0 is not a character device; \
-         no drop-in written\n"
-    );
-    assert!(!rig.out.exists());
+    for read in [no_node, crate::crun::read_node] {
+        let ran = rig.run_host(&rig.args(&[]), absent_smi, read);
+        assert_eq!(ran.code, status(1));
+        assert_eq!(
+            ran.err,
+            format!(
+                "crun-gpu-dropin: --gpu-device: {} is not a character device; no drop-in \
+                 written\n",
+                rig.dev.join("nvidia0").display()
+            )
+        );
+        assert!(!rig.out.exists());
+    }
 }
 
 /// `nvidia-smi -L` listing another number of GPUs than the nodes is a warning: the drop-in is
@@ -491,8 +498,9 @@ fn the_check_uses_the_gpus_nvidia_smi_lists() {
         format!(
             "crun-gpu-dropin: warning: /usr/bin/nvidia-smi -L lists the GPUs {{0, 1}} and {} \
              has the GPU nodes {{}}\n\
-             crun-gpu-dropin: --gpu-device: /dev/nvidia0 is not a character device; no drop-in \
+             crun-gpu-dropin: --gpu-device: {}/nvidia0 is not a character device; no drop-in \
              written\n",
+            rig.dev.display(),
             rig.dev.display()
         )
     );
