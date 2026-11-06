@@ -26,12 +26,12 @@ pub(crate) async fn tick(rig: &Rig) {
 }
 
 /// The sink a start of the job `job` carries.
-pub(crate) fn sink_of(job: &str) -> LogSink {
+pub(crate) fn sink_of(host: &str, job: &str) -> LogSink {
     LogSink {
         endpoint: LOG_ENDPOINT.to_owned(),
         region: LOG_REGION.to_owned(),
         bucket: LOG_BUCKET.to_owned(),
-        prefix: format!("a/b/{job}/"),
+        prefix: format!("a/b/{}/{job}/", js_logmint::host_segment(host)),
         path_style: true,
     }
 }
@@ -63,11 +63,12 @@ pub(crate) fn capture(lines: &Lines) -> tracing::subscriber::DefaultGuard {
 }
 
 /// A placed job's start holds the configured store, region, bucket and style and the job's
-/// own prefix under the log prefix, and no credential; the host's reply carries the
-/// credential, which may put and delete under that job's prefix and under another job's below
-/// the same log prefix, and nothing else: not under `a/bc/` beside the log prefix `a/b`, and no
-/// get or list anywhere. Catches a sink with the wrong prefix, a secret in a start, and a
-/// credential broader than the log prefix.
+/// own prefix under its host's prefix `a/b/js-<hash of host-a>/`, and no credential; the
+/// host's reply carries the credential, which may put and delete under that job's prefix and
+/// under another job's below the same host prefix, and nothing else: not under the sibling
+/// host's prefix, not directly under the log prefix `a/b/`, not under `a/bc/`, and no get or
+/// list anywhere. Catches a sink with the wrong prefix, a secret in a start, and a credential
+/// broader than the host's prefix (which would let a host write another host's jobs).
 #[tokio::test]
 async fn a_placed_job_starts_with_a_sink_naming_its_own_prefix_and_no_credential() {
     let (mut rig, logs) = logging_rig("logs_sink_prefix", LONG_GRACE);
@@ -77,7 +78,7 @@ async fn a_placed_job_starts_with_a_sink_naming_its_own_prefix_and_no_credential
     rig.place("job-a", "host-a");
     let reply = rig.beat(&agent).await.unwrap();
     let start = start_of(&reply, "job-a");
-    assert_eq!(start.log_sink, Some(sink_of("job-a")));
+    assert_eq!(start.log_sink, Some(sink_of("host-a", "job-a")));
     let grant = reply
         .log_grant
         .clone()
@@ -93,9 +94,11 @@ async fn a_placed_job_starts_with_a_sink_naming_its_own_prefix_and_no_credential
 
     let store = logs.client(&grant);
     let metadata = Metadata::default();
-    let ours = "a/b/job-a/stdout/00000000000000000000";
-    let theirs = "a/b/job-z/stderr/00000000000000000000";
-    for key in [ours, theirs] {
+    let host = |host: &str| format!("a/b/{}", js_logmint::host_segment(host));
+    let ours = format!("{}/job-a/stdout/00000000000000000000", host("host-a"));
+    let theirs = format!("{}/job-z/stderr/00000000000000000000", host("host-a"));
+    let ours = ours.as_str();
+    for key in [ours, theirs.as_str()] {
         store.put(key, b"bytes".to_vec(), &metadata).unwrap();
         store.delete(key).unwrap();
     }
@@ -105,12 +108,19 @@ async fn a_placed_job_starts_with_a_sink_naming_its_own_prefix_and_no_credential
             "{what}: {answer:?}"
         );
     };
+    let sibling = format!("{}/job-b/stdout/00000000000000000000", host("host-b"));
+    for outside in [
+        sibling.as_str(),
+        "a/b/job-a/stdout/00000000000000000000",
+        "a/bc/job-a/stdout/00000000000000000000",
+    ] {
+        denied(
+            store.put(outside, b"bytes".to_vec(), &metadata),
+            "a put outside",
+        );
+        denied(store.delete(outside), "a delete outside");
+    }
     let outside = "a/bc/job-a/stdout/00000000000000000000";
-    denied(
-        store.put(outside, b"bytes".to_vec(), &metadata),
-        "a put outside",
-    );
-    denied(store.delete(outside), "a delete outside");
     store.put(ours, b"bytes".to_vec(), &metadata).unwrap();
     for key in [ours, outside] {
         denied(store.get_range(key, 0, 5).map(drop), "a get");
@@ -177,13 +187,13 @@ async fn one_credential_serves_every_job_on_a_host() {
     let mut b = FakeAgent::uploading("host-b");
     let reply_a = rig.beat(&a).await.unwrap();
     let reply_b = rig.beat(&b).await.unwrap();
-    for (reply, jobs) in [
-        (&reply_a, &["job-1", "job-2", "job-3"][..]),
-        (&reply_b, &["job-4"][..]),
+    for (host, reply, jobs) in [
+        ("host-a", &reply_a, &["job-1", "job-2", "job-3"][..]),
+        ("host-b", &reply_b, &["job-4"][..]),
     ] {
         assert_eq!(starts(reply).len(), jobs.len());
         for job in jobs {
-            assert_eq!(start_of(reply, job).log_sink, Some(sink_of(job)));
+            assert_eq!(start_of(reply, job).log_sink, Some(sink_of(host, job)));
         }
     }
     let grant_a = reply_a.log_grant.clone().unwrap();
@@ -217,13 +227,19 @@ async fn a_start_never_waits_for_a_mint() {
     rig.place("job-a", "host-a");
     let agent = FakeAgent::uploading("host-a");
     let reply = rig.beat(&agent).await.unwrap();
-    assert_eq!(start_of(&reply, "job-a").log_sink, Some(sink_of("job-a")));
+    assert_eq!(
+        start_of(&reply, "job-a").log_sink,
+        Some(sink_of("host-a", "job-a"))
+    );
     assert_eq!(reply.log_grant, None);
     logs.minter.release();
     logs.settle().await;
     let reply = rig.beat(&agent).await.unwrap();
     assert!(reply.log_grant.is_some());
-    assert_eq!(start_of(&reply, "job-a").log_sink, Some(sink_of("job-a")));
+    assert_eq!(
+        start_of(&reply, "job-a").log_sink,
+        Some(sink_of("host-a", "job-a"))
+    );
 
     let unavailable = Unavailable::Status {
         status: 503,
@@ -235,7 +251,10 @@ async fn a_start_never_waits_for_a_mint() {
     logs.settle().await;
     rig.place("job-b", "host-b");
     let reply = rig.beat(&FakeAgent::uploading("host-b")).await.unwrap();
-    assert_eq!(start_of(&reply, "job-b").log_sink, Some(sink_of("job-b")));
+    assert_eq!(
+        start_of(&reply, "job-b").log_sink,
+        Some(sink_of("host-b", "job-b"))
+    );
     assert_eq!(reply.log_grant, None);
     assert_eq!(logs.minter.calls("host-b"), 1);
 }
@@ -249,9 +268,12 @@ async fn a_job_whose_id_cannot_make_a_prefix_has_no_sink() {
     let (mut rig, logs) = logging_rig("logs_bad_id", LONG_GRACE);
     let mut before = super::job_rig::rig("logs_bad_id_before", true);
     for bad in ["_lead", "-lead"] {
-        assert_eq!(logs.grants.sink_for(bad), None, "{bad}");
+        assert_eq!(logs.grants.sink_for("host-a", bad), None, "{bad}");
     }
-    assert_eq!(logs.grants.sink_for("ok-1"), Some(sink_of("ok-1")));
+    assert_eq!(
+        logs.grants.sink_for("host-a", "ok-1"),
+        Some(sink_of("host-a", "ok-1"))
+    );
     rig.join("host-a", true).await;
     before.register("host-a", true);
     for job in ["_lead", "-lead"] {
@@ -267,7 +289,10 @@ async fn a_job_whose_id_cannot_make_a_prefix_has_no_sink() {
     rig.place("ok-1", "host-a");
     let reply = rig.beat(&FakeAgent::uploading("host-a")).await.unwrap();
     assert_eq!(starts(&reply).len(), 1);
-    assert_eq!(start_of(&reply, "ok-1").log_sink, Some(sink_of("ok-1")));
+    assert_eq!(
+        start_of(&reply, "ok-1").log_sink,
+        Some(sink_of("host-a", "ok-1"))
+    );
 }
 
 /// A mint that fails at registration, `Unavailable` or `Refused`, costs the host its live
@@ -301,7 +326,10 @@ async fn a_mint_failure_costs_the_host_its_live_upload_until_a_later_mint_succee
         let id = rig.place("job-a", "host-a");
         let mut agent = FakeAgent::uploading("host-a");
         let reply = rig.beat(&agent).await.unwrap();
-        assert_eq!(start_of(&reply, "job-a").log_sink, Some(sink_of("job-a")));
+        assert_eq!(
+            start_of(&reply, "job-a").log_sink,
+            Some(sink_of("host-a", "job-a"))
+        );
         assert_eq!(reply.log_grant, None);
         agent.take(&reply);
         agent.run("job-a");

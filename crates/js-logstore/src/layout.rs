@@ -252,7 +252,7 @@ fn allowed(byte: u8) -> bool {
 }
 
 /// Whether `segment` is a segment a log prefix may hold.
-fn segment_ok(segment: &str) -> bool {
+pub(crate) fn segment_ok(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(allowed)
 }
 

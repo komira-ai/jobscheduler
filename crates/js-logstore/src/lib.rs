@@ -11,7 +11,11 @@
 //!   metadata), `delete` (a missing key is success), `get_range` and `list` (ListObjectsV2),
 //!   path-style or virtual-host-style, over a [`Transport`]. [`UreqTransport`] is the production
 //!   transport; the `fake` feature's [`fake::FakeStore`] is an in-memory bucket that checks
-//!   signatures and session policies.
+//!   signatures, session policies and prefix grants.
+//! - [`presigned`] is the upload credential of a store with no STS: a [`PrefixGrant`] scopes a
+//!   derived key to one prefix until an absolute expiry, and [`PrefixSigner`] presigns puts and
+//!   deletes with it, refusing a key outside the prefix or a time past the expiry before any
+//!   request exists.
 //!
 //! **Credentials.** A [`Credential`] is an access key id, a secret, an optional session token and
 //! an expiry. The client never sends a request with an expired one ([`StoreError::Expired`]);
@@ -39,6 +43,7 @@ pub mod fake;
 pub mod http;
 pub mod layout;
 pub mod list;
+pub mod presigned;
 pub mod sigv4;
 pub mod ureq_transport;
 
@@ -51,4 +56,5 @@ pub use layout::{
     ChunkName, Gap, JobPrefix, LayoutError, MAX_CHUNK_BYTES, MAX_PUT_BYTES, OFFSET_WIDTH, Stream,
 };
 pub use list::{Entry, Page};
+pub use presigned::{GrantError, PrefixGrant, PrefixSigner};
 pub use ureq_transport::{MAX_RESPONSE_BYTES, UreqTransport};

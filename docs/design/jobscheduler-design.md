@@ -688,7 +688,7 @@ Purpose: a job must not be able to harm the host, another job or the object stor
 
 Purpose: let a job write its output, once, without jobscheduler ever handling the credentials a client gives a job. The fence is a capability the client builds (step 1) and the agent carries. The server sends `files` only to a host that advertised the `run-files` capability. The agent keeps them in a memory-backed directory and mounts it read-only into the job; their contents are secret.
 
-What this guarantees, provided the client builds the grant as described and the object store enforces it (jobscheduler checks neither): a job can write one object, once, and cannot delete or overwrite. jobscheduler never holds the credentials a client gives a job: the create-only write grant of step 1 is still the client's. For logs alone it holds two operator-provided keys (the `AssumeRole` key and a read-only key) and hands each host's agent a temporary credential that can only put and delete under the configured log prefix (`live-logs.md`, section 4).
+What this guarantees, provided the client builds the grant as described and the object store enforces it (jobscheduler checks neither): a job can write one object, once, and cannot delete or overwrite. jobscheduler never holds the credentials a client gives a job: the create-only write grant of step 1 is still the client's. For logs alone it holds two operator-provided keys (the `AssumeRole` key, or for a store with no STS the grant signing key, and a read-only key) and hands each host's agent a temporary credential that can only put and delete under that host's prefix of the configured log prefix (`live-logs.md`, sections 4 and 4.1).
 
 #### Taint
 
@@ -1117,7 +1117,7 @@ Settled by the maintainers and therefore not listed: the job and allocation mode
 
 26. **Log retention.** Who deletes the final log files, and the chunks of streams that got no final or that an agent left behind? The scheduler never deletes a log object. **Recommendation:** a bucket lifecycle rule on the log prefix, set by the operator, of at least `--job-retention`, so a log lives as long as the job record `GetLogs` needs to find it; a job whose record was swept answers `unknown-job` whatever the store still holds (`live-logs.md`, section 10).
 27. **Live log coverage.** A stream is uploaded live only up to the local file cap (`--log-file-cap`, default 64 MiB); bytes past it are dropped by the capture and are a gap to the reader. The alternatives are *A.* a larger default (more disk per job) or *B.* a capture that frees what was uploaded, so the cap bounds the backlog rather than the stream (a change to the capture, and to the final file, which needs the whole stream on the host). The owners decide.
-28. **Object stores without `AssumeRole`.** A store must serve the STS `AssumeRole` call to be a log sink, and tierstore has no STS endpoint today. *A.* The store grows one. *B.* The scheduler gets a second minting kind (the `credentials` key leaves room for it). The owners decide.
+28. **Object stores without `AssumeRole`.** Decided: *B.* The scheduler has a second minting kind, `credentials = "presigned_prefix"`: each host's credential is a prefix grant derived from a signing key the store also holds, scoped to the host's prefix and expiring at the scheduler's clock plus `credential_ttl` (`live-logs.md`, section 4.1). One object layout serves both kinds, with the host in every job's prefix. Checking grants in tierstore, and the test against it, belong to the tierstore side.
 
 ## Related work
 

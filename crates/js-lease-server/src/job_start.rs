@@ -122,7 +122,9 @@ pub(crate) fn start_of(
         .wall_limit_secs
         .checked_mul(1000)
         .ok_or(Unsendable::WallLimit)?;
-    let log_sink = context.logs.and_then(|logs| logs.sink_for(job.id.as_str()));
+    let log_sink = context
+        .logs
+        .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str()));
     let mut start = JobStartSpec {
         job_id: job.id.to_string(),
         allocation_id: allocation.allocation_id.to_string(),
