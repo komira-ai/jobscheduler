@@ -38,8 +38,12 @@
 //!   files a pull request changes against the entries of `site/ci-paths`.
 //! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
-//!   service's descriptor set into the two checked-in files; `--check` fails naming a file that
-//!   is not current (docs/job-surface.md).
+//!   service's descriptor set into the two checked-in files, and the generated blocks of
+//!   `docs/http-gateway.md` (its route table and the paragraph that says which calls the
+//!   server serves); `--check` fails naming a file that is not current (docs/job-surface.md).
+//! - [`doc_refs`]: every `js` command the runbooks show and every `/v1/` route they and
+//!   `docs/http-gateway.md` name exists, used by the `doc_refs` test rather than a verb:
+//!   `cargo test -p xtask --test doc_refs`.
 //! - `determinism [--root <dir>]` ([`determinism`]): no clock or random source is read in the
 //!   crates a `js-sim-cell` run links, but at the sites its allow-list names, each with a
 //!   reason (docs/simulation.md). The test `cargo test -p xtask --test determinism` runs it on
@@ -68,6 +72,7 @@ pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
 pub mod determinism;
+pub mod doc_refs;
 pub mod fetch;
 pub mod image;
 pub mod job_surface;

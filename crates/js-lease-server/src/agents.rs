@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
@@ -26,6 +26,7 @@ use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::logs::{self, LogGrants};
+use crate::metrics::Meter;
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
@@ -97,6 +98,9 @@ pub(crate) struct Agents {
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
+    /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
+    /// the server serves its metrics, and counting nothing until then.
+    meter: OnceLock<Meter>,
     /// Trips when the state store says this process is no longer its writer
     /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
     pub(crate) fence: Fence,
@@ -226,6 +230,7 @@ pub(crate) fn assemble_placed(
                 logs,
                 job_limits,
                 listed_sessions: Mutex::default(),
+                meter: OnceLock::new(),
                 fence: Fence::new(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
@@ -274,6 +279,7 @@ impl Agents {
             logs: None,
             job_limits: JobLimits::default(),
             listed_sessions: Mutex::default(),
+            meter: OnceLock::new(),
             fence: Fence::new(),
         }
     }
@@ -479,6 +485,17 @@ impl Agents {
     /// bindings that could not be written.
     pub(crate) fn errors(&self) -> u64 {
         self.errors.load(Ordering::SeqCst)
+    }
+
+    /// Counts the job side's events with `meter` from now on. Set once: a second meter is
+    /// ignored.
+    pub(crate) fn set_meter(&self, meter: Meter) {
+        let _ = self.meter.set(meter);
+    }
+
+    /// Where the job side's events are counted: [`Meter::off`] until [`Agents::set_meter`].
+    pub(crate) fn meter(&self) -> &Meter {
+        self.meter.get().unwrap_or(Meter::off())
     }
 
     /// What every tick does for the agent side: read the join tokens again and drop the

@@ -107,6 +107,7 @@ use js_types::{ExecMode, HostId, RequestId};
 use tracing::{debug, info, warn};
 
 use crate::adapt::SharedClock;
+use crate::metrics::Meter;
 use crate::sched::engine::jobs::open_to_jobs;
 use crate::util::blocking;
 
@@ -184,6 +185,9 @@ struct Core {
     /// The next tick takes them and puts them back if its records were not written, so a
     /// request is dropped only by a restart before the write; asking again is harmless.
     brake_resets: Mutex<BTreeSet<String>>,
+    /// Where each launch asked of a provider is counted ([`crate::metrics`]); set once, at
+    /// start, when the server serves its metrics.
+    meter: OnceLock<Meter>,
     /// Whether the provider's notice stream is open (the `events` module).
     listen: Mutex<events::Listen>,
     /// The provider ids of reclaimed machines that no tick has written records for yet. The
@@ -269,6 +273,7 @@ impl Scaler {
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
             sink: OnceLock::new(),
+            meter: OnceLock::new(),
             brake_resets: Mutex::new(BTreeSet::new()),
             listen: Mutex::new(events::Listen::Closed),
             reclaimed: Mutex::new(BTreeSet::new()),
@@ -299,6 +304,13 @@ impl Scaler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
+    }
+
+    /// Counts each launch the scaler asks a provider for, and each that fails over, with
+    /// `meter` ([`crate::metrics`]). Set once, before the first tick; a second call changes
+    /// nothing.
+    pub(crate) fn set_meter(&self, meter: Meter) {
+        let _ = self.core.meter.set(meter);
     }
 
     /// Sends every alert the scaler raises to `sink` as well as the log: once when it
@@ -734,7 +746,12 @@ impl Core {
                 }
                 Action::Acquire(plan) => {
                     let answer = match tokens.remove(&plan.name) {
-                        Some(token) => self.effects.acquire(&plan, token),
+                        Some(token) => {
+                            let answer = self.effects.acquire(&plan, token);
+                            let meter = self.meter.get().unwrap_or(Meter::off());
+                            meter.sink().acquire_answered(&plan.pool, &answer);
+                            answer
+                        }
                         None => Acquired::Deferred { wait: RETRY_AFTER },
                     };
                     answers.acquired.push(AcquireResult {

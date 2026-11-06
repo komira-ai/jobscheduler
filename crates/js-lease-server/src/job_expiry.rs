@@ -29,6 +29,7 @@ use js_state::StoreTime;
 
 use crate::file::PoolSettings;
 use crate::job_store::ServerJobs;
+use crate::metrics::MetricsSink;
 
 /// How long a pool's jobs may wait (design section 4.2): its `max_queue_wait` and its
 /// `start_timeout`.
@@ -103,7 +104,8 @@ pub(crate) fn due(job: &JobRecord, limits: JobLimits, now: StoreTime) -> Option<
 /// are the queued ones and those of every live allocation (a placed or starting job always has
 /// one). A job that moved on between the read and its commit (placed, started, ended, or
 /// changed by a heartbeat) is left for the next pass, which reads it again; a job that another
-/// writer ended in between keeps that end and is not returned.
+/// writer ended in between keeps that end and is not returned. Each job it ends is told to
+/// `metrics` as its commit lands, so a pass that fails later still counts it.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read, or of a commit that failed for another reason than a
@@ -112,6 +114,7 @@ pub(crate) fn expire(
     jobs: &ServerJobs,
     limits: JobLimits,
     now: StoreTime,
+    metrics: &dyn MetricsSink,
 ) -> Result<Vec<(JobId, StartFailure)>, JobStoreError> {
     let mut waiting = jobs.queued()?;
     for allocation in jobs.live_allocations()? {
@@ -125,7 +128,10 @@ pub(crate) fn expire(
         match jobs.end_job(&job.id, JobEnd::FailedToStart(failure)) {
             Ok(record) => {
                 let by_this = record.state == JobState::FailedToStart(failure);
-                ended.extend(by_this.then_some((job.id, failure)));
+                ended.extend(by_this.then(|| {
+                    metrics.start_failed(failure);
+                    (job.id, failure)
+                }));
             }
             Err(JobStoreError::IllegalTransition { .. } | JobStoreError::Stale { .. }) => {}
             Err(error) => return Err(error),
