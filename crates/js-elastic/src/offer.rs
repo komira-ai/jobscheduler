@@ -31,15 +31,27 @@ pub enum Purchase {
     Other(String),
 }
 
-/// A provider account's limit on the vCPUs of running machines, for the group of machine
-/// types and the purchase option an offer belongs to, as the provider reported it. It is
+/// A provider account's limits on running machines, for the group of machine types and
+/// the purchase option an offer belongs to, as the provider reported them: one on their
+/// vCPUs and one on their accelerators, each `None` when the provider states no such
+/// limit for the group (a cloud may limit a GPU family by its GPUs only). It is
 /// information: nothing removes, delays or marks an offer because of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quota {
-    /// The most vCPUs the account may run.
-    pub vcpus_limit: u32,
-    /// The vCPUs running now, when the provider says; `None`: not reported.
-    pub vcpus_in_use: Option<u32>,
+    /// The limit on the vCPUs of running machines. `None`: not stated.
+    pub vcpus: Option<QuotaLimit>,
+    /// The limit on the accelerators (GPUs) of running machines, of the offer's
+    /// accelerator model. `None`: not stated.
+    pub accelerators: Option<QuotaLimit>,
+}
+
+/// One limit of a [`Quota`], in units of the thing it counts (vCPUs or accelerators).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaLimit {
+    /// The most the account may run.
+    pub limit: u32,
+    /// How many run now, when the provider says; `None`: not reported.
+    pub in_use: Option<u32>,
 }
 
 /// The terms of a reserved block of machines that an offer of
@@ -143,7 +155,7 @@ pub struct Offer {
     /// How a machine from it is bought. `None`: the catalog does not say. It is not part
     /// of the [fit](Self::fit).
     pub purchase: Option<Purchase>,
-    /// The account's vCPU limit for this offer's machine group and purchase option, as
+    /// The account's limits for this offer's machine group and purchase option, as
     /// information only. `None`: not known (the provider has none, the account has no
     /// entry, or the read failed).
     pub quota: Option<Quota>,

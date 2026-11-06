@@ -89,8 +89,14 @@ pub(super) fn rig(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Rig
 pub(super) fn rig_of(config: crate::config::Config, dir: TestDir, clock: ManualClock) -> Rig {
     let shared = SharedClock::new(clock.clone());
     let table_of = (config.settings, config.state_file.clone(), config.boot);
-    let ((source, agents), placer) =
-        assemble_placed(config.hosts, config.usage, &shared, &config.state_file).unwrap();
+    let ((source, agents), placer) = assemble_placed(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    )
+    .unwrap();
     let agents = agents.unwrap();
     let provider = agents.registry.provider().with_classes(vec![sharing()]);
     Rig {

@@ -371,7 +371,13 @@ fn served_with(name: &str, ports: &[u16]) -> (Arc<Agents>, ManualClock, js_testk
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let moving = clock();
     let shared = crate::adapt::SharedClock::new(moving.clone());
-    let assembled = assemble_placed(config.hosts, config.usage, &shared, &config.state_file);
+    let assembled = assemble_placed(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    );
     let ((_, agents), _) = assembled.unwrap();
     let (_store, jobs) = tables();
     let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();

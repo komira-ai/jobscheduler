@@ -69,8 +69,14 @@ fn live_over(name: &str, pool: &str, hosts: &[&str], extra: &[&str]) -> Live {
     let config = config_of(dir.path(), pool, extra);
     let clock = ManualClock::new(Timestamp::from_millis(T0));
     let shared = SharedClock::new(clock.clone());
-    let (source, agents) =
-        assemble(config.hosts, config.usage, &shared, &config.state_file).unwrap();
+    let (source, agents) = assemble(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    )
+    .unwrap();
     let provider = source.provider(&[]).unwrap().provider;
     let table_of = (config.settings, config.state_file.clone(), config.boot);
     let agents = agents.unwrap();
@@ -506,8 +512,14 @@ fn from_file(name: &str, ceiling: Option<&str>) -> Live {
     )
     .unwrap();
     let table_of = (config.settings, config.state_file.clone(), config.boot);
-    let (source, agents) =
-        assemble(config.hosts, config.usage, &shared, &config.state_file).unwrap();
+    let (source, agents) = assemble(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    )
+    .unwrap();
     let provider = source.provider(&[]).unwrap().provider;
     let agents = agents.unwrap();
     let welcome = agents

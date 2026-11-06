@@ -105,7 +105,7 @@ async fn until_release_is_asked(
 
 /// Asserts the whole life of a machine through the real server and the cloud's own bill. A
 /// request waits; the cloud refuses the first launch for capacity and makes nothing (the
-/// bill is nothing); the next launch succeeds; the host says hello with the token in the
+/// bill is nothing); the next launch, `acquire_retry` later, succeeds; the host says hello with the token in the
 /// user data; the lease is placed and ends; the host is drained, marked and released; the
 /// cloud answers `Terminating` and then the record goes `Gone` when the cloud says it no
 /// longer has the machine. The cloud's bill is then exactly the whole minutes between its
@@ -124,8 +124,12 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
     rig.tick().await;
     assert_eq!((cloud.count(Call::Acquire), cloud.launched()), (1, 0));
     assert_eq!(cloud.bill(), Bill::default());
-    for _ in 0..3 {
+    // The request every offer was refused for waits the pool's `acquire_retry` (60 seconds),
+    // presented again every ten seconds as a waiting consumer does, so the registry keeps it.
+    for _ in 0..9 {
         if cloud.launched() == 0 {
+            rig.advance(10);
+            assert!(matches!(rig.present(), StartAck::Unknown));
             rig.tick().await;
         }
     }
@@ -185,15 +189,14 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
         .await;
 }
 
-/// Asserts the refusals that hold the pool back, through the server: for quota, denial and a
-/// request that fits nothing the pool says why after the tick that learns of the refusal,
-/// nothing is launched and the bill is nothing, the cloud is asked once during the whole
-/// cooldown, and after it (ten minutes) the machine is launched. It catches a refusal
-/// that does not stop the pool from asking again, and one that stops it for longer.
+/// Asserts the refusals that hold the pool back, through the server: for denial and a request
+/// that fits nothing the pool says why after the tick that learns of the refusal, nothing is
+/// launched and the bill is nothing, the cloud is asked once during the whole cooldown, and
+/// after it (ten minutes) the machine is launched. It catches a refusal that does not stop
+/// the pool from asking again, and one that stops it for longer.
 #[tokio::test]
-async fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
+async fn a_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
     let cases = [
-        (RefusalCode::Quota, Blocked::Quota),
         (RefusalCode::Denied, Blocked::Denied),
         (RefusalCode::Shape, Blocked::Shape),
     ];
@@ -224,6 +227,43 @@ async fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         rig.tick().await;
         assert_eq!(cloud.launched(), 1, "{code:?}");
     }
+}
+
+/// Asserts that a quota refusal passes the instance type over instead of cooling the pool,
+/// through the server: after the refusal the pool shows no block and no cooldown, nothing
+/// is launched and the bill is nothing, the cloud is not asked again for the quota backoff
+/// (one hour) although the request waits and the pool ticks, and once the hour is past the
+/// instance type is asked for again and the machine is launched. It catches a quota refusal
+/// that cools or blocks the whole pool, one that does not stop the same instance type from
+/// being asked again at once, and one that never lets it be asked again.
+#[tokio::test]
+async fn a_quota_refusal_passes_the_instance_type_over_for_the_backoff() {
+    let cloud = cloud();
+    cloud.script(Call::Acquire, &[Step::Refuse(RefusalCode::Quota)]);
+    let rig = Rig::elastic("e2e_cloud_refuse_quota", cloud.clone()).await;
+    rig.tick().await;
+    rig.wait();
+    rig.tick().await;
+    rig.tick().await;
+    assert!(!rig.state().blocked.contains_key("burst"));
+    assert_eq!(cloud.count(Call::Acquire), 1);
+    assert_eq!(cloud.launched(), 0);
+    assert_eq!(cloud.bill(), Bill::default());
+    assert!(rig.state().records.instances.is_empty());
+
+    rig.advance(30 * 60);
+    rig.h.checks.step().await;
+    rig.wait();
+    rig.tick().await;
+    assert_eq!(cloud.count(Call::Acquire), 1, "asked during the backoff");
+    assert!(!rig.state().blocked.contains_key("burst"));
+
+    rig.advance(31 * 60);
+    rig.h.checks.step().await;
+    rig.wait();
+    rig.tick().await;
+    assert_eq!(cloud.count(Call::Acquire), 2);
+    assert_eq!(cloud.launched(), 1);
 }
 
 /// Asserts preemption through the server: the cloud reclaims a registered machine two and a

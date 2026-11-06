@@ -14,6 +14,8 @@
 //! - [`Catalogs::acquired`] invalidates a provider's cache when it refuses an acquire for
 //!   capacity or quota: its offers are out of date. They stay readable until the fetch it
 //!   makes due replaces them.
+//! - [`Catalogs::fetches`] counts the fetches that completed, so the scaler sees that a
+//!   refresh completed and asks again for a request every offer was refused for.
 //! - A catalog never fetched reads as [`CatalogView::Unread`], which admission counts as
 //!   "may offer"; a stale catalog is still the offers it holds. A restart starts with every
 //!   catalog never fetched and no cool-down.
@@ -29,6 +31,7 @@
 //! is a live answer from the provider, so it calls the provider itself.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -48,6 +51,8 @@ struct Entry {
     provider: Arc<dyn CapacityProvider>,
     cache: Mutex<CatalogCache>,
     offer_cooldown: Duration,
+    /// How many fetches of its catalog have completed.
+    fetches: AtomicU64,
 }
 
 impl Entry {
@@ -85,6 +90,7 @@ impl Catalogs {
             cache: Mutex::new(CatalogCache::new(catalog_refresh)),
             offer_cooldown,
             provider,
+            fetches: AtomicU64::new(0),
         };
         self.providers.insert(entry.provider.id(), entry);
         self
@@ -131,6 +137,16 @@ impl Catalogs {
         cooldowns.cool_down(key, now, entry.offer_cooldown);
     }
 
+    /// How many fetches of `provider`'s catalog have completed (a failed one is not
+    /// counted); zero for a provider that is not one of these. Pass 2 reads a change of the
+    /// count as a completed catalog refresh (design 5.6, step 5): a request waiting
+    /// `acquire_retry` after every offer was refused for it is asked about again at once.
+    pub fn fetches(&self, provider: &ProviderId) -> u64 {
+        self.providers
+            .get(provider)
+            .map_or(0, |entry| entry.fetches.load(Ordering::Relaxed))
+    }
+
     /// Takes in `provider`'s answer to an acquire: a refusal for capacity or quota
     /// invalidates its cache, so the next [`Catalogs::refresh_due`] fetches it, and the
     /// offers stay readable until then. Any other answer changes nothing: a `shape` or
@@ -162,6 +178,9 @@ impl Catalogs {
             }
             let fetched = fetch(Arc::clone(&entry.provider)).await;
             let recorded = entry.cache().record(now, fetched);
+            if recorded == Recorded::Fetched {
+                entry.fetches.fetch_add(1, Ordering::Relaxed);
+            }
             if recorded == (Recorded::Failed { first: true }) {
                 let error = entry.cache().last_error().unwrap_or_default().to_owned();
                 warn!(
