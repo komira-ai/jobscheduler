@@ -1,4 +1,4 @@
-Reads the log tail held so far, also for a running job, and for the retention window after the job ended. Changes nothing.
+Reads a job's output. Without a stream: the job's state and its result's tails. With a stream: one page of that stream's bytes from an offset, read from the log store, while the job runs and for the retention window after it ended, optionally waiting a bounded time for new bytes. Changes nothing.
 
 Usage: js job logs [OPTIONS] --job-id <TEXT>
 
@@ -15,8 +15,22 @@ Options:
       --json
           Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
 
+      --follow <BOOL>
+          Whether to wait, up to 20 seconds, for new bytes when none are there yet, then answer; an answer at the cap has no data. Absent: false. A job that has ended answers at once.
+
+      --from-offset <N>
+          The offset of the first byte wanted, counted from the stream's first byte. Absent: 0. Past the length of an ended job's stream: refused, OUT_OF_RANGE.
+
       --job-id <TEXT>
-          The id of the job whose log tail to read.
+          The id of the job whose output to read.
+
+      --max-bytes <N>
+          The most bytes of data in the answer. Absent: 262144 (256 KiB). A larger value than 1048576 (1 MiB) is cut to it; 0 is refused.
+
+      --stream <NAME>
+          The stream to read. Unspecified: the result's tails, and the other fields below are not read.
+          
+          [possible values: unspecified, stdout, stderr]
 
   -h, --help
           Print help (see a summary with '-h')

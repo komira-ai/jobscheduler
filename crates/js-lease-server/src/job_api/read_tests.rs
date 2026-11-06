@@ -64,6 +64,11 @@ impl js_lease::Clock for ServiceClock {
     }
 }
 
+/// The service's clock over the store's clock `clock`: the same reading.
+pub(super) fn service_clock(clock: &Arc<ManualClock>) -> SharedClock {
+    SharedClock::new(ServiceClock(Arc::clone(clock)))
+}
+
 /// A store clock at [`START_MS`].
 pub(super) fn clock() -> Arc<ManualClock> {
     let clock = Arc::new(ManualClock::default());
@@ -107,8 +112,16 @@ impl Rig {
         clock: Arc<ManualClock>,
         ctx: read::Ctx,
     ) -> Rig {
-        let shared = SharedClock::new(ServiceClock(Arc::clone(&clock)));
-        let api = Arc::new(JobApi::new(Arc::clone(&jobs), shared).with_read(ctx));
+        let api = JobApi::new(Arc::clone(&jobs), service_clock(&clock)).with_read(ctx);
+        Rig::serving(Arc::new(api), jobs, clock).await
+    }
+
+    /// The service `api`, reading the tables `jobs` on `clock`, over both transports.
+    pub(super) async fn serving(
+        api: Arc<JobApi>,
+        jobs: Arc<ServerJobs>,
+        clock: Arc<ManualClock>,
+    ) -> Rig {
         let channel = connect(grpc(Arc::clone(&api), token())).await;
         let router = gateway(api, token());
         Rig {
@@ -224,6 +237,7 @@ impl Rig {
     pub(super) async fn get_logs(&self, id: &str) -> Result<GetLogsResponse, Status> {
         let request = GetLogsRequest {
             job_id: id.to_owned(),
+            ..GetLogsRequest::default()
         };
         self.read("GetLogs", request, &format!("/v1/jobs/{id}/logs"))
             .await
@@ -546,6 +560,7 @@ async fn the_job_is_visible_over_grpc_and_json_identically() {
             stdout_tail: result.stdout_tail.clone(),
             stderr_tail: result.stderr_tail.clone(),
             truncated: true,
+            ..GetLogsResponse::default()
         };
         assert_eq!(logs, tails, "{name}");
         let (status, body) = rig.get("/v1/jobs/visible-1/result").await;
@@ -705,6 +720,7 @@ async fn get_job_of_an_unknown_id_is_not_found() {
         assert_eq!(refusal(answer), bad, "{text:?}");
         let request = GetLogsRequest {
             job_id: text.to_owned(),
+            ..GetLogsRequest::default()
         };
         let answer = rig.grpc::<_, GetLogsResponse>("GetLogs", request).await;
         assert_eq!(refusal(answer), bad, "{text:?}");
@@ -761,6 +777,7 @@ async fn a_failed_read_answers_internal() {
             "GetLogs",
             GetLogsRequest {
                 job_id: "fails-1".to_owned(),
+                ..GetLogsRequest::default()
             },
         )
         .await;

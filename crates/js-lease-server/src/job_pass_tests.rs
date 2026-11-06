@@ -68,6 +68,7 @@ async fn get_result(api: &JobApi, id: &JobId) -> Result<JobResult, Status> {
 async fn get_logs(api: &JobApi, id: &JobId) -> Result<v1::GetLogsResponse, Status> {
     let asked = Request::new(GetLogsRequest {
         job_id: id.to_string(),
+        ..GetLogsRequest::default()
     });
     Ok(api.get_logs(asked).await?.into_inner())
 }

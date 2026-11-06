@@ -13,7 +13,7 @@ use js_proto::refusal::refusal_status;
 use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     CancelJobRequest, GetJobRequest, GetJobResponse, GetResultRequest, GetResultResponse,
-    GetUsageRequest, ListJobsRequest, ListJobsResponse, RefusalCode,
+    GetUsageRequest, ListJobsRequest, ListJobsResponse, LogStream, RefusalCode,
 };
 use prost::Message;
 use prost_reflect::{DynamicMessage, Value};
@@ -369,13 +369,18 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 6] = [
+const MESSAGES: [&str; 11] = [
     "unknown-job",
     "expired",
     "not-finished",
     "state-write-failed",
     "field: spec.image",
     "something else",
+    "no-log-sink",
+    "no-live-logs",
+    "too-many-follows",
+    "log-store-unavailable",
+    "field: fromOffset",
 ];
 
 /// Asserts that every gRPC code with each message of [`MESSAGES`] maps to the line of
@@ -491,6 +496,45 @@ async fn a_status_message_selects_the_row() {
             Status::unavailable("try later"),
             500,
             json!({ "error": "internal" }),
+        ),
+        (
+            Status::failed_precondition("no-log-sink"),
+            409,
+            json!({ "error": "no-log-sink" }),
+        ),
+        (
+            Status::failed_precondition("no-live-logs"),
+            409,
+            json!({ "error": "no-live-logs" }),
+        ),
+        (
+            Status::out_of_range("field: fromOffset"),
+            400,
+            json!({
+                "error": "out-of-range",
+                "field": "fromOffset",
+                "reason": "the offset is past the end of the stream",
+            }),
+        ),
+        (
+            Status::out_of_range("elsewhere"),
+            500,
+            json!({ "error": "internal" }),
+        ),
+        (
+            Status::resource_exhausted("too-many-follows"),
+            429,
+            json!({ "error": "too-many-follows" }),
+        ),
+        (
+            Status::resource_exhausted("quota"),
+            500,
+            json!({ "error": "internal" }),
+        ),
+        (
+            Status::unavailable("log-store-unavailable"),
+            503,
+            json!({ "error": "log-store-unavailable" }),
         ),
     ];
     for (status, code, body) in rows {
@@ -807,7 +851,8 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
     same!(
         get_logs,
         js_proto::v1::GetLogsRequest {
-            job_id: "x-1".to_owned()
+            job_id: "x-1".to_owned(),
+            ..Default::default()
         },
         js_proto::v1::GetLogsResponse,
         "GetLogsResponse",
@@ -821,4 +866,41 @@ async fn fleet_usage_and_log_answers_survive_the_mapping() {
         "/v1/jobs"
     );
     assert_eq!(listed.json()["jobs"][2]["state"], json!(42));
+}
+
+/// Asserts that `GET /v1/jobs/x-1/logs?stream=LOG_STREAM_STDERR&fromOffset=9007199254740993
+/// &maxBytes=7&follow=true` calls `GetLogs` with exactly the stream `Stderr`, the offset
+/// 2^53+1, `max_bytes` of `Some(7)` and `follow`; and that an answer with bytes that are not
+/// UTF-8 (a NUL among them), offsets above 2^53, a gap and the first-byte time is written
+/// with `data` in base64, every 64-bit field as a decimal string and the gap as an object.
+/// Catches a query parameter lost or narrowed, and a 64-bit value rounded in JSON.
+#[tokio::test]
+async fn the_gateway_route_carries_the_new_fields() {
+    let (stub, router) = serve();
+    let uri = "/v1/jobs/x-1/logs?stream=LOG_STREAM_STDERR&fromOffset=9007199254740993\
+        &maxBytes=7&follow=true";
+    let reply = send(&router, "GET", uri, "").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        stub.only_request::<js_proto::v1::GetLogsRequest>(),
+        js_proto::v1::GetLogsRequest {
+            job_id: "x-1".to_owned(),
+            stream: LogStream::Stderr.into(),
+            from_offset: Some(BIG),
+            max_bytes: Some(7),
+            follow: Some(true),
+        }
+    );
+    assert_eq!(
+        reply.json(),
+        json!({
+            "state": "JOB_STATE_RUNNING",
+            "data": "/wBhgA==",
+            "offset": "9007199254740995",
+            "nextOffset": "9007199254740999",
+            "gaps": [{ "offset": "9007199254740993", "length": "2" }],
+            "eof": true,
+            "firstByteAtMs": "9007199254741003",
+        })
+    );
 }

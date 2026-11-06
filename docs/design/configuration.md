@@ -204,7 +204,9 @@ file is owner-only like every other key file (mode 0600 or 0400, owned by the se
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
 repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
 server mints each uploading host's credential with the mint key, delivers and renews it in heartbeat replies, and puts each job's sink
-in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
+in its start (live-logs.md, sections 3.1 and 4). The read key serves `GetLogs` with a stream (live-logs.md, section 8; `docs/http-gateway.md`,
+"Reading logs"): the server lists and reads the job's objects with it and passes the bytes through, and `max_follow` bounds how many
+of those calls with `follow` wait at once (one more is refused `too-many-follows`).
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
 section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64

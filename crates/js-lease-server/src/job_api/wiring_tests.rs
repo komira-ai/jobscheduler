@@ -14,7 +14,7 @@ use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use tower::ServiceExt;
 
-use super::{from_server, port};
+use super::{from_server, logs, port};
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::Agents;
@@ -79,7 +79,8 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
     let dir = scratch("one_handle");
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
-    let api = from_server(&state, WALL).expect("the server holds a job store");
+    let logs = logs::Ctx::default();
+    let api = from_server(&state, WALL, logs).expect("the server holds a job store");
     let held = state.agents().unwrap().jobs.as_ref().unwrap();
     assert!(Arc::ptr_eq(&api.jobs, held));
 
@@ -116,9 +117,9 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
 #[test]
 fn without_a_job_store_the_server_builds_no_job_service() {
     let dir = scratch("no_store");
-    assert!(from_server(&state(&dir, true, None), WALL).is_none());
+    assert!(from_server(&state(&dir, true, None), WALL, logs::Ctx::default()).is_none());
     let other = scratch("no_agents");
-    assert!(from_server(&state(&other, false, None), WALL).is_none());
+    assert!(from_server(&state(&other, false, None), WALL, logs::Ctx::default()).is_none());
 }
 
 /// The status, the `grpc-status` header (absent for a plain HTTP answer) and the body of
@@ -132,7 +133,10 @@ async fn answer(
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
-    let router = port(from_server(&state, WALL).unwrap(), clients);
+    let router = port(
+        from_server(&state, WALL, logs::Ctx::default()).unwrap(),
+        clients,
+    );
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {
         request = request.header(header::CONTENT_TYPE, content_type);

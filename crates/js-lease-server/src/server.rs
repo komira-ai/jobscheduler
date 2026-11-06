@@ -112,6 +112,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     checks: C,
 ) -> Result<Running, StartupError> {
     let logs = config.logs().sink();
+    let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
     let (prepared, listeners) = prepare(config, &clock)?;
     let tls = listeners
         .tls
@@ -174,7 +175,11 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     // The job service, when it is on: the server holds its one job store exactly when
     // `--job-listen` is given, so the listener and the service are there together.
     let job = job_listener
-        .zip(job_api::from_server(&shared, listeners.max_job_wall))
+        .zip(job_api::from_server(
+            &shared,
+            listeners.max_job_wall,
+            log_reads,
+        ))
         .map(|((listener, addr), api)| {
             let (stop, stopped) = oneshot::channel::<()>();
             let slots = Arc::new(Slots::new(limits.max_connections));

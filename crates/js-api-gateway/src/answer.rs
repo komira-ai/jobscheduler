@@ -105,7 +105,8 @@ impl Answer {
     /// The answer to a call that answered `status`: by its refusal when it carries one
     /// ([`Answer::of_refusal`]), else by its gRPC code and its message, which the service
     /// sets to the code of the error table. The message is never written to the answer;
-    /// only an `INVALID_ARGUMENT` message `field: <name>` gives the answer's `"field"`.
+    /// an `INVALID_ARGUMENT` message `field: <name>` gives the answer's `"field"`, and
+    /// `OUT_OF_RANGE` with `field: fromOffset` is a 400 naming that field.
     #[must_use]
     pub fn of_status(status: &Status) -> Self {
         if let Some(refusal) = refusal_of(status) {
@@ -120,6 +121,8 @@ impl Answer {
             },
             Code::FailedPrecondition => match message {
                 "not-finished" => Self::coded(StatusCode::CONFLICT, "not-finished"),
+                "no-log-sink" => Self::coded(StatusCode::CONFLICT, "no-log-sink"),
+                "no-live-logs" => Self::coded(StatusCode::CONFLICT, "no-live-logs"),
                 _ => Self::internal(),
             },
             Code::Internal => match message {
@@ -133,16 +136,33 @@ impl Answer {
                 message.strip_prefix("field: ").map(str::to_owned),
                 "the service refused an argument of the request",
             ),
+            Code::OutOfRange => match message {
+                "field: fromOffset" => Self::refused(
+                    "out-of-range",
+                    Some("fromOffset".to_owned()),
+                    "the offset is past the end of the stream",
+                ),
+                _ => Self::internal(),
+            },
+            Code::ResourceExhausted => match message {
+                "too-many-follows" => {
+                    Self::coded(StatusCode::TOO_MANY_REQUESTS, "too-many-follows")
+                }
+                _ => Self::internal(),
+            },
+            Code::Unavailable => match message {
+                "log-store-unavailable" => {
+                    Self::coded(StatusCode::SERVICE_UNAVAILABLE, "log-store-unavailable")
+                }
+                _ => Self::internal(),
+            },
             Code::Ok
             | Code::Cancelled
             | Code::Unknown
             | Code::DeadlineExceeded
             | Code::AlreadyExists
             | Code::PermissionDenied
-            | Code::ResourceExhausted
             | Code::Aborted
-            | Code::OutOfRange
-            | Code::Unavailable
             | Code::DataLoss
             | Code::Unauthenticated => Self::internal(),
         }

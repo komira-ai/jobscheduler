@@ -600,6 +600,7 @@ fn answers_print_as_lines_or_proto3_json() {
         stdout_tail: b"line one\nline two\n".to_vec(),
         stderr_tail: b"oo\x1bps".to_vec(),
         truncated: true,
+        ..Default::default()
     };
     let fake = Fake::new();
     fake.answer("GetLogs", vec![Answer::Message(logs.encode_to_vec())]);
@@ -901,6 +902,7 @@ fn empty_and_binary_log_tails_keep_their_labels() {
         stdout_tail: Vec::new(),
         stderr_tail: vec![b'o', 0xff, b'k'],
         truncated: false,
+        ..Default::default()
     };
     let fake = Fake::new();
     fake.answer("GetLogs", vec![Answer::Message(logs.encode_to_vec())]);

@@ -118,7 +118,12 @@
 //! | `NOT_FOUND`, message `unknown-job` | 404 | `unknown-job` |
 //! | `NOT_FOUND`, message `expired` (result or logs past retention) | 410 | `expired` |
 //! | `FAILED_PRECONDITION`, message `not-finished` (the result of a job that has not ended) | 409 | `not-finished` |
+//! | `FAILED_PRECONDITION`, message `no-log-sink` (the server keeps no logs: its sink is `none`) | 409 | `no-log-sink` |
+//! | `FAILED_PRECONDITION`, message `no-live-logs` (the job ran without live logs) | 409 | `no-live-logs` |
 //! | `INVALID_ARGUMENT` (a message `field: <name>` gives `field`) | 400 | `invalid-argument` |
+//! | `OUT_OF_RANGE`, message `field: fromOffset` (a log offset past the end of the stream) | 400 | `out-of-range`, `field` `fromOffset` |
+//! | `RESOURCE_EXHAUSTED`, message `too-many-follows` | 429 | `too-many-follows` |
+//! | `UNAVAILABLE`, message `log-store-unavailable` | 503 | `log-store-unavailable` |
 //! | `UNIMPLEMENTED` | 501 | `unimplemented` |
 //! | `INTERNAL`, message `state-write-failed` (a store write that failed) | 500 | `state-write-failed` |
 //! | any other status, an unknown refusal, a fault of the gateway | 500 | `internal` |
