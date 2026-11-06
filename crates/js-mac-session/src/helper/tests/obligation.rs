@@ -21,11 +21,6 @@ fn count(calls: &[String], call: &str) -> usize {
     calls.iter().filter(|c| *c == call).count()
 }
 
-/// Asserts that no other lease can have the uid: the pool of one has no free user.
-fn uid_held(rig: &Rig) {
-    exhausted(rig.helper.user_create("99.1", None));
-}
-
 /// The record that `uid`'s GUI domain is owed a teardown, in the rig.
 fn owed(rig: &Rig, uid: u32) -> bool {
     rig.dir.join(format!("gui-teardown.{uid}")).exists()

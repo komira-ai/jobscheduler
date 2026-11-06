@@ -104,7 +104,7 @@ mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
 pub use ipc::{IPCRM, IPCS};
-pub use pool::{LeaseError, POOL_EXHAUSTED, PoolExhausted, PoolStatus};
+pub use pool::{DSEDITGROUP, LeaseError, POOL_EXHAUSTED, PoolExhausted, PoolStatus};
 pub use switch::Reset;
 
 use pool::LeaseUser;

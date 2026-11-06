@@ -123,6 +123,9 @@ pub(crate) enum TeardownError {
     /// A user record could not be made.
     #[error("creating user {name}: {source}")]
     Create { name: String, source: io::Error },
+    /// The user may be in the `admin` group: the directory says so, or could not say.
+    #[error("user {name} may be an administrator: {why}")]
+    Admin { name: String, why: String },
 }
 
 impl From<TeardownError> for String {

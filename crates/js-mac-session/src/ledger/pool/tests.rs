@@ -17,7 +17,8 @@ fn state(ledger: &Ledger, n: u32) -> Option<SlotState> {
 }
 
 /// Catches: a slot's state kept only in memory, under which a restart forgets which
-/// user is lent to which lease, or that it was broken; and a lease and its slot written
+/// user is lent to which lease, that it was broken, or that its user (an
+/// administrator's) must be replaced rather than reset; and a lease and its slot written
 /// in the wrong order (a crash between the two must never leave a live lease without
 /// its slot).
 #[test]
@@ -25,27 +26,33 @@ fn every_slot_state_survives_reopening() {
     let dir = dir("reopen");
     let path = dir.join("ledger");
     let mut ledger = Ledger::open(&path).unwrap();
-    let (a, b) = (LeaseId::new(9, 1), LeaseId::new(9, 2));
+    let (a, b, c) = (LeaseId::new(9, 1), LeaseId::new(9, 2), LeaseId::new(9, 3));
     for n in 0..4 {
         ledger.record_slot(slot(n), 600 + n).unwrap();
     }
-    assert_eq!(state(&ledger, 0), Some(SlotState::Resetting));
+    assert_eq!(
+        state(&ledger, 0),
+        Some(SlotState::Resetting { replace: true })
+    );
     for n in 0..3 {
         ledger.record_free(slot(n)).unwrap();
     }
     ledger.record_broken(slot(3)).unwrap();
     ledger.record_leased(slot(0), a, false).unwrap();
     ledger.record_leased(slot(1), b, true).unwrap();
+    ledger.record_leased(slot(2), c, true).unwrap();
     ledger.record_released(slot(0), a).unwrap();
+    ledger.record_released(slot(2), c).unwrap();
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(dir.join("pool")).unwrap(),
         "made 0 600\nmade 1 601\nmade 2 602\nmade 3 603\nfree 0\nfree 1\nfree 2\n\
-         broken 3\nleased 0 9.1\nleased 1 9.2 admin\nresetting 0\n"
+         broken 3\nleased 0 9.1\nleased 1 9.2 admin\nleased 2 9.3 admin\nresetting 0\n\
+         resetting 2 replace\n"
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "created 9.1 600\ncreated 9.2 601\ndeleted 9.1\n"
+        "created 9.1 600\ncreated 9.2 601\ncreated 9.3 602\ndeleted 9.1\ndeleted 9.3\n"
     );
     let ledger = Ledger::open(&path).unwrap();
     assert_eq!(
@@ -55,7 +62,7 @@ fn every_slot_state_survives_reopening() {
                 slot(0),
                 SlotEntry {
                     uid: 600,
-                    state: SlotState::Resetting
+                    state: SlotState::Resetting { replace: false }
                 }
             ),
             (
@@ -72,7 +79,7 @@ fn every_slot_state_survives_reopening() {
                 slot(2),
                 SlotEntry {
                     uid: 602,
-                    state: SlotState::Free
+                    state: SlotState::Resetting { replace: true }
                 }
             ),
             (
@@ -206,7 +213,10 @@ fn a_torn_pool_record_is_cut_and_a_link_refused() {
     let path = dir.join("ledger");
     std::fs::write(dir.join("pool"), "made 0 600\nfree").unwrap();
     let mut ledger = Ledger::open(&path).unwrap();
-    assert_eq!(state(&ledger, 0), Some(SlotState::Resetting));
+    assert_eq!(
+        state(&ledger, 0),
+        Some(SlotState::Resetting { replace: true })
+    );
     ledger.record_free(slot(0)).unwrap();
     drop(ledger);
     assert_eq!(
@@ -229,5 +239,8 @@ fn a_failed_pool_write_changes_nothing() {
     ledger.record_slot(slot(0), 600).unwrap();
     ledger.fail_writes(&path, true);
     assert!(ledger.record_free(slot(0)).is_err());
-    assert_eq!(state(&ledger, 0), Some(SlotState::Resetting));
+    assert_eq!(
+        state(&ledger, 0),
+        Some(SlotState::Resetting { replace: true })
+    );
 }

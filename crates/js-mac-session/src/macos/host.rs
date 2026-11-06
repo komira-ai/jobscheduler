@@ -175,7 +175,9 @@ impl Host for MacHost {
             };
             // A stale membership would make the next holder of the name an
             // administrator: a pool user is replaced under the same name (after an
-            // administrator's lease, too), so the group is cleaned first.
+            // administrator's lease, too), so the group is cleaned first. A removal
+            // that fails is not judged here: the helper asks the directory afterwards
+            // whether the new user is a member, and a slot whose user is never goes free.
             let admin = group(&node, ADMIN_GROUP)?;
             let mut ignored = None;
             // SAFETY: both are records of the local node. Not a member is an error

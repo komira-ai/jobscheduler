@@ -3,9 +3,11 @@
 //! a pool user remove them and judge by the outcome: `ipcs` lists none of the uid's
 //! afterwards.
 //!
-//! `ipcs -a` prints one object per line, `<kind> <id> <key> <mode> <owner> <group> ...`,
-//! with the kind `q`, `m` or `s`; the owner is the user's name, or the uid when no user
-//! record has it. POSIX shared memory and semaphores are not listed by any interface of
+//! `ipcs -a` prints one object per line, `<kind> <id> <key> <mode> <owner> <group>
+//! <creator> <creator's group> ...`, with the kind `q`, `m` or `s`; owner and creator are
+//! a user's name, or the uid when no user record has it. An object is the uid's when it
+//! owns it or created it: a creator keeps its access after giving the object away
+//! (`IPC_SET`), so an object given to another owner is removed too. POSIX shared memory and semaphores are not listed by any interface of
 //! macOS (they have names but no directory), so they cannot be found to be removed.
 
 use super::Helper;
@@ -24,7 +26,8 @@ struct Object {
     id: String,
 }
 
-/// The objects in `listing` (what `ipcs -a` printed) that `name` or `uid` owns.
+/// The objects in `listing` (what `ipcs -a` printed) that `name` or `uid` owns or
+/// created.
 fn owned(listing: &str, name: &str, uid: u32) -> Vec<Object> {
     let number = uid.to_string();
     listing
@@ -39,7 +42,8 @@ fn owned(listing: &str, name: &str, uid: u32) -> Vec<Object> {
             };
             let owner = *fields.get(4)?;
             let id = fields.get(1)?.parse::<u64>().ok()?;
-            (owner == name || owner == number).then(|| Object {
+            let mine = |who: &str| who == name || who == number;
+            (mine(owner) || fields.get(6).is_some_and(|creator| mine(creator))).then(|| Object {
                 kind,
                 id: id.to_string(),
             })
@@ -106,9 +110,9 @@ impl Helper {
 mod tests {
     use super::*;
 
-    /// Catches: an object of another owner taken for the uid's, a header or a section
-    /// title read as an object, or the uid's spelling as a number (after its record
-    /// went) missed.
+    /// Catches: an object of another owner and creator taken for the uid's, one the uid
+    /// created and gave away missed, a header or a section title read as an object, or
+    /// the uid's spelling as a number (after its record went) missed.
     #[test]
     fn only_the_uid_s_objects_are_listed() {
         let listing = "IPC status from <running system> as of Thu Nov  5 10:00:00 2026\n\
@@ -118,6 +122,8 @@ mod tests {
              Shared Memory:\n\
              m  65537 0x00000002 --rw-------     root    wheel\n\
              m  65538 0x00000003 --rw-------      601    staff\n\
+             m  65541 0x00000006 --rw-------   nobody   nobody kbf-lease-pool-0 staff\n\
+             m  65542 0x00000007 --rw-------   nobody   nobody     root  wheel\n\
              m  bad   0x00000004 --rw-------      601    staff\n\
              m  65540\n\
              Semaphores:\n\
@@ -132,6 +138,10 @@ mod tests {
                 Object {
                     kind: "-m",
                     id: "65538".to_owned()
+                },
+                Object {
+                    kind: "-m",
+                    id: "65541".to_owned()
                 },
                 Object {
                     kind: "-s",

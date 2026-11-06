@@ -283,7 +283,8 @@ impl Ledger {
     }
 
     /// Records, durably, that `lease`, which holds `slot`, is over: first the lease's
-    /// `deleted`, then the slot's `resetting`.
+    /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for an
+    /// administrator's lease).
     ///
     /// # Errors
     /// The lease is not live, `slot` is not leased to it, or a write failed (a failed
@@ -292,8 +293,9 @@ impl Ledger {
     pub fn record_released(&mut self, slot: Slot, lease: LeaseId) -> io::Result<()> {
         self.admit(Record::Deleted(lease)).map_err(refused)?;
         self.pool.admit_reset(slot, Some(lease)).map_err(refused)?;
+        let replace = self.leased_admin(slot);
         self.append(Record::Deleted(lease))?;
-        self.pool.append(pool::Record::Resetting(slot))
+        self.pool.append(pool::Record::Resetting(slot, replace))
     }
 
     /// Records, durably, that `slot`, leased to a lease that is not live, is resetting.
@@ -313,7 +315,20 @@ impl Ledger {
             )));
         }
         self.pool.admit_reset(slot, None).map_err(refused)?;
-        self.pool.append(pool::Record::Resetting(slot))
+        let replace = self.leased_admin(slot);
+        self.pool.append(pool::Record::Resetting(slot, replace))
+    }
+
+    /// Whether `slot` is leased to an administrator's lease: its user is then replaced,
+    /// never reset, and its `resetting` says so.
+    fn leased_admin(&self, slot: Slot) -> bool {
+        matches!(
+            self.slot(slot),
+            Some(SlotEntry {
+                state: SlotState::Leased { admin: true, .. },
+                ..
+            })
+        )
     }
 
     /// Records, durably, that `slot`'s user is clean (or new): the slot is free.

@@ -1,6 +1,6 @@
 use crate::autologin::{CommandOutput, Intent, kcpassword, read_intent};
 use crate::helper::tests::{Rig, add_legacy, fds, log, me, rig, rig_with};
-use crate::helper::{IPCS, Outcome, Reset};
+use crate::helper::{DSEDITGROUP, IPCS, Outcome, Reset};
 use crate::lease::{Slot, UidRange};
 use crate::proto::{Reply, Request};
 
@@ -42,12 +42,17 @@ fn session_login_needs_a_live_lease_user() {
     assert!(error.contains("was deleted"), "{error}");
     assert!(rig.helper.session_login("1.x").is_err());
     let calls = log(&rig);
-    // Only the reset of 1.2's pool user ran a program: `ipcs`, for its IPC objects.
+    // Only the reset of 1.2's pool user ran programs: `ipcs`, for its IPC objects, and
+    // `dseditgroup`, to see it is no administrator.
+    let ran = |call: &String| {
+        [IPCS, DSEDITGROUP]
+            .iter()
+            .any(|program| call.starts_with(&format!("command {program} ")))
+    };
     assert!(
         calls
             .iter()
-            .all(|call| !call.starts_with("command")
-                || call.starts_with(&format!("command {IPCS} "))),
+            .all(|call| !call.starts_with("command") || ran(call)),
         "{calls:#?}"
     );
     assert_eq!(intent(&rig), None);

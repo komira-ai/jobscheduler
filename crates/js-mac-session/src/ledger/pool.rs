@@ -3,10 +3,11 @@
 //! One record per line, as the lease ledger's (see the parent module):
 //!
 //! ```text
-//! made <slot> <uid>               the slot's user is being made: resetting
+//! made <slot> <uid>               the slot's user is being made: resetting, to be replaced
 //! leased <slot> <term>.<seq>      the slot's user is the lease's
 //! leased <slot> <term>.<seq> admin   ... made an administrator for the lease
 //! resetting <slot>                the lease is over; the user is being reset (or replaced)
+//! resetting <slot> replace        ... an administrator's lease: the user is only replaced
 //! free <slot>                     the user is clean: the next lease may take it
 //! broken <slot>                   the user could be neither reset nor replaced
 //! ```
@@ -40,7 +41,13 @@ pub enum SlotState {
         admin: bool,
     },
     /// Being made, reset after a lease, or replaced: lent to no one until it is free.
-    Resetting,
+    /// `replace` when the user must be replaced, never reset: one being made, or the
+    /// user of an administrator's lease. It survives a restart, so the recovery after a
+    /// crash replaces it too.
+    Resetting {
+        /// Whether the user is only replaced, never reset.
+        replace: bool,
+    },
     /// Neither the reset nor the replacement of its user succeeded: lent to no one, until
     /// a `pool-create` (or the boot reset) replaces the user.
     Broken,
@@ -60,7 +67,7 @@ pub struct SlotEntry {
 pub(super) enum Record {
     Made(Slot, u32),
     Leased(Slot, LeaseId, bool),
-    Resetting(Slot),
+    Resetting(Slot, bool),
     Free(Slot),
     Broken(Slot),
 }
@@ -76,7 +83,8 @@ impl Record {
             )),
             ["leased", n, lease] => Ok(Self::Leased(slot(n)?, parse_lease(lease)?, false)),
             ["leased", n, lease, "admin"] => Ok(Self::Leased(slot(n)?, parse_lease(lease)?, true)),
-            ["resetting", n] => Ok(Self::Resetting(slot(n)?)),
+            ["resetting", n] => Ok(Self::Resetting(slot(n)?, false)),
+            ["resetting", n, "replace"] => Ok(Self::Resetting(slot(n)?, true)),
             ["free", n] => Ok(Self::Free(slot(n)?)),
             ["broken", n] => Ok(Self::Broken(slot(n)?)),
             _ => Err(format!("unknown record {line:?}")),
@@ -90,7 +98,8 @@ impl std::fmt::Display for Record {
             Self::Made(slot, uid) => write!(f, "made {slot} {uid}"),
             Self::Leased(slot, lease, false) => write!(f, "leased {slot} {}", Dotted(*lease)),
             Self::Leased(slot, lease, true) => write!(f, "leased {slot} {} admin", Dotted(*lease)),
-            Self::Resetting(slot) => write!(f, "resetting {slot}"),
+            Self::Resetting(slot, false) => write!(f, "resetting {slot}"),
+            Self::Resetting(slot, true) => write!(f, "resetting {slot} replace"),
             Self::Free(slot) => write!(f, "free {slot}"),
             Self::Broken(slot) => write!(f, "broken {slot}"),
         }
@@ -150,16 +159,16 @@ impl Pool {
                 (SlotState::Free, None) => Ok(()),
                 _ => Err(format!("slot {slot} is not free")),
             },
-            Record::Resetting(slot) => match state(slot)? {
+            Record::Resetting(slot, _) => match state(slot)? {
                 SlotState::Leased { .. } => Ok(()),
                 _ => Err(format!("slot {slot} is not leased")),
             },
             Record::Free(slot) => match state(slot)? {
-                SlotState::Resetting | SlotState::Broken => Ok(()),
+                SlotState::Resetting { .. } | SlotState::Broken => Ok(()),
                 _ => Err(format!("slot {slot} is neither resetting nor broken")),
             },
             Record::Broken(slot) => match state(slot)? {
-                SlotState::Resetting => Ok(()),
+                SlotState::Resetting { .. } => Ok(()),
                 _ => Err(format!("slot {slot} is not resetting")),
             },
         }
@@ -168,12 +177,12 @@ impl Pool {
     fn commit(&mut self, record: Record) {
         let (slot, state) = match record {
             Record::Made(slot, uid) => {
-                let state = SlotState::Resetting;
+                let state = SlotState::Resetting { replace: true };
                 self.slots.insert(slot, SlotEntry { uid, state });
                 return;
             }
             Record::Leased(slot, lease, admin) => (slot, SlotState::Leased { lease, admin }),
-            Record::Resetting(slot) => (slot, SlotState::Resetting),
+            Record::Resetting(slot, replace) => (slot, SlotState::Resetting { replace }),
             Record::Free(slot) => (slot, SlotState::Free),
             Record::Broken(slot) => (slot, SlotState::Broken),
         };
@@ -208,7 +217,7 @@ impl Pool {
                     Dotted(lease)
                 ))
             }
-            _ => self.admit(Record::Resetting(slot)),
+            _ => self.admit(Record::Resetting(slot, false)),
         }
     }
 

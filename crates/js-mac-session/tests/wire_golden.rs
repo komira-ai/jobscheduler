@@ -326,7 +326,8 @@ fn a_ledger_written_before_the_move_is_read() {
     assert_eq!(ledger.held_uids(), std::collections::BTreeSet::from([651]));
 }
 
-/// Catches: a pool file line that is not one of its six records, in the order a lease's
+/// Catches: a pool file line that is not one of its records (an administrator's lease
+/// ends in `resetting <slot> replace`), in the order a lease's
 /// life writes them, which a later release would then fail to read.
 #[test]
 fn the_pool_file_is_one_line_per_slot_record() {
@@ -343,7 +344,7 @@ fn the_pool_file_is_one_line_per_slot_record() {
     drop(ledger);
     assert_eq!(
         std::fs::read_to_string(dir.join("pool")).unwrap(),
-        "made 0 650\nfree 0\nleased 0 3.7 admin\nresetting 0\nbroken 0\nfree 0\n"
+        "made 0 650\nfree 0\nleased 0 3.7 admin\nresetting 0 replace\nbroken 0\nfree 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),

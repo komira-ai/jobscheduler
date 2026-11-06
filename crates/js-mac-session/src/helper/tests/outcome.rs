@@ -202,7 +202,7 @@ fn a_process_that_never_goes_away_fails_after_the_last_attempt_and_quarantines_t
     assert_eq!(kills, KILL_ROUNDS, "{calls:#?}");
     let quarantined = || {
         assert!(rig.host.state().users.contains_key("kbf-lease-55-1"));
-        exhausted(rig.helper.user_create("99.1", None));
+        uid_held(&rig);
     };
     quarantined();
     assert_eq!(

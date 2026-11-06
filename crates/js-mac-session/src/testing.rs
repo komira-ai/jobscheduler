@@ -126,9 +126,25 @@ impl State {
         let mut text =
             String::from("IPC status from <running system>\nT ID KEY MODE OWNER GROUP\n");
         for (id, (kind, owner)) in &self.ipc {
-            text.push_str(&format!("{kind} {id} 0x0 --rw------- {owner} staff\n"));
+            text.push_str(&format!(
+                "{kind} {id} 0x0 --rw------- {owner} staff {owner} staff\n"
+            ));
         }
         text
+    }
+
+    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a user made an
+    /// administrator, else `no` and a failure, as `dseditgroup` answers.
+    fn checkmember(&self, name: &str) -> CommandOutput {
+        let admin = self.users.get(name).is_some_and(|user| user.admin);
+        CommandOutput {
+            success: admin,
+            stdout: match admin {
+                true => format!("yes {name} is a member of admin\n"),
+                false => format!("no {name} is NOT a member of admin\n"),
+            },
+            stderr: String::new(),
+        }
     }
 
     /// `ipcrm -<kind> <id>`: removes the object, unless it is stuck.
@@ -408,6 +424,8 @@ impl Host for FakeHost {
                 stderr: String::new(),
             },
             None if program == crate::helper::IPCRM => state.ipcrm(args),
+            // The helper runs it only as `-o checkmember -m <name> admin`.
+            None if program == crate::helper::DSEDITGROUP => state.checkmember(args[3]),
             None if text == "/usr/bin/fdesetup isactive" => CommandOutput {
                 success: false,
                 stdout: "false\n".to_owned(),

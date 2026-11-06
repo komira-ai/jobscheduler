@@ -115,6 +115,21 @@ pub(super) fn add_legacy(rig: &Rig, lease: &str) -> u32 {
     uid
 }
 
+/// Asserts that no other lease can get the range's first uid (the rig's one slot): no
+/// lease finds a free user, and `pool-create` frees none. When the slot was never made
+/// (its uid a lease's from before the pool), `pool-create` refuses it because a live
+/// lease holds the uid.
+pub(super) fn uid_held(rig: &Rig) {
+    let created = rig.helper.pool_create();
+    assert!(created.free.is_empty(), "{created:?}");
+    if created.missing.contains(&Slot::new(0)) {
+        let uid = rig.helper.settings.range.uids().next().unwrap();
+        let held = format!("slot 0: uid {uid} is held by a live lease");
+        assert!(created.errors.contains(&held), "{created:?}");
+    }
+    exhausted(rig.helper.user_create("99.1", None));
+}
+
 /// Asserts that `created` is the pool's exhaustion: no slot was free for the lease.
 pub(super) fn exhausted(created: Result<u32, LeaseError>) {
     match created {

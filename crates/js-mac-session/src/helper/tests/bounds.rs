@@ -20,11 +20,6 @@ fn count(calls: &[String], call: &str) -> usize {
     calls.iter().filter(|c| *c == call).count()
 }
 
-/// Asserts that no other lease can have the uid: the pool of one has no free user.
-fn uid_held(rig: &Rig) {
-    exhausted(rig.helper.user_create("99.1", None));
-}
-
 /// Catches a bound off by one: processes that are gone at the last allowed attempt are a
 /// success, not a refusal, and the loop takes exactly [`KILL_ROUNDS`] attempts for it.
 #[test]

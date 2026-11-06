@@ -21,15 +21,19 @@
 //!   out (the teardown of `kill-uid`), its crontab and `at` jobs removed, its System V IPC
 //!   objects removed, its files in the places `user-delete` sweeps removed, its home
 //!   removed whole and made again empty, and its `DARWIN_USER_DIR` entry emptied (its
-//!   `0`, `C` and `T` kept). Each step is judged by its outcome, as the teardown's are;
-//!   only a reset with every step clean returns the slot to free.
+//!   `0`, `C` and `T` kept), and last the directory asked that the user is not in
+//!   `admin`. Each step is judged by its outcome, as the teardown's are; only a reset
+//!   with every step clean returns the slot to free.
 //! - A reset that is not clean replaces the user ([`Helper::replace`]): the uid's
 //!   processes killed again, the user deleted as `user-delete` deleted a lease's user
 //!   (its `DARWIN_USER_DIR` entry and its home removed whole), then a new user made in the
-//!   slot, with the same name and uid. The slot is free only once the new user exists.
+//!   slot, with the same name and uid, and the directory asked that it is not in `admin`
+//!   (a membership the deletion left would make it one). The slot is free only once the
+//!   new user exists and is not.
 //!   A replacement that fails too leaves the slot broken: no lease gets it, `pool-status`
 //!   and an exhausted pool name it, and the next `pool-create` (or boot reset) replaces it
-//!   again. The lease of an administrator is always replaced, never reset.
+//!   again. The lease of an administrator is always replaced, never reset, also after a
+//!   crash: its `resetting` record says so.
 //! - The boot reset ends every live lease but the one whose session it keeps (as above),
 //!   and then resets every slot that is resetting or leased to a lease that is not live
 //!   (a crash between two records, or during a reset), before `pool-create`.
@@ -45,6 +49,9 @@ use crate::sweep::{SweepPlan, empty_keeping, sweep};
 
 /// What every [`PoolExhausted`] says first: a caller can tell the refusal by it.
 pub const POOL_EXHAUSTED: &str = "the pool has no free user";
+
+/// The program that answers whether a user is in the `admin` group.
+pub const DSEDITGROUP: &str = "/usr/sbin/dseditgroup";
 
 /// The folders of a `DARWIN_USER_DIR` entry the reset empties and keeps.
 const KEPT_FOLDERS: [&str; 3] = ["0", "C", "T"];
@@ -124,6 +131,16 @@ enum End {
     Repair,
 }
 
+impl End {
+    /// [`End::Replace`] when `replace`, else [`End::Reset`].
+    fn of(replace: bool) -> Self {
+        match replace {
+            true => Self::Replace,
+            false => Self::Reset,
+        }
+    }
+}
+
 /// How the end of a slot's use came out.
 #[derive(Debug)]
 pub(super) enum Settled {
@@ -188,7 +205,7 @@ impl Helper {
                 None => status.missing.push(slot),
                 Some(SlotState::Free) => status.free.push(slot),
                 Some(SlotState::Leased { lease, .. }) => status.leased.push((slot, lease)),
-                Some(SlotState::Resetting) => status.resetting.push(slot),
+                Some(SlotState::Resetting { .. }) => status.resetting.push(slot),
                 Some(SlotState::Broken) => status.broken.push(slot),
             }
         }
@@ -310,13 +327,13 @@ impl Helper {
         lease: LeaseId,
         slot: Slot,
     ) -> Result<Settled, String> {
-        let end = match ledger.slot(slot) {
+        let end = End::of(matches!(
+            ledger.slot(slot),
             Some(SlotEntry {
                 state: SlotState::Leased { admin: true, .. },
                 ..
-            }) => End::Replace,
-            _ => End::Reset,
-        };
+            })
+        ));
         ledger
             .record_released(slot, lease)
             .map_err(|why| format!("recording the end of lease {}: {why}", Dotted(lease)))?;
@@ -330,14 +347,11 @@ impl Helper {
         let mut errors = Vec::new();
         for (slot, entry) in ledger.slots() {
             let result = match entry.state {
-                SlotState::Resetting => self.settle(ledger, slot, End::Reset),
+                SlotState::Resetting { replace } => self.settle(ledger, slot, End::of(replace)),
                 SlotState::Leased { lease, admin }
                     if ledger.get(lease).is_none_or(|entry| entry.deleted) =>
                 {
-                    let end = match admin {
-                        true => End::Replace,
-                        false => End::Reset,
-                    };
+                    let end = End::of(admin);
                     ledger
                         .record_orphan_reset(slot)
                         .map_err(|why| format!("recording slot {slot} resetting: {why}"))
@@ -396,7 +410,7 @@ impl Helper {
     /// documentation. Each step is judged by its outcome; the first that does not hold
     /// fails the reset.
     pub(super) fn reset(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
-        self.kill_account(name, uid, false)?;
+        self.kill_pool_user(name, uid)?;
         if self
             .host
             .account(name)
@@ -422,16 +436,63 @@ impl Helper {
         }
         // The kill discharged any GUI domain owed; this last look judges the domains again.
         self.settled(uid)?;
-        Ok(())
+        self.not_admin(name)
     }
 
     /// Replaces the pool user `name`, with `uid`: kills its processes, deletes it (and
     /// what it leaves, as `user-delete` did a lease's user), and makes a new one with the
     /// same name and uid, an administrator when `admin`.
     pub(super) fn replace(&self, name: &str, uid: u32, admin: bool) -> Result<(), TeardownError> {
-        self.kill_account(name, uid, false)?;
+        self.kill_pool_user(name, uid)?;
         self.remove_account(name, uid)?;
-        self.create_account(name, uid, admin)
+        self.create_account(name, uid, admin)?;
+        match admin {
+            true => Ok(()),
+            false => self.not_admin(name),
+        }
+    }
+
+    /// Whether `name` is in no way a member of `admin`, as the directory answers
+    /// (`dseditgroup -o checkmember`, which says `no ...` and exits non-zero for a user
+    /// that is not): judged by the outcome, so a membership a deletion failed to remove,
+    /// which a new user of the same name would inherit, fails the step.
+    fn not_admin(&self, name: &str) -> Result<(), TeardownError> {
+        let failed = |why: String| TeardownError::Admin {
+            name: name.to_owned(),
+            why,
+        };
+        let output = self
+            .host
+            .command(DSEDITGROUP, &["-o", "checkmember", "-m", name, "admin"])
+            .map_err(|why| failed(why.to_string()))?;
+        match (
+            output.success,
+            output.stdout.trim_start().starts_with("no "),
+        ) {
+            (false, true) => Ok(()),
+            (true, _) => Err(failed("the directory says it is a member".to_owned())),
+            (false, false) => Err(failed(format!(
+                "dseditgroup failed: {}",
+                output.stderr.trim()
+            ))),
+        }
+    }
+
+    /// [`Helper::kill_account`] of the pool user `name`, with `uid`: a uid whose
+    /// processes or domains outlive it is a lease's, quarantined, as `kill-uid` words it.
+    fn kill_pool_user(&self, name: &str, uid: u32) -> Result<(), TeardownError> {
+        self.kill_account(name, uid, false)
+            .map_err(|why| match why {
+                TeardownError::Outlived {
+                    uid, left, stayed, ..
+                } => TeardownError::Outlived {
+                    uid,
+                    left,
+                    stayed,
+                    lease: true,
+                },
+                other => other,
+            })
     }
 
     /// What `user-delete` sweeps, with the home folder of each user.

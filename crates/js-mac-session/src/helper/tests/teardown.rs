@@ -30,7 +30,7 @@ fn held(rig: &Rig, user: &str, got: Result<impl std::fmt::Debug, String>, want: 
         rig.host.state().users.contains_key(user),
         "{user} was deleted"
     );
-    exhausted(rig.helper.user_create("99.1", None));
+    uid_held(rig);
 }
 
 /// What launchd has after the teardown: the domains, and the uid's processes at two
