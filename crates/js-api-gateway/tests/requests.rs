@@ -148,7 +148,7 @@ async fn a_query_sets_the_fields_of_a_read() {
     let (stub, router) = serve();
     let query = "states=JOB_STATE_QUEUED&states=JOB_STATE_RUNNING&labels[team]=ml&\
                  labels%5Bkind%5D=a+b&queuedAfterMs=9007199254740993&queued_before_ms=7&\
-                 pageSize=10&page_token=t%2F1&&";
+                 pageSize=10&page_token=t%2F1&client=ci-1&&";
     let reply = send(&router, "GET", &format!("/v1/jobs?{query}"), "").await;
     assert_eq!(reply.status, StatusCode::OK);
     let request: ListJobsRequest = stub.only_request();
@@ -161,6 +161,7 @@ async fn a_query_sets_the_fields_of_a_read() {
             queued_before_ms: Some(7),
             page_size: 10,
             page_token: "t/1".to_owned(),
+            client: Some("ci-1".to_owned()),
         }
     );
 }

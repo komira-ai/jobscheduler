@@ -11,8 +11,8 @@
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
 //! without a suffix such as `+proto`) to the gRPC service and every other request to the
-//! HTTP/JSON gateway. Each of the two is behind the bearer layer of the server's token, so
-//! no request reaches a call without it, whichever way it is routed.
+//! HTTP/JSON gateway. Each of the two is behind the bearer layer of the server's clients, so
+//! no request reaches a call without a client's token, whichever way it is routed.
 
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
@@ -31,7 +31,7 @@ use super::auth::is_grpc;
 use super::{Bearer, JobApi, gateway, grpc, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
-use crate::config::Token;
+use crate::config::Clients;
 
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall`. `None` when the
@@ -48,12 +48,12 @@ pub(crate) fn from_server(state: &Shared, max_job_wall: Duration) -> Option<JobA
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the
-/// bearer layer of `token`, chosen by the request's content type.
-pub(crate) fn port(api: JobApi, token: Token) -> Router {
+/// bearer layer of `clients`, chosen by the request's content type.
+pub(crate) fn port(api: JobApi, clients: Clients) -> Router {
     let api = Arc::new(api);
     let both = Both {
-        grpc: grpc(Arc::clone(&api), token.clone()),
-        gateway: gateway(api, token),
+        grpc: grpc(Arc::clone(&api), clients.clone()),
+        gateway: gateway(api, clients),
     };
     Router::new().fallback_service(both)
 }

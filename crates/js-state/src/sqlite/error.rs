@@ -47,6 +47,19 @@ pub enum SqliteError {
         /// Its link count.
         links: u64,
     },
+    /// [`super::SqliteStore::open_locked`] was given a writer lock that is not this
+    /// file's: one taken on another state file, or on a Postgres store.
+    #[error(
+        "state file {}: the writer lock given is not this file's lock ({})",
+        path.display(),
+        lock.display()
+    )]
+    NotThisFilesLock {
+        /// The state file.
+        path: PathBuf,
+        /// The file's own lock file, the one a lock for it is held on.
+        lock: PathBuf,
+    },
     /// The file is not a state store this binary reads (another schema, or another
     /// application's database), or the filesystem cannot keep it in WAL mode.
     #[error("{0}")]

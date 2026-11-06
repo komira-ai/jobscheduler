@@ -254,6 +254,7 @@ async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
             id: Some(JobId::parse("job-q").unwrap()),
             spec: spec(),
             priority: 0,
+            client: None,
         };
         rig.jobs.insert_queued(new).unwrap().record.id
     };

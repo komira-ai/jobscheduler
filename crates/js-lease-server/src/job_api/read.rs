@@ -40,7 +40,8 @@
 //! # `ListJobs`
 //!
 //! Filters: the states (any of them; a state this server does not know matches no job), the
-//! labels (every one, with the same value), and the time a job was queued, half-open:
+//! labels (every one, with the same value), the client that submitted the job (a job recorded
+//! with no client matches no client), and the time a job was queued, half-open:
 //! `queued_after_ms` is in, `queued_before_ms` is out. The jobs come in the order of the
 //! table's keys, which is the order of their ids. A page holds [`DEFAULT_PAGE_SIZE`] jobs
 //! when the request asks for 0, and at most [`MAX_PAGE_SIZE`]: a larger page size is cut
@@ -61,7 +62,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_jobs::{JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
+use js_jobs::{ClientName, JobId, JobPage, JobRecord, JobState, MAX_PAGE, keys};
 use js_lease::Clock;
 use js_proto::v1::{
     self, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
@@ -293,6 +294,8 @@ struct Filter {
     after: Option<u64>,
     /// Kept: queued before this time, in milliseconds.
     before: Option<u64>,
+    /// Kept: submitted by the client of this name.
+    client: Option<String>,
 }
 
 impl Filter {
@@ -307,7 +310,12 @@ impl Filter {
             .all(|(key, value)| job.spec.labels.get(key) == Some(value.as_str()));
         let after = self.after.is_none_or(|after| queued >= after);
         let before = self.before.is_none_or(|before| queued < before);
-        [in_state, labelled, after, before]
+        let by = job.client.as_ref().map(ClientName::as_str);
+        let client = self
+            .client
+            .as_deref()
+            .is_none_or(|client| by == Some(client));
+        [in_state, labelled, after, before, client]
             .into_iter()
             .all(|kept| kept)
     }
@@ -371,6 +379,7 @@ pub(super) async fn list_jobs(
         labels: request.labels.into_iter().collect(),
         after: request.queued_after_ms,
         before: request.queued_before_ms,
+        client: request.client,
     };
     let (jobs, next) = list(&api.read, Reads(&api.jobs), &filter, resume, size)?;
     Ok(Response::new(ListJobsResponse {

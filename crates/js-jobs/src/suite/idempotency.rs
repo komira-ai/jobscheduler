@@ -15,8 +15,8 @@ use crate::codec::{FORMAT, job_tag, rearranged};
 use crate::ids::ScriptedIds;
 use crate::interfere::INJECTED;
 use crate::{
-    IdSource, JobId, JobSpec, JobState, JobStore, JobStoreError, MINT_TRIES, MintError, NewJob,
-    RandomIds,
+    ClientName, IdSource, JobId, JobSpec, JobState, JobStore, JobStoreError, MINT_TRIES, MintError,
+    NewJob, RandomIds,
 };
 
 /// The digits of a minted id.
@@ -39,6 +39,7 @@ fn new_job(id: &JobId, spec: JobSpec, priority: i32) -> NewJob {
         id: Some(id.clone()),
         spec,
         priority,
+        client: None,
     }
 }
 
@@ -251,6 +252,63 @@ pub fn a_priority_only_difference_is_the_same_job<B: Backend>(backend: &B) {
     );
 }
 
+/// A job recorded with a client, and the same id with the same job again from another client
+/// and from none: each retry is answered from the stored record with the first client, writes
+/// nothing, and the row reads back with that client; a job without an id is recorded with
+/// its client. The client is not part of the idempotency comparison, and a retry never
+/// overwrites it.
+pub fn a_retry_by_another_client_keeps_the_first<B: Backend>(backend: &B) {
+    let name = "a_retry_by_another_client_keeps_the_first";
+    let rig = rig(backend);
+    let id = job_id("by-a");
+    let client = |text: &str| Some(ClientName::parse(text).expect("a client name"));
+    let from = |client: Option<ClientName>| NewJob {
+        client,
+        ..new_job(&id, full_spec(), 0)
+    };
+    let first = rig
+        .jobs
+        .insert_queued(from(client("client-a")))
+        .expect("the first insert");
+    assert_eq!(
+        (first.created, first.record.client.clone()),
+        (true, client("client-a")),
+        "{name}: the first insert did not record its client"
+    );
+    let before = rig.raw("job/by-a");
+    for retry in [client("client-b"), None] {
+        let again = rig
+            .jobs
+            .insert_queued(from(retry.clone()))
+            .expect("a retry answers");
+        assert_eq!(
+            (again.created, again.record),
+            (false, first.record.clone()),
+            "{name}: a retry from {retry:?} did not answer the stored record"
+        );
+    }
+    assert_eq!(rig.raw("job/by-a"), before, "{name}: a retry wrote the row");
+    let stored = rig.jobs.get_job(&id).expect("reads").expect("present");
+    assert_eq!(
+        stored.client,
+        client("client-a"),
+        "{name}: the row lost its client"
+    );
+    let minted = rig
+        .jobs
+        .insert_queued(NewJob {
+            id: None,
+            client: client("client-c"),
+            ..new_job(&id, full_spec(), 0)
+        })
+        .expect("a minted insert");
+    assert_eq!(
+        minted.record.client,
+        client("client-c"),
+        "{name}: a job without an id lost its client"
+    );
+}
+
 /// A second writer records the id between this insert's read and its commit: the same job
 /// is answered from the second writer's record, a different one is a conflict, and neither
 /// writes over it.
@@ -316,6 +374,7 @@ pub fn minted_ids_do_not_repeat_across_instances<B: Backend>(backend: &B) {
                     id: None,
                     spec: full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .expect("minted_ids_do_not_repeat_across_instances: a job without an id");
             let text = inserted.record.id.as_str().to_owned();
@@ -358,6 +417,7 @@ pub fn a_minted_id_collision_is_retried<B: Backend>(backend: &B) {
             id: None,
             spec: full_spec(),
             priority: 0,
+            client: None,
         })
         .expect("a_minted_id_collision_is_retried: a taken id is minted again");
     assert_eq!(
@@ -373,6 +433,7 @@ pub fn a_minted_id_collision_is_retried<B: Backend>(backend: &B) {
         id: None,
         spec: full_spec(),
         priority: 0,
+        client: None,
     });
     assert_eq!(
         answer,
@@ -426,6 +487,7 @@ fn unnamed() -> NewJob {
         id: None,
         spec: full_spec(),
         priority: 0,
+        client: None,
     }
 }
 
@@ -526,6 +588,7 @@ where
                 id: Some(JobId::minted(raced)),
                 spec: super::whole_host_spec(),
                 priority: 0,
+                client: None,
             })
             .expect("the other writer takes the id");
     });

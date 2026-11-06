@@ -106,13 +106,15 @@ pub fn render(service: &str, routes: &[RouteSpec]) -> String {
     code.push_str(&format!(
         "];\n\n\
          /// Calls the method `rpc` of `service` with `input`, a message of its request type,\n\
-         /// and answers its response as a message of `output` (see [`decode_as`] and\n\
-         /// [`answer_of`]).\n\
+         /// carrying `extensions` (those of the HTTP request, which the mounting server's\n\
+         /// layers may have set), and answers its response as a message of `output` (see\n\
+         /// [`decode_as`] and [`answer_of`]).\n\
          async fn call<T: {MODULE}::job_service_server::JobService>(\n    \
          service: &T,\n    \
          rpc: Rpc,\n    \
          input: ::prost_reflect::DynamicMessage,\n    \
-         output: &::prost_reflect::MessageDescriptor,\n\
+         output: &::prost_reflect::MessageDescriptor,\n    \
+         extensions: ::tonic::Extensions,\n\
          ) -> ::core::result::Result<::prost_reflect::DynamicMessage, Answer> {{\n    \
          match rpc {{\n"
     ));
@@ -120,7 +122,9 @@ pub fn render(service: &str, routes: &[RouteSpec]) -> String {
         code.push_str(&format!(
             "        Rpc::{} => {{\n            \
              let request = decode_as::<{}>(&input)?;\n            \
-             let response = service.{}(::tonic::Request::new(request)).await;\n            \
+             let request = ::tonic::Request::from_parts(\
+             ::tonic::metadata::MetadataMap::new(), extensions, request);\n            \
+             let response = service.{}(request).await;\n            \
              answer_of(output, response.map(|response| \
              ::prost::Message::encode_to_vec(response.get_ref())))\n        \
              }}\n",

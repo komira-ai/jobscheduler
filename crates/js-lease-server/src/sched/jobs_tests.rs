@@ -92,6 +92,7 @@ pub(super) fn queue_spec(jobs: &ServerJobs, id: &str, spec: JobSpec, priority: i
         id: Some(JobId::parse(id).unwrap()),
         spec,
         priority,
+        client: None,
     };
     jobs.insert_queued(new).unwrap().record.id
 }
