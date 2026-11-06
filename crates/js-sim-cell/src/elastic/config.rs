@@ -72,6 +72,7 @@ fn built(cloud: Cloud) -> Built {
     Built::Elastic(ElasticBuilt {
         provider: cloud.provider(),
         floor,
+        idle_costs: false,
         exec: vec![ExecMode::Container],
     })
 }

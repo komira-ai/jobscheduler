@@ -442,7 +442,7 @@ impl Scenario {
         let first = timed.borrow().first().cloned();
         let at_end = |cell: &mut Cell| self.expects.iter().find_map(|e| e.unmet(cell));
         let own = |cell: &mut Cell| {
-            let found = self.statements.iter();
+            let mut found = self.statements.iter();
             found.find_map(|(name, judge)| judge(cell).map(|why| format!("{name}: {why}")))
         };
         let unmet = first
