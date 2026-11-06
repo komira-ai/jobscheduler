@@ -47,7 +47,8 @@ pub(crate) fn from_server(state: &Arc<Shared>, max_job_wall: Duration) -> Option
     let read = read::Ctx::default().with_silence(silence);
     let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
-    let hosts: Arc<dyn Hosts> = Arc::clone(state);
+    let shared: Arc<Shared> = Arc::clone(state);
+    let hosts: Arc<dyn Hosts> = shared;
     let pools: Arc<dyn Pools> = match state.pools() {
         Some(pools) => Arc::clone(pools) as Arc<dyn Pools>,
         // A state given no status of its pools has no elastic pool: the status of none.
