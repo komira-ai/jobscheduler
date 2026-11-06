@@ -11,7 +11,8 @@ use js_elastic::{
     Held, HostRef, Offer, PriceUnit, ProviderError, Released,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
-use js_lease::{Booking, ManualClock};
+use js_jobs::{Constraints, JobId, JobSpec, JobStore, Needs, NetworkPolicy, NewJob, RandomIds};
+use js_lease::Booking;
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{
     BuildCtx, Built, CapacitySource, Config, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles,
@@ -20,9 +21,10 @@ use js_lease_server::{
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_registry::{SequentialSessions, SessionSource};
+use js_state::sqlite::{Options, SqliteStore};
 use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, Model, ProviderId, Request, RequestId, ResourceClass,
-    Resources, accelerator_of,
+    ExecMode, ImageDigestRef, Labels, LeaseId, Model, ProviderId, ResourceClass, Resources,
+    accelerator_of,
 };
 
 use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body, routed};
@@ -203,8 +205,9 @@ fn offer() -> Offer {
 }
 
 /// The configuration file of a server with one live pool `burst` of the `logged-cloud` kind,
-/// leases of 60 s, and the agent routes on a port of their own (which an elastic pool needs,
-/// and which the seam does not bind).
+/// leases of 60 s, the agent routes on a port of their own (which an elastic pool needs,
+/// and which the seam does not bind), and the job service on, so the server holds the job
+/// tables beside the state file (the seam binds no job listener either).
 fn file_text(scratch: &Scratch) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     let key = scratch.write("api-key", "test-api-key", 0o600);
@@ -219,6 +222,7 @@ fn file_text(scratch: &Scratch) -> String {
          default_ttl = \"60s\"\n\
          listen = \"127.0.0.1:0\"\n\
          agent_listen = \"127.0.0.2:0\"\n\
+         job_listen = \"127.0.0.3:0\"\n\
          advertise_url = \"https://sched.example.org:7301\"\n\
          \n\
          [[pool]]\n\
@@ -240,24 +244,39 @@ fn file_text(scratch: &Scratch) -> String {
     )
 }
 
-/// The start of a whole-node request `id` for one a100, under the lease `lease`: what a
-/// consumer presents to the registry.
-fn whole_node(lease: u64, id: &str) -> StartSpec {
-    let request = Request {
-        class: ClassId::new("whole-node").unwrap(),
-        resources: Resources::new(1000, 1024, 1, Some("nvidia-a100".to_owned())).unwrap(),
-        capabilities: Capabilities::new(),
-        max_wall: Duration::from_secs(7200),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
+/// Writes one queued job, `id`, asking for one core, 1 GiB and one a100, into the job tables
+/// beside the state file of `scratch`, before the server opens them: the demand the scaler
+/// reads.
+fn queue_job(scratch: &Scratch, id: &str) {
+    let mut path = scratch.state().into_os_string();
+    path.push(".jobs");
+    let clock = Arc::new(js_state::ManualClock::default());
+    clock.advance(Duration::from_millis(1_000_000_000_000));
+    let store = SqliteStore::open(std::path::Path::new(&path), clock, Options::default()).unwrap();
+    let store: Arc<dyn js_state::Store> = Arc::new(store);
+    let jobs = JobStore::new(Arc::new(store), RandomIds).unwrap();
+    let spec = JobSpec {
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        command: vec!["run".to_owned()],
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        needs: Needs::Shape(
+            Resources::new(1000, 1 << 30, 1, Some("nvidia-a100".to_owned())).unwrap(),
+        ),
+        constraints: Constraints::default(),
+        wall_limit_secs: 600,
+        network: NetworkPolicy::None,
+        ports: Vec::new(),
+        files: js_jobs::JobFiles::default(),
+        labels: Labels::default(),
     };
-    let spec = StartSpec::new(
-        LeaseId::new(1, lease),
-        request,
-        &[ResourceClass::whole_node()],
-    );
-    spec.unwrap().with_request_id(RequestId::new(id).unwrap())
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec,
+        priority: 0,
+        client: None,
+    };
+    jobs.insert_queued(new).unwrap();
 }
 
 /// Where `call` first appears in `calls`.
@@ -268,94 +287,33 @@ fn first(calls: &[String], call: &str) -> usize {
         .unwrap_or_else(|| panic!("no {call} in {calls:?}"))
 }
 
-/// A server with the live pool `burst` of [`file_text`] on a fresh elastic fake cloud, its
-/// static hosts the logged two-host pool, both writing to the log it returns; the scaler
-/// draws from `entropy` when one is given, else from the default the configuration has.
-struct Burst {
-    server: InProcess,
-    clock: ManualClock,
-    fake_clock: FakeClock,
-    log: Log,
-    _scratch: Scratch,
-}
-
-impl Burst {
-    fn start(name: &str, entropy: Option<Arc<dyn SessionSource>>) -> Self {
-        let scratch = Scratch::new(name);
-        let fake_clock = FakeClock::new(1_000_000_000_000);
-        let cloud = ElasticFake::new(fake_clock.clone(), Billing::Lambda, vec![offer()]);
-        let log: Log = Arc::default();
-        let key = scratch.path("api-key").display().to_string();
-        CLOUDS.lock().unwrap().insert(key, (cloud, log.clone()));
-        let path = scratch.write("js.toml", &file_text(&scratch), 0o644);
-        let (clock, shared) = clock();
-        let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
-        let config =
-            Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
-        let config = config
-            .with_capacity_source(Box::new(LoggedStatic(log.clone())))
-            .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
-        let config = match entropy {
-            Some(entropy) => config.with_entropy(entropy),
-            None => config,
-        };
-        let server = InProcess::start(config, shared).unwrap();
-        Self {
-            server,
-            clock,
-            fake_clock,
-            log,
-            _scratch: scratch,
-        }
-    }
-
-    /// Moves both clocks on by `by`.
-    fn advance(&self, by: Duration) {
-        self.clock.advance(by);
-        self.fake_clock.advance(by);
-    }
-
-    /// The acquire id and the name of each machine the scaler has a record of, in the
-    /// order of its records.
-    fn machines(&self) -> Vec<(String, String)> {
-        let scaler = self.server.scaler().unwrap();
-        let records = scaler.state().records.instances;
-        let named = records.iter().map(|record| {
-            let acquire = record.acquire.as_ref().map(ToString::to_string);
-            (acquire.unwrap_or_default(), record.name.clone())
-        });
-        named.collect()
-    }
-}
-
-/// Starts [`Burst`] with `entropy` and has its scaler launch: a first tick passes the pool's
-/// checks (its scaler draws once and launches nothing), then the clocks move on 61 s (so the
-/// checks fall due again), a whole-node request waits, and a tick launches one machine for
-/// it. Returns the machines the scaler then has records of.
-async fn launches(name: &str, entropy: Option<Arc<dyn SessionSource>>) -> Vec<(String, String)> {
-    let burst = Burst::start(name, entropy);
-    burst.server.tick().await;
-    burst.advance(Duration::from_secs(61));
-    let registry = burst.server.registry().unwrap();
-    let waits = registry.provider().start(whole_node(99, "wait-1"));
-    assert!(matches!(waits, StartAck::Unknown), "{waits:?}");
-    burst.server.tick().await;
-    burst.machines()
-}
-
-/// Asserts the order of one tick over an elastic pool. The first tick runs the pool's first
-/// pass of checks (so the pool is available) and a scaler pass that has nothing to launch.
-/// Then a lease on the static pool passes its ttl, the checks fall due again (60 s), and a
-/// whole-node request waits; in the one tick that follows, the log shows the checks before
-/// the first `acquire` and the table's stop of the expired lease before the scaler's first
-/// call (its `list`). It catches a tick that runs the scaler before the checks (the scaler
-/// would read the pool as it was, or as still being checked at the first tick), one that skips
-/// the checks (no `checks`, and no launch: the scaler launches only while they pass), and one
-/// that runs the scaler before the table.
+/// Asserts the order of a tick over an elastic pool with a job queued from the start. The
+/// first tick runs the pool's first pass of checks (so the pool is available) and then the
+/// scaler, which launches for the job: the log shows the checks before the first `acquire`.
+/// Then a lease on the static pool passes its ttl and the checks fall due again (60 s); in
+/// the tick that follows, the table's stop of the expired lease comes before the scaler's
+/// first call (its `list`), and the job, still on its way to its machine, launches nothing
+/// more. It catches a tick that runs the scaler before the checks (the scaler would read the
+/// pool as still being checked and launch nothing), one that skips the checks (no `checks`,
+/// and no launch: the scaler launches only while they pass), and one that runs the scaler
+/// before the table.
 #[tokio::test]
 async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
-    let burst = Burst::start("order", None);
-    let Burst { server, log, .. } = &burst;
+    let scratch = Scratch::new("order");
+    let fake_clock = FakeClock::new(1_000_000_000_000);
+    let cloud = ElasticFake::new(fake_clock.clone(), Billing::Lambda, vec![offer()]);
+    let log: Log = Arc::default();
+    let key = scratch.path("api-key").display().to_string();
+    CLOUDS.lock().unwrap().insert(key, (cloud, log.clone()));
+    let path = scratch.write("js.toml", &file_text(&scratch), 0o644);
+    queue_job(&scratch, "wants-a100");
+    let (clock, shared) = clock();
+    let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
+    let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
+    let config = config
+        .with_capacity_source(Box::new(LoggedStatic(log.clone())))
+        .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
+    let server = InProcess::start(config, shared).unwrap();
     let client = server.client_router();
     let granted = routed(
         &client,
@@ -371,36 +329,67 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     server.tick().await;
     let calls = log.lock().unwrap()[before..].to_vec();
     assert!(first(&calls, "checks") < first(&calls, "list"), "{calls:?}");
-    assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
-
-    burst.advance(Duration::from_secs(61));
-    let registry = server.registry().unwrap();
-    let waits = registry.provider().start(whole_node(99, "wait-1"));
-    assert!(matches!(waits, StartAck::Unknown), "{waits:?}");
-    let before = log.lock().unwrap().len();
-    server.tick().await;
-    let calls = log.lock().unwrap()[before..].to_vec();
     assert!(
         first(&calls, "checks") < first(&calls, "acquire"),
         "{calls:?}"
     );
+
+    clock.advance(Duration::from_secs(61));
+    fake_clock.advance(Duration::from_secs(61));
+    let before = log.lock().unwrap().len();
+    server.tick().await;
+    let calls = log.lock().unwrap()[before..].to_vec();
     assert!(
         first(&calls, "stop 1-1") < first(&calls, "list"),
         "{calls:?}"
     );
+    assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
     let scaler = server.scaler().unwrap();
     assert_eq!(scaler.state().records.instances.len(), 1);
 }
 
+/// Starts a server with the live pool `burst` of [`file_text`] on a fresh elastic fake cloud
+/// and one job queued from the start, its scaler drawing from `entropy` when one is given,
+/// else from the default the configuration has, and runs one tick: the pool's checks pass
+/// and the scaler launches one machine for the job with its first draw. Returns the acquire
+/// id and the name of each machine the scaler then has a record of.
+async fn launches(name: &str, entropy: Option<Arc<dyn SessionSource>>) -> Vec<(String, String)> {
+    let scratch = Scratch::new(name);
+    let fake_clock = FakeClock::new(1_000_000_000_000);
+    let cloud = ElasticFake::new(fake_clock, Billing::Lambda, vec![offer()]);
+    let log: Log = Arc::default();
+    let key = scratch.path("api-key").display().to_string();
+    CLOUDS.lock().unwrap().insert(key, (cloud, log.clone()));
+    let path = scratch.write("js.toml", &file_text(&scratch), 0o644);
+    queue_job(&scratch, "wants-a100");
+    let (_clock, shared) = clock();
+    let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
+    let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
+    let config = config
+        .with_capacity_source(Box::new(LoggedStatic(log)))
+        .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
+    let config = match entropy {
+        Some(entropy) => config.with_entropy(entropy),
+        None => config,
+    };
+    let server = InProcess::start(config, shared).unwrap();
+    server.tick().await;
+    let records = server.scaler().unwrap().state().records.instances;
+    let named = records.iter().map(|record| {
+        let acquire = record.acquire.as_ref().map(ToString::to_string);
+        (acquire.unwrap_or_default(), record.name.clone())
+    });
+    named.collect()
+}
+
 /// Asserts that two servers whose scalers are given seeded sources that answer the same
 /// bytes ([`SequentialSessions`], each its own) launch the same machine, with the same
-/// acquire id and the same host name; that the id is the pool's name and the source's draw in
-/// hex, the second draw (the first tick drew the first and launched nothing); and that a
-/// source shared by one server and a server started after it (the same `Arc`) goes on with
-/// the next draws, so the second names a machine the first did not. It catches a scaler that
-/// ignores `Config::with_entropy` (its id would be the operating system's random one,
-/// different on each run), one that draws other than once a tick, and a copy of the source
-/// that starts it over.
+/// acquire id and the same host name; that the id is the pool's name and the source's first
+/// draw in hex; and that a source shared by one server and a server started after it (the
+/// same `Arc`) goes on with the next draw, so the second names a machine the first did not.
+/// It catches a scaler that ignores `Config::with_entropy` (its id would be the operating
+/// system's random one, different on each run), one that draws other than once a step, and
+/// a copy of the source that starts it over.
 #[tokio::test]
 async fn seeded_entropy_names_the_same_machines_on_every_run() {
     let first_run = launches("seeded-a", Some(Arc::new(SequentialSessions::new()))).await;
@@ -408,7 +397,7 @@ async fn seeded_entropy_names_the_same_machines_on_every_run() {
     assert_eq!(first_run.len(), 1, "{first_run:?}");
     assert_eq!(first_run, second_run);
     let (id, name) = &first_run[0];
-    assert_eq!(*id, format!("burst-{:032x}", 2));
+    assert_eq!(*id, format!("burst-{:032x}", 1));
     assert!(name.starts_with("js-"), "{name}");
 
     let shared: Arc<dyn SessionSource> = Arc::new(SequentialSessions::new());
@@ -416,7 +405,7 @@ async fn seeded_entropy_names_the_same_machines_on_every_run() {
     let after = launches("shared-b", Some(shared)).await;
     assert_eq!(before, first_run);
     assert_eq!(after.len(), 1, "{after:?}");
-    assert_eq!(after[0].0, format!("burst-{:032x}", 4));
+    assert_eq!(after[0].0, format!("burst-{:032x}", 2));
     assert_ne!(after[0].1, before[0].1);
 }
 

@@ -26,7 +26,7 @@ use super::{gateway_over, grpc_over};
 use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{OneClock, START_MS, tables_on};
 use crate::config::clients_rig::{ClientsRig, DEFAULT_TOKEN, JOIN};
-use crate::config::{Cli, Clients, Config, parse_token};
+use crate::config::{Cli, Clients, Config, Entry, LiveClients, Role, parse_token};
 
 /// The token of the client `ci`.
 const CI: &str = "ci-token-0123456789-abcdefghijklmnopqrst";
@@ -38,20 +38,24 @@ const OPS: &str = "ops-token-0123456789-abcdefghijklmnopqrs";
 const STRANGER: &str = "stranger-token-0123456789-abcdefghijklmn";
 
 /// The clients `default` (the token [`TOKEN`]), `ci` and `ops`.
-fn three() -> Clients {
+fn three() -> LiveClients {
     let token = |text: &str| parse_token(text.as_bytes()).expect("a valid token");
     let mut clients = Clients::only(&token(TOKEN), "--token-file");
     for (name, text) in [("ci", CI), ("ops", OPS)] {
-        let place = format!("--client-token {name}");
-        let name = ClientName::parse(name).expect("a client name");
-        assert_eq!(clients.add(name, &token(text), place), Ok(()));
+        let entry = Entry {
+            name: ClientName::parse(name).expect("a client name"),
+            role: Role::Client,
+            place: format!("--client-token {name}"),
+            file: std::path::PathBuf::new(),
+        };
+        assert_eq!(clients.add(entry, &token(text)), Ok(()));
     }
-    clients
+    LiveClients::new(clients)
 }
 
 /// The service over fresh tables with a served submit that admits every job, behind the
 /// bearer layer of `clients`.
-async fn served(clients: Clients) -> Writes {
+async fn served(clients: LiveClients) -> Writes {
     let clock = Arc::new(ManualClock::default());
     clock.advance(Duration::from_millis(START_MS));
     let (_, jobs) = tables_on(Arc::clone(&clock), Retention::DEFAULT);
@@ -119,7 +123,8 @@ fn labelled(id: &str, label: &str) -> v1::JobSpec {
 
 /// Asserts that with three clients, a `SubmitJob` with each client's token succeeds over gRPC
 /// and over the gateway and records that client's name, answered on the job, and that the
-/// job read back with another client's token, over either transport, shows it; each job is
+/// job read back with the client's own token and with the operator `default`'s, over either
+/// transport, shows it; each job is
 /// labelled with another client's name, which the record does not take. Catches a name not
 /// attached by the bearer layer (the record would have none), a name taken from the request
 /// rather than the token, and a transport that loses the name on the way to the call.
@@ -138,9 +143,9 @@ async fn each_client_token_is_accepted_and_names_its_client() {
             let stored = rig.jobs.get_job(&job_id(&id)).unwrap();
             let stored = stored.expect("the job is recorded").client;
             assert_eq!(stored.as_ref().map(ClientName::as_str), Some(*name));
-            for reader in Via::BOTH {
-                let read = read_as(&rig, OPS, reader, &id).await;
-                assert_eq!(read.client.as_deref(), Some(*name), "{id} over {reader:?}");
+            for (reader, via) in [token, &TOKEN].into_iter().zip(Via::BOTH) {
+                let read = read_as(&rig, reader, via, &id).await;
+                assert_eq!(read.client.as_deref(), Some(*name), "{id} over {via:?}");
             }
         }
     }
@@ -212,33 +217,36 @@ async fn an_unknown_or_removed_token_is_refused_with_no_handler_run() {
     );
 }
 
-/// Asserts that job ids are one namespace across clients: client A submits the job `x`;
-/// client B submitting the same job gets the same answer (the job, with A as its client),
-/// over gRPC and over the gateway; B submitting another job under `x` is `job-id-conflict`
-/// (409, `ALREADY_EXISTS` over gRPC); and the stored job still names A. Catches ids scoped
-/// per client (B would make a second job, or be refused the same one) and a retry that
-/// overwrites the stored client.
+/// Asserts that job ids are one namespace across clients: client A (`ci`) submits the job
+/// `x`; client B (`ops`, of the role `client`) submitting the same job is `job-id-conflict`
+/// (409), over gRPC and over the gateway, so it never reads A's job; the operator `default`
+/// submitting the same job gets the same answer (the job, with A as its client); any other
+/// job under `x` is `job-id-conflict` (409, `ALREADY_EXISTS` over gRPC) whoever sends it; and
+/// the stored job still names A. Catches ids scoped per client (B would make a second job), a
+/// client that reads another's job through a retry, and a retry that overwrites the stored
+/// client.
 #[tokio::test]
-async fn a_retry_from_another_client_returns_the_same_job_and_a_different_job_conflicts() {
+async fn a_retry_of_another_clients_id_conflicts_for_a_client_and_answers_an_operator() {
     let rig = served(three()).await;
     let first = submit_as(&rig, CI, Via::Grpc, &wire("x"))
         .await
         .expect("the first submit is recorded");
     assert_eq!(first.client.as_deref(), Some("ci"));
     for via in Via::BOTH {
-        let again = submit_as(&rig, OPS, via, &wire("x")).await;
-        assert_eq!(
-            again,
-            Ok(first.clone()),
-            "a retry from another client over {via:?}"
-        );
+        let refused = submit_as(&rig, OPS, via, &wire("x"))
+            .await
+            .expect_err("another client's id");
+        assert_eq!(refused.0, StatusCode::CONFLICT, "{via:?}");
+        assert_eq!(refused.1["error"], json!("job-id-conflict"), "{via:?}");
+        let again = submit_as(&rig, TOKEN, via, &wire("x")).await;
+        assert_eq!(again, Ok(first.clone()), "an operator's retry over {via:?}");
     }
     let other = v1::JobSpec {
         args: vec!["--slow".to_owned()],
         ..wire("x")
     };
-    for via in Via::BOTH {
-        let refused = submit_as(&rig, OPS, via, &other)
+    for (token, via) in [(OPS, Via::Grpc), (OPS, Via::Json), (TOKEN, Via::Json)] {
+        let refused = submit_as(&rig, token, via, &other)
             .await
             .expect_err("a conflict");
         assert_eq!(refused.0, StatusCode::CONFLICT, "{via:?}");
@@ -364,7 +372,10 @@ async fn the_token_never_appears_in_debug_errors_or_logs() {
     let mut printed = vec![format!("{cli:?}")];
     let config = Config::from_cli(cli).expect("the flags start");
     printed.push(format!("{:?}", config.clients));
-    assert_eq!(printed[1], r#"Clients(["default", "marker"])"#);
+    assert_eq!(
+        printed[1],
+        r#"Clients([("default", "operator"), ("marker", "client")])"#
+    );
 
     let pasted: Vec<OsString> = vec!["--client-token".into(), MARKER.into()];
     let twice = rig.client_flags(&[("marker", MARKER), ("copy", MARKER)]);

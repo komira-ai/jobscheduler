@@ -20,7 +20,7 @@ use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Clients, Config, JobListen, Limits, TlsFiles, Token};
+use crate::config::{Config, JobListen, Limits, LiveClients, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
@@ -218,8 +218,8 @@ pub(crate) struct Listeners {
     job_listen: Option<JobListen>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
     max_job_wall: Duration,
-    /// The clients the job service's bearer layer admits.
-    clients: Clients,
+    /// The clients the job service's bearer layer admits, as the tick reloads them.
+    clients: LiveClients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -289,12 +289,14 @@ pub(crate) fn prepare(
         entropy,
         alerts,
         alert_repeat,
+        logs,
         max_job_wall,
         ..
     } = config;
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(hosts, usage, clock, &state_file)?;
+    let logs = crate::logs::from_config(&logs, clock);
+    let (source, agents) = assemble(hosts, usage, clock, &state_file, logs)?;
     let launching = elastic.iter().map(|plan| Launching {
         provider: Arc::clone(&plan.provider),
         share: plan.share,
@@ -399,6 +401,7 @@ pub(crate) fn open(
         cached,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
     }
@@ -428,7 +431,8 @@ pub(crate) fn open(
         warn!("{warning}");
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let status =
+        Status::new(pool, registry, scaler.clone(), warnings, clock.clone()).with_logs(logs);
     let status = serves_status.then(|| Arc::new(status));
     let shared = Arc::new(
         Shared::new(table, token, agents)

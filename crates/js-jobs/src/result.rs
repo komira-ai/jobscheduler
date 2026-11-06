@@ -2,7 +2,8 @@
 //! sections 3.2, 6.7 and 8, rows 3, 30 and 36).
 //!
 //! An ended job's record keeps its [`JobResult`] (exit code, reason, log tails, timing,
-//! resource usage) and its retention end, both written by [`crate::JobStore::end_job`] in
+//! resource usage, and the lengths of its live-log streams when the agent reported them) and
+//! its retention end, both written by [`crate::JobStore::end_job`] in
 //! the transaction that ends the job. The retention end is a stored instant: the store's
 //! clock at the end plus the [`Retention`] window the store was opened with, so a window
 //! changed later applies to the jobs that end afterwards and not to those already ended.
@@ -67,6 +68,22 @@ pub struct ResourceUsage {
     pub peak_memory_bytes: u64,
 }
 
+/// The length of each output stream of a job and the bytes of each that the host's capture
+/// could not keep, as the agent reported them in the job's result (`docs/design/live-logs.md`,
+/// section 2). They are kept with the result so that a reader of the job's live logs knows
+/// where each stream ends; the log bytes themselves are never stored here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogLengths {
+    /// Every byte the job printed to standard output.
+    pub stdout_bytes: u64,
+    /// Every byte the job printed to standard error.
+    pub stderr_bytes: u64,
+    /// The bytes of standard output the capture could not keep, so never uploaded.
+    pub stdout_dropped: u64,
+    /// The bytes of standard error the capture could not keep.
+    pub stderr_dropped: u64,
+}
+
 /// What a client reads of a job that ended with a result (design section 5.3, "Get, list,
 /// result, logs"). A job that was lost or failed to start has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,9 +103,13 @@ pub struct JobResult {
     pub timing: JobTiming,
     /// What it used; `None` when the agent reported nothing.
     pub usage: Option<ResourceUsage>,
+    /// The lengths of its output streams; `None` when the agent reported none (a runtime that
+    /// does not upload live logs, or a build from before them).
+    pub logs: Option<LogLengths>,
 }
 
-/// What the host reported of a job that stopped: the tails of its output and its usage.
+/// What the host reported of a job that stopped: the tails of its output, its usage and the
+/// lengths of its streams.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Output {
     /// The end of its standard output. A tail longer than [`MAX_LOG_STREAM_LEN`] bytes is
@@ -100,6 +121,8 @@ pub struct Output {
     pub truncated: bool,
     /// What it used, when the agent reported it.
     pub usage: Option<ResourceUsage>,
+    /// The lengths of its output streams, when the agent reported them.
+    pub logs: Option<LogLengths>,
 }
 
 /// How a job ended: what [`crate::JobStore::end_job`] records.
@@ -231,8 +254,10 @@ fn tail_of(mut text: String) -> (String, bool) {
 }
 
 /// `job` ended as `end` says at `now`: its state, its end time, its result (none for a job
-/// that was lost or failed to start, with the tails cut to the cap) and its retention end,
-/// `now` plus `retention`. This is the one place a job record is made ended.
+/// that was lost or failed to start, with the tails cut to the cap), its retention end,
+/// `now` plus `retention`, and its files' contents replaced by their digests
+/// ([`crate::JobFiles`]). This is the one place a job record is made ended, so every write
+/// that ends a job drops the contents in the same write.
 pub(crate) fn ended(
     job: JobRecord,
     end: JobEnd,
@@ -257,9 +282,11 @@ pub(crate) fn ended(
             truncated: output.truncated | stdout_cut | stderr_cut,
             timing,
             usage: output.usage,
+            logs: output.logs,
         }
     });
     JobRecord {
+        spec: job.spec.digested(),
         state,
         ended_at: Some(now),
         result,
@@ -301,6 +328,22 @@ pub(crate) fn floored_at_boot(job: &JobRecord, boot: StoreTime) -> Option<JobRec
     })
 }
 
+/// `job` with its files' contents replaced by their digests when it has ended and still holds
+/// some (a row written by a build that kept them after the end); `None` for a job that has
+/// not ended, for one whose files are already digests, and for one with no files, which has
+/// nothing to drop. Nothing else changes.
+pub(crate) fn digested_at_boot(job: &JobRecord) -> Option<JobRecord> {
+    let holds_contents = job
+        .spec
+        .files
+        .contents()
+        .is_some_and(|files| !files.is_empty());
+    (job.state.is_ended() & holds_contents).then(|| JobRecord {
+        spec: job.spec.clone().digested(),
+        ..job.clone()
+    })
+}
+
 /// `job` with its retention end raised to `boot` plus [`BOOT_GRACE`], when it has one that
 /// is earlier; `None` when it has none or one at least that late. Nothing else changes.
 pub(crate) fn raised_at_boot(job: &JobRecord, boot: StoreTime) -> Option<JobRecord> {
@@ -320,6 +363,14 @@ mod tests {
     fn at(secs: u64) -> StoreTime {
         StoreTime::from_duration(Duration::from_secs(secs))
     }
+
+    /// The stream lengths every output of these tests reports.
+    const LENGTHS: LogLengths = LogLengths {
+        stdout_bytes: 2_621_440,
+        stderr_bytes: 100,
+        stdout_dropped: 0,
+        stderr_dropped: 7,
+    };
 
     fn job(text: &str, state: JobState, retention_ends: Option<StoreTime>) -> JobRecord {
         JobRecord {
@@ -351,12 +402,14 @@ mod tests {
                 cpu_time: Duration::from_millis(1500),
                 peak_memory_bytes: 4096,
             }),
+            logs: Some(LENGTHS),
         }
     }
 
     // Catches an end mapped to the wrong state or reason (a clean exit read as failed, a wall
     // limit read as an exit, a cancel without its reason), an exit code dropped or invented,
-    // and a result made for a job that was lost or failed to start.
+    // the stream lengths the host reported dropped from the result, and a result made for a
+    // job that was lost or failed to start.
     #[test]
     fn every_end_has_its_state_and_its_result() {
         let cases = [
@@ -443,6 +496,7 @@ mod tests {
                             cpu_time: Duration::from_millis(1500),
                             peak_memory_bytes: 4096,
                         }),
+                        logs: Some(LENGTHS),
                     },
                     "{end:?}"
                 );

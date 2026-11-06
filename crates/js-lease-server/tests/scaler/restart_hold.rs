@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_registry::HostState;
 use js_scaler::Phase;
 
-use crate::fakes::{Rig, live, record, records, request, rig};
+use crate::fakes::{Rig, job, live, record, records, rig};
 
 /// A rig just restarted over the records of one registered machine, `js-restored`, with
 /// the registry showing no host and one request waiting that the machine's offer fits.
@@ -17,7 +17,7 @@ fn restarted() -> Rig {
         records(vec![record("js-restored", Phase::Registered)]),
         live(),
     );
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig
 }
 
@@ -80,7 +80,7 @@ async fn a_request_the_restored_machine_does_not_fit_is_launched_for_at_once() {
     machine.offer.gpus = 0;
     machine.offer.gpu_class = None;
     let rig = rig(records(vec![machine]), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     assert!(launched(&rig), "{:?}", rig.log());
     assert_eq!(rig.scaler.state().records.instances.len(), 2);
@@ -91,7 +91,7 @@ async fn a_request_the_restored_machine_does_not_fit_is_launched_for_at_once() {
 #[tokio::test]
 async fn a_restored_machine_holds_the_launch_for_one_request_only() {
     let rig = restarted();
-    rig.world().waiting = vec![request("r1"), request("r2")];
+    rig.world().queued = vec![job("r1"), job("r2")];
     rig.scaler.tick().await;
     let acquires = rig
         .log()
@@ -102,7 +102,7 @@ async fn a_restored_machine_holds_the_launch_for_one_request_only() {
 }
 
 /// Asserts that a machine whose host the registry shows silent (waiting to say hello
-/// again, holding a lease) covers a request its offer fits the same way. It catches a shell
+/// again, a job allocation on it) covers a request its offer fits the same way. It catches a shell
 /// that holds only for a machine the registry does not show.
 #[tokio::test]
 async fn an_awaiting_host_holds_the_launch_the_same_way() {
@@ -110,8 +110,8 @@ async fn an_awaiting_host_holds_the_launch_the_same_way() {
     let mut awaiting = crate::fakes::view("js-restored");
     awaiting.state = HostState::Awaiting;
     awaiting.claim = None;
-    awaiting.lease = Some(js_types::LeaseId::new(1, 1));
     rig.world().hosts = vec![awaiting];
+    rig.world().live = vec![crate::fakes::allocation("j-restored", "js-restored")];
     rig.scaler.tick().await;
     assert!(!launched(&rig), "{:?}", rig.log());
 }
@@ -121,7 +121,7 @@ async fn an_awaiting_host_holds_the_launch_the_same_way() {
 #[tokio::test]
 async fn without_restored_records_a_waiting_request_is_launched_for() {
     let rig = rig(js_scaler::Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     assert!(launched(&rig), "{:?}", rig.log());
     assert_eq!(rig.scaler.state().records.instances.len(), 1);
@@ -137,7 +137,7 @@ async fn a_restored_draining_machine_does_not_hold_the_launch() {
         records(vec![record("js-restored", Phase::Draining)]),
         live(),
     );
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     assert!(launched(&rig), "{:?}", rig.log());
 }
@@ -150,7 +150,7 @@ async fn a_restored_machine_that_fits_part_of_a_request_does_not_hold_the_launch
     let mut machine = record("js-restored", Phase::Registered);
     machine.offer.memory_bytes = 1 << 29;
     let rig = rig(records(vec![machine]), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     assert!(launched(&rig), "{:?}", rig.log());
 }

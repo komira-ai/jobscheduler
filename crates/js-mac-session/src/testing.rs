@@ -13,6 +13,11 @@ use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
 
+/// The fake clock's time before a test moves it.
+pub(crate) fn epoch() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(NOW)
+}
+
 /// More pauses than any bounded wait of the helper takes: past this a wait has no
 /// bound, and the test panics instead of hanging.
 const PAUSES: usize = 10_000;
@@ -43,7 +48,8 @@ pub(crate) struct State {
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
     /// "delete_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
-    /// "command", "reset_password", "boot_session", "account", "processes", "kill_group").
+    /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
+    /// "term_group").
     pub(crate) fail: BTreeSet<&'static str>,
     /// What `command` answers, by the command's text (`program arg ...`). A command
     /// with no answer succeeds and prints nothing, except `fdesetup isactive`, which
@@ -71,6 +77,8 @@ pub(crate) struct State {
     pub(crate) tables_ok: Option<usize>,
     /// How many more `kill_group` calls leave their group alive.
     pub(crate) stubborn_groups: usize,
+    /// How far the fake clock has moved past [`NOW`].
+    pub(crate) advanced: Duration,
     /// The launchd domains that exist (`gui/<uid>` once a login has completed). As
     /// launchd does, `bootout user/<uid>` ends the domain only while no process of the
     /// uid lives (in `procs`): a live one makes it again.
@@ -188,7 +196,7 @@ impl FakeHost {
 
 impl Host for FakeHost {
     fn now(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(NOW)
+        UNIX_EPOCH + Duration::from_secs(NOW) + self.state().advanced
     }
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {
@@ -460,6 +468,10 @@ impl Host for FakeHost {
             state.table.retain(|process| process.pgid != pgid);
         }
         Ok(())
+    }
+
+    fn term_group(&self, pgid: i32) -> io::Result<()> {
+        self.call("term_group", format!("term_group {pgid}"))
     }
 
     fn pause(&self) {

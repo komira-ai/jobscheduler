@@ -3,8 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_elastic::{Acquired, Extra, Held, HostStatus, RefusalCode, Released};
-use js_types::{AcceleratorNeed, Model};
+use js_elastic::{Acquired, Extra, Held, HostStatus, Instant, RefusalCode, Released};
+use js_sched::failover::{AcquireMemory, Refused};
+use js_types::{AcceleratorNeed, Model, RequestId};
 
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
 use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
@@ -32,6 +33,8 @@ pub(crate) struct Pass<'a> {
     pub(crate) silent_now: BTreeMap<String, Millis>,
     /// The machines released this step on their host's silence.
     pub(crate) silent_released: Vec<String>,
+    /// The machines launched this step, each with its request ([`State::launched`]).
+    pub(crate) launched: BTreeMap<String, RequestId>,
     /// Since when each machine was missing from a complete view, at the last step and now.
     missing: BTreeMap<String, Millis>,
     pub(crate) missing_now: BTreeMap<String, Millis>,
@@ -51,8 +54,10 @@ pub(crate) struct Pass<'a> {
     pub(crate) plan: Vec<PlanLine>,
     pub(crate) refused: u64,
     pub(crate) actions: Vec<Action>,
-    /// The offers a provider answered `Capacity` to, which are not chosen again this step.
-    pub(crate) declined: Vec<(String, String, Option<String>)>,
+    /// What pass 2 remembers of refused acquires ([`State::acquire`]).
+    pub(crate) memory: AcquireMemory,
+    /// The refusals this step took in ([`State::refusals`]).
+    pub(crate) refusals: Vec<Refused>,
 }
 
 /// The host named `name`, if the registry knows it.
@@ -189,6 +194,7 @@ impl<'a> Pass<'a> {
             silent,
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
+            launched: BTreeMap::new(),
             missing,
             missing_now: BTreeMap::new(),
             unheard: state.unheard,
@@ -200,7 +206,8 @@ impl<'a> Pass<'a> {
             plan: Vec::new(),
             refused: state.refused,
             actions: Vec::new(),
-            declined: Vec::new(),
+            memory: state.acquire,
+            refusals: Vec::new(),
         }
     }
 
@@ -243,6 +250,7 @@ impl<'a> Pass<'a> {
         if let Some(held) = &pool.held {
             self.apply_list(pool, held);
         }
+        self.apply_reclaimed(pool);
         self.apply_hosts(pool);
         self.records.instances.append(&mut self.extras);
     }
@@ -261,6 +269,21 @@ impl<'a> Pass<'a> {
     }
 
     fn on_acquired(&mut self, pool: &PoolInput, i: usize, result: &AcquireResult) {
+        // Pass 2 takes in an answer to an acquire still out; one for a record that has moved
+        // on is a replay, and fails nothing over.
+        let record = &self.records.instances[i];
+        if record.phase == Phase::Launching {
+            let offer = record.offer.to_offer(record.price_cents_per_hour);
+            let settings = &pool.settings;
+            let refused = self.memory.answered(
+                &result.acquire,
+                (&settings.provider, &offer),
+                &result.answer,
+                Instant::from_millis(self.now.as_millis()),
+                settings.quota_backoff,
+            );
+            self.refusals.extend(refused);
+        }
         match &result.answer {
             Acquired::Accepted { held, extras } => {
                 let failed = self.records.instances[i].phase == Phase::Failed;
@@ -320,18 +343,14 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// A refused acquire: the record is dropped. A `capacity` or `quota` answer is pass 2's
+    /// to fail over from ([`AcquireMemory::answered`], already taken in): neither cools the
+    /// pool nor counts toward its brake. `denied` and `shape` cool the pool, as before.
     fn on_refused(&mut self, pool: &PoolInput, i: usize, code: RefusalCode) {
         if self.go(i, Phase::Refused) {
             self.clean_up(i);
-            let record = &self.records.instances[i];
-            let offer = (
-                record.pool.clone(),
-                record.offer.id.clone(),
-                record.offer.zone.clone(),
-            );
             match code {
-                RefusalCode::Capacity => self.declined.push(offer),
-                RefusalCode::Quota => self.cool(&pool.settings, CooldownReason::Quota),
+                RefusalCode::Capacity | RefusalCode::Quota => {}
                 RefusalCode::Denied => self.cool(&pool.settings, CooldownReason::Denied),
                 RefusalCode::Shape => self.cool(&pool.settings, CooldownReason::Shape),
             }
@@ -396,15 +415,8 @@ impl<'a> Pass<'a> {
         }
         match (before, is_dead(&held.status)) {
             (Phase::Booting | Phase::Registered | Phase::Draining, true) => {
-                self.start_release(i);
-                // A boot that ended starts the cooldown. A host the provider took back (a
-                // spot preemption) after it booted counts toward the trip and the next
-                // cooldown's length, and starts none: the replacement launches at once.
-                if before == Phase::Booting {
-                    self.cool(&pool.settings, CooldownReason::BootFailed);
-                } else if held.status == HostStatus::Preempted {
-                    self.strike(&pool.settings);
-                }
+                let preempted = held.status == HostStatus::Preempted;
+                self.on_lost(pool, i, preempted);
             }
             (Phase::Orphan, true) => self.orphan_gone(i),
             (Phase::Orphan, false) => {
@@ -413,6 +425,39 @@ impl<'a> Pass<'a> {
                 record.last_clean = None;
             }
             _ => {}
+        }
+    }
+
+    /// A machine in `Booting`, `Registered` or `Draining` that the provider no longer runs
+    /// (`preempted` when it took the machine back) is released. A boot that ended starts the
+    /// cooldown. A host the provider took back (a spot preemption) after it booted counts
+    /// toward the trip and the next cooldown's length, and starts none: the replacement
+    /// launches at once.
+    fn on_lost(&mut self, pool: &PoolInput, i: usize, preempted: bool) {
+        let before = self.records.instances[i].phase;
+        self.start_release(i);
+        if before == Phase::Booting {
+            self.cool(&pool.settings, CooldownReason::BootFailed);
+        } else if preempted {
+            self.strike(&pool.settings);
+        }
+    }
+
+    /// The machines the provider's notices said it reclaimed ([`Input::reclaimed`]), after
+    /// the list: each takes the route of a machine the list shows preempted, so a machine
+    /// both a notice and the list name is released and counted once.
+    fn apply_reclaimed(&mut self, pool: &PoolInput) {
+        let input = self.input;
+        for i in self.indices(&pool.settings.pool) {
+            let record = &self.records.instances[i];
+            let named = record
+                .cloud_id
+                .as_ref()
+                .is_some_and(|id| input.reclaimed.contains(id));
+            let held = [Phase::Booting, Phase::Registered, Phase::Draining].contains(&record.phase);
+            if named && held {
+                self.on_lost(pool, i, true);
+            }
         }
     }
 
