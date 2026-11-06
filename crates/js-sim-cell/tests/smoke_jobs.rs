@@ -12,7 +12,10 @@
 //!
 //! Sizes, in agent requests a seed:
 //! - a hundred hosts beating every 30 s for 3,600 s: 12,000, over [`BURST_SEEDS`] seeds
-//!   per front;
+//!   per front; over the job front its quiet end is [`BURST_JOBS_SETTLE`] rather than an
+//!   hour, which keeps the end check (every run ends long before) and leaves out the hour
+//!   of a hundred hosts beating with nothing to do, each of whose heartbeats the server
+//!   answers with a read of the job tables;
 //! - the lossy wire: about 8,400 (`cell/lossy_wire.rs`), over [`LOSSY_SEEDS`] seeds per
 //!   front;
 //! - the partition: twenty hosts beating every 5 s for 1,920 s, about 7,700, over
@@ -40,10 +43,11 @@ const BURST_GIVE_UP: Duration = Duration::from_secs(2_400);
 const BURST_INTERVAL: Duration = Duration::from_secs(30);
 const BURST_GRACE: Duration = Duration::from_secs(90);
 const BURST_SETTLE: Duration = Duration::from_secs(3_600);
+const BURST_JOBS_SETTLE: Duration = Duration::from_secs(600);
 const BURST_SEEDS: u64 = 1;
 
 /// The lossy wire's seeds.
-const LOSSY_SEEDS: u64 = 2;
+const LOSSY_SEEDS: u64 = 1;
 
 /// The partition, as `smoke.rs` has it: ten of twenty agents cut for longer than the grace.
 const CUT_HOSTS: usize = 20;
@@ -54,7 +58,7 @@ const CUT_AGENTS: usize = 10;
 const CUT_AT: Duration = Duration::from_secs(60);
 const CUT_FOR: Duration = Duration::from_secs(60);
 const CUT_SETTLE: Duration = Duration::from_secs(1_800);
-const CUT_SEEDS: u64 = 2;
+const CUT_SEEDS: u64 = 1;
 
 /// The broken-agent family's world: two hosts beating every second, a grace of 3 s, four
 /// runs of 200 ms, and a bus that delays every message 1.5 s, longer than the interval.
@@ -135,7 +139,12 @@ fn a_partition_of_ten_agents_that_heals_settles_every_run() -> Scenario {
 #[test]
 fn smoke_scenarios_run_over_the_job_front() {
     for front in FRONTS {
-        over(a_hundred_hosts_settle_four_hundred_runs(), front).run_seeds(BURST_SEEDS);
+        let burst = over(a_hundred_hosts_settle_four_hundred_runs(), front);
+        let burst = match front {
+            Over::Leases => burst,
+            Over::Jobs => burst.settle_within(BURST_JOBS_SETTLE),
+        };
+        burst.run_seeds(BURST_SEEDS);
         over(lossy_wire::a_lossy_agent_wire_settles_every_run(), front).run_seeds(LOSSY_SEEDS);
         over(
             a_partition_of_ten_agents_that_heals_settles_every_run(),

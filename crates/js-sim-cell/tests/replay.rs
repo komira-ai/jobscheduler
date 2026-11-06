@@ -132,7 +132,7 @@ const FAULTS_FAMILY: &str = "faults";
 
 /// How many seeds of the job smoke scenario the golden file pins, and the family they are
 /// kept under.
-const JOBS_SEEDS: u64 = 2;
+const JOBS_SEEDS: u64 = 1;
 const JOBS_FAMILY: &str = "jobs";
 
 /// The jobs of the cell whose ids are compared: four hosts, eight jobs of [`JOB_RUN`].

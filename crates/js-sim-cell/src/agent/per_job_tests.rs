@@ -166,7 +166,7 @@ fn a_repeated_jobstart_for_a_held_job_runs_once() {
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     let named = format!("{JOB}/{}", allocation());
-    assert_eq!(launches(&io), [named.clone()]);
+    assert_eq!(launches(&io), [named.as_str()]);
     assert_eq!(io.counters.get(Counter::StartRepeated), 1);
     let truth = agent.truth();
     let running = truth.get(&job(JOB)).expect("the job runs");
@@ -185,7 +185,7 @@ fn a_repeated_jobstart_for_a_held_job_runs_once() {
     let mut io = fresh_io();
     answer(&mut broken, &mut io, vec![start(JOB)], &[], &[]);
     answer(&mut broken, &mut io, vec![start(JOB)], &[], &[]);
-    assert_eq!(launches(&io), [named.clone(), named]);
+    assert_eq!(launches(&io), [named.as_str(), named.as_str()]);
 }
 
 /// Asserts that a stop of a job the agent never held retires its id: listed in
