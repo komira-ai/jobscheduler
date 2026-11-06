@@ -119,8 +119,9 @@ pub(crate) const fn classify(error: &StateError) -> Attempt {
         StateError::Missing(_) | StateError::Conflict(_) => Attempt::Stale,
         StateError::StaleOwner(_) => Attempt::Disowned,
         StateError::Store(StoreError::Fenced) => Attempt::Superseded,
-        StateError::Store(StoreError::StaleCursor { .. }) => Attempt::Dropped,
-        StateError::Corrupt { .. } | StateError::Codec(_) => Attempt::Dropped,
+        StateError::Store(StoreError::StaleCursor { .. })
+        | StateError::Corrupt { .. }
+        | StateError::Codec(_) => Attempt::Dropped,
     }
 }
 

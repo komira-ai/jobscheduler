@@ -137,11 +137,14 @@ fn row_of(entry: &str) -> Option<String> {
     keys::indexed_row(entry)
 }
 
-/// The id of the job a `job/<id>` or `alloc/<id>` key names, if it is a valid one.
+/// The id of the job a `job/<id>` or `alloc/<id>` key names, if it is a valid one. The
+/// backfill only ever checks rows of the two tables, so another key has no table prefix to
+/// strip and is judged whole, which no valid id is.
 fn id_of(key: &str) -> Option<JobId> {
     let rest = key
         .strip_prefix(keys::JOB)
-        .or_else(|| key.strip_prefix(keys::ALLOCATION))?;
+        .or_else(|| key.strip_prefix(keys::ALLOCATION))
+        .unwrap_or(key);
     JobId::parse(rest).ok()
 }
 
@@ -312,11 +315,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::Store`].
     #[cfg(any(test, feature = "test-support"))]
     pub fn index_by_scan(&self) -> Result<BTreeSet<String>, JobStoreError> {
-        Ok(self
-            .wanted_entries()?
-            .into_values()
-            .flat_map(|(_, entries)| entries)
-            .collect())
+        let wanted = self.wanted_entries();
+        wanted.map(|rows| {
+            rows.into_values()
+                .flat_map(|(_, entries)| entries)
+                .collect()
+        })
     }
 
     /// Every entry the index spaces this build names hold. Tests only.
