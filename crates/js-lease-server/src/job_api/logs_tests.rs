@@ -245,7 +245,8 @@ async fn a_final_file_is_preferred_and_serves_ranges() {
     running(rig.jobs(), "final-4");
     rig.chunk("final-4", Stream::Stdout, 0, b"abc", 4);
     end(rig.jobs(), "final-4", (3, 0), (0, 0));
-    rig.put("js/final-4/stdout.log.part", b"not the final");
+    let beside = format!("{}stdout.log.part", prefix("final-4").as_str());
+    rig.put(&beside, b"not the final");
     let answer = rig.read(out("final-4", 0)).await.expect("a page");
     assert_eq!(answer, page(ok, 0, 0, b"abc", true, Some(4)));
 
@@ -280,18 +281,17 @@ async fn a_chunk_deleted_after_the_listing_is_served_from_the_final() {
     end(rig.jobs(), "race-1", (150, 0), (0, 0));
     let writer = rig.writer.clone();
     let whole = bytes[..150].to_vec();
-    rig.tap
-        .before(&prefix("race-1").chunk_key(Stream::Stdout, 0), move || {
-            writer
-                .put("js/race-1/stdout.log", whole, &Default::default())
-                .unwrap();
-            writer
-                .delete("js/race-1/stdout/00000000000000000000")
-                .unwrap();
-            writer
-                .delete("js/race-1/stdout/00000000000000000100")
-                .unwrap();
-        });
+    let race = prefix("race-1");
+    let (final_key, first, second) = (
+        race.final_key(Stream::Stdout),
+        race.chunk_key(Stream::Stdout, 0),
+        race.chunk_key(Stream::Stdout, 100),
+    );
+    rig.tap.before(&first.clone(), move || {
+        writer.put(&final_key, whole, &Default::default()).unwrap();
+        writer.delete(&first).unwrap();
+        writer.delete(&second).unwrap();
+    });
     let answer = rig.read(out("race-1", 0)).await.expect("a page");
     assert_eq!(answer, page(ok, 0, 0, &bytes[..150], true, None));
 
@@ -306,7 +306,7 @@ async fn a_chunk_deleted_after_the_listing_is_served_from_the_final() {
         let writer = rig.writer.clone();
         let whole = bytes.clone();
         let final_key = prefix(job).final_key(Stream::Stdout);
-        rig.tap.before(&format!("js%2F{job}%2Fstdout%2F"), move || {
+        rig.tap.before(&format!("{job}%2Fstdout%2F"), move || {
             writer.put(&final_key, whole, &Default::default()).unwrap();
         });
         let answer = rig.grpc(out(job, from)).await.expect("a page");
@@ -480,20 +480,24 @@ async fn missing_bytes_after_the_settle_window_become_a_gap_and_before_it_are_wa
     assert_eq!(refusal(rig.read(out("never-1", 1)).await), past);
 }
 
-/// Asserts that the reader reads only the asked job's objects: of `job-1` and `job-10`, whose
-/// ids share a beginning, each reads its own bytes, and every key and listing prefix asked for
-/// `job-1` begins with `js/job-1/` and none with `js/job-10/`; that a key under the stream's
-/// prefix that is not the layout's is ignored; that the objects an earlier job left under a
-/// reused id (written more than the margin before the placement) are ignored, its final too;
-/// that ids the layout gives no prefix (`_x`, `-x`, `..`) have no live logs, with no store
-/// request; that a `job_id` that is not a job id is refused naming `jobId`; and that a queued
-/// job answers an empty page without a store request. Catches a prefix match that leaks a
-/// neighbour, and a client's text in a key.
+/// Asserts that the reader reads only the asked job's objects, under the prefix of the host
+/// its record names: of `job-1` and `job-10`, whose ids share a beginning, each reads its own
+/// bytes, and every key and listing prefix asked for `job-1` begins with its own prefix and
+/// none with `job-10`'s; that a key under the stream's prefix that is not the layout's is
+/// ignored; that the objects an earlier job left under a reused id (written more than the
+/// margin before the placement) are ignored, its final too; that ids the layout gives no
+/// prefix (`_x`, `-x`, `..`) have no live logs, with no store request; that a `job_id` that is
+/// not a job id is refused naming `jobId`; and that a queued job answers an empty page without
+/// a store request. Catches a prefix match that leaks a neighbour, a prefix that is not the
+/// one the job's start named, and a client's text in a key.
 #[tokio::test]
 async fn the_object_prefix_comes_from_the_job_id_only() {
     let rig = Rig::new().await;
     let ok = v1::JobState::Succeeded;
-    rig.put("js/reuse-1/stdout.log", b"the earlier job's");
+    rig.put(
+        &prefix("reuse-1").final_key(Stream::Stdout),
+        b"the earlier job's",
+    );
     rig.chunk("reuse-1", Stream::Stdout, 3, b"stale", 1);
     rig.advance(Duration::from_secs(360));
     running(rig.jobs(), "job-1");
@@ -502,7 +506,8 @@ async fn the_object_prefix_comes_from_the_job_id_only() {
     rig.chunk("job-1", Stream::Stdout, 0, b"one", 1);
     rig.chunk("job-10", Stream::Stdout, 0, b"ten!", 2);
     rig.final_file("job-10", Stream::Stdout, b"ten!");
-    rig.put("js/job-1/stdout/not-an-offset", b"ignored");
+    let odd = format!("{}stdout/not-an-offset", prefix("job-1").as_str());
+    rig.put(&odd, b"ignored");
     rig.chunk("reuse-1", Stream::Stdout, 0, b"new", 4);
     end(rig.jobs(), "job-1", (3, 0), (0, 0));
 
@@ -512,8 +517,8 @@ async fn the_object_prefix_comes_from_the_job_id_only() {
     let asked = rig.asked().split_off(before);
     assert!(!asked.is_empty());
     for key in &asked {
-        assert!(key.starts_with("js/job-1/"), "{key}");
-        assert!(!key.starts_with("js/job-10/"), "{key}");
+        assert!(key.starts_with(prefix("job-1").as_str()), "{key}");
+        assert!(!key.starts_with(prefix("job-10").as_str()), "{key}");
     }
     let live = v1::JobState::Running;
     let answer = rig.read(out("job-10", 0)).await.expect("a page");

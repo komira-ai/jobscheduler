@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_jobs::{JobEnd, JobId, LogLengths, Output};
-use js_logmint::{Bucket, LogPrefix, RoleArn, StsEndpoint};
+use js_logmint::{Bucket, LogPrefix, RoleArn, StsEndpoint, host_prefix};
 use js_logstore::fake::{Action, FakeStore, Op, Policy};
 use js_logstore::layout::{FIRST_BYTE_AT_MS, encode_gap};
 use js_logstore::{
@@ -350,9 +350,15 @@ impl Rig {
     }
 }
 
-/// The job prefix of `job` under [`PREFIX`].
+/// The host every test job is placed on (`read_tests::place`).
+pub(super) const HOST: &str = "host-a";
+
+/// The job prefix of `job` on [`HOST`]: the job under the host's prefix under [`PREFIX`], as
+/// the job's start names it.
 pub(super) fn prefix(job: &str) -> JobPrefix {
-    JobPrefix::new(PREFIX, job).expect("a job prefix")
+    let logs = LogPrefix::new(PREFIX).expect("a log prefix");
+    let base = host_prefix(&logs, HOST).expect("a host prefix");
+    JobPrefix::new(base.as_str().trim_end_matches('/'), job).expect("a job prefix")
 }
 
 /// The request for `stream` of `job` from `from`, with no page size and no follow.

@@ -36,6 +36,11 @@ pub const ARCH_KEY: &str = "arch";
 /// The architecture [`ServerSpec::placement`] gives a shape that names none.
 pub const ARCH: &str = "x86_64";
 
+/// The address `--job-listen` names for a server of [`ServerSpec::jobs`]: on the
+/// loopback, as the server demands of an address served without TLS, and never bound,
+/// since the cell's server runs in process.
+pub const JOB_LISTEN: &str = "127.0.0.1:0";
+
 /// What the pool books for every host, and what each of the cell's agents offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -112,6 +117,8 @@ pub struct ServerSpec {
     /// Whether the server boots over the lease file a server before it left
     /// (`--boot resume`), rather than a first boot (`--boot initialise`).
     resume: bool,
+    /// Whether the job service is on ([`ServerSpec::jobs`]).
+    jobs: bool,
 }
 
 impl ServerSpec {
@@ -131,6 +138,7 @@ impl ServerSpec {
             lost_retention: Duration::from_millis(DEFAULT_LOST_RETENTION_MS),
             whole_keys: BTreeMap::new(),
             resume: false,
+            jobs: false,
         }
     }
 
@@ -160,6 +168,24 @@ impl ServerSpec {
         caps.entry(ARCH_KEY.to_owned())
             .or_insert_with(|| ARCH.to_owned());
         self
+    }
+
+    /// This server, serving the job service too (`--job-listen`, an address on the loopback
+    /// that is never bound: the cell reaches the service in process) and placing as
+    /// `js-sched` (`--placement js-sched`, [`ServerSpec::placement`]), the one placement
+    /// that places queued jobs. The cell's agents then speak the per-job messages (they
+    /// report [`js_agent_wire::PER_JOB_CAPABILITY`] in their hello), and a
+    /// [`crate::JobFront`] submits jobs to it; the lease routes are served beside it.
+    #[must_use]
+    pub fn jobs(mut self) -> Self {
+        self.jobs = true;
+        self.placement(Placement::JsSched)
+    }
+
+    /// Whether the server serves the job service ([`ServerSpec::jobs`]).
+    #[must_use]
+    pub fn serves_jobs(&self) -> bool {
+        self.jobs
     }
 
     /// This server, telling its hosts to beat every `interval` and holding a host lost
@@ -286,7 +312,7 @@ impl ServerSpec {
     /// Writes the pool file and the two token files into `dir` and returns the server's
     /// command line: the lease file in `dir`, a first boot (or a resumed one, for a
     /// server started again), registration into the pool with [`JOIN_TOKEN`], the hello
-    /// burst, the placement, and usage off.
+    /// burst, the placement, the job service's address when it is on, and usage off.
     ///
     /// # Errors
     ///
@@ -307,7 +333,7 @@ impl ServerSpec {
         )?;
         let placement = self.placement.to_possible_value();
         let placement = placement.map(|value| value.get_name().to_owned());
-        let flags: [(&str, OsString); 7] = [
+        let mut flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
             ("--token-file", token),
@@ -316,6 +342,10 @@ impl ServerSpec {
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
             ("--placement", placement.unwrap_or_default().into()),
         ];
+        let job = self
+            .jobs
+            .then(|| ("--job-listen", OsString::from(JOB_LISTEN)));
+        flags.extend(job);
         let pairs = flags
             .into_iter()
             .flat_map(|(flag, value)| [flag.into(), value]);

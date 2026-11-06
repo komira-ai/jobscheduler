@@ -5,8 +5,10 @@
 //!
 //! The bytes pass through: each page is read from the store for the answer and kept nowhere,
 //! neither in the job tables nor in memory after the answer. The object keys are built from
-//! the configured log prefix and the job's id alone (`js_logstore::JobPrefix`), never from a
-//! client's text. No lock of the server is held: the row is read through the job tables'
+//! the configured log prefix, the host the job's record names (its host's prefix,
+//! `js_logmint::host_prefix`, the one the host's credential covers) and the job's id alone
+//! (`js_logstore::JobPrefix`), never from a client's text. A job that was never placed has
+//! no host and printed nothing. No lock of the server is held: the row is read through the job tables'
 //! read path, and every store request runs on the pool for blocking calls.
 //!
 //! # Answers
@@ -58,6 +60,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use js_jobs::{JobRecord, JobState};
 use js_lease::Clock as _;
+use js_logmint::{LogPrefix, host_prefix};
 use js_logstore::{Credential, JobPrefix, Store, StoreError, Stream, Transport, UreqTransport};
 use js_proto::v1::{self, GetLogsRequest, GetLogsResponse, LogGap};
 use tokio::sync::Semaphore;
@@ -112,11 +115,11 @@ impl Waiter for Sleep {
 }
 
 /// Where a server with an object-store sink reads logs: the store, and the log prefix the
-/// job prefixes are built under.
+/// hosts' prefixes are built under.
 struct Source {
     store: page::LogStore,
-    /// The configured log prefix without its trailing `/` (empty for none).
-    base: String,
+    /// The configured log prefix, with its trailing `/` (empty for none).
+    prefix: LogPrefix,
 }
 
 /// The state of the logs group: the store (none with `sink = "none"`), the waiter of follows
@@ -180,10 +183,12 @@ impl Ctx {
             sink.endpoint.clone(),
             credential,
         );
-        let base = sink.prefix.as_str().trim_end_matches('/').to_owned();
         let slots = usize::try_from(sink.max_follow).unwrap_or(usize::MAX);
         Ctx {
-            source: Some(Arc::new(Source { store, base })),
+            source: Some(Arc::new(Source {
+                store,
+                prefix: sink.prefix.clone(),
+            })),
             follows: Arc::new(Semaphore::new(slots.min(Semaphore::MAX_PERMITS))),
             ..Ctx::default()
         }
@@ -259,7 +264,7 @@ async fn attempt(
     from: u64,
     max: u32,
 ) -> Result<page::Page, Status> {
-    let prefix = JobPrefix::new(&source.base, job.id.as_str()).map_err(|_| no_live_logs())?;
+    JobPrefix::new("", job.id.as_str()).map_err(|_| no_live_logs())?;
     if matches!(job.state, JobState::Queued) {
         return Ok(page::Page {
             offset: from,
@@ -276,6 +281,15 @@ async fn attempt(
     {
         return Err(past_the_end());
     }
+    let Some(host) = job.host.as_ref() else {
+        // Never placed (cancelled while queued): it printed nothing, and it has ended.
+        return Ok(page::Page {
+            offset: from,
+            eof: true,
+            ..page::Page::default()
+        });
+    };
+    let prefix = job_prefix(&source.prefix, host.as_str(), job.id.as_str())?;
     let placed_ms = job.placed_at.map_or(0, view::millis);
     let ask = page::Ask {
         prefix,
@@ -289,6 +303,15 @@ async fn attempt(
     let source = Arc::clone(source);
     let read = blocking(move || page::read(&source.store, &ask)).await;
     read.map_err(|error| store_failed(&error))
+}
+
+/// The prefix `P` of the job `job_id` placed on `host`: the job's id under the host's prefix
+/// under the log prefix `prefix`, as the job's start named it to the agent.
+fn job_prefix(prefix: &LogPrefix, host: &str, job_id: &str) -> Result<JobPrefix, Status> {
+    host_prefix(prefix, host)
+        .ok()
+        .and_then(|base| JobPrefix::new(base.as_str().trim_end_matches('/'), job_id).ok())
+        .ok_or_else(no_live_logs)
 }
 
 /// How the stream `stream` of the ended job `job` ends: its length and dropped bytes from its

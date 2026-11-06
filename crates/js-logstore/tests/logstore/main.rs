@@ -6,9 +6,11 @@
 
 mod answers;
 mod endpoint;
+mod fake_presigned;
 mod fake_requests;
 mod fake_sts;
 mod layout;
+mod presigned;
 mod secrets;
 mod server;
 mod signer;

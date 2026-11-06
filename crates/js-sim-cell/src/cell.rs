@@ -46,6 +46,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
+use js_agent_wire::PER_JOB_CAPABILITY;
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
 use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
@@ -58,6 +59,7 @@ use crate::bus::{SERVER, agent_name};
 use crate::counters::{Counter, Counters};
 use crate::front::{Answer, ClientPort, Front, LeaseFront};
 use crate::invariant::{Checker, Invariant, Touched, Violation};
+use crate::jobs::read::Reader;
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
 use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
@@ -189,6 +191,8 @@ pub struct Cell {
     /// Both traces as one, when lines are kept, and how many kernel lines it holds.
     merged: Option<Vec<String>>,
     kernel_lines: usize,
+    /// What the cell last read of the server's job tables.
+    tables: Reader,
 }
 
 impl Cell {
@@ -210,7 +214,7 @@ impl Cell {
             .resources()
             .map_err(StartupError::because("shape"))?;
         let path = dir.path().to_path_buf();
-        let server = ServerNode::start(&spec, dir)?;
+        let server = ServerNode::start_seeded(&spec, dir, setup.seed)?;
         let mut sim = Sim::new(setup.seed, faults.clone());
         let mut trace = Trace::new("js-sim-cell");
         let mut merged = None;
@@ -249,6 +253,7 @@ impl Cell {
             trace,
             merged,
             kernel_lines: 0,
+            tables: Reader::default(),
         };
         cell.set_faults(faults);
         Ok(cell)
@@ -285,12 +290,17 @@ impl Cell {
     fn add(&mut self, kind: AgentKind) -> Result<HostId, IdError> {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
+        let mut capabilities = self.spec.shape().capabilities.clone();
+        // A real agent's node does not speak the per-job messages, so it does not say so.
+        if self.spec.serves_jobs() & matches!(kind, AgentKind::Fake(_)) {
+            capabilities.insert(PER_JOB_CAPABILITY.to_owned(), "true".to_owned());
+        }
         let spec = AgentSpec {
             host: host.clone(),
             pool: self.spec.pool().to_owned(),
             join_token: JOIN_TOKEN.to_owned(),
             capacity: self.capacity.clone(),
-            capabilities: self.spec.shape().capabilities.clone(),
+            capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
             kind,
@@ -371,7 +381,7 @@ impl Cell {
         }
         let end = self.sim.now().saturating_add(within);
         self.run_until(end)?;
-        self.reread();
+        self.reread(true);
         self.observations.at = self.sim.now();
         let at = self.observations.at;
         let found = Checker::end(&self.observations, within).unwrap_or_else(|refused| {
@@ -559,7 +569,7 @@ impl Cell {
             }
             _ => self.record("restart server".to_owned()),
         }
-        self.reread();
+        self.reread(true);
         self.check(Touched::nothing().server());
     }
 
@@ -606,7 +616,7 @@ impl Cell {
         let answer = server.map(|server| server.client_call(now, request));
         let status = answer.as_ref().map_or(0, |answer| answer.status().as_u16());
         self.record(format!("client {method} {status}"));
-        self.reread();
+        self.reread(true);
         self.check(Touched::nothing().server());
         answer
     }
@@ -712,7 +722,7 @@ impl Cell {
         }
         let due = self.listed_at.map(|at| at.saturating_add(LISTING_EVERY));
         if due.is_none_or(|due| due <= self.sim.now()) {
-            self.reread();
+            self.reread(false);
             touched = touched.server();
         }
         touched
@@ -725,8 +735,10 @@ impl Cell {
     }
 
     /// Reads the server's listing into the observations, with the bookings it starts and
-    /// ends, writing each host whose entry changed into the trace.
-    fn reread(&mut self) {
+    /// ends, and its job tables when the job service is on (always when `force`, else when a
+    /// read of them is due), writing each host, job and allocation whose entry changed into
+    /// the trace.
+    fn reread(&mut self, force: bool) {
         let now = self.sim.now();
         let view = self.server().map(ServerNode::view).unwrap_or_default();
         let old = &self.observations.server;
@@ -760,6 +772,10 @@ impl Cell {
         }
         self.observations.read_listing(view, now);
         self.listed_at = Some(now);
+        let server = self.sim.node(&NodeId::new(SERVER));
+        let server = server.and_then(CellNode::as_server);
+        let lines = self.tables.read(server, &mut self.observations, now, force);
+        lines.into_iter().for_each(|line| self.record(line));
     }
 
     /// Polls the client now: its calls go to the server, each is written into the trace,
@@ -788,7 +804,7 @@ impl Cell {
             record.heard.push(Heard { at: now, event });
             touched = touched.item(item);
         }
-        self.reread();
+        self.reread(true);
         self.check(touched);
     }
 
@@ -812,6 +828,16 @@ impl Cell {
         let judged = self.observations.verdicts.len();
         let verdicts = self.ledger.verdicts_after(judged);
         self.observations.verdicts.extend(verdicts);
+        let seen = &self.observations;
+        let counts = [
+            seen.job_beats.len(),
+            seen.job_replies.len(),
+            seen.results_made.len(),
+        ];
+        let (beats, replies, made) = self.ledger.jobs_after(counts);
+        self.observations.job_beats.extend(beats);
+        self.observations.job_replies.extend(replies);
+        self.observations.results_made.extend(made);
         self.checks += 1;
         let found = self
             .checker
