@@ -10,9 +10,9 @@
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
       "instance_type": {
-        "name": "gpu_1x_sample",
-        "description": "1x Sample GPU (24 GB)",
-        "gpu_description": "Sample GPU (24 GB)",
+        "name": "gpu_1x_h100_sxm5",
+        "description": "1x H100 (80 GB SXM5)",
+        "gpu_description": "H100 (80 GB SXM5)",
         "price_cents_per_hour": 75,
         "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 },
         "architecture": "x86_64"
@@ -32,7 +32,7 @@
       "ssh_key_names": ["fixture-key"],
       "file_system_names": [],
       "region": { "name": "region-b", "description": "Place B" },
-      "instance_type": { "name": "gpu_1x_sample", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_1x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
       "first_healthy": null,
       "actions": {}
     },
@@ -43,7 +43,7 @@
       "ssh_key_names": [],
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
-      "instance_type": { "name": "gpu_8x_example", "description": "x", "gpu_description": "x", "price_cents_per_hour": 1200, "specs": { "vcpus": 128, "memory_gib": 1800, "storage_gib": 6000, "gpus": 8 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_8x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 1200, "specs": { "vcpus": 128, "memory_gib": 1800, "storage_gib": 6000, "gpus": 8 }, "architecture": "x86_64" },
       "first_healthy": "2026-10-19T08:00:00Z",
       "tags": null,
       "actions": {}
@@ -54,7 +54,7 @@
       "ssh_key_names": [],
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
-      "instance_type": { "name": "gpu_1x_sample", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_1x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
       "first_healthy": "not a time",
       "actions": {}
     },
@@ -64,7 +64,7 @@
       "ssh_key_names": [],
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
-      "instance_type": { "name": "gpu_1x_sample", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_1x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
       "first_healthy": null,
       "actions": {}
     },
@@ -74,7 +74,7 @@
       "ssh_key_names": [],
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
-      "instance_type": { "name": "gpu_1x_sample", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_1x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
       "first_healthy": null,
       "actions": {}
     },
@@ -84,7 +84,7 @@
       "ssh_key_names": [],
       "file_system_names": [],
       "region": { "name": "region-a", "description": "Place A" },
-      "instance_type": { "name": "gpu_1x_sample", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
+      "instance_type": { "name": "gpu_1x_h100_sxm5", "description": "x", "gpu_description": "x", "price_cents_per_hour": 75, "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 }, "architecture": "x86_64" },
       "first_healthy": null,
       "actions": {}
     }

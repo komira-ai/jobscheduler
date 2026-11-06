@@ -3,7 +3,7 @@
 //!
 //! It holds
 //!
-//! - [`LambdaApi`], the calls (instance types with GPU facts and regions that have
+//! - [`LambdaApi`], the calls (instance types with their GPU count and regions that have
 //!   capacity, the list of instances, one instance, launch, terminate), and its two
 //!   implementations: [`HttpApi`], the real client, and [`FakeLambda`], the same calls
 //!   over memory;
@@ -26,7 +26,11 @@
 //!   instances that carry one scheduler's marks (whole or partial), for a watcher that must
 //!   not be able to spend;
 //! - [`ApiKey`], the key read from an owner-only file and never printed;
-//! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked;
+//! - the catalog table, in code: the GPU facts (canonical model from the alias table of
+//!   `js-caps`, count, memory per device, form factor, NVLink domain) of every Lambda
+//!   instance type the provider can offer, keyed by Lambda's instance-type name;
+//! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked: the
+//!   allow list of instance types, which states no GPU fact;
 //! - [`kind::build`], the `lambdalabs` kind of the service's table of provider kinds: the
 //!   provider table of a pool, checked offline and turned into a [`LambdaProvider`].
 //!
@@ -72,6 +76,7 @@
 
 mod aborter;
 mod api;
+mod catalog;
 mod clock;
 mod config;
 mod error;

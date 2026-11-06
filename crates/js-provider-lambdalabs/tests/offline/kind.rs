@@ -14,6 +14,8 @@ use js_provider_lambdalabs::ManualClock;
 use js_provider_lambdalabs::kind::{self, Built, Context, DEFAULT_API_URL, Refused, SecretFiles};
 use js_types::ExecMode;
 
+use crate::rig::warnings;
+
 const KEY_FILE: &str = "/run/credentials/js/lambda-key";
 const SECRET: &str = "PLANTED-LAMBDA-KEY-VALUE";
 
@@ -53,7 +55,7 @@ fn with_key(rest: &str) -> toml::Table {
     table(&format!("api_key_file = {KEY_FILE:?}\n{rest}"))
 }
 
-const TYPES: &str = "types = [{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }]";
+const TYPES: &str = "types = [{ name = \"gpu_1x_a10\" }]";
 
 fn refusal(table: &toml::Table) -> (String, String) {
     let files = files(SECRET.as_bytes());
@@ -111,22 +113,107 @@ fn why(answer: Acquired) -> (RefusalCode, Reason) {
     }
 }
 
-/// Asserts that the table of the design's first example builds, and that the facts the
-/// service reads offline are the pool's: the fewest GPUs over the types and their one
-/// class, with the types in either order. It catches a floor taken from the first row
-/// instead of the least, and a class lost on the way.
+/// Asserts that the pool floor comes from the catalog table: one A10 type gives the A10
+/// family and one GPU; A100 types of 8, 1 and 4 GPUs, in any order, give the A100 family
+/// and the least count, 1; two variants of one family (40 GB SXM4 and 80 GB SXM4) are one
+/// model; one 8x H100 type gives 8. Catches a floor taken from the first row instead of the
+/// least, a model taken from a row's text, and variants of one family refused as two
+/// models.
 #[test]
-fn the_facts_of_a_pool_are_its_fewest_gpus_and_its_class() {
+fn a_pool_floor_comes_from_the_catalog_table() {
     let one = built(&with_key(TYPES), false);
-    assert_eq!((one.gpus, one.gpu_class.as_str()), (1, "nvidia-a10"));
-    let rows = "types = [{ name = \"gpu_2x_a10\", gpu = \"nvidia-a10\", gpus = 2 }, \
-                { name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }, \
-                { name = \"gpu_4x_a10\", gpu = \"nvidia-a10\", gpus = 4 }]";
-    let several = built(&with_key(rows), false);
-    assert_eq!(several.gpus, 1);
-    let first_is_least = "types = [{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }, \
-                { name = \"gpu_2x_a10\", gpu = \"nvidia-a10\", gpus = 2 }]";
-    assert_eq!(built(&with_key(first_is_least), false).gpus, 1);
+    assert_eq!(
+        (one.gpus, one.gpu_class.as_str()),
+        (1, js_types::NVIDIA_A10)
+    );
+    for rows in [
+        "types = [{ name = \"gpu_8x_a100\" }, { name = \"gpu_1x_a100\" }, { name = \"gpu_4x_a100\" }]",
+        "types = [{ name = \"gpu_1x_a100\" }, { name = \"gpu_8x_a100\" }]",
+        "types = [{ name = \"gpu_8x_a100_80gb_sxm4\" }, { name = \"gpu_1x_a100_sxm4\" }]",
+    ] {
+        let several = built(&with_key(rows), false);
+        assert_eq!(
+            (several.gpus, several.gpu_class.as_str()),
+            (1, js_types::NVIDIA_A100),
+            "{rows}"
+        );
+    }
+    let eight = built(
+        &with_key("types = [{ name = \"gpu_8x_h100_sxm5\" }]"),
+        false,
+    );
+    assert_eq!(
+        (eight.gpus, eight.gpu_class.as_str()),
+        (8, js_types::NVIDIA_H100)
+    );
+}
+
+/// Asserts that a pool whose types are of two models is refused at the second type's
+/// name, naming both canonical models, and that a listed type the catalog table does not
+/// know is refused naming `types[i].name`. Catches a pool with two classes, whose floor
+/// would match neither, and a pool with a type it has no facts for.
+#[test]
+fn a_pool_mixing_two_models_is_refused() {
+    let mixed = "types = [{ name = \"gpu_1x_a10\" }, { name = \"gpu_1x_h100_pcie\" }]";
+    assert_eq!(
+        refusal(&with_key(mixed)),
+        (
+            "types[2].name".to_owned(),
+            "a pool has one gpu model; types[1] (\"gpu_1x_a10\") has \"nvidia-a10\", \
+             \"gpu_1x_h100_pcie\" has \"nvidia-h100\""
+                .to_owned()
+        )
+    );
+    let unknown = "types = [{ name = \"gpu_1x_a10\" }, { name = \"gpu_1x_rtx6000\" }]";
+    assert_eq!(
+        refusal(&with_key(unknown)),
+        (
+            "types[2].name".to_owned(),
+            "\"gpu_1x_rtx6000\" is not an instance type this release knows the GPUs of; \
+             the known types are listed in js-provider-lambdalabs"
+                .to_owned()
+        )
+    );
+}
+
+/// Asserts that a `types` row written for an earlier release, with `gpu` and `gpus` of
+/// any value (a class that is not the table's, a count that is not, a value of another
+/// type), builds with the catalog table's model and count, and logs one warning per such
+/// row naming the row and its type, while a row without them logs none. Catches an old
+/// file refused, an old value that wins over the table, and a missing warning.
+#[test]
+fn an_old_types_row_with_gpu_fields_is_accepted_and_the_fields_ignored() {
+    let text = "types = [{ name = \"gpu_1x_a10\", gpu = \"nvidia-bogus\", gpus = 7 }]";
+    let (old, logged) = warnings(|| built(&with_key(text), false));
+    assert_eq!(
+        (old.gpus, old.gpu_class.as_str()),
+        (1, js_types::NVIDIA_A10)
+    );
+    let lines: Vec<&str> = logged.lines().collect();
+    assert_eq!(lines.len(), 1, "{logged}");
+    assert!(
+        lines[0].contains(
+            "types[1] (gpu_1x_a10): gpu and gpus are ignored; the GPU facts of an instance \
+             type come from js-provider-lambdalabs, so remove them from the row"
+        ),
+        "{logged}"
+    );
+    for row in [
+        "{ name = \"gpu_1x_a100\", gpu = 3 }",
+        "{ name = \"gpu_1x_a100\", gpus = \"two\" }",
+        "{ name = \"gpu_1x_a100\", gpu = \"\", gpus = 0 }",
+    ] {
+        let text = format!("types = [{{ name = \"gpu_8x_a100\" }}, {row}]");
+        let (old, logged) = warnings(|| built(&with_key(&text), false));
+        assert_eq!(
+            (old.gpus, old.gpu_class.as_str()),
+            (1, js_types::NVIDIA_A100)
+        );
+        assert_eq!(logged.lines().count(), 1, "{row}: {logged}");
+        assert!(logged.contains("types[2] (gpu_1x_a100)"), "{logged}");
+    }
+    let (_, logged) = warnings(|| built(&with_key(TYPES), false));
+    assert_eq!(logged, "");
 }
 
 /// Asserts that a table with every optional key builds: `regions`, `ssh_key` and an
@@ -255,28 +342,22 @@ fn each_fault_of_the_table_names_its_field() {
 }
 
 /// Asserts the rules of `types`, each naming the row and the field: a row that is not a
-/// table, an unknown key in a row, a missing or mistyped `name`, `gpu` and `gpus`, a type
-/// name that is empty, too long, in upper case or with a dash, a type listed twice, a class
-/// not in the agent's spelling, a second class in one pool, and `gpus` of zero, negative,
-/// too large or not a number. It catches each rule being skipped, and a refusal that
-/// points at the wrong row.
+/// table, an unknown key in a row (beside the two old ones), a missing or mistyped `name`,
+/// a type name that is empty, too long, in upper case or with a dash, and a type listed
+/// twice. It catches each rule being skipped, and a refusal that points at the wrong row.
 #[test]
 fn each_rule_of_the_types_names_its_row_and_field() {
-    let row = |name: &str, gpu: &str, gpus: &str| {
-        format!("{{ name = {name:?}, gpu = {gpu:?}, gpus = {gpus} }}")
-    };
-    let good = row("gpu_1x_a10", "nvidia-a10", "1");
+    let row = |name: &str| format!("{{ name = {name:?} }}");
+    let good = row("gpu_1x_a10");
     let long = "a".repeat(65);
     let cases: Vec<(String, &str, &str)> = vec![
         (
             "types = [3]".to_owned(),
             "types[1]",
-            "must be a table with name, gpu and gpus",
+            "must be a table with a name",
         ),
         (
-            format!(
-                "types = [{good}, {{ name = \"x\", gpu = \"nvidia-a10\", gpus = 1, size = 2 }}]"
-            ),
+            format!("types = [{good}, {{ name = \"gpu_2x_a100\", size = 2 }}]"),
             "types[2].size",
             "unknown field; known: name, gpu, gpus",
         ),
@@ -286,27 +367,27 @@ fn each_rule_of_the_types_names_its_row_and_field() {
             "required",
         ),
         (
-            "types = [{ name = 3, gpu = \"nvidia-a10\", gpus = 1 }]".to_owned(),
+            "types = [{ name = 3 }]".to_owned(),
             "types[1].name",
             "must be a string",
         ),
         (
-            format!("types = [{}]", row("", "nvidia-a10", "1")),
+            format!("types = [{}]", row("")),
             "types[1].name",
             "must be 1 to 64 lower case letters, digits or '_'",
         ),
         (
-            format!("types = [{}]", row(&long, "nvidia-a10", "1")),
+            format!("types = [{}]", row(&long)),
             "types[1].name",
             "must be 1 to 64 lower case letters, digits or '_'",
         ),
         (
-            format!("types = [{}]", row("GPU_1x", "nvidia-a10", "1")),
+            format!("types = [{}]", row("GPU_1x")),
             "types[1].name",
             "must be 1 to 64 lower case letters, digits or '_'",
         ),
         (
-            format!("types = [{}]", row("gpu-1x", "nvidia-a10", "1")),
+            format!("types = [{}]", row("gpu-1x")),
             "types[1].name",
             "must be 1 to 64 lower case letters, digits or '_'",
         ),
@@ -314,56 +395,6 @@ fn each_rule_of_the_types_names_its_row_and_field() {
             format!("types = [{good}, {good}]"),
             "types[2].name",
             "\"gpu_1x_a10\" is listed twice",
-        ),
-        (
-            "types = [{ name = \"x\", gpus = 1 }]".to_owned(),
-            "types[1].gpu",
-            "required",
-        ),
-        (
-            "types = [{ name = \"x\", gpu = 3, gpus = 1 }]".to_owned(),
-            "types[1].gpu",
-            "must be a string",
-        ),
-        (
-            format!("types = [{}]", row("x", "NVIDIA A10", "1")),
-            "types[1].gpu",
-            "must be lower case letters and digits joined by single '-', as the agent reports a GPU model",
-        ),
-        (
-            format!("types = [{}]", row("x", "", "1")),
-            "types[1].gpu",
-            "is empty",
-        ),
-        (
-            format!("types = [{good}, {}]", row("y", "nvidia-a100", "1")),
-            "types[2].gpu",
-            "a pool has one gpu class; \"nvidia-a10\" is the class of types[1], not \"nvidia-a100\"",
-        ),
-        (
-            "types = [{ name = \"x\", gpu = \"nvidia-a10\" }]".to_owned(),
-            "types[1].gpus",
-            "required",
-        ),
-        (
-            format!("types = [{}]", row("x", "nvidia-a10", "0")),
-            "types[1].gpus",
-            "must be a whole number from 1",
-        ),
-        (
-            format!("types = [{}]", row("x", "nvidia-a10", "-2")),
-            "types[1].gpus",
-            "must be a whole number from 1",
-        ),
-        (
-            format!("types = [{}]", row("x", "nvidia-a10", "5000000000")),
-            "types[1].gpus",
-            "must be a whole number from 1",
-        ),
-        (
-            format!("types = [{}]", row("x", "nvidia-a10", "\"two\"")),
-            "types[1].gpus",
-            "must be a whole number from 1",
         ),
     ];
     for (text, field, reason) in cases {

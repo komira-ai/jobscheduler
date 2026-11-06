@@ -701,8 +701,9 @@ impl CapacityProvider for LambdaProvider {
         true
     }
 
-    /// Linux, the architectures of the instance types Lambda documents, and the GPU classes
-    /// of the option table: the table [`CapacityProvider::catalog`] takes each offer's class
+    /// Linux, the architectures of the instance types Lambda documents, and the canonical
+    /// GPU model the crate's catalog table gives each instance type of the option table (the
+    /// allow list): the table [`CapacityProvider::catalog`] takes each offer's accelerator
     /// from.
     ///
     /// An architecture Lambda does not document reaches the catalog as its own text; once a

@@ -133,7 +133,7 @@ fn a_state_file_that_is_missing_or_not_ours_is_refused() {
     assert_eq!(status, 1);
     assert!(out.contains("state: "), "{out}");
     assert_eq!(rig.fake.calls(), Vec::new());
-    let good = "first-launch-state=1\nacquire=first-launch-abc\nlaunched_unix=5\nkey_name=k\ninstance_type=gpu_1x_cheap\nregion=r\nprice_cents_per_hour=75\ninstances=fake0001\n";
+    let good = "first-launch-state=1\nacquire=first-launch-abc\nlaunched_unix=5\nkey_name=k\ninstance_type=gpu_1x_a10\nregion=r\nprice_cents_per_hour=75\ninstances=fake0001\n";
     let lines: Vec<&str> = good.lines().collect();
     // Cut after each line: every field is required.
     for keep in 0..lines.len() {
@@ -168,8 +168,8 @@ fn a_state_file_that_is_missing_or_not_ours_is_refused() {
 #[test]
 fn a_state_file_whose_key_name_or_type_is_unusable_is_refused() {
     let rig = Rig::new();
-    let good = "first-launch-state=1\nacquire=first-launch-abc\nlaunched_unix=5\nkey_name=k\ninstance_type=gpu_1x_cheap\nregion=r\nprice_cents_per_hour=75\ninstances=fake0001\n";
-    for bad in ["key_name=k", "instance_type=gpu_1x_cheap"] {
+    let good = "first-launch-state=1\nacquire=first-launch-abc\nlaunched_unix=5\nkey_name=k\ninstance_type=gpu_1x_a10\nregion=r\nprice_cents_per_hour=75\ninstances=fake0001\n";
+    for bad in ["key_name=k", "instance_type=gpu_1x_a10"] {
         let replaced = match bad {
             "key_name=k" => "key_name=",
             _ => "instance_type=Not Valid",

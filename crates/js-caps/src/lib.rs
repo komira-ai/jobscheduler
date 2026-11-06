@@ -48,8 +48,9 @@ pub use accel::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
     ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ALIASES, APPLE_M, AccelError,
     Accelerator, AcceleratorMiss, AcceleratorNeed, AcceleratorRequest, Alias, FAMILIES, Family,
-    FormFactor, Interconnect, MAX_MEMORY_GIB, Model, RequestNeed, RequestNeedError, Resolved,
-    Variant, Vendor, accelerator_of, check_stated, request_need, vendor_of,
+    FormFactor, Interconnect, MAX_MEMORY_GIB, Model, NVIDIA_A10, NVIDIA_A100, NVIDIA_B200,
+    NVIDIA_H100, NVIDIA_RTX_A6000, RequestNeed, RequestNeedError, Resolved, Variant, Vendor,
+    accelerator_of, check_stated, request_need, vendor_of,
 };
 pub use cpu::{CpuCaps, ParseError};
 pub use gpu::{
