@@ -223,7 +223,10 @@ async fn a_heartbeat_never_calls_the_minter() {
     logs.held(1).await;
     rig.place("job-a", "host-a");
     let reply = rig.beat(&FakeAgent::uploading("host-a")).await.unwrap();
-    assert_eq!(start_of(&reply, "job-a").log_sink, Some(sink_of("job-a")));
+    assert_eq!(
+        start_of(&reply, "job-a").log_sink,
+        Some(sink_of("host-a", "job-a"))
+    );
     assert_eq!(reply.log_grant, None);
     rig.register_uploading("host-b");
     let reply = rig.beat(&FakeAgent::uploading("host-b")).await.unwrap();
@@ -467,7 +470,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
     let odd = Endpoint::parse("https://odd_host.example", LOG_REGION, LOG_BUCKET, true).unwrap();
     let minter = Arc::clone(&logs.minter) as Arc<dyn js_logmint::Minter>;
     let grants = grants_over(odd, minter, &status_clock(&rig));
-    assert!(grants.sink_for("job-a").is_some());
+    assert!(grants.sink_for("host-a", "job-a").is_some());
     let (job, allocation) = placed(&rig.jobs, "job-a", "host-a", spec(), BOOKED);
     let host = HostId::new("host-a").unwrap();
     let context = BeatContext {
@@ -482,7 +485,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
         ..context
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
-    assert_eq!(start.log_sink, Some(sink_of("job-a")));
+    assert_eq!(start.log_sink, Some(sink_of("host-a", "job-a")));
 }
 
 /// With every log line captured and the status page rendered, across a mint that succeeds, one

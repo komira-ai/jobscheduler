@@ -212,13 +212,16 @@ file is owner-only like every other key file (mode 0600 or 0400, owned by the se
 `{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
 repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
-server mints each uploading host's credential with the mint key, delivers and renews it in heartbeat replies, and puts each job's sink
+server mints each uploading host's credential with the mint key (or derives it from the signing key), delivers and renews it in heartbeat replies, and puts each job's sink
 in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
-section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64
+section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 476 bytes, so that a host's
+prefix fits under it); `region` is 1 to 64
 bytes of `[a-z0-9-]`; `endpoint` and `sts_endpoint` are `https` URLs, or `http` to a loopback address, with no path, query, fragment or
-user; `credentials` is `"sts"` (anything else is refused as not built); `role_arn` begins with `arn:` and is at most 2,048 bytes of
+user; `credentials` is `"sts"` (the default) or `"presigned_prefix"` (anything else is refused, naming the key), and a key of the
+other kind is refused, naming the key: `sts_endpoint`, `role_arn` and `mint_key_file` belong to `sts`, `signing_key_file` (required)
+to `presigned_prefix`, a store with no STS whose host credentials are prefix grants (live-logs.md, section 4.1); `role_arn` begins with `arn:` and is at most 2,048 bytes of
 printable ASCII; `credential_ttl` is from 15 minutes to 12 hours; `max_follow` is from 1 to 4,096. `credential_ttl` must also be at most
 the role's maximum session duration, which is the operator's to set in the store and which the server cannot check at start: STS
 refuses a longer session, and the refusal shows as a mint failure.
@@ -231,10 +234,11 @@ region          = "us-east-1"                           # required with object_s
 endpoint        = "https://objects.example"             # required: the store's URL; the server names no cloud's host by default
 path_style      = false                                 # optional; true for stores that need /bucket/key URLs
 read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
-credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
+credentials     = "sts"                                 # how a host's credential is minted: "sts" or "presigned_prefix"
 sts_endpoint    = "https://objects.example"             # optional; default endpoint
 role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts; its maximum session duration at least credential_ttl
 mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
+# signing_key_file = "/run/credentials/js/logs-signing-key"  # required with presigned_prefix, instead of the three keys above
 credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once
 ```

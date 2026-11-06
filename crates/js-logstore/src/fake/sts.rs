@@ -130,7 +130,7 @@ impl FakeStore {
             .and_then(|text| Policy::from_session_policy(text, bucket))
             .ok_or_else(|| sts_error(400, "MalformedPolicyDocument"))?;
         let lifetime = state.sts_lifetime.unwrap_or(Duration::from_secs(seconds));
-        let credential = self.issue_in(state, policy, lifetime, false);
+        let credential = self.issue_in(state, policy, lifetime, super::Kind::Temporary);
         let body = assume_role_answer(&credential).into_bytes();
         Ok(answer(200, vec![xml()], body))
     }
