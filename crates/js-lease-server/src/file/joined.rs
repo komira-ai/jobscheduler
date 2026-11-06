@@ -51,7 +51,7 @@ use super::platform::PATH_GRACE;
 use super::{Pool, Read, Registering, Section, registry_pool};
 use crate::agent_pool::{MAX_MACHINES, capabilities_fit, share_class, shipped_class};
 use crate::agent_tokens::AgentTokens;
-use crate::config::Clients;
+use crate::config::LiveClients;
 use crate::error::StartupError;
 
 const KEYS: &[&str] = &[
@@ -316,7 +316,7 @@ fn needed(sh: &mut Section, key: &str) -> Result<u64, StartupError> {
 
 /// Reads the `[[pool]]` table of a joined pool for the file: the pool, and the shared token
 /// file when it names one. The pool registers agents and launches nothing.
-pub(super) fn read(table: toml::Table, client: &Clients) -> Result<Read, StartupError> {
+pub(super) fn read(table: toml::Table, client: &LiveClients) -> Result<Read, StartupError> {
     let joined = JoinedPool::from_table(table)?;
     let pool = joined.validate()?;
     let tokens = match &joined.join_token_file {
@@ -327,7 +327,7 @@ pub(super) fn read(table: toml::Table, client: &Clients) -> Result<Read, Startup
                 return Err(StartupError::at(place, err.reason()));
             }
         },
-        None => AgentTokens::none(),
+        None => AgentTokens::none(client),
     };
     let registering = Registering {
         plan: None,
