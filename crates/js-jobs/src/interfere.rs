@@ -26,6 +26,9 @@ pub struct Interfere<S> {
     /// How many reads (gets and scans) pass before one fails; `None`: none fails.
     fail_read_at: Mutex<Option<usize>>,
     before: Mutex<Option<Hook>>,
+    /// The error a failed commit or read answers; [`StoreError::Failed`] with [`INJECTED`]
+    /// until [`Interfere::fail_with`] says another.
+    error: Mutex<StoreError>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -41,6 +44,7 @@ impl<S: Store> Interfere<S> {
             fail_at: Mutex::new(None),
             fail_read_at: Mutex::new(None),
             before: Mutex::new(None),
+            error: Mutex::new(StoreError::Failed(INJECTED.to_owned())),
         }
     }
 
@@ -73,19 +77,26 @@ impl<S: Store> Interfere<S> {
         self.fail_after(0);
     }
 
+    /// Makes every commit or read that fails from now on, as [`Interfere::fail_after`] and
+    /// [`Interfere::fail_read_after`] say, answer `error` instead of [`StoreError::Failed`]:
+    /// a test of how a caller reacts to [`StoreError::Fenced`], which no retry answers.
+    pub fn fail_with(&self, error: StoreError) {
+        *lock(&self.error) = error;
+    }
+
     /// Runs `hook` just before the next commit reaches the wrapped store: after the
     /// operation's reads, before its transaction.
     pub fn before_next(&self, hook: impl FnOnce() + Send + 'static) {
         *lock(&self.before) = Some(Box::new(hook));
     }
 
-    /// [`StoreError::Failed`] when this call is the one `slot` counts down to.
-    fn countdown(slot: &Mutex<Option<usize>>) -> Result<(), StoreError> {
+    /// The error of [`Interfere::fail_with`] when this call is the one `slot` counts down to.
+    fn countdown(&self, slot: &Mutex<Option<usize>>) -> Result<(), StoreError> {
         let mut left = lock(slot);
         match *left {
             Some(0) => {
                 *left = None;
-                Err(StoreError::Failed(INJECTED.to_owned()))
+                Err(lock(&self.error).clone())
             }
             Some(n) => {
                 *left = Some(n - 1);
@@ -103,22 +114,22 @@ impl<S: Store> Store for Interfere<S> {
         if let Some(hook) = hook {
             hook();
         }
-        Self::countdown(&self.fail_at)?;
+        self.countdown(&self.fail_at)?;
         self.inner.apply_batch(batch)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
-        Self::countdown(&self.fail_read_at)?;
+        self.countdown(&self.fail_read_at)?;
         self.inner.get(key)
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        Self::countdown(&self.fail_read_at)?;
+        self.countdown(&self.fail_read_at)?;
         self.inner.scan_prefix(prefix)
     }
 
     fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
-        Self::countdown(&self.fail_read_at)?;
+        self.countdown(&self.fail_read_at)?;
         self.inner.scan_range(scan)
     }
 
@@ -208,6 +219,19 @@ mod tests {
         store.fail_read_after(0);
         assert_eq!(store.get("a"), Err(StoreError::Failed(INJECTED.to_owned())));
         put(&store, "b").expect("a commit does not count as a read");
+    }
+
+    // Catches an injected error that is not the one told: a failed commit and a failed read
+    // each answer the error `fail_with` set, and the default stays `Failed` until then.
+    #[test]
+    fn a_failed_call_answers_the_error_it_was_told() {
+        let store = wrapped();
+        store.fail_with(StoreError::Fenced);
+        store.fail_next();
+        assert_eq!(put(&store, "a"), Err(StoreError::Fenced));
+        store.fail_read_after(0);
+        assert_eq!(store.get("a"), Err(StoreError::Fenced));
+        put(&store, "b").expect("nothing is failing now");
     }
 
     // Catches a hook that runs after the commit, or more than once.

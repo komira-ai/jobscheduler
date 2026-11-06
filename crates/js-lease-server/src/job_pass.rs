@@ -117,7 +117,8 @@ impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
     /// server's clock, under the pool's limits, with the hosts the registry removed read absent;
     /// then those removals are settled. A failed pass is logged and changes no removal; the
-    /// next tick passes again. Without the job tables, nothing.
+    /// next tick passes again, unless the store said it has a newer writer, which trips the
+    /// fence ([`crate::fence`]) and ends the server. Without the job tables, nothing.
     pub(crate) fn job_pass(&self) {
         let Some(jobs) = &self.jobs else {
             return;
@@ -143,6 +144,7 @@ impl Agents {
                 self.placer.iter().for_each(settle);
             }
             Err(error) => {
+                self.fence.note(&error);
                 warn!(%error, "the job pass failed; the next tick passes again");
             }
         }

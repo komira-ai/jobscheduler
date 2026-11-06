@@ -20,6 +20,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::fence::Fence;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
@@ -88,6 +89,9 @@ pub(crate) struct Agents {
     /// For each host, the session whose job listing was last committed: a listing of another
     /// session is the first after a hello ([`crate::job_loss`]). Its lock is a leaf.
     listed_sessions: Mutex<BTreeMap<HostId, Session>>,
+    /// Trips when the state store says this process is no longer its writer
+    /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
+    pub(crate) fence: Fence,
 }
 
 /// A host's session as the job side tells one from another: the epoch of its hello and when
@@ -204,6 +208,7 @@ pub(crate) fn assemble_placed(
                 unclean: Mutex::default(),
                 job_limits,
                 listed_sessions: Mutex::default(),
+                fence: Fence::new(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
@@ -248,6 +253,7 @@ impl Agents {
             unclean: Mutex::default(),
             job_limits: JobLimits::default(),
             listed_sessions: Mutex::default(),
+            fence: Fence::new(),
         }
     }
 
