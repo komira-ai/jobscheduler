@@ -67,6 +67,7 @@ mod alert;
 mod build;
 mod complete;
 mod effects;
+mod events;
 mod launch;
 mod live;
 mod store;
@@ -74,6 +75,7 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -168,6 +170,13 @@ struct Core {
     /// Where each launch asked of a provider is counted ([`crate::metrics`]); set once, at
     /// start, when the server serves its metrics.
     meter: OnceLock<Meter>,
+    /// Whether the provider's notice stream is open (the `events` module).
+    listen: Mutex<events::Listen>,
+    /// The provider ids of reclaimed machines that no tick has written records for yet. The
+    /// next tick takes them and puts them back if its records were not written.
+    reclaimed: Mutex<BTreeSet<String>>,
+    /// The reclaim notices that named no machine of the records, since the scaler started.
+    reclaims_ignored: AtomicU64,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -247,6 +256,9 @@ impl Scaler {
             sink: OnceLock::new(),
             meter: OnceLock::new(),
             brake_resets: Mutex::new(BTreeSet::new()),
+            listen: Mutex::new(events::Listen::Closed),
+            reclaimed: Mutex::new(BTreeSet::new()),
+            reclaims_ignored: AtomicU64::new(0),
         };
         Self {
             core: Arc::new(core),
@@ -345,10 +357,28 @@ impl Scaler {
         })
     }
 
-    /// One tick, on the pool for blocking calls.
+    /// One tick, on the pool for blocking calls. Before it, the provider's notice stream is
+    /// opened if it is not open and the provider sends notices (the `events` module).
     pub async fn tick(&self) {
         let core = Arc::clone(&self.core);
-        blocking(move || core.tick()).await;
+        blocking(move || {
+            core.listen();
+            core.tick();
+        })
+        .await;
+    }
+
+    /// Whether the scaler holds the provider's notice stream open: `false` before the first
+    /// tick, for a provider that sends no notices, and after a stream ended until the next
+    /// tick opens it again.
+    pub fn notices_open(&self) -> bool {
+        self.core.notices_open()
+    }
+
+    /// How many reclaim notices named no machine of the scaler's records since it started.
+    /// Such a notice changes nothing.
+    pub fn reclaims_ignored(&self) -> u64 {
+        self.core.reclaims_ignored.load(Ordering::Relaxed)
     }
 
     /// Asks for the failure brake of `pool` to be reset at the next tick: its count, its trip
@@ -422,14 +452,27 @@ impl Core {
                 .unwrap_or_else(PoisonError::into_inner),
         );
         input.brake_resets = asked.iter().cloned().collect();
+        let reclaimed = std::mem::take(
+            &mut *self
+                .reclaimed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        input.reclaimed = reclaimed.iter().cloned().collect();
         let (next, actions) = step(work.state.clone(), &input, now);
         let Some(answers) = self.run(&mut work, actions) else {
-            // The records were not written, so the reset is not made: ask again.
+            // The records were not written, so the reset is not made and the reclaims are
+            // not acted on: ask again.
             let mut again = self
                 .brake_resets
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             again.extend(asked);
+            let mut pending = self
+                .reclaimed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            pending.extend(reclaimed);
             *self.memory() = work;
             return;
         };
@@ -595,6 +638,7 @@ impl Core {
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
             budgets: self.budgets.clone(),
             brake_resets: Vec::new(),
+            reclaimed: Vec::new(),
         }
     }
 

@@ -260,7 +260,7 @@ trait CapacityProvider {
     async fn list(&self, scope: Scope) -> Vec<Instance>;      // for reaping and re-adoption                            (Built)
     async fn observe(&self, i: &InstanceId) -> Observed;      // Present | Absent | Unknown                             (Planned for elastic)
     fn verify_instance(&self, hello: &Hello) -> Option<InstanceId>; // match a first hello to an acquire            (Planned)
-    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices                              (Planned)
+    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices        (Built: Reclaimed; Interruption planned)
 }
 ```
 
@@ -549,7 +549,7 @@ The steps below are the job table's contract. Where they say "commit", today's s
 **Submit** (`SubmitJob`; Planned, step 27):
 
 1. Parse and validate the job: image by digest, resource needs, constraints, a wall limit, network policy, ports, files, and a job id of 1 to 63 bytes (letters, digits, dot, underscore, dash) or none, in which case the service mints one. A wall limit that is missing, not positive or above the server's ceiling is refused (`wall-time-not-positive`, `wall-time-above-ceiling`).
-2. **Idempotency.** The same id with the same job (every field except the priority) is answered from the job it made, in whatever state it is now: this is what makes a retry after a lost answer safe. The same id with a different job is 409 `job-id-conflict`. An id is reusable once the retention window of the job that held it has passed.
+2. **Idempotency.** The same id with the same job (every field except the priority; for an ended job, whose record keeps only the SHA-256 of each file, each submitted file by its digest) is answered from the job it made, in whatever state it is now: this is what makes a retry after a lost answer safe. The same id with a different job is 409 `job-id-conflict`. An id is reusable once the retention window of the job that held it has passed.
 3. **Admission** (section 5.6, step 2). A job that nothing could ever serve is refused with `no-capable-host` and nothing is recorded.
 4. **Commit before anything else.** Insert the job as queued and commit. Only then answer 201 `{id, state: queued}`. A failed commit answers 500 `state-write-failed` and nothing was done. Submit never waits for placement.
 5. **Place.** `js-sched` takes the queued job (section 5.6) and, in one transaction, marks it placed and inserts its allocation: the host and the resources booked. **Commit before start**: the host is not asked until the commit is done, so a crash leaves a placement the next boot can resolve by observation, never a booking nobody knows about.
@@ -686,7 +686,7 @@ Purpose: a job must not be able to harm the host, another job or the object stor
 
 #### Write fencing
 
-Purpose: let a job write its output, once, without jobscheduler ever handling the credentials a client gives a job. The fence is a capability the client builds (step 1) and the agent carries. The server sends `files` only to a host that advertised the `run-files` capability. The agent keeps them in a memory-backed directory and mounts it read-only into the job; their contents are secret.
+Purpose: let a job write its output, once, without jobscheduler ever handling the credentials a client gives a job. The fence is a capability the client builds (step 1) and the agent carries. The server sends `files` only to a host that advertised the `run-files` capability. The agent keeps them in a memory-backed directory and mounts it read-only into the job; their contents are secret. The job's record keeps the contents only while the job is live: the write that ends the job replaces each with its SHA-256, so an ended job's record, kept for the retention window, holds the file names and no contents, and a resubmit of it is compared by those digests.
 
 What this guarantees, provided the client builds the grant as described and the object store enforces it (jobscheduler checks neither): a job can write one object, once, and cannot delete or overwrite. jobscheduler never holds the credentials a client gives a job: the create-only write grant of step 1 is still the client's. For logs alone it holds two operator-provided keys (the `AssumeRole` key and a read-only key) and hands each host's agent a temporary credential that can only put and delete under the configured log prefix (`live-logs.md`, section 4).
 
