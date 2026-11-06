@@ -32,6 +32,10 @@ pub(crate) enum Unsendable {
     /// A file's contents are not UTF-8, which a start carries as text.
     #[error("the file {0} is not UTF-8 text")]
     FileNotText(String),
+    /// The job's files hold their digests, not their contents: the job has ended, and its
+    /// contents were dropped with the end.
+    #[error("the job's files hold digests, not contents")]
+    FilesDigested,
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -104,6 +108,8 @@ pub(crate) fn start_of(
     }
     let files = spec
         .files
+        .contents()
+        .ok_or(Unsendable::FilesDigested)?
         .iter()
         .map(|(name, contents)| {
             String::from_utf8(contents.clone())
