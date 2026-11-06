@@ -53,13 +53,17 @@ pub(crate) fn normalised(reply: &HeartbeatReply) -> String {
 }
 
 /// Log lines go to `lines`, from this thread and from the mints it starts, until the guard
-/// drops.
+/// drops. The interest cache is rebuilt once the subscriber is installed: a callsite another
+/// test registered first, while no subscriber of this thread existed, would otherwise stay
+/// disabled and its line would never reach `lines`.
 pub(crate) fn capture(lines: &Lines) -> tracing::subscriber::DefaultGuard {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
         .finish();
-    tracing::subscriber::set_default(subscriber)
+    let guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    guard
 }
 
 /// A placed job's start holds the configured store, region, bucket and style and the job's
