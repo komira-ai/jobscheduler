@@ -4,7 +4,8 @@ use std::path::Path;
 use super::*;
 use crate::autologin::CommandOutput;
 use crate::helper::Outcome;
-use crate::helper::tests::{Rig, log, me, rig};
+use crate::helper::tests::{Rig, log, me, rig_with};
+use crate::lease::{PoolSize, UidRange};
 use crate::proto::Request;
 
 const REBOOT: &str = "/bin/launchctl reboot system";
@@ -48,9 +49,13 @@ fn open_window(rig: &Rig) {
 /// A Mac with something in every class but auto-login (off at rest): a launch agent,
 /// a launch daemon, a login items file (and launchd's `disabled` overrides, which
 /// the login items class leaves out), a background task, a foreign user record in the
-/// lease range.
+/// lease range; and a pool of four free users, which are no scan items, in a range of
+/// six uids.
 fn furnished(name: &str) -> Rig {
-    let rig = rig(name, 4);
+    let mut rig = rig_with(name, UidRange::new(me(), me() + 5).unwrap(), None);
+    rig.helper.settings.pool = PoolSize::new(4).unwrap();
+    rig.helper.boot_reset(&[]).unwrap();
+    log(&rig);
     for folder in ["LaunchAgents", "LaunchDaemons", "launchd"] {
         std::fs::create_dir(rig.dir.join(folder)).unwrap();
     }
@@ -59,7 +64,7 @@ fn furnished(name: &str) -> Rig {
     std::fs::write(rig.dir.join("launchd/loginitems.501.plist"), "l").unwrap();
     std::fs::write(rig.dir.join("launchd/disabled.501.plist"), "o").unwrap();
     answer(&rig, DUMPBTM, true, &dumpbtm(&["16.com.apple.btm"]), "");
-    rig.host.state().foreign.insert(me() + 3);
+    rig.host.state().foreign.insert(me() + 4);
     rig
 }
 
@@ -118,7 +123,7 @@ fn a_clean_tree_gives_an_empty_diff() {
 /// must add.
 type Plant = fn(&Rig);
 
-const PLANTS: [(&str, Plant, &str); 10] = [
+const PLANTS: [(&str, Plant, &str); 11] = [
     (
         "a launch agent",
         |rig| std::fs::write(rig.dir.join("LaunchAgents/evil.plist"), "x").unwrap(),
@@ -145,7 +150,14 @@ const PLANTS: [(&str, Plant, &str); 10] = [
     (
         "a user in the lease range",
         |rig| {
-            rig.host.state().foreign.insert(me() + 1);
+            rig.host.state().foreign.insert(me() + 5);
+        },
+        "lease-users uid ",
+    ),
+    (
+        "a pool user lent to a lease",
+        |rig| {
+            rig.helper.user_create("5.1", None).unwrap();
         },
         "lease-users uid ",
     ),
@@ -436,11 +448,11 @@ fn the_first_lease_user_closes_the_window() {
     assert!(error.contains("window is closed"), "{error}");
     // A window that cannot be removed (a directory with something in it).
     std::fs::create_dir_all(rig.dir.join("baseline-window/x")).unwrap();
-    let error = rig.helper.user_create("1.2", None).unwrap_err();
+    let error = rig.helper.user_create("1.2", None).unwrap_err().to_string();
     assert!(error.contains("closing "), "{error}");
-    assert!(rig.host.state().users.is_empty());
+    assert!(rig.helper.pool_status().leased.is_empty());
     std::fs::remove_dir_all(rig.dir.join("baseline-window")).unwrap();
-    assert_eq!(rig.helper.user_create("1.2", None), Ok(me() + 1));
+    assert_eq!(rig.helper.user_create("1.2", None), Ok(me()));
 }
 
 /// Catches: a baseline that cannot be written reported as recorded.

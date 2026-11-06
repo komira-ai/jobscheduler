@@ -1,5 +1,7 @@
 //! `kill-uid` and `user-delete`: the end of a lease user, and the errors their steps
-//! fail with ([`TeardownError`], worded for the refusal at the protocol boundary).
+//! fail with ([`TeardownError`], worded for the refusal at the protocol boundary). The
+//! kill and the deletion here are also the steps of a pool user's reset and replacement
+//! (`super::pool`); `user-delete` of a pool user's lease goes there.
 //!
 //! Both are judged by their outcome, never by what a `launchctl` call answered: no
 //! process of the uid is left, and the uid's launchd domains no longer print. A
@@ -28,11 +30,12 @@ use std::path::PathBuf;
 use js_types::LeaseId;
 
 use super::folders::{self, NotAnEntry};
+use super::pool::Settled;
 use super::{EXIT_LOOKS, Helper, KILL_ROUNDS, LiveProcess, NAMED, PrintAnswer};
 use crate::autologin::{Intent, read_intent};
-use crate::lease::{Dotted, parse_lease, user_name};
+use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
-use crate::sweep::{SweepPlan, Swept, owned_entries, remove_owned, sweep};
+use crate::sweep::{Swept, owned_entries, remove_owned, sweep};
 
 /// Why a step of `kill-uid` or `user-delete` failed. Its text is the refusal the caller
 /// reads.
@@ -105,6 +108,21 @@ pub(crate) enum TeardownError {
     /// The ledger could not record the deletion.
     #[error("recording the deletion of lease {lease}: {source}")]
     Record { lease: String, source: io::Error },
+    /// The pool user to reset has no record: there is no user left to reset.
+    #[error("user {name} has no record, so it cannot be reset")]
+    Missing { name: String },
+    /// The uid's System V IPC objects could not be listed.
+    #[error("listing the IPC objects of uid {uid}: {why}")]
+    Ipc { uid: u32, why: String },
+    /// System V IPC objects of the uid were still listed after their removal.
+    #[error("IPC objects of uid {uid} remain: {}", .left.join(", "))]
+    IpcLeft { uid: u32, left: Vec<String> },
+    /// A home folder could not be made.
+    #[error("making {}: {source}", .path.display())]
+    MakeHome { path: PathBuf, source: io::Error },
+    /// A user record could not be made.
+    #[error("creating user {name}: {source}")]
+    Create { name: String, source: io::Error },
 }
 
 impl From<TeardownError> for String {
@@ -241,13 +259,14 @@ impl Helper {
 
     /// [`Self::kill_uid`], with the ledger's lock held.
     pub(super) fn kill_locked(&self, ledger: &Ledger, lease: LeaseId) -> Result<(), TeardownError> {
-        let uid = self
-            .live_uid(ledger, lease)
+        let user = self
+            .lease_user(ledger, lease)
             .map_err(TeardownError::Refused)?;
+        let uid = user.uid;
         let intended = read_intent(&self.settings.session.intent)
             .map_err(TeardownError::Refused)?
             == Some(Intent::Lease(lease));
-        self.kill_account(&user_name(lease), uid, intended)
+        self.kill_account(&user.name, uid, intended)
             .map_err(|why| match why {
                 TeardownError::Outlived {
                     uid, left, stayed, ..
@@ -368,7 +387,7 @@ impl Helper {
 
     /// Removes the record that `uid`'s GUI domain is owed a teardown, once its domain was
     /// judged gone.
-    fn discharge_gui(&self, uid: u32) -> Result<(), TeardownError> {
+    pub(super) fn discharge_gui(&self, uid: u32) -> Result<(), TeardownError> {
         let path = self.gui_record(uid);
         crate::autologin::remove(&path)
             .map(drop)
@@ -426,9 +445,11 @@ impl Helper {
         left
     }
 
-    /// `user-delete <lease>`: sweeps what the user leaves, deletes its record and
-    /// records the deletion. Returns whether a record was there to delete; a lease
-    /// already deleted returns `false` and touches nothing.
+    /// `user-delete <lease>`: ends the lease. A pool user's lease is recorded over and
+    /// its user reset or replaced (`super::pool`), returning `true`, or refused naming
+    /// why when the slot broke. For a lease from before the pool: sweeps what the user
+    /// leaves, deletes its record and records the deletion, returning whether a record
+    /// was there to delete. A lease already over returns `false` and touches nothing.
     ///
     /// The uid's entry under the per-user folders is taken from its `DARWIN_USER_DIR`,
     /// asked first, while the record is there ([`super::Host::user_dir`]); an answer that
@@ -476,65 +497,80 @@ impl Helper {
                 Dotted(lease)
             ));
         }
-        Ok(self.delete_locked(&mut ledger, lease)?)
+        Ok(self.end_locked(&mut ledger, lease)?)
     }
 
-    /// [`Self::user_delete`] of a live lease, with the ledger's lock held.
-    pub(super) fn delete_locked(
+    /// [`Self::user_delete`] of a live lease, with the ledger's lock held: a pool user
+    /// is released ([`Self::release`]), the user of a lease from before the pool deleted.
+    pub(super) fn end_locked(
         &self,
         ledger: &mut Ledger,
         lease: LeaseId,
     ) -> Result<bool, TeardownError> {
-        let uid = self
-            .live_uid(ledger, lease)
+        let user = self
+            .lease_user(ledger, lease)
             .map_err(TeardownError::Refused)?;
-        self.delete_steps(ledger, lease, uid)
-            .inspect_err(|why| kept(lease, uid, why))
+        match user.slot {
+            Some(slot) => match self.release(ledger, lease, slot) {
+                Ok(Settled::Free) => Ok(true),
+                Ok(Settled::Broken(why)) | Err(why) => Err(TeardownError::Refused(why)),
+            },
+            None => self
+                .delete_steps(ledger, lease, &user.name, user.uid)
+                .inspect_err(|why| kept(lease, user.uid, why)),
+        }
     }
 
-    /// The steps of [`Self::user_delete`] for the live lease `lease` with `uid`.
+    /// The steps of [`Self::user_delete`] for the live lease `lease` from before the pool,
+    /// whose user is `name` with `uid`.
     fn delete_steps(
         &self,
         ledger: &mut Ledger,
         lease: LeaseId,
+        name: &str,
         uid: u32,
     ) -> Result<bool, TeardownError> {
-        let name = user_name(lease);
-        let entries = self.user_entries(&name, uid)?;
-        self.settled(uid)?;
-        let mut removed = Self::swept(sweep(&self.settings.schedules, &name, uid), &name)?;
-        self.none_left(uid)?;
-        let mut plan: SweepPlan = self.settings.sweep.clone();
-        plan.named
-            .push(format!("{}/{{user}}", self.settings.homes.display()));
-        removed += Self::swept(sweep(&plan, &name, uid), &name)?;
-        for entry in &entries {
-            removed += Self::swept(remove_owned(entry, uid), &name)?;
-        }
-        if self.settled(uid)? {
-            self.discharge_gui(uid)?;
-        }
-        let existed = self
-            .host
-            .delete_user(&name)
-            .map_err(|source| TeardownError::Delete {
-                name: name.clone(),
-                source,
-            })?;
+        let existed = self.remove_account(name, uid)?;
         ledger
             .record_deleted(lease)
             .map_err(|source| TeardownError::Record {
                 lease: Dotted(lease).to_string(),
                 source,
             })?;
-        tracing::info!(lease = %Dotted(lease), uid, removed, existed, "deleted lease user {name}");
+        tracing::info!(lease = %Dotted(lease), uid, existed, "deleted lease user {name}");
+        Ok(existed)
+    }
+
+    /// Deletes the user `name`, with `uid`, and sweeps what it leaves, in the order of
+    /// [`Self::user_delete`]. Returns whether a record was there to delete.
+    pub(super) fn remove_account(&self, name: &str, uid: u32) -> Result<bool, TeardownError> {
+        let entries = self.user_entries(name, uid)?;
+        self.settled(uid)?;
+        let mut removed = Self::swept(sweep(&self.settings.schedules, name, uid), name)?;
+        self.none_left(uid)?;
+        self.remove_ipc(name, uid)?;
+        removed += Self::swept(sweep(&self.with_home(), name, uid), name)?;
+        for entry in &entries {
+            removed += Self::swept(remove_owned(entry, uid), name)?;
+        }
+        if self.settled(uid)? {
+            self.discharge_gui(uid)?;
+        }
+        let existed = self
+            .host
+            .delete_user(name)
+            .map_err(|source| TeardownError::Delete {
+                name: name.to_owned(),
+                source,
+            })?;
+        tracing::info!(uid, removed, existed, "deleted user {name}");
         Ok(existed)
     }
 
     /// The entries under [`super::Settings::user_folders`] of the user `name` with `uid`:
     /// the one its `DARWIN_USER_DIR` names while its record exists; once the record is
     /// gone, every entry there that the uid owns.
-    fn user_entries(&self, name: &str, uid: u32) -> Result<Vec<PathBuf>, TeardownError> {
+    pub(super) fn user_entries(&self, name: &str, uid: u32) -> Result<Vec<PathBuf>, TeardownError> {
         let folders_root = &self.settings.user_folders;
         let account = self
             .host
@@ -565,7 +601,7 @@ impl Helper {
     /// removed, so it is not waited out: the delete stops, the uid stays held, and the
     /// repeated delete sweeps everything again. Returns whether the GUI domain was owed
     /// (and is now judged gone).
-    fn settled(&self, uid: u32) -> Result<bool, TeardownError> {
+    pub(super) fn settled(&self, uid: u32) -> Result<bool, TeardownError> {
         self.none_left(uid)?;
         let gui = self.gui_owed(uid)?;
         let domains = domains(uid, gui);
@@ -583,7 +619,7 @@ impl Helper {
 
     /// Waits, for at most [`EXIT_LOOKS`] listings, until no process of `uid` is
     /// alive; refuses, naming the processes, if some still are.
-    fn none_left(&self, uid: u32) -> Result<(), TeardownError> {
+    pub(super) fn none_left(&self, uid: u32) -> Result<(), TeardownError> {
         let mut left = self.processes(uid)?;
         let mut looks = 1;
         while !left.is_empty() && looks < EXIT_LOOKS {
@@ -598,7 +634,7 @@ impl Helper {
     }
 
     /// What the sweep `swept` for the user `name` removed, or why it is incomplete.
-    fn swept(swept: Swept, name: &str) -> Result<usize, TeardownError> {
+    pub(super) fn swept(swept: Swept, name: &str) -> Result<usize, TeardownError> {
         match swept.errors.is_empty() {
             true => Ok(swept.removed),
             false => Err(TeardownError::Sweep {

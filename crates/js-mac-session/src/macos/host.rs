@@ -174,7 +174,8 @@ impl Host for MacHost {
                 };
             };
             // A stale membership would make the next holder of the name an
-            // administrator; names are never reused, but the group is cleaned anyway.
+            // administrator: a pool user is replaced under the same name (after an
+            // administrator's lease, too), so the group is cleaned first.
             let admin = group(&node, ADMIN_GROUP)?;
             let mut ignored = None;
             // SAFETY: both are records of the local node. Not a member is an error

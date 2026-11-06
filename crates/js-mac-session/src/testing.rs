@@ -112,9 +112,42 @@ pub(crate) struct State {
     /// The uids with one more live process whose name cannot be read (`?`, pid 901),
     /// which a kill ends.
     pub(crate) unreadable: BTreeSet<u32>,
+    /// The System V IPC objects, by id: their kind's letter (`q`, `m` or `s`) and their
+    /// owner as `ipcs` prints it (a user's name, or a uid). `ipcs -a` lists them and
+    /// `ipcrm -<kind> <id>` removes one, unless a command answer is set for either.
+    pub(crate) ipc: BTreeMap<u64, (char, String)>,
+    /// The ids of IPC objects `ipcrm` refuses to remove (it fails, and they stay).
+    pub(crate) ipc_stuck: BTreeSet<u64>,
 }
 
 impl State {
+    /// What `ipcs -a` prints for `ipc`: a header, then one line per object.
+    fn ipcs(&self) -> String {
+        let mut text =
+            String::from("IPC status from <running system>\nT ID KEY MODE OWNER GROUP\n");
+        for (id, (kind, owner)) in &self.ipc {
+            text.push_str(&format!("{kind} {id} 0x0 --rw------- {owner} staff\n"));
+        }
+        text
+    }
+
+    /// `ipcrm -<kind> <id>`: removes the object, unless it is stuck.
+    fn ipcrm(&mut self, args: &[&str]) -> CommandOutput {
+        let id: u64 = args[1].parse().unwrap();
+        if !self.ipc_stuck.contains(&id) {
+            self.ipc.remove(&id);
+            return CommandOutput {
+                success: true,
+                ..CommandOutput::default()
+            };
+        }
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("ipcrm: {}: Operation not permitted\n", args[1]),
+        }
+    }
+
     /// The effect of a successful `chflags -h uchg|nouchg <paths>` when `enforce_uchg` is
     /// on: the parent of every path with the flag loses its write permission (so nothing
     /// in it can be unlinked, and a flagged directory cannot be removed from its parent)
@@ -142,6 +175,11 @@ impl State {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode)).unwrap();
         }
     }
+}
+
+/// A pool with one user for each uid of `range`.
+pub(crate) fn pool_of(range: crate::lease::UidRange) -> crate::lease::PoolSize {
+    crate::lease::PoolSize::new(u32::try_from(range.uids().count()).unwrap()).unwrap()
 }
 
 /// `launchctl print`'s answer for a domain launchd has.
@@ -364,6 +402,12 @@ impl Host for FakeHost {
         }
         let output = match state.answers.get(&text) {
             Some(answer) => answer.clone(),
+            None if program == crate::helper::IPCS => CommandOutput {
+                success: true,
+                stdout: state.ipcs(),
+                stderr: String::new(),
+            },
+            None if program == crate::helper::IPCRM => state.ipcrm(args),
             None if text == "/usr/bin/fdesetup isactive" => CommandOutput {
                 success: false,
                 stdout: "false\n".to_owned(),

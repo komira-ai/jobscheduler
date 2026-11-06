@@ -4,7 +4,7 @@ use std::os::fd::OwnedFd;
 use super::*;
 use crate::autologin::SessionPaths;
 use crate::grant::testing::{key_line, sign, text};
-use crate::testing::{FakeHost, NOW, act_argv, scratch, trace};
+use crate::testing::{FakeHost, NOW, act_argv, pool_of, scratch, trace};
 
 /// The fake clock's time, as a grant's times count it.
 const NOW_SECS: i64 = NOW.cast_signed();
@@ -57,6 +57,7 @@ pub(super) fn rig_vm_with(
     let host = FakeHost::default();
     let settings = Settings {
         range,
+        pool: pool_of(range),
         gid: my_gid(),
         homes,
         schedules: SweepPlan {
@@ -80,149 +81,50 @@ pub(super) fn rig_vm_with(
     Rig { host, helper, dir }
 }
 
-pub(super) fn log(rig: &Rig) -> Vec<String> {
-    std::mem::take(&mut rig.host.state().log)
+/// A rig of ONE uid, the test's own, holding `lease` as a release before the pool left
+/// it: the ledger records the lease with the uid and the lease's own user
+/// (`kbf-lease-<term>-<seq>`) exists, so the pool's one slot could not be made (its uid
+/// has a record the ledger does not hold). `kill-uid` and `user-delete` act on that user
+/// with the teardown and the deletion a pool user's replacement runs too; no other lease
+/// gets the uid until a delete succeeds and `pool-create` makes the slot.
+pub(super) fn legacy(name: &str, lease: &str) -> (Rig, u32) {
+    let uid = me();
+    let rig = rig_with(name, UidRange::new(uid, uid).unwrap(), None);
+    rig.host.state().foreign.insert(uid);
+    rig.helper.boot_reset(&[]).unwrap();
+    rig.host.state().foreign.remove(&uid);
+    add_legacy(&rig, lease);
+    log(&rig);
+    (rig, uid)
 }
 
-/// Catches: a uid reused while its lease is live, a uid another user record or a
-/// running process has, or allocation that restarts at the bottom of the range.
-#[test]
-fn each_lease_gets_a_free_uid_after_the_last_one() {
-    let rig = rig("alloc", 4);
-    let base = me();
-    assert_eq!(rig.helper.user_create("1.1", None), Ok(base));
-    assert_eq!(rig.helper.user_create("1.2", None), Ok(base + 1));
-    let user = rig.host.state().users["kbf-lease-1-2"].clone();
-    // Deleting 1.1 frees its uid, but allocation goes on after the uid handed out
-    // last, so the freed one is reused as late as possible.
-    rig.helper.user_delete("1.1").unwrap();
-    assert_eq!(rig.helper.user_create("1.3", None), Ok(base + 2));
-    // Skipped: a uid another user record has (base+3), one a process runs as (base),
-    // and ones live leases hold (base+1, base+2) even when their records are gone.
-    rig.host.state().foreign.insert(base + 3);
-    rig.host.state().users.clear();
-    rig.host.state().procs.insert(base, 1);
-    let error = rig.helper.user_create("1.4", None).unwrap_err();
-    assert!(error.contains("no free uid"), "{error}");
-    rig.host.state().procs.clear();
-    // Wrapped round to the bottom of the range.
-    assert_eq!(rig.helper.user_create("1.5", None), Ok(base));
-    assert_eq!(
-        user,
-        NewUser {
-            name: "kbf-lease-1-2".to_owned(),
-            uid: base + 1,
-            gid: my_gid(),
-            home: rig.dir.join("Users/kbf-lease-1-2"),
-            admin: false,
-        }
-    );
-    let made = log(&rig)
-        .into_iter()
-        .filter(|line| line.starts_with("make_home"))
-        .count();
-    assert_eq!(made, 4);
+/// Records `lease` from before the pool in `rig`, with the range's first uid and its own
+/// user, as [`legacy`] does. Returns the uid.
+pub(super) fn add_legacy(rig: &Rig, lease: &str) -> u32 {
+    let uid = rig.helper.settings.range.uids().next().unwrap();
+    let id = parse_lease(lease).unwrap();
+    rig.helper.lock().record_created(id, uid).unwrap();
+    let user = NewUser {
+        name: crate::lease::user_name(id),
+        uid,
+        gid: my_gid(),
+        home: rig.helper.settings.homes.join(crate::lease::user_name(id)),
+        admin: false,
+    };
+    rig.host.state().users.insert(user.name.clone(), user);
+    uid
 }
 
-/// Catches: a lease id used twice (S4.2: a name never reused), including after its
-/// user was deleted, and including across a restart of the helper.
-#[test]
-fn a_lease_id_is_never_used_twice() {
-    let rig = rig("reuse", 4);
-    rig.helper.user_create("2.1", None).unwrap();
-    let again = rig.helper.user_create("2.1", None).unwrap_err();
-    assert!(again.contains("never reused"), "{again}");
-    rig.helper.user_delete("2.1").unwrap();
-    assert!(
-        rig.helper
-            .user_create("2.1", None)
-            .unwrap_err()
-            .contains("never reused")
-    );
-    // A new helper over the same ledger (a reboot) remembers.
-    let range = UidRange::new(me(), me() + 3).unwrap();
-    let rebooted = rig_with("reuse", range, Some(rig.dir.clone()));
-    let after = rebooted.helper.user_create("2.1", None).unwrap_err();
-    assert!(after.contains("never reused"), "{after}");
-    assert!(
-        rig.helper
-            .user_create("2.01", None)
-            .unwrap_err()
-            .contains("not <term>.<seq>")
-    );
-}
-
-/// Catches: an administrator made on the daemon's word (S10: "trust an admin flag
-/// from the daemon"), a grant used twice, or a grant for another lease or Mac.
-#[test]
-fn an_administrator_needs_a_valid_unused_grant() {
-    let rig = rig("admin", 4);
-    let grant = sign(7, &text("SERIAL1", "3.1", NOW_SECS));
-    assert_eq!(rig.helper.user_create("3.1", Some(&grant)), Ok(me()));
-    assert!(rig.host.state().users["kbf-lease-3-1"].admin);
-    // Single use: the lease id is spent.
-    assert!(
-        rig.helper
-            .user_create("3.1", Some(&grant))
-            .unwrap_err()
-            .contains("never reused")
-    );
-    // A grant names one lease and one Mac, and the gate's key.
-    let error = rig.helper.user_create("3.2", Some(&grant)).unwrap_err();
-    assert!(error.contains("names lease 3.1"), "{error}");
-    let other_mac = sign(7, &text("SERIAL2", "3.2", NOW_SECS));
-    assert!(
-        rig.helper
-            .user_create("3.2", Some(&other_mac))
-            .unwrap_err()
-            .contains("serial")
-    );
-    let forged = sign(8, &text("SERIAL1", "3.2", NOW_SECS));
-    assert!(
-        rig.helper
-            .user_create("3.2", Some(&forged))
-            .unwrap_err()
-            .contains("does not verify")
-    );
-    // A refused grant made no user and spent nothing: the plain lease still works.
-    assert_eq!(rig.helper.user_create("3.2", None), Ok(me() + 1));
-    assert!(!rig.host.state().users["kbf-lease-3-2"].admin);
-
-    let mut keyless = rig_with("admin-nokeys", UidRange::new(me(), me()).unwrap(), None);
-    keyless.helper.settings.grant_keys = None;
-    let grant = sign(7, &text("SERIAL1", "3.3", NOW_SECS));
-    let error = keyless.helper.user_create("3.3", Some(&grant)).unwrap_err();
-    assert!(error.contains("no gate key"), "{error}");
-    assert!(keyless.host.state().users.is_empty());
-}
-
-/// Catches: a lease recorded as created when the host failed part-way silently
-/// reported as success.
-#[test]
-fn host_failures_during_create_are_reported() {
-    for fail in ["uid_taken", "live_processes", "make_home", "create_user"] {
-        let rig = rig(&format!("create-{fail}"), 2);
-        rig.host.state().fail.insert(fail);
-        let error = rig.helper.user_create("4.1", None).unwrap_err();
-        assert!(error.contains("failed"), "{fail}: {error}");
+/// Asserts that `created` is the pool's exhaustion: no slot was free for the lease.
+pub(super) fn exhausted(created: Result<u32, LeaseError>) {
+    match created {
+        Err(LeaseError::Exhausted(_)) => {}
+        other => panic!("not exhausted: {other:?}"),
     }
 }
 
-/// Catches: a user created, or a deletion reported done, when the ledger could not
-/// record it (after a reboot the lease id or the uid would be reused).
-#[test]
-fn a_ledger_that_cannot_record_stops_the_verb() {
-    let rig = rig("ledger-fail", 2);
-    rig.helper.user_create("4.2", None).unwrap();
-    rig.helper.lock().fail_writes(&rig.dir.join("ledger"));
-    let error = rig.helper.user_create("4.3", None).unwrap_err();
-    assert!(error.starts_with("recording lease 4.3"), "{error}");
-    assert!(!rig.host.state().users.contains_key("kbf-lease-4-3"));
-    let error = rig.helper.user_delete("4.2").unwrap_err();
-    assert!(
-        error.starts_with("recording the deletion of lease 4.2"),
-        "{error}"
-    );
+pub(super) fn log(rig: &Rig) -> Vec<String> {
+    std::mem::take(&mut rig.host.state().log)
 }
 
 /// Catches: booting the launchd domains out before the kill and never after (a live
@@ -371,7 +273,7 @@ fn run_starts_the_process_as_the_lease_user_in_the_lease_directory() {
         "{}\n{}\n{}\n",
         me(),
         std::fs::canonicalize(rig.dir.path()).unwrap().display(),
-        rig.dir.join("Users/kbf-lease-7-1").display()
+        rig.dir.join("Users/kbf-lease-pool-0").display()
     );
     assert_eq!(text, want);
 }
@@ -464,8 +366,7 @@ fn run_refuses_bad_limits_and_starts_a_limited_run() {
 /// failed sweep or deletion reported as done.
 #[test]
 fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
-    let rig = rig("delete", 2);
-    let uid = rig.helper.user_create("9.1", None).unwrap();
+    let (rig, uid) = legacy("delete", "9.1");
     // One process is enough to refuse (`> 0`, not `> 1`).
     rig.host.state().procs.insert(uid, 1);
     let error = rig.helper.user_delete("9.1").unwrap_err();
@@ -520,7 +421,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
     assert!(log(&rig).is_empty());
 
     // A record already gone (a delete that crashed after it) still completes.
-    rig.helper.user_create("9.2", None).unwrap();
+    add_legacy(&rig, "9.2");
     rig.host.state().users.clear();
     log(&rig);
     assert_eq!(rig.helper.user_delete("9.2"), Ok(false));
@@ -533,7 +434,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
             .contains("was deleted")
     );
 
-    rig.helper.user_create("9.3", None).unwrap();
+    add_legacy(&rig, "9.3");
     rig.host.state().fail.insert("live_processes");
     assert!(
         rig.helper
@@ -550,8 +451,7 @@ fn user_delete_refuses_live_processes_and_an_incomplete_sweep() {
 /// rest, turns this red.
 #[test]
 fn a_process_started_during_user_delete_stops_it() {
-    let rig = rig("delete-race", 2);
-    let uid = rig.helper.user_create("11.1", None).unwrap();
+    let (rig, uid) = legacy("delete-race", "11.1");
     let home = rig.dir.join("Users/kbf-lease-11-1");
     let tab = rig.dir.join("tabs/kbf-lease-11-1");
     std::fs::create_dir_all(&home).unwrap();
@@ -609,13 +509,14 @@ fn a_process_started_during_user_delete_stops_it() {
     ];
     want.extend(settle.clone());
     want.push(format!("live_processes {uid}"));
+    want.push(format!("command {IPCS} -a"));
     want.extend(settle);
     want.push("delete_user kbf-lease-11-1".to_owned());
     assert_eq!(log(&rig), want);
 
     // An incomplete sweep of the schedules stops the delete too.
     if me() != 0 {
-        rig.helper.user_create("11.2", None).unwrap();
+        add_legacy(&rig, "11.2");
         let tabs = rig.dir.join("tabs");
         std::fs::set_permissions(&tabs, std::os::unix::fs::PermissionsExt::from_mode(0o000))
             .unwrap();
@@ -694,8 +595,7 @@ fn a_home_folder_is_new_private_and_the_users() {
 /// look instead of refusing at once. Red with a single listing per look (no wait).
 #[test]
 fn user_delete_waits_for_a_process_that_exits() {
-    let rig = rig("delete-wait", 2);
-    let uid = rig.helper.user_create("12.1", None).unwrap();
+    let (rig, uid) = legacy("delete-wait", "12.1");
     log(&rig);
     // Alive at the first two listings of the first look, gone at the third.
     rig.host.state().live_script.extend([1, 1]);
@@ -715,14 +615,16 @@ fn user_delete_waits_for_a_process_that_exits() {
         look.clone(),
     ];
     want.extend(domains.clone());
-    want.extend([look.clone(), look.clone(), look.clone()]);
+    want.extend([look.clone(), look.clone()]);
+    want.push(format!("command {IPCS} -a"));
+    want.push(look.clone());
     want.extend(domains);
     want.push(look);
     want.push("delete_user kbf-lease-12-1".to_owned());
     assert_eq!(log(&rig), want);
 
     // One that exits during the last look, after the sweep: waited for too.
-    let uid = rig.helper.user_create("12.2", None).unwrap();
+    let uid = add_legacy(&rig, "12.2");
     log(&rig);
     let mut script = vec![0, 0, 0];
     script.extend(std::iter::repeat_n(3, EXIT_LOOKS - 1));
@@ -742,8 +644,7 @@ fn user_delete_waits_for_a_process_that_exits() {
 /// are left. More than [`NAMED`] are counted, not listed.
 #[test]
 fn user_delete_gives_up_naming_what_is_left() {
-    let rig = rig("delete-give-up", 2);
-    let uid = rig.helper.user_create("13.1", None).unwrap();
+    let (rig, uid) = legacy("delete-give-up", "13.1");
     log(&rig);
     rig.host.state().procs.insert(uid, 2);
     let error = rig.helper.user_delete("13.1").unwrap_err();
@@ -782,7 +683,7 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
     let rig = rig("kill-schedules", 2);
     rig.helper.user_create("14.1", None).unwrap();
     let tabs = rig.dir.join("tabs");
-    let tab = tabs.join("kbf-lease-14-1");
+    let tab = tabs.join("kbf-lease-pool-0");
     std::fs::create_dir_all(&tabs).unwrap();
     std::fs::write(&tab, "* * * * * job").unwrap();
     log(&rig);
@@ -798,7 +699,7 @@ fn kill_uid_removes_the_schedules_between_two_kills() {
         .collect();
     // The crontab goes after the first kill and before the second: a sweep after
     // both kills leaves a window in which its job starts a process nothing kills.
-    let uid = rig.host.state().users["kbf-lease-14-1"].uid;
+    let uid = rig.host.state().users["kbf-lease-pool-0"].uid;
     assert_eq!(
         kills,
         [
@@ -970,6 +871,7 @@ fn only_launchds_not_found_answer_is_absence() {
 }
 
 mod bounds;
+mod lease;
 mod obligation;
 mod outcome;
 mod previous_release;

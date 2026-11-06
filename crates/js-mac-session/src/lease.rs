@@ -273,18 +273,6 @@ impl UidRange {
         (self.first..=self.last).contains(&uid)
     }
 
-    /// Every uid of the range once, starting after `after` (the uid handed out last)
-    /// and wrapping, so a uid is reused as late as possible. From the first uid when
-    /// `after` is `None` or outside the range.
-    pub fn after(self, after: Option<u32>) -> impl Iterator<Item = u32> {
-        let len = self.last - self.first + 1;
-        let start = match after {
-            Some(uid) if self.contains(uid) => uid - self.first + 1,
-            _ => 0,
-        };
-        (0..len).map(move |i| self.first + (start + i) % len)
-    }
-
     /// Every uid of the range, in order.
     pub fn uids(self) -> impl Iterator<Item = u32> {
         self.first..=self.last
@@ -443,18 +431,6 @@ mod tests {
             assert!(bad.parse::<UidRange>().is_err(), "{bad:?} was accepted");
         }
         assert!("500-10499".parse::<UidRange>().is_ok());
-    }
-
-    /// Catches: allocation that restarts at the first uid (reusing a uid at once) or
-    /// skips or repeats one when it wraps.
-    #[test]
-    fn uids_come_round_after_the_last_one_handed_out() {
-        let range = UidRange::new(600, 603).unwrap();
-        let order = |after| range.after(after).collect::<Vec<_>>();
-        assert_eq!(order(None), [600, 601, 602, 603]);
-        assert_eq!(order(Some(601)), [602, 603, 600, 601]);
-        assert_eq!(order(Some(603)), [600, 601, 602, 603]);
-        assert_eq!(order(Some(42)), [600, 601, 602, 603]);
     }
 
     /// Catches: a slot whose uid moves (off by one, or past the range's end), or a pool

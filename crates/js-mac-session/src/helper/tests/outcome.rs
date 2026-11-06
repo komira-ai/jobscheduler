@@ -7,13 +7,10 @@
 use super::*;
 use crate::testing::found;
 
-/// A rig of ONE uid, the test's own, holding lease `lease`: a later lease gets a uid
-/// only if this one was freed.
+/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
+/// the uid only once its user is deleted and the pool's slot made.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    let rig = rig(name, 1);
-    let uid = rig.helper.user_create(lease, None).unwrap();
-    log(&rig);
-    (rig, uid)
+    legacy(name, lease)
 }
 
 /// The calls of one attempt of `kill-uid` that ends with nothing left: the kill, the
@@ -205,12 +202,7 @@ fn a_process_that_never_goes_away_fails_after_the_last_attempt_and_quarantines_t
     assert_eq!(kills, KILL_ROUNDS, "{calls:#?}");
     let quarantined = || {
         assert!(rig.host.state().users.contains_key("kbf-lease-55-1"));
-        let range = rig.helper.settings.range;
-        assert_eq!(
-            rig.helper.user_create("99.1", None),
-            Err(format!("no free uid in {range}")),
-            "uid {uid} was handed out again"
-        );
+        exhausted(rig.helper.user_create("99.1", None));
     };
     quarantined();
     assert_eq!(
@@ -226,6 +218,7 @@ fn a_process_that_never_goes_away_fails_after_the_last_attempt_and_quarantines_t
     rig.host.state().stubborn.clear();
     assert_eq!(rig.helper.kill_uid("55.1"), Ok(()));
     assert_eq!(rig.helper.user_delete("55.1"), Ok(true));
+    assert!(rig.helper.pool_create().errors.is_empty());
     assert_eq!(rig.helper.user_create("55.2", None), Ok(uid));
 }
 

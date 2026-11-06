@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::autologin::SessionPaths;
 use crate::client::{Client, ClientError, Exit};
+use crate::helper::POOL_EXHAUSTED;
 use crate::helper::Settings;
 use crate::lease::UidRange;
 use crate::ledger::Ledger;
-use crate::proto::Request;
+use crate::proto::{PoolState, Request};
 use crate::sweep::SweepPlan;
-use crate::testing::{FakeHost, act_argv, scratch, trace};
+use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
 
 fn me() -> u32 {
     rustix::process::getuid().as_raw()
@@ -120,6 +121,7 @@ fn served_in(
     }
     let settings = Settings {
         range,
+        pool: pool_of(range),
         gid: my_gid(),
         homes: dir.join("Users"),
         schedules: SweepPlan {
@@ -477,7 +479,10 @@ fn a_refused_caller_gets_nothing_done() {
         other => panic!("{other:?}"),
     }
     assert!(served.host.state().log.is_empty());
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: the caller checked only after its request was read (S4.3, the
@@ -527,7 +532,10 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Err(ClientError::Refused(why)) => assert_eq!(why, "caller refused: gone"),
         other => panic!("{other:?}"),
     }
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
     // The same pid with another version is another process.
     let check = Scripted::new(
         vec![
@@ -544,7 +552,10 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Err(ClientError::Refused(why)) => assert!(why.contains("now pid 7 version 2"), "{why}"),
         other => panic!("{other:?}"),
     }
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: the nonce not checked, so a request written before the helper's check (by
@@ -574,7 +585,10 @@ fn a_request_written_before_the_hello_is_refused() {
             reason: "caller refused: the request does not carry this connection's nonce".to_owned()
         }
     );
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: a nonce that repeats, which a request written early could then carry.
@@ -741,6 +755,18 @@ fn the_client_reports_unexpected_replies_and_hangups() {
             code: Some(3),
             signal: None,
         }),
+        // The pool: an exhausted pool, a state, and a reply of the wrong kind.
+        Some(Reply::Refused {
+            reason: format!("{POOL_EXHAUSTED}: of 1 slots"),
+        }),
+        Some(Reply::Refused {
+            reason: "the pool has no free userX".replace('X', ""),
+        }),
+        Some(Reply::Pool(Box::new(PoolState {
+            size: 1,
+            ..PoolState::default()
+        }))),
+        Some(Reply::Killed),
     ];
     std::thread::spawn(move || {
         // First a helper that answers the connection with something other than Hello.
@@ -794,6 +820,20 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     let running = client.role_run(&[], &[], fds).unwrap();
     assert_eq!(running.pid, 9);
     assert_eq!(running.wait().unwrap().code, Some(3));
+    match client.user_create("1.1", None) {
+        Err(error @ ClientError::Exhausted(_)) => assert_eq!(
+            error.to_string(),
+            format!("kbf-mac-session refused: {POOL_EXHAUSTED}: of 1 slots")
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Exactly the words, with nothing after them, are the exhausted pool too.
+    assert!(matches!(
+        client.user_create("1.1", None),
+        Err(ClientError::Exhausted(_))
+    ));
+    assert_eq!(client.pool_status().unwrap().size, 1);
+    assert!(unexpected(client.pool_create().map(drop)).contains("Killed"));
     let refused = ClientError::Refused("why".to_owned());
     assert_eq!(refused.to_string(), "kbf-mac-session refused: why");
     let gone = Client::new(dir.join("no-socket"));
@@ -811,6 +851,7 @@ fn serve_returns_when_accept_fails() {
         let ledger = Ledger::open(&dir.join("ledger")).unwrap();
         let settings = Settings {
             range: UidRange::new(600, 601).unwrap(),
+            pool: crate::lease::PoolSize::new(2).unwrap(),
             gid: 20,
             homes: dir.to_path_buf(),
             schedules: SweepPlan {
@@ -868,6 +909,7 @@ fn quiet_helper(dir: &Path) -> Helper {
     let ledger = Ledger::open(&dir.join("ledger")).unwrap();
     let settings = Settings {
         range: UidRange::new(600, 601).unwrap(),
+        pool: crate::lease::PoolSize::new(2).unwrap(),
         gid: 20,
         homes: dir.to_path_buf(),
         schedules: SweepPlan {
