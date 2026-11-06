@@ -231,8 +231,8 @@
 //! `[[machine_provider]]` has a `name` (the grammar of pool names) and a `kind`: `static`
 //! (the hosts that run `js-agent` and register themselves; no other key) or a provider kind
 //! compiled in, such as `lambdalabs`, whose other keys are that kind's, as under a pool's
-//! `provider` (`api_key_file` and the rest; secrets stay paths). `ec2` and `gce` are refused
-//! as not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
+//! `provider` (`api_key_file` and the rest; secrets stay paths). `gce` is refused as
+//! not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
 //! (`kubernetes`, `cloud_run` and `ecs` are refused as not built), and its
 //! `machine_providers` lists declared machine providers first to last. A pool's `platforms`
 //! lists declared platforms first to last; it is refused beside `provider`. Each declared

@@ -41,7 +41,7 @@ const MADE: char = '+';
 const STATIC: &str = "static";
 
 /// Machine provider kinds that are planned and not built.
-const UNBUILT_PROVIDERS: &[&str] = &["ec2", "gce"];
+const UNBUILT_PROVIDERS: &[&str] = &["gce"];
 
 /// Platform kinds that are planned and not built.
 const UNBUILT_PLATFORMS: &[&str] = &["kubernetes", "cloud_run", "ecs"];

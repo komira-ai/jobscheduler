@@ -49,6 +49,7 @@ fn hello(name: &str, instance: Option<&str>) -> Hello {
     Hello {
         name: name.to_owned(),
         instance_id: instance.map(str::to_owned),
+        identity: None,
     }
 }
 

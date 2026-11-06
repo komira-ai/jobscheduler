@@ -266,6 +266,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             None => Box::new(cloud),
         };
         return Ok(Built::Elastic(ElasticBuilt {
+            idle_costs: false,
             provider,
             floor: Floor {
                 gpus: 1,
@@ -307,6 +308,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
+        idle_costs: false,
     }))
 }
 

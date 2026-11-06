@@ -125,6 +125,7 @@ fn logged_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindE
     let clouds = CLOUDS.lock().unwrap();
     let (cloud, log) = clouds.get(path.unwrap()).cloned().unwrap();
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(Logged { cloud, log }),
         floor: Floor {
             gpus: 1,

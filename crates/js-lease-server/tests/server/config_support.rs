@@ -89,6 +89,7 @@ fn kind_error(field: &str, reason: impl Into<String>) -> KindError {
 
 fn built(gpus: u64, exec: Vec<ExecMode>) -> Built {
     Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(NullElastic),
         floor: Floor {
             gpus,
@@ -134,6 +135,7 @@ fn cloud_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
 /// A kind whose floor says GPUs and no class of them, which no pool can have.
 fn broken_floor(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(NullElastic),
         floor: Floor {
             gpus: 1,
@@ -146,6 +148,7 @@ fn broken_floor(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, Kind
 /// A kind that launches hosts of either mode, with no GPU.
 fn any_mode(_table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(NullElastic),
         floor: Floor {
             gpus: 0,

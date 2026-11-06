@@ -790,7 +790,7 @@ impl Elastic<'_> {
             min_host_lifetime: keys.min_host_lifetime,
         };
         let brake = keys.brake.check(s)?;
-        let accelerators = built.floor.gpus > 0;
+        let accelerators = built.floor.gpus > 0 || built.idle_costs;
         let (max_age, min_host_lifetime) =
             lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {

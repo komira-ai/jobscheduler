@@ -1,11 +1,13 @@
-//! The calls the catalog makes: a narrow, read-only port over EC2 and the services beside
-//! it (the Pricing API and Service Quotas).
+//! The calls the provider makes: a narrow port over EC2 and the services beside it (the
+//! Pricing API and Service Quotas). The catalog side reads; the launch side launches,
+//! reads and terminates instances.
 
 use std::fmt;
 
 use js_elastic::Purchase;
 
 use crate::error::{ApiError, SettingsError};
+use crate::launch::{DescribeFilter, Instance, InstanceId, RunRequest};
 use crate::model::{
     BlockOffering, InstanceTypeInfo, Region, TypePrice, VcpuQuota, ZoneOffering, ZonePrice,
 };
@@ -26,6 +28,12 @@ pub enum Action {
     GetServiceQuota,
     /// [`Ec2Api::capacity_block_offerings`]: EC2 `DescribeCapacityBlockOfferings`.
     DescribeCapacityBlockOfferings,
+    /// [`Ec2Api::run_instances`]: EC2 `RunInstances`.
+    RunInstances,
+    /// [`Ec2Api::describe_instances`]: EC2 `DescribeInstances`.
+    DescribeInstances,
+    /// [`Ec2Api::terminate_instances`]: EC2 `TerminateInstances`.
+    TerminateInstances,
 }
 
 impl Action {
@@ -38,6 +46,9 @@ impl Action {
             Self::DescribeSpotPriceHistory => "DescribeSpotPriceHistory",
             Self::GetServiceQuota => "GetServiceQuota",
             Self::DescribeCapacityBlockOfferings => "DescribeCapacityBlockOfferings",
+            Self::RunInstances => "RunInstances",
+            Self::DescribeInstances => "DescribeInstances",
+            Self::TerminateInstances => "TerminateInstances",
         }
     }
 }
@@ -95,12 +106,13 @@ impl PurchaseKind {
     }
 }
 
-/// The read-only calls of the catalog. Every call blocks, answers or fails within the
-/// client's bound, and makes exactly one request, or one walk over every page of one list
-/// that it hides: a list is never cut short in silence (a walk that ends early is
+/// The calls of the provider. Every call blocks, answers or fails within the client's
+/// bound, and makes exactly one request, or one walk over every page of one list that it
+/// hides: a list is never cut short in silence (a walk that ends early is
 /// [`ApiError::Incomplete`]), nothing is retried here, and a failure is never an empty
-/// answer. No call creates or changes anything; launching and terminating belong to the
-/// port's launch side, which this crate does not hold.
+/// answer. The catalog's calls only read. The launch side, the last three calls, creates
+/// and terminates instances: [`Ec2Api::run_instances`] and [`Ec2Api::terminate_instances`]
+/// are the only ones that change anything.
 pub trait Ec2Api: Send + Sync {
     /// Every instance type of `region` (`DescribeInstanceTypes`).
     ///
@@ -159,4 +171,32 @@ pub trait Ec2Api: Send + Sync {
         region: &Region,
         hours: u32,
     ) -> Result<Vec<BlockOffering>, ApiError>;
+
+    /// The launch side: one call each. Launches one instance (`RunInstances`) and answers
+    /// the ids of the instances the call named: one, or those of the first call with the
+    /// same client token.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails, the answer cannot be read or the call times out.
+    /// A failure that is not a cloud answer (a timeout, a transport error) may have
+    /// launched the instance.
+    fn run_instances(&self, request: &RunRequest) -> Result<Vec<InstanceId>, ApiError>;
+
+    /// The instances `filter` selects (`DescribeInstances`), of every state the cloud
+    /// still shows, in one hidden walk over every page. A page that fails fails the call.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when a page fails or the answer cannot be read. Asking by id for an
+    /// instance the cloud does not know is an error with the code
+    /// `InvalidInstanceID.NotFound` ([`ApiError::is_not_found`]).
+    fn describe_instances(&self, filter: &DescribeFilter) -> Result<Vec<Instance>, ApiError>;
+
+    /// Terminates the instances `ids` (`TerminateInstances`).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails; an unknown id is `InvalidInstanceID.NotFound`.
+    fn terminate_instances(&self, ids: &[InstanceId]) -> Result<(), ApiError>;
 }

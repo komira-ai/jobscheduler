@@ -247,6 +247,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         })?;
     let cloud = NEXT.with(|next| next.borrow_mut().take()).unwrap();
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(Handle(cloud)),
         floor: Floor {
             gpus: 1,

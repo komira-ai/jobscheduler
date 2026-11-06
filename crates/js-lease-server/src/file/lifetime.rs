@@ -28,11 +28,10 @@ pub(super) struct Given {
 /// it could say hello) and not pass [`LONGEST`]; `min_host_lifetime` may not exceed
 /// `max_age`.
 ///
-/// A pool has accelerators when its kind's floor says one GPU or more. The floor is the
-/// least of the sizes the kind may launch, so this relies on every size of the kind having
-/// at least one accelerator, as Lambda's do; a provider whose catalog mixes sizes with and
-/// without accelerators must revisit the test, since its floor would read as none and the
-/// pool would escape these refusals.
+/// A pool has accelerators when its kind's floor says one GPU or more, or the kind says
+/// its idle hosts cost money (`ElasticBuilt::idle_costs`). The floor is the least of the
+/// sizes the kind may launch, so a provider whose catalog mixes sizes with and without
+/// accelerators, as EC2's does, sets `idle_costs` or its pool would escape these refusals.
 pub(super) fn check(
     s: &Section,
     given: &Given,

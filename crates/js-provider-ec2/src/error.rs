@@ -90,7 +90,20 @@ pub enum ApiError {
     /// A list answer could not be had whole (a page walk that ended early).
     #[error("the answer is not complete")]
     Incomplete,
+    /// The call did not finish within the client's bound. A launch that times out may
+    /// have landed.
+    #[error("the call timed out")]
+    Timeout,
+    /// The client has no credential to sign with.
+    #[error(
+        "no credential: set the provider-standard variables or give the machine an instance role"
+    )]
+    NoCredential,
 }
+
+/// The code `DescribeInstances` and `TerminateInstances` answer for an instance id the
+/// cloud does not know.
+const NOT_FOUND: &str = "InvalidInstanceID.NotFound";
 
 impl ApiError {
     /// The error of an answer that carried the error code `code`: [`ApiError::Throttled`]
@@ -110,8 +123,19 @@ impl ApiError {
     pub fn code(&self) -> Option<&ErrorCode> {
         match self {
             Self::Throttled { code } | Self::Denied { code } | Self::Refused { code } => Some(code),
-            Self::Transport(_) | Self::Unreadable(_) | Self::Incomplete => None,
+            Self::Transport(_)
+            | Self::Unreadable(_)
+            | Self::Incomplete
+            | Self::Timeout
+            | Self::NoCredential => None,
         }
+    }
+
+    /// Whether the cloud answered that an instance id is not known
+    /// (`InvalidInstanceID.NotFound`). It is the only answer that says an instance does not
+    /// exist.
+    pub fn is_not_found(&self) -> bool {
+        self.code().is_some_and(|code| code.as_str() == NOT_FOUND)
     }
 }
 
@@ -143,4 +167,31 @@ pub enum SettingsError {
     /// `capacity-block` is listed without a block length, or the length is zero.
     #[error("capacity_block_hours: capacity-block needs a length of at least one hour")]
     BlockHours,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that only the answer `InvalidInstanceID.NotFound` is a not-found (not
+    /// another code, not an error with no code), that the timeout and the missing
+    /// credential carry no code and print their own words.
+    #[test]
+    fn only_the_not_found_code_is_a_not_found() {
+        assert!(ApiError::answered("InvalidInstanceID.NotFound").is_not_found());
+        assert!(!ApiError::answered("InvalidInstanceID.Malformed").is_not_found());
+        for error in [
+            ApiError::Timeout,
+            ApiError::NoCredential,
+            ApiError::Incomplete,
+        ] {
+            assert_eq!(error.code(), None);
+            assert!(!error.is_not_found());
+        }
+        assert_eq!(ApiError::Timeout.to_string(), "the call timed out");
+        assert_eq!(
+            ApiError::NoCredential.to_string(),
+            "no credential: set the provider-standard variables or give the machine an instance role"
+        );
+    }
 }

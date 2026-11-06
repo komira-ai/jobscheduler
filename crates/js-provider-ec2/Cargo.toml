@@ -13,11 +13,32 @@ js-elastic = { path = "../js-elastic" }
 # `ExecMode`, which an offer states, is defined in js-types and re-exported by neither
 # js-caps nor js-elastic.
 js-types = { path = "../js-types" }
+# The user data of a launch is base64 text, and the signature of an identity document is.
+base64.workspace = true
+# The signed HTTPS client of the port: SigV4, the transport and the credential type, shared
+# with the object store.
+js-logstore = { path = "../js-logstore" }
+# The XML answers of the Query API (EC2 describe, run and terminate calls).
+quick-xml.workspace = true
+# Verifies the RSA signature of an instance identity document.
+ring.workspace = true
+serde_json.workspace = true
+# The client token of a launch is a hash of the scheduler and the acquire.
+sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
+# The catalog runs its blocking calls on tokio's blocking pool.
+tokio = { workspace = true, features = ["rt"] }
+# The `ec2` kind's table.
+toml.workspace = true
 # The warnings of a type that passes through or has no offer.
 tracing.workspace = true
 
 [dev-dependencies]
+# The provider contract's conformance suite (tests/offline/conformance.rs).
+js-elastic = { path = "../js-elastic", features = ["conformance"] }
+# The catalog future is driven on a multi-thread runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 # The tests install a subscriber that takes every event, so the fields of each log line
 # are evaluated under test.
 tracing-subscriber.workspace = true
