@@ -23,6 +23,8 @@ base64 = "0.23.1"
 block2 = "0.6.2"
 # The registry client (js-oci): response bodies are chunks of `Bytes`.
 bytes = "1.12.1"
+# Allocation limit for the decode-memory tests and fuzz targets (js-agent-wire).
+cap = "0.1.2"
 clap = { version = "4.6.7", features = ["derive"] }
 # macOS only (js-mac-session): CFData for the caller's audit token.
 core-foundation = "0.10.1"
@@ -66,13 +68,16 @@ percent-encoding = "2.3.2"
 # macOS only (js-vmm): the property lists of the guest disk, as values, not through serde.
 plist = { version = "1.10.1", default-features = false }
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
-# no TLS (an `sslmode=require` URL is refused rather than downgraded).
+# with js-state's own rustls connector for TLS.
 postgres = "0.19.10"
 # The spawn-site check (xtask): the line of each token it reports.
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 # The job service's messages (js-proto): prost encodes and decodes them, and prost-types
 # holds the descriptor set the crate's tests read the schema from.
 prost = "0.14.4"
+# Property tests of the decoders (js-agent-wire, js-api-gateway, js-jobs): generated values
+# round-trip, from a fixed seed. Dev-dependency only; no fork or timeout runner.
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # The job service's messages by its descriptor set: the HTTP/JSON gateway (js-api-gateway) reads
 # the `google.api.http` option of each method and maps messages to and from proto3 JSON
 # (`serde`); the job commands of js-cli build a request from flags and print an answer (`serde`,

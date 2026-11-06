@@ -50,13 +50,16 @@ fn a_fake_minter_can_be_scripted() {
     assert_eq!(minter.calls("host-1"), 3);
 
     let none = Metadata::new();
-    let key = "a/b/job-1/stdout.log";
-    let clients = [rig.client(credential), rig.client(late)];
-    for client in &clients {
+    let key = |host: &str| format!("a/b/{}/job-1/stdout.log", js_logmint::host_segment(host));
+    let clients = [
+        (rig.client(credential), key("host-1")),
+        (rig.client(late), key("host-2")),
+    ];
+    for (client, key) in &clients {
         client.put(key, b"x".to_vec(), &none).unwrap();
     }
     minter.expire_all();
-    for client in &clients {
+    for (client, key) in &clients {
         assert_eq!(
             client.put(key, b"x".to_vec(), &none),
             Err(StoreError::Expired {

@@ -12,6 +12,8 @@
 //! - The worked examples of the S3 documentation for header authentication (service `s3`, host
 //!   `examplebucket.s3.amazonaws.com`): GET Object with a `Range` header, PUT Object, and GET
 //!   Bucket (list objects). Their paths are as sent, which the S3 form does not encode again.
+//! - The worked example of the S3 documentation for query-string authentication (a presigned
+//!   URL): GET Object `/test.txt`, valid for 86,400 seconds, signing `host` alone.
 
 /// One vector: the request, the credential and the published result.
 pub struct Vector {
@@ -245,3 +247,30 @@ pub const VECTORS: [Vector; 10] = [
 
 /// The canonical request of `get-vanilla`, as the suite publishes it.
 pub const GET_VANILLA_CANONICAL_REQUEST: &str = "GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// A presigned-URL vector: the request, the credential, the validity and the published query
+/// parameters.
+pub struct Presigned {
+    pub unix_seconds: u64,
+    pub access_key_id: &'static str,
+    pub secret_access_key: &'static str,
+    pub host: &'static str,
+    pub path: &'static str,
+    pub expires_secs: u64,
+    pub credential: &'static str,
+    pub stamp: &'static str,
+    pub signature: &'static str,
+}
+
+/// The presigned GET Object example of the S3 documentation.
+pub const PRESIGNED_GET: Presigned = Presigned {
+    unix_seconds: S3_TIME,
+    access_key_id: S3_KEY_ID,
+    secret_access_key: S3_SECRET,
+    host: S3_HOST,
+    path: "/test.txt",
+    expires_secs: 86_400,
+    credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request",
+    stamp: S3_STAMP,
+    signature: "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404",
+};

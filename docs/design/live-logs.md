@@ -2,7 +2,8 @@
 
 Status: **Planned, partly built.** Built so far: the wire fields of section 7 (`js-agent-wire`, with the per-run capture file cap
 in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of section 6, which the server reads and checks at
-start; the mint of section 4 (`js-logmint`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
+start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
+(`js-logmint` and its signer in `js-logstore`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
 credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
 stored with the result); and the agent's uploader of a `crun` job (`js-agent/src/logs`, without the progress record of 3.5: a
 restarted agent uploads nothing more for a job it adopted), which fills `log_grant_state` and `logs`. Nothing reads a log yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
@@ -18,14 +19,15 @@ scheduler never stores or holds them.
 - **Live logs are part of v1.** Log bytes never go to the scheduler's store or database.
 - **The destination is the server's configuration**: a `[logs]` table with `sink = "object_store"` or `"none"` and
   `url = "s3://bucket/prefix"`, naming any S3-compatible store (S3, MinIO, tierstore, Google Cloud Storage's interoperability API; a
-  store must also serve `AssumeRole`, section 4). `none`, the default, keeps logs on the host only, as today.
+  store must also serve `AssumeRole`, section 4, or check prefix grants, section 4.1). `none`, the default, keeps logs on the host only, as today.
 - **The agent uploads, not the job.** The agent sends new output in chunks every ~2 s or every 1 MiB, whichever comes first, to
-  `{prefix}/{job}/stdout/{offset}` and `{prefix}/{job}/stderr/{offset}`, where the offset is the byte offset of the chunk's first byte in
+  `{prefix}/{host}/{job}/stdout/{offset}` and `{prefix}/{host}/{job}/stderr/{offset}`, where `{host}` names the host that runs the job
+  (section 2) and the offset is the byte offset of the chunk's first byte in
   its stream, zero padded so that names sort. When the job ends the agent writes one final `stdout.log` and one final `stderr.log` and
   deletes the chunks.
-- **One upload credential per host.** The scheduler mints each agent's write-only credential, one per host, scoped by session policy to
-  the configured log prefix as a whole (section 4). It is the fence of design section 5.7 (a job writes to the object store only through a
-  grant), widened from one key to the log prefix.
+- **One upload credential per host.** The scheduler mints each agent's write-only credential, one per host, scoped to the host's own
+  prefix under the configured log prefix (section 4): a host writes its own jobs' logs and no other host's. It is the fence of design
+  section 5.7 (a job writes to the object store only through a grant), widened from one key to the host's prefix.
 - **`GetLogs(job, stream, from_offset, follow)` reads from the object store.** `follow` waits for new chunks (like `tail -f`, about 2 s
   behind the job); the offset lets a client resume exactly where it stopped.
 - **The store being down never blocks a job.** The agent keeps the output locally up to its cap and retries; bytes it cannot keep become
@@ -36,8 +38,9 @@ scheduler never stores or holds them.
 
 Inside that, the design takes these choices; each is explained where it applies:
 
-- **D1.** The credential is minted by the store's STS `AssumeRole` call with an inline session policy, one per host, delivered in the
-  heartbeat reply and renewed per host (section 4).
+- **D1.** The credential is minted by the store's STS `AssumeRole` call with an inline session policy (section 4), or, for a store
+  with no STS, derived by the scheduler as a prefix grant (section 4.1); one per host, scoped to the host's prefix, delivered in the
+  heartbeat reply and renewed per host.
 - **D2.** `GetLogs` stays a unary call. `follow` is a bounded long poll, never a server stream (section 8).
 - **D3.** A final file needs the whole stream on the host and at most `MAX_PUT_BYTES`; otherwise the chunks stay and are the log (3.4).
 - **D4.** The scheduler never deletes log objects. Their retention is the operator's bucket lifecycle rule (section 10).
@@ -54,7 +57,15 @@ non-empty runs of `[A-Za-z0-9._-]` and none is `.` or `..`; at most 512 bytes in
 refused in a prefix, because the session policy of section 4 names the prefix in a resource pattern and such a character would widen
 it.
 
-**The job's prefix.** Let `P = prefix/job_id/`, or just `job_id/` when the prefix is empty. The job id is the service's (`js-jobs`
+**The host's prefix.** Let `H` be the host segment: `js-` and the first 32 hex digits of the SHA-256 of the host's agent id (an agent
+id may be longer than a key segment should be, or hold characters a key refuses; `H` never does). The host's prefix is `prefix/H/`, or
+just `H/` when the prefix is empty. Two hosts' prefixes have the same length and differ, so neither is a prefix of the other. The
+configured prefix is at most 476 bytes, so that `prefix/H` fits the 512 bytes below; a longer one is refused at start. Both minting
+kinds scope a host's credential to exactly the host's prefix (section 4), so a host can write only its own jobs' logs.
+
+**The job's prefix.** Let `P = prefix/H/job_id/`, or just `H/job_id/` when the prefix is empty, where `H` is the segment of the host
+the job's start is sent to. The job record keeps that host (`host`) after the job ends, so the reader builds `P` from the record; a
+job put back in the queue loses its host and gets a new one, and so a new `P`, with its next start. The job id is the service's (`js-jobs`
 `JobId`: 1 to 63 bytes of `[A-Za-z0-9._-]`). The agent wire checks an id more loosely (up to 128 bytes, `MAX_ID_LEN`) but requires a
 leading letter or digit, so a job's prefix is built only for an id of 1 to 63 bytes of that alphabet whose first byte is a letter or a
 digit. Such an id never holds `/` and is never `.` or `..`. A job whose id does not qualify runs without live logs (its start carries
@@ -88,35 +99,35 @@ local cap or after a file write failed. They are never uploaded.
 
 ### 2.1 Worked example: 2.5 MiB to stdout, 100 bytes to stderr
 
-The configuration has `url = "s3://logs/js"`, so the bucket is `logs`, the prefix `js`, and for the job `build-42`
-`P = js/build-42/`. The job prints 2,621,440 bytes (2.5 MiB) to stdout, fast, and 100 bytes to stderr, early. The local cap is the
+The configuration has `url = "s3://logs/js"`, so the bucket is `logs`, the prefix `js`, and for the job `build-42` on a host whose
+segment is `H`, `P = js/H/build-42/`. The job prints 2,621,440 bytes (2.5 MiB) to stdout, fast, and 100 bytes to stderr, early. The local cap is the
 default 64 MiB, so nothing is dropped.
 
 | Object | Offset | Bytes | When |
 |---|---|---|---|
-| `js/build-42/stderr/00000000000000000000` | 0 | 100 | 2 s after the poll that saw the first byte (`LOG_FLUSH`) |
-| `js/build-42/stdout/00000000000000000000` | 0 | 1,048,576 | as soon as 1 MiB is waiting (`MAX_CHUNK`) |
-| `js/build-42/stdout/00000000000001048576` | 1,048,576 | 1,048,576 | the same |
-| `js/build-42/stdout/00000000000002097152` | 2,097,152 | 524,288 | 2 s after its first byte was seen, or at the job's end |
+| `js/H/build-42/stderr/00000000000000000000` | 0 | 100 | 2 s after the poll that saw the first byte (`LOG_FLUSH`) |
+| `js/H/build-42/stdout/00000000000000000000` | 0 | 1,048,576 | as soon as 1 MiB is waiting (`MAX_CHUNK`) |
+| `js/H/build-42/stdout/00000000000001048576` | 1,048,576 | 1,048,576 | the same |
+| `js/H/build-42/stdout/00000000000002097152` | 2,097,152 | 524,288 | 2 s after its first byte was seen, or at the job's end |
 
 The stdout chunks add up: 1,048,576 + 1,048,576 + 524,288 = 2,621,440. What a reader does at each step, with the default page of
 256 KiB (262,144 bytes):
 
-1. **While the job runs.** `GetLogs(build-42, stdout, from_offset = 0, follow)` lists `js/build-42/stdout/`, finds the chunk at 0 and
+1. **While the job runs.** `GetLogs(build-42, stdout, from_offset = 0, follow)` lists `js/H/build-42/stdout/`, finds the chunk at 0 and
    answers `data` = bytes `[0, 262144)`, `offset` 0, `next_offset` 262,144, `first_byte_at_ms` from that chunk, `eof` false. The client
    calls again from 262,144; four calls read the first chunk. A call from 2,621,440 before the job has ended finds nothing new and,
    with `follow`, waits for a new chunk, the job's end or the follow cap (section 8).
 2. **The job ends.** The agent reports the result at once, with `logs` = `{stdout_bytes: 2621440, stderr_bytes: 100, stdout_dropped:
    0, stderr_dropped: 0}`. In the background it uploads anything not yet uploaded (here the last stdout chunk, if its 2 s had not
-   passed), writes `js/build-42/stdout.log` (2,621,440 bytes) and `js/build-42/stderr.log` (100 bytes), then deletes the four chunks.
+   passed), writes `js/H/build-42/stdout.log` (2,621,440 bytes) and `js/H/build-42/stderr.log` (100 bytes), then deletes the four chunks.
 3. **Between the finals and the deletes**, a reader sees both a final and chunks. The final wins.
-4. **After the end.** `GetLogs(build-42, stdout, from_offset = 2359296)` finds `js/build-42/stdout.log` and answers `data` = bytes
+4. **After the end.** `GetLogs(build-42, stdout, from_offset = 2359296)` finds `js/H/build-42/stdout.log` and answers `data` = bytes
    `[2359296, 2621440)` (262,144 bytes) by a ranged read, `next_offset` 2,621,440, `eof` true (the job ended and `next_offset` equals
    `stdout_bytes`), and no `first_byte_at_ms` (a final served it).
 
 **The same job past the cap.** Had it printed 70 MiB (73,400,320 bytes) to stdout with the 64 MiB cap, the capture would have kept
-the first 67,108,864 bytes. The agent uploads 64 chunks of 1 MiB, the last at `js/build-42/stdout/00000000000066060288`, and at the end
-writes the gap marker `js/build-42/stdout/00000000000067108864.gap` with the body `{"length":6291456}` (73,400,320 − 67,108,864 =
+the first 67,108,864 bytes. The agent uploads 64 chunks of 1 MiB, the last at `js/H/build-42/stdout/00000000000066060288`, and at the end
+writes the gap marker `js/H/build-42/stdout/00000000000067108864.gap` with the body `{"length":6291456}` (73,400,320 − 67,108,864 =
 6,291,456). The result says `stdout_dropped: 6291456`. There is no `stdout.log` (D3): the chunks and the marker stay, and a reader that
 reaches offset 67,108,864 is told of the gap `{offset: 67108864, length: 6291456}` and `eof`.
 
@@ -223,10 +234,10 @@ chunks and markers it put. The record is written before the first put and replac
 ## 4. The host credential (D1)
 
 **One per host.** The scheduler mints one temporary S3 credential per registered agent, that is per host, through the store's STS
-`AssumeRole` call, with an inline session policy that allows `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*` and
-nothing else: no read, no list, no other prefix. `L` is the configured log prefix with its trailing `/`, and the resource is
-`arn:aws:s3:::BUCKET/*` when the prefix is empty. The credential covers every job's log objects under the prefix, whichever job and
-whichever host they belong to; the object layout stays keyed by job (`GetLogs` finds logs by job id) and the host is in no path.
+`AssumeRole` call, with an inline session policy that allows `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::BUCKET/LH/*` and
+nothing else: no read, no list, no other prefix. `L` is the configured log prefix with its trailing `/` (empty when there is none) and
+`H` the host segment (section 2). The credential covers the log objects of every job of that host, and no other host's. A store with
+no STS gets the same scope from a prefix grant instead (4.1).
 
 **The call.** `AssumeRole` at `sts_endpoint`, signed (AWS Signature Version 4, service `sts`, the configured `region`) with the
 mint key (`mint_key_file`), with:
@@ -241,7 +252,7 @@ The answer's access key id, secret access key, session token and expiry are the 
 minute, or lives less than half of the `DurationSeconds` asked (a store that shortens sessions), is refused and counts as a failed mint
 (section 5): the scheduler never hands out a credential about to die.
 
-**The session policy**, exactly, for the bucket `logs` and the prefix `js`:
+**The session policy**, exactly, for the bucket `logs`, the prefix `js` and a host whose segment is `H`:
 
 ```json
 {
@@ -250,7 +261,7 @@ minute, or lives less than half of the `DurationSeconds` asked (a store that sho
     {
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::logs/js/*"
+      "Resource": "arn:aws:s3:::logs/js/H/*"
     }
   ]
 }
@@ -258,7 +269,7 @@ minute, or lives less than half of the `DurationSeconds` asked (a store that sho
 
 `<policy language version>` stands for the version string of the IAM policy language that the AWS documentation names as current; the
 minting code holds it as a constant, and this page does not spell it because it is written as a calendar date. For an empty prefix the
-resource is `arn:aws:s3:::logs/*`. A session policy can only narrow what the role allows, never widen it, so the credential can do no
+resource is `arn:aws:s3:::logs/H/*`. A session policy can only narrow what the role allows, never widen it, so the credential can do no
 more than this whatever the role grants.
 
 **What the operator configures in the store.**
@@ -271,8 +282,8 @@ more than this whatever the role grants.
 - **The read key** (`read_key_file`): a long-lived key with `s3:ListBucket` on `arn:aws:s3:::BUCKET` limited to the prefix `L`, and
   `s3:GetObject` on `arn:aws:s3:::BUCKET/L*`. Nothing else.
 - **A lifecycle rule** on the prefix, at least `--job-retention` (D4, section 10).
-- **The log prefix apart from every client's output keys.** The host credential may put and delete anything under it, so a client must
-  not let its jobs' outputs (design section 5.7) land under the log prefix.
+- **The log prefix apart from every client's output keys.** A host credential may put and delete anything under its host's prefix, so
+  a client must not let its jobs' outputs (design section 5.7) land under the log prefix.
 
 **Lifetime and renewal, per host.** The credential lives for `credential_ttl` (default 1 h). The scheduler mints a host's first one when
 an agent that reported `log-upload` registers, or beats for the first time after a server restart. It mints a new one when the one it
@@ -293,16 +304,55 @@ appear in no `Debug` output and no log line, on the agent or on the server. A re
 **What the agent may do with it**: put chunks, gap markers and finals under the job prefixes of its own jobs' sinks, and delete the
 chunks and markers it put. Nothing else; the agent's code builds no other key.
 
-**What a compromised host can do with it**, until it expires: put and delete any object under the log prefix. For its own jobs that is
-no more than it can already do (it controls them and their output). It can also overwrite or delete the log objects of jobs on other
-hosts, and fill the prefix with bytes the operator pays to store; a reader cannot tell such an object from a real one. That is the cost
-of one credential per host, and the reason the scope is the log prefix and nothing wider. It cannot read or list any log, cannot touch
-any object outside the prefix, and cannot reach the mint key, the read key or another host's credential. One credential read off the
-agent channel allows the same, until it expires.
+**What a compromised host can do with it**, until it expires: put and delete any object under its own host's prefix. For its own jobs
+that is no more than it can already do (it controls them and their output). It can also fill its prefix with bytes the operator pays to
+store. It cannot touch the log objects of jobs on other hosts, cannot read or list any log, cannot touch any object outside its prefix,
+and cannot reach the mint key, the signing key, the read key or another host's credential. One credential read off the agent channel
+allows the same, until it expires.
 
-**What the scheduler holds.** Two operator-provided keys, the mint key and the read key, as owner-only key files named in the
-configuration, and each host's current credential in memory. It never holds the credentials a client gives a job. A job and its
+**What the scheduler holds.** Two operator-provided keys, the mint key (or, with prefix grants, the signing key) and the read key, as
+owner-only key files named in the configuration, and each host's current credential in memory. It never holds the credentials a client gives a job. A job and its
 container never see any of these.
+
+### 4.1 A store with no STS: prefix grants
+
+**Why.** A store must serve `AssumeRole` for section 4, and the farm's own object store (tierstore) has none; neither has Google Cloud
+Storage's interoperability API. With `credentials = "presigned_prefix"` the scheduler mints without the store: it derives each host's
+credential from a signing key the store also holds, and the store checks it. Nothing else changes: one credential per host, the same
+scope (the host's prefix, put and delete only), the same lifetime, renewal, delivery and failures (sections 4 and 5).
+
+**The grant.** For a host, the scheduler builds the token
+
+```text
+jspp1:<signing key id>:<bucket>:<expiry>:<host prefix>
+```
+
+where the expiry is the scheduler's clock now plus `credential_ttl`, in whole seconds since the Unix epoch (cut down, never rounded
+up), and the host prefix is `LH/` (section 2), the same the STS session policy names. The host's credential is:
+
+- the session token: the token;
+- the secret access key: the lower-case hex HMAC-SHA256 of the token under the signing key's secret;
+- the access key id: `JSPP` and the first 32 hex digits of the token's SHA-256;
+- the expiry: the token's.
+
+The host never sees the signing secret. Changing the prefix, the bucket or the expiry changes the token, and so the secret it would
+need. A mint makes no call, so it fails only for a request no grant can be built for, which the checks at start rule out.
+
+**What the store checks**, for every request signed with such a credential, in either Signature Version 4 form (the agent's headers,
+or a presigned URL whose query carries the signature): the token parses; its signing key is one the store holds for grants; the access
+key id is the one the token gives; the signature is made with the secret derived from the token; the bucket is the token's; the time is
+before the token's expiry (and, for a presigned URL, before its own `X-Amz-Expires`); and the call is a put or a delete of a key under
+the token's prefix whose rest is plain segments (no empty, `.` or `..` segment). Anything else is refused. The signing key itself signs
+no request.
+
+**The signer.** `js-logstore`'s `PrefixSigner` presigns puts and deletes with a grant's credential, and refuses, before any request
+exists, a key outside the prefix, a key whose rest is not plain segments, and any time at or after the expiry. The fake store of the
+tests checks grants as above, so the minter, the signer and the agent's own client are tested against it.
+
+**What the operator configures.** `signing_key_file`: an owner-only file holding the signing key, the same JSON as the other key files.
+The same key must be configured in the store as a grant signing key; the read key and the lifecycle rule are as in section 4. Checking
+grants is the store's work: tierstore's support for it, and the test against the real tierstore, belong to the tierstore side and are
+not part of this repository.
 
 ## 5. Failures
 
@@ -328,16 +378,17 @@ unknown key is refused. The example is in `configuration.md`, "Live logs". The k
 | Key | Type | Default | Bound and rule |
 |---|---|---|---|
 | `sink` | string | `"none"` | `"object_store"` or `"none"`. With `"none"`, any other key present is refused, naming the key. |
-| `url` | string | none | Required with `object_store`. `s3://BUCKET` or `s3://BUCKET/prefix`; the bucket 3 to 63 bytes of lower-case letters, digits, `.` and `-`; the prefix as section 2 says. |
+| `url` | string | none | Required with `object_store`. `s3://BUCKET` or `s3://BUCKET/prefix`; the bucket 3 to 63 bytes of lower-case letters, digits, `.` and `-`; the prefix as section 2 says, at most 476 bytes so that a host's prefix fits under it. |
 | `region` | string | none | Required with `object_store`. 1 to 64 bytes of `[a-z0-9-]`. Signs every request. |
 | `endpoint` | string | none | Required with `object_store`: the server names no cloud's host by default. At most 512 bytes; `https`, or `http` to a loopback address; no path, query or user. The agent puts here and the server reads here. |
 | `path_style` | bool | `false` | Optional. `true` for stores that need `/bucket/key` URLs. |
 | `read_key_file` | path | none | Required with `object_store`. An owner-only file holding JSON `{"access_key_id": ..., "secret_access_key": ...}`: the read key of section 4 (list and get on the prefix). |
-| `credentials` | string | `"sts"` | How a host's credential is minted. `"sts"` is the only value. |
-| `sts_endpoint` | string | `endpoint` | Optional. The same URL rule as `endpoint`. |
+| `credentials` | string | `"sts"` | How a host's credential is minted: `"sts"` (section 4) or `"presigned_prefix"` (4.1). Anything else is refused, naming the key. The keys of the other kind are refused, naming the key. |
+| `sts_endpoint` | string | `endpoint` | Optional with `sts`. The same URL rule as `endpoint`. |
 | `role_arn` | string | none | Required with `sts`. An `arn:` value of at most 2,048 bytes: the role `AssumeRole` assumes (section 4). |
 | `mint_key_file` | path | none | Required with `sts`. An owner-only file, the same JSON as `read_key_file`: the key that calls `AssumeRole`. |
-| `credential_ttl` | duration | `"1h"` | From `"15m"` to `"12h"`. At most the role's maximum session duration, which the server cannot check at start: a longer one is refused by STS and reads as a mint failure. |
+| `signing_key_file` | path | none | Required with `presigned_prefix`. An owner-only file, the same JSON as `read_key_file`: the key grants are derived from (4.1). |
+| `credential_ttl` | duration | `"1h"` | From `"15m"` to `"12h"`, for either kind. With `sts`, at most the role's maximum session duration, which the server cannot check at start: a longer one is refused by STS and reads as a mint failure. |
 | `max_follow` | integer | 256 | From 1 to 4,096. The most `GetLogs` calls with `follow` waiting at once (section 8). |
 
 Keys are files, never inline secrets, and the files must be owner-only, the rule every key file of the server follows (read 0600 or
@@ -461,6 +512,12 @@ agent's `logs` module (the uploader, the progress record, the end); the server's
 credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
 fields in `js-agent-wire`, and the agent's `logs` module without the progress record (the uploader and the end).
 
+**Decided: an object store without `AssumeRole`** (design section 13, question 28). The scheduler has a second minting kind,
+`credentials = "presigned_prefix"` (4.1): the farm's store (tierstore) has no STS, and a grant derived from a signing key needs no call
+to the store. Each host's grant covers the host's prefix alone and expires at the scheduler's clock plus `credential_ttl`; one object
+layout, with the host's segment in every job's prefix, serves both kinds (section 2), and the STS session policy is narrowed to the
+same host prefix. Checking grants in tierstore, and testing against the real tierstore, are left to the tierstore side.
+
 **Later and open.**
 
 - **Other runtimes (D6).** The container-engine fallback and the macOS native runtime do not report `log-upload` and ignore a sink if
@@ -470,9 +527,6 @@ fields in `js-agent-wire`, and the agent's `logs` module without the progress re
   answers `unknown-job`. Whether the scheduler should delete instead is design section 13, question 26.
 - **Live log coverage.** A stream is uploaded live only up to the local cap; bytes past it are a gap. The alternatives are a larger
   default, or a capture that frees what was uploaded so the cap bounds the backlog rather than the stream. Design section 13, question 27.
-- **An object store without `AssumeRole`.** A store must serve the call to be a sink; tierstore has no STS endpoint today, and Google
-  Cloud Storage's interoperability API has none either. Either the store grows one, or the scheduler gets a second minting kind (the
-  `credentials` key exists for that). Design section 13, question 28.
 - **Presigned read URLs.** `GetLogs` returns the bytes through the service. An alternative is to return presigned read URLs of the
   objects, so the bytes go straight from the store to the client; it moves the work off the server and hands a client a URL to the
   store. Not chosen for v1.

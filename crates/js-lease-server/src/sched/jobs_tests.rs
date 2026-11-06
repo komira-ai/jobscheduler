@@ -166,7 +166,8 @@ fn a_queued_job_needs_no_re_presentation() {
         js_state::fake::Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store;
-    let jobs = js_jobs::JobStore::new(Arc::new(dynamic), js_jobs::RandomIds).unwrap();
+    let jobs =
+        js_jobs::JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     let (fill, _) = placed(&jobs, "job-fill", "host-a", sized(8), booked(8));
     queue(&jobs, "job-z-first", 10, 0);
     assert_eq!(pass(&placer, &jobs, &["host-a"]), NONE);
@@ -610,4 +611,49 @@ fn the_server_places_queued_jobs_on_the_hosts_the_registry_opens() {
     assert_eq!(state(&jobs, "job-b"), JobState::Queued);
     agents.place_jobs();
     assert_eq!(state(&jobs, "job-b"), JobState::Placed);
+}
+
+/// Asserts that a placement commit that fails for an ordinary reason leaves the pass going
+/// (the next job is placed) and the fence untripped, and that a commit the store answers with
+/// `Fenced` ends the pass at that job, places nothing after it and trips the fence. It catches
+/// a fenced store let go like a failed commit, so a server that is no longer the writer goes on
+/// offering jobs.
+#[test]
+fn a_fenced_placement_commit_ends_the_pass_and_trips_the_fence() {
+    let (agents, store, _dir) = served("jobs-fenced-commit");
+    let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
+    queue(&jobs, "job-a", 2, 0);
+    queue(&jobs, "job-b", 2, 0);
+    store.fail_next();
+    agents.place_jobs();
+    assert!(!agents.fence.is_tripped());
+    assert_eq!(
+        (state(&jobs, "job-a"), state(&jobs, "job-b")),
+        (JobState::Queued, JobState::Placed)
+    );
+
+    queue(&jobs, "job-c", 2, 0);
+    queue(&jobs, "job-d", 2, 0);
+    store.fail_with(js_state::StoreError::Fenced);
+    store.fail_next();
+    agents.place_jobs();
+    assert!(agents.fence.is_tripped());
+    assert_eq!(
+        ["job-a", "job-c", "job-d"].map(|job| state(&jobs, job)),
+        [JobState::Queued; 3]
+    );
+}
+
+/// Asserts that a read of the tables the store answers with `Fenced` trips the fence, and
+/// places nothing. It catches a fenced read logged as a failed one.
+#[test]
+fn a_fenced_read_of_the_queue_trips_the_fence() {
+    let (agents, store, _dir) = served("jobs-fenced-read");
+    let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
+    queue(&jobs, "job-a", 2, 0);
+    store.fail_with(js_state::StoreError::Fenced);
+    store.fail_read_after(0);
+    agents.place_jobs();
+    assert!(agents.fence.is_tripped());
+    assert_eq!(state(&jobs, "job-a"), JobState::Queued);
 }

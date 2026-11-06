@@ -64,7 +64,7 @@ pub struct Call {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verb", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
-    /// Create the lease's user; an administrator only with a gate grant.
+    /// Lend the lease a free user of the pool; an administrator only with a gate grant.
     UserCreate {
         /// The lease, as `<term>.<seq>`.
         lease: String,
@@ -125,7 +125,9 @@ pub enum Request {
         /// The lease, as `<term>.<seq>`.
         lease: String,
     },
-    /// Delete the lease's user and sweep what it leaves.
+    /// End the lease: reset its pool user for the next lease (or replace it when the reset
+    /// is not clean), or delete the user of a lease from before the pool and sweep what
+    /// it leaves.
     UserDelete {
         /// The lease, as `<term>.<seq>`.
         lease: String,
@@ -199,6 +201,11 @@ pub enum Request {
     Baseline,
     /// Reboot, after the helper's own scan came back dirty.
     RebootDirty,
+    /// Make the pool's missing users and replace its broken ones; the users the ledger
+    /// holds are kept as they are.
+    PoolCreate,
+    /// The state of the pool.
+    PoolStatus,
 }
 
 /// Where `run` starts a process.
@@ -230,9 +237,9 @@ pub enum Reply {
         /// The nonce the request must carry.
         nonce: String,
     },
-    /// The user exists with this uid.
+    /// The lease has its user, with this uid.
     Created {
-        /// The new user's uid.
+        /// The lease user's uid.
         uid: u32,
     },
     /// The process started with this pid.
@@ -295,11 +302,33 @@ pub enum Reply {
         /// The report, as the VMM printed it.
         report: String,
     },
+    /// The state of the pool, after `pool-create` or for `pool-status`.
+    Pool(Box<PoolState>),
     /// The request was refused or failed, and why.
     Refused {
         /// Why.
         reason: String,
     },
+}
+
+/// The state of the pool, as [`Reply::Pool`] carries it: each list holds slot indexes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolState {
+    /// How many slots the pool has.
+    pub size: u32,
+    /// The free slots.
+    pub free: Vec<u32>,
+    /// The leased slots, each with its lease as `<term>.<seq>`.
+    pub leased: Vec<(u32, String)>,
+    /// The slots being made, reset or replaced.
+    pub resetting: Vec<u32>,
+    /// The slots whose user could be neither reset nor replaced: lent to no one.
+    pub broken: Vec<u32>,
+    /// The slots never made.
+    pub missing: Vec<u32>,
+    /// What `pool-create` could not do, slot by slot.
+    pub errors: Vec<String>,
 }
 
 /// Sends `message` as one frame, with `fds` attached.

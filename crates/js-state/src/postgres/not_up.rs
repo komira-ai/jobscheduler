@@ -6,12 +6,13 @@
 //! seconds, and that is told apart from a refusal, which no wait cures and which a person
 //! has to read (a URL, a login, a database, a schema).
 
-use std::error::Error as _;
 use std::io;
 
 use postgres::error::SqlState;
 
 use super::Fail;
+use super::conn::io_cause;
+use super::tls::TlsError;
 use crate::StoreError;
 
 /// Why [`super::PostgresStore::try_open`] failed, by what a caller does about it.
@@ -30,6 +31,10 @@ pub enum OpenError {
     /// failure that is not an I/O error of the connection.
     #[error(transparent)]
     Refused(StoreError),
+    /// The TLS the configuration asks for could not be had: the server offers none, or its
+    /// certificate is not one the mode accepts. A wait does not change it either.
+    #[error(transparent)]
+    Tls(TlsError),
 }
 
 impl OpenError {
@@ -44,6 +49,7 @@ impl OpenError {
     pub fn into_store(self) -> StoreError {
         match self {
             OpenError::NotUp(e) | OpenError::Refused(e) => e,
+            OpenError::Tls(e) => StoreError::Failed(e.to_string()),
         }
     }
 }
@@ -53,12 +59,14 @@ impl From<Fail> for OpenError {
         let not_up = match &fail {
             Fail::Pg(err) => match err.code() {
                 Some(code) => starting_up(code),
-                None => io_cause(err),
+                None => io_cause(err).is_some_and(|io| not_listening(io.kind())),
             },
-            // A schema or durability refusal came from a server that answered.
-            Fail::Refused(_) => false,
+            Fail::Tls(tls) => return OpenError::Tls(tls.clone()),
+            // A schema or durability refusal came from a server that answered; a fence is
+            // never met before the store is open.
+            Fail::Refused(_) | Fail::Fenced => false,
         };
-        let error = fail.into_store();
+        let error = fail.into_failed();
         if not_up {
             OpenError::NotUp(error)
         } else {
@@ -74,19 +82,6 @@ impl From<Fail> for OpenError {
 /// fix.
 fn starting_up(code: &SqlState) -> bool {
     *code == SqlState::CANNOT_CONNECT_NOW
-}
-
-/// Whether the error has no SQLSTATE and an `io::Error` in its causes of a kind that means
-/// the server is not listening yet.
-fn io_cause(err: &postgres::Error) -> bool {
-    let mut cause = err.source();
-    while let Some(e) = cause {
-        if let Some(io) = e.downcast_ref::<io::Error>() {
-            return not_listening(io.kind());
-        }
-        cause = e.source();
-    }
-    false
 }
 
 /// The I/O kinds of a connect to a server that is not there yet: nothing listens
