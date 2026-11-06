@@ -47,9 +47,22 @@ const THROTTLED: [&str; 2] = ["rateLimitExceeded", "RATE_LIMIT_EXCEEDED"];
 
 /// The reasons that say the credential may not make the call: `forbidden` (Compute Engine
 /// troubleshooting VM creation: a missing `compute.regions.get` permission answers
-/// `forbidden`) and `PERMISSION_DENIED` (the canonical error code of AIP-193, which the
-/// Cloud Billing API answers with).
-const DENIED: [&str; 2] = ["forbidden", "PERMISSION_DENIED"];
+/// `forbidden`), `PERMISSION_DENIED` (the canonical error code of AIP-193, which the
+/// Cloud Billing API answers with), and the two of a credential the cloud does not accept
+/// (HTTP 401): `authError`, the reason of the Compute Engine API's error answer, and
+/// `UNAUTHENTICATED`, the canonical code.
+const DENIED: [&str; 4] = [
+    "forbidden",
+    "PERMISSION_DENIED",
+    "authError",
+    "UNAUTHENTICATED",
+];
+
+/// The reason of an answer that says the resource asked for does not exist (HTTP 404).
+const NOT_FOUND: &str = "notFound";
+
+/// The reason of an answer that says a resource of that name exists already (HTTP 409).
+const ALREADY_EXISTS: &str = "alreadyExists";
 
 /// Why a call failed. A failure is never an empty answer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -85,6 +98,13 @@ pub enum ApiError {
     /// aggregated list that named a scope it could not reach.
     #[error("the answer is not complete")]
     Incomplete,
+    /// No answer came within the client's time limit. The call may have taken effect.
+    #[error("the call timed out")]
+    Timeout,
+    /// The client has no credential to call with: no key file is named and the metadata
+    /// server hands out no token. Nothing was sent to the cloud.
+    #[error("no credential is available")]
+    NoCredential,
 }
 
 impl ApiError {
@@ -107,8 +127,25 @@ impl ApiError {
             Self::Throttled { reason } | Self::Denied { reason } | Self::Refused { reason } => {
                 Some(reason)
             }
-            Self::Transport(_) | Self::Unreadable(_) | Self::Incomplete => None,
+            Self::Transport(_)
+            | Self::Unreadable(_)
+            | Self::Incomplete
+            | Self::Timeout
+            | Self::NoCredential => None,
         }
+    }
+
+    /// Whether the cloud said the resource asked for does not exist (the reason
+    /// `notFound`). Nothing else is evidence of that: a failed or timed-out call is not.
+    pub fn is_not_found(&self) -> bool {
+        self.reason().is_some_and(|reason| reason.as_str() == NOT_FOUND)
+    }
+
+    /// Whether the cloud said a resource of that name exists already (the reason
+    /// `alreadyExists`).
+    pub fn is_already_exists(&self) -> bool {
+        self.reason()
+            .is_some_and(|reason| reason.as_str() == ALREADY_EXISTS)
     }
 }
 
