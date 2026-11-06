@@ -291,6 +291,8 @@ fn offer() -> Offer {
         price_unit: js_elastic::PriceUnit::UsCents,
         available: true,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

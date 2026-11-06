@@ -83,6 +83,8 @@ mod tests {
             price_unit: PriceUnit::UsCents,
             available: true,
             purchase: None,
+            quota: None,
+            block: None,
         }
     }
 

@@ -55,6 +55,8 @@ pub fn offer(id: &str, price: u64) -> Offer {
         price_unit: PriceUnit::UsCents,
         available: true,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

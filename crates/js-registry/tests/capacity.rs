@@ -79,6 +79,8 @@ fn offer(os: &str, gpus: u32, class: Option<&str>) -> Offer {
         price_unit: PriceUnit::UsCents,
         available: true,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 
