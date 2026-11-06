@@ -13,6 +13,17 @@ const A: &str =
 const B: &str =
     "registry.example/b@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+/// What `prepare` answers for `A` naming `ticket`, once the pull of that ticket has ended:
+/// asked again (yielding between asks) while it says the pull goes on.
+fn answer_of(prefetcher: &Prefetcher, ticket: Ticket) -> Prepared {
+    loop {
+        match prefetcher.prepare(A, Some(ticket)) {
+            Prepared::Pending(_) => std::thread::yield_now(),
+            done => return done,
+        }
+    }
+}
+
 fn failed(text: &str) -> Prepared {
     Prepared::Failed(js_agent::lifecycle::RuntimeError::new(text))
 }
@@ -100,7 +111,9 @@ fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
     let Prepared::Pending(ticket) = prefetcher.prepare(A, None) else {
         panic!("not pending");
     };
-    assert_eq!(prefetcher.wait(A), failed("registry down"));
+    // The first waiter names the ticket, as a run that waited on the pull does: `wait` names
+    // none, and once the failed pull has ended before it asks, it would start a new one.
+    assert_eq!(answer_of(&prefetcher, ticket), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(pulls.load(Ordering::SeqCst), 1);

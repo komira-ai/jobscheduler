@@ -320,8 +320,8 @@ credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once
 ```
 
-The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a job whose
-start carries a log sink.
+The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a `crun` job
+whose start carries a log sink, and for a native job with a sink the most bytes of each of its log files that are uploaded.
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
