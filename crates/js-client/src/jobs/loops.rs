@@ -9,7 +9,7 @@
 
 use std::future::{Future, poll_fn};
 use std::io;
-use std::pin::{Pin, pin};
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -196,7 +196,8 @@ fn seen(state: i32) -> Seen {
 /// When `cancel` completes while the loop pauses, the job is cancelled (`CancelJob`, once)
 /// and the loop goes on reading until the job has ended, so the answer is how it really
 /// ended: cancelled, or another end it reached first. A wait that should never cancel
-/// passes [`std::future::pending`].
+/// passes [`std::future::pending`], pinned. `cancel` and `sink` (of [`follow_logs`]) are
+/// trait objects so that each client type has one copy of each loop.
 ///
 /// # Errors
 ///
@@ -207,13 +208,12 @@ pub async fn wait_for_terminal<C, W>(
     client: &mut C,
     waiter: &W,
     job_id: &str,
-    cancel: impl Future<Output = ()>,
+    mut cancel: Pin<&mut dyn Future<Output = ()>>,
 ) -> Result<Outcome, WaitError>
 where
     C: JobCalls + ?Sized,
     W: Waiter + ?Sized,
 {
-    let mut cancel = pin!(cancel);
     let mut cancelled = false;
     loop {
         let read = v1::GetJobRequest {
@@ -253,7 +253,7 @@ where
 /// `cancel`. `cancel` is looked at first, so a cancel that is already due is never lost to a
 /// pause that is over too.
 async fn first(
-    mut cancel: Pin<&mut impl Future<Output = ()>>,
+    mut cancel: Pin<&mut dyn Future<Output = ()>>,
     mut pause: Pin<Box<dyn Future<Output = ()> + Send + '_>>,
 ) -> bool {
     poll_fn(move |cx| match cancel.as_mut().poll(cx) {
@@ -327,7 +327,7 @@ pub async fn follow_logs<C, W>(
     waiter: &W,
     job_id: &str,
     stream: LogStream,
-    mut sink: impl FnMut(Piece<'_>) -> io::Result<()>,
+    sink: &mut dyn FnMut(Piece<'_>) -> io::Result<()>,
 ) -> Result<(), FollowError>
 where
     C: JobCalls + ?Sized,

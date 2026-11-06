@@ -53,8 +53,8 @@ pub(crate) fn run(
     let (out, err) = (RefCell::new(out), RefCell::new(err));
     runtime()?.block_on(async {
         let mut client = connection.client().await?;
-        let sink = |piece: Piece<'_>| put(piece, name, render, &out, &err);
-        follow_logs(&mut client, waiter, &job, stream, sink).await?;
+        let mut sink = |piece: Piece<'_>| put(piece, name, render, &out, &err);
+        follow_logs(&mut client, waiter, &job, stream, &mut sink).await?;
         Ok(exit::OK)
     })
 }

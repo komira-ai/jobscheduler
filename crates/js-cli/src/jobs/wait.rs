@@ -5,6 +5,7 @@
 
 use std::future::pending;
 use std::io::Write;
+use std::pin::pin;
 
 use clap::{Arg, ArgMatches};
 use js_client::jobs::{Outcome, WaitError, wait_for_terminal};
@@ -135,7 +136,7 @@ pub(crate) fn run(
     let waiter = &*services.job_waiter;
     runtime()?.block_on(async {
         let mut client = connection.client().await?;
-        let waited = wait_for_terminal(&mut client, waiter, &job, pending()).await;
+        let waited = wait_for_terminal(&mut client, waiter, &job, pin!(pending())).await;
         ended(&job, waited, render, out)
     })
 }

@@ -406,6 +406,53 @@ fn job_follow_reads_the_stream_named_and_says_its_gaps() {
     }
 }
 
+/// Asserts that `job follow` sends a read whose answer is lost again from the same offset
+/// after two seconds, and that the third loss in a row ends it with exit 9 (`unconfirmed`)
+/// and the call's reason. Catches a transient log store failure that cuts the stream short,
+/// and a follow retried forever against a server that is gone.
+#[test]
+fn job_follow_sends_a_lost_read_again_three_times_in_a_row_at_most() {
+    let scratch = Scratch::new("follow_lost");
+    let fake = Fake::new();
+    fake.answer(
+        "GetLogs",
+        vec![
+            Answer::Status(Code::Unavailable, "log-store-unavailable"),
+            Answer::Status(Code::Unavailable, "log-store-unavailable"),
+            Answer::Message(page(0, b"abc", true).encode_to_vec()),
+        ],
+    );
+    let paces = Arc::new(Paces::default());
+    let words = ["job", "follow", "--job-id", "j-1"];
+    let got = quiet(&scratch, &fake, &paces, &words);
+    assert_eq!(
+        (got.code, got.out.as_str(), got.err.as_str()),
+        (0, "abc", "")
+    );
+    let reads: Vec<GetLogsRequest> = sent(&fake, "GetLogs");
+    let offsets: Vec<u64> = reads.iter().map(|read| read.from_offset.unwrap()).collect();
+    assert_eq!(offsets, [0, 0, 0]);
+    assert_eq!(paces.asked(), [TWO, TWO]);
+
+    let fake = Fake::new();
+    fake.answer(
+        "GetLogs",
+        vec![Answer::Status(Code::Unavailable, "log-store-unavailable")],
+    );
+    let paces = Arc::new(Paces::default());
+    let got = quiet(&scratch, &fake, &paces, &words);
+    assert_eq!(
+        (got.code, got.out.as_str(), got.err.as_str()),
+        (
+            9,
+            "",
+            "js: no answer from http://localhost:7070 after the request was sent: log-store-unavailable\n"
+        )
+    );
+    assert_eq!(sent::<GetLogsRequest>(&fake, "GetLogs").len(), 3);
+    assert_eq!(paces.asked(), [TWO, TWO]);
+}
+
 /// A writer that refuses every write, as a closed pipe does.
 struct Closed;
 

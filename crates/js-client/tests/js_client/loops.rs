@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::future::{pending, ready};
 use std::io;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::Mutex;
 use std::task::{Context, Waker};
 use std::time::Duration;
@@ -167,7 +167,7 @@ async fn a_wait_pauses_after_each_live_read_until_the_job_ends() {
         ..Script::default()
     };
     let paces = Paces::default();
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", pending()).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(pending())).await;
     assert_eq!(got.unwrap(), Outcome::Succeeded);
     assert_eq!(paces.asked(), [TWO, TWO]);
     assert_eq!(fake.calls, ["GetJob j-1", "GetJob j-1", "GetJob j-1"]);
@@ -220,7 +220,7 @@ async fn every_ended_state_has_its_own_outcome() {
             ..Script::default()
         };
         let paces = Paces::default();
-        let got = wait_for_terminal(&mut fake, &paces, "j-1", pending()).await;
+        let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(pending())).await;
         assert_eq!(got.unwrap(), want, "{state:?}");
         assert_eq!(paces.asked().len(), live.len(), "{state:?}");
         let read_result = fake.calls.last().unwrap() == "GetResult j-1";
@@ -239,7 +239,7 @@ async fn a_failed_read_or_an_unknown_state_is_no_outcome() {
         jobs: [job(JobState::Running), Err(lost())].into(),
         ..Script::default()
     };
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", pending()).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(pending())).await;
     assert!(matches!(
         got,
         Err(WaitError::Call(JobError::MayHaveActed(_)))
@@ -254,7 +254,7 @@ async fn a_failed_read_or_an_unknown_state_is_no_outcome() {
         .into(),
         ..Script::default()
     };
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", pending()).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(pending())).await;
     assert_eq!(got.unwrap_err().to_string(), "expired (not-found)");
 
     let newer = Ok(GetJobResponse {
@@ -268,7 +268,7 @@ async fn a_failed_read_or_an_unknown_state_is_no_outcome() {
             jobs: [answer].into(),
             ..Script::default()
         };
-        let got = wait_for_terminal(&mut fake, &paces, "j-1", pending()).await;
+        let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(pending())).await;
         assert_eq!(
             got.unwrap_err().to_string(),
             format!("job j-1 is in a state this client does not know ({state})")
@@ -295,7 +295,7 @@ async fn a_due_cancel_is_sent_once_and_the_wait_reads_the_real_end() {
         ..Script::default()
     };
     let paces = Paces::default();
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", ready(())).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(ready(()))).await;
     assert_eq!(got.unwrap(), Outcome::Cancelled);
     assert_eq!(
         fake.calls,
@@ -314,7 +314,7 @@ async fn a_due_cancel_is_sent_once_and_the_wait_reads_the_real_end() {
         cancels: [Ok(CancelJobResponse::default())].into(),
         ..Script::default()
     };
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", ready(())).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(ready(()))).await;
     assert_eq!(got.unwrap(), Outcome::Succeeded);
 
     let mut fake = Script {
@@ -322,7 +322,7 @@ async fn a_due_cancel_is_sent_once_and_the_wait_reads_the_real_end() {
         cancels: [Err(lost())].into(),
         ..Script::default()
     };
-    let got = wait_for_terminal(&mut fake, &paces, "j-1", ready(())).await;
+    let got = wait_for_terminal(&mut fake, &paces, "j-1", pin!(ready(()))).await;
     assert!(matches!(
         got,
         Err(WaitError::Call(JobError::MayHaveActed(_)))
@@ -352,7 +352,7 @@ async fn a_follow_hands_on_each_byte_once_and_ends_only_at_eof() {
     };
     let paces = Paces::default();
     let mut out = Vec::new();
-    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, |piece| {
+    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, &mut |piece| {
         if let Piece::Data(bytes) = piece {
             out.extend_from_slice(bytes);
         }
@@ -406,7 +406,7 @@ async fn a_busy_follow_is_tried_again_and_gaps_are_handed_on() {
     };
     let paces = Paces::default();
     let mut pieces = Vec::new();
-    follow_logs(&mut fake, &paces, "j-1", LogStream::Stderr, |piece| {
+    follow_logs(&mut fake, &paces, "j-1", LogStream::Stderr, &mut |piece| {
         pieces.push(match piece {
             Piece::Data(bytes) => format!("data {}", String::from_utf8_lossy(bytes)),
             Piece::Gap { offset, length } => format!("gap {offset}+{length}"),
@@ -437,7 +437,7 @@ async fn a_refused_follow_or_a_failing_sink_ends_the_follow() {
         .into(),
         ..Script::default()
     };
-    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, |_| Ok(())).await;
+    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, &mut |_| Ok(())).await;
     assert_eq!(
         got.unwrap_err().to_string(),
         "no-live-logs (failed-precondition)"
@@ -454,12 +454,16 @@ async fn a_refused_follow_or_a_failing_sink_ends_the_follow() {
             logs: [answer].into(),
             ..Script::default()
         };
-        let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, |piece| match (
-            gaps_only, piece,
-        ) {
-            (true, Piece::Data(_)) => Ok(()),
-            _ => Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
-        })
+        let got = follow_logs(
+            &mut fake,
+            &paces,
+            "j-1",
+            LogStream::Stdout,
+            &mut |piece| match (gaps_only, piece) {
+                (true, Piece::Data(_)) => Ok(()),
+                _ => Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
+            },
+        )
         .await;
         let error = got.unwrap_err();
         assert!(matches!(error, FollowError::Write(_)));
@@ -489,7 +493,7 @@ async fn a_lost_follow_is_sent_again_three_times_in_a_row_at_most() {
     };
     let paces = Paces::default();
     let mut out = Vec::new();
-    follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, |piece| {
+    follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, &mut |piece| {
         if let Piece::Data(bytes) = piece {
             out.extend_from_slice(bytes);
         }
@@ -511,7 +515,7 @@ async fn a_lost_follow_is_sent_again_three_times_in_a_row_at_most() {
         ..Script::default()
     };
     let paces = Paces::default();
-    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, |_| Ok(())).await;
+    let got = follow_logs(&mut fake, &paces, "j-1", LogStream::Stdout, &mut |_| Ok(())).await;
     assert!(matches!(
         got,
         Err(FollowError::Call(JobError::MayHaveActed(_)))

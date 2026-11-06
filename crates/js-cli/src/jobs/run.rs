@@ -14,6 +14,7 @@
 use std::cell::RefCell;
 use std::future::pending;
 use std::io::Write;
+use std::pin::pin;
 
 use clap::ArgMatches;
 use js_client::jobs::{Piece, Waiter, follow_logs, submit_retrying, wait_for_terminal};
@@ -135,7 +136,8 @@ impl Run<'_> {
         submitted.map_err(|why| unanswered(why.into(), self.submit, self.key.as_ref()))?;
         let mut stdout = self.connection.client().await?;
         let mut stderr = self.connection.client().await?;
-        let wait = wait_for_terminal(&mut control, self.waiter, &self.job, first.notified());
+        let cancel = pin!(first.notified());
+        let wait = wait_for_terminal(&mut control, self.waiter, &self.job, cancel);
         let follows = async {
             tokio::join!(
                 self.follow(&mut stdout, LogStream::Stdout, out, err),
@@ -170,8 +172,8 @@ impl Run<'_> {
             LogStream::Stdout => "stdout",
             _ => "stderr",
         };
-        let sink = |piece: Piece<'_>| put(piece, name, self.render, data, notes);
-        let followed = follow_logs(client, self.waiter, &self.job, stream, sink).await;
+        let mut sink = |piece: Piece<'_>| put(piece, name, self.render, data, notes);
+        let followed = follow_logs(client, self.waiter, &self.job, stream, &mut sink).await;
         if let Err(why) = followed {
             let why = Failure::from(why);
             let failure = Failure::Server(format!(
