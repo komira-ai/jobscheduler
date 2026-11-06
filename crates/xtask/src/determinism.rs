@@ -80,6 +80,7 @@ pub const CRATES: &[&str] = &[
     "js-pool-static",
     "js-proto",
     "js-provider",
+    "js-provider-ec2",
     "js-provider-lambdalabs",
     "js-registry",
     "js-scaler",
@@ -864,6 +865,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the session helper's clock, given to connection_on; the cell runs no session helper",
     },
     Allowed {
+        file: "crates/js-provider-ec2/src/clock.rs",
+        item: "SystemClock::new",
+        token: Token::InstantNow,
+        sites: 1,
+        reason: "the EC2 provider's clock for its live API guards; the cell's pools are static and call no provider",
+    },
+    Allowed {
         file: "crates/js-provider-lambdalabs/src/clock.rs",
         item: "SystemClock::new",
         token: Token::InstantNow,
@@ -882,7 +890,7 @@ pub const ALLOWED: &[Allowed] = &[
         item: "SystemClock::now",
         token: Token::SystemTimeNow,
         sites: 1,
-        reason: "the state store's default wall clock; the cell gives the job store its own clock (StoreClock, js-sim-cell server/ids.rs), and usage is off",
+        reason: "the state store's default wall clock; the cell gives the job store its own clock (StoreClock), turns usage off and sets no --store",
     },
     Allowed {
         file: "crates/js-state/src/sqlite/mod.rs",
