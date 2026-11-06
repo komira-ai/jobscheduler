@@ -169,7 +169,7 @@ A pool may name container platforms in priority order instead of naming its prov
 `[[machine_provider]]` tables declare where machines come from: `kind = "static"` is the hosts that run `js-agent` and register
 themselves (no key beside `name` and `kind`; it is not the agentless `static` provider kind of a pool's `provider`), and any other kind is
 a provider kind compiled in, whose own keys follow (`lambdalabs`: `api_key_file` and the rest, as under `provider`). `ec2` and `gce` are
-refused as not built. `[[platform]]` tables declare platforms: only `kind = "default"` is built (`kubernetes`, `cloud_run` and `ecs` are
+built, with the keys of `js-provider-ec2` and `js-provider-gce`. `[[platform]]` tables declare platforms: only `kind = "default"` is built (`kubernetes`, `cloud_run` and `ecs` are
 refused as not built), with `machine_providers` listing declared machine providers first to last. Names follow the grammar of pool
 names and are unique among their kind of table; every declared machine provider must be named by a platform and every platform by a
 pool.

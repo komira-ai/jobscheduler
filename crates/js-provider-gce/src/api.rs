@@ -7,7 +7,9 @@ use std::fmt;
 use js_elastic::Purchase;
 
 use crate::error::{ApiError, SettingsError};
-use crate::launch::{InsertRequest, Instance, InstanceRef, ListFilter, Operation, OperationRef, Page};
+use crate::launch::{
+    InsertRequest, Instance, InstanceRef, ListFilter, Operation, OperationRef, Page,
+};
 use crate::model::{
     AcceleratorTypeInfo, MachineTypeInfo, Project, QuotaMetric, Region, SkuPrice, Zone,
 };

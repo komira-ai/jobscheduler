@@ -16,10 +16,9 @@ use js_elastic::{
 use js_provider_gce::{
     AcceleratorTypeInfo, ApiError, ArchName, AttachedAccelerator, FakeGce, GceApi,
     GceCatalogSettings, GceConfig, GceProvider, ImagePath, Images, InsertRequest, Instance,
-    InstanceId, InstanceRef, InstanceStatus, Label, ListFilter, MachineTypeInfo,
-    MachineTypeName, ManualClock, Money, NetworkInterface, Operation, OperationRef, Page,
-    PricedItem, Project, QuotaMetric, Region, SeriesName, SkuPrice, UsageType, Zone,
-    host_ref, label_value,
+    InstanceId, InstanceRef, InstanceStatus, Label, ListFilter, MachineTypeInfo, MachineTypeName,
+    ManualClock, Money, NetworkInterface, Operation, OperationRef, Page, PricedItem, Project,
+    QuotaMetric, Region, SeriesName, SkuPrice, UsageType, Zone, host_ref, label_value,
 };
 use js_types::ExecMode;
 
@@ -62,18 +61,24 @@ impl Account {
             .add_machine_type(machine(GPU_TYPE, 24, &[("nvidia-tesla-a100", 2)], "X86_64"));
         let region = zone.region();
         for usage in [UsageType::OnDemand, UsageType::Preemptible] {
-            fake.add_price(&region, sku(PricedItem::Cores(series("a2")), usage, 500_000_000))
-                .add_price(&region, sku(PricedItem::Memory(series("a2")), usage, 50_000_000))
-                .add_price(
-                    &region,
-                    sku(
-                        PricedItem::Accelerator(js_provider_gce::AcceleratorTypeName(
-                            "nvidia-tesla-a100".to_owned(),
-                        )),
-                        usage,
-                        900_000_000,
-                    ),
-                );
+            fake.add_price(
+                &region,
+                sku(PricedItem::Cores(series("a2")), usage, 500_000_000),
+            )
+            .add_price(
+                &region,
+                sku(PricedItem::Memory(series("a2")), usage, 50_000_000),
+            )
+            .add_price(
+                &region,
+                sku(
+                    PricedItem::Accelerator(js_provider_gce::AcceleratorTypeName(
+                        "nvidia-tesla-a100".to_owned(),
+                    )),
+                    usage,
+                    900_000_000,
+                ),
+            );
         }
         Self {
             fake,
@@ -257,9 +262,12 @@ pub fn live(max_machines: usize) -> GceConfig {
 
 /// The config of a live, enabled provider whose only image is the x86_64 one.
 pub fn live_x86_only(max_machines: usize) -> GceConfig {
-    config_with(max_machines, Images::new(None, Some(image(X86_IMAGE))).unwrap())
-        .enable()
-        .live()
+    config_with(
+        max_machines,
+        Images::new(None, Some(image(X86_IMAGE))).unwrap(),
+    )
+    .enable()
+    .live()
 }
 
 /// The catalog settings of the rig: on demand and Spot, the rig's three types, in

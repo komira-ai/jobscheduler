@@ -29,9 +29,7 @@ pub enum LabelError {
     Twice(String),
     /// The value is longer than 63 characters or holds a character other than lower-case
     /// letters, digits, `_` and `-`.
-    #[error(
-        "the value of label {0:?} must be at most 63 lower case letters, digits, '_' and '-'"
-    )]
+    #[error("the value of label {0:?} must be at most 63 lower case letters, digits, '_' and '-'")]
     Value(String),
     /// The instance would carry more labels than the cloud allows.
     #[error("{0} labels are more than the {MAX_LABELS} allowed")]

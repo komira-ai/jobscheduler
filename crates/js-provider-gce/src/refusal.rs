@@ -14,7 +14,10 @@ const TABLE: [(&str, RefusalCode); 7] = [
     // The zone has no capacity for the machine type now (zone operation error codes,
     // Compute Engine "Troubleshooting resource availability errors").
     ("ZONE_RESOURCE_POOL_EXHAUSTED", RefusalCode::Capacity),
-    ("ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS", RefusalCode::Capacity),
+    (
+        "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS",
+        RefusalCode::Capacity,
+    ),
     // The project's limits: instances, CPUs, accelerators and addresses all answer this
     // code, the metric named only in the message.
     ("QUOTA_EXCEEDED", RefusalCode::Quota),
@@ -60,7 +63,7 @@ pub fn launch_answer(error: &ApiError) -> Acquired {
             .reason()
             .and_then(|reason| TABLE.iter().find(|(listed, _)| *listed == reason.as_str()))
             .map_or(Acquired::Unknown, |(listed, constant)| {
-                refused(*constant, listed)
+                refused(*constant, *listed)
             }),
     }
 }

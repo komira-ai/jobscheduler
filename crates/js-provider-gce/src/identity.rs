@@ -85,9 +85,13 @@ pub struct GoogleIdentityVerifier {
 impl GoogleIdentityVerifier {
     /// The verifier for the pinned keys ([`GOOGLE_KEYS`]).
     pub fn new() -> Self {
+        Self::pinned(&GOOGLE_KEYS)
+    }
+
+    /// The verifier for `keys`, each a key id and the modulus of its key.
+    fn pinned(keys: &[(&str, &[u8])]) -> Self {
         Self::with_keys(
-            GOOGLE_KEYS
-                .iter()
+            keys.iter()
                 .map(|(kid, modulus)| ((*kid).to_owned(), modulus.to_vec()))
                 .collect(),
         )
@@ -184,12 +188,23 @@ mod tests {
     /// module documentation says is pinned.
     #[test]
     fn the_default_verifier_holds_the_pinned_keys() {
-        assert_eq!(GoogleIdentityVerifier::default().key_count(), GOOGLE_KEYS.len());
+        assert_eq!(
+            GoogleIdentityVerifier::default().key_count(),
+            GOOGLE_KEYS.len()
+        );
         assert_eq!(GoogleIdentityVerifier::new().key_count(), 0);
         let identity = SignedIdentity {
             document: "e30.e30.c2ln".to_owned(),
             signature: String::new(),
         };
         assert_eq!(GoogleIdentityVerifier::new().verify(&identity), None);
+    }
+
+    /// Asserts that a verifier made from pinned keys holds one key for each, whatever the
+    /// pinned table holds in this release.
+    #[test]
+    fn a_verifier_holds_one_key_for_each_pinned_key() {
+        let keys: [(&str, &[u8]); 2] = [("one", &[1, 2, 3]), ("two", &[4])];
+        assert_eq!(GoogleIdentityVerifier::pinned(&keys).key_count(), 2);
     }
 }

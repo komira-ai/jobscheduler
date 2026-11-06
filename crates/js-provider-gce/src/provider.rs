@@ -20,8 +20,8 @@ use crate::error::ApiError;
 use crate::gpu::ACCELERATOR_ROWS;
 use crate::identity::{GoogleIdentityVerifier, IdentityVerifier};
 use crate::launch::{
-    HostMaintenance, InsertRequest, Instance, InstanceId, InstanceKey, InstanceName,
-    InstanceRef, Label, ListFilter, Operation, Payload, ProvisioningModel, RequestId, Scheduling,
+    HostMaintenance, InsertRequest, Instance, InstanceId, InstanceKey, InstanceName, InstanceRef,
+    Label, ListFilter, Operation, Payload, ProvisioningModel, RequestId, Scheduling,
     TerminationAction, host_ref, parse_host_ref,
 };
 use crate::model::{AcceleratorTypeName, AttachedAccelerator, MachineTypeName, Zone};
@@ -287,7 +287,11 @@ impl GceProvider {
         if matches!(answer, Acquired::Refused(_)) {
             unknown.remove(wanted);
         }
-        let codes: Vec<&str> = operation.error_codes.iter().map(|code| code.as_str()).collect();
+        let codes: Vec<&str> = operation
+            .error_codes
+            .iter()
+            .map(|code| code.as_str())
+            .collect();
         tracing::warn!(?codes, "the insert's operation finished with an error");
         answer
     }
@@ -314,7 +318,9 @@ impl GceProvider {
                 extras: Vec::new(),
             },
             Claim::Suspect | Claim::Foreign => {
-                tracing::error!("no launch: the instance of this name carries some of this scheduler's marks, not all");
+                tracing::error!(
+                    "no launch: the instance of this name carries some of this scheduler's marks, not all"
+                );
                 Self::refuse(RefusalCode::Denied, Reason::HalfMarked { count: 1 })
             }
         }
@@ -456,12 +462,15 @@ impl GceProvider {
 
     /// The names of the instances of the acquires with an insert that got no answer.
     fn unresolved_names(&self, unknown: &Unknown) -> BTreeSet<String> {
-        unknown
-            .keys()
-            .filter_map(|id| AcquireId::new(id).ok())
+        unanswered(unknown)
             .map(|acquire| HostName::derive(&self.config.scheduler, &acquire).to_string())
             .collect()
     }
+}
+
+/// The acquire ids of the inserts that got no answer.
+fn unanswered(unknown: &Unknown) -> impl Iterator<Item = AcquireId> + '_ {
+    unknown.keys().filter_map(|id| AcquireId::new(id).ok())
 }
 
 /// The `scheduling` of an instance of `model`: no restart and termination on host
@@ -645,10 +654,7 @@ impl CapacityProvider for GceProvider {
 
     fn unresolved(&self) -> Vec<AcquireId> {
         let unknown = self.unknown();
-        unknown
-            .keys()
-            .filter_map(|id| AcquireId::new(id).ok())
-            .collect()
+        unanswered(&unknown).collect()
     }
 
     /// A reference that is no reference of the cloud is not read and is `Unknown`; only a
@@ -657,7 +663,9 @@ impl CapacityProvider for GceProvider {
         let Some((zone, instance)) = parse_host_ref(id) else {
             return Observed::Unknown;
         };
-        let observed = self.find(&self.instance(zone, InstanceKey::Id(instance))).observed();
+        let observed = self
+            .find(&self.instance(zone, InstanceKey::Id(instance)))
+            .observed();
         self.records().observed(id, &observed);
         observed
     }
@@ -675,11 +683,12 @@ impl CapacityProvider for GceProvider {
             return Some(found);
         };
         let claims = self.verifier.verify(identity)?;
-        let (zone, id) = parse_host_ref(&found)?;
+        // The reference is `<zone>/<id>` with neither part holding a `/`, so the claimed pair
+        // written the same way is the reference only when both parts are.
+        let claimed = format!("{}/{}", claims.zone, claims.instance_id);
         [
             claims.project_id == self.config.project.as_str(),
-            claims.zone == zone.as_str(),
-            claims.instance_id == id.as_str(),
+            claimed == found.as_str(),
             claims.instance_name == name.as_str(),
         ]
         .into_iter()

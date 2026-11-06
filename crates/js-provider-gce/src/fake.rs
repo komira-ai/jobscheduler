@@ -165,8 +165,7 @@ impl State {
         };
         self.request_ids
             .insert(request.request_id.as_str().to_owned(), answer.clone());
-        self.operations
-            .insert(answer.reference.name.clone(), done);
+        self.operations.insert(answer.reference.name.clone(), done);
         Ok(answer)
     }
 }
@@ -444,7 +443,11 @@ impl GceApi for FakeGce {
 
     fn insert_instance(&self, request: &InsertRequest) -> Result<Operation, ApiError> {
         let mut state = self.state();
-        let call = launch_call(Method::InsertInstance, &request.project, Some(&request.zone));
+        let call = launch_call(
+            Method::InsertInstance,
+            &request.project,
+            Some(&request.zone),
+        );
         if let Some(error) = state.begin(call) {
             return Err(error);
         }
@@ -523,7 +526,10 @@ impl GceApi for FakeGce {
             return Err(ApiError::Incomplete);
         }
         let end = start.saturating_add(size).min(rows.len());
-        let items = rows.get(start..end).map(<[Instance]>::to_vec).unwrap_or_default();
+        let items = rows
+            .get(start..end)
+            .map(<[Instance]>::to_vec)
+            .unwrap_or_default();
         let next_page_token = (end < rows.len()).then(|| format!("page-{end}"));
         let unreachable = std::mem::take(&mut state.unreachable);
         let answer = Page {
@@ -536,7 +542,11 @@ impl GceApi for FakeGce {
 
     fn get_operation(&self, operation: &OperationRef) -> Result<Operation, ApiError> {
         let mut state = self.state();
-        let call = launch_call(Method::GetOperation, &operation.project, Some(&operation.zone));
+        let call = launch_call(
+            Method::GetOperation,
+            &operation.project,
+            Some(&operation.zone),
+        );
         if let Some(error) = state.begin(call) {
             return Err(error);
         }

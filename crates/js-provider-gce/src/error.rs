@@ -138,7 +138,8 @@ impl ApiError {
     /// Whether the cloud said the resource asked for does not exist (the reason
     /// `notFound`). Nothing else is evidence of that: a failed or timed-out call is not.
     pub fn is_not_found(&self) -> bool {
-        self.reason().is_some_and(|reason| reason.as_str() == NOT_FOUND)
+        self.reason()
+            .is_some_and(|reason| reason.as_str() == NOT_FOUND)
     }
 
     /// Whether the cloud said a resource of that name exists already (the reason

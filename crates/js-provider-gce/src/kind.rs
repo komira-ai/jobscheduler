@@ -62,7 +62,7 @@ use crate::catalog::GceCatalogSettings;
 use crate::clock::Clock;
 use crate::config::{GceConfig, Images};
 use crate::error::SettingsError;
-use crate::http::{Credentials, HttpGce};
+use crate::http::{CredentialError, Credentials, HttpGce, KEY_FILE_VARIABLE};
 use crate::launch::{ImagePath, NetworkInterface, is_resource_name};
 use crate::model::{MachineTypeName, Project, Zone};
 use crate::provider::GceProvider;
@@ -182,7 +182,10 @@ fn images(table: &Table) -> Result<Images, Refused> {
         return Err(refused("images", "required"));
     };
     let Value::Table(rows) = value else {
-        return Err(refused("images", "must be a table from architecture to image"));
+        return Err(refused(
+            "images",
+            "must be a table from architecture to image",
+        ));
     };
     if rows.contains_key("aarch64") & rows.contains_key("arm64") {
         return Err(refused("images.aarch64", "arm64 is given twice"));
@@ -314,9 +317,18 @@ fn assemble(parsed: Parsed, ctx: &Context, api: Arc<dyn GceApi>) -> Built {
 /// documentation; and naming `GOOGLE_APPLICATION_CREDENTIALS` when that variable names a
 /// key file that cannot be read as a service-account key.
 pub fn build(table: &Table, ctx: &Context) -> Result<Built, Refused> {
+    build_with(table, ctx, Credentials::standard)
+}
+
+/// [`build`] with the credential read by `credentials`, which is called once, after the
+/// table has been checked.
+fn build_with(
+    table: &Table,
+    ctx: &Context,
+    credentials: impl FnOnce() -> Result<Credentials, CredentialError>,
+) -> Result<Built, Refused> {
     let parsed = parse(table, ctx)?;
-    let credentials = Credentials::standard()
-        .map_err(|error| refused(crate::http::KEY_FILE_VARIABLE, error))?;
+    let credentials = credentials().map_err(|error| refused(KEY_FILE_VARIABLE, error))?;
     let api = HttpGce::new(
         credentials,
         Arc::new(UreqTransport::new(API_TIMEOUT)),
@@ -333,4 +345,56 @@ pub fn build(table: &Table, ctx: &Context) -> Result<Built, Refused> {
 /// The same as [`build`], but for the credential.
 pub fn build_over(table: &Table, ctx: &Context, api: Arc<dyn GceApi>) -> Result<Built, Refused> {
     Ok(assemble(parse(table, ctx)?, ctx, api))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::ManualClock;
+
+    fn context() -> Context {
+        Context {
+            scheduler: SchedulerId::new("one").unwrap(),
+            max_machines: NonZeroUsize::new(1).unwrap(),
+            live: false,
+            clock: Arc::new(ManualClock::new()),
+        }
+    }
+
+    fn table() -> Table {
+        r#"
+            project = "sample-project"
+            zones = ["region-one-a"]
+            network = "global/networks/default"
+            subnetwork = "regions/region-one/subnetworks/default"
+            images = { x86_64 = "projects/image-project/global/images/js-agent-x86" }
+        "#
+        .parse()
+        .unwrap()
+    }
+
+    /// Asserts that a credential that cannot be read refuses a good table under the name of
+    /// the variable that names the key file, with the credential error's words, and that a
+    /// table that is faulty is refused before the credential is read.
+    #[test]
+    fn a_credential_that_cannot_be_read_refuses_the_table_under_its_variable() {
+        let refused = match build_with(&table(), &context(), || Err(CredentialError::NotJson)) {
+            Ok(_) => panic!("the credential should be refused"),
+            Err(refused) => refused,
+        };
+        assert_eq!(refused.field, "GOOGLE_APPLICATION_CREDENTIALS");
+        assert_eq!(
+            refused.reason,
+            "GOOGLE_APPLICATION_CREDENTIALS: the key file is not JSON"
+        );
+        let mut faulty = table();
+        faulty.remove("project");
+        let refused = match build_with(&faulty, &context(), || -> Result<Credentials, _> {
+            panic!("the credential is read before the table is checked")
+        }) {
+            Ok(_) => panic!("the table should be refused"),
+            Err(refused) => refused,
+        };
+        assert_eq!(refused.field, "project");
+    }
 }

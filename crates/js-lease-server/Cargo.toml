@@ -22,6 +22,7 @@ js-pool-static = { path = "../js-pool-static" }
 js-proto = { path = "../js-proto" }
 js-provider = { path = "../js-provider" }
 js-provider-ec2 = { path = "../js-provider-ec2" }
+js-provider-gce = { path = "../js-provider-gce" }
 js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-registry = { path = "../js-registry" }
 js-scaler = { path = "../js-scaler" }

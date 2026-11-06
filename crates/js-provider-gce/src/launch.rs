@@ -275,20 +275,17 @@ impl InstanceStatus {
     /// The status the cloud calls `text`; a name this release does not know is
     /// [`InstanceStatus::Other`].
     pub fn parse(text: &str) -> Self {
-        STATUSES
-            .iter()
-            .find(|(name, _)| *name == text)
-            .map_or_else(
-                || {
-                    Self::Other(
-                        text.chars()
-                            .filter(char::is_ascii_graphic)
-                            .take(STATUS_KEPT)
-                            .collect(),
-                    )
-                },
-                |(_, status)| status.clone(),
-            )
+        STATUSES.iter().find(|(name, _)| *name == text).map_or_else(
+            || {
+                Self::Other(
+                    text.chars()
+                        .filter(char::is_ascii_graphic)
+                        .take(STATUS_KEPT)
+                        .collect(),
+                )
+            },
+            |(_, status)| status.clone(),
+        )
     }
 
     /// The status the scheduler reads this as. `PROVISIONING`, `STAGING` and `REPAIRING`
