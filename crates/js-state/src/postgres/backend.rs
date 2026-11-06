@@ -102,7 +102,7 @@ impl Drop for PostgresBackend {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
         // Best effort: a schema left behind is only clutter in a throwaway database.
-        let _ = Conn::connect(&self.base.pg).map(|mut client| {
+        let _ = Conn::connect(&self.base.dial()).map(|mut client| {
             for schema in schemas.iter() {
                 let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"));
             }

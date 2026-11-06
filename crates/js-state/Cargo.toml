@@ -9,8 +9,10 @@ publish.workspace = true
 
 [features]
 # The Postgres backend (`postgres` module). Off by default: the pure scheduler crates and
-# the single-node build carry no database client.
-postgres = ["dep:postgres", "dep:tokio"]
+# the single-node build carry no database client. TLS (rustls with ring, already in the
+# workspace for the lease server and the clients) is part of it, not a feature of its own:
+# a store on another host needs it, and it adds no crate the workspace does not build.
+postgres = ["dep:percent-encoding", "dep:postgres", "dep:rustls", "dep:tokio", "dep:tokio-rustls"]
 # The in-memory fake with its deliberate defects, the conformance suite and the Postgres
 # suite factory. Test-only: a production build carries none of it. A crate that tests
 # against the fake enables it in its `[dev-dependencies]` entry for js-state.
@@ -23,12 +25,17 @@ test-database = ["postgres", "dep:js-testkit"]
 [dependencies]
 # `test-database` only.
 js-testkit = { path = "../js-testkit", optional = true, features = ["postgres"] }
+# The `sslrootcert` path of a store URL (postgres/url.rs), feature `postgres`.
+percent-encoding = { workspace = true, optional = true }
 postgres = { workspace = true, optional = true }
 rusqlite.workspace = true
+# The Postgres client's TLS (postgres/tls.rs), feature `postgres`.
+rustls = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["fs"] }
 thiserror.workspace = true
 # `rt` only, to ask whether the calling thread is inside a runtime (postgres/conn.rs).
 tokio = { workspace = true, optional = true, features = ["rt"] }
+tokio-rustls = { workspace = true, optional = true }
 # A change feed row of a kind this build does not know is skipped and logged.
 tracing.workspace = true
 
@@ -36,6 +43,13 @@ tracing.workspace = true
 # This crate's own tests (unit tests are built with `cfg(test)`, the files in tests/ are
 # separate crates that see only the features on).
 js-state = { path = "../js-state", features = ["test-database", "test-support"] }
+# The test certificates of the TLS tests (tests/postgres_faults/tls.rs).
+rcgen.workspace = true
+rustls.workspace = true
+# The TLS front of the TLS tests: a loopback listener that answers the client's TLS request
+# and passes the connection on to the test server.
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }
+tokio-rustls.workspace = true
 # A child held between fork and exec, for the tests of what releases the file lock, and the
 # test server's URL (`database::server_url`) for the Postgres tests.
 js-testkit = { path = "../js-testkit", features = ["postgres"] }

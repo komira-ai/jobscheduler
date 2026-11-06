@@ -65,7 +65,12 @@ pub(crate) fn from_server(state: &Arc<Shared>, max_job_wall: Duration) -> Option
         .map(|usage| Arc::new(SinkHistory(usage.sink())) as Arc<dyn History>);
     let fleet = fleet::Ctx::served(hosts, pools, history);
     let api = JobApi::new(jobs, agents.clock.clone());
-    Some(api.with_read(read).with_submit(submit).with_fleet(fleet))
+    Some(
+        api.with_read(read)
+            .with_submit(submit)
+            .with_fleet(fleet)
+            .with_fence(agents.fence.clone()),
+    )
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the

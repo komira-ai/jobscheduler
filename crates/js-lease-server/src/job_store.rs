@@ -29,21 +29,41 @@ use js_state::{Store, SystemClock};
 use tracing::info;
 
 use crate::agents::state_path;
+use crate::config::FeedRetention;
 use crate::error::StartupError;
+
+mod feed_trim;
+
+pub(crate) use feed_trim::FeedTrim;
 
 /// The job store the server runs on: the tables over whichever state store the service
 /// opened, with allocation ids from the system's random source.
 pub(crate) type ServerJobs = JobStore<Arc<dyn Store>, RandomIds>;
 
 /// What the job store is opened with: the flag or key of the job service's address (which
-/// turned it on, and names it in a refusal), and how long an ended job is kept
-/// (`--job-retention`, `server.job_retention`).
+/// turned it on, and names it in a refusal), how long an ended job is kept
+/// (`--job-retention`, `server.job_retention`), how many changes its feed keeps
+/// (`--job-feed-retention`, `server.job_feed_retention`) and how long a freed allocation's
+/// row is kept (`--job-allocation-retention`, `server.job_allocation_retention`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JobStoreSetup {
     /// `--job-listen` or `server.job_listen`.
     pub(crate) flag: &'static str,
     /// The window an ended job's record and result are kept for.
     pub(crate) retention: Retention,
+    /// How many of the newest changes of the store's feed the tick keeps.
+    pub(crate) feed_retention: FeedRetention,
+    /// The window a freed allocation's row is kept for after its free.
+    pub(crate) allocation_retention: Retention,
+}
+
+/// The job store as [`open`] returns it: the tables, and the state store under them, which
+/// the tick trims the feed of ([`FeedTrim`]).
+pub(crate) struct Opened {
+    /// The job and allocation tables.
+    pub(crate) jobs: Arc<ServerJobs>,
+    /// The tick's handle for trimming the store's feed.
+    pub(crate) feed: FeedTrim,
 }
 
 /// The suffix of the job store's file, after the lease file's name.
@@ -56,10 +76,7 @@ pub(crate) const SUFFIX: &str = ".jobs";
 /// cannot be made owner-only or opened as a state store (a directory in its place, another
 /// process holding it, a file that is not a state store) is a refused start naming the flag
 /// of the job service's address.
-pub(crate) fn open(
-    state_file: &Path,
-    setup: JobStoreSetup,
-) -> Result<Arc<ServerJobs>, StartupError> {
+pub(crate) fn open(state_file: &Path, setup: JobStoreSetup) -> Result<Opened, StartupError> {
     let path = state_path(state_file, SUFFIX);
     if let Err(err) = owner_only(&path) {
         let reason = format!("{}: {err}", path.display());
@@ -70,6 +87,7 @@ pub(crate) fn open(
         .map_err(StartupError::because(setup.flag))?;
     let store: Arc<dyn Store> = Arc::new(store);
     let boot = store.now();
+    let feed = FeedTrim::new(Arc::clone(&store), setup.feed_retention);
     let jobs =
         JobStore::new(Arc::new(store), RandomIds).map_err(StartupError::because(setup.flag))?;
     // Before the first tick: an outage longer than a queue wait, a start timeout or a
@@ -79,7 +97,13 @@ pub(crate) fn open(
         .raise_at_boot(boot)
         .map_err(StartupError::because(setup.flag))?;
     info!(file = %path.display(), raised, "the job store is open");
-    Ok(Arc::new(jobs.with_retention(setup.retention)))
+    Ok(Opened {
+        jobs: Arc::new(
+            jobs.with_retention(setup.retention)
+                .with_allocation_retention(setup.allocation_retention),
+        ),
+        feed,
+    })
 }
 
 /// Makes the file at `path` (creating it empty when it is missing) owner-only.
@@ -110,6 +134,8 @@ mod tests {
         JobStoreSetup {
             flag: "--job-listen",
             retention: Retention::new(Duration::from_secs(retention_secs)).unwrap(),
+            feed_retention: FeedRetention::DEFAULT,
+            allocation_retention: Retention::new(Duration::from_secs(2 * retention_secs)).unwrap(),
         }
     }
 
@@ -121,9 +147,13 @@ mod tests {
     fn the_store_is_opened_once_beside_the_lease_file_with_its_retention() {
         let dir = scratch("opened");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(259_200)).unwrap();
+        let jobs = open(&state, setup(259_200)).unwrap().jobs;
         assert!(dir.path().join("leases.toml.jobs").is_file());
         assert_eq!(jobs.retention(), setup(259_200).retention);
+        assert_eq!(
+            jobs.allocation_retention(),
+            setup(259_200).allocation_retention
+        );
         let second = open(&state, setup(259_200)).err().unwrap();
         assert_eq!(second.flag(), "--job-listen");
         assert!(second.reason().contains("leases.toml.jobs"), "{second}");
@@ -137,7 +167,7 @@ mod tests {
     fn opening_the_store_raises_the_deadlines_for_the_boot() {
         let dir = scratch("boot");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(60)).unwrap();
+        let jobs = open(&state, setup(60)).unwrap().jobs;
         let id = js_jobs::JobId::parse("job-q").unwrap();
         let new = js_jobs::NewJob {
             id: Some(id.clone()),
@@ -149,11 +179,11 @@ mod tests {
         assert_eq!(queued.deadline_floor, None);
         drop(jobs);
         let floor = |jobs: &ServerJobs| jobs.get_job(&id).unwrap().unwrap().deadline_floor;
-        let reopened = open(&state, setup(60)).unwrap();
+        let reopened = open(&state, setup(60)).unwrap().jobs;
         let first = floor(&reopened).unwrap();
         assert!(first >= queued.submitted_at.saturating_add(js_jobs::BOOT_GRACE));
         drop(reopened);
-        let again = open(&state, setup(60)).unwrap();
+        let again = open(&state, setup(60)).unwrap().jobs;
         assert!(floor(&again).unwrap() >= first);
     }
 

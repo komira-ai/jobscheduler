@@ -28,9 +28,13 @@
 //!   `session-idle` rests it at the VM user. The VM user is never deleted or killed
 //!   here: the leases whose users are deleted are those the ledger holds, and a lease
 //!   user's name cannot be the VM user's ([`crate::lease::VmUser`]). Then every
-//!   other live lease user is killed and deleted (with the sweep of `user-delete`): a Mac
-//!   that lost power mid-lease never stays logged in as a dead lease user. A reset that
-//!   fails part-way can be repeated.
+//!   other live lease is ended as `user-delete` ends it (its pool user reset, or replaced;
+//!   the user of a lease from before the pool killed and deleted): a Mac that lost power
+//!   mid-lease never stays logged in as a dead lease user. Then every pool slot that is
+//!   resetting, or leased to a lease that is not live, is reset, and last `pool-create`
+//!   makes the slots that are missing and replaces the broken ones. A reset that fails
+//!   part-way can be repeated; a pool user left broken, or a slot that could not be made,
+//!   does not fail it.
 //!
 //! The restart ends the daemon's connection, and the helper with it, so the reply to a
 //! switch may never arrive; the daemon learns of the switch from its own restart.
@@ -41,11 +45,12 @@ use std::sync::atomic::Ordering;
 use js_types::LeaseId;
 
 use super::Helper;
+use super::pool::Settled;
 use super::role::{Gui, Role};
 use crate::autologin::{
     self, Intent, ensure_kcpassword, read_intent, remove, write_intent, write_kcpassword,
 };
-use crate::lease::{Dotted, parse_lease, user_name};
+use crate::lease::{Dotted, parse_lease};
 use crate::ledger::Ledger;
 
 /// What the boot reset did.
@@ -74,7 +79,7 @@ impl Helper {
         let lease = parse_lease(lease)?;
         let paths = &self.settings.session;
         let ledger = self.lock();
-        self.live_uid(&ledger, lease)?;
+        let name = self.lease_user(&ledger, lease)?.name;
         match read_intent(&paths.intent)? {
             Some(Intent::Lease(other)) if other != lease => {
                 return Err(format!(
@@ -87,7 +92,6 @@ impl Helper {
         autologin::require_filevault_off(self.host.as_ref())?;
         write_intent(&paths.intent, Intent::Lease(lease))
             .map_err(|why| format!("writing {}: {why}", paths.intent.display()))?;
-        let name = user_name(lease);
         let password = self
             .host
             .reset_password(&name)
@@ -244,21 +248,37 @@ impl Helper {
                 Err(why) => errors.push(format!("lease {}: {why}", Dotted(lease))),
             }
         }
+        errors.extend(self.reset_orphans(&mut ledger));
         if !errors.is_empty() {
             return Err(format!(
                 "the boot reset is incomplete: {}",
                 errors.join("; ")
             ));
         }
+        // A slot that could not be made is named in the log and in `pool-status`; it
+        // does not stop the Mac from serving with the rest of the pool.
+        self.make_pool(&mut ledger);
         self.reset_done.store(true, Ordering::Release);
         tracing::info!(kept = ?kept, deleted = deleted.len(), "boot reset done");
         Ok(Reset { kept, deleted })
     }
 
-    /// Kills and deletes the user of a lease left from before this start.
+    /// Ends a lease left from before this start: its pool user is reset (or replaced),
+    /// the user of a lease from before the pool killed and deleted. A pool user left
+    /// broken does not stop the reset: it is lent to no one, and `pool-create` replaces it.
     fn remove_leftover(&self, ledger: &mut Ledger, lease: LeaseId) -> Result<(), String> {
+        let user = self.lease_user(ledger, lease)?;
+        if let Some(slot) = user.slot {
+            return match self.release(ledger, lease, slot)? {
+                Settled::Free => Ok(()),
+                Settled::Broken(why) => {
+                    tracing::warn!(lease = %Dotted(lease), "{why}");
+                    Ok(())
+                }
+            };
+        }
         self.kill_locked(ledger, lease)?;
-        Ok(self.delete_locked(ledger, lease).map(drop)?)
+        Ok(self.end_locked(ledger, lease).map(drop)?)
     }
 }
 
