@@ -36,6 +36,9 @@
 //!   `[dev-dependencies]` and adds one test file that calls it. A provider that cannot
 //!   launch runs `conformance::run_all_registered` over a `conformance::RegisteredRig`
 //!   instead. `conformance::block_on` awaits a provider's future on the calling thread.
+//!   `conformance::live` runs the cases that need no fault injection against a live
+//!   provider (`LiveArgs`, `LiveCloud`, `run`): a dry run by default, a spend run only
+//!   with the plan hash the dry run printed, and a cleanup that always runs.
 //!
 //! Nothing here does I/O or reads a clock; the lease-level `Pool` of `js-provider` (the
 //! scheduler's allocation port) is a different trait.

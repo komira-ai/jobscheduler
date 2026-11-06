@@ -1,0 +1,15 @@
+{
+  "kind": "compute#operation",
+  "id": "5000000000000000001",
+  "name": "operation-1700000000000-6000000000001-00000001-0000a001",
+  "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+  "operationType": "insert",
+  "targetLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987654",
+  "status": "RUNNING",
+  "user": "js-launcher@example-project.iam.gserviceaccount.com",
+  "progress": 50,
+  "insertTime": "2026-11-05T00:00:00.000-08:00",
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/operations/operation-1700000000000-6000000000001-00000001-0000a001",
+  "targetId": "1234567890123456789",
+  "startTime": "2026-11-05T00:00:01.000-08:00"
+}

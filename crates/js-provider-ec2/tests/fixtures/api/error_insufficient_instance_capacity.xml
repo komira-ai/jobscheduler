@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>InsufficientInstanceCapacity</Code>
+            <Message>We currently do not have sufficient p5.48xlarge capacity in the Availability Zone you requested (us-east-1b). Our system will be working on provisioning additional capacity.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000021</RequestID>
+</Response>

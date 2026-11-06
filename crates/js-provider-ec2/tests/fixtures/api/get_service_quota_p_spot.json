@@ -1,0 +1,24 @@
+{
+  "Quota": {
+    "ServiceCode": "ec2",
+    "ServiceName": "Amazon Elastic Compute Cloud (Amazon EC2)",
+    "QuotaArn": "arn:aws:servicequotas:us-east-1:123456789012:ec2/L-7212CCBC",
+    "QuotaCode": "L-7212CCBC",
+    "QuotaName": "All P Spot Instance Requests",
+    "Value": 192.0,
+    "Unit": "None",
+    "Adjustable": true,
+    "GlobalQuota": false,
+    "UsageMetric": {
+      "MetricNamespace": "AWS/EC2",
+      "MetricName": "vCPU",
+      "MetricDimensions": {
+        "Class": "P/Spot",
+        "Resource": "vCPU",
+        "Service": "EC2",
+        "Type": "Resource"
+      },
+      "MetricStatisticRecommendation": "Maximum"
+    }
+  }
+}

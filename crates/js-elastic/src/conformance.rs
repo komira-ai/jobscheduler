@@ -20,7 +20,11 @@
 //! to nothing. A case awaits the catalog with [`block_on`], which parks the calling thread
 //! until the provider's future wakes it; a rig whose provider's catalog runs on an async
 //! runtime enters that runtime before the cases run.
+//!
+//! [`live`] runs the cases that need no fault injection against a real provider, behind a
+//! dry run and a plan hash, and always cleans up what it launched.
 
+pub mod live;
 mod registered;
 
 pub use registered::{

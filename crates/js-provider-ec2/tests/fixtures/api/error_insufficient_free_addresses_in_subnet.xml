@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>InsufficientFreeAddressesInSubnet</Code>
+            <Message>There are not enough free addresses in subnet 'subnet-0123456789abcdef0' to satisfy the requested number of instances.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000034</RequestID>
+</Response>

@@ -227,6 +227,8 @@ and is not a launch; it costs nothing.
 
 ### 3.3 Optional: the provider alone
 
+**LIVE**, the provider alone: `docs/runbooks/live-conformance.md` runs the provider's live conformance suite (a dry run by default; it spends only with `--spend --plan-hash <hash>`, which needs the same go as step 4) and refreshes the provider's response fixtures from what the cloud answered.
+
 `crates/js-provider-lambdalabs/examples/first_launch.rs` launches one instance through the provider with
 hard boot, wall-clock and spend limits and no scaler or bootstrap. It runs under its own scheduler id, `first-launch`, so what it launches carries that id and not the pool's.
 It takes no ssh flag and checks nothing on the instance: nothing can connect, so it waits for the API to

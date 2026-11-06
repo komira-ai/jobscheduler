@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "instance-operations/launch/file-system-in-wrong-region",
+    "message": "The file system is in another region. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-file_system_in_wrong_region"
+  }
+}

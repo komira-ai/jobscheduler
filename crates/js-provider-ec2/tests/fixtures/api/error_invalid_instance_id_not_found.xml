@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>InvalidInstanceID.NotFound</Code>
+            <Message>The instance ID 'i-00000000000000001' does not exist</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000020</RequestID>
+</Response>

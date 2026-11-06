@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeCapacityBlockOfferingsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>00000000-0000-0000-0000-000000000005</requestId>
+    <capacityBlockOfferingSet>
+        <item>
+            <capacityBlockOfferingId>cb-0123456789abcdef0</capacityBlockOfferingId>
+            <instanceType>p5.48xlarge</instanceType>
+            <availabilityZone>us-east-1b</availabilityZone>
+            <instanceCount>1</instanceCount>
+            <startDate>2026-11-12T11:30:00.000Z</startDate>
+            <endDate>2026-11-13T11:30:00.000Z</endDate>
+            <capacityBlockDurationHours>24</capacityBlockDurationHours>
+            <upfrontFee>1000.0000</upfrontFee>
+            <currencyCode>USD</currencyCode>
+            <tenancy>default</tenancy>
+        </item>
+        <item>
+            <capacityBlockOfferingId>cb-0fedcba9876543210</capacityBlockOfferingId>
+            <instanceType>p5.48xlarge</instanceType>
+            <availabilityZone>us-east-1a</availabilityZone>
+            <instanceCount>2</instanceCount>
+            <startDate>2026-11-12T11:30:00.000Z</startDate>
+            <endDate>2026-11-13T11:30:00.000Z</endDate>
+            <capacityBlockDurationHours>24</capacityBlockDurationHours>
+            <upfrontFee>2400.0000</upfrontFee>
+            <currencyCode>USD</currencyCode>
+            <tenancy>default</tenancy>
+        </item>
+    </capacityBlockOfferingSet>
+    <nextToken/>
+</DescribeCapacityBlockOfferingsResponse>

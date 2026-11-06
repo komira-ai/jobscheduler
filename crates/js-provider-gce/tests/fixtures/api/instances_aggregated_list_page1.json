@@ -1,0 +1,222 @@
+{
+  "kind": "compute#instanceAggregatedList",
+  "id": "projects/example-project/aggregated/instances",
+  "items": {
+    "zones/us-central1-a": {
+      "instances": [
+        {
+          "kind": "compute#instance",
+          "id": "1234567890123456701",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "js-0123456789ab-fedcba987651",
+          "machineType": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/machineTypes/n1-standard-4",
+          "status": "PROVISIONING",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+          "canIpForward": false,
+          "networkInterfaces": [
+            {
+              "kind": "compute#networkInterface",
+              "network": "https://www.googleapis.com/compute/v1/projects/example-project/global/networks/default",
+              "subnetwork": "https://www.googleapis.com/compute/v1/projects/example-project/regions/us-central1/subnetworks/default",
+              "networkIP": "192.0.2.10",
+              "name": "nic0",
+              "stackType": "IPV4_ONLY",
+              "fingerprint": "EXAMPLE-FINGERPRINT="
+            }
+          ],
+          "disks": [
+            {
+              "kind": "compute#attachedDisk",
+              "type": "PERSISTENT",
+              "mode": "READ_WRITE",
+              "source": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/disks/js-0123456789ab-fedcba987651",
+              "deviceName": "persistent-disk-0",
+              "index": 0,
+              "boot": true,
+              "autoDelete": true,
+              "interface": "SCSI",
+              "diskSizeGb": "50"
+            }
+          ],
+          "metadata": {
+            "kind": "compute#metadata",
+            "fingerprint": "EXAMPLE-FINGERPRINT=",
+            "items": [
+              {
+                "key": "user-data",
+                "value": "REDACTED-BOOT-PAYLOAD"
+              }
+            ]
+          },
+          "serviceAccounts": [],
+          "scheduling": {
+            "onHostMaintenance": "TERMINATE",
+            "automaticRestart": false,
+            "preemptible": false,
+            "provisioningModel": "STANDARD"
+          },
+          "tags": {
+            "fingerprint": "EXAMPLE-FINGERPRINT="
+          },
+          "startRestricted": false,
+          "deletionProtection": false,
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987651",
+          "labels": {
+            "js-scheduler": "example-scheduler",
+            "js-acquire-id": "acquire-0001",
+            "js-label-validation-run": "example-run-1"
+          },
+          "labelFingerprint": "EXAMPLE-FINGERPRINT="
+        },
+        {
+          "kind": "compute#instance",
+          "id": "1234567890123456702",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "js-0123456789ab-fedcba987652",
+          "machineType": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/machineTypes/n1-standard-4",
+          "status": "STAGING",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+          "canIpForward": false,
+          "networkInterfaces": [
+            {
+              "kind": "compute#networkInterface",
+              "network": "https://www.googleapis.com/compute/v1/projects/example-project/global/networks/default",
+              "subnetwork": "https://www.googleapis.com/compute/v1/projects/example-project/regions/us-central1/subnetworks/default",
+              "networkIP": "192.0.2.10",
+              "name": "nic0",
+              "stackType": "IPV4_ONLY",
+              "fingerprint": "EXAMPLE-FINGERPRINT="
+            }
+          ],
+          "disks": [
+            {
+              "kind": "compute#attachedDisk",
+              "type": "PERSISTENT",
+              "mode": "READ_WRITE",
+              "source": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/disks/js-0123456789ab-fedcba987652",
+              "deviceName": "persistent-disk-0",
+              "index": 0,
+              "boot": true,
+              "autoDelete": true,
+              "interface": "SCSI",
+              "diskSizeGb": "50"
+            }
+          ],
+          "metadata": {
+            "kind": "compute#metadata",
+            "fingerprint": "EXAMPLE-FINGERPRINT=",
+            "items": [
+              {
+                "key": "user-data",
+                "value": "REDACTED-BOOT-PAYLOAD"
+              }
+            ]
+          },
+          "serviceAccounts": [],
+          "scheduling": {
+            "onHostMaintenance": "TERMINATE",
+            "automaticRestart": false,
+            "preemptible": false,
+            "provisioningModel": "STANDARD"
+          },
+          "tags": {
+            "fingerprint": "EXAMPLE-FINGERPRINT="
+          },
+          "startRestricted": false,
+          "deletionProtection": false,
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987652",
+          "labels": {
+            "js-scheduler": "example-scheduler",
+            "js-acquire-id": "acquire-0002",
+            "js-label-validation-run": "example-run-1"
+          },
+          "labelFingerprint": "EXAMPLE-FINGERPRINT="
+        },
+        {
+          "kind": "compute#instance",
+          "id": "1234567890123456703",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "js-0123456789ab-fedcba987653",
+          "machineType": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/machineTypes/a2-highgpu-1g",
+          "status": "RUNNING",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+          "canIpForward": false,
+          "networkInterfaces": [
+            {
+              "kind": "compute#networkInterface",
+              "network": "https://www.googleapis.com/compute/v1/projects/example-project/global/networks/default",
+              "subnetwork": "https://www.googleapis.com/compute/v1/projects/example-project/regions/us-central1/subnetworks/default",
+              "networkIP": "192.0.2.10",
+              "name": "nic0",
+              "stackType": "IPV4_ONLY",
+              "fingerprint": "EXAMPLE-FINGERPRINT="
+            }
+          ],
+          "disks": [
+            {
+              "kind": "compute#attachedDisk",
+              "type": "PERSISTENT",
+              "mode": "READ_WRITE",
+              "source": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/disks/js-0123456789ab-fedcba987653",
+              "deviceName": "persistent-disk-0",
+              "index": 0,
+              "boot": true,
+              "autoDelete": true,
+              "interface": "SCSI",
+              "diskSizeGb": "50"
+            }
+          ],
+          "metadata": {
+            "kind": "compute#metadata",
+            "fingerprint": "EXAMPLE-FINGERPRINT=",
+            "items": [
+              {
+                "key": "user-data",
+                "value": "REDACTED-BOOT-PAYLOAD"
+              }
+            ]
+          },
+          "serviceAccounts": [],
+          "scheduling": {
+            "onHostMaintenance": "TERMINATE",
+            "automaticRestart": false,
+            "preemptible": false,
+            "provisioningModel": "STANDARD"
+          },
+          "tags": {
+            "fingerprint": "EXAMPLE-FINGERPRINT="
+          },
+          "startRestricted": false,
+          "deletionProtection": false,
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987653",
+          "labels": {
+            "js-scheduler": "example-scheduler",
+            "js-acquire-id": "acquire-0003",
+            "js-label-validation-run": "example-run-1"
+          },
+          "labelFingerprint": "EXAMPLE-FINGERPRINT=",
+          "guestAccelerators": [
+            {
+              "acceleratorType": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/acceleratorTypes/nvidia-tesla-a100",
+              "acceleratorCount": 1
+            }
+          ]
+        }
+      ]
+    },
+    "zones/us-central1-f": {
+      "warning": {
+        "code": "NO_RESULTS_ON_PAGE",
+        "message": "There are no results for scope 'zones/us-central1-f' on this page.",
+        "data": [
+          {
+            "key": "scope",
+            "value": "zones/us-central1-f"
+          }
+        ]
+      }
+    }
+  },
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/aggregated/instances",
+  "nextPageToken": "EXAMPLE-PAGE-TOKEN-3"
+}

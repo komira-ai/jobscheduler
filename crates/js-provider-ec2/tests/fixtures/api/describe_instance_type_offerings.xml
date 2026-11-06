@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeInstanceTypeOfferingsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>00000000-0000-0000-0000-000000000003</requestId>
+    <instanceTypeOfferingSet>
+        <item>
+            <instanceType>m7i.large</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1a</location>
+        </item>
+        <item>
+            <instanceType>m7i.large</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1b</location>
+        </item>
+        <item>
+            <instanceType>c7g.metal</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1a</location>
+        </item>
+        <item>
+            <instanceType>g5.xlarge</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1a</location>
+        </item>
+        <item>
+            <instanceType>g5.xlarge</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1b</location>
+        </item>
+        <item>
+            <instanceType>p5.48xlarge</instanceType>
+            <locationType>availability-zone</locationType>
+            <location>us-east-1b</location>
+        </item>
+    </instanceTypeOfferingSet>
+</DescribeInstanceTypeOfferingsResponse>

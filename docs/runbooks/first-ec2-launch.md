@@ -72,6 +72,8 @@ the volume); give them for the one image and the one subnet of the run. **LIVE**
 
 ### 1.4 Pre-checks
 
+**LIVE**, the provider alone: `docs/runbooks/live-conformance.md` runs the provider's live conformance suite (a dry run by default; it spends only with `--spend --plan-hash <hash>`, which needs the same go as the launch below) and refreshes the provider's response fixtures from what the cloud answered. Run its dry run before the pre-checks below.
+
 | # | item | pass criterion | mark |
 |---|---|---|---|
 | 1.4.1 | An image for each architecture the pool's offers have. An offer whose architecture has no image is not launched. | `describe-images` in the account's console shows the image `available` in the region, with the architecture the config names. | LIVE |

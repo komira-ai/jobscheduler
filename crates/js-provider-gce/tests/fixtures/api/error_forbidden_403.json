@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": 403,
+    "message": "Required 'compute.instances.create' permission for 'projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987654'",
+    "errors": [
+      {
+        "message": "Required 'compute.instances.create' permission for 'projects/example-project/zones/us-central1-a/instances/js-0123456789ab-fedcba987654'",
+        "domain": "global",
+        "reason": "forbidden"
+      }
+    ]
+  }
+}

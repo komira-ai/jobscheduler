@@ -1,0 +1,18 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded for quota metric 'Requests' and limit 'Requests per minute' of service 'cloudbilling.googleapis.com' for consumer 'project_number:123456789012'.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "service": "cloudbilling.googleapis.com",
+          "consumer": "projects/123456789012"
+        }
+      }
+    ]
+  }
+}

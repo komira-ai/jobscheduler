@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>OptInRequired</Code>
+            <Message>You are not subscribed to this service. Please go to http://aws.amazon.com to subscribe.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000029</RequestID>
+</Response>

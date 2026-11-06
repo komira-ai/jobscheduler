@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TerminateInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>00000000-0000-0000-0000-000000000011</requestId>
+    <instancesSet>
+        <item>
+            <instanceId>i-0123456789abcdef0</instanceId>
+            <currentState>
+                <code>32</code>
+                <name>shutting-down</name>
+            </currentState>
+            <previousState>
+                <code>16</code>
+                <name>running</name>
+            </previousState>
+        </item>
+    </instancesSet>
+</TerminateInstancesResponse>

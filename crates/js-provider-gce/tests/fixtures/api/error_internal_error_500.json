@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": 500,
+    "message": "Internal error. Please try again later.",
+    "errors": [
+      {
+        "message": "Internal error. Please try again later.",
+        "domain": "global",
+        "reason": "internalError"
+      }
+    ],
+    "status": "INTERNAL"
+  }
+}

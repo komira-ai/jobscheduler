@@ -123,7 +123,7 @@ fn the_instance_list_keeps_every_row_in_the_order_given() {
     assert_eq!(first.id.as_str(), "a1b2c3d4e5f60718293a4b5c6d7e8f90");
     assert_eq!(first.name.as_deref(), Some("js-0123abcd-000000000001"));
     assert_eq!(first.ip.as_deref(), Some("198.51.100.7"));
-    assert_eq!(first.private_ip.as_deref(), Some("10.0.0.7"));
+    assert_eq!(first.private_ip.as_deref(), Some("192.0.2.7"));
     assert_eq!(first.hostname.as_deref(), Some("host-7"));
     assert_eq!(
         (first.region.as_str(), first.instance_type.as_str()),
