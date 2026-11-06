@@ -260,7 +260,7 @@ trait CapacityProvider {
     async fn list(&self, scope: Scope) -> Vec<Instance>;      // for reaping and re-adoption                            (Built)
     async fn observe(&self, i: &InstanceId) -> Observed;      // Present | Absent | Unknown                             (Planned for elastic)
     fn verify_instance(&self, hello: &Hello) -> Option<InstanceId>; // match a first hello to an acquire            (Planned)
-    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices                              (Planned)
+    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices        (Built: Reclaimed; Interruption planned)
 }
 ```
 

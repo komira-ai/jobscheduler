@@ -243,6 +243,7 @@ impl<'a> Pass<'a> {
         if let Some(held) = &pool.held {
             self.apply_list(pool, held);
         }
+        self.apply_reclaimed(pool);
         self.apply_hosts(pool);
         self.records.instances.append(&mut self.extras);
     }
@@ -396,15 +397,8 @@ impl<'a> Pass<'a> {
         }
         match (before, is_dead(&held.status)) {
             (Phase::Booting | Phase::Registered | Phase::Draining, true) => {
-                self.start_release(i);
-                // A boot that ended starts the cooldown. A host the provider took back (a
-                // spot preemption) after it booted counts toward the trip and the next
-                // cooldown's length, and starts none: the replacement launches at once.
-                if before == Phase::Booting {
-                    self.cool(&pool.settings, CooldownReason::BootFailed);
-                } else if held.status == HostStatus::Preempted {
-                    self.strike(&pool.settings);
-                }
+                let preempted = held.status == HostStatus::Preempted;
+                self.on_lost(pool, i, preempted);
             }
             (Phase::Orphan, true) => self.orphan_gone(i),
             (Phase::Orphan, false) => {
@@ -413,6 +407,39 @@ impl<'a> Pass<'a> {
                 record.last_clean = None;
             }
             _ => {}
+        }
+    }
+
+    /// A machine in `Booting`, `Registered` or `Draining` that the provider no longer runs
+    /// (`preempted` when it took the machine back) is released. A boot that ended starts the
+    /// cooldown. A host the provider took back (a spot preemption) after it booted counts
+    /// toward the trip and the next cooldown's length, and starts none: the replacement
+    /// launches at once.
+    fn on_lost(&mut self, pool: &PoolInput, i: usize, preempted: bool) {
+        let before = self.records.instances[i].phase;
+        self.start_release(i);
+        if before == Phase::Booting {
+            self.cool(&pool.settings, CooldownReason::BootFailed);
+        } else if preempted {
+            self.strike(&pool.settings);
+        }
+    }
+
+    /// The machines the provider's notices said it reclaimed ([`Input::reclaimed`]), after
+    /// the list: each takes the route of a machine the list shows preempted, so a machine
+    /// both a notice and the list name is released and counted once.
+    fn apply_reclaimed(&mut self, pool: &PoolInput) {
+        let input = self.input;
+        for i in self.indices(&pool.settings.pool) {
+            let record = &self.records.instances[i];
+            let named = record
+                .cloud_id
+                .as_ref()
+                .is_some_and(|id| input.reclaimed.contains(id));
+            let held = [Phase::Booting, Phase::Registered, Phase::Draining].contains(&record.phase);
+            if named && held {
+                self.on_lost(pool, i, true);
+            }
         }
     }
 

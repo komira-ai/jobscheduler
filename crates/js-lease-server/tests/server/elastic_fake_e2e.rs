@@ -11,8 +11,9 @@ use js_elastic::{Offer, PriceUnit, RefusalCode};
 use js_elastic_fake::{Bill, Billing, Call, ElasticFake, FakeClock, Step};
 use js_provider::{Pool, StartAck, StopAck};
 use js_provider_lambdalabs::Call as LambdaCall;
+use js_registry::HostMark;
 use js_scaler::{Blocked, Phase};
-use js_types::{ExecMode, LeaseId, Model, accelerator_of};
+use js_types::{ExecMode, HostId, LeaseId, Model, accelerator_of};
 
 use crate::lambda_e2e_support::Rig;
 use crate::scaler_support::{account, elastic_cloud, spec, start, text_with};
@@ -217,16 +218,18 @@ async fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
     }
 }
 
-/// Asserts preemption through the server: the cloud reclaims a registered machine two and a
-/// half minutes after its launch; the next tick's list shows it preempted, the record goes
-/// to `Releasing` and the release is sent, and the record is `Gone` when the cloud says
-/// it has no more of the machine. The cloud's bill for the machine stops at the
-/// preemption: three whole minutes, however long the test goes on. It catches a preempted
-/// machine the scaler goes on counting as running, and one it never releases.
+/// Asserts preemption through the server, over a provider that sends no notices (the list
+/// is then what shows a reclaim, as it is for a notice stream that has ended): the cloud
+/// reclaims a registered machine two and a half minutes after its launch; the next tick's
+/// list shows it preempted, the record goes to `Releasing` and the release is sent, and the
+/// record is `Gone` when the cloud says it has no more of the machine. The cloud's bill for
+/// the machine stops at the preemption: three whole minutes, however long the test goes on.
+/// It catches a preempted machine the scaler goes on counting as running, and one it never
+/// releases.
 #[tokio::test]
 async fn a_preempted_machine_is_released_and_billed_only_until_it_was_taken() {
     let cloud = cloud();
-    let rig = Rig::elastic("e2e_cloud_preempt", cloud.clone()).await;
+    let rig = Rig::quiet("e2e_cloud_preempt", cloud.clone()).await;
     let (name, token) = rig.launch().await;
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
@@ -251,6 +254,50 @@ async fn a_preempted_machine_is_released_and_billed_only_until_it_was_taken() {
     assert_eq!(cloud.bill_of(&id), minutes_billed(3));
     assert_eq!(cloud.bill(), minutes_billed(3));
     assert!(cloud.running().is_empty());
+}
+
+/// Asserts a reclaim seen by the cloud's notice, through the server, with a list that
+/// still shows the machine active and no tick of the server's: once the reader has acted on
+/// the notice the host is cordoned and marked ending in the registry, the record is
+/// `Releasing`, the release has been sent and the brake counts one failure; a request
+/// presented then is not placed on the host but waits, and the next tick launches a
+/// replacement for it. It catches a notice nobody reads (the request would be booked on a
+/// host that no longer exists until a list caught up), and a reclaim that skips the route
+/// a listed preemption takes.
+#[tokio::test]
+async fn a_reclaim_notice_takes_the_host_out_before_any_list_shows_it() {
+    let cloud = cloud();
+    let (rig, back) = Rig::lagging("e2e_cloud_reclaim_notice", cloud.clone()).await;
+    let pace = || {
+        let heard = back.recv_timeout(std::time::Duration::from_secs(30));
+        heard.expect("the scaler's reader never came back for a notice");
+    };
+    let (name, token) = rig.launch().await;
+    pace();
+    let (me, credential) = rig.join(&token, &name).await;
+    rig.tick().await;
+    assert_eq!(rig.phase(), Phase::Registered);
+    let id = cloud.running()[0].clone();
+    rig.withdraw();
+    rig.advance(150);
+    assert_eq!(rig.beat(&credential, &me).await.status, 200);
+
+    cloud.preempt(&id);
+    pace();
+    let host = HostId::new(&name).unwrap();
+    let own = rig.registry().own_host(&host).unwrap();
+    assert!(own.cordon_until.is_some(), "{own:?}");
+    assert_eq!(own.host.mark, Some(HostMark::Releasing));
+    assert_eq!(rig.phase(), Phase::Releasing);
+    assert_eq!(cloud.count(Call::Release), 1);
+    assert_eq!(rig.state().records.brake["burst"].failures, 1);
+    let scaler = rig.h.running.scaler().unwrap();
+    assert_eq!(scaler.reclaims_ignored(), 0);
+
+    rig.wait();
+    rig.tick().await;
+    assert_eq!(rig.launched(), 2);
+    assert_eq!(rig.state().records.brake["burst"].failures, 1);
 }
 
 /// Asserts a release the cloud refuses forever, through the server: the host is idle and
