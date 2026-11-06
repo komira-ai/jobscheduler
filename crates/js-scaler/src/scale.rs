@@ -602,10 +602,14 @@ impl Pass<'_> {
             if !staged.is_empty() {
                 self.note_kind(settings);
             }
-            for (record, request) in staged.into_iter().zip(&served) {
-                if let Some(acquire) = &record.acquire {
-                    self.memory.launched(&request.id, acquire);
-                }
+            // Each staged launch carries the acquire id `stage` minted for it.
+            let launches = staged.iter().zip(&served).flat_map(|(record, request)| {
+                record.acquire.iter().map(move |acquire| (request, acquire))
+            });
+            for (request, acquire) in launches {
+                self.memory.launched(&request.id, acquire);
+            }
+            for record in staged {
                 self.actions.extend(launch_actions(
                     &record,
                     settings.token_life(),

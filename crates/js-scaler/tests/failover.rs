@@ -19,7 +19,8 @@ use common::{
 use js_elastic::{Acquired, HostStatus, Instant, Offer, Reason, Refusal, RefusalCode};
 use js_elastic_fake::{Billing, Call, ElasticFake, Step};
 use js_scaler::{
-    AcquirePlan, AcquireResult, Blocked, Millis, Phase, Settings, State, UNNAMED_PROVIDER,
+    AcquirePlan, AcquireResult, Blocked, Cooldown, CooldownReason, Millis, Phase, Settings, State,
+    UNNAMED_PROVIDER,
 };
 use js_sched::failover::{PassedOver, Refused};
 
@@ -471,4 +472,30 @@ fn an_accepted_answer_records_no_refusal() {
     assert_eq!(rig.phase(0), Phase::Booting);
     assert!(rig.state.refusals.is_empty());
     calm(&rig);
+}
+
+/// Asserts that a records file an earlier release wrote, holding a pool cooldown for a quota
+/// refusal (this release passes the instance type over instead and writes none), is still
+/// read and still holds the pool: it shows `Quota` and launches nothing until the cooldown's
+/// end, then launches. Catches a quota cooldown read back from an older file that is dropped
+/// or shown as another reason.
+#[test]
+fn a_quota_cooldown_an_earlier_release_wrote_still_holds_the_pool() {
+    let mut rig = rig_with(settings("gpu"), vec![offer("a", 60)]);
+    let mut records = rig.state.records.clone();
+    records.cooldowns.insert(
+        "gpu".to_owned(),
+        Cooldown {
+            until: at(10 * MINUTE),
+            reason: CooldownReason::Quota,
+        },
+    );
+    rig.state = State::new(records);
+
+    let held = step(&mut rig, at(0), vec![]);
+    assert!(held.is_empty(), "{:?}", labels(&held));
+    assert_eq!(rig.state.blocked.get("gpu"), Some(&Blocked::Quota));
+
+    let launched = only(step(&mut rig, at(10 * MINUTE), vec![]));
+    assert_eq!(label(&launched), "a/z1");
 }
