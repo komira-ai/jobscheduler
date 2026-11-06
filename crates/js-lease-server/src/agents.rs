@@ -25,6 +25,7 @@ use crate::job_expiry::JobLimits;
 use crate::job_store::{self, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
+use crate::logs::{self, LogGrants};
 use crate::rate::HelloLimiter;
 use crate::sched::place::SchedPlacer;
 use crate::usage_hub::Usage;
@@ -83,6 +84,10 @@ pub(crate) struct Agents {
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
     unclean: Mutex<BTreeSet<HostId>>,
+    /// The host credentials and job sinks of live logs, with `sink = "object_store"`
+    /// ([`crate::logs`]); `None` with `sink = "none"`. Its lock is a leaf, and no mint runs
+    /// under it or under the registry's.
+    pub(crate) logs: Option<Arc<LogGrants>>,
     /// The pool's `max_queue_wait` and `start_timeout`, which the job pass of the tick
     /// enforces ([`Agents::job_pass`]).
     pub(crate) job_limits: JobLimits,
@@ -115,14 +120,17 @@ pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
 ///
 /// Without agent flags this is the source `--pool-config` names, untouched. With them it
 /// is a [`LayeredSource`] over that source (if given) and a registry on `clock`, seeded
-/// with the bindings the previous run persisted.
+/// with the bindings the previous run persisted. The agent side mints the host credentials
+/// of live logs with `logs` ([`crate::logs`]); without agent flags no host reports, and
+/// `logs` is dropped.
 pub(crate) fn assemble(
     hosts: Hosts,
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
+    logs: Option<Arc<LogGrants>>,
 ) -> Result<Assembled, StartupError> {
-    assemble_placed(hosts, usage, clock, state_file).map(|(assembled, _)| assembled)
+    assemble_placed(hosts, usage, clock, state_file, logs).map(|(assembled, _)| assembled)
 }
 
 /// [`assemble`], with the placer the registry was given under `--placement js-sched`.
@@ -131,6 +139,7 @@ pub(crate) fn assemble_placed(
     usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
+    logs: Option<Arc<LogGrants>>,
 ) -> Result<(Assembled, Option<Arc<SchedPlacer>>), StartupError> {
     match hosts {
         Hosts::Static(source) => Ok(((source, None), None)),
@@ -206,6 +215,7 @@ pub(crate) fn assemble_placed(
                 jobs,
                 placer: placer.clone(),
                 unclean: Mutex::default(),
+                logs,
                 job_limits,
                 listed_sessions: Mutex::default(),
                 fence: Fence::new(),
@@ -251,6 +261,7 @@ impl Agents {
             jobs: None,
             placer: None,
             unclean: Mutex::default(),
+            logs: None,
             job_limits: JobLimits::default(),
             listed_sessions: Mutex::default(),
             fence: Fence::new(),
@@ -262,6 +273,16 @@ impl Agents {
     pub(crate) fn with_jobs(self, jobs: Arc<ServerJobs>) -> Self {
         Self {
             jobs: Some(jobs),
+            ..self
+        }
+    }
+
+    /// This agent side minting the host credentials of live logs with `logs`, for a test of
+    /// the heartbeat's log grant and the start's sink.
+    #[cfg(test)]
+    pub(crate) fn with_logs(self, logs: Arc<LogGrants>) -> Self {
+        Self {
+            logs: Some(logs),
             ..self
         }
     }
@@ -444,7 +465,9 @@ impl Agents {
     /// hello limits of those that left the file, and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits. The usage side, when there is one, is ticked last.
+    /// force, and their limits. The usage side, when there is one, is ticked next, and the
+    /// host credentials of live logs last ([`LogGrants::tick`]: the departed hosts' are
+    /// forgotten, the renewals and the retries queued and started, off this task).
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
         match blocking(move || this.tokens.reload()).await {
@@ -458,6 +481,9 @@ impl Agents {
         if let Some(usage) = &self.usage {
             usage.tick().await;
         }
+        // A closure over the option, so every test binary runs the same code of the tick.
+        let tick = |grants: &Arc<LogGrants>| grants.tick(&logs::uploading_hosts(&self.registry));
+        self.logs.iter().for_each(tick);
     }
 
     /// Makes the file of bindings hold what the registry has bound, on the pool for

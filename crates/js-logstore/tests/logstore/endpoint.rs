@@ -1,4 +1,4 @@
-//! Endpoints, the URLs built on them, credentials' expiry, and the clocks.
+//! Endpoints, the URLs built on them (the store's base URL among them), credentials' expiry, and the clocks.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +43,20 @@ fn the_url_forms_are_right() {
         (local.region(), local.bucket(), local.path_style()),
         ("us-east-1", "logs", true)
     );
+
+    // The base URL names the store alone, in either style, and reads back to the endpoint.
+    assert_eq!(local.base_url(), "http://127.0.0.1:9000");
+    assert_eq!(path.base_url(), "https://store.example.com");
+    assert_eq!(virtual_host.base_url(), "https://store.example.com");
+    for given in [&local, &path, &virtual_host] {
+        let again = Endpoint::parse(
+            &given.base_url(),
+            given.region(),
+            given.bucket(),
+            given.path_style(),
+        );
+        assert_eq!(again.as_ref(), Ok(given));
+    }
 
     for path_style in [true, false] {
         let rig = Rig::with_style(path_style);
