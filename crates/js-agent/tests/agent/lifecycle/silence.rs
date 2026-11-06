@@ -61,6 +61,7 @@ pub fn job_start(job_id: &str, allocation: &str) -> Command {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     }))
 }
 

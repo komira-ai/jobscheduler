@@ -365,13 +365,6 @@ impl Agents {
     /// Whether the capacity of `host` may be counted by placement: its last job listing was
     /// clean (design section 6.2, section 8 row 37). A host that lists a job it holds no live
     /// allocation for is told to stop it and is not placed on until a listing is clean.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the placement engine reads it; until it lands only tests do"
-        )
-    )]
     pub(crate) fn listing_clean(&self, host: &HostId) -> bool {
         let unclean = self.unclean.lock().unwrap_or_else(PoisonError::into_inner);
         !unclean.contains(host)

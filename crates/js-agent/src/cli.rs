@@ -346,6 +346,18 @@ pub struct Cli {
     /// the flag `--runtime docker` exits 2; the flag without `--runtime docker` exits 2.
     #[arg(long)]
     pub allow_container_engine: bool,
+    /// Turns the VM backend on (macOS, beside `--native-helper-socket`): the absolute path of
+    /// the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A VM start then runs
+    /// in a fresh VM cloned from the base image and destroyed when it ends, at most two at
+    /// once, and the hello
+    /// reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`. Without it a VM start is
+    /// refused `vm-unavailable`. Needs `--vm-store`.
+    #[arg(long, value_name = "PATH")]
+    pub vm_driver: Option<PathBuf>,
+    /// The directory of the VM backend: the base image in `base` and each run's clone under
+    /// `runs/`, on one APFS volume so a clone is a copy-on-write copy. Needs `--vm-driver`.
+    #[arg(long, value_name = "DIR")]
+    pub vm_store: Option<PathBuf>,
     /// The `crun` program of `--runtime crun`, by absolute path; by default
     /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
     /// distribution's AppArmor profile for `crun` (the one that allows it a user
@@ -368,7 +380,9 @@ pub struct Cli {
     /// The bytes of each stream of a `--runtime crun` job with a live-log sink that the
     /// capture keeps in its file in the lease directory, from 1 MiB to 1 GiB: the file is
     /// what the agent uploads while the store is down, and bytes past it are a gap in the
-    /// job's live logs. A job without a sink keeps the capture's 1 MiB.
+    /// job's live logs. A job without a sink keeps the capture's 1 MiB. For a native job with
+    /// a sink it is the most bytes of each of its log files the agent uploads; the rest is a
+    /// gap, and the files themselves are as before.
     #[arg(
         long,
         value_name = "BYTES",

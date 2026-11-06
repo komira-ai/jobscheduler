@@ -171,7 +171,7 @@ pub fn build(spec: &VmSpec) -> Result<Built, String> {
             cfg.setDirectorySharingDevices(&NSArray::from_retained_slice(&shares));
         }
 
-        if !spec.vsock_ports.is_empty() {
+        if !spec.vsock_ports.is_empty() || spec.exec_bridge.is_some() {
             let dev = VZVirtioSocketDeviceConfiguration::new();
             let list: Retained<NSArray<VZSocketDeviceConfiguration>> =
                 NSArray::from_retained_slice(&[Retained::into_super(dev)]);

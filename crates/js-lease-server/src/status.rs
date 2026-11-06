@@ -14,6 +14,11 @@
 //! credential and those whose last mint failed); they hold no credential, and without a sink
 //! the field is left out, so the reply is as it was before it.
 //!
+//! Both also show the health of the store paths of the tick (`store`, see
+//! [`crate::store_health`]): the failed ticks in a row, the kind of the last failure, the last
+//! tick whose store work succeeded, the job pass's latency, the writer lock, and the
+//! `store:unreachable` alert while it holds. It holds no error text, only a kind.
+//!
 //! The machines, the figures of what they cost, the orphans and the last launch are the
 //! scaler's records for the pool (what its last tick left), so they are empty for a pool
 //! that has launched nothing, and in `plan` mode. A record holds no secret: it names a
@@ -36,6 +41,7 @@ use crate::hosts::MemoryView;
 use crate::logs::{LogCounters, LogGrants};
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 use crate::scaler::Scaler;
+use crate::store_health::{self, StoreHealth, StoreView};
 
 /// What the status routes read.
 pub(crate) struct Status {
@@ -45,6 +51,7 @@ pub(crate) struct Status {
     warnings: Vec<String>,
     clock: SharedClock,
     logs: Option<Arc<LogGrants>>,
+    store: Option<Arc<StoreHealth>>,
 }
 
 /// The reply of `GET /v1/pools`.
@@ -56,6 +63,9 @@ pub(crate) struct PoolsView {
     /// The counters of the host credentials of live logs; left out without a sink.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) logs: Option<LogCounters>,
+    /// The health of the store paths; left out only by a status built without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) store: Option<StoreView>,
 }
 
 /// One pool.
@@ -270,6 +280,7 @@ impl Status {
             warnings,
             clock,
             logs: None,
+            store: None,
         }
     }
 
@@ -279,6 +290,15 @@ impl Status {
         Self { logs, ..self }
     }
 
+    /// The same status, showing the health of the store paths `store` records.
+    #[must_use]
+    pub(crate) fn with_store_health(self, store: Arc<StoreHealth>) -> Self {
+        Self {
+            store: Some(store),
+            ..self
+        }
+    }
+
     /// The status now.
     pub(crate) fn view(&self) -> PoolsView {
         let pools = self.pool.iter().map(|pool| self.pool_view(pool)).collect();
@@ -286,6 +306,7 @@ impl Status {
             pools,
             warnings: self.warnings.clone(),
             logs: self.logs.as_ref().map(|logs| logs.counters()),
+            store: self.store.as_ref().map(|store| store.view()),
         }
     }
 
@@ -404,6 +425,9 @@ pub(crate) fn page(view: &PoolsView, at: Timestamp) -> String {
     view.logs
         .iter()
         .for_each(|logs| logs_section(&mut out, logs));
+    view.store
+        .iter()
+        .for_each(|store| store_section(&mut out, store));
     out.push_str("</body></html>\n");
     out
 }
@@ -420,6 +444,15 @@ fn logs_section(out: &mut String, logs: &LogCounters) {
         "hosts whose last mint failed",
         &logs.hosts_failing.to_string(),
     );
+    out.push_str("</table>\n");
+}
+
+/// The health of the store paths.
+fn store_section(out: &mut String, store: &StoreView) {
+    out.push_str("<h2>Store</h2>\n<table>\n");
+    for (label, value) in store_health::rows(store) {
+        row(out, label, &value);
+    }
     out.push_str("</table>\n");
 }
 

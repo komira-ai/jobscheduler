@@ -122,6 +122,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
         readiness: None,
         silence_stop: None,
+        vm: None,
     }
 }
 

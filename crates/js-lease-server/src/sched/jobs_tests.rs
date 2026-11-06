@@ -9,19 +9,25 @@ use std::time::Duration;
 
 use js_agent_wire::{Command, HeldJob, HeldState, NetworkCeiling};
 use js_jobs::interfere::Interfere;
-use js_jobs::{AllocationStep, JobEnd, JobSpec, JobState, NewJob, Output};
-use js_lease::ManualClock;
+use js_jobs::{AllocationStep, Booked, JobEnd, JobId, JobSpec, JobState, Needs, NewJob, Output};
+use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool};
 use js_registry::{Credential, Placer};
+use js_sched::Event;
+use js_sched_placer::engine::Engine;
+use js_sched_placer::engine::jobs::{JobStarts, NoStarts};
+use js_sched_placer::map;
+use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
 use js_state::fake::Fake;
-use js_types::{LeaseId, Shape};
+use js_types::sched::FarmTime;
+use js_types::{HostId, LeaseId, Resources, Shape};
 
-use super::*;
 use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};
-use crate::agents::assemble_placed;
+use crate::agents::{Agents, assemble_placed};
 use crate::job_alloc::{Freed, free_allocation};
+use crate::job_store::ServerJobs;
 use crate::metrics::NoMetrics;
 use crate::per_job::{BeatContext, serve};
 use crate::sched::engine::Settings;
@@ -536,20 +542,20 @@ fn the_engine_keeps_a_jobs_booking_through_its_own_events() {
     }];
     let now = placer.now();
     let mut rebuilt = placer.engine().rebuild(Settings::default(), &every, now);
-    let memory = |engine: &Engine| engine.sched.booked(&worker).unwrap().memory_bytes;
+    let memory = |engine: &Engine| engine.sched().booked(&worker).unwrap().memory_bytes;
     assert_eq!(memory(&rebuilt), 10 * GIB);
     let later = FarmTime::from_millis(now.as_millis() + 5_000);
     rebuilt.heard(&a, None, later);
     rebuilt.feed(later, Event::Tick);
     assert_eq!(rebuilt.job_leases_on(&a).count(), 1);
     let held = rebuilt.job_leases_on(&a).collect::<Vec<_>>();
-    assert_eq!(rebuilt.sched.leases_on(&worker), held);
+    assert_eq!(rebuilt.sched().leases_on(&worker), held);
     rebuilt.host_gone(&a);
     assert_eq!(memory(&rebuilt), 10 * GIB);
     rebuilt.job_failed(&JobId::parse("job-a").unwrap());
     assert_eq!(memory(&rebuilt), 0);
     rebuilt.host_gone(&a);
-    assert!(rebuilt.sched.capacity(&worker).is_none());
+    assert!(rebuilt.sched().capacity(&worker).is_none());
 }
 
 /// Asserts that a pass whose read of either table fails answers the error and places

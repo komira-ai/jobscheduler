@@ -17,6 +17,7 @@ use crate::config::{
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
+use crate::store_health::UNREACHABLE_AFTER;
 use crate::usage_setup::{DEFAULT_HISTORY_RETENTION_DAYS, DEFAULT_PROFILE_STORE_BYTES};
 
 const SERVER_KEYS: &[&str] = &[
@@ -63,6 +64,7 @@ const SERVER_KEYS: &[&str] = &[
     "max_job_wall",
     "store",
     "allow_sqlite_store",
+    "store_unreachable_after",
     "metrics_listen",
 ];
 
@@ -102,6 +104,9 @@ pub(crate) struct Server {
     pub(crate) store: Option<PathBuf>,
     /// `allow_sqlite_store`: whether a `sqlite:` store is accepted; false unless set.
     pub(crate) allow_sqlite_store: bool,
+    /// `store_unreachable_after`: how long the tick's store paths may fail before the store
+    /// is unreachable; 60 s unless the file sets it.
+    pub(crate) store_unreachable_after: Duration,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -271,6 +276,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let job_allocation_retention = read_job_allocation_retention(&mut s)?;
     let max_job_wall = read_max_job_wall(&mut s)?;
     let (store, allow_sqlite_store) = read_store(&mut s)?;
+    let store_unreachable_after = s.duration_or("store_unreachable_after", UNREACHABLE_AFTER)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -305,6 +311,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         max_job_wall,
         store,
         allow_sqlite_store,
+        store_unreachable_after,
     })
 }
 

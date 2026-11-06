@@ -72,8 +72,9 @@
 //! - **Live logs are outside the job's critical path.** A job start's checked sink goes to
 //!   the runtime ([`RunSpec::log_sink`]; one that fails its check is dropped with a
 //!   `log-sink-ignored` note and the job starts as without one), and a runtime that uploads
-//!   (`crun`, [`crate::logs`]) does so on a thread of its own per job: the result, with its
-//!   tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot never wait for it.
+//!   (`crun` and the native runtime, [`crate::logs`]) does so on a thread of its own per job:
+//!   the result, with its tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot
+//!   never wait for it.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each
@@ -509,6 +510,9 @@ pub struct Local {
     /// `--silence-stop`, or [`DEFAULT_SILENCE_STOP`]: how long the server may be silent
     /// before every job is stopped; above the server's default grace plus the stop grace.
     pub silence_stop: Duration,
+    /// The VM backend, when `--vm-driver` turned it on; the agent sets it after the checks
+    /// here ([`crate::vm::VmSettings::from_cli`]).
+    pub vm: Option<crate::vm::VmSettings>,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -783,6 +787,7 @@ impl Local {
             image_allow: image_allow(&cli.image_allow)?,
             egress,
             silence_stop,
+            vm: None,
         })
     }
 }

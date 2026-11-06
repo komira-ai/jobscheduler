@@ -89,6 +89,9 @@
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
+//! - [`sweep`]: a scenario family over a range of seeds split into shards, each shard a run
+//!   of the test binary `tests/sweep.rs`, which the nightly `sim-sweep` workflow runs; a
+//!   failure is printed with the command that replays its seed.
 //! - [`replay`]: a seed run to its end, run again with its trace kept when it fails, and the
 //!   [`FailureReport`] that names the scenario, the seed, the trace hash, the violation
 //!   and the last trace lines.
@@ -122,6 +125,7 @@ pub mod observe;
 pub mod replay;
 pub mod scenario;
 pub mod server;
+pub mod sweep;
 mod text;
 pub mod work;
 

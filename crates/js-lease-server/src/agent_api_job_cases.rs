@@ -41,6 +41,7 @@ async fn a_start_is_resent_until_listed() {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     };
     let mut last = None;
     for _ in 0..3 {
@@ -280,4 +281,51 @@ async fn a_heartbeat_places_a_queued_job_and_the_next_one_starts_it() {
     let id = queue(&unplaced);
     unplaced.beat(&agent).await.unwrap();
     assert_eq!(unplaced.job(&id).state, JobState::Queued);
+}
+
+/// Under `--placement js-sched`, a host whose listing names a job it holds no live allocation
+/// for takes no start while it lists it, though it has room: neither the beat that lists it,
+/// nor the one that lists its result, nor a pass of its own places the queued job there. The
+/// first beat whose listing is clean places it (its start rides on the next reply). It
+/// catches a placement that counts the capacity of a host still running a job the store does
+/// not know (design section 8, row 37).
+#[tokio::test]
+async fn a_host_that_lists_an_unknown_job_takes_no_start_until_its_listing_is_clean() {
+    let mut rig = placing_rig("unclean_no_start");
+    rig.register("host-a", true);
+    let host = HostId::new("host-a").unwrap();
+    let mut agent = FakeAgent::new("host-a");
+    agent.hold("ghost", "00", HeldState::Running);
+    let new = NewJob {
+        id: Some(JobId::parse("job-q").unwrap()),
+        spec: spec(),
+        priority: 0,
+        client: None,
+    };
+    let queued = rig.jobs.insert_queued(new).unwrap().record.id;
+
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(stops(&reply), ["ghost"]);
+    assert!(!rig.agents.listing_clean(&host));
+    assert_eq!(rig.job(&queued).state, JobState::Queued);
+    rig.agents.place_jobs();
+    assert_eq!(rig.job(&queued).state, JobState::Queued);
+
+    agent.take(&reply);
+    let reply = rig.beat(&agent).await.unwrap();
+    assert_eq!(stops(&reply), ["ghost"]);
+    assert_eq!(rig.job(&queued).state, JobState::Queued);
+
+    agent.take(&reply);
+    assert!(agent.listing().is_empty());
+    let reply = rig.beat(&agent).await.unwrap();
+    assert!(starts(&reply).is_empty());
+    assert!(rig.agents.listing_clean(&host));
+    assert_eq!(
+        rig.states(&queued),
+        (JobState::Placed, AllocationStep::Booked)
+    );
+    let reply = rig.beat(&agent).await.unwrap();
+    let started: Vec<String> = starts(&reply).into_iter().map(|s| s.job_id).collect();
+    assert_eq!(started, ["job-q"]);
 }

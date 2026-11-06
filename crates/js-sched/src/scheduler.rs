@@ -671,9 +671,12 @@ impl Scheduler {
             let (barred, backoff) = self.drain.kept_off(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &backoff);
             let backfill = self.backfill_duration(id);
+            // A whole-machine request is not placed on a worker another request's mark is on.
+            let takes_whole = request.kind == LeaseKind::WholeMachine && request.pin.is_none();
+            let unmarked = takes_whole.then(|| self.off_marks(&reserved, id)).flatten();
             let attempt = Attempt {
                 request,
-                reserved: &reserved,
+                reserved: unmarked.as_ref().unwrap_or(&reserved),
                 starts: &holds.starts,
                 backfill,
                 barred: &barred,
@@ -787,11 +790,13 @@ impl Scheduler {
                         let open = !held_pools.contains(&pool);
                         let name = open
                             .then(|| {
+                                let unmarked = self.off_marks(&reserved, id);
                                 servable.reserve(
                                     &self.workers,
                                     request,
-                                    &reserved,
+                                    unmarked.as_ref().unwrap_or(&reserved),
                                     &op.avoid,
+                                    None,
                                     &drain,
                                 )
                             })
@@ -820,9 +825,10 @@ impl Scheduler {
                 && !held_pools.contains(&pool)
                 && self.backfill.only(id).is_none()
             {
+                let unmarked = self.off_marks(&reserved, id);
                 let attempt = Attempt {
                     request,
-                    reserved: &reserved,
+                    reserved: unmarked.as_ref().unwrap_or(&reserved),
                     starts: &holds.starts,
                     backfill,
                     barred: &barred,

@@ -21,8 +21,11 @@ use js_agent::lifecycle::{
 };
 use js_agent::native::NativeRuntime;
 use js_agent::quota::{FakeQuota, ScratchQuota};
+use js_agent::vm::VmSettings;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
 use js_mac_session::client::Client;
+use js_vm_lease::VmDriver;
+use js_vm_lease::fake::FakeDriver;
 
 /// How long a test waits for the other thread before it fails.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -410,6 +413,9 @@ pub struct FakeMachine {
     pub quota: Arc<FakeQuota>,
     /// For each native runtime made: whether its settings carried a bundle store.
     pub bundles_seen: Arc<Mutex<Vec<bool>>>,
+    /// The VM driver of the VM backend; none for a machine that runs no VMs (the default
+    /// driver, which runs none off macOS).
+    pub vms: Option<Arc<FakeDriver>>,
 }
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
@@ -471,6 +477,15 @@ impl FakeMachine {
             files: SharedFiles::default(),
             quota: Arc::new(FakeQuota::new()),
             bundles_seen: Arc::default(),
+            vms: None,
+        }
+    }
+
+    /// The same machine, whose VMs `driver` makes.
+    pub fn with_vms(self, driver: &Arc<FakeDriver>) -> Self {
+        Self {
+            vms: Some(Arc::clone(driver)),
+            ..self
         }
     }
 
@@ -541,6 +556,13 @@ impl Machine for FakeMachine {
 
     fn scratch_quota(&self, _root: &Path) -> Arc<dyn ScratchQuota> {
         self.quota.clone()
+    }
+
+    fn vm_driver(&self, settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
+        match &self.vms {
+            Some(driver) => Ok(driver.clone()),
+            None => js_agent::vm::system_driver(settings),
+        }
     }
 
     fn view(&self) -> Box<dyn HostView> {

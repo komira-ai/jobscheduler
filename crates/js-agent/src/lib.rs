@@ -48,7 +48,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress` and `egress-ports` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress`, `egress-ports`, `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -72,6 +72,8 @@
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
+//! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS only; needs `--vm-store` and `--native-helper-socket` |
+//! | `--vm-store <dir>` | the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
 //! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
 //! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
@@ -94,7 +96,7 @@
 //! | `--allow-container-engine` | accept `--runtime docker`: the engine at `--container-bin` runs the jobs, a fallback for a host that cannot run `crun` and for GPU jobs; every job it runs gets network none, and the agent prints one warning at start that says so. `--runtime docker` without it exits 2 (`--runtime docker: needs --allow-container-engine`), and it without `--runtime docker` exits 2 (`--allow-container-engine: needs --runtime docker`). When the fallback is dropped is an open question of the design (question 7 of komira-ai/jobscheduler#648) |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
 //! | `--image-budget-gib <n>` | the most GiB the unpacked images of `--runtime crun` may take together: a pull that would go over it first evicts the images used least recently (never one a run holds), and one that still does not fit fails `no-capacity`, evicts nothing and removes the image it brought (only a removal the store refuses partway, another agent on the store having taken the image meanwhile, leaves what was evicted before it evicted); the disk offered is reduced by the part of the budget the store does not hold yet. Above 0; by default no budget; needs `--runtime crun` |
-//! | `--log-file-cap <bytes>` | the bytes of each stream of a `--runtime crun` job with a live-log sink that the capture keeps in its file (default 67108864, 64 MiB; from 1 MiB to 1 GiB): the file is the local backlog the agent uploads from while the store is down, and bytes past it are a gap in the job's live logs (`docs/design/live-logs.md`); a job without a sink keeps the capture's 1 MiB. With `--runtime crun` the agent reports the capability `log-upload`, holds the host's upload credential from the heartbeat replies in memory only, and reports what it holds in each heartbeat (`log_grant_state`) |
+//! | `--log-file-cap <bytes>` | the bytes of each stream of a `--runtime crun` job with a live-log sink that the capture keeps in its file (default 67108864, 64 MiB; from 1 MiB to 1 GiB): the file is the local backlog the agent uploads from while the store is down, and bytes past it are a gap in the job's live logs (`docs/design/live-logs.md`); a job without a sink keeps the capture's 1 MiB. For a native job with a sink (`--native-helper-socket`) it is the most bytes of each of the job's log files the agent uploads, the rest a gap, and the files are as before. With `--runtime crun` or `--native-helper-socket` the agent reports the capability `log-upload`, holds the host's upload credential from the heartbeat replies in memory only, and reports what it holds in each heartbeat (`log_grant_state`) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
 //! | `--gpu-mount <src>:<dst>` | a host directory a `crun` GPU job is given read-only (`nosuid,nodev`, not recursive), such as the driver's libraries; repeatable; both absolute, the source a directory not below `/proc`, `/sys` or `/dev`, the destination not at or below those, `/scratch` or a place the runtime mounts itself (`/work`, `/root`, `/tmp`, `/var/tmp`, `/run`, the `/etc` name files), nor hold one of them (`/etc`, `/var`), nor at or below another's. A file source is refused: binding a file where the image has none would leave a file in the image's root that every job of that image shares. A GPU job whose image has a link or a file on the way to the destination, or whose driver directory is gone, is refused when it starts, naming the flag. Needs `--gpu-device` |
@@ -289,6 +291,7 @@ mod transport;
 mod trusted_file;
 pub mod update_hook;
 pub mod usage;
+pub mod vm;
 mod worker;
 
 use std::ffi::OsString;
@@ -724,6 +727,13 @@ fn execute(
         (Some(native), Some(store)) => Some(native.with_bundles(store).map_err(Failure::Usage)?),
         (native, _) => native,
     };
+    let cap = cli.log_file_cap;
+    local.native = local
+        .native
+        .take()
+        .map(|native| native.with_log_file_cap(cap));
+    local.vm =
+        vm::VmSettings::from_cli(&cli, platform, local.native.is_some()).map_err(Failure::Usage)?;
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
@@ -815,13 +825,17 @@ fn execute(
         .is_some_and(|plan| plan.gpus.is_some());
     #[cfg(not(target_os = "linux"))]
     let passthrough = false;
-    // A crun agent uploads live logs: it says so, and its session fills the host's credential
-    // from the replies and reports what it holds.
+    // A crun agent uploads live logs, and so does a native one: it says so, and its session
+    // fills the host's credential from the replies and reports what it holds.
     let log_grant = local
         .container
         .as_ref()
         .and_then(Settings::crun)
-        .map(|plan| Arc::clone(&plan.logs.grant));
+        .map(|plan| Arc::clone(&plan.logs.grant))
+        .or_else(|| {
+            let native = local.native.as_ref();
+            native.map(|native| Arc::clone(&native.logs().grant))
+        });
     let reported = match (local.container.is_some(), local.native.as_ref()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
@@ -838,6 +852,9 @@ fn execute(
         )),
         (false, None) => None,
     };
+    if local.vm.is_some() {
+        vm::report(&mut offer.hello);
+    }
     if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");

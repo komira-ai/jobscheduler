@@ -31,6 +31,15 @@ pub enum Cmd {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Serve the VMs of a lease's store to the host agent: requests are JSON lines on
+    /// stdin, one reply line each on stdout (`js_vm_lease::protocol`); stdin closing ends
+    /// it. The host agent starts this as a child process, one for each VM.
+    #[command(hide = true)]
+    Lease {
+        /// The store: the base image in `base`, each VM under `runs/`.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 /// The gates `probe` runs.

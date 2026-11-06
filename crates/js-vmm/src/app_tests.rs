@@ -16,6 +16,7 @@ fn go(sys: Option<&FakeSystem>, args: &[&str]) -> (String, String, String) {
         cli,
         sys.map(|s| s as &dyn crate::system::System),
         Timing::instant(),
+        &mut std::io::empty(),
         &mut out,
         &mut err,
     );
@@ -54,6 +55,7 @@ fn without_a_hypervisor_every_subcommand_refuses() {
             "image",
         ),
         (vec!["vm-run", "--spec", "/nonexistent"], "vm-run"),
+        (vec!["lease", "--store", "/nonexistent"], "lease"),
     ] {
         let (code, out, err) = go(None, &args);
         assert_eq!(code, REFUSED, "{name}");
@@ -608,4 +610,17 @@ fn a_bases_recorded_sizes_round_trip_and_an_old_base_has_none() {
     assert_eq!(crate::bundle::recorded_sizing(&dir), Some(r));
     std::fs::write(dir.join(crate::bundle::SIZING), "{\"cpus\": \"many\"}").expect("bad");
     assert_eq!(crate::bundle::recorded_sizing(&dir), None);
+}
+
+/// Asserts that the lease mode refuses off macOS, saying why, with status 2 and nothing on
+/// stdout. Catches a Linux host that would answer the agent with a driver that boots
+/// nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_lease_mode_refuses_off_macos() {
+    let sys = FakeSystem::new();
+    let (code, out, err) = go(Some(&sys), &["lease", "--store", "/nonexistent"]);
+    assert_eq!(code, REFUSED);
+    assert_eq!(out, "");
+    assert_eq!(err, "js-vmm lease: VM leases run on macOS only\n");
 }

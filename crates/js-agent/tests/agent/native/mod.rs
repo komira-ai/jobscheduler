@@ -7,17 +7,18 @@
 //! (`disclaim`).
 
 mod adopt;
-mod agent;
+pub(crate) mod agent;
 mod bound;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod env;
-mod fake_helper;
+pub(crate) mod fake_helper;
 mod files;
 mod inputs;
 mod journal;
 mod lifecycle;
+mod live_logs;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
@@ -105,6 +106,13 @@ impl Rig {
     pub fn handing_over(self, hand_over: js_agent::native::HandOver) -> Self {
         let Self { fake, rt, dir } = self;
         let rt = rt.with_hand_over(hand_over);
+        Self { fake, rt, dir }
+    }
+
+    /// The same rig, its runtime uploading the live logs of a run with a sink with `logs`.
+    pub fn living(self, logs: js_agent::logs::LiveLogs) -> Self {
+        let Self { fake, rt, dir } = self;
+        let rt = rt.with_live_logs(logs);
         Self { fake, rt, dir }
     }
 

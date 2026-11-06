@@ -38,6 +38,7 @@ fn start(job_id: &str, bucket: &str, prefix: &str) -> JobStartSpec {
             prefix: prefix.to_owned(),
             path_style: false,
         }),
+        kind: Default::default(),
     }
 }
 

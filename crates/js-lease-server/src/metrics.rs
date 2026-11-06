@@ -71,6 +71,27 @@ impl MetricsSink for NoMetrics {
     fn acquire_answered(&self, _: &str, _: &Acquired) {}
 }
 
+/// The sink it holds, as the placer's job pass reports to it: each placement it committed
+/// and each whose commit failed.
+pub(crate) struct PassSink<'a>(pub(crate) &'a dyn MetricsSink);
+
+// The pass's trait is named by its path, so that its two methods never meet the sink's own in
+// a call here.
+impl js_sched_placer::engine::jobs::PassMetrics for PassSink<'_> {
+    fn job_placed(&self, waited: Duration) {
+        self.0.job_placed(waited);
+    }
+
+    fn store_write_failed(&self) {
+        self.0.store_write_failed();
+    }
+}
+
+impl js_sched_placer::engine::jobs::PassMetrics for NoMetrics {
+    fn job_placed(&self, _: Duration) {}
+    fn store_write_failed(&self) {}
+}
+
 impl Monotonic for NoMetrics {
     fn reading(&self) -> Duration {
         Duration::ZERO
