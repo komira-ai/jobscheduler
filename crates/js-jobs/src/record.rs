@@ -316,7 +316,9 @@ pub struct JobRecord {
     pub ended_at: Option<StoreTime>,
     /// The host it is placed on, once placed.
     pub host: Option<HostId>,
-    /// Whether the client asked to cancel it.
+    /// Whether the client asked to cancel it. Kept after the job ends, however it ends; the job
+    /// service's `Job.cancel_requested` shows it only until the end, and on a job that ended
+    /// lost.
     pub cancel_requested: bool,
     /// When the client first asked to cancel it.
     pub cancel_requested_at: Option<StoreTime>,

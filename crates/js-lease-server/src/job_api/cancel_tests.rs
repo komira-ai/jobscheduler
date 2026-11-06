@@ -86,8 +86,9 @@ async fn no_start_is_sent_after_a_cancel_intent() {
 }
 
 /// Asserts that a queued job is cancelled in the same call, over each transport, with no
-/// allocation, and that the placement passes that follow do not place it. It catches a queued
-/// job left for a later pass to place.
+/// allocation, answered without `cancel_requested` (it has ended), and that the placement
+/// passes that follow do not place it. It catches a queued job left for a later pass to
+/// place, and a cancelled job answered with the cancel still requested.
 #[tokio::test]
 async fn a_cancel_of_a_queued_job_is_immediate() {
     let mut rig = clocked_rig("cancel_queued", true, NEVER);
@@ -96,7 +97,11 @@ async fn a_cancel_of_a_queued_job_is_immediate() {
     for (via, named) in [(Via::Grpc, "job-g"), (Via::Json, "job-j")] {
         writes.submit(via, &wire(named)).await.unwrap();
         let cancelled = writes.cancel(via, named).await.unwrap();
-        assert_eq!(cancelled.state(), v1::JobState::Cancelled, "{via:?}");
+        assert_eq!(
+            (cancelled.state(), cancelled.cancel_requested),
+            (v1::JobState::Cancelled, false),
+            "{via:?}"
+        );
         assert_eq!(rig.jobs.get_allocation(&id(named)).unwrap(), None);
     }
     rig.tick();
@@ -184,7 +189,9 @@ async fn cancel_of_an_unknown_job_is_not_found() {
 /// Asserts that a cancel whose commit fails answers `INTERNAL` with `state-write-failed`
 /// (500 `state-write-failed`) and leaves the job as it was: a queued job still queued, a placed
 /// one still placed without the intent; and that the cancel repeated once the fault has
-/// cleared is committed. It catches a cancel that changes the job before its commit.
+/// cleared is committed: the queued job ends cancelled (so without `cancel_requested`), the
+/// placed one keeps its state with the intent. It catches a cancel that changes the job
+/// before its commit.
 #[tokio::test]
 async fn a_failed_cancel_answers_500_and_changes_nothing() {
     let (store, writes) = over_fake(Fixed::new(true)).await;
@@ -192,9 +199,19 @@ async fn a_failed_cancel_answers_500_and_changes_nothing() {
     writes.submit(Via::Grpc, &wire("job-p")).await.unwrap();
     let host = HostId::new("host-a").unwrap();
     writes.jobs.place(&id("job-p"), host, BOOKED).unwrap();
-    for (via, named, state) in [
-        (Via::Grpc, "job-q", JobState::Queued),
-        (Via::Json, "job-p", JobState::Placed),
+    for (via, named, state, answered) in [
+        (
+            Via::Grpc,
+            "job-q",
+            JobState::Queued,
+            (v1::JobState::Cancelled, false),
+        ),
+        (
+            Via::Json,
+            "job-p",
+            JobState::Placed,
+            (v1::JobState::Placed, true),
+        ),
     ] {
         let before = writes.jobs.get_job(&id(named)).unwrap().unwrap();
         store.fail_next();
@@ -211,7 +228,7 @@ async fn a_failed_cancel_answers_500_and_changes_nothing() {
         assert_eq!(after, before, "{named}");
         assert_eq!((after.state, after.cancel_requested), (state, false));
         let asked = writes.cancel(via, named).await.unwrap();
-        assert!(asked.cancel_requested, "{named}");
+        assert_eq!((asked.state(), asked.cancel_requested), answered, "{named}");
     }
     store.fail_next();
     let again = writes.cancel_grpc("job-p").await.unwrap();

@@ -13,6 +13,10 @@
 //!   their fields. Any other capability has no field and is not shown.
 //! - The host silence of a job (`host_silent_since_ms`) is not in the record: it is left
 //!   absent here, and the read calls set it from the registry (`read.rs`, "Host silence").
+//! - The record's cancel flag says the client asked to cancel the job, and it stays set after
+//!   the job ends. The message's `cancel_requested` means the cancel was asked for and the job
+//!   has not yet ended, or the job ended lost after the ask (`job.proto`), so a job that ended
+//!   any other way, cancelled included, shows it false ([`cancel_requested`]).
 
 use std::time::Duration;
 
@@ -192,6 +196,14 @@ fn times(job: &JobRecord) -> v1::JobTimes {
     }
 }
 
+/// Whether `job` shows `cancel_requested`, as `job.proto` defines it: its record's cancel flag
+/// while it has not ended, and on a job that ended lost; false on a job that ended any other
+/// way, whatever its record holds.
+fn cancel_requested(job: &JobRecord) -> bool {
+    let open = !job.state.is_ended() | (job.state == JobState::Lost);
+    job.cancel_requested & open
+}
+
 /// `job` as the job service shows it.
 pub(crate) fn job(job: &JobRecord) -> v1::Job {
     v1::Job {
@@ -207,7 +219,7 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
             .unwrap_or_default(),
         times: Some(times(job)),
         host_silent_since_ms: None,
-        cancel_requested: job.cancel_requested,
+        cancel_requested: cancel_requested(job),
         client: job.client.as_ref().map(|client| client.as_str().to_owned()),
     }
 }

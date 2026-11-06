@@ -13,7 +13,7 @@
 //!
 //! | the job | what is committed | the answer |
 //! |---|---|---|
-//! | queued | cancelled at once, with a result of reason cancelled and its retention end: it has no allocation | the job, cancelled |
+//! | queued | cancelled at once, with a result of reason cancelled and its retention end: it has no allocation | the job, cancelled, with `cancel_requested` false: it has ended |
 //! | placed, starting or running | the cancel intent (`cancel_requested`), and nothing else | the job, in its state, with the intent |
 //! | ended | nothing | the job, unchanged |
 //! | its cancel already asked for | nothing: a second cancel is the first | the job as the first left it |
