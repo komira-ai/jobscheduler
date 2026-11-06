@@ -233,6 +233,96 @@ fn a_mark_stays_on_its_host_and_goes_with_its_request() {
     assert_eq!(e.sched.state(op), None);
 }
 
+/// Catches: a give-up at a mark's deadline that the registry is not told of (its record of
+/// the request, which its history and its ledger read, would count none), or a request
+/// that gave nothing up reported. `r` marks `a` and gives it up at its deadline: one
+/// give-up, reported for `r`; nothing is reported before.
+#[test]
+fn the_give_ups_of_the_queue_are_reported_by_request() {
+    let hosts = live(&["a", "b"]);
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    e.whole_round(round(vec![waiting("r", 0)], &hosts), at(11_000));
+    assert!(e.whole_give_ups().is_empty());
+    for now in (16_000..=72_000).step_by(5_000) {
+        beat(&mut e, &["a", "b"], now);
+        e.whole_round(round(vec![waiting("r", 0)], &hosts), at(now));
+    }
+    assert_eq!(e.whole_give_ups(), BTreeMap::from([(id("r"), 1)]));
+}
+
+/// Catches: a pending grant kept when the whole-node ceiling falls below the hosts held
+/// whole (the scheduler counts a pending grant as a held whole worker, which its own drop
+/// at the round's start never touches, while the registry drops its newest reservations,
+/// an assigned one included), or a committed lease dropped in its place. `r` is granted
+/// `a` and commits there; `s` is granted `b`. With two of the three hosts kept for
+/// ordinary work the ceiling is one: `s`'s grant is put back and not made again, and
+/// `r`'s lease stays. With the ceiling back, `s` is granted again.
+#[test]
+fn a_falling_ceiling_puts_back_the_newest_pending_grant_and_never_a_committed_lease() {
+    let names = ["a", "b", "c"];
+    let mut e = engine(&[("a", &[]), ("b", &[]), ("c", &[])]);
+    let both = vec![waiting("r", 0), waiting("s", 0)];
+    let marks = e.whole_round(round(both, &live(&names)), at(1_000));
+    assert_eq!(held(&marks), ["r@a*", "s@b*"]);
+    let open = [
+        candidate("a", &[]),
+        candidate("b", &[]),
+        candidate("c", &[]),
+    ];
+    let committed = e.commit_whole(&whole_spec(7, "r"), &open, at(2_000));
+    assert_eq!(committed, Some(Some(0)));
+    let mut low = round(vec![waiting("s", 0)], &live(&names));
+    low.settings.keep_for_ordinary = 2;
+    let marks = e.whole_round(low.clone(), at(3_000));
+    assert!(marks.is_empty(), "{marks:?}");
+    let a = map::worker(&host("a"));
+    assert_eq!(e.sched.leases_on(&a).len(), 1);
+    assert!(e.on[&host("a")].contains_key(&LeaseId::new(1, 7)));
+    let marks = e.whole_round(low, at(4_000));
+    assert!(marks.is_empty(), "{marks:?}");
+    let marks = e.whole_round(round(vec![waiting("s", 0)], &live(&names)), at(5_000));
+    assert_eq!(held(&marks), ["s@b*"]);
+}
+
+/// Request `name`, first presented at `since` ms, holding what `answered` (the engine's
+/// last answer) set aside for it, as the registry hands its marks back in the next round.
+fn waiting_with(name: &str, since: u64, answered: &[Reservation]) -> WaitingWhole {
+    let mark = answered
+        .iter()
+        .find(|mark| mark.request == id(name))
+        .cloned();
+    WaitingWhole {
+        mark,
+        ..waiting(name, since)
+    }
+}
+
+/// Catches: the ceiling's drop ordering a pending grant by the round it is read in rather
+/// than by when it was made (a grant would always look newest, and be put back in place
+/// of a newer mark, the reverse of the registry's pass). `r` is granted the quiet `a` at
+/// one second; `s` marks the busy `b` at eleven. With one of the two hosts kept for
+/// ordinary work the ceiling falls by one: the newer, `s`'s mark, goes, and `r`'s grant
+/// stays, with the time it was made.
+#[test]
+fn a_falling_ceiling_drops_the_newer_mark_before_an_older_pending_grant() {
+    let hosts = live(&["a", "b"]);
+    let mut e = engine(&[("a", &[]), ("b", &[1])]);
+    let first = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(1_000));
+    assert_eq!(held(&first), ["r@a*"]);
+    let both = vec![waiting_with("r", 0, &first), waiting("s", 1_000)];
+    let second = e.whole_round(round(both, &hosts), at(11_000));
+    assert_eq!(held(&second), ["r@a*", "s@b"]);
+    let both = vec![
+        waiting_with("r", 0, &second),
+        waiting_with("s", 1_000, &second),
+    ];
+    let mut low = round(both, &hosts);
+    low.settings.keep_for_ordinary = 1;
+    let third = e.whole_round(low, at(12_000));
+    assert_eq!(held(&third), ["r@a*"]);
+    assert_eq!(third[0].at, Timestamp::from_millis(1_000));
+}
+
 /// Catches: the engine's own queue order used in place of the registry's wait list (the
 /// requests would be served by name). `zeta` was presented before `alpha`: the one quiet
 /// host goes to `zeta`.

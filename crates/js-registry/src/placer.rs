@@ -237,4 +237,17 @@ pub trait Placer: Send + Sync {
         let _ = round;
         None
     }
+
+    /// How many holds each request of the whole-node queue this placer keeps
+    /// ([`Placer::whole_round`]) has given up at their deadline; a request that gave none
+    /// up may be left out. The registry raises its record of each request to that count
+    /// (what [`crate::Registry::request_record`], the history of the request and the
+    /// reservation ledger read), as its own pass counts the give-ups it makes. The hosts a
+    /// give-up backs the request off stay the placer's. Asked under the registry's lock,
+    /// right after [`Placer::whole_round`] answered.
+    ///
+    /// The default, empty, is a placer that gives nothing up.
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        BTreeMap::new()
+    }
 }

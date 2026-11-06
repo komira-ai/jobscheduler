@@ -35,6 +35,13 @@
 //!    worker cheapest to drain once it has waited `drain_after`, and keeps it until it is
 //!    placed, cancelled or gives it up at its deadline.
 //!
+//! A pending grant is a held whole worker to the scheduler, and its drop at the start of a
+//! round never touches one; the registry drops its newest reservations, an assigned one
+//! included, when the ceiling falls. So before each round the engine puts back the newest
+//! pending grants beyond the ceiling ([`Engine::whole_tick`]); a committed lease is never
+//! touched. The holds a request gives up at their deadlines are counted, and the registry
+//! keeps that count in its record of the request ([`Engine::whole_give_ups`]).
+//!
 //! The leases of whole-node requests are numbered in their own term ([`WHOLE_TERM`]), at
 //! a round of their own before any other is placed ([`Engine::whole_tick`]): a round that
 //! places a start or a job numbers its lease as the registry or the job table does, and a
@@ -298,11 +305,13 @@ impl Engine {
     }
 
     /// One placement round in [`WHOLE_TERM`], for the whole-node requests the engine
-    /// queues: none when it queues none. The term and the sequence are as they were after.
+    /// queues: none when it queues none. The newest pending grants beyond the whole-node
+    /// ceiling are put back first. The term and the sequence are as they were after.
     pub(super) fn whole_tick(&mut self, now: FarmTime) {
         if self.whole.is_empty() {
             return;
         }
+        self.drop_over_ceiling(now);
         let (operation, seq) = (self.sched.next_operation(), self.sched.next_seq());
         self.sched
             .recover(WHOLE_TERM, operation, self.whole_seq, Vec::new());
@@ -357,6 +366,45 @@ impl Engine {
         let pending = self.whole.values().filter_map(|op| self.pending(*op));
         let here = pending.filter(|(_, on)| on == worker);
         here.map(|(lease, _)| lease).collect()
+    }
+
+    /// How many holds each whole-node request the engine queues has given up at their
+    /// deadline, those that gave one up ([`Placer::whole_give_ups`]).
+    ///
+    /// [`Placer::whole_give_ups`]: js_registry::Placer::whole_give_ups
+    pub(crate) fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        let counted = self.whole.iter().map(|(id, operation)| {
+            let count = self.sched.whole_give_ups(*operation);
+            (id.clone(), count)
+        });
+        counted.filter(|(_, count)| *count > 0).collect()
+    }
+
+    /// Puts back the newest pending grants beyond the whole-node ceiling, with the marks
+    /// (their requests are queued again, keeping their queue time, with no give-up and no
+    /// bar), as the registry drops its newest reservations, an assigned one included, when
+    /// the ceiling falls; a committed lease is never touched. The scheduler counts a
+    /// pending grant as a held whole worker, which its own drop at the round's start never
+    /// touches, so the engine drops it here, before the round. A mark among the newest is
+    /// left to that drop, which then finds the same marks beyond the ceiling.
+    fn drop_over_ceiling(&mut self, now: FarmTime) {
+        let summary = self.sched.whole_summary();
+        let excess = summary.map_or(0, |summary| summary.whole.saturating_sub(summary.ceiling));
+        if excess == 0 {
+            return;
+        }
+        let mut held = self.reservations(now);
+        // Newest first, as `js_whole::caps::ceiling_excess` takes them.
+        held.sort_by(|a, b| (b.at, &b.request).cmp(&(a.at, &a.request)));
+        let newest = held.into_iter().take(excess).filter(|held| held.assigned);
+        let leases: Vec<SchedLeaseId> = newest
+            .filter_map(|held| self.whole.get(&held.request))
+            .filter_map(|operation| self.pending(*operation))
+            .map(|(lease, _)| lease)
+            .collect();
+        for lease in leases {
+            let _ = self.sched.unplace_keeping_queued_at(lease);
+        }
     }
 
     /// The hosts the engine's whole-node requests hold: marked, or granted and pending.

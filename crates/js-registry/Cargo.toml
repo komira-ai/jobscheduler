@@ -26,6 +26,10 @@ thiserror.workspace = true
 # against `StaticCapacity`.
 js-elastic = { path = "../js-elastic", features = ["conformance"] }
 js-pool-static = { path = "../js-pool-static" }
+# The whole-node suites run under both placements: js-sched's engine is the placer
+# `--placement js-sched` gives the registry (tests/support `Placement`).
+js-sched = { path = "../js-sched" }
+js-sched-placer = { path = "../js-sched-placer" }
 js-sim = { path = "../js-sim" }
 # tests/history.rs writes the records of ended leases into the in-memory fake state store
 # and into a SQLite file in a scratch directory.

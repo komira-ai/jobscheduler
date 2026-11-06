@@ -2,6 +2,9 @@
 //! that one request id holds at most one host, and that the gpu-host class is untouched
 //! by the whole-node records. The registry is driven directly, on a manual clock.
 //!
+//! Each test runs under both placements, `--placement registry` (`registry::NAME`) and
+//! `--placement js-sched` (`js_sched::NAME`), with the same assertions.
+//!
 //! The wait list is in first-seen order but placement does not follow it yet, so nothing
 //! here asserts that the front request gets a freed host.
 
@@ -19,7 +22,7 @@ fn whole() -> ResourceClass {
 
 fn config() -> PoolConfig {
     let name = ProviderId::new("builders").unwrap();
-    PoolConfig::new(name, whole(), pool_shape(), 4)
+    PoolConfig::new(name, whole(), world_shape(), 4)
 }
 
 fn id(text: &str) -> RequestId {
@@ -49,9 +52,9 @@ fn exclusive_not_ready() -> StartAck {
 }
 
 /// A pool with host `a` joined and lease 1 committed to it for request `holder`.
-fn busy() -> (Fixture, js_registry::RegisteredProvider, u64) {
-    let fx = fixture_of(config());
-    let epoch = fx.join("a", "t");
+fn busy(p: Placement) -> (Fixture, js_registry::RegisteredProvider, u64) {
+    let fx = fixture_in(config(), p);
+    let epoch = fx.join_world("a");
     let mut provider = fx.registry.provider();
     assert_eq!(provider.start(named(1, "holder")), StartAck::Unknown);
     (fx, provider, epoch)
@@ -65,9 +68,8 @@ fn waiter(n: usize) -> String {
 /// waiting, a new id still enters and waits at the back; with the cap waiting, a new id
 /// is answered `NoCapacity` and is not entered; a request already waiting keeps its place
 /// and still polls `Unknown`; and a place freed by a cancel is taken by the next new id.
-#[test]
-fn a_new_id_past_the_cap_is_not_entered() {
-    let (fx, mut provider, _) = busy();
+fn a_new_id_past_the_cap_is_not_entered(p: Placement) {
+    let (fx, mut provider, _) = busy(p);
     let below = MAX_WAITING_REQUESTS - 1;
     for n in 0..below {
         let sequence = 10 + n as u64;
@@ -100,9 +102,8 @@ fn a_new_id_past_the_cap_is_not_entered() {
 /// Asserts that a whole-node request with no capable host is refused `no-capable-host`
 /// rather than `NoCapacity` also when the list is full: the cap only turns away requests
 /// that would have waited.
-#[test]
-fn a_full_list_still_refuses_what_no_host_could_serve() {
-    let (fx, mut provider, epoch) = busy();
+fn a_full_list_still_refuses_what_no_host_could_serve(p: Placement) {
+    let (fx, mut provider, epoch) = busy(p);
     for n in 0..MAX_WAITING_REQUESTS {
         let sequence = 10 + n as u64;
         assert_eq!(
@@ -125,10 +126,9 @@ fn a_full_list_still_refuses_what_no_host_could_serve() {
 /// yet ready: a start of the same id under a new lease books nothing, waits (`NoCapacity`)
 /// and is not entered on the list, though another host is free; it books once the first
 /// lease has ended.
-#[test]
-fn a_request_id_holds_one_host_while_committed() {
-    let (fx, mut provider, epoch) = busy();
-    fx.join("b", "t");
+fn a_request_id_holds_one_host_while_committed(p: Placement) {
+    let (fx, mut provider, epoch) = busy(p);
+    fx.join_world("b");
     assert_eq!(provider.start(named(2, "holder")), no_capacity());
     assert_eq!(provider.booked().len(), 1);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
@@ -145,10 +145,9 @@ fn a_request_id_holds_one_host_while_committed() {
 
 /// Asserts the same for a lease that is ready: the id still holds its host, and another
 /// id is placed on the free one.
-#[test]
-fn a_request_id_holds_one_host_while_ready() {
-    let (fx, mut provider, epoch) = busy();
-    fx.join("b", "t");
+fn a_request_id_holds_one_host_while_ready(p: Placement) {
+    let (fx, mut provider, epoch) = busy(p);
+    fx.join_world("b");
     let mut message = fx.heartbeat("a", epoch);
     message.exclusive_ready = Some(lease(1).to_string());
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
@@ -161,10 +160,9 @@ fn a_request_id_holds_one_host_while_ready() {
 /// Asserts that a repeat start with the same request id and the same lease id of a ready
 /// lease is answered `Started` on the host it holds: it is neither refused nor given a
 /// second host.
-#[test]
-fn a_repeat_start_of_a_ready_lease_answers_started() {
-    let (fx, mut provider, epoch) = busy();
-    fx.join("b", "t");
+fn a_repeat_start_of_a_ready_lease_answers_started(p: Placement) {
+    let (fx, mut provider, epoch) = busy(p);
+    fx.join_world("b");
     let mut message = fx.heartbeat("a", epoch);
     message.exclusive_ready = Some(lease(1).to_string());
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
@@ -178,11 +176,10 @@ fn a_repeat_start_of_a_ready_lease_answers_started() {
 
 /// Asserts that a start without an id is not held to one host: two equal anonymous
 /// requests are two consumers and both book.
-#[test]
-fn anonymous_equal_requests_each_book_a_host() {
-    let fx = fixture_of(config());
-    fx.join("a", "t");
-    fx.join("b", "t");
+fn anonymous_equal_requests_each_book_a_host(p: Placement) {
+    let fx = fixture_in(config(), p);
+    fx.join_world("a");
+    fx.join_world("b");
     let mut provider = fx.registry.provider();
     let anonymous =
         |sequence| StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap();
@@ -193,7 +190,7 @@ fn anonymous_equal_requests_each_book_a_host() {
 
 /// A gpu pool where request `r1` used up its one try as a whole-node request on host
 /// `a`, which restored; the provider serves both classes.
-fn spent() -> (Fixture, js_registry::RegisteredProvider, u64) {
+fn spent(p: Placement) -> (Fixture, js_registry::RegisteredProvider, u64) {
     let settings = WholeNodeConfig {
         max_replace: 1,
         ..WholeNodeConfig::dedicated(4)
@@ -201,14 +198,14 @@ fn spent() -> (Fixture, js_registry::RegisteredProvider, u64) {
     let a100 = Some("a100".to_string());
     let shape = Shape::new(
         Resources::new(4000, 8 << 30, 1, a100.clone()).unwrap(),
-        map(&[("os", "macos")]),
+        map(&[("os", "macos"), ("arch", WORLD_ARCH)]),
     );
     let name = ProviderId::new("builders").unwrap();
     let config = PoolConfig::new(name, whole(), shape, 4)
         .with_whole_node(settings)
         .unwrap();
-    let fx = fixture_of(config);
-    let mut joining = hello("a");
+    let fx = fixture_in(config, p);
+    let mut joining = world_hello("a");
     joining.shape.gpus = 1;
     joining.shape.gpu_class = a100;
     let epoch = fx.hello(&joining, &cred("t")).unwrap().epoch;
@@ -248,9 +245,8 @@ fn gpu_start(sequence: u64) -> StartSpec {
 /// gpu-host start under the same id is placed (`Started`, no `exclusive`) and is not
 /// refused; and it does not consume the record, so a whole-node start under the id is
 /// still refused `ExclusiveNotReady` once.
-#[test]
-fn a_spent_whole_node_record_does_not_refuse_a_gpu_host_start() {
-    let (fx, mut provider, epoch) = spent();
+fn a_spent_whole_node_record_does_not_refuse_a_gpu_host_start(p: Placement) {
+    let (fx, mut provider, epoch) = spent(p);
     fx.clock
         .advance(std::time::Duration::from_millis(DEFAULT_RESERVE_BACKOFF_MS));
     fx.beat("a", epoch);
@@ -264,9 +260,19 @@ fn a_spent_whole_node_record_does_not_refuse_a_gpu_host_start() {
 
 /// Asserts that the host a whole-node request is kept off during the back-off is open to
 /// a gpu-host start under the same request id.
-#[test]
-fn a_whole_node_back_off_does_not_close_a_host_to_a_gpu_host_start() {
-    let (_fx, mut provider, _) = spent();
+fn a_whole_node_back_off_does_not_close_a_host_to_a_gpu_host_start(p: Placement) {
+    let (_fx, mut provider, _) = spent(p);
     let ack = provider.start(gpu_start(2));
     assert_eq!(started_on(&ack), Some("a"), "{ack:?}");
 }
+
+crate::both!(
+    a_new_id_past_the_cap_is_not_entered,
+    a_full_list_still_refuses_what_no_host_could_serve,
+    a_request_id_holds_one_host_while_committed,
+    a_request_id_holds_one_host_while_ready,
+    a_repeat_start_of_a_ready_lease_answers_started,
+    anonymous_equal_requests_each_book_a_host,
+    a_spent_whole_node_record_does_not_refuse_a_gpu_host_start,
+    a_whole_node_back_off_does_not_close_a_host_to_a_gpu_host_start,
+);
