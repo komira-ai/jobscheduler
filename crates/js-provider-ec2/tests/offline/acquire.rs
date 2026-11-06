@@ -352,6 +352,28 @@ fn the_cap_counts_launched_and_unanswered_machines() {
     assert_eq!(runs(&lost.account), 1);
 }
 
+/// Asserts that a launch whose answer was lost after it landed counts toward the cap once:
+/// while it is unresolved and no list shows its machine, the launch is counted; once a list
+/// shows that machine, the machine is counted and the unresolved launch of the same acquire
+/// is not counted again. It catches a count that adds the unresolved launch beside the
+/// machine it made, which would refuse an acquire the cap still has room for.
+#[test]
+fn an_unresolved_launch_and_the_machine_it_made_count_once() {
+    let rig = rig(live(2));
+    rig.account
+        .lose_after_next(Action::RunInstances, ApiError::Timeout);
+    assert_eq!(rig.provider.acquire(&ask("a1")), Acquired::Unknown);
+    assert_eq!(rig.account.launched(), 1);
+    assert_eq!(rig.provider.capacity().can_add, Some(1));
+    let listed = rig.provider.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].acquire, "a1");
+    let capacity = rig.provider.capacity();
+    assert_eq!((capacity.supplied, capacity.can_add), (1, Some(1)));
+    accepted(rig.provider.acquire(&ask("a2")));
+    assert_eq!(rig.account.launched(), 2);
+}
+
 /// Asserts that an instance of the acquire that carries some of this scheduler's marks and
 /// not all (here the right tags and another name) denies the acquire as half-marked with
 /// nothing launched; and that the provider counts such an instance, once a list has shown
