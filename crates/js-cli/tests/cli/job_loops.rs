@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::future::{Future, ready};
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -610,6 +611,43 @@ fn job_run_writes_both_streams_and_exits_with_the_jobs_status() {
     let reads: Vec<GetJobRequest> = sent(&fake, "GetJob");
     assert!(reads.iter().all(|read| read.job_id == "nightly-7"));
     assert_eq!(paces.asked(), [TWO]);
+}
+
+/// Asserts that when the job has ended while its stdout still has bytes the log store has
+/// not yet given (the fake answers `GetLogs` with no new bytes until the terminal `GetJob`
+/// was answered), `job run` goes on reading, writes the rest of the stream and then exits
+/// with the job's status. Catches a run that leaves at the job's end with the stream cut
+/// short. The stream cannot end before the job's end here, so the end is always seen first.
+#[test]
+fn job_run_writes_the_rest_of_a_stream_after_the_job_has_ended() {
+    let scratch = Scratch::new("run_late_stream");
+    let fake = Fake::new();
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = ended.clone();
+    fake.respond("GetJob", move |_| {
+        flag.store(true, Ordering::SeqCst);
+        job(JobState::Failed)
+    });
+    fake.answer("GetResult", vec![result(ResultReason::WallLimit)]);
+    fake.respond("GetLogs", move |message| {
+        let read = GetLogsRequest::decode(message).unwrap();
+        let from = read.from_offset.unwrap();
+        let live = LogStream::try_from(read.stream).unwrap() == LogStream::Stdout;
+        let page = match (live, ended.load(Ordering::SeqCst), from) {
+            (true, false, _) => page(0, b"", false),
+            (true, true, 0) => page(0, b"late ", false),
+            (true, true, _) => page(5, b"bytes", true),
+            (false, _, _) => page(0, b"", true),
+        };
+        Answer::Message(page.encode_to_vec())
+    });
+    let paces = Arc::new(Paces::default());
+    let words = ["job", "run", "--id", "nightly-7", "--spec.image", IMAGE];
+    let got = quiet(&scratch, &fake, &paces, &words);
+    assert_eq!(
+        (got.code, got.out.as_str(), got.err.as_str()),
+        (12, "late bytes", "job nightly-7 timed-out\n")
+    );
 }
 
 /// Asserts that a signal fired while the job runs makes `job run` say so, send exactly one
