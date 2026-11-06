@@ -4,12 +4,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostName,
-    HostRef, Offer, ProviderError, Released,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, EventStream,
+    Held, HostName, HostRef, HostStatus, Offer, ProviderError, ProviderEvent, Released,
 };
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{
@@ -43,6 +44,125 @@ static CLOUDS: Mutex<BTreeMap<String, ElasticFake>> = Mutex::new(BTreeMap::new()
 pub fn elastic_cloud(scratch: &Scratch, cloud: &ElasticFake) {
     let key = scratch.path("api-key").display().to_string();
     CLOUDS.lock().unwrap().insert(key, cloud.clone());
+}
+
+/// The key files whose pool's provider lists late and paces its notices ([`Lagging`]), with
+/// where its streams say they are back for a notice; `None` for one that sends no notices.
+static LAGGING: Mutex<BTreeMap<String, Option<Sender<()>>>> = Mutex::new(BTreeMap::new());
+
+/// Makes the provider of the pool whose key file `scratch` makes its elastic fake cloud as
+/// a provider that sends no notices: a reclaim is seen in its list alone.
+pub fn quiet(scratch: &Scratch) {
+    let key = scratch.path("api-key").display().to_string();
+    LAGGING.lock().unwrap().insert(key, None);
+}
+
+/// Makes the provider of the pool whose key file `scratch` makes a [`Lagging`] one over its
+/// elastic fake cloud. The answer hears once each time the scaler's reader comes back for
+/// a notice: when the stream is first read, and after each notice has been acted on.
+pub fn lagging(scratch: &Scratch) -> Receiver<()> {
+    let key = scratch.path("api-key").display().to_string();
+    let (back, heard) = channel();
+    LAGGING.lock().unwrap().insert(key, Some(back));
+    heard
+}
+
+/// The elastic fake cloud whose list does not show a reclaim yet (a preempted machine is
+/// listed active), and whose notice streams say when the reader comes back for the next
+/// notice: the notice is then the only way the scaler learns of the reclaim. With no `back`
+/// it is the cloud as it is, except that it sends no notices.
+struct Lagging {
+    cloud: ElasticFake,
+    back: Option<Sender<()>>,
+}
+
+/// A notice stream that sends `back` a value each time it is asked for the next notice.
+struct Paced {
+    stream: EventStream,
+    back: Sender<()>,
+}
+
+impl Iterator for Paced {
+    type Item = ProviderEvent;
+
+    fn next(&mut self) -> Option<ProviderEvent> {
+        let _ = self.back.send(());
+        self.stream.next()
+    }
+}
+
+impl CapacityProvider for Lagging {
+    fn catalog(&self) -> CatalogFuture<'_> {
+        self.cloud.catalog()
+    }
+
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
+        self.cloud.host_prep(offer)
+    }
+
+    fn payload_limit(&self) -> usize {
+        self.cloud.payload_limit()
+    }
+
+    fn acquire(&self, request: &AcquireRequest) -> Acquired {
+        self.cloud.acquire(request)
+    }
+
+    fn list(&self) -> Result<Vec<Held>, ProviderError> {
+        let mut held = self.cloud.list()?;
+        if self.back.is_none() {
+            return Ok(held);
+        }
+        for each in held
+            .iter_mut()
+            .filter(|h| h.status == HostStatus::Preempted)
+        {
+            each.status = HostStatus::Active;
+        }
+        Ok(held)
+    }
+
+    fn release(&self, id: &HostRef) -> Released {
+        self.cloud.release(id)
+    }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        self.cloud.unresolved()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        self.cloud.is_gone(id)
+    }
+
+    fn id(&self) -> js_types::ProviderId {
+        self.cloud.id()
+    }
+
+    fn can_launch(&self) -> bool {
+        self.cloud.can_launch()
+    }
+
+    fn capabilities(&self) -> js_elastic::ProviderCaps {
+        self.cloud.capabilities()
+    }
+
+    fn capacity(&self) -> js_elastic::Capacity {
+        self.cloud.capacity()
+    }
+
+    fn observe(&self, id: &HostRef) -> js_elastic::Observed {
+        self.cloud.observe(id)
+    }
+
+    fn verify_instance(&self, hello: &js_elastic::Hello) -> Option<HostRef> {
+        self.cloud.verify_instance(hello)
+    }
+
+    fn events(&self) -> Option<EventStream> {
+        let back = self.back.clone()?;
+        let stream = self.cloud.events()?;
+        Some(Box::new(Paced { stream, back }))
+    }
 }
 
 /// The key files whose pool has a provider that panics when the scaler lists its machines.
@@ -136,8 +256,18 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         .get(path.unwrap_or_default())
         .cloned();
     if let Some(cloud) = elastic {
+        let lagging = LAGGING
+            .lock()
+            .unwrap()
+            .get(path.unwrap_or_default())
+            .cloned();
+        let provider: Box<dyn CapacityProvider> = match lagging {
+            Some(back) => Box::new(Lagging { cloud, back }),
+            None => Box::new(cloud),
+        };
         return Ok(Built::Elastic(ElasticBuilt {
-            provider: Box::new(cloud),
+            idle_costs: false,
+            provider,
             floor: Floor {
                 gpus: 1,
                 gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
@@ -178,6 +308,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
+        idle_costs: false,
     }))
 }
 

@@ -13,7 +13,9 @@
 //! # What a step decides
 //!
 //! * Demand. A waiting request is covered, and gets no machine, when it holds a
-//!   reservation, when a free host that fits is not set aside for another request, or
+//!   reservation ([`Waiting::reserved`]: the host or the machine on its way it is set aside
+//!   for is then matched to no other request, and the host is not drained as idle), when a
+//!   free host that fits is not set aside for another request, or
 //!   when a machine on its way (planned, launching, unresolved or booting) has an offer
 //!   that fits it. Matching is greedy in queue order, one request to one host or machine,
 //!   across all the pools before any pool launches. A request that fits a draining host
@@ -25,8 +27,13 @@
 //!   choose): with the pool as its one machine provider, the cheapest available fitting
 //!   offer inside the pool's `provider_limits` (`allowed_instance_types`,
 //!   `max_price_cents_per_hour`), then the fewest accelerators, the least spare CPU and
-//!   memory, and the offer id and zone, never one a provider refused for capacity in the
-//!   same step. An offer with no price, or a price of zero, is never launched (zero would
+//!   memory, and the offer id and zone. A provider's refusal is failed over within the
+//!   request's attempt ([`js_sched::failover`]): an offer refused for `capacity` is not
+//!   asked again in the attempt and its other zones are asked next, an instance type refused
+//!   for `quota` is passed over in its region for [`Settings::quota_backoff`] for every
+//!   request, and a request every offer was refused for waits [`Settings::acquire_retry`],
+//!   or until the pool's catalog is fetched again ([`PoolInput::catalog_refreshed`]). Neither
+//!   answer cools the pool or counts toward its brake. An offer with no price, or a price of zero, is never launched (zero would
 //!   pass both spend caps; a request that fits only such an offer shows
 //!   [`Blocked::Unpriced`]), and a provider that holds its share ([`Settings::provider_share`])
 //!   launches nothing and shows [`Blocked::MaxInstances`]. A launch is made when the pool
@@ -45,7 +52,7 @@
 //!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
 //!   their billed time has left the 30 days.
 //!   The failure brake ([`Brake`], in `brake`) keeps a pool from looping on failures: each
-//!   refusal (quota, denied, shape), boot given up on and spot preemption counts, the cooldown
+//!   refusal (denied, shape), boot given up on and spot preemption counts, the cooldown
 //!   after the n-th in a row is `boot_fail_cooldown` doubled n-1 times up to
 //!   `boot_fail_cooldown_max`, and `boot_fail_trip_after` in a row trip the pool to `Plan`
 //!   ([`Blocked::Tripped`]) until the step is given the pool's name in
@@ -64,8 +71,8 @@
 //!   silent for `unknown_hold`, the machine is released, since it costs money and holds
 //!   nothing: drained and marked for release, which the registry checks when the actions
 //!   run, then released when the mark is read back; [`State::silent_released`] names it for
-//!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
-//!   mark is never released, except that a silent host whose leases the registry gave up
+//!   the shell to log. A host that shows work ([`HostFacts::busy`]) or a `Held` or
+//!   `Reserved` mark is never released, except that a silent host with nothing booked on it
 //!   ([`HostFacts::lease_given_up`]) is not kept by the runs and streams it lists, which a
 //!   job that can no longer report leaves behind. A registered host never heard from since
 //!   its hello ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books
@@ -153,8 +160,8 @@ pub use record::{
     StoredOffer, VERSION,
 };
 pub use settings::{
-    BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked, Health,
-    LaunchMode, Settings, UNNAMED_PROVIDER,
+    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
+    Health, LaunchMode, QUOTA_BACKOFF, Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
@@ -176,6 +183,7 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     // a request a later pool's host or machine on its way covers gets nothing from an
     // earlier one.
     let mut claims = Claims::default();
+    pass.hold_reserved(&mut claims);
     let mut waiting: Vec<&Waiting> = input
         .waiting
         .iter()
@@ -229,7 +237,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
             .map(|record| record.name.clone())
             .collect();
         let machines = holding(settings, &state.records.instances, &[], &idle).len();
-        let price = decide(settings, &pool.offers, &[], demand, machines)
+        let price = decide(settings, &pool.offers, demand, machines)
             .ok()
             .and_then(|offer| offer.price_cents_per_hour);
         let within = price.is_some_and(|price| {

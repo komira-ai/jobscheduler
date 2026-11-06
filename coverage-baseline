@@ -49,6 +49,7 @@ js-proto                    0      -
 js-provider                 0      0
 js-provider-ec2             0      0
 js-provider-fake            0      0
+js-provider-gce             0      0
 js-provider-lambdalabs      0      0
 js-registry                 0      0
 js-scaler                   0      0

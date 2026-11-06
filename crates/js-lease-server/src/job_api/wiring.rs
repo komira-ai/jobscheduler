@@ -4,9 +4,13 @@
 //! job store handle the server holds and the server's clock, and then gives each call group
 //! the context it needs, one builder call per group. A group task whose calls the server
 //! serves adds its `with_<group>` line here when the server handles that group's context
-//! needs exist. Today the read group's is (it reads host silence from the registry), and the
+//! needs exist. Today the read group's is (it reads host silence from the registry), the
 //! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
-//! and the pool's launching providers). The cancel group needs nothing but the tables.
+//! and the pool's launching providers), and the fleet group's (the server's hosts and their
+//! cordons, the status of its pools, and the usage sink's ended bookings, none with
+//! `--usage-off`). The cancel group needs nothing but the tables.
+//! [`SERVED_CALLS`] names the calls a service so built serves; every other call answers
+//! `UNIMPLEMENTED`, and a group task that adds a `with_<group>` line adds its calls there.
 //!
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
@@ -24,32 +28,78 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response};
+use js_api_gateway::Rpc;
 use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
 use super::auth::is_grpc;
+use super::fleet::{self, History, Hosts, Pools, SinkHistory};
 use super::{Bearer, JobApi, gateway, grpc, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
-use crate::config::Clients;
+use crate::config::LiveClients;
+use crate::status::Status;
+
+/// The calls of the job service that [`from_server`] builds and serves, in the order of the
+/// service definition; every other call answers `UNIMPLEMENTED` (over the gateway, 501
+/// `unimplemented`). `docs/http-gateway.md` says which calls are served from this list
+/// (`cargo xtask gen-job-surface` writes that text), and a test of this file sends every call
+/// to the service `from_server` builds and fails when one answers otherwise than this list
+/// says.
+pub const SERVED_CALLS: [Rpc; 12] = [
+    Rpc::SubmitJob,
+    Rpc::GetJob,
+    Rpc::ListJobs,
+    Rpc::CancelJob,
+    Rpc::GetResult,
+    Rpc::GetLogs,
+    Rpc::ListHosts,
+    Rpc::CordonHost,
+    Rpc::UncordonHost,
+    Rpc::ListPools,
+    Rpc::ListProviders,
+    Rpc::GetUsage,
+];
 
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall`. `None` when the
 /// server holds no job store: the job service is off.
-pub(crate) fn from_server(state: &Shared, max_job_wall: Duration) -> Option<JobApi> {
+pub(crate) fn from_server(state: &Arc<Shared>, max_job_wall: Duration) -> Option<JobApi> {
     let agents = state.agents()?;
     let jobs = agents.jobs.clone()?;
     let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
     let read = read::Ctx::default().with_silence(silence);
     let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
+    let shared: Arc<Shared> = Arc::clone(state);
+    let hosts: Arc<dyn Hosts> = shared;
+    let pools: Arc<dyn Pools> = match state.pools() {
+        Some(pools) => Arc::clone(pools) as Arc<dyn Pools>,
+        // A state given no status of its pools has no elastic pool: the status of none.
+        None => Arc::new(Status::new(
+            None,
+            state.registry(),
+            None,
+            Vec::new(),
+            agents.clock.clone(),
+        )),
+    };
+    let history = state
+        .usage()
+        .map(|usage| Arc::new(SinkHistory(usage.sink())) as Arc<dyn History>);
+    let fleet = fleet::Ctx::served(hosts, pools, history);
     let api = JobApi::new(jobs, agents.clock.clone());
-    Some(api.with_read(read).with_submit(submit))
+    Some(
+        api.with_read(read)
+            .with_submit(submit)
+            .with_fleet(fleet)
+            .with_fence(agents.fence.clone()),
+    )
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the
 /// bearer layer of `clients`, chosen by the request's content type.
-pub(crate) fn port(api: JobApi, clients: Clients) -> Router {
+pub(crate) fn port(api: JobApi, clients: LiveClients) -> Router {
     let api = Arc::new(api);
     let both = Both {
         grpc: grpc(Arc::clone(&api), clients.clone()),

@@ -9,17 +9,23 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use js_jobs::{JobId, NewJob};
 use js_lease::{Boot, Clock, LeaseTable, ManualClock, Settings, Timestamp};
+use js_proto::v1::ListPoolsRequest;
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
+use tonic::Code;
 use tower::ServiceExt;
 
-use super::{from_server, port};
+use super::super::tests::{call, connect, methods, send_all, value};
+use super::super::{gateway, grpc};
+use super::{SERVED_CALLS, from_server, port};
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::Agents;
 use crate::api::Shared;
 use crate::config::{Token, parse_token};
+use crate::job_api::fleet;
+use crate::status::Status;
 
 /// The time the server's clock reads, in milliseconds since the Unix epoch.
 const NOW_MS: u64 = 1_700_000_000_000;
@@ -33,7 +39,20 @@ fn token() -> Token {
 
 /// A server state in `dir` whose agent side holds `jobs` (when given), or that has no agent
 /// side at all when `agents` is false.
-fn state(dir: &TestDir, agents: bool, jobs: Option<Arc<crate::job_store::ServerJobs>>) -> Shared {
+fn state(
+    dir: &TestDir,
+    agents: bool,
+    jobs: Option<Arc<crate::job_store::ServerJobs>>,
+) -> Arc<Shared> {
+    Arc::new(bare_state(dir, agents, jobs))
+}
+
+/// The state of [`state`], not yet shared, for a test that gives it more.
+fn bare_state(
+    dir: &TestDir,
+    agents: bool,
+    jobs: Option<Arc<crate::job_store::ServerJobs>>,
+) -> Shared {
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
     let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
     let pool = PoolConfig::new(
@@ -121,6 +140,35 @@ fn without_a_job_store_the_server_builds_no_job_service() {
     assert!(from_server(&state(&other, false, None), WALL).is_none());
 }
 
+/// Asserts that the fleet group of the job service built from the server's state is served
+/// over the server's own handles: its hosts are the state itself, its pools the very status
+/// the state holds, and it has no usage history when the state has no usage side. A state
+/// given no status of its pools is served all the same, over the status of no pool:
+/// `ListPools` answers an empty list, not `UNIMPLEMENTED`. It catches a service built
+/// without its fleet group, or over a copy of the server's state or of its pools' status.
+#[tokio::test]
+async fn the_fleet_group_is_served_over_the_servers_own_handles() {
+    let dir = scratch("fleet_handles");
+    let (_, jobs) = tables();
+    let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(NOW_MS)));
+    let pools = Arc::new(Status::new(None, None, None, Vec::new(), clock));
+    let given = bare_state(&dir, true, Some(Arc::new(jobs))).with_pools(Arc::clone(&pools));
+    let served = Arc::new(given);
+    let api = from_server(&served, WALL).expect("the server holds a job store");
+    let hosts: Arc<dyn fleet::Hosts> = served.clone();
+    assert_eq!(api.fleet, fleet::Ctx::served(hosts, pools, None));
+
+    let other = scratch("fleet_no_status");
+    let (_, jobs) = tables();
+    let bare = state(&other, true, Some(Arc::new(jobs)));
+    assert!(bare.pools().is_none());
+    let api = from_server(&bare, WALL).expect("the server holds a job store");
+    assert_ne!(api.fleet, fleet::Ctx::default());
+    let listed = fleet::list_pools(&api, tonic::Request::new(ListPoolsRequest::default())).await;
+    let listed = listed.expect("ListPools is served").into_inner();
+    assert!(listed.pools.is_empty(), "{listed:?}");
+}
+
 /// The status, the `grpc-status` header (absent for a plain HTTP answer) and the body of
 /// the port's answer to `GET /v1/jobs/job-1` sent with `content_type` (none when `None`)
 /// and, when `authorized`, the server's token.
@@ -132,6 +180,7 @@ async fn answer(
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
     let router = port(from_server(&state, WALL).unwrap(), clients);
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {
@@ -190,6 +239,56 @@ async fn the_port_routes_by_content_type() {
             (status, code, body.as_str()),
             (StatusCode::UNAUTHORIZED, None, ""),
             "{other:?}"
+        );
+    }
+}
+
+/// Asserts that the service the server builds serves exactly the calls of [`SERVED_CALLS`],
+/// over both transports: each of them answers neither `UNIMPLEMENTED` nor 501, and every
+/// other call of the service definition answers `UNIMPLEMENTED` over gRPC and 501
+/// `unimplemented` over the gateway. It catches a list that names a call the server does not
+/// serve yet, or leaves out one it serves, so the served calls `docs/http-gateway.md` names
+/// (rendered from the list) are the server's.
+#[tokio::test]
+async fn the_served_calls_are_the_ones_the_server_serves() {
+    let dir = scratch("served");
+    let (_, jobs) = tables();
+    let state = state(&dir, true, Some(Arc::new(jobs)));
+    let api = Arc::new(from_server(&state, WALL).unwrap());
+    let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
+    let authorization = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
+    let served = |name: &str| SERVED_CALLS.iter().any(|rpc| rpc.name() == name);
+
+    let channel = connect(grpc(Arc::clone(&api), clients.clone())).await;
+    let methods = methods();
+    for method in &methods {
+        let code = call(&channel, method, Some(&authorization))
+            .await
+            .map_or_else(|status| status.code(), |()| Code::Ok);
+        assert_eq!(
+            code == Code::Unimplemented,
+            !served(method),
+            "{method}: {code:?}"
+        );
+    }
+    for rpc in SERVED_CALLS {
+        assert!(
+            methods.iter().any(|method| method == rpc.name()),
+            "{}",
+            rpc.name()
+        );
+    }
+
+    let router = gateway(api, clients);
+    let answers = send_all(&router, Some(value(&authorization))).await;
+    assert_eq!(answers.len(), js_api_gateway::ROUTES.len());
+    for (route, (status, _)) in js_api_gateway::ROUTES.iter().zip(answers) {
+        assert_eq!(
+            status == StatusCode::NOT_IMPLEMENTED,
+            !served(route.rpc.name()),
+            "{}: {status}",
+            route.template
         );
     }
 }

@@ -38,8 +38,16 @@
 //!   files a pull request changes against the entries of `site/ci-paths`.
 //! - `gen-job-surface --out <dir> [--descriptor <path>] [--check]` ([`job_surface`]): the job
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
-//!   service's descriptor set into the two checked-in files; `--check` fails naming a file that
-//!   is not current (docs/job-surface.md).
+//!   service's descriptor set into the two checked-in files, and the generated blocks of
+//!   `docs/http-gateway.md` (its route table and the paragraph that says which calls the
+//!   server serves); `--check` fails naming a file that is not current (docs/job-surface.md).
+//! - [`doc_refs`]: every `js` command the runbooks show and every `/v1/` route they and
+//!   `docs/http-gateway.md` name exists, used by the `doc_refs` test rather than a verb:
+//!   `cargo test -p xtask --test doc_refs`.
+//! - `image-recipe --out <dir> [--root <dir>] [--pins <file>]` ([`image`]): the build
+//!   description of the machine images of `linux-x86_64` and `linux-arm64` (js-agent, crun and
+//!   hostkeeper baked in, each pinned by URL and SHA-256), and the cloud-init seed that builds
+//!   each one from its base image (docs/runbooks/machine-images.md).
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
@@ -59,7 +67,9 @@ use clap::{Parser, Subcommand};
 pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
+pub mod doc_refs;
 pub mod fetch;
+pub mod image;
 pub mod job_surface;
 pub mod layering;
 pub mod macpkg;
@@ -100,6 +110,9 @@ pub enum Error {
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
+    /// The machine image recipes could not be made.
+    #[error("image-recipe: {0}")]
+    Image(#[from] image::Error),
     /// The job surface could not be generated, or the checked-in files are not current.
     #[error(transparent)]
     JobSurface(#[from] job_surface::GenError),
@@ -208,6 +221,9 @@ enum Verb {
     /// Render the job commands of js and the job client's methods from the job service's
     /// descriptor set, or with `--check` fail when the checked-in files differ.
     GenJobSurface(job_surface::Args),
+    /// Write the build descriptions of the linux-x86_64 and linux-arm64 machine images, and the
+    /// cloud-init seed that builds each one (no network: every archive is pinned).
+    ImageRecipe(image::Args),
     /// The js-agent Linux package.
     Pkg {
         /// Which step.
@@ -309,6 +325,7 @@ fn run(cli: Cli) -> Result<String, Error> {
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
+        Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
             PkgVerb::CheckDeb(args) => pkg::check(&args)?,
             PkgVerb::StageMacos(args) => macpkg::stage(&args)?,

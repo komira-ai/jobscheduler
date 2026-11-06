@@ -16,6 +16,8 @@
 --handshake-timeout default=10s required=false
 --header-timeout default=10s required=false
 --history-retention-days default=90 required=false
+--job-allocation-retention default=14d required=false
+--job-feed-retention default=100000 required=false
 --job-listen default=none required=false
 --job-retention default=7d required=false
 --listen default=127.0.0.1:7300 required=false
@@ -23,6 +25,7 @@
 --max-job-wall default=none required=false
 --max-requests default=100 required=false
 --max-ttl default=3600s required=false
+--metrics-listen default=none required=false
 --placement default=registry required=false values=registry|js-sched
 --pool-config default=none required=false
 --profile-store-bytes default=268435456 required=false

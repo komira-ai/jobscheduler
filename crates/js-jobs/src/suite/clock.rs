@@ -128,8 +128,10 @@ pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
                 ended_at: at,
             },
             usage: None,
+            logs: None,
         }),
         retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
+        spec: want.spec.clone().digested(),
         ..want
     };
     assert_eq!(ended, want, "{name}: the end");
@@ -275,9 +277,11 @@ pub fn every_supported_end_is_stored_with_its_time_and_release<B: Backend>(backe
                 ended_at: Some(at),
                 result: ended.result.clone(),
                 retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
+                spec: before.spec.clone().digested(),
                 ..before
             },
-            "{name}: {from:?} to {to:?} is not stored with its time, result and retention alone"
+            "{name}: {from:?} to {to:?} is not stored with its time, result, retention and \
+             digested files alone"
         );
         assert_eq!(stored_job(&rig, &id), ended, "{name}: {from:?} to {to:?}");
         assert_eq!(

@@ -1,7 +1,9 @@
 //! The names of a job's log objects, and the body of a gap marker.
 //!
-//! Let `prefix` be the configured log prefix and `P` the job's prefix, `prefix/job_id/` (just
-//! `job_id/` when the prefix is empty). A job's objects are:
+//! Let `prefix` be the base a job's objects are under, the host's prefix (the configured log
+//! prefix and the host's segment, `js_logmint::host_prefix`, without its trailing `/`), and `P`
+//! the job's prefix, `prefix/job_id/` (just `job_id/` when the base is empty). A job's objects
+//! are:
 //!
 //! | object | key | body |
 //! |---|---|---|
@@ -96,8 +98,8 @@ impl Stream {
     }
 }
 
-/// A job's prefix `P`: `prefix/job_id/`, or `job_id/` when the log prefix is empty. Every key
-/// of the job's objects begins with it.
+/// A job's prefix `P`: `prefix/job_id/` under the base `prefix` (the host's prefix), or
+/// `job_id/` when the base is empty. Every key of the job's objects begins with it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobPrefix(String);
 
@@ -252,7 +254,7 @@ fn allowed(byte: u8) -> bool {
 }
 
 /// Whether `segment` is a segment a log prefix may hold.
-fn segment_ok(segment: &str) -> bool {
+pub(crate) fn segment_ok(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(allowed)
 }
 

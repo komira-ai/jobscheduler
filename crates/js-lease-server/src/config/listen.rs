@@ -4,11 +4,14 @@
 //! only with TLS. [`clear_text`] is that rule, once; the flags (`--listen`, `--job-listen`)
 //! and the configuration file's keys (`server.listen`, `server.agent_listen`,
 //! `server.job_listen`) each ask it, and differ only in how they name the two TLS settings.
+//!
+//! The metrics listener (`--metrics-listen`, `server.metrics_listen`) carries no token, so it
+//! is held to another rule: [`not_private`].
 
 use std::net::SocketAddr;
 use std::path::Path;
 
-use super::{Cli, TlsFiles};
+use super::{Cli, TlsFiles, is_private_address};
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
 
@@ -23,6 +26,40 @@ pub(crate) struct JobListen {
     pub(crate) addr: SocketAddr,
     /// `--job-listen`, or `server.job_listen` when the configuration file gave it.
     pub(crate) flag: &'static str,
+}
+
+/// The address the metrics are served on (`--metrics-listen`, `server.metrics_listen`), and
+/// the flag or key that names it in a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MetricsListen {
+    /// The address to bind.
+    pub(crate) addr: SocketAddr,
+    /// `--metrics-listen`, or `server.metrics_listen` when the configuration file gave it.
+    pub(crate) flag: &'static str,
+}
+
+/// Why the metrics may not be served on `addr`, or `None` when they may: they take no token,
+/// so only a private address ([`is_private_address`]) serves them, as the status routes.
+pub(crate) fn not_private(addr: SocketAddr) -> Option<String> {
+    let public = !is_private_address(addr.ip());
+    public.then(|| {
+        format!(
+            "{addr} is not a private address: the metrics take no token, so they are served on a private address only"
+        )
+    })
+}
+
+/// Where `--metrics-listen` serves the metrics, named by the flag; `None` when it is off.
+///
+/// # Errors
+/// The refusal of an address that is not a private one ([`not_private`]).
+pub(super) fn metrics_listen(cli: &Cli) -> Result<Option<MetricsListen>, StartupError> {
+    let flag = "--metrics-listen";
+    let checked = |addr: SocketAddr| match not_private(addr) {
+        Some(reason) => Err(StartupError::new(flag, reason)),
+        None => Ok(MetricsListen { addr, flag }),
+    };
+    cli.metrics_listen.map(checked).transpose()
 }
 
 /// Why `addr` may not be served without TLS, or `None` when it may: it is a loopback
@@ -44,11 +81,18 @@ pub(super) fn job_listen(cli: &Cli) -> Option<JobListen> {
 }
 
 /// The job store's setup when `--job-listen` turns the job service on: named by the flag,
-/// keeping an ended job for `--job-retention`.
+/// keeping an ended job for `--job-retention`, the newest `--job-feed-retention` changes of
+/// its feed, and a freed allocation for `--job-allocation-retention`.
 pub(super) fn job_store(cli: &Cli) -> Option<JobStoreSetup> {
     let flag = "--job-listen";
-    let retention = cli.job_retention;
-    cli.job_listen.map(|_| JobStoreSetup { flag, retention })
+    let (retention, feed_retention) = (cli.job_retention, cli.job_feed_retention);
+    let allocation_retention = cli.job_allocation_retention;
+    cli.job_listen.map(|_| JobStoreSetup {
+        flag,
+        retention,
+        feed_retention,
+        allocation_retention,
+    })
 }
 
 /// The TLS files of `--tls-cert` and `--tls-key`, both or neither, and the refusal of the

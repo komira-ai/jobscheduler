@@ -59,6 +59,10 @@ pub(crate) struct Shared {
     /// private one and the routes answer as if they did not exist. A request whose peer
     /// is not a private address is answered so too.
     status: Option<Arc<Status>>,
+    /// The status of the pools that the job service's `ListPools` and `ListProviders` read,
+    /// whatever the listen address: the job port takes a client's token. `None` when the
+    /// server was given none.
+    pools: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
     /// The whole-node counts the last tick logged.
@@ -82,6 +86,7 @@ impl Shared {
             agents,
             scaler: None,
             status: None,
+            pools: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
@@ -116,6 +121,18 @@ impl Shared {
     pub(crate) fn with_status(mut self, status: Option<Arc<Status>>) -> Self {
         self.status = status;
         self
+    }
+
+    /// The same state with `pools` as the status of the pools the job service reads.
+    #[must_use]
+    pub(crate) fn with_pools(mut self, pools: Arc<Status>) -> Self {
+        self.pools = Some(pools);
+        self
+    }
+
+    /// The status of the pools the job service reads; `None` when the server was given none.
+    pub(crate) fn pools(&self) -> Option<&Arc<Status>> {
+        self.pools.as_ref()
     }
 
     /// The lease table behind its lock. A handler that also needs the registry takes this
@@ -178,6 +195,22 @@ impl Shared {
     /// Records that the tick loop has ended.
     pub(crate) fn stop_ticking(&self) {
         self.ticking.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether the state store has said this process is no longer its writer.
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.agents
+            .as_ref()
+            .is_some_and(|agents| agents.fence.is_tripped())
+    }
+
+    /// Completes once the state store has said this process is no longer its writer
+    /// ([`crate::fence`]); never without agents, which hold the only store.
+    pub(crate) async fn fenced(&self) {
+        match &self.agents {
+            Some(agents) => agents.fence.tripped().await,
+            None => std::future::pending().await,
+        }
     }
 
     /// How many ticks failed to write the lease file.
@@ -342,7 +375,7 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
 
 /// The peer of the connection a request came in on, as the listener sets it. Absent when
 /// the listener could not name the peer; a status route then refuses.
-type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+pub(crate) type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 
 /// Whether a peer may read the status pages, which take no token: only a private address
 /// ([`is_private_address`]; an IPv4-mapped IPv6 address counts as its IPv4 form). An
@@ -388,7 +421,7 @@ fn page_response(status: &Arc<Status>) -> Response {
 }
 
 /// The answer of a status route that is not served: that of a route that does not exist.
-fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     ApiError::no_route().into_response()
 }
 
@@ -508,9 +541,11 @@ mod request_id_tests;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]
+mod status_logs_tests;
+#[cfg(test)]
 mod whole_restart_tests;
 #[cfg(test)]
-mod whole_view_tests;
+pub(crate) mod whole_view_tests;
 
 #[cfg(test)]
 mod tests {

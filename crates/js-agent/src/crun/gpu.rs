@@ -2,9 +2,12 @@
 //! `--gpu-mount`, `--gpu-env`), checked once at start ([`GpuPassthrough::from_cli`]), and what
 //! a run that booked GPUs is given when it starts.
 //!
-//! Nothing is discovered: the agent reads no CDI spec, runs no vendor hook (the container
-//! runs as the job user, and such a hook needs root) and never guesses a driver's path. A run
-//! that booked the GPU indices `[i, j, ...]` is given:
+//! The running agent discovers nothing: it reads no CDI spec, runs no vendor hook (the
+//! container runs as the job user, and such a hook needs root) and never guesses a driver's
+//! path. The flags are the unit's: on a packaged host `js-agent crun-gpu-dropin` writes them,
+//! from the NVIDIA nodes in `/dev`, into a drop-in of the unit before it starts, after the
+//! same check (see `crate::gpu_dropin`). A run that booked the GPU indices `[i, j, ...]` is
+//! given:
 //!
 //! - each `--gpu-device` without `{index}` (`/dev/nvidiactl`), and each one with it
 //!   (`/dev/nvidia{index}`) for exactly `i, j, ...`: character devices at their own paths,

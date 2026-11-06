@@ -223,6 +223,7 @@ pub fn open(
             passthrough,
             read: read_node,
         }),
+        image_budget: plan.image_budget,
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?
         .with_live_logs(plan.logs.live());

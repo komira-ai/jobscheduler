@@ -224,7 +224,7 @@ pub struct Cli {
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
     /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
-    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// agent runs native jobs, programs started as a user the helper lends from its pool for each run, under
     /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
     /// and `--state-root`, the agent must run as root, and it cannot be combined with
     /// `--container-bin`. The agent checks at start that `sandbox-exec` applies a profile.
@@ -232,10 +232,11 @@ pub struct Cli {
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
     /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
-    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
-    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
-    /// died runs; until then they run on, and their wall limit is enforced only while an
-    /// agent runs.
+    /// are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts
+    /// each run the lease journal in the state root recorded and ends the rest, as the rescue
+    /// of an agent whose worker died does; meanwhile the helper ends a run at its own
+    /// deadline, its wall limit plus `--stop-grace` (a helper from before that deadline holds
+    /// none, and its runs are bounded only while an agent runs).
     /// The profile does not deny System V or POSIX shared memory, semaphores or message
     /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
     /// run that gets the same uid: an open channel between runs on one Mac.
@@ -353,6 +354,17 @@ pub struct Cli {
     /// agent with a loud warning. Needs `--runtime crun`.
     #[arg(long, value_name = "PATH")]
     pub crun_bin: Option<PathBuf>,
+    /// The most GiB the unpacked images of `--runtime crun` (the store beside the scratch
+    /// root) may take together. A pull that would take the store over it first evicts the
+    /// images used least recently, never one a run holds; one that cannot fit even so fails
+    /// as `no-capacity`, evicting nothing, and the image it brought is removed again. Only
+    /// when the store refuses a removal partway (another agent on the store took the image
+    /// meanwhile) does such a failed pull leave the images it evicted before evicted. The
+    /// disk the agent offers
+    /// (`disk-gib`) is reduced by the part of the budget the store does not hold yet. Above
+    /// 0; by default there is no budget and no image is evicted. Needs `--runtime crun`.
+    #[arg(long, value_name = "GIB")]
+    pub image_budget_gib: Option<u64>,
     /// The bytes of each stream of a `--runtime crun` job with a live-log sink that the
     /// capture keeps in its file in the lease directory, from 1 MiB to 1 GiB: the file is
     /// what the agent uploads while the store is down, and bytes past it are a gap in the

@@ -53,6 +53,7 @@ use crate::agreement::{self, Outcome};
 use crate::cell::{Cell, Setup};
 use crate::counters::{Counter, Counters};
 use crate::front::{FrontFactory, LeaseFront};
+use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
 use crate::server::{ServerSpec, Shape};
@@ -252,6 +253,20 @@ impl Scenario {
         let spelled = spelled.map(|value| value.get_name().to_owned());
         self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
         self.server = self.server.placement(placement);
+        self
+    }
+
+    /// This scenario over the job service: its server also serves jobs
+    /// ([`ServerSpec::jobs`], which places as `js-sched`), its agents speak the per-job
+    /// messages, and its client is a [`crate::JobFront`], which submits each unit of work as
+    /// a job. Its name is followed by `-jobs`, so its runs are named apart from the same
+    /// scenario's over the lease front. After [`Scenario::server`] and [`Scenario::under`],
+    /// which would put the lease routes' server back.
+    #[must_use]
+    pub fn over_jobs(mut self) -> Self {
+        self.name = format!("{}-jobs", self.name);
+        self.server = self.server.jobs();
+        self.front = JobFront::factory();
         self
     }
 

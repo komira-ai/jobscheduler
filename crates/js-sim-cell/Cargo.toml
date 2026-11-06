@@ -12,11 +12,16 @@ publish.workspace = true
 js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-conformance = { path = "../js-conformance" }
+# The job and allocation tables' types, and the scripted id source (feature `test-support`)
+# the cell's server mints its ids from, so a seed replays (src/server/ids.rs).
+js-jobs = { path = "../js-jobs", features = ["test-support"] }
 js-lease = { path = "../js-lease" }
 # The server in process, with no listener (src/in_process.rs of that crate).
 js-lease-server = { path = "../js-lease-server", features = ["in-process"] }
 js-registry = { path = "../js-registry" }
 js-sim = { path = "../js-sim" }
+# The clock the job store stamps its rows with, read from the cell's (src/server/ids.rs).
+js-state = { path = "../js-state" }
 js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
 # Requests and bodies for the server's routers (`axum::http`, `axum::body`).

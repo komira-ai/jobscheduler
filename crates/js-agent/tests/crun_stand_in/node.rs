@@ -300,6 +300,7 @@ impl Node {
             files: None,
             egress: None,
             gpus: None,
+            image_budget: None,
         }
     }
 

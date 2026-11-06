@@ -49,13 +49,12 @@
 //! is placed on arrival by the registry's placer, which sees the job allocations too.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{NetworkCeiling, Phase};
 use js_jobs::{
-    AllocationRecord, Booked, JobId, JobRecord, JobStore, JobStoreError, Needs, NetworkPolicy,
-    RandomIds,
+    AllocationRecord, Booked, IdSource, JobId, JobRecord, JobStore, JobStoreError, Needs,
+    NetworkPolicy,
 };
 use js_lease::Timestamp;
 use js_registry::{HostState, HostView};
@@ -69,9 +68,6 @@ use super::{Engine, Placed, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
 
-/// The job tables a server holds: the job store over its state store, drawing random ids.
-pub type ServerJobs = JobStore<Arc<dyn js_state::Store>, RandomIds>;
-
 /// The network level a job's policy asks for.
 pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
     match policy {
@@ -79,6 +75,21 @@ pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
         NetworkPolicy::AllowList => JobNetwork::AllowList,
         NetworkPolicy::Open => JobNetwork::Open,
     }
+}
+
+/// What a pass tells the server's metrics: each committed placement, with how long its job
+/// waited since its submit, and each placement whose commit failed.
+pub trait PassMetrics {
+    /// A queued job was placed, `waited` after it was submitted.
+    fn job_placed(&self, waited: Duration);
+    /// A placement's commit failed: its write did not land.
+    fn store_write_failed(&self);
+}
+
+/// Whether `error` says the state store has a newer writer, so this server commits nothing
+/// more.
+fn is_fenced(error: &JobStoreError) -> bool {
+    matches!(error, JobStoreError::Store(js_state::StoreError::Fenced))
 }
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
@@ -421,15 +432,19 @@ impl SchedPlacer {
     /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now, each
     /// with the network ceiling it advertises, handing each committed placement to `starts` (the
     /// steps of the module docs): the jobs it placed, in queue order. A placement whose commit
-    /// fails is logged and let go; its job stays queued for the next pass.
+    /// fails is logged and let go; its job stays queued for the next pass. Each committed
+    /// placement, with how long its job waited since its submit, and each placement that did
+    /// not commit, are told to `metrics`.
     ///
     /// # Errors
-    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed.
-    pub fn place_jobs(
+    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A commit the
+    /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
+    /// there: a store with a newer writer commits nothing more.
+    pub fn place_jobs<S: js_state::Store, I: IdSource>(
         &self,
-        jobs: &ServerJobs,
+        jobs: &JobStore<S, I>,
         open: &BTreeMap<HostId, NetworkCeiling>,
-        starts: &dyn JobStarts,
+        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
         let live = jobs.live_allocations()?;
@@ -443,13 +458,21 @@ impl SchedPlacer {
         let mut placed = Vec::new();
         for (job, host, booked) in decided {
             match jobs.place(&job, host.clone(), booked) {
-                Ok(_) => {
+                Ok((record, _)) => {
+                    let at = record.placed_at.unwrap_or(record.submitted_at);
+                    metrics.job_placed(at.since(record.submitted_at));
                     starts.placed(&job, &host);
                     placed.push(job);
                 }
                 Err(error) => {
+                    metrics.store_write_failed();
                     self.engine().job_failed(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
+                    // A store with a newer writer commits nothing more: the pass ends here
+                    // and answers the error, for the caller to trip the fence on.
+                    if is_fenced(&error) {
+                        return Err(error);
+                    }
                 }
             }
         }

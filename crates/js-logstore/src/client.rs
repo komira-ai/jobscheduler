@@ -226,7 +226,7 @@ fn request_url(endpoint: &Endpoint, path: &str, query: &[(String, String)]) -> S
 
 /// The headers of a put of `len` bytes at `key` with `metadata`, after the checks made before
 /// any request.
-fn put_headers(
+pub(crate) fn put_headers(
     key: &str,
     len: usize,
     metadata: &Metadata,
@@ -363,7 +363,7 @@ fn content_range(value: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Refuses a key the client does not send: empty or longer than [`MAX_KEY_LEN`].
-fn check_key(key: &str) -> Result<(), StoreError> {
+pub(crate) fn check_key(key: &str) -> Result<(), StoreError> {
     match key.is_empty() || key.len() > MAX_KEY_LEN {
         true => Err(StoreError::Invalid("a key is 1 to MAX_KEY_LEN bytes")),
         false => Ok(()),

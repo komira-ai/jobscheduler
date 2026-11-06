@@ -17,32 +17,35 @@ use crate::answer::Answer;
 const MAX_JOB_ID: usize = 63;
 
 /// The reason of a 400 for a body that is not JSON.
-const NOT_JSON: &str = "the body is not valid JSON";
+pub(crate) const NOT_JSON: &str = "the body is not valid JSON";
 /// The reason of a 400 for a body that is JSON but not an object.
-const NOT_AN_OBJECT: &str = "the body is not a JSON object";
+pub(crate) const NOT_AN_OBJECT: &str = "the body is not a JSON object";
 /// The reason of a 400 for a body with an object that gives one member twice.
-const MEMBER_TWICE: &str = "an object of the body gives a member twice";
+pub(crate) const MEMBER_TWICE: &str = "an object of the body gives a member twice";
 /// The reason of a 400 for a body sent to a route that takes none.
-const NO_BODY: &str = "this route takes no body; its fields are set by the path and the query";
+pub(crate) const NO_BODY: &str =
+    "this route takes no body; its fields are set by the path and the query";
 /// The reason of a 400 for a query string sent to a route whose body is the request.
-const NO_QUERY: &str = "this route takes its fields in the body, not in the query";
+pub(crate) const NO_QUERY: &str = "this route takes its fields in the body, not in the query";
 /// The reason of a 400 for path or query text with a malformed percent escape, or that does
 /// not decode as UTF-8.
-const NOT_TEXT: &str = "the text has a malformed percent escape or does not decode as UTF-8";
+pub(crate) const NOT_TEXT: &str =
+    "the text has a malformed percent escape or does not decode as UTF-8";
 /// The reason of a 400 for a query parameter or JSON key that names no field.
-const UNKNOWN_FIELD: &str = "the request has no such field";
+pub(crate) const UNKNOWN_FIELD: &str = "the request has no such field";
 /// The reason of a 400 for a query parameter of a map that names no key, or of another
 /// field that names one.
-const MALFORMED_KEY: &str = "a map field is set as name[key]=value, any other field as name=value";
+pub(crate) const MALFORMED_KEY: &str =
+    "a map field is set as name[key]=value, any other field as name=value";
 /// The reason of a 400 for a field set twice.
-const TWICE: &str = "the field is set twice";
+pub(crate) const TWICE: &str = "the field is set twice";
 /// The reason of a 400 for a body or query field the request does not have, or that holds a
 /// value of the wrong kind.
-const WRONG_VALUE: &str = "the field is unknown, or does not hold a value of its type";
+pub(crate) const WRONG_VALUE: &str = "the field is unknown, or does not hold a value of its type";
 /// The reason of a 400 for an id outside its grammar.
-const BAD_ID: &str = "the field is not a valid id";
+pub(crate) const BAD_ID: &str = "the field is not a valid id";
 /// The reason of a 400 for a body or query field that the path sets.
-const SET_BY_PATH: &str = "the field is set by the path";
+pub(crate) const SET_BY_PATH: &str = "the field is set by the path";
 
 /// Whether `text` is a job id: 1 to 63 bytes of letters, digits, dot, underscore and dash
 /// (design section 5.3, `JobSpec.job_id` in `job.proto`).

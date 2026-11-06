@@ -73,13 +73,31 @@ pub trait Store: Send + Sync {
     /// At most `limit` feed rows with a revision after `after`, in revision order, never
     /// past a revision that can still commit (C5).
     ///
+    /// A cursor below the feed's floor (the highest revision [`Store::trim_feed`] has
+    /// removed through; 0 for a feed never trimmed) is refused with
+    /// [`StoreError::StaleCursor`] instead of being answered with rows that skip the
+    /// trimmed ones. A read at or past the floor is answered as if no trim had run.
+    ///
     /// On Postgres, a row of a kind this build does not know (a newer release wrote it) is
     /// logged and left out of `rows`, though it counts toward `limit` and the cursor passes
     /// it: a page can hold fewer rows than the limit, or none, and its cursor still moves on.
     ///
     /// # Errors
-    /// [`StoreError`] when the backend fails.
+    /// [`StoreError::StaleCursor`] when `after` is below the floor; [`StoreError`] when
+    /// the backend fails.
     fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError>;
+
+    /// Deletes every feed row whose revision is at or below `min(before, h)`, where `h` is
+    /// the highest revision that can no longer change (the committed head, or one below
+    /// the first revision still to commit: the horizon [`Store::changes`] reads to), and
+    /// returns how many rows it deleted. It never deletes a row above a revision that
+    /// can still commit. It writes no feed row and changes no key. The feed's floor
+    /// rises to `min(before, h)` and never falls, so trimming again at or below the
+    /// floor deletes nothing, and a cursor at or past the floor reads on as before.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the backend fails.
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError>;
 
     /// Removes every key the store's clock has expired, writing an `Expire` row for each,
     /// and returns how many. The reaper task calls this; reads do not wait for it (C4).
@@ -126,6 +144,10 @@ impl Store for std::sync::Arc<dyn Store> {
 
     fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError> {
         (**self).changes(after, limit)
+    }
+
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        (**self).trim_feed(before)
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {
@@ -298,6 +320,15 @@ mod tests {
         assert!(after > before);
         assert_eq!(<Arc<dyn Store> as Store>::reap_expired(&handle), Ok(1));
         assert_eq!(inner.get("k/c").expect("store"), None);
+
+        // The feed holds four rows now (three puts and the expiry); a trim through the
+        // handle removes the first two from the store underneath.
+        assert_eq!(
+            <Arc<dyn Store> as Store>::trim_feed(&handle, Revision(2)),
+            Ok(2)
+        );
+        let left = inner.changes(Revision(2), 10).expect("store");
+        assert_eq!(left.rows.len(), 2);
     }
 
     // Catches a successor that steps into the surrogate gap (no char there, so the

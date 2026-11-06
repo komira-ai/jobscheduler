@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use js_elastic::{CapacityProvider, SchedulerId};
 use js_lease::Clock as LeaseClock;
+use js_provider_ec2 as ec2;
 use js_provider_lambdalabs as lambda;
 use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
 
@@ -107,6 +108,10 @@ pub struct ElasticBuilt {
     /// The execution modes its hosts can run jobs in. A pool whose `exec` is not among
     /// them is refused at start.
     pub exec: Vec<ExecMode>,
+    /// Whether an idle host of this kind costs money by the hour even though the floor
+    /// reports no GPU, as when a catalog mixes sizes with and without accelerators. The
+    /// pool is then held to the lifetime bounds a pool with accelerators is.
+    pub idle_costs: bool,
 }
 
 /// What a constructor builds.
@@ -164,12 +169,13 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// The kinds compiled into the server: provider kinds `static` and `lambdalabs`, and
-    /// platform kind `default`.
+    /// The kinds compiled into the server: provider kinds `static`, `lambdalabs` and `ec2`,
+    /// and platform kind `default`.
     pub fn standard() -> Self {
         Self::default()
             .with("static", static_kind)
             .with("lambdalabs", lambdalabs_kind)
+            .with("ec2", ec2_kind)
             .with_platform(PlatformKind::DEFAULT)
     }
 
@@ -278,10 +284,48 @@ fn lambdalabs_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, Kin
         reason: refused.reason,
     })?;
     Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: false,
         provider: Box::new(built.provider),
         floor: Floor {
             gpus: built.gpus,
             gpu_class: Some(built.gpu_class),
+        },
+        exec: vec![ExecMode::Container],
+    }))
+}
+
+/// The EC2 provider's clock over the server's: the milliseconds the server's clock reads.
+struct Ec2Clock(SharedClock);
+
+impl ec2::Clock for Ec2Clock {
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.0.now().millis())
+    }
+}
+
+/// The `ec2` kind: `js_provider_ec2::kind::build` over the pool's table. The provider is
+/// built disabled and in dry-run unless the pool's `launch` is `live`; the hosts it
+/// launches run containers, and the kind promises no GPU, so its floor is zero; but its
+/// catalog has GPU sizes and EC2 has no run-duration limit, so `idle_costs` holds the
+/// pool to the lifetime keys.
+fn ec2_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
+    let max = usize::try_from(ctx.max_instances).unwrap_or(usize::MAX);
+    let kind_ctx = ec2::kind::Context {
+        scheduler: ctx.scheduler.clone(),
+        max_machines: NonZeroUsize::new(max).unwrap_or(NonZeroUsize::MIN),
+        live: ctx.launch == Launch::Live,
+        clock: Arc::new(Ec2Clock(ctx.clock.clone())),
+    };
+    let built = ec2::kind::build(table, &kind_ctx).map_err(|refused| KindError {
+        field: refused.field,
+        reason: refused.reason,
+    })?;
+    Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: true,
+        provider: Box::new(built.provider),
+        floor: Floor {
+            gpus: 0,
+            gpu_class: None,
         },
         exec: vec![ExecMode::Container],
     }))
@@ -304,5 +348,18 @@ mod tests {
         assert_eq!(clock.now(), Duration::from_millis(5_000));
         server.advance(Duration::from_secs(2));
         assert_eq!(clock.now(), Duration::from_millis(7_000));
+    }
+
+    /// Asserts that the EC2 provider's clock reads the server's, in milliseconds since the
+    /// epoch, and moves when it moves. It catches a provider clock that counts from another
+    /// origin, which would make the launch interval and the unknown hold a guess.
+    #[test]
+    fn the_ec2_providers_clock_is_the_servers() {
+        use ec2::Clock as _;
+        let server = ManualClock::new(Timestamp::from_millis(9_000));
+        let clock = Ec2Clock(SharedClock::new(server.clone()));
+        assert_eq!(clock.now(), Duration::from_millis(9_000));
+        server.advance(Duration::from_secs(3));
+        assert_eq!(clock.now(), Duration::from_millis(12_000));
     }
 }

@@ -218,8 +218,11 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--profile-store-bytes", "5"),
         key("--history-retention-days", "5"),
         key("--job-retention", "3d"),
+        key("--job-feed-retention", "500"),
+        key("--job-allocation-retention", "3d"),
         key("--job-listen", "127.0.0.1:0"),
         key("--max-job-wall", "12h"),
+        key("--metrics-listen", "127.0.0.1:9100"),
     ];
     rows.push((
         vec!["--usage-off"],

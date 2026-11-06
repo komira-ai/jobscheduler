@@ -1,6 +1,7 @@
-//! The `catalog_refresh` and `offer_cooldown` keys of a pool's `provider_limits`: their
-//! defaults, the values a file gives, and the refusal of a zero, read through
-//! [`Config::resolve_file`]; and the limits the scaler's pick of an offer is given.
+//! The `quota_backoff`, `acquire_retry`, `catalog_refresh` and `offer_cooldown` keys of a
+//! pool's `provider_limits`: their defaults, the values a file gives, and the refusal of a
+//! zero, read through [`Config::resolve_file`]; and the limits the scaler's pick of an offer
+//! is given.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -147,4 +148,96 @@ fn the_scaler_settings_carry_the_providers_limits() {
     assert_eq!(settings.provider_share, Some(4));
     assert_eq!(settings.allowed_instance_types, None);
     assert_eq!(settings.max_price_cents_per_hour, None);
+}
+
+/// The `quota_backoff` and `acquire_retry` the file gives the provider `lambda` of the pool
+/// `gpu`, as the limits read them and as the scaler settings of the plan carry them.
+fn failover(scratch: &Scratch, limits: &str) -> [(Duration, Duration); 2] {
+    let resolved = match resolve(scratch, &limited(scratch, limits)) {
+        Ok(resolved) => resolved,
+        Err(err) => panic!("the file should resolve: {err}"),
+    };
+    let read = &resolved.pool("gpu").unwrap().provider_limits["lambda"];
+    let config = load(scratch, &limited(scratch, limits)).unwrap();
+    let settings = config.elastic_pool().unwrap().scaler_settings(&registry());
+    [
+        (read.quota_backoff, read.acquire_retry),
+        (settings.quota_backoff, settings.acquire_retry),
+    ]
+}
+
+/// Asserts that a provider table that gives neither `quota_backoff` nor `acquire_retry`
+/// resolves them to one hour and sixty seconds, both in the limits and in the scaler
+/// settings of the plan. Catches a default that is not 1h and 60s, and a value that is read
+/// but never reaches the scaler.
+#[test]
+fn acquire_failover_keys_default_to_one_hour_and_sixty_seconds() {
+    let scratch = Scratch::new("catalog_config_failover_defaults");
+    let expected = (Duration::from_secs(3600), Duration::from_secs(60));
+    let [read, settings] = failover(&scratch, "{ lambda = { max_machines = 2 } }");
+    assert_eq!(read, expected);
+    assert_eq!(settings, expected);
+}
+
+/// Asserts that `quota_backoff = "2h"` with `acquire_retry = "90s"` arrive as those values
+/// in the limits and in the scaler settings, and that each given alone leaves the other at
+/// its default. Catches a key read into the other's field, and a key dropped on the way to
+/// the scaler.
+#[test]
+fn acquire_failover_keys_are_read_from_the_config_file() {
+    let scratch = Scratch::new("catalog_config_failover_values");
+    let hour = Duration::from_secs(3600);
+    let minute = Duration::from_secs(60);
+    let both = "{ lambda = { quota_backoff = \"2h\", acquire_retry = \"90s\" } }";
+    let expected = (Duration::from_secs(7200), Duration::from_secs(90));
+    assert_eq!(failover(&scratch, both), [expected, expected]);
+    let backoff = "{ lambda = { quota_backoff = \"2h\" } }";
+    let expected = (Duration::from_secs(7200), minute);
+    assert_eq!(failover(&scratch, backoff), [expected, expected]);
+    let retry = "{ lambda = { acquire_retry = \"90s\" } }";
+    let expected = (hour, Duration::from_secs(90));
+    assert_eq!(failover(&scratch, retry), [expected, expected]);
+}
+
+/// Asserts that a `quota_backoff` of zero, written `0s` or `0`, is refused naming the pool,
+/// the provider and the key, with the full message. Catches a zero back-off read as a quota
+/// refusal that passes over nothing.
+#[test]
+fn zero_quota_backoff_is_a_startup_error_naming_the_key() {
+    let scratch = Scratch::new("catalog_config_zero_backoff");
+    for zero in ["0s", "0"] {
+        let limits = format!("{{ lambda = {{ quota_backoff = {} }} }}", quote(zero));
+        assert_eq!(
+            refused(&scratch, &limited(&scratch, &limits)),
+            "pool \"gpu\": provider_limits.lambda.quota_backoff: must be a positive duration such as 600s, 10m or 1h"
+        );
+    }
+}
+
+/// Asserts that an `acquire_retry` of zero, written `0s` or `0`, is refused naming the pool,
+/// the provider and the key, with the full message. Catches a zero retry read as a request
+/// that asks the provider again at every tick.
+#[test]
+fn zero_acquire_retry_is_a_startup_error_naming_the_key() {
+    let scratch = Scratch::new("catalog_config_zero_retry");
+    for zero in ["0s", "0"] {
+        let limits = format!("{{ lambda = {{ acquire_retry = {} }} }}", quote(zero));
+        assert_eq!(
+            refused(&scratch, &limited(&scratch, &limits)),
+            "pool \"gpu\": provider_limits.lambda.acquire_retry: must be a positive duration such as 600s, 10m or 1h"
+        );
+    }
+}
+
+/// Asserts that an `acquire_retry` that is not a duration (`soon`) is refused with the full
+/// message naming the pool, the provider and the key. Catches an unparsable value that is
+/// read as the default.
+#[test]
+fn unparsable_acquire_retry_names_the_provider() {
+    let scratch = Scratch::new("catalog_config_bad_retry");
+    let limits = "{ lambda = { acquire_retry = \"soon\" } }";
+    assert_eq!(
+        refused(&scratch, &limited(&scratch, limits)),
+        "pool \"gpu\": provider_limits.lambda.acquire_retry: must be a positive duration such as 600s, 10m or 1h"
+    );
 }

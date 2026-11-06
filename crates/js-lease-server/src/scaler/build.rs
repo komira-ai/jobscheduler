@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_registry::{OsSessions, Registry, WholeNodeConfig};
+use js_registry::{Registry, SessionSource, WholeNodeConfig};
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
@@ -38,6 +38,19 @@ pub(crate) struct Parts<'a> {
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     /// The cache of the provider's catalog, which a refused launch invalidates.
     pub(crate) catalogs: Arc<Catalogs>,
+    /// Where the scaler draws the random part of each acquire id
+    /// ([`crate::Config::with_entropy`]; the operating system's unless that gave another).
+    pub(crate) entropy: Arc<dyn SessionSource>,
+}
+
+/// The configuration's entropy source, shared, as the scaler holds a source: it asks the
+/// shared one, so a source given to a server started again goes on where it left off.
+struct SharedEntropy(Arc<dyn SessionSource>);
+
+impl SessionSource for SharedEntropy {
+    fn fresh(&self) -> Option<[u8; 32]> {
+        self.0.fresh()
+    }
 }
 
 /// The network mode the scaler launches with. A pool in `plan` mode launches nothing, so
@@ -101,6 +114,8 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
         .allowed_instance_types
         .clone_from(&plan.limits.allowed_instance_types);
     settings.max_price_cents_per_hour = plan.limits.max_price_cents_per_hour;
+    settings.quota_backoff = plan.failover.quota_backoff;
+    settings.acquire_retry = plan.failover.acquire_retry;
     settings
 }
 
@@ -138,6 +153,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         Arc::clone(&plan.provider),
         launcher,
         (file, unremoved_file, parts.health),
+        plan.floor_demand.clone(),
     );
     let wiring = (
         plan.scheduler.clone(),
@@ -146,7 +162,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
     let scaler = Scaler::budgeted(
         Box::new(live),
         parts.clock,
-        Box::new(OsSessions),
+        Box::new(SharedEntropy(parts.entropy)),
         wiring,
         (plan.scaler_settings(&registry), plan.budgets.clone()),
         records,

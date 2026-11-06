@@ -1,5 +1,6 @@
 //! The job start a host is sent for one placement: the job as its record holds it, with what
-//! its allocation booked and its id ([`start_of`]).
+//! its allocation booked and its id ([`start_of`]), and the job's log sink when the host
+//! uploads live logs.
 //!
 //! A start the wire cannot carry is not sent ([`Unsendable`]): the job then waits as placed,
 //! and the start timeout ends it. Nothing here guesses a value the records do not hold: a GPU
@@ -30,6 +31,10 @@ pub(crate) enum Unsendable {
     /// A file's contents are not UTF-8, which a start carries as text.
     #[error("the file {0} is not UTF-8 text")]
     FileNotText(String),
+    /// The job's files hold their digests, not their contents: the job has ended, and its
+    /// contents were dropped with the end.
+    #[error("the job's files hold digests, not contents")]
+    FilesDigested,
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -51,8 +56,11 @@ pub(crate) use js_sched_placer::engine::jobs::job_network;
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
 /// image, the command then its arguments, the environment, the files, what the
 /// allocation booked, the wall limit, the network level and the declared ports, keyed by the
-/// job id and the allocation id. The start is checked as the agent checks it
-/// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned.
+/// job id and the allocation id, and the job's log sink when `context` has sinks (the host
+/// uploads live logs). The start is checked as the agent checks it
+/// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned; a
+/// sink that fails the agent's check ([`JobStartSpec::log_sink_checked`]) is left out and the
+/// start is sent without it, since a sink never refuses a start.
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -96,6 +104,8 @@ pub(crate) fn start_of(
     }
     let files = spec
         .files
+        .contents()
+        .ok_or(Unsendable::FilesDigested)?
         .iter()
         .map(|(name, contents)| {
             String::from_utf8(contents.clone())
@@ -110,7 +120,10 @@ pub(crate) fn start_of(
         .wall_limit_secs
         .checked_mul(1000)
         .ok_or(Unsendable::WallLimit)?;
-    let start = JobStartSpec {
+    let log_sink = context
+        .logs
+        .and_then(|logs| logs.sink_for(context.host.as_str(), job.id.as_str()));
+    let mut start = JobStartSpec {
         job_id: job.id.to_string(),
         allocation_id: allocation.allocation_id.to_string(),
         image: format!("{}@{}", spec.image.name(), spec.image.digest()),
@@ -124,8 +137,10 @@ pub(crate) fn start_of(
         wall_ms,
         network,
         ports,
-        log_sink: None,
+        log_sink,
     };
+    let sink_ok = start.log_sink_checked().is_ok();
+    start.log_sink = start.log_sink.filter(|_| sink_ok);
     start
         .validate()
         .and_then(|()| start.require_pinned())

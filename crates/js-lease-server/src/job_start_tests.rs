@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use js_agent_wire::{
     BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, RunFile,
 };
-use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobId, JobRecord, NetworkPolicy};
+use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
 use js_types::{HostId, JobNetwork as Level, PortMap};
 
 use super::{Unsendable, start_of};
 use crate::agent_api::job_rig::{BOOKED, image, placed, spec, tables};
+use crate::metrics::NoMetrics;
 use crate::per_job::BeatContext;
 
 /// A placed job's records, with the spec's network, ports, environment and files set.
@@ -22,7 +23,10 @@ fn records() -> (JobRecord, AllocationRecord) {
         container: 80,
     }];
     job_spec.env = BTreeMap::from([("MODE".to_owned(), "test".to_owned())]);
-    job_spec.files = BTreeMap::from([("upload".to_owned(), b"https://store/put".to_vec())]);
+    job_spec.files = JobFiles::Contents(BTreeMap::from([(
+        "upload".to_owned(),
+        b"https://store/put".to_vec(),
+    )]));
     placed(&jobs, "job-a", "host-a", job_spec, BOOKED)
 }
 
@@ -39,6 +43,8 @@ fn build(
         &BeatContext {
             host: &host,
             ceiling,
+            logs: None,
+            metrics: &NoMetrics,
         },
     )
 }
@@ -139,13 +145,26 @@ fn a_start_the_wire_cannot_carry_says_why() {
         Err(Unsendable::AboveCeiling)
     );
     let mut binary = job.clone();
-    binary
-        .spec
-        .files
-        .insert("blob".to_owned(), vec![0xff, 0xfe]);
+    let mut files = binary.spec.files.contents().cloned().unwrap();
+    files.insert("blob".to_owned(), vec![0xff, 0xfe]);
+    binary.spec.files = JobFiles::Contents(files);
     assert_eq!(
         build(&binary, &allocation, &ceiling),
         Err(Unsendable::FileNotText("blob".to_owned()))
+    );
+    // An ended job's files are digests: there are no contents to send, and none is made up.
+    let mut digested = job.clone();
+    digested.spec.files = JobFiles::Digests(BTreeMap::from([(
+        "upload".to_owned(),
+        js_jobs::FileDigest::of(b"https://store/put"),
+    )]));
+    assert_eq!(
+        build(&digested, &allocation, &ceiling),
+        Err(Unsendable::FilesDigested)
+    );
+    assert_eq!(
+        Unsendable::FilesDigested.to_string(),
+        "the job's files hold digests, not contents"
     );
     let mut endless = job.clone();
     endless.spec.wall_limit_secs = u64::MAX;

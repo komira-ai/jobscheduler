@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -657,14 +658,29 @@ where
 /// Decodes the commands one by one. A command that does not decode (a kind this version
 /// does not know, or a start whose isolation it cannot classify) reads as
 /// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
-/// the one it cannot classify.
+/// the one it cannot classify. Each command is decoded as soon as it is read, so the
+/// decode holds one generic tree at a time and not one for every command of the list.
 fn commands_or_unknown<'de, D>(deserializer: D) -> Result<Vec<Command>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let items = Vec::<Value>::deserialize(deserializer)?;
-    Ok(items
-        .into_iter()
-        .map(|item| Command::deserialize(item).unwrap_or(Command::Unknown))
-        .collect())
+    struct Commands;
+
+    impl<'de> Visitor<'de> for Commands {
+        type Value = Vec<Command>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a list of commands")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut commands = Vec::new();
+            while let Some(item) = seq.next_element::<Value>()? {
+                commands.push(Command::deserialize(item).unwrap_or(Command::Unknown));
+            }
+            Ok(commands)
+        }
+    }
+
+    deserializer.deserialize_seq(Commands)
 }

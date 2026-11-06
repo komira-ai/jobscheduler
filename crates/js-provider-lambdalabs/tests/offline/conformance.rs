@@ -300,6 +300,7 @@ fn a_read_by_id_updates_what_the_provider_holds() {
     let hello = Hello {
         name: request.name.to_string(),
         instance_id: Some("fake0001".to_owned()),
+        identity: None,
     };
     assert_eq!(rig.provider.verify_instance(&hello), Some(machine.clone()));
     rig.fake.remove_instance(&id("fake0001"));
@@ -331,6 +332,7 @@ fn a_hello_is_matched_to_a_listed_instance() {
     let hello = Hello {
         name: request.name.to_string(),
         instance_id: None,
+        identity: None,
     };
     assert_eq!(restarted.provider.verify_instance(&hello), None);
     restarted.provider.list().unwrap();

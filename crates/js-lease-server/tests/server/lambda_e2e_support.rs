@@ -4,6 +4,7 @@
 //! live Lambda or Tailscale APIs, time is the test's clock, and the ticks are stepped.
 
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use js_elastic_fake::ElasticFake;
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
@@ -15,7 +16,8 @@ use serde_json::json;
 use crate::agents_support::{Session, hosts};
 use crate::config_support::{API_KEY, OAUTH_SECRET, oauth_file};
 use crate::scaler_support::{
-    account, beat, elastic_cloud, hello_body_of, records_path, spec, start, text_with, token_in,
+    account, beat, elastic_cloud, hello_body_of, lagging, quiet, records_path, spec, start,
+    text_with, token_in,
 };
 use crate::support::{Harness, Reply, Scratch, TOKEN, request};
 use crate::tailnet::{AUTH_KEY, Fake, Reply as Canned, TOKEN as TAILNET_TOKEN};
@@ -111,21 +113,70 @@ impl Rig {
     /// the account is empty of instances and offers `gpu_1x_a100`, and terminating removes
     /// the instance at once.
     pub async fn over(name: &str, tailnet: Fake, tailscale: bool) -> Self {
-        Self::over_cloud(name, tailnet, tailscale, None).await
+        Self::over_cloud(name, (tailnet, tailscale), None, "").await
     }
 
     /// A server whose pool is in `default` mode and launches on the elastic fake cloud
     /// `cloud`, on the clock the rig moves (`cloud` must read the clock it was made with,
     /// and [`Rig::advance`] moves both).
     pub async fn elastic(name: &str, cloud: ElasticFake) -> Self {
-        Self::over_cloud(name, tailnet(), false, Some(cloud)).await
+        Self::over_cloud(name, (tailnet(), false), Some(cloud), "").await
     }
 
+    /// [`Rig::elastic`] over a provider whose list does not show a reclaim and whose notice
+    /// streams pace the test ([`lagging`]): the answer hears once each time the scaler's
+    /// reader comes back for a notice.
+    pub async fn lagging(name: &str, cloud: ElasticFake) -> (Self, Receiver<()>) {
+        let scratch = Scratch::new(name);
+        let back = lagging(&scratch);
+        let rig = Self::prepared(scratch, cloud).await;
+        (rig, back)
+    }
+
+    /// [`Rig::elastic`] over a provider that sends no notices: a reclaim is seen in the
+    /// provider's list alone.
+    pub async fn quiet(name: &str, cloud: ElasticFake) -> Self {
+        let scratch = Scratch::new(name);
+        quiet(&scratch);
+        Self::prepared(scratch, cloud).await
+    }
+
+    /// A server over `cloud` in `scratch`, whose provider kind has been set up already.
+    async fn prepared(scratch: Scratch, cloud: ElasticFake) -> Self {
+        elastic_cloud(&scratch, &cloud);
+        let source = pool_text(&scratch, None, "initialise");
+        let h = start(scratch, &source).await;
+        Self {
+            h,
+            account: Arc::new(FakeLambda::new()),
+            tailnet: tailnet(),
+            tailscale: false,
+            elastic: Some(cloud),
+        }
+    }
+
+    /// [`Rig::elastic`], serving the metrics on a loopback port of the system's choice
+    /// (`server.metrics_listen`).
+    pub async fn elastic_metered(name: &str, cloud: ElasticFake) -> Self {
+        let metrics = "metrics_listen = \"127.0.0.1:0\"\n";
+        Self::over_cloud(name, (tailnet(), false), Some(cloud), metrics).await
+    }
+
+    /// The text of a scrape of the server's metrics.
+    pub async fn scrape(&self) -> String {
+        let addr = self.h.running.metrics_addr().unwrap();
+        let scraped = crate::support::request(addr, "GET", "/metrics", None, None).await;
+        assert_eq!(scraped.status, 200, "{}", scraped.body);
+        scraped.body
+    }
+
+    /// A server over `tailnet` (in Tailscale mode when the flag says so), launching on the
+    /// elastic fake cloud when one is given, with `serving` added to its `[server]` table.
     async fn over_cloud(
         name: &str,
-        tailnet: Fake,
-        tailscale: bool,
+        (tailnet, tailscale): (Fake, bool),
         elastic: Option<ElasticFake>,
+        serving: &str,
     ) -> Self {
         let scratch = Scratch::new(name);
         let account = match &elastic {
@@ -140,6 +191,7 @@ impl Rig {
         }
         let url = tailnet.url();
         let source = pool_text(&scratch, tailscale.then_some(url.as_str()), "initialise");
+        let source = source.replacen("[server]\n", &format!("[server]\n{serving}"), 1);
         let h = start(scratch, &source).await;
         Self {
             h,

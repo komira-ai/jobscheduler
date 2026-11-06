@@ -15,7 +15,7 @@ use js_provider::{Candidate, Pool};
 use js_registry::{Credential, Placer};
 use js_sched::Event;
 use js_sched_placer::engine::Engine;
-use js_sched_placer::engine::jobs::{JobStarts, NoStarts, ServerJobs};
+use js_sched_placer::engine::jobs::{JobStarts, NoStarts};
 use js_sched_placer::map;
 use js_sched_placer::place::SchedPlacer;
 use js_state::Store;
@@ -27,6 +27,8 @@ use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::{Agents, assemble_placed};
 use crate::job_alloc::{Freed, free_allocation};
+use crate::job_store::ServerJobs;
+use crate::metrics::NoMetrics;
 use crate::per_job::{BeatContext, serve};
 use crate::sched::engine::Settings;
 use crate::sched::engine_rig::{GIB, T0, hello_of, pool, rig, share_of};
@@ -129,7 +131,9 @@ pub(super) fn finish(jobs: &ServerJobs, id: &JobId) {
 
 /// One pass of `placer` over `jobs` on the hosts `names`: the jobs it placed.
 pub(super) fn pass(placer: &SchedPlacer, jobs: &ServerJobs, names: &[&str]) -> Vec<String> {
-    let placed = placer.place_jobs(jobs, &open(names), &NoStarts).unwrap();
+    let placed = placer
+        .place_jobs(jobs, &open(names), (&NoStarts, &NoMetrics))
+        .unwrap();
     placed.iter().map(ToString::to_string).collect()
 }
 
@@ -171,7 +175,8 @@ fn a_queued_job_needs_no_re_presentation() {
         js_state::fake::Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store;
-    let jobs = js_jobs::JobStore::new(Arc::new(dynamic), js_jobs::RandomIds).unwrap();
+    let jobs =
+        js_jobs::JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     let (fill, _) = placed(&jobs, "job-fill", "host-a", sized(8), booked(8));
     queue(&jobs, "job-z-first", 10, 0);
     assert_eq!(pass(&placer, &jobs, &["host-a"]), NONE);
@@ -235,7 +240,7 @@ fn placement_and_allocation_are_one_commit() {
     };
     queue(&jobs, "job-a", 4, 0);
     let before = store.commit_stats().txns;
-    let placed = placer.place_jobs(&jobs, &open(&["host-a"]), &starts);
+    let placed = placer.place_jobs(&jobs, &open(&["host-a"]), (&starts, &NoMetrics));
     assert_eq!(placed, Ok(vec![JobId::parse("job-a").unwrap()]));
     assert_eq!(store.commit_stats().txns, before + 1);
     let seen = |job: &str, commits| Seen {
@@ -249,7 +254,7 @@ fn placement_and_allocation_are_one_commit() {
 
     queue(&jobs, "job-b", 4, 0);
     store.fail_next();
-    let refused = placer.place_jobs(&jobs, &open(&["host-a"]), &starts);
+    let refused = placer.place_jobs(&jobs, &open(&["host-a"]), (&starts, &NoMetrics));
     assert_eq!(refused, Ok(Vec::new()));
     let b = JobId::parse("job-b").unwrap();
     assert_eq!(
@@ -294,6 +299,8 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
     let context = BeatContext {
         host: &host("host-a"),
         ceiling: &ceiling,
+        logs: None,
+        metrics: &NoMetrics,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -371,6 +378,8 @@ fn only_absent_frees_an_allocation() {
                 let context = BeatContext {
                     host: &host("host-a"),
                     ceiling: &ceiling,
+                    logs: None,
+                    metrics: &NoMetrics,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),
@@ -460,7 +469,10 @@ fn lease_and_job_bookings_cannot_overbook_a_host() {
     assert_eq!(rig.start(share_of(1, 1000, 6 * GIB)).as_deref(), Some("h1"));
     queue(&jobs, "job-1", 6, 0);
     let placed = |rig: &crate::sched::engine_rig::Rig| {
-        let placed = rig.placer().place_jobs(&jobs, &on_h1, &NoStarts).unwrap();
+        let placed = rig
+            .placer()
+            .place_jobs(&jobs, &on_h1, (&NoStarts, &NoMetrics))
+            .unwrap();
         placed.iter().map(ToString::to_string).collect::<Vec<_>>()
     };
     assert_eq!(placed(&rig), ["job-1"]);
@@ -555,7 +567,7 @@ fn a_pass_that_cannot_read_the_tables_places_nothing() {
     queue(&jobs, "job-a", 2, 0);
     for reads in [0, 1] {
         store.fail_read_after(reads);
-        let failed = placer.place_jobs(&jobs, &open(&["host-a"]), &NoStarts);
+        let failed = placer.place_jobs(&jobs, &open(&["host-a"]), (&NoStarts, &NoMetrics));
         assert!(failed.is_err(), "the read after {reads}");
         assert_eq!(state(&jobs, "job-a"), JobState::Queued);
     }
@@ -567,7 +579,13 @@ pub(super) fn served(name: &str) -> (Arc<Agents>, Arc<Interfere<Fake>>, js_testk
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let shared = SharedClock::new(clock());
-    let assembled = assemble_placed(config.hosts, config.usage, &shared, &config.state_file);
+    let assembled = assemble_placed(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    );
     let ((_, agents), _) = assembled.unwrap();
     let (store, jobs) = tables();
     let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
@@ -607,4 +625,49 @@ fn the_server_places_queued_jobs_on_the_hosts_the_registry_opens() {
     assert_eq!(state(&jobs, "job-b"), JobState::Queued);
     agents.place_jobs();
     assert_eq!(state(&jobs, "job-b"), JobState::Placed);
+}
+
+/// Asserts that a placement commit that fails for an ordinary reason leaves the pass going
+/// (the next job is placed) and the fence untripped, and that a commit the store answers with
+/// `Fenced` ends the pass at that job, places nothing after it and trips the fence. It catches
+/// a fenced store let go like a failed commit, so a server that is no longer the writer goes on
+/// offering jobs.
+#[test]
+fn a_fenced_placement_commit_ends_the_pass_and_trips_the_fence() {
+    let (agents, store, _dir) = served("jobs-fenced-commit");
+    let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
+    queue(&jobs, "job-a", 2, 0);
+    queue(&jobs, "job-b", 2, 0);
+    store.fail_next();
+    agents.place_jobs();
+    assert!(!agents.fence.is_tripped());
+    assert_eq!(
+        (state(&jobs, "job-a"), state(&jobs, "job-b")),
+        (JobState::Queued, JobState::Placed)
+    );
+
+    queue(&jobs, "job-c", 2, 0);
+    queue(&jobs, "job-d", 2, 0);
+    store.fail_with(js_state::StoreError::Fenced);
+    store.fail_next();
+    agents.place_jobs();
+    assert!(agents.fence.is_tripped());
+    assert_eq!(
+        ["job-a", "job-c", "job-d"].map(|job| state(&jobs, job)),
+        [JobState::Queued; 3]
+    );
+}
+
+/// Asserts that a read of the tables the store answers with `Fenced` trips the fence, and
+/// places nothing. It catches a fenced read logged as a failed one.
+#[test]
+fn a_fenced_read_of_the_queue_trips_the_fence() {
+    let (agents, store, _dir) = served("jobs-fenced-read");
+    let jobs = Arc::clone(agents.jobs.as_ref().unwrap());
+    queue(&jobs, "job-a", 2, 0);
+    store.fail_with(js_state::StoreError::Fenced);
+    store.fail_read_after(0);
+    agents.place_jobs();
+    assert!(agents.fence.is_tripped());
+    assert_eq!(state(&jobs, "job-a"), JobState::Queued);
 }

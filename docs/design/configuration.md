@@ -17,11 +17,14 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
 | `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+| `--job-feed-retention` | `server.job_feed_retention`, same default (`100000`) and rules: how many of the newest changes of the job store's change feed each tick keeps, a whole number of at least 1 (a count of feed changes, never a time); zero or a non-number is refused at start naming the flag or the key. Older rows are trimmed by the job pass of the tick, and a reader whose cursor is behind them is refused with a stale-cursor error and starts again from the tables. It is read once at start and applies to the job store of `--job-listen`; without `--job-listen` the setting is checked and kept, and nothing reads it |
+| `--job-allocation-retention` | `server.job_allocation_retention`, same default (`14d`) and rules as `--job-retention`: how long a freed allocation's row is kept after its free, a whole count of days or a duration of at least one minute. The tick deletes freed rows past it, at most 500 a tick; booked and releasing rows, and the usage history of an allocation, are never deleted. It is read once at start and applies to the job store of `--job-listen`; without `--job-listen` the setting is checked and kept, and nothing reads it |
 | `--job-listen` | `server.job_listen`, off unless given: the address the job service is served on (see "The job service's port" below); off the loopback it needs `server.tls_cert` and `server.tls_key`, the same pair as `server.listen`; refused unless a pool registers agents |
+| `--metrics-listen` | `server.metrics_listen`, off unless given: the address the operator's metrics are served on (see "The metrics port" below); a private address only, plain HTTP, no token; an address that is not a private one is refused at start naming the flag or the key; needs no agent registration |
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
-| `--client-token NAME=PATH` (repeatable) | a `[[client]]` table with `name` and `token_file`: one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
+| `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
@@ -35,20 +38,27 @@ HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind one c
 without one is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one
 TLS setup and one connection cap for the service, whichever client calls it.
 
-The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME=PATH` or `[[client]]` table:
+The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME[:ROLE]=PATH` or `[[client]]`
+table:
 
 ```toml
 [[client]]
 name       = "ci"                             # 1 to 40 bytes of letters, digits, '.', '_' and '-'; unique; not "default"
 token_file = "/run/credentials/js/ci-token"   # owner-only (0600 or 0400), one token of at least 32 bytes, as client_token_file
+role       = "client"                         # optional: "client" (the default) or "operator"; anything else is refused
 ```
 
 A start is refused, naming the entry and never the token, for two clients of one name, a client named `default`, a name that is not
 one, a short token, a token file others can read, the same token in two entries, and a client token that the join token file of the
 pool also holds. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
 client's, records the client's name on each job it submits (`Job.client`, and the `client` filter of `ListJobs`), and logs the
-client and the job on each call's line. Every client may read and cancel every job; job ids are one namespace. To revoke a client,
-remove its entry and restart the server: the set is read at start only, and a restart ends no job.
+client, its role, the target and the outcome on each call's line. A `client` reads, lists and cancels only its own jobs and makes no
+fleet call; an `operator`, and `default` always, may call everything on every job. An entry with no role is a `client`, so an entry
+whose holder calls the fleet calls or cancels other clients' jobs needs `role = "operator"` (the role model is in
+[http-gateway.md](../http-gateway.md), "Clients, roles and token reload"). Every tick reads each named client's token file again:
+to rotate or revoke a token, write the new token into its file, and the old one is refused from the request after the next tick;
+a file that cannot be read or holds no valid token keeps every token in force, with a warning. Adding or removing a client, or
+changing its role, takes a restart (a restart ends no job); `default`'s token is read at start only, with the lease routes'.
 
 - **TLS.** The rule of `--listen`: an address off the loopback is refused at start without `--tls-cert` and `--tls-key` (the same two
   flags, not new ones), with a message naming `--job-listen` and saying that a bearer token never crosses a network in clear. With
@@ -118,6 +128,41 @@ engine's rule instead: the registry's book takes each host's whole `[shape]` mem
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
 `GET /v1/hosts` shows the same as under `registry`: `shape.memory_bytes` is the cut, beside `memory`. A static pool is not affected.
 
+### The metrics port
+
+`--metrics-listen <addr>` (`server.metrics_listen`) serves `GET /metrics` on a port of its own, in the Prometheus text format
+(version 0.0.4, content type `text/plain; version=0.0.4; charset=utf-8`). It is off by default: without it the server binds no other
+port and counts nothing. Any other path, on that port, is answered as an unknown route, and the lease port does not serve `/metrics`.
+
+| family | kind | labels | what |
+|---|---|---|---|
+| `js_jobs` | gauge | `state` | the jobs in the job tables, by state (`queued`, `placed`, `starting`, `running`, `succeeded`, `failed`, `cancelled`, `lost`, `failed-to-start`); only with the job service on |
+| `js_queue_oldest_age_seconds` | gauge | | how long the oldest queued job has waited since its submit, 0 with none queued; only with the job service on |
+| `js_job_placements_total` | counter | | the queued jobs placed on a host |
+| `js_queue_wait_seconds` | histogram | | each placed job's wait from its submit to its placement |
+| `js_job_start_failures_total` | counter | `code` | the jobs that failed to start, by code (`no-capacity`, `start-timeout`, `exclusive-not-ready`, `agent-refused`) |
+| `js_jobs_lost_total` | counter | | the jobs lost: their host read gone by the job pass, or their container missing from the first listing after a new hello |
+| `js_store_write_failures_total` | counter | | the passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit; a client's submit or cancel that fails is answered to the client |
+| `js_job_pass_duration_seconds` | histogram | | how long each job pass of the tick took |
+| `js_acquires_total` | counter | `pool` | the launches the scaler ran, whatever their answer (a launch refused before the provider is called, such as one for an architecture with no pinned agent, included) |
+| `js_acquire_failovers_total` | counter | `pool` | those refused for capacity or quota, after which the scaler tries another offer |
+| `js_host_cpu_booked_millicores`, `js_host_cpu_free_millicores` | gauge | `host` | each host's CPU booked (its leases and its jobs' live allocations; one that books the host whole counts as its shape) and free (its shape less that, and never below 0) |
+| `js_host_memory_booked_bytes`, `js_host_memory_free_bytes` | gauge | `host` | the same of memory, of the bookable memory (`memory_schedulable_percent`) |
+| `js_host_whole_mark` | gauge | `host`, `state` | 1 for each host set aside whole, by its mark (`reserved`, `held`, `draining`, `releasing`) |
+
+The counters count from the start of the process; a start failure or a loss is counted as its commit lands, so a pass that fails later
+still counts what it ended. The gauges are read at each scrape from the state `GET /v1/hosts` and the job service read, holding no lock
+of the server's while the text is written; a scrape whose read of the job tables fails is answered 503. The parts are read one after
+another, not in one transaction, so a job placed between two reads can show as queued while its booking already counts. The text
+names no job, lease, run or token: its labels are a state, a failure code, a host's id, a pool's name and a mark.
+
+- **Address.** The route takes no token, so it is served only on a private address (the rule of `/status`: loopback, RFC 1918, the
+  shared range a tailnet uses, link-local and IPv6 unique-local; a wildcard is accepted), and on each request only to a peer whose
+  address is private too; any other peer gets the answer of an unknown route. An address that is not a private one is refused at
+  start. The port needs no TLS and speaks plain HTTP whatever the other ports speak: bind it to a private or tailnet address.
+- **Limits.** The port has the connection cap and timeouts of the other listeners, and stops with them. An address in use is refused
+  at start naming the flag or the key.
+
 ### Machine providers, platforms and pool settings
 
 A pool may name container platforms in priority order instead of naming its provider (design `jobscheduler-design.md`, section 4.2).
@@ -160,6 +205,8 @@ allowed_instance_types = ["gpu_1x_a10"] # names, none empty, none twice
 max_price_cents_per_hour = 200          # 1 or more
 max_machines = 2                        # 1 or more, at most the pool's
 max_spot_machines = 1                   # at most this table's max_machines
+quota_backoff = "1h"                    # default 1h; a positive duration, zero is refused
+acquire_retry = "60s"                   # default 60s; a positive duration, zero is refused
 catalog_refresh = "1h"                  # default 1h; a positive duration, zero is refused
 offer_cooldown = "1h"                   # default 1h; a positive duration, zero is refused
 ```
@@ -183,8 +230,12 @@ machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the p
 it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
 next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance
 type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it; it is read and checked,
-and nothing enters a cool-down yet (the check of a host's hello against its offer will). Zero for either is refused, naming the key: a
-zero refresh would ask the cloud at every tick, and a zero cool-down is none. A limit
+and nothing enters a cool-down yet (the check of a host's hello against its offer will). `quota_backoff` is how long, after the provider refuses a launch for quota, pass 2 passes over that
+instance type in that region (in that zone, for providers whose zones are regions); the provider as a whole is not braked.
+`acquire_retry` is how long a request waits when every offer was refused or passed over: it stays waiting and pass 2 asks again after
+this long, or at once after a completed catalog refresh. Zero for any of the four is refused, naming the key: a
+zero refresh would ask the cloud at every tick, a zero cool-down is none, a zero back-off passes over nothing, and a zero retry would
+ask at every tick. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 
@@ -196,13 +247,17 @@ when the table is absent) with any other key present is refused, naming the key.
 file is owner-only like every other key file (mode 0600 or 0400, owned by the service user), holding exactly
 `{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
-repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). Nothing uses the table
-yet: no credential is minted and no log is read.
+repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
+server mints each uploading host's credential with the mint key (or derives it from the signing key), delivers and renews it in heartbeat replies, and puts each job's sink
+in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
-section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64
+section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 476 bytes, so that a host's
+prefix fits under it); `region` is 1 to 64
 bytes of `[a-z0-9-]`; `endpoint` and `sts_endpoint` are `https` URLs, or `http` to a loopback address, with no path, query, fragment or
-user; `credentials` is `"sts"` (anything else is refused as not built); `role_arn` begins with `arn:` and is at most 2,048 bytes of
+user; `credentials` is `"sts"` (the default) or `"presigned_prefix"` (anything else is refused, naming the key), and a key of the
+other kind is refused, naming the key: `sts_endpoint`, `role_arn` and `mint_key_file` belong to `sts`, `signing_key_file` (required)
+to `presigned_prefix`, a store with no STS whose host credentials are prefix grants (live-logs.md, section 4.1); `role_arn` begins with `arn:` and is at most 2,048 bytes of
 printable ASCII; `credential_ttl` is from 15 minutes to 12 hours; `max_follow` is from 1 to 4,096. `credential_ttl` must also be at most
 the role's maximum session duration, which is the operator's to set in the store and which the server cannot check at start: STS
 refuses a longer session, and the refusal shows as a mint failure.
@@ -215,10 +270,11 @@ region          = "us-east-1"                           # required with object_s
 endpoint        = "https://objects.example"             # required: the store's URL; the server names no cloud's host by default
 path_style      = false                                 # optional; true for stores that need /bucket/key URLs
 read_key_file   = "/run/credentials/js/logs-read-key"   # required: list and get on the prefix; JSON {access_key_id, secret_access_key}
-credentials     = "sts"                                 # how a host's credential is minted; "sts" is the only value
+credentials     = "sts"                                 # how a host's credential is minted: "sts" or "presigned_prefix"
 sts_endpoint    = "https://objects.example"             # optional; default endpoint
 role_arn        = "arn:aws:iam::<account-id>:role/js-logs"   # required with sts; its maximum session duration at least credential_ttl
 mint_key_file   = "/run/credentials/js/logs-mint-key"   # required with sts: the key that calls AssumeRole
+# signing_key_file = "/run/credentials/js/logs-signing-key"  # required with presigned_prefix, instead of the three keys above
 credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once
 ```

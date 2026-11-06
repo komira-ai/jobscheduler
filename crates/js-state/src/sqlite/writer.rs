@@ -22,6 +22,8 @@ pub(super) struct Reply {
     pub(super) commits: Vec<Result<Commit, Conflict>>,
     /// How many keys a reap request removed.
     pub(super) reaped: usize,
+    /// How many feed rows a trim request deleted.
+    pub(super) trimmed: u64,
 }
 
 /// One call on the store, waiting for its answer.
@@ -30,6 +32,9 @@ pub(super) struct Request {
     pub(super) txns: Vec<Txn>,
     /// Whether this is a reap request.
     pub(super) reap: bool,
+    /// The revision a trim request removes the feed through, at most (`None` for any
+    /// other request).
+    pub(super) trim: Option<u64>,
     /// When the caller queued it: commit latency counts from here.
     pub(super) queued: Instant,
     /// Where the answer goes, once the group it is in is on disk.
@@ -161,22 +166,33 @@ impl Writer {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut applier = Applier::new(&tx, self.head, now)?;
         let mut replies = Vec::with_capacity(group.len());
+        let mut trimmed_any = false;
         for request in group {
             let reaped = applier.reap()?;
             let mut commits = Vec::with_capacity(request.txns.len());
             for txn in &request.txns {
                 commits.push(applier.apply(txn)?);
             }
+            let trimmed = match request.trim {
+                Some(before) => applier.trim(before)?,
+                None => 0,
+            };
+            trimmed_any |= trimmed > 0;
             replies.push(Reply {
                 commits,
                 reaped: if request.reap { reaped } else { 0 },
+                trimmed,
             });
         }
         let head = applier.finish()?;
         drop(applier);
-        if let Some(head) = head {
+        // A trim writes no revision, so a group that only trimmed has no new head but
+        // still has deletes to make durable.
+        if head.is_some() || trimmed_any {
             tx.commit()?;
             self.shared.commits.fetch_add(1, Ordering::AcqRel);
+        }
+        if let Some(head) = head {
             self.head = head;
         }
         Ok(replies)
@@ -192,6 +208,7 @@ struct Applier<'c> {
     counter: Statement<'c>,
     expire: Statement<'c>,
     set_head: Statement<'c>,
+    trim: Statement<'c>,
     now: StoreTime,
     head: u64,
     wrote: bool,
@@ -216,10 +233,20 @@ impl<'c> Applier<'c> {
                 "DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?1 RETURNING key",
             )?,
             set_head: conn.prepare("UPDATE meta SET value = ?1 WHERE name = 'head'")?,
+            trim: conn.prepare("DELETE FROM feed WHERE revision <= ?1")?,
             now,
             head,
             wrote: false,
         })
+    }
+
+    /// Deletes the feed rows at or below `before`, held to the head this group has
+    /// reached (every revision up to it is in this transaction or committed, so none can
+    /// still commit behind the bound); how many. A trim takes no revision and writes no
+    /// row.
+    fn trim(&mut self, before: u64) -> rusqlite::Result<u64> {
+        let bound = before.min(self.head);
+        Ok(self.trim.execute([to_sql(bound)])? as u64)
     }
 
     /// Takes the next revision.

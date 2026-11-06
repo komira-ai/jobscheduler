@@ -165,6 +165,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         files: None,
         egress: None,
         gpus: None,
+        image_budget: None,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));

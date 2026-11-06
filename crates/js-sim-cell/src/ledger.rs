@@ -10,6 +10,10 @@
 //! replacement that launches a run its predecessor launched shows as a second entry. The
 //! completions and the verdicts are what [`crate::Invariant::NoResultLost`] reads: a
 //! process that dies takes its own record of them with it, the ledger keeps them.
+//!
+//! A per-job agent also writes each heartbeat it sends, each answer it reads and each
+//! result it makes ([`JobBeat`], [`JobReply`], [`ResultMade`]), for the job invariants;
+//! its launches go into the launches beside the runs', each named `<job>/<allocation>`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +21,7 @@ use std::rc::Rc;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
+use crate::jobs::{JobBeat, JobReply, ResultMade};
 use crate::observe::{Launch, ReadyReport, RunId, StartSeen, StopSeen, Verdict};
 
 /// One run that ended on its own (its job's time ran out), in the cell's ledger.
@@ -60,6 +65,9 @@ struct Entries {
     ready: Vec<ReadyReport>,
     starts: Vec<StartSeen>,
     stops: Vec<StopSeen>,
+    job_beats: Vec<JobBeat>,
+    job_replies: Vec<JobReply>,
+    results_made: Vec<ResultMade>,
 }
 
 impl Ledger {
@@ -169,5 +177,34 @@ impl Ledger {
     /// Appends a verdict.
     pub(crate) fn acked(&self, acked: Acked) {
         self.0.borrow_mut().verdicts.push(acked);
+    }
+
+    /// The per-job heartbeats, answers and results after the first `skip` of each, oldest
+    /// first.
+    pub(crate) fn jobs_after(
+        &self,
+        [beats, replies, results]: [usize; 3],
+    ) -> (Vec<JobBeat>, Vec<JobReply>, Vec<ResultMade>) {
+        let entries = self.0.borrow();
+        (
+            entries.job_beats.iter().skip(beats).cloned().collect(),
+            entries.job_replies.iter().skip(replies).cloned().collect(),
+            entries.results_made.iter().skip(results).cloned().collect(),
+        )
+    }
+
+    /// Appends a per-job heartbeat sent.
+    pub(crate) fn job_beat(&self, beat: JobBeat) {
+        self.0.borrow_mut().job_beats.push(beat);
+    }
+
+    /// Appends an answer a per-job agent read.
+    pub(crate) fn job_reply(&self, reply: JobReply) {
+        self.0.borrow_mut().job_replies.push(reply);
+    }
+
+    /// Appends a result a per-job agent made.
+    pub(crate) fn result_made(&self, made: ResultMade) {
+        self.0.borrow_mut().results_made.push(made);
     }
 }
