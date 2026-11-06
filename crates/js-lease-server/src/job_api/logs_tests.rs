@@ -807,9 +807,10 @@ async fn a_store_failing_at_each_step_is_unavailable() {
 /// Asserts the cases of the walk over a page's objects: a chunk that does not begin where
 /// the data ends stops the page; a chunk read shorter than listed (rewritten meanwhile) stops
 /// the page after what was read; a marker that reaches an ended job's length ends the
-/// stream; a hole before a fresh chunk of a job that ended long enough ago is a gap; and a
+/// stream; a hole before a fresh chunk of a job that ended long enough ago is a gap; a
 /// chunk gone after the final was asked for twice is a hole up to the end, not a third
-/// request for the final. Catches a page that reads past a hole, a short read taken as the
+/// request for the final; and a chunk rewritten so short that the read starts past its end
+/// (the store answers 416) is a hole, not an error. Catches a page that reads past a hole, a short read taken as the
 /// whole chunk, and an end missed after a gap.
 #[tokio::test]
 async fn the_walk_stops_at_every_break_in_the_bytes() {
@@ -862,4 +863,18 @@ async fn the_walk_stops_at_every_break_in_the_bytes() {
         .before(&key, move || writer.delete(&deleted).expect("deleted"));
     let answer = rig.grpc(out("walk-5", 0)).await.expect("a page");
     assert_eq!(answer, page(ok, 0, 20, b"", true, None));
+
+    running(rig.jobs(), "walk-6");
+    rig.chunk("walk-6", Stream::Stdout, 0, &bytes[..100], 1);
+    let writer = rig.writer.clone();
+    let key = prefix("walk-6").chunk_key(Stream::Stdout, 0);
+    let shorter = key.clone();
+    let head = bytes[..10].to_vec();
+    rig.tap.before(&key, move || {
+        writer
+            .put(&shorter, head, &Default::default())
+            .expect("put");
+    });
+    let answer = rig.grpc(out("walk-6", 50)).await.expect("a page");
+    assert_eq!(answer, page(live, 50, 50, b"", false, None));
 }

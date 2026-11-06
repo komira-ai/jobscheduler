@@ -351,11 +351,18 @@ impl Walk<'_> {
             let read = self
                 .store
                 .get_range(&object.key, self.pos - object.offset, want);
-            let object = match read {
-                Ok(Some(object)) => object,
-                Ok(None) | Err(StoreError::OutOfRange) if index == 0 => return Ok(None),
-                Ok(None) | Err(StoreError::OutOfRange) => break,
+            let read = match read {
+                Ok(read) => read,
+                // Gone, or shorter than listed so the range starts past its end.
+                Err(StoreError::OutOfRange) => None,
                 Err(error) => return Err(error),
+            };
+            let Some(object) = read else {
+                // The first chunk gone ends the read; a later one ends the data there.
+                if index == 0 {
+                    return Ok(None);
+                }
+                break;
             };
             if index == 0 {
                 first_byte_at_ms = object
