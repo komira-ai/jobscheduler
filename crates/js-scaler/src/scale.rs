@@ -106,6 +106,22 @@ impl Pass<'_> {
         self.release(pool);
     }
 
+    /// Holds for each reserved request ([`Waiting::reserved`]) what it is set aside for, before
+    /// any request is matched: the host of that name, so that no other request is matched to
+    /// it and it is not drained as idle, and the pool's machine on its way of that name, so
+    /// that no other request counts it. A reserved request is matched to nothing else and gets
+    /// no machine.
+    pub(crate) fn hold_reserved(&self, claims: &mut Claims) {
+        let reserved = self.input.waiting.iter();
+        for host in reserved.filter_map(|request| request.reserved.as_ref()) {
+            claims.hosts.insert(host.as_str().to_owned());
+            let coming = self.records.instances.iter().position(|record| {
+                (COMING.contains(&record.phase), record.name.as_str()) == (true, host.as_str())
+            });
+            claims.records.extend(coming);
+        }
+    }
+
     /// Matches requests greedily, in queue order, to a free host that fits and is not set
     /// aside, then to a machine on its way whose offer fits, or to a restored machine
     /// still awaited (its host has not said hello since the restart, `boot_timeout` not yet
@@ -609,6 +625,10 @@ impl Pass<'_> {
             for (request, acquire) in launches {
                 self.memory.launched(&request.id, acquire);
             }
+            for (record, request) in staged.iter().zip(&served) {
+                self.launched
+                    .insert(record.name.clone(), request.id.clone());
+            }
             for record in staged {
                 self.actions.extend(launch_actions(
                     &record,
@@ -807,6 +827,7 @@ impl Pass<'_> {
             credited,
             silent: self.silent_now,
             silent_released: self.silent_released,
+            launched: self.launched,
             refusals: self.refusals,
             acquire: self.memory,
             missing: self.missing_now,

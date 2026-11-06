@@ -155,15 +155,19 @@ fn a_lease_that_could_not_be_undone_is_ended_by_a_later_runtime() {
     );
 }
 
-/// Asserts the crash path: a run is started and its runtime is dropped without a stop (the
-/// agent died, stopped or was rescued), and the runtime of the next process, over a helper
-/// that has reset already, kills and deletes the lease user and empties the journal; a
-/// second look finds nothing. It catches runs left behind by every end of the agent.
+/// Asserts the crash path for a lease with no run record (a journal written before run
+/// records, or a start that died before the helper's `run`): its runtime is dropped without
+/// a stop, and the runtime of the next process, over a helper that has reset already, kills
+/// and deletes the lease user and empties the journal; a second look finds nothing. It
+/// catches runs left behind by every end of the agent, and a journal of an earlier agent
+/// that the run records made unreadable.
 #[test]
 fn a_run_an_earlier_process_left_is_ended_when_the_next_runtime_reclaims() {
     let mut rig = Rig::new("journal-crash");
     rig.start("r1", "/bin/true", &[]);
     assert_eq!(live(&rig), ["7.0"]);
+    // The journal as an agent from before run records wrote it.
+    fs::write(rig.dir.path("native-leases"), "+ 7.0\n").unwrap();
     rig.fake.refuse("boot-reset", RESET_ALREADY);
     let Rig { fake, rt, dir } = rig;
     drop(rt);
@@ -285,9 +289,9 @@ fn a_journal_that_cannot_be_written_stops_the_start_before_the_helper() {
 fn a_helper_that_restarted_is_asked_for_its_boot_reset_again() {
     let mut rig = Rig::new("journal-reset");
     let id = rig.start("r1", "/bin/true", &[]);
-    rig.fake.refuse("kill-uid", RESET_NEEDED);
+    rig.fake.refuse("stop", RESET_NEEDED);
     assert!(rig.rt.stop(&id, Duration::ZERO).is_err());
-    rig.fake.allow("kill-uid");
+    rig.fake.allow("stop");
     rig.fake.refuse("boot-reset", "no");
     let error = rig.rt.remove(&id).unwrap_err();
     assert!(error.0.starts_with("the boot reset: "), "{}", error.0);

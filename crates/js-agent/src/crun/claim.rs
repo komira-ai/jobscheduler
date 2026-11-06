@@ -45,9 +45,23 @@ pub enum ClaimError {
 
 /// A claim, held for as long as the value lives. The lock is dropped by the system when the
 /// process ends, so a restarted agent finds it free.
+///
+/// Dropping the value unlocks the file before it closes it, so the claim is free once the
+/// drop returns. Closing alone would not do: the lock belongs to the open file, which every
+/// copy of the descriptor shares, and a child this process forks holds a copy until it
+/// executes its program (the descriptor is closed on exec), so the lock would outlive the
+/// value for as long as any such child had not yet done so.
 #[derive(Debug)]
 pub struct HostClaim {
-    _held: File,
+    held: File,
+}
+
+impl Drop for HostClaim {
+    fn drop(&mut self) {
+        // Nothing to do when it fails: the lock then goes with the last copy of the
+        // descriptor.
+        let _ = self.held.unlock();
+    }
 }
 
 /// The name of the claim file of the `key` of a `kind`: a hash, so any key makes a plain file
@@ -119,11 +133,15 @@ impl HostClaim {
             };
             return Err(ClaimError::Held { what, holder });
         }
-        file.set_len(0).map_err(io)?;
-        file.rewind().map_err(io)?;
-        file.write_all(std::process::id().to_string().as_bytes())
+        // The claim from here on, so a failed write below unlocks it as it drops.
+        let mut claim = Self { held: file };
+        claim.held.set_len(0).map_err(io)?;
+        claim.held.rewind().map_err(io)?;
+        claim
+            .held
+            .write_all(std::process::id().to_string().as_bytes())
             .map_err(io)?;
-        Ok(Self { _held: file })
+        Ok(claim)
     }
 }
 
@@ -177,4 +195,27 @@ pub fn prepare_store(parent: &Path, store: &Path) -> Result<(), String> {
     // A store that is there already (or a link, which `verify` refuses) is left as it is.
     let _ = fs::DirBuilder::new().mode(0o755).create(store);
     verify(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a claim is held while its value lives and is free once the value drops,
+    /// even while another descriptor of its open file stays open (as one does in a child that
+    /// another thread forked and that has not yet executed its program). It catches a claim
+    /// released only when the last copy of its descriptor closes, so that the next taker
+    /// finds it still held.
+    #[test]
+    fn a_claim_is_free_once_dropped_while_a_copy_of_its_descriptor_is_open() {
+        let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "claim-copy");
+        let claim = HostClaim::take(dir.path(), "host-a").expect("the claim");
+        let copy = claim.held.try_clone().expect("a copy of the descriptor");
+        let why = HostClaim::take(dir.path(), "host-a").expect_err("held");
+        assert!(matches!(why, ClaimError::Held { .. }), "{why}");
+        drop(claim);
+        let again = HostClaim::take(dir.path(), "host-a").expect("free once dropped");
+        drop(copy);
+        drop(again);
+    }
 }

@@ -174,7 +174,10 @@ impl Host for MacHost {
                 };
             };
             // A stale membership would make the next holder of the name an
-            // administrator; names are never reused, but the group is cleaned anyway.
+            // administrator: a pool user is replaced under the same name (after an
+            // administrator's lease, too), so the group is cleaned first. A removal
+            // that fails is not judged here: the helper asks the directory afterwards
+            // whether the new user is a member, and a slot whose user is never goes free.
             let admin = group(&node, ADMIN_GROUP)?;
             let mut ignored = None;
             // SAFETY: both are records of the local node. Not a member is an error
@@ -286,17 +289,11 @@ impl Host for MacHost {
     }
 
     fn kill_group(&self, pgid: i32) -> io::Result<()> {
-        // SAFETY: killpg(2) takes plain integers; the caller refused a group of 1 or less.
-        if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        // A group with no process left is what the caller wants.
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
-        }
+        signal_group(pgid, libc::SIGKILL)
+    }
+
+    fn term_group(&self, pgid: i32) -> io::Result<()> {
+        signal_group(pgid, libc::SIGTERM)
     }
 
     fn pause(&self) {
@@ -620,5 +617,27 @@ mod tests {
             .map(|&b| libc::c_char::from_ne_bytes([b]))
             .collect();
         assert_eq!(c_name(&full), "abcd");
+    }
+}
+
+/// Sends `signal` to the process group `pgid`; a group with no process left is what the
+/// caller wants. A group of 1 or less (every process, the caller's group, init's) is refused
+/// before any signal.
+fn signal_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
+    if pgid <= 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("process group {pgid} is not one the helper signals"),
+        ));
+    }
+    // SAFETY: killpg(2) takes plain integers, and the group is above 1 (checked above).
+    if unsafe { libc::killpg(pgid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
     }
 }

@@ -1,9 +1,6 @@
 //! The flags, and the checks that decide whether the server may start.
 
-use std::fs::OpenOptions;
-use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +9,6 @@ use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
-use rustix::fs::OFlags;
-use rustix::process::geteuid;
 
 use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
@@ -35,19 +30,29 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod feed_retention;
 mod job_wall;
 mod listen;
 mod placement;
+mod private;
 mod resolve;
 mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub use feed_retention::FeedRetention;
+pub(crate) use feed_retention::{
+    DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
+};
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
-pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub(crate) use private::{read_private, read_private_reason};
+pub(crate) use retention::{
+    DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
+    parse_job_retention,
+};
 pub(crate) use store::{StoreNames, StoreSetting};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
@@ -239,6 +244,18 @@ pub struct Cli {
     /// window affects only the jobs that end after the restart.
     #[arg(long, default_value = DEFAULT_JOB_RETENTION, value_parser = parse_job_retention)]
     pub job_retention: Retention,
+    /// How many of the newest changes the job store's change feed keeps: a whole number,
+    /// at least 1; 100000 unless given. The tick trims the feed to them (counted in feed
+    /// changes, never by time), so a reader that has fallen further behind is told to start
+    /// again from the tables. Read once at start.
+    #[arg(long, default_value = DEFAULT_JOB_FEED_RETENTION, value_parser = parse_job_feed_retention)]
+    pub job_feed_retention: FeedRetention,
+    /// How long a freed allocation's row is kept after its free: a whole count of days
+    /// (`14d`) or a duration such as `36h` or `90m`, at least one minute; fourteen days unless
+    /// given. The tick deletes a freed row once the window has passed, a bounded batch a tick;
+    /// the usage history of the allocation is kept. Read once at start.
+    #[arg(long, default_value = DEFAULT_JOB_ALLOCATION_RETENTION, value_parser = parse_job_retention)]
+    pub job_allocation_retention: Retention,
     /// The most a submitted job's wall limit may be: a whole count of days (`30d`) or a
     /// duration such as `12h` or `90m`, at least one second; 30 days unless given. A job
     /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
@@ -429,6 +446,12 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    /// How many of the newest feed changes the job store keeps (`--job-feed-retention`,
+    /// `server.job_feed_retention`).
+    pub(crate) job_feed_retention: FeedRetention,
+    /// How long a freed allocation's row is kept (`--job-allocation-retention`,
+    /// `server.job_allocation_retention`).
+    pub(crate) job_allocation_retention: Retention,
     /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
@@ -509,6 +532,8 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            job_feed_retention: cli.job_feed_retention,
+            job_allocation_retention: cli.job_allocation_retention,
             max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
             store,
@@ -579,7 +604,7 @@ impl Config {
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
-                    jobs: server.agents.job_store(server.job_retention),
+                    jobs: server.agents.job_store(server.job_store_windows()),
                 });
                 (
                     Hosts::Layered {
@@ -631,6 +656,8 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            job_feed_retention: server.job_feed_retention,
+            job_allocation_retention: server.job_allocation_retention,
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
             store,
@@ -782,6 +809,19 @@ impl Config {
         self.job_retention
     }
 
+    /// How many of the newest changes the job store's change feed keeps
+    /// (`--job-feed-retention`, or `server.job_feed_retention`): 100000 unless set.
+    pub fn job_feed_retention(&self) -> FeedRetention {
+        self.job_feed_retention
+    }
+
+    /// How long a freed allocation's row is kept after its free
+    /// (`--job-allocation-retention`, or `server.job_allocation_retention`): fourteen days
+    /// unless set.
+    pub fn job_allocation_retention(&self) -> Retention {
+        self.job_allocation_retention
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -905,60 +945,10 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
     }
 }
 
-/// Whether a secret file may be trusted: a regular file, owned by the user running the
-/// server (`euid`), that nobody else can read or write (mode 0600 or 0400).
-fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
-    is_file & matches!(mode, 0o600 | 0o400) & (owner == euid)
-}
-
 /// The fewest bytes a bearer token may have after its trailing whitespace is dropped.
 /// A token that anyone on the network can try to guess is only as strong as it is long;
 /// 32 bytes of a random source is out of reach.
 pub const MIN_TOKEN_BYTES: usize = 32;
-
-/// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
-/// that it is a regular file owned by the server's user that only that user can use.
-/// See [`read_private_reason`].
-pub(crate) fn read_private(path: &Path, flag: &'static str) -> Result<Vec<u8>, StartupError> {
-    read_private_reason(path).map_err(StartupError::because(flag))
-}
-
-/// Reads the secret file at `path` after checking, on the open file, that it is a regular
-/// file owned by the server's user that only that user can use, and says why it was not
-/// read otherwise. The file is opened without blocking, so a named pipe at the path is
-/// refused instead of waited on; a symbolic link is followed (secret mounts are links)
-/// and the checks are on what it leads to. The reason names the path and never the
-/// content.
-pub(crate) fn read_private_reason(path: &Path) -> Result<Vec<u8>, String> {
-    match open_private(path) {
-        Ok(read) => read,
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
-}
-
-/// [`read_private_reason`] with the system's failures on the outside: a file that could
-/// not be opened, inspected or read, and inside it the refusal a file earns by what it
-/// is.
-fn open_private(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
-    let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nonblocking)
-        .open(path)?;
-    let meta = file.metadata()?;
-    let mode = meta.permissions().mode() & 0o777;
-    let euid = geteuid().as_raw();
-    if !trusted_private_file(meta.is_file(), mode, meta.uid(), euid) {
-        return Ok(Err(format!(
-            "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
-            path.display(),
-            meta.uid()
-        )));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Ok(bytes))
-}
 
 /// Reads the token from the file `--token-file` names, see [`read_private`].
 fn read_token(path: &Path) -> Result<Token, StartupError> {

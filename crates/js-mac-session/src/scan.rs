@@ -13,7 +13,9 @@
 //!   `/private/var/db/com.apple.xpc.launchd`.
 //! - `background-tasks`: each entry `sfltool dumpbtm` prints, by the uid its record
 //!   is under, its identifier, type, URL, executable and disposition.
-//! - `lease-users`: each uid of the lease range that a user record has.
+//! - `lease-users`: each uid of the lease range that a user record has, except the uids
+//!   of the pool's free users: a free pool user is the clean node's own, and a leased,
+//!   resetting or broken one (or a user the pool does not hold) is reported.
 //! - `auto-login`: the login window's `autoLoginUser`, whether `/etc/kcpassword` is
 //!   there, and the session switch's intent record.
 //!
@@ -183,9 +185,10 @@ pub fn diff(baseline: &BTreeSet<String>, now: &BTreeSet<String>) -> Diff {
     }
 }
 
-/// Collects every item of the minimal set.
+/// Collects every item of the minimal set; `free` are the uids of the pool's free users,
+/// which are not items.
 #[must_use]
-pub fn collect(host: &dyn Host, settings: &Settings) -> Snapshot {
+pub fn collect(host: &dyn Host, settings: &Settings, free: &BTreeSet<u32>) -> Snapshot {
     let mut snapshot = Snapshot::default();
     for folder in &settings.scan.folders {
         if let Err(why) = folder_items(folder, &mut snapshot.items) {
@@ -196,7 +199,7 @@ pub fn collect(host: &dyn Host, settings: &Settings) -> Snapshot {
     }
     let collected = [
         background_tasks(host),
-        lease_users(host, settings),
+        lease_users(host, settings, free),
         auto_login(host, settings),
     ];
     for result in collected {
@@ -344,10 +347,14 @@ fn is_entry_header(line: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Each uid of the lease range a user record has.
-fn lease_users(host: &dyn Host, settings: &Settings) -> Result<Vec<String>, String> {
+/// Each uid of the lease range a user record has, but those in `free`.
+fn lease_users(
+    host: &dyn Host,
+    settings: &Settings,
+    free: &BTreeSet<u32>,
+) -> Result<Vec<String>, String> {
     let mut items = Vec::new();
-    for uid in settings.range.after(None) {
+    for uid in settings.range.uids().filter(|uid| !free.contains(uid)) {
         let taken = host
             .uid_taken(uid)
             .map_err(|why| format!("{LEASE_USERS}: looking up uid {uid}: {why}"))?;
