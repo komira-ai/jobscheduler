@@ -511,10 +511,15 @@ impl Lifecycle {
                 "the job does not fit what is free",
             ));
         }
+        // A native body's mount inputs are resolved as mounts are, read-only, each with its
+        // `dest` as its target: the native runtime stages them into the run directory.
+        let inputs = body.iter().flat_map(|native| &native.inputs);
+        let staged = inputs.filter_map(|input| self.config.mounts.resolve_input(input));
         let mounts = spec
             .mounts
             .iter()
             .map(|mount| self.config.mounts.resolve(mount))
+            .chain(staged)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
         // A job above the runtime's ceiling is refused, never run with less; it costs no call.

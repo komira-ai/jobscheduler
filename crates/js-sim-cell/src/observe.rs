@@ -23,6 +23,9 @@
 //! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`]
 //! and [`ServerHost::set_aside`].
 //!
+//! Jobs have sources of their own beside these (the server's job and allocation tables, and
+//! what the per-job agents sent and were sent), kept in [`crate::jobs`].
+//!
 //! [`Observations`] gathers them, with whether a fault is active and the items the client
 //! asked to cancel ([`Observations::cancels`]). Its builder
 //! ([`Observations::quiet`], [`Observations::with_agent`], [`Observations::with_event`],
@@ -33,9 +36,11 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use js_jobs::{AllocationId, JobId};
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
 
+use crate::jobs::{AllocationRead, JobBeat, JobRead, JobReply, ResultMade};
 use crate::ledger::{Acked, Completion};
 
 /// One unit of work the client driver submits, numbered from zero in the order it
@@ -186,6 +191,15 @@ pub struct Running {
     pub resources: Resources,
 }
 
+/// A job a per-job agent runs now, as the start that launched it named it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningJob {
+    /// The allocation the start named.
+    pub allocation: AllocationId,
+    /// The resources the job holds on the host.
+    pub resources: Resources,
+}
+
 /// The server's verdict on a result an agent reported (the wire's acknowledgement).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -215,6 +229,8 @@ pub struct AgentTruth {
     pub completed: BTreeMap<RunId, FarmTime>,
     /// The results the server acknowledged, with its verdict. No check reads it yet.
     pub acknowledged: BTreeMap<RunId, Verdict>,
+    /// The jobs it runs now, when it speaks the per-job messages.
+    pub jobs: BTreeMap<JobId, RunningJob>,
 }
 
 impl AgentTruth {
@@ -231,6 +247,17 @@ impl AgentTruth {
     #[must_use]
     pub fn with_run(mut self, run: RunId, lease: LeaseId, resources: Resources) -> Self {
         self.running.insert(run, Running { lease, resources });
+        self
+    }
+
+    /// This agent, also running `job` under `allocation` with `resources`.
+    #[must_use]
+    pub fn with_job(mut self, job: JobId, allocation: AllocationId, resources: Resources) -> Self {
+        let running = RunningJob {
+            allocation,
+            resources,
+        };
+        self.jobs.insert(job, running);
         self
     }
 }
@@ -437,6 +464,21 @@ pub struct Observations {
     pub stops: Vec<StopSeen>,
     /// The items the client asked to cancel, with when it first asked.
     pub cancels: BTreeMap<ItemId, FarmTime>,
+    /// Each change of a job's state the server's job table showed, in the order read; only
+    /// ever appended.
+    pub job_reads: Vec<JobRead>,
+    /// Each change of an allocation's row the server's allocation table showed, in the
+    /// order read; only ever appended.
+    pub allocation_reads: Vec<AllocationRead>,
+    /// When the server's job and allocation tables were last read; `None` before the
+    /// first read, and for a server without the job service.
+    pub tables_at: Option<FarmTime>,
+    /// Every heartbeat a per-job agent sent, oldest first; only ever appended.
+    pub job_beats: Vec<JobBeat>,
+    /// Every answer a per-job agent read to a heartbeat, oldest first; only ever appended.
+    pub job_replies: Vec<JobReply>,
+    /// Every result a per-job agent made, oldest first; only ever appended.
+    pub results_made: Vec<ResultMade>,
 }
 
 impl Observations {

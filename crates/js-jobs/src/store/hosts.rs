@@ -4,8 +4,8 @@
 use js_state::{Cond, Store, Txn};
 use js_types::HostId;
 
+use super::index::{Span, put_allocation, put_job};
 use super::{JobStore, allocation_at, ensure, with_rows};
-use crate::codec::{encode_allocation, encode_job};
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
@@ -15,8 +15,9 @@ use crate::result::{JobEnd, ended};
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// The live (booked and releasing) allocations on `host`, in job id order, each with its
     /// job's record, or `None` for a job whose row was deleted at its retention end (its
-    /// allocation is kept as history and may still be releasing). It reads every allocation
-    /// row, freed ones included, as [`JobStore::booked_on`] does, and then each live one's job.
+    /// allocation is kept as history and may still be releasing). It reads the rows of the
+    /// host's on-host entries and the allocation rows this build cannot read, as
+    /// [`JobStore::booked_on`] does, and then each live one's job.
     ///
     /// # Errors
     /// [`JobStoreError::UnknownRow`] or [`JobStoreError::Corrupt`] when a row cannot be read
@@ -27,7 +28,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         host: &HostId,
     ) -> Result<Vec<(AllocationRecord, Option<JobRecord>)>, JobStoreError> {
         let mut live = Vec::new();
-        for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
+        let on_host = keys::on_host_prefix(host);
+        let spans = [Span::all(&on_host), Span::all(keys::UNREAD_ALLOCATION)];
+        for (key, row) in self.indexed_rows(&spans)? {
             let allocation = allocation_at(&key, &row.value)?;
             if allocation.host == *host && allocation.step != AllocationStep::Freed {
                 let job = self.read_job(&allocation.job)?.map(|(job, _)| job);
@@ -89,12 +92,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                     to,
                 },
             )?;
+            let before = job.clone();
             let ended = ended(job, end, now, self.retention);
-            txn = txn.put(
-                keys::job(id),
-                encode_job(&ended)?,
-                Cond::Version(job_version),
-            );
+            txn = put_job(txn, Some(&before), &ended, Cond::Version(job_version))?;
             ended
         };
         let allocation = if allocation.step == AllocationStep::Freed {
@@ -104,13 +104,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 step: AllocationStep::Freed,
                 freed_at: Some(now),
                 end_reason: Some(reason),
-                ..allocation
+                ..allocation.clone()
             };
-            txn = txn.put(
-                keys::allocation(id),
-                encode_allocation(&freed)?,
+            txn = put_allocation(
+                txn,
+                Some(&allocation),
+                &freed,
                 Cond::Version(allocation_version),
-            );
+            )?;
             txn = with_rows(txn, beside(&freed));
             freed
         };

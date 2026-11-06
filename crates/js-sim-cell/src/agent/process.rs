@@ -28,6 +28,7 @@ use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
 
 use super::exclusive::Exclusive;
+use super::per_job::{Acks, PerJob};
 use super::real::RealAgent;
 use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
@@ -124,7 +125,7 @@ fn sim_run(job: &JobSpec) -> Option<Duration> {
 
 /// The cell's verdict for the wire's, or `None` for one this version cannot read: the
 /// agent keeps that result and sends it again.
-fn verdict(ack: Ack) -> Option<Verdict> {
+pub(super) fn verdict(ack: Ack) -> Option<Verdict> {
     match ack {
         Ack::Accepted => Some(Verdict::Accepted),
         Ack::Duplicate => Some(Verdict::Duplicate),
@@ -277,6 +278,8 @@ pub(super) struct Process {
     disconnected: bool,
     /// Where the process is in the whole-host handshake.
     exclusive: Exclusive,
+    /// The per-job half, for a fake agent that speaks the per-job messages.
+    jobs: Option<PerJob>,
 }
 
 impl Process {
@@ -291,6 +294,7 @@ impl Process {
             book: Book::default(),
             disconnected: false,
             exclusive: Exclusive::default(),
+            jobs: PerJob::of(spec),
         })
     }
 
@@ -317,6 +321,7 @@ impl Process {
             running: running.collect(),
             completed: self.book.completed.clone(),
             acknowledged: self.book.acknowledged.clone(),
+            jobs: self.jobs.as_ref().map(PerJob::truth).unwrap_or_default(),
         }
     }
 
@@ -338,6 +343,10 @@ impl Process {
     /// completes unless it no longer runs (it was stopped, or this is the end of a second
     /// launch of a run that already ended).
     pub(super) fn timer(&mut self, tag: u64, io: &mut Io) {
+        let per_job = self.jobs.as_mut();
+        if per_job.is_some_and(|jobs| jobs.timer(tag, io)) {
+            return;
+        }
         let Some(run) = self.book.run_timers.remove(&tag) else {
             return;
         };
@@ -398,6 +407,7 @@ impl Process {
             if let Some(agent) = self.agent.fake() {
                 agent.disconnect();
             }
+            self.jobs.iter_mut().for_each(PerJob::disconnect);
             self.disconnected = true;
         }
     }
@@ -413,6 +423,7 @@ impl Process {
         let results = self.agent.results(&self.book.runs);
         self.book.count_resent(&results, io);
         let held = self.list();
+        let listing = self.jobs.as_ref().map(PerJob::listing).unwrap_or_default();
         let (ready, refused) = self.exclusive.report(io.prepare, held.is_empty(), io.now);
         if let Some(lease) = &ready {
             io.ledger.reported_ready(ReadyReport {
@@ -433,8 +444,8 @@ impl Process {
             exclusive_refused: refused,
             load: None,
             disk_gib: None,
-            jobs: Vec::new(),
-            retired_jobs: Vec::new(),
+            jobs: listing.held.clone(),
+            retired_jobs: listing.retired.clone(),
             log_grant_state: None,
         };
         if let Some(agent) = self.agent.fake() {
@@ -444,6 +455,9 @@ impl Process {
         let body = serde_json::to_string(&beat).unwrap_or_default();
         let id = io.call(Route::Heartbeat, &spec.join_token, body);
         session.unanswered.insert(id, false);
+        if let Some(jobs) = self.jobs.as_mut() {
+            jobs.sent(id, listing, io);
+        }
     }
 
     /// What a hello or heartbeat lists as held ([`Behind::held`]), noted as listed.
@@ -467,6 +481,7 @@ impl Process {
             if let Some(agent) = self.agent.fake() {
                 agent.reconnect();
             }
+            self.jobs.iter_mut().for_each(PerJob::reconnect);
         }
     }
 
@@ -504,7 +519,7 @@ impl Process {
 
     fn beat_answered(&mut self, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
-            200 => self.act(&answer.body, &spec.capacity, io),
+            200 => self.act(answer.id, &answer.body, &spec.capacity, io),
             409 => {
                 if is_code(&answer.body, refusal::UNKNOWN_HOST) {
                     io.bump(Counter::UnknownHost);
@@ -531,8 +546,9 @@ impl Process {
     /// ledger is told of each start and of each stop or cancel of a running run. The fake
     /// is told each; the real lifecycle is handed the reply, with the starts the cell
     /// cannot account for taken out. While the agent prepares or has refused, no start
-    /// reaches either.
-    fn act(&mut self, body: &str, capacity: &Resources, io: &mut Io) {
+    /// reaches either. The per-job half, when the agent speaks the per-job messages, is
+    /// handed the reply last, as the answer to the heartbeat sent as call `id`.
+    fn act(&mut self, id: CallId, body: &str, capacity: &Resources, io: &mut Io) {
         let Ok(mut reply) = serde_json::from_str::<HeartbeatReply>(body) else {
             return io.bump(Counter::ReplyInvalid);
         };
@@ -573,7 +589,12 @@ impl Process {
                 starts.unaccounted.extend(withheld);
                 drop(check);
                 hand_over(real, &mut self.book, &mut reply, starts, io);
+                return;
             }
+        }
+        if let Some(jobs) = self.jobs.as_mut() {
+            let acks = Acks::of(&reply, &check);
+            jobs.answered(id, &check.commands, &acks, capacity, io);
         }
     }
 

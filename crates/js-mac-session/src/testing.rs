@@ -13,6 +13,11 @@ use crate::helper::{Account, Host, LiveProcess, NewUser, PrintAnswer, Process};
 /// The fake clock's time.
 pub(crate) const NOW: u64 = 1_800_000_000;
 
+/// The fake clock's time before a test moves it.
+pub(crate) fn epoch() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(NOW)
+}
+
 /// More pauses than any bounded wait of the helper takes: past this a wait has no
 /// bound, and the test panics instead of hanging.
 const PAUSES: usize = 10_000;
@@ -43,7 +48,8 @@ pub(crate) struct State {
     /// Calls that fail, by name ("uid_taken", "make_home", "create_user",
     /// "delete_user", "launchctl print", "bootout gui", "bootout user", "user_dir",
     /// "kill_all", "live_processes",
-    /// "command", "reset_password", "boot_session", "account", "processes", "kill_group").
+    /// "command", "reset_password", "boot_session", "account", "processes", "kill_group",
+    /// "term_group").
     pub(crate) fail: BTreeSet<&'static str>,
     /// What `command` answers, by the command's text (`program arg ...`). A command
     /// with no answer succeeds and prints nothing, except `fdesetup isactive`, which
@@ -71,6 +77,8 @@ pub(crate) struct State {
     pub(crate) tables_ok: Option<usize>,
     /// How many more `kill_group` calls leave their group alive.
     pub(crate) stubborn_groups: usize,
+    /// How far the fake clock has moved past [`NOW`].
+    pub(crate) advanced: Duration,
     /// The launchd domains that exist (`gui/<uid>` once a login has completed). As
     /// launchd does, `bootout user/<uid>` ends the domain only while no process of the
     /// uid lives (in `procs`): a live one makes it again.
@@ -112,9 +120,58 @@ pub(crate) struct State {
     /// The uids with one more live process whose name cannot be read (`?`, pid 901),
     /// which a kill ends.
     pub(crate) unreadable: BTreeSet<u32>,
+    /// The System V IPC objects, by id: their kind's letter (`q`, `m` or `s`) and their
+    /// owner as `ipcs` prints it (a user's name, or a uid). `ipcs -a` lists them and
+    /// `ipcrm -<kind> <id>` removes one, unless a command answer is set for either.
+    pub(crate) ipc: BTreeMap<u64, (char, String)>,
+    /// The ids of IPC objects `ipcrm` refuses to remove (it fails, and they stay).
+    pub(crate) ipc_stuck: BTreeSet<u64>,
 }
 
 impl State {
+    /// What `ipcs -a` prints for `ipc`: a header, then one line per object.
+    fn ipcs(&self) -> String {
+        let mut text =
+            String::from("IPC status from <running system>\nT ID KEY MODE OWNER GROUP\n");
+        for (id, (kind, owner)) in &self.ipc {
+            text.push_str(&format!(
+                "{kind} {id} 0x0 --rw------- {owner} staff {owner} staff\n"
+            ));
+        }
+        text
+    }
+
+    /// `dseditgroup -o checkmember -m <name> admin`: `yes` (exit 0) for a user made an
+    /// administrator, else `no` and a failure, as `dseditgroup` answers.
+    fn checkmember(&self, name: &str) -> CommandOutput {
+        let admin = self.users.get(name).is_some_and(|user| user.admin);
+        CommandOutput {
+            success: admin,
+            stdout: match admin {
+                true => format!("yes {name} is a member of admin\n"),
+                false => format!("no {name} is NOT a member of admin\n"),
+            },
+            stderr: String::new(),
+        }
+    }
+
+    /// `ipcrm -<kind> <id>`: removes the object, unless it is stuck.
+    fn ipcrm(&mut self, args: &[&str]) -> CommandOutput {
+        let id: u64 = args[1].parse().unwrap();
+        if !self.ipc_stuck.contains(&id) {
+            self.ipc.remove(&id);
+            return CommandOutput {
+                success: true,
+                ..CommandOutput::default()
+            };
+        }
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("ipcrm: {}: Operation not permitted\n", args[1]),
+        }
+    }
+
     /// The effect of a successful `chflags -h uchg|nouchg <paths>` when `enforce_uchg` is
     /// on: the parent of every path with the flag loses its write permission (so nothing
     /// in it can be unlinked, and a flagged directory cannot be removed from its parent)
@@ -142,6 +199,11 @@ impl State {
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(mode)).unwrap();
         }
     }
+}
+
+/// A pool with one user for each uid of `range`.
+pub(crate) fn pool_of(range: crate::lease::UidRange) -> crate::lease::PoolSize {
+    crate::lease::PoolSize::new(u32::try_from(range.uids().count()).unwrap()).unwrap()
 }
 
 /// `launchctl print`'s answer for a domain launchd has.
@@ -188,7 +250,7 @@ impl FakeHost {
 
 impl Host for FakeHost {
     fn now(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(NOW)
+        UNIX_EPOCH + Duration::from_secs(NOW) + self.state().advanced
     }
 
     fn uid_taken(&self, uid: u32) -> io::Result<bool> {
@@ -364,6 +426,14 @@ impl Host for FakeHost {
         }
         let output = match state.answers.get(&text) {
             Some(answer) => answer.clone(),
+            None if program == crate::helper::IPCS => CommandOutput {
+                success: true,
+                stdout: state.ipcs(),
+                stderr: String::new(),
+            },
+            None if program == crate::helper::IPCRM => state.ipcrm(args),
+            // The helper runs it only as `-o checkmember -m <name> admin`.
+            None if program == crate::helper::DSEDITGROUP => state.checkmember(args[3]),
             None if text == "/usr/bin/fdesetup isactive" => CommandOutput {
                 success: false,
                 stdout: "false\n".to_owned(),
@@ -460,6 +530,10 @@ impl Host for FakeHost {
             state.table.retain(|process| process.pgid != pgid);
         }
         Ok(())
+    }
+
+    fn term_group(&self, pgid: i32) -> io::Result<()> {
+        self.call("term_group", format!("term_group {pgid}"))
     }
 
     fn pause(&self) {

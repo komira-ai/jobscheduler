@@ -3,7 +3,11 @@
 //!
 //! - **Postgres** (feature `postgres`): a session-level advisory lock on the key
 //!   `postgres::WRITER_LOCK_KEY`,
-//!   held on a connection of its own (`postgres/writer.rs`).
+//!   held on a connection of its own (`postgres/writer.rs`). Once it holds the lock, the
+//!   acquire increments the store's writer generation and keeps the new value
+//!   ([`WriterLock::generation`]): the holder opens its store with it
+//!   (`postgres::PostgresStore::fenced`), and every commit of that store checks the row
+//!   still holds it.
 //! - **SQLite**: the `flock` on `<file>.lock` a store holds while it is open
 //!   ([`StoreLock`]). [`crate::sqlite::SqliteStore::open_locked`] opens the store under a
 //!   lock taken here, so the lock is held from before the open until the store is dropped.
@@ -47,6 +51,26 @@ pub enum LockRefused {
     Failed(String),
 }
 
+/// The generation a Postgres writer lock took: the value of the store's writer generation row
+/// after this holder incremented it. Each acquire takes a greater one than every acquire
+/// before it on the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WriterGeneration(i64);
+
+impl WriterGeneration {
+    /// The generation `value` (the row's value).
+    #[must_use]
+    pub const fn new(value: i64) -> WriterGeneration {
+        WriterGeneration(value)
+    }
+
+    /// The row's value.
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
 /// The lock of the one active writer of a store, held until this value is dropped.
 pub struct WriterLock {
     pub(crate) held: Held,
@@ -74,6 +98,18 @@ impl WriterLock {
             }
         };
         Ok(WriterLock { held })
+    }
+
+    /// The writer generation this holder took, which its store is opened with
+    /// (`postgres::PostgresStore::fenced`). `None` on SQLite, where the file lock alone keeps
+    /// a second writer out (the lock lasts as long as the process that holds it).
+    #[must_use]
+    pub fn generation(&self) -> Option<WriterGeneration> {
+        match &self.held {
+            #[cfg(feature = "postgres")]
+            Held::Postgres(session) => Some(session.generation()),
+            Held::Sqlite(_) => None,
+        }
     }
 
     /// Whether the lock is still held, for a caller to ask on every tick. On Postgres it

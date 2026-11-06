@@ -11,6 +11,7 @@ use js_elastic::{
     Held, HostRef, Offer, PriceUnit, ProviderError, Released,
 };
 use js_elastic_fake::{Billing, ElasticFake, FakeClock};
+use js_jobs::{Constraints, JobId, JobSpec, JobStore, Needs, NetworkPolicy, NewJob, RandomIds};
 use js_lease::Booking;
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{
@@ -19,9 +20,10 @@ use js_lease_server::{
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
+use js_state::sqlite::{Options, SqliteStore};
 use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, Model, ProviderId, Request, RequestId, ResourceClass,
-    Resources, accelerator_of,
+    ExecMode, ImageDigestRef, Labels, LeaseId, Model, ProviderId, ResourceClass, Resources,
+    accelerator_of,
 };
 
 use crate::support::{Scratch, Stepping, TOKEN, clock, lease_body, routed};
@@ -203,8 +205,9 @@ fn offer() -> Offer {
 }
 
 /// The configuration file of a server with one live pool `burst` of the `logged-cloud` kind,
-/// leases of 60 s, and the agent routes on a port of their own (which an elastic pool needs,
-/// and which the seam does not bind).
+/// leases of 60 s, the agent routes on a port of their own (which an elastic pool needs,
+/// and which the seam does not bind), and the job service on, so the server holds the job
+/// tables beside the state file (the seam binds no job listener either).
 fn file_text(scratch: &Scratch) -> String {
     let token = scratch.write("client-token", TOKEN, 0o600);
     let key = scratch.write("api-key", "test-api-key", 0o600);
@@ -219,6 +222,7 @@ fn file_text(scratch: &Scratch) -> String {
          default_ttl = \"60s\"\n\
          listen = \"127.0.0.1:0\"\n\
          agent_listen = \"127.0.0.2:0\"\n\
+         job_listen = \"127.0.0.3:0\"\n\
          advertise_url = \"https://sched.example.org:7301\"\n\
          \n\
          [[pool]]\n\
@@ -240,24 +244,39 @@ fn file_text(scratch: &Scratch) -> String {
     )
 }
 
-/// The start of a whole-node request `id` for one a100, under the lease `lease`: what a
-/// consumer presents to the registry.
-fn whole_node(lease: u64, id: &str) -> StartSpec {
-    let request = Request {
-        class: ClassId::new("whole-node").unwrap(),
-        resources: Resources::new(1000, 1024, 1, Some("nvidia-a100".to_owned())).unwrap(),
-        capabilities: Capabilities::new(),
-        max_wall: Duration::from_secs(7200),
-        labels: BTreeMap::new(),
-        validation_run: None,
-        probe_host: None,
+/// Writes one queued job, `id`, asking for one core, 1 GiB and one a100, into the job tables
+/// beside the state file of `scratch`, before the server opens them: the demand the scaler
+/// reads.
+fn queue_job(scratch: &Scratch, id: &str) {
+    let mut path = scratch.state().into_os_string();
+    path.push(".jobs");
+    let clock = Arc::new(js_state::ManualClock::default());
+    clock.advance(Duration::from_millis(1_000_000_000_000));
+    let store = SqliteStore::open(std::path::Path::new(&path), clock, Options::default()).unwrap();
+    let store: Arc<dyn js_state::Store> = Arc::new(store);
+    let jobs = JobStore::new(Arc::new(store), RandomIds).unwrap();
+    let spec = JobSpec {
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        command: vec!["run".to_owned()],
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        needs: Needs::Shape(
+            Resources::new(1000, 1 << 30, 1, Some("nvidia-a100".to_owned())).unwrap(),
+        ),
+        constraints: Constraints::default(),
+        wall_limit_secs: 600,
+        network: NetworkPolicy::None,
+        ports: Vec::new(),
+        files: js_jobs::JobFiles::default(),
+        labels: Labels::default(),
     };
-    let spec = StartSpec::new(
-        LeaseId::new(1, lease),
-        request,
-        &[ResourceClass::whole_node()],
-    );
-    spec.unwrap().with_request_id(RequestId::new(id).unwrap())
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec,
+        priority: 0,
+        client: None,
+    };
+    jobs.insert_queued(new).unwrap();
 }
 
 /// Where `call` first appears in `calls`.
@@ -268,15 +287,16 @@ fn first(calls: &[String], call: &str) -> usize {
         .unwrap_or_else(|| panic!("no {call} in {calls:?}"))
 }
 
-/// Asserts the order of one tick over an elastic pool. The first tick runs the pool's first
-/// pass of checks (so the pool is available) and a scaler pass that has nothing to launch.
-/// Then a lease on the static pool passes its ttl, the checks fall due again (60 s), and a
-/// whole-node request waits; in the one tick that follows, the log shows the checks before
-/// the first `acquire` and the table's stop of the expired lease before the scaler's first
-/// call (its `list`). It catches a tick that runs the scaler before the checks (the scaler
-/// would read the pool as it was, or as still being checked at the first tick), one that skips
-/// the checks (no `checks`, and no launch: the scaler launches only while they pass), and one
-/// that runs the scaler before the table.
+/// Asserts the order of a tick over an elastic pool with a job queued from the start. The
+/// first tick runs the pool's first pass of checks (so the pool is available) and then the
+/// scaler, which launches for the job: the log shows the checks before the first `acquire`.
+/// Then a lease on the static pool passes its ttl and the checks fall due again (60 s); in
+/// the tick that follows, the table's stop of the expired lease comes before the scaler's
+/// first call (its `list`), and the job, still on its way to its machine, launches nothing
+/// more. It catches a tick that runs the scaler before the checks (the scaler would read the
+/// pool as still being checked and launch nothing), one that skips the checks (no `checks`,
+/// and no launch: the scaler launches only while they pass), and one that runs the scaler
+/// before the table.
 #[tokio::test]
 async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     let scratch = Scratch::new("order");
@@ -286,6 +306,7 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     let key = scratch.path("api-key").display().to_string();
     CLOUDS.lock().unwrap().insert(key, (cloud, log.clone()));
     let path = scratch.write("js.toml", &file_text(&scratch), 0o644);
+    queue_job(&scratch, "wants-a100");
     let (clock, shared) = clock();
     let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
     let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
@@ -308,24 +329,21 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     server.tick().await;
     let calls = log.lock().unwrap()[before..].to_vec();
     assert!(first(&calls, "checks") < first(&calls, "list"), "{calls:?}");
-    assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
-
-    clock.advance(Duration::from_secs(61));
-    fake_clock.advance(Duration::from_secs(61));
-    let registry = server.registry().unwrap();
-    let waits = registry.provider().start(whole_node(99, "wait-1"));
-    assert!(matches!(waits, StartAck::Unknown), "{waits:?}");
-    let before = log.lock().unwrap().len();
-    server.tick().await;
-    let calls = log.lock().unwrap()[before..].to_vec();
     assert!(
         first(&calls, "checks") < first(&calls, "acquire"),
         "{calls:?}"
     );
+
+    clock.advance(Duration::from_secs(61));
+    fake_clock.advance(Duration::from_secs(61));
+    let before = log.lock().unwrap().len();
+    server.tick().await;
+    let calls = log.lock().unwrap()[before..].to_vec();
     assert!(
         first(&calls, "stop 1-1") < first(&calls, "list"),
         "{calls:?}"
     );
+    assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
     let scaler = server.scaler().unwrap();
     assert_eq!(scaler.state().records.instances.len(), 1);
 }

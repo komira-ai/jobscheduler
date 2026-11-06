@@ -116,7 +116,7 @@ impl Minter for FakeMinter {
         }
         // The text is always one the fake reads; were it not, the credential would be
         // issued with no action at all, so a test of its scope fails rather than passes.
-        let text = policy(&request.bucket, &request.prefix);
+        let text = policy(&request.bucket, &request.host_prefix()?);
         let nothing = Policy {
             actions: Vec::new(),
             prefix: String::new(),

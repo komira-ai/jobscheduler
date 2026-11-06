@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_elastic::{Acquired, Extra, Held, HostStatus, Instant, RefusalCode, Released};
 use js_sched::failover::{AcquireMemory, Refused};
-use js_types::{AcceleratorNeed, Model};
+use js_types::{AcceleratorNeed, Model, RequestId};
 
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
 use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
@@ -33,6 +33,8 @@ pub(crate) struct Pass<'a> {
     pub(crate) silent_now: BTreeMap<String, Millis>,
     /// The machines released this step on their host's silence.
     pub(crate) silent_released: Vec<String>,
+    /// The machines launched this step, each with its request ([`State::launched`]).
+    pub(crate) launched: BTreeMap<String, RequestId>,
     /// Since when each machine was missing from a complete view, at the last step and now.
     missing: BTreeMap<String, Millis>,
     pub(crate) missing_now: BTreeMap<String, Millis>,
@@ -192,6 +194,7 @@ impl<'a> Pass<'a> {
             silent,
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
+            launched: BTreeMap::new(),
             missing,
             missing_now: BTreeMap::new(),
             unheard: state.unheard,

@@ -64,6 +64,8 @@ in-process = []
 
 [dev-dependencies]
 js-agent = { path = "../js-agent" }
+# The job-service conformance suite, run against the real service (src/job_api/conformance_tests.rs).
+js-conformance = { path = "../js-conformance" }
 # The in-process server, for tests/in_process.rs.
 js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).

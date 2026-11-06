@@ -5,8 +5,8 @@
 //! `Action=AssumeRole&Version=..&RoleArn=..&RoleSessionName=..&DurationSeconds=..&Policy=..`,
 //! every value percent-encoded, signed with AWS Signature Version 4 for the service `sts` in the
 //! configured region with the mint key. The session name is `js-` and the first 32 hex digits of
-//! the SHA-256 of the host's agent id (an agent id may be longer than STS takes or hold
-//! characters it refuses), so the store's audit trail names the host.
+//! the SHA-256 of the host's agent id ([`crate::names::host_segment`]: an agent id may be longer
+//! than STS takes or hold characters it refuses), so the store's audit trail names the host.
 //!
 //! The answer is read by a small strict scanner, not an XML parser: the one `<Credentials>`
 //! element, and in it exactly one each of `AccessKeyId`, `SecretAccessKey`, `SessionToken` and
@@ -18,14 +18,14 @@
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
-use js_logstore::sigv4::{Scope, Unsigned, sha256_hex, sign, uri_encode};
+use js_logstore::sigv4::{Scope, Unsigned, sign, uri_encode};
 use js_logstore::{
     Clock, Credential, Endpoint, EndpointError, HttpRequest, Method, Transport, Unavailable,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::names::RoleArn;
+use crate::names::{LogPrefix, RoleArn, host_segment};
 use crate::policy::policy;
 use crate::{MintError, MintRequest, Minter, Refusal};
 
@@ -39,12 +39,6 @@ pub const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 
 /// The content type of the call's body.
 const FORM: &str = "application/x-www-form-urlencoded";
-
-/// What every session name begins with.
-const SESSION_PREFIX: &str = "js-";
-
-/// The hex digits of the agent id's SHA-256 a session name keeps.
-const SESSION_DIGITS: usize = 32;
 
 /// The longest STS error code kept.
 const MAX_CODE_LEN: usize = 64;
@@ -124,11 +118,12 @@ impl<T: Transport, C: Clock> StsMinter<T, C> {
         }
     }
 
-    /// The signed `AssumeRole` request for `request`.
-    fn request(&self, request: &MintRequest) -> HttpRequest {
-        let session = session_name(&request.host);
+    /// The signed `AssumeRole` request for `request`, whose session policy allows the host's
+    /// own prefix `prefix`.
+    fn request(&self, request: &MintRequest, prefix: &LogPrefix) -> HttpRequest {
+        let session = host_segment(&request.host);
         let seconds = request.ttl.as_secs().to_string();
-        let policy = policy(&request.bucket, &request.prefix);
+        let policy = policy(&request.bucket, prefix);
         let body = form(&[
             ("Action", "AssumeRole"),
             ("Version", STS_API_VERSION),
@@ -166,9 +161,10 @@ impl<T: Transport, C: Clock> StsMinter<T, C> {
 
 impl<T: Transport, C: Clock> Minter for StsMinter<T, C> {
     fn mint(&self, request: &MintRequest) -> Result<Credential, MintError> {
+        let prefix = request.host_prefix()?;
         let answer = self
             .transport
-            .send(self.request(request))
+            .send(self.request(request, &prefix))
             .map_err(|error| MintError::Unavailable(Unavailable::Transport(error)))?;
         if answer.status != 200 {
             return Err(refusal(answer.status, &answer.body));
@@ -183,12 +179,6 @@ impl<T: Transport, C: Clock> Minter for StsMinter<T, C> {
             false => Ok(credential),
         }
     }
-}
-
-/// The session name of the host `host`: `js-` and the first 32 hex digits of its SHA-256.
-fn session_name(host: &str) -> String {
-    let digest = sha256_hex(host.as_bytes());
-    format!("{SESSION_PREFIX}{}", &digest[..SESSION_DIGITS])
 }
 
 /// The form body of `pairs`, in their order, each name and value percent-encoded.

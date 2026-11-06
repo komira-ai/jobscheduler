@@ -77,6 +77,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::fence::STATE_FENCED;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
@@ -270,6 +271,9 @@ async fn heartbeat(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
+    // Before anything is read or recorded: a server whose store has a newer writer writes
+    // nothing at all.
+    refuse_when_fenced(&agents)?;
     let heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
@@ -374,7 +378,8 @@ async fn add_jobs(
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
 /// room for `room` commands, its starts carrying the sinks of `logs`; `None` for any other
 /// host. The store is read and written on the pool for blocking calls. A failed read or
-/// commit is a 500 `state-write-failed`.
+/// commit is a 500 `state-write-failed`, except a store that says it has a newer writer, which
+/// is a 503 `state-fenced` and trips the fence.
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
 async fn serve_jobs(
@@ -438,11 +443,26 @@ async fn serve_jobs(
         }
         (host, Err(error)) => {
             warn!(%host, %error, "a heartbeat's job listing could not be committed");
-            Err(Refused::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                STATE_WRITE_FAILED,
-            ))
+            Err(match agents.fence.note(&error) {
+                true => fenced(),
+                false => Refused::new(StatusCode::INTERNAL_SERVER_ERROR, STATE_WRITE_FAILED),
+            })
         }
+    }
+}
+
+/// The answer to a heartbeat once the state store has a newer writer: 503 `state-fenced`.
+/// The server writes nothing more and is about to exit, so the agent retries against whatever
+/// replaces it.
+fn fenced() -> Refused {
+    Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_FENCED)
+}
+
+/// [`fenced`] when the fence has tripped, else nothing.
+fn refuse_when_fenced(agents: &Agents) -> Result<(), Refused> {
+    match agents.fence.is_tripped() {
+        true => Err(fenced()),
+        false => Ok(()),
     }
 }
 

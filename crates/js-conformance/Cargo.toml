@@ -18,6 +18,12 @@ js-sched = { path = "../js-sched" }
 # The in-memory store the reference core runs on (`core` module); test-only by nature, like
 # this crate.
 js-state = { path = "../js-state", features = ["test-support"] }
+# The job-service suite (`jobs`): the generated service and client, the channel that joins
+# them over an in-memory stream, and the reference service.
+js-proto = { path = "../js-proto" }
+hyper-util = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["io-util", "rt"] }
+tonic = { workspace = true, features = ["transport"] }
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
@@ -27,6 +33,7 @@ js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit" }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

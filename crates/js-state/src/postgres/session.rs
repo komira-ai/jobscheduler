@@ -6,11 +6,11 @@
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
+use postgres::Statement;
 use postgres::error::Severity;
-use postgres::{Config, Statement};
 
 use super::Fail;
-use super::conn::Conn;
+use super::conn::{Conn, Dial};
 use super::schema::{SchemaError, Supported, check_conn, require_durable};
 
 /// The time of the store's clock in microseconds since the Unix epoch, as SQL: the value
@@ -58,6 +58,11 @@ pub(super) struct Statements {
     pub due: Statement,
     /// `$1` after, `$2` upper bound, `$3` limit: feed rows.
     pub changes: Statement,
+    /// `$1` the revision to trim through: deletes the feed rows at or below the lesser of
+    /// it and the head (which the trimming transaction holds locked); how many rows go.
+    pub trim: Statement,
+    /// The feed's floor: one below its oldest row, or the head when it has none.
+    pub floor: Statement,
     /// `$1` prefix, `$2` now, `$3` limit: live rows under a prefix, locked, skipping rows
     /// another transaction holds.
     pub claim: Statement,
@@ -118,6 +123,11 @@ impl Statements {
             changes: client.prepare(
                 "SELECT rev, key, kind, value FROM feed WHERE rev > $1 AND rev <= $2 \
                  ORDER BY rev LIMIT $3",
+            )?,
+            trim: client
+                .prepare("DELETE FROM feed WHERE rev <= least($1::bigint, (SELECT rev FROM head))")?,
+            floor: client.prepare(
+                "SELECT coalesce((SELECT min(rev) FROM feed) - 1, (SELECT rev FROM head))",
             )?,
             claim: client.prepare(&claim(" SKIP LOCKED"))?,
             claim_waiting: client.prepare(&claim(""))?,
@@ -220,8 +230,8 @@ pub(super) struct Session {
 /// Opens a connection. The first one of a store (`judge` is `Some`) also refuses a schema
 /// outside what this build supports; later ones do not, so a serving child keeps working
 /// when the installer migrates under it.
-fn connect(config: &Config, schema: &str, judge: Option<Supported>) -> Result<Session, Fail> {
-    let mut client = Conn::connect(config)?;
+fn connect(dial: &Dial, schema: &str, judge: Option<Supported>) -> Result<Session, Fail> {
+    let mut client = Conn::connect(dial)?;
     require_durable(&mut client).map_err(refuse)?;
     if let Some(supported) = judge {
         check_conn(&mut client, schema, supported).map_err(refuse)?;
@@ -266,7 +276,7 @@ struct PoolState {
 
 /// At most `max` sessions; a caller past that waits for one to come back.
 pub(super) struct Pool {
-    config: Config,
+    dial: Dial,
     schema: String,
     max: usize,
     state: Mutex<PoolState>,
@@ -281,14 +291,14 @@ impl Pool {
     /// Connects once, refusing a server that does not make commits durable and a schema
     /// outside `supported`. It creates nothing: the installer owns the schema.
     pub(super) fn open(
-        config: Config,
+        dial: Dial,
         schema: String,
         max: usize,
         supported: Supported,
     ) -> Result<Pool, Fail> {
-        let first = connect(&config, &schema, Some(supported))?;
+        let first = connect(&dial, &schema, Some(supported))?;
         Ok(Pool {
-            config,
+            dial,
             schema,
             max,
             state: Mutex::new(PoolState {
@@ -311,7 +321,7 @@ impl Pool {
             if state.open < self.max {
                 state.open += 1;
                 drop(state);
-                return match connect(&self.config, &self.schema, None) {
+                return match connect(&self.dial, &self.schema, None) {
                     Ok(session) => Ok(Pooled {
                         pool: self,
                         session: Some(session),
@@ -329,13 +339,26 @@ impl Pool {
         }
     }
 
+    /// Drops every idle session. The sessions on loan are judged when they come back.
+    pub(super) fn discard_idle(&self) {
+        let idle = {
+            let mut state = lock(&self.state);
+            state.open -= state.idle.len();
+            std::mem::take(&mut state.idle)
+        };
+        self.ready.notify_all();
+        drop(idle);
+    }
+
     fn forget_one(&self) {
         lock(&self.state).open -= 1;
         self.ready.notify_one();
     }
 
     fn give_back(&self, session: Session) {
-        if session.broken || session.client.is_closed() {
+        // `|`, not `||`: whether a dead session was marked or only reads closed depends on
+        // when the client saw the end, so both are asked every time.
+        if session.broken | session.client.is_closed() {
             self.forget_one();
         } else {
             lock(&self.state).idle.push(session);
@@ -415,7 +438,7 @@ mod tests {
         )
         .expect("the installer's step");
         let pool = Pool::open(
-            config.pg.clone(),
+            config.dial(),
             "kbf_unit_pool".to_owned(),
             1,
             config.supported,
