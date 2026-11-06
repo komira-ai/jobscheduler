@@ -8,10 +8,8 @@
 //! file the wire's grammar refuses.
 
 use js_agent_wire::{BookedResources, JobStartSpec, RunFile};
-use js_jobs::{AllocationRecord, Booked, JobRecord, NetworkPolicy};
-// The job's network level, named `Level` here: the server's own `network` module is the
-// only one that names a network path (tests/network/one_layer.rs).
-use js_types::{JobNetwork as Level, PortMap};
+use js_jobs::{AllocationRecord, Booked, JobRecord};
+use js_types::PortMap;
 
 use crate::per_job::BeatContext;
 
@@ -51,14 +49,8 @@ pub(crate) enum Unsendable {
     },
 }
 
-/// The network level a job's policy asks for.
-pub(crate) fn job_network(policy: NetworkPolicy) -> Level {
-    match policy {
-        NetworkPolicy::None => Level::None,
-        NetworkPolicy::AllowList => Level::AllowList,
-        NetworkPolicy::Open => Level::Open,
-    }
-}
+/// The network level a job's policy asks for, as the placer reads it.
+pub(crate) use js_sched_placer::engine::jobs::job_network;
 
 /// The start of the job `job` for its allocation `allocation`, to the host of `context`
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the

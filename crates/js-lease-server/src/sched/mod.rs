@@ -1,20 +1,17 @@
 //! The server's side of placing work with `js-sched`.
 //!
-//! [`map`] holds the pure conversions between this crate's vocabulary and the scheduler's.
-//! [`place`] is the placer a registry takes under `--placement js-sched`: it keeps one
-//! scheduler for the life of the server, [`engine`], which follows the registry's books
-//! through the registry's own events and is asked at each start which of the hosts that
-//! could take it to book. [`probe`] judges a probe's host by the scheduler's probe rule.
+//! The placer itself is the `js-sched-placer` crate: [`map`] holds the pure conversions
+//! between the registry's vocabulary and the scheduler's, [`place`] is the placer a registry
+//! takes under `--placement js-sched`, and [`engine`] is the one scheduler it keeps for the
+//! life of the server, which follows the registry's books through the registry's own events
+//! and is asked at each start which of the hosts that could take it to book. They are named
+//! here under their old paths. What stays in the server is the pass over the queued jobs that
+//! the tick and the heartbeats run ([`jobs_pass`]), and the tests that drive the placer
+//! through the server.
 
-pub(crate) mod engine;
-// `host_id` and the lease-text conversions are for the step that reads grants back.
-#[allow(
-    dead_code,
-    reason = "the conversions back from the scheduler are not read yet"
-)]
-pub(crate) mod map;
-pub(crate) mod place;
-mod probe;
+pub(crate) use js_sched_placer::{engine, map, place};
+
+mod jobs_pass;
 
 #[cfg(test)]
 mod backfill_tests;
