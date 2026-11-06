@@ -74,7 +74,9 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
   rotated by overlap (the file may hold several tokens) with no restart. The service account token is not mounted
   (`automountServiceAccountToken: false`): the service never calls the Kubernetes API.
 - **Probes.** Liveness is the merged `/healthz`: open, `200` while the tick loop runs, `503` once it has stopped (a server that no longer
-  ticks expires nothing, so the pod should be restarted). Readiness is `/readyz` (step 48): ready only when the files are loaded under
+  ticks expires nothing, so the pod should be restarted). It also answers `503 store unreachable` (merged) while the tick's store paths
+  have failed for `server.store_unreachable_after`; a restart does not mend a store that is down, so a liveness probe that reads only the
+  status code restarts the pod through a store outage. Readiness is `/readyz` (step 48): ready only when the files are loaded under
   the lock and the tick has run, and not ready while draining. A startup probe allows a long load. All probes are `HTTPS`.
 - **Resources.** Requests of 250m CPU and 256 MiB of memory, a memory limit equal to the request and no CPU limit (a CPU limit throttles
   the tick). These are starting values, not measurements: the table is held in memory and written whole, so the memory follows the lease

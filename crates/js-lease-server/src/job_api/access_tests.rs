@@ -125,6 +125,7 @@ impl Pools for NoPools {
             pools: Vec::new(),
             warnings: Vec::new(),
             logs: None,
+            store: None,
         }
     }
 }

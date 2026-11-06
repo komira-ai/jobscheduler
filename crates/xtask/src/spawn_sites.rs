@@ -719,8 +719,8 @@ fn path_literal(attr: &Attribute) -> Option<String> {
 }
 
 /// Whether `attrs` make the item exist only in a test build: a `#[cfg(test)]`, or a
-/// `#[cfg(all(...))]` that holds `test`.
-fn test_only(attrs: &[Attribute]) -> bool {
+/// `#[cfg(all(...))]` that holds `test`. The determinism lint leaves out the same items.
+pub(crate) fn test_only(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().is_ident("cfg")
             && attr
