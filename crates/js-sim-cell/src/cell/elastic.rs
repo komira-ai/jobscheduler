@@ -69,12 +69,11 @@ struct Launched {
 /// How the cloud stopped running a machine.
 fn ending(cloud: &Cloud, id: &str, known: &BTreeSet<String>) -> &'static str {
     let released = cloud.fake().released();
-    if released.iter().any(|machine| machine.as_str() == id) {
-        "release"
-    } else if known.contains(id) {
-        "preempt"
-    } else {
-        "drop"
+    let released = released.iter().any(|machine| machine.as_str() == id);
+    match (released, known.contains(id)) {
+        (true, _) => "release",
+        (false, true) => "preempt",
+        (false, false) => "drop",
     }
 }
 
