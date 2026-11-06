@@ -66,6 +66,8 @@ use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "prepare.rs"]
+pub mod prepare;
 #[path = "whole.rs"]
 pub mod whole;
 
@@ -130,6 +132,9 @@ pub struct Engine {
     /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
     /// queued again ([`Engine::carry_whole`]).
     carried: BTreeMap<RequestId, whole::Carried>,
+    /// The prepares of the whole-node leases committed from the queue, and the records of
+    /// the requests whose prepare failed ([`prepare`]).
+    prepare: prepare::Prepare,
     /// The last pass of the whole-node queue the registry handed over, which a rebuild
     /// hands to the new engine; it also holds the whole-node settings the scheduler has.
     round: Option<js_registry::WholeRound>,
@@ -188,6 +193,7 @@ impl Engine {
             jobs: BTreeMap::new(),
             whole: BTreeMap::new(),
             carried: BTreeMap::new(),
+            prepare: prepare::Prepare::default(),
             round: None,
             whole_seq: 0,
             cordoned: BTreeSet::new(),
@@ -366,8 +372,10 @@ impl Engine {
     }
 
     /// The registry stopped `lease`: the engine releases it, whether it still holds it or
-    /// gave it up and waits with it. A lease the engine does not know changes nothing.
+    /// gave it up and waits with it, and a whole-node lease's prepare ends with it, counting
+    /// nothing ([`prepare`]). A lease the engine does not know changes nothing.
     pub fn ended(&mut self, lease: LeaseId) {
+        self.prepare.end(&lease);
         let found = self
             .on
             .iter_mut()

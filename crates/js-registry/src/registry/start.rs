@@ -19,7 +19,7 @@ use crate::whole::caps::Capability;
 use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::placement::{self, Asking};
-use crate::whole::requests::{RequestKey, Rules, whole_settings};
+use crate::whole::requests::{Exclusion, RequestKey, Rules, whole_settings};
 use crate::whole::reserve::{self, HostFacts, Pass};
 use crate::whole_config::WholeNodeConfig;
 
@@ -255,8 +255,14 @@ impl Registry {
             if id_held & state.requests.held_by_other(&key, &lease) {
                 return StartAck::Refused(RefusalCode::NoCapacity);
             }
-            // A request that used up its tries is not placed again.
-            if state.requests.start(&key, now) {
+            // A request that used up its tries is not placed again: the placer says so of a
+            // request it keeps the record of, the registry of its own.
+            let placer = self.shared.placer.get();
+            let id = spec.request_id();
+            let kept = id
+                .zip(placer)
+                .is_some_and(|(id, placer)| placer.whole_start(id));
+            if state.requests.start(&key, now) | kept {
                 return StartAck::Refused(RefusalCode::ExclusiveNotReady);
             }
         }
@@ -279,11 +285,18 @@ impl Registry {
         // no host could ever be given whole; otherwise it waits, if it has an id.
         let listed = state.book.hosts();
         let tainted = tainted(state);
+        // The hosts a placer that keeps the request bars it from, beside the registry's own.
+        let kept_off = self.placer_exclusions(spec);
+        let for_life = kept_off
+            .iter()
+            .filter(|(_, bar)| **bar == Exclusion::ForLife);
+        let for_life: BTreeSet<HostId> = for_life.map(|(host, _)| host.clone()).collect();
         let asking = Asking {
             spec,
             key: &key,
             hosts: &listed,
             tainted: &tainted,
+            for_life: &for_life,
         };
         // A host that could be launched counts as one that could ever serve the request.
         let launch = state
@@ -351,7 +364,8 @@ impl Registry {
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
             // Only a whole-node request is kept off a host its earlier tries failed on.
-            let barred = whole & requests.excluded(&key, id, now);
+            let placer_bar = kept_off.get(id).is_some_and(|bar| bar.holds(now));
+            let barred = whole & (requests.excluded(&key, id, now) | placer_bar);
             let bookable = record.is_some_and(|record| {
                 let beside = |leases: &Vec<LeaseId>| record.clear_beside(runs, id, leases);
                 let quiet = match (shares, occupied.get(id)) {
@@ -450,5 +464,17 @@ impl Registry {
             }
             (other, _, _) => other,
         }
+    }
+
+    /// The hosts a placer that keeps `spec`'s request ([`crate::Placer::whole_record`])
+    /// leaves out of its placements, and until when: none for a start without a request id,
+    /// or with no such placer.
+    fn placer_exclusions(&self, spec: &StartSpec) -> BTreeMap<HostId, Exclusion> {
+        let placer = self.shared.placer.get();
+        let id = spec.request_id();
+        let record = id
+            .zip(placer)
+            .and_then(|(id, placer)| placer.whole_record(id));
+        record.map(|record| record.exclusions).unwrap_or_default()
     }
 }

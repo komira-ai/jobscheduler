@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent_wire::DEFAULT_GRACE_MS;
+use js_agent_wire::{DEFAULT_GRACE_MS, RefusalReason};
 use js_lease::{ExclusionEnd, Held, Queued, ReservationRecord, Timestamp};
 use js_provider::{Candidate, StartAck, StartSpec};
 use js_registry::PoolConfig;
 use js_registry::{
-    Exclusion, MarkedTails, Placer, ProfileLives, Reservation, Restored, Standing, WaitingWhole,
-    WholeHost, WholeNodeConfig, WholeRound,
+    DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, MarkedTails, Placer,
+    ProfileLives, Reservation, Restored, Standing, WaitingWhole, WholeHost, WholeNodeConfig,
+    WholeRound,
 };
 use js_types::{ProviderId, RequestId};
 use js_usage::ProfileKey;
@@ -279,4 +280,55 @@ fn a_restored_mark_is_held_outside_until_its_request_is_presented() {
         Some(host("a"))
     );
     assert!(w.reservations().is_empty());
+}
+
+/// Catches: a placer that keeps the whole-node queue but not the prepares (one that does not
+/// answer the prepare calls) taking the registry's rules with it: the failed-prepare count,
+/// the bars, the record a ready report clears, the deadline a hello restarts and the record a
+/// cancel forgets must stay the registry's. `r` is refused on `a` and counted here, is placed
+/// on `b` and reported ready, which clears its record; `b`'s agent restarts, and the lease
+/// fails at the registry's own deadline from that hello; the next try waits and is cancelled,
+/// which forgets the record.
+#[test]
+fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
+    let (mut w, _queue) = world(&["a", "b"]);
+    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
+    assert_eq!(w.lease_on("a"), Some(lease(2)));
+    let refused = w.now();
+    w.refuse("a", &lease(2), RefusalReason::NotQuiet);
+    w.drop_ask(2);
+    let kept = w.fx.registry.request_record(&id("r")).unwrap();
+    assert_eq!(kept.prepare_failures, 1);
+    let backoff = Duration::from_millis(DEFAULT_RESERVE_BACKOFF_MS);
+    let until = Exclusion::Until(refused.plus(backoff));
+    assert_eq!(kept.exclusions, BTreeMap::from([(host("a"), until)]));
+    assert_eq!(w.ask(3, "r"), StartAck::Unknown);
+    assert_eq!(w.lease_on("b"), Some(lease(3)));
+    w.ready("b", &lease(3));
+    assert_eq!(w.fx.registry.request_record(&id("r")), None);
+    w.silent.insert("b".to_owned());
+    w.step(DEFAULT_GRACE_MS + 5_000);
+    let epoch = w.fx.hello(&world_hello("b"), &cred("t")).unwrap().epoch;
+    w.epochs.insert("b".to_owned(), epoch);
+    w.silent.remove("b");
+    w.step(DEFAULT_PREPARE_TIMEOUT_MS - 1);
+    w.fx.registry.advance();
+    assert_eq!(w.lease_on("b"), Some(lease(3)));
+    w.step(1);
+    w.fx.registry.advance();
+    assert_eq!(w.lease_on("b"), None);
+    assert_eq!(
+        w.fx.registry
+            .request_record(&id("r"))
+            .unwrap()
+            .prepare_failures,
+        1
+    );
+    w.drop_ask(3);
+    cordon(&w, "a");
+    assert_eq!(w.ask(4, "r"), StartAck::Unknown);
+    assert_eq!(w.lease_on("b"), None);
+    w.drop_ask(4);
+    w.stop(4);
+    assert_eq!(w.fx.registry.request_record(&id("r")), None);
 }

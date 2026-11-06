@@ -10,7 +10,7 @@ use js_agent_wire::{
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, RegisteredProvider, RunRefusal, RunState};
-use js_types::{Admission, ClassId, ProviderId, Request, ResourceClass, Resources};
+use js_types::{Admission, ClassId, ProviderId, Request, RequestId, ResourceClass, Resources};
 use support::*;
 
 /// The whole-node class of the pool under test.
@@ -18,10 +18,17 @@ fn whole() -> ResourceClass {
     ResourceClass::whole_node()
 }
 
-/// A pool whose class is `Whole`.
-fn whole_fixture() -> Fixture {
+/// A pool whose class is `Whole`, placed by `engine`.
+fn whole_fixture(engine: Engine) -> Fixture {
     let name = ProviderId::new("builders").unwrap();
-    fixture_of(PoolConfig::new(name, whole(), pool_shape(), 4))
+    fixture_on(PoolConfig::new(name, whole(), world_shape(), 4), engine)
+}
+
+/// A pool whose class is the `BookAll` one, placed by `engine`.
+fn bookall_fixture(engine: Engine, max_machines: usize) -> Fixture {
+    let name = ProviderId::new("builders").unwrap();
+    let config = PoolConfig::new(name, class(), world_shape(), max_machines);
+    fixture_on(config, engine)
 }
 
 /// A request for the whole-node class.
@@ -32,8 +39,10 @@ fn whole_request() -> Request {
     }
 }
 
+/// A start of the whole-node request `r` as lease `sequence`.
 fn whole_spec(sequence: u64) -> StartSpec {
-    StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap()
+    let spec = StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap();
+    spec.with_request_id(RequestId::new("r").unwrap())
 }
 
 /// A provider that serves a `BookAll` class (`share`) next to the `Whole` one.
@@ -57,6 +66,13 @@ fn share_spec(sequence: u64) -> StartSpec {
 
 fn no_capacity() -> StartAck {
     StartAck::Refused(RefusalCode::NoCapacity)
+}
+
+/// Asserts that the whole-node request `r`, started as lease `sequence`, waits: the start
+/// answers `Unknown` and the provider books no host.
+fn assert_waits(provider: &mut RegisteredProvider, sequence: u64) {
+    assert_eq!(provider.start(whole_spec(sequence)), StartAck::Unknown);
+    assert!(provider.booked().is_empty());
 }
 
 /// A heartbeat of `host` in `epoch`, changed by `edit`, answered.
@@ -125,17 +141,17 @@ fn starts(reply: &HeartbeatReply) -> usize {
 
 /// A pool with host `a` joined, lease 1 committed to it. Returns the fixture, the
 /// provider and the epoch.
-fn committed() -> (Fixture, RegisteredProvider, u64) {
-    let fx = whole_fixture();
-    let epoch = fx.join("a", "t");
+fn committed(engine: Engine) -> (Fixture, RegisteredProvider, u64) {
+    let fx = whole_fixture(engine);
+    let epoch = fx.join_world("a");
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     (fx, provider, epoch)
 }
 
 /// As `committed`, then the agent reports the host ready.
-fn ready() -> (Fixture, RegisteredProvider, u64) {
-    let (fx, provider, epoch) = committed();
+fn ready(engine: Engine) -> (Fixture, RegisteredProvider, u64) {
+    let (fx, provider, epoch) = committed(engine);
     report_ready(&fx, epoch, &lease(1).to_string());
     (fx, provider, epoch)
 }
@@ -149,19 +165,21 @@ fn ready() -> (Fixture, RegisteredProvider, u64) {
 /// `Started` (the token before the host is ready) and an `observe` that confirms early.
 #[test]
 fn a_whole_start_commits_and_stays_unconfirmed_until_the_report() {
-    let (fx, mut provider, epoch) = committed();
-    assert_eq!(lease(1).to_string(), "1-1");
-    assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
-    let view = &fx.registry.hosts()[0];
-    assert_eq!(view.lease, Some(lease(1)));
-    let reply = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
-    assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-1"));
-    let preparing = beat_with(&fx, "a", epoch, |b| b.phase = Phase::Preparing);
-    assert_eq!(preparing.exclusive.as_deref(), Some("1-1"));
-    assert_eq!(fx.registry.hosts()[0].phase, Phase::Preparing);
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    over_both(|engine| {
+        let (fx, mut provider, epoch) = committed(engine);
+        assert_eq!(lease(1).to_string(), "1-1");
+        assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+        let view = &fx.registry.hosts()[0];
+        assert_eq!(view.lease, Some(lease(1)));
+        let reply = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
+        assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-1"));
+        let preparing = beat_with(&fx, "a", epoch, |b| b.phase = Phase::Preparing);
+        assert_eq!(preparing.exclusive.as_deref(), Some("1-1"));
+        assert_eq!(fx.registry.hosts()[0].phase, Phase::Preparing);
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    });
 }
 
 /// Asserts the ready report: it flips the lease to `Present` and a repeated start to
@@ -171,30 +189,32 @@ fn a_whole_start_commits_and_stays_unconfirmed_until_the_report() {
 /// catches a report taken for any lease and a token minted on a tainted host.
 #[test]
 fn only_the_named_lease_reported_ready_by_a_clean_host_is_confirmed() {
-    let (fx, mut provider, epoch) = committed();
-    report_ready(&fx, epoch, &lease(9).to_string());
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    let tainted = beat_with(&fx, "a", epoch, |b| {
-        b.exclusive_ready = Some(lease(1).to_string());
-        b.taint = Some(Taint {
-            reason: "check".into(),
-            run_id: None,
-            check: None,
+    over_both(|engine| {
+        let (fx, mut provider, epoch) = committed(engine);
+        report_ready(&fx, epoch, &lease(9).to_string());
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        let tainted = beat_with(&fx, "a", epoch, |b| {
+            b.exclusive_ready = Some(lease(1).to_string());
+            b.taint = Some(Taint {
+                reason: "check".into(),
+                run_id: None,
+                check: None,
+            });
         });
+        assert!(tainted.taint_ack);
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        assert!(fx.registry.hosts()[0].taint.is_some());
+        // A clean host, on a fresh pool.
+        let (fx, mut provider, epoch) = committed(engine);
+        let reply = report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        let again = StartAck::Started { host: host("a") };
+        assert_eq!(provider.start(whole_spec(1)), again);
+        let later = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
+        assert_eq!(later.unwrap().exclusive.as_deref(), Some("1-1"));
     });
-    assert!(tainted.taint_ack);
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert!(fx.registry.hosts()[0].taint.is_some());
-    // A clean host, on a fresh pool.
-    let (fx, mut provider, epoch) = committed();
-    let reply = report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    let again = StartAck::Started { host: host("a") };
-    assert_eq!(provider.start(whole_spec(1)), again);
-    let later = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
-    assert_eq!(later.unwrap().exclusive.as_deref(), Some("1-1"));
 }
 
 /// Asserts that a host tainted in an earlier heartbeat does not take the ready report for
@@ -202,17 +222,19 @@ fn only_the_named_lease_reported_ready_by_a_clean_host_is_confirmed() {
 /// ready report taken without the check that the host is clean.
 #[test]
 fn a_host_tainted_earlier_does_not_become_ready() {
-    let (fx, mut provider, epoch) = committed();
-    let tainted = beat_with(&fx, "a", epoch, |b| {
-        b.taint = Some(Taint {
-            reason: "check".into(),
-            run_id: None,
-            check: None,
+    over_both(|engine| {
+        let (fx, mut provider, epoch) = committed(engine);
+        let tainted = beat_with(&fx, "a", epoch, |b| {
+            b.taint = Some(Taint {
+                reason: "check".into(),
+                run_id: None,
+                check: None,
+            });
         });
+        assert!(tainted.taint_ack);
+        report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
     });
-    assert!(tainted.taint_ack);
-    report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
 }
 
 /// Asserts the run gate on the queue: before the report a run is refused `NotReady`
@@ -221,17 +243,19 @@ fn a_host_tainted_earlier_does_not_become_ready() {
 /// that has not finished preparing.
 #[test]
 fn no_run_is_queued_before_ready() {
-    let (fx, _provider, epoch) = committed();
-    let queue = |run: &str| fx.registry.queue_run(&host("a"), &lease(1), job(run));
-    assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
-    assert_eq!(RunRefusal::NotReady.code(), "not-ready");
-    beat_with(&fx, "a", epoch, |b| b.phase = Phase::Preparing);
-    assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
-    assert!(fx.registry.runs_of(&lease(1)).is_empty());
-    report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(queue("r1").unwrap().state, RunState::Queued);
-    let reply = beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!(starts(&reply), 1);
+    over_both(|engine| {
+        let (fx, _provider, epoch) = committed(engine);
+        let queue = |run: &str| fx.registry.queue_run(&host("a"), &lease(1), job(run));
+        assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
+        assert_eq!(RunRefusal::NotReady.code(), "not-ready");
+        beat_with(&fx, "a", epoch, |b| b.phase = Phase::Preparing);
+        assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
+        assert!(fx.registry.runs_of(&lease(1)).is_empty());
+        report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(queue("r1").unwrap().state, RunState::Queued);
+        let reply = beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!(starts(&reply), 1);
+    });
 }
 
 /// Asserts the restore of a whole-node booking after a restart: a lease seated on a host
@@ -242,40 +266,42 @@ fn no_run_is_queued_before_ready() {
 /// with no ready report, or a restored host that other leases or runs could use.
 #[test]
 fn a_restored_whole_booking_is_committed_until_the_agent_reports_ready() {
-    let fx = whole_fixture();
-    let mut provider = fx.provider.clone();
-    provider.seat(&host("a"), lease(1), None).unwrap();
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    let epoch = fx.join("a", "t");
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    let reply = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
-    assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-1"));
-    let queue = |run: &str| fx.registry.queue_run(&host("a"), &lease(1), job(run));
-    assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
-    report_ready(&fx, epoch, &lease(1).to_string());
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    assert_eq!(queue("r1").unwrap().state, RunState::Queued);
+    over_both(|engine| {
+        let fx = whole_fixture(engine);
+        let mut provider = fx.provider.clone();
+        provider.seat(&host("a"), lease(1), None).unwrap();
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        let epoch = fx.join_world("a");
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        let reply = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
+        assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-1"));
+        let queue = |run: &str| fx.registry.queue_run(&host("a"), &lease(1), job(run));
+        assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
+        report_ready(&fx, epoch, &lease(1).to_string());
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        assert_eq!(queue("r1").unwrap().state, RunState::Queued);
 
-    // A host that already joined takes the restored lease the same way.
-    let fx = whole_fixture();
-    let mut provider = fx.provider.clone();
-    let epoch = fx.join("b", "t");
-    provider.seat(&host("b"), lease(2), None).unwrap();
-    assert_eq!(provider.observe(&lease(2)), Observed::Unknown);
-    let reply = fx.registry.heartbeat(&fx.heartbeat("b", epoch), &cred("t"));
-    assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-2"));
+        // A host that already joined takes the restored lease the same way.
+        let fx = whole_fixture(engine);
+        let mut provider = fx.provider.clone();
+        let epoch = fx.join_world("b");
+        provider.seat(&host("b"), lease(2), None).unwrap();
+        assert_eq!(provider.observe(&lease(2)), Observed::Unknown);
+        let reply = fx.registry.heartbeat(&fx.heartbeat("b", epoch), &cred("t"));
+        assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-2"));
 
-    // A pool that books the whole host without the commit gate restores its leases as
-    // they were: present, with nothing to prepare.
-    let fx = fixture(2);
-    let mut provider = fx.provider.clone();
-    let epoch = fx.join("c", "t");
-    provider.seat(&host("c"), lease(3), None).unwrap();
-    let seen = Observed::Present { host: host("c") };
-    assert_eq!(provider.observe(&lease(3)), seen);
-    let reply = fx.registry.heartbeat(&fx.heartbeat("c", epoch), &cred("t"));
-    assert_eq!(reply.unwrap().exclusive, None);
+        // A pool that books the whole host without the commit gate restores its leases as
+        // they were: present, with nothing to prepare.
+        let fx = bookall_fixture(engine, 2);
+        let mut provider = fx.provider.clone();
+        let epoch = fx.join_world("c");
+        provider.seat(&host("c"), lease(3), None).unwrap();
+        let seen = Observed::Present { host: host("c") };
+        assert_eq!(provider.observe(&lease(3)), seen);
+        let reply = fx.registry.heartbeat(&fx.heartbeat("c", epoch), &cred("t"));
+        assert_eq!(reply.unwrap().exclusive, None);
+    });
 }
 
 /// Asserts that a whole-node booking put back on a host that lists held runs is ready,
@@ -285,27 +311,29 @@ fn a_restored_whole_booking_is_committed_until_the_agent_reports_ready() {
 /// that refuses the consumer of a ready lease until its runs end.
 #[test]
 fn a_restored_whole_booking_with_live_runs_is_ready() {
-    let fx = whole_fixture();
-    let mut provider = fx.provider.clone();
-    let epoch = fx.join("a", "t");
-    beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
-    provider.seat(&host("a"), lease(1), None).unwrap();
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    let reply = beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
-    assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
-    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
-    assert_eq!(queued.unwrap().state, RunState::Queued);
+    over_both(|engine| {
+        let fx = whole_fixture(engine);
+        let mut provider = fx.provider.clone();
+        let epoch = fx.join_world("a");
+        beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
+        provider.seat(&host("a"), lease(1), None).unwrap();
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        let reply = beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
+        assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
+        let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+        assert_eq!(queued.unwrap().state, RunState::Queued);
 
-    // The same restore on a host that lists no run is committed.
-    let fx = whole_fixture();
-    let mut provider = fx.provider.clone();
-    let epoch = fx.join("a", "t");
-    beat_with(&fx, "a", epoch, |_| {});
-    provider.seat(&host("a"), lease(1), None).unwrap();
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    let refused = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
-    assert_eq!(refused.unwrap_err(), RunRefusal::NotReady);
+        // The same restore on a host that lists no run is committed.
+        let fx = whole_fixture(engine);
+        let mut provider = fx.provider.clone();
+        let epoch = fx.join_world("a");
+        beat_with(&fx, "a", epoch, |_| {});
+        provider.seat(&host("a"), lease(1), None).unwrap();
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        let refused = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+        assert_eq!(refused.unwrap_err(), RunRefusal::NotReady);
+    });
 }
 
 /// Asserts that a ready report moves only a committed host: a report from a host that
@@ -315,43 +343,47 @@ fn a_restored_whole_booking_with_live_runs_is_ready() {
 /// taken for a lease the reporting host does not hold.
 #[test]
 fn a_ready_report_moves_only_a_committed_host() {
-    let (fx, mut provider, epoch) = committed();
-    let other = fx.join("b", "t");
-    let reply = beat_with(&fx, "b", other, |b| {
-        b.exclusive_ready = Some(lease(1).to_string());
+    over_both(|engine| {
+        let (fx, mut provider, epoch) = committed(engine);
+        let other = fx.join_world("b");
+        let reply = beat_with(&fx, "b", other, |b| {
+            b.exclusive_ready = Some(lease(1).to_string());
+        });
+        assert_eq!(reply.exclusive, None);
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        assert!(!provider.booked().contains_key(&host("b")));
+
+        // Reported again, and for another lease, after it is ready: still ready.
+        report_ready(&fx, epoch, &lease(1).to_string());
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        report_ready(&fx, epoch, &lease(1).to_string());
+        let reply = report_ready(&fx, epoch, &lease(9).to_string());
+        assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
+        assert_eq!(provider.observe(&lease(1)), seen);
+
+        // Reported for a lease that ended: the host is restoring, never ready again.
+        provider.stop(&lease(1));
+        let reply = report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(reply.exclusive, None);
+        assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+        let reply = report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(reply.exclusive, None);
+        assert!(provider.booked().is_empty());
     });
-    assert_eq!(reply.exclusive, None);
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert!(!provider.booked().contains_key(&host("b")));
-
-    // Reported again, and for another lease, after it is ready: still ready.
-    report_ready(&fx, epoch, &lease(1).to_string());
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    report_ready(&fx, epoch, &lease(1).to_string());
-    let reply = report_ready(&fx, epoch, &lease(9).to_string());
-    assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
-    assert_eq!(provider.observe(&lease(1)), seen);
-
-    // Reported for a lease that ended: the host is restoring, never ready again.
-    provider.stop(&lease(1));
-    let reply = report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(reply.exclusive, None);
-    assert_eq!(provider.observe(&lease(1)), Observed::Absent);
-    let reply = report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(reply.exclusive, None);
-    assert!(provider.booked().is_empty());
 }
 
 /// Asserts that stopping a lease the registry never booked (a whole-node request that
 /// was refused, then released) reads `Absent` and leaves the hosts as they were.
 #[test]
 fn stopping_an_unbooked_lease_changes_no_host() {
-    let (fx, mut provider, _epoch) = committed();
-    let stopped = provider.stop(&lease(7));
-    assert!(matches!(stopped, js_provider::StopAck::Stopped { .. }));
-    assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
-    assert!(!fx.registry.hosts()[0].releasing);
+    over_both(|engine| {
+        let (fx, mut provider, _epoch) = committed(engine);
+        let stopped = provider.stop(&lease(7));
+        assert!(matches!(stopped, js_provider::StopAck::Stopped { .. }));
+        assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
+        assert!(!fx.registry.hosts()[0].releasing);
+    });
 }
 
 /// Asserts that a host that says hello again lost its session and its preparation: a
@@ -361,113 +393,124 @@ fn stopping_an_unbooked_lease_changes_no_host() {
 /// restart of the agent.
 #[test]
 fn a_new_session_must_report_ready_again() {
-    let (fx, mut provider, _epoch) = ready();
-    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
-    assert!(queued.is_ok());
-    fx.pass_grace();
-    let epoch = fx.hello(&hello("a"), &cred("t")).unwrap().epoch;
-    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
-    assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
-    let runs = fx.registry.runs_of(&lease(1));
-    assert_eq!(runs[0].state, RunState::NeverStarted);
-    let refused = fx.registry.queue_run(&host("a"), &lease(1), job("r2"));
-    assert_eq!(refused.unwrap_err(), RunRefusal::NotReady);
-    report_ready(&fx, epoch, &lease(1).to_string());
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
+    over_both(|engine| {
+        let (fx, mut provider, _epoch) = ready(engine);
+        let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+        assert!(queued.is_ok());
+        fx.pass_grace();
+        let epoch = fx.hello(&world_hello("a"), &cred("t")).unwrap().epoch;
+        assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+        assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
+        let runs = fx.registry.runs_of(&lease(1));
+        assert_eq!(runs[0].state, RunState::NeverStarted);
+        let refused = fx.registry.queue_run(&host("a"), &lease(1), job("r2"));
+        assert_eq!(refused.unwrap_err(), RunRefusal::NotReady);
+        report_ready(&fx, epoch, &lease(1).to_string());
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+    });
 }
 
 /// Asserts exclusivity (W1): while a whole-node lease holds a host, in either state, no
-/// other lease books it, whole or shared, and a second whole start finds no capacity.
+/// other lease books it, whole or shared, and a second whole start of the request the
+/// host's lease holds finds no capacity.
 /// It catches a second booking of a committed host.
 #[test]
 fn a_committed_host_is_booked_by_nobody_else() {
-    let fx = whole_fixture();
-    let epoch = fx.join("a", "t");
-    let mut provider = mixed(&fx);
-    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
-    assert_eq!(provider.start(whole_spec(2)), no_capacity());
-    assert_eq!(provider.start(share_spec(3)), no_capacity());
-    report_ready(&fx, epoch, &lease(1).to_string());
-    assert_eq!(provider.start(whole_spec(2)), no_capacity());
-    assert_eq!(provider.start(share_spec(3)), no_capacity());
-    assert_eq!(provider.booked().len(), 1);
+    over_both(|engine| {
+        let fx = whole_fixture(engine);
+        let epoch = fx.join_world("a");
+        let mut provider = mixed(&fx);
+        assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+        assert_eq!(provider.start(whole_spec(2)), no_capacity());
+        assert_eq!(provider.start(share_spec(3)), no_capacity());
+        report_ready(&fx, epoch, &lease(1).to_string());
+        assert_eq!(provider.start(whole_spec(2)), no_capacity());
+        assert_eq!(provider.start(share_spec(3)), no_capacity());
+        assert_eq!(provider.booked().len(), 1);
+    });
 }
 
 /// Asserts the quiet rule: a host that lists a run it holds is not committed to, even
-/// serving, live and clean (the answer is `NoCapacity` and nothing is booked); the same
-/// host commits once a heartbeat lists none. It catches a commit on a host that is still
+/// serving, live and clean (the request waits: the answer is `Unknown` and nothing is
+/// booked); the same host commits once a heartbeat lists none. It catches a commit on a host that is still
 /// busy with the last lease's work.
 #[test]
 fn a_host_that_is_not_quiet_is_not_committed_to() {
-    let fx = whole_fixture();
-    let epoch = fx.join("a", "t");
-    let mut provider = fx.provider.clone();
-    beat_with(&fx, "a", epoch, |b| b.held = vec![running("old")]);
-    assert_eq!(provider.start(whole_spec(1)), no_capacity());
-    assert!(provider.booked().is_empty());
-    beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+    over_both(|engine| {
+        let fx = whole_fixture(engine);
+        let epoch = fx.join_world("a");
+        let mut provider = fx.provider.clone();
+        beat_with(&fx, "a", epoch, |b| b.held = vec![running("old")]);
+        assert_waits(&mut provider, 1);
+        beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+    });
 }
 
 /// Asserts the end of a lease (W9): a stop frees the booking and reads `Absent`, and the
 /// host books again only after a heartbeat that follows a reply without `exclusive` and
 /// shows it serving with nothing held. A heartbeat that crossed the stop (serving,
 /// empty), one in phase `restoring`, and one serving with a run held each leave it
-/// unbookable (shown as `releasing`); the next serving, empty one frees it. The same
+/// unbookable (shown as `releasing`; a start of the request waits, booking nothing); the
+/// next serving, empty one frees it. The same
 /// holds when the lease ended before the report. It catches a host booked while the
 /// agent still restores, and one booked on the stale heartbeat that preceded the stop.
 #[test]
 fn a_host_books_again_only_after_it_is_serving_and_empty_following_the_stop() {
-    for reported in [true, false] {
-        let (fx, mut provider, epoch) = committed();
-        if reported {
-            report_ready(&fx, epoch, &lease(1).to_string());
+    over_both(|engine| {
+        for reported in [true, false] {
+            let (fx, mut provider, epoch) = committed(engine);
+            if reported {
+                report_ready(&fx, epoch, &lease(1).to_string());
+            }
+            let stopped = provider.stop(&lease(1));
+            assert!(matches!(stopped, js_provider::StopAck::Stopped { .. }));
+            assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+            assert!(fx.registry.hosts()[0].releasing);
+            assert_waits(&mut provider, 2);
+            let crossed = beat_with(&fx, "a", epoch, |_| {});
+            assert_eq!(crossed.exclusive, None);
+            assert_waits(&mut provider, 2);
+            beat_with(&fx, "a", epoch, |b| b.phase = Phase::Restoring);
+            assert_waits(&mut provider, 2);
+            beat_with(&fx, "a", epoch, |b| b.held = vec![running("r1")]);
+            assert_waits(&mut provider, 2);
+            assert!(fx.registry.hosts()[0].releasing);
+            beat_with(&fx, "a", epoch, |_| {});
+            assert!(!fx.registry.hosts()[0].releasing);
+            assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
         }
-        let stopped = provider.stop(&lease(1));
-        assert!(matches!(stopped, js_provider::StopAck::Stopped { .. }));
-        assert_eq!(provider.observe(&lease(1)), Observed::Absent);
-        assert!(fx.registry.hosts()[0].releasing);
-        assert_eq!(provider.start(whole_spec(2)), no_capacity());
-        let crossed = beat_with(&fx, "a", epoch, |_| {});
-        assert_eq!(crossed.exclusive, None);
-        assert_eq!(provider.start(whole_spec(2)), no_capacity());
-        beat_with(&fx, "a", epoch, |b| b.phase = Phase::Restoring);
-        assert_eq!(provider.start(whole_spec(2)), no_capacity());
-        beat_with(&fx, "a", epoch, |b| b.held = vec![running("r1")]);
-        assert_eq!(provider.start(whole_spec(2)), no_capacity());
-        assert!(fx.registry.hosts()[0].releasing);
-        beat_with(&fx, "a", epoch, |_| {});
-        assert!(!fx.registry.hosts()[0].releasing);
-        assert_eq!(provider.start(whole_spec(2)), StartAck::Unknown);
-    }
+    });
 }
 
 /// Asserts that a host that says hello during the restore starts the wait again (the
-/// new session has not been told), and that a tainted host never books again, however
-/// quiet it is. It catches a restore cleared by a hello and a taint forgotten by it.
+/// new session has not been told: a start waits, booking nothing), and that a tainted host
+/// never books again, however quiet it is (no host could ever hold the request). It catches a restore cleared by a hello and a taint forgotten by it.
 #[test]
 fn a_hello_restarts_the_restore_and_a_taint_ends_booking() {
-    let (fx, mut provider, epoch) = ready();
-    provider.stop(&lease(1));
-    beat_with(&fx, "a", epoch, |_| {});
-    fx.pass_grace();
-    let epoch = fx.hello(&hello("a"), &cred("t")).unwrap().epoch;
-    beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!(provider.start(whole_spec(2)), no_capacity());
-    beat_with(&fx, "a", epoch, |b| {
-        b.taint = Some(Taint {
-            reason: "check".into(),
-            run_id: None,
-            check: None,
-        });
-    });
-    for _ in 0..2 {
+    over_both(|engine| {
+        let (fx, mut provider, epoch) = ready(engine);
+        provider.stop(&lease(1));
         beat_with(&fx, "a", epoch, |_| {});
-        // The only host is tainted, so no host could ever be given whole.
-        let refused = StartAck::Refused(RefusalCode::NoCapableHost);
-        assert_eq!(provider.start(whole_spec(2)), refused);
-    }
+        fx.pass_grace();
+        let epoch = fx.hello(&world_hello("a"), &cred("t")).unwrap().epoch;
+        beat_with(&fx, "a", epoch, |_| {});
+        assert_waits(&mut provider, 2);
+        beat_with(&fx, "a", epoch, |b| {
+            b.taint = Some(Taint {
+                reason: "check".into(),
+                run_id: None,
+                check: None,
+            });
+        });
+        for _ in 0..2 {
+            beat_with(&fx, "a", epoch, |_| {});
+            // The only host is tainted, so no host could ever be given whole.
+            let refused = StartAck::Refused(RefusalCode::NoCapableHost);
+            assert_eq!(provider.start(whole_spec(2)), refused);
+        }
+    });
 }
 
 /// Asserts the regression: a `BookAll` lease on a registered host is granted at once
@@ -476,24 +519,27 @@ fn a_hello_restarts_the_restore_and_a_taint_ends_booking() {
 /// no restore to wait for. It catches a gate that leaks into the shared class.
 #[test]
 fn a_bookall_lease_is_unchanged() {
-    let fx = fixture(4);
-    let epoch = fx.join("a", "t");
-    let mut provider = fx.provider.clone();
-    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
-    assert!(queued.is_ok());
-    let reply = beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!((starts(&reply), reply.exclusive.as_deref()), (1, None));
-    provider.stop(&lease(1));
-    beat_with(&fx, "a", epoch, |_| {});
-    beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!(started_on(&provider.start(spec(2))), Some("a"));
+    over_both(|engine| {
+        let fx = bookall_fixture(engine, 4);
+        let epoch = fx.join_world("a");
+        let mut provider = fx.provider.clone();
+        assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+        assert!(queued.is_ok());
+        let reply = beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!((starts(&reply), reply.exclusive.as_deref()), (1, None));
+        provider.stop(&lease(1));
+        beat_with(&fx, "a", epoch, |_| {});
+        beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!(started_on(&provider.start(spec(2))), Some("a"));
+    });
 }
 
 /// Documents the static pool: it has no agent to wait for, so a `Whole` lease (the
-/// `whole-node` class) is held at once and reads `Present` on its first look.
+/// `whole-node` class) is held at once and reads `Present` on its first look. It has no
+/// registry and so no placement engine: it runs once.
 #[test]
 fn a_static_pool_holds_a_whole_lease_at_once() {
     let id = ProviderId::new("pool").unwrap();
@@ -521,29 +567,33 @@ fn a_static_pool_holds_a_whole_lease_at_once() {
 /// leave every real gpu-host lease pending for want of an agent that reports ready.
 #[test]
 fn a_gpu_host_lease_is_started_at_once_without_the_gate() {
-    let class = ResourceClass::gpu_host();
-    let mut hello = hello("a");
-    hello.shape.gpus = 1;
-    hello.shape.gpu_class = Some("a100".into());
-    let floor = Resources::new(4000, 8 << 30, 1, Some("a100".into())).unwrap();
-    let shape = js_types::Shape::new(floor, [("os".to_string(), "macos".to_string())].into());
-    let name = ProviderId::new("builders").unwrap();
-    let fx = fixture_of(PoolConfig::new(name, class.clone(), shape, 4));
-    let epoch = fx.hello(&hello, &cred("t")).unwrap().epoch;
-    let request = Request {
-        class: class.id().clone(),
-        resources: Resources::new(1000, 1, 1, Some("a100".into())).unwrap(),
-        ..request()
-    };
-    let spec = StartSpec::new(lease(1), request, &[class]).unwrap();
-    let mut provider = fx.provider.clone();
-    assert_eq!(started_on(&provider.start(spec)), Some("a"));
-    let seen = Observed::Present { host: host("a") };
-    assert_eq!(provider.observe(&lease(1)), seen);
-    let reply = beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!(reply.exclusive, None);
-    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
-    assert_eq!(queued.unwrap().state, RunState::Queued);
-    let reply = beat_with(&fx, "a", epoch, |_| {});
-    assert_eq!((starts(&reply), reply.exclusive), (1, None));
+    over_both(|engine| {
+        let class = ResourceClass::gpu_host();
+        let mut hello = world_hello("a");
+        hello.shape.gpus = 1;
+        hello.shape.gpu_class = Some("a100".into());
+        let floor = Resources::new(4000, 8 << 30, 1, Some("a100".into())).unwrap();
+        let caps = [("os", "macos"), ("arch", WORLD_ARCH)];
+        let shape = js_types::Shape::new(floor, map(&caps));
+        let name = ProviderId::new("builders").unwrap();
+        let config = PoolConfig::new(name, class.clone(), shape, 4);
+        let fx = fixture_on(config, engine);
+        let epoch = fx.hello(&hello, &cred("t")).unwrap().epoch;
+        let request = Request {
+            class: class.id().clone(),
+            resources: Resources::new(1000, 1, 1, Some("a100".into())).unwrap(),
+            ..request()
+        };
+        let spec = StartSpec::new(lease(1), request, &[class]).unwrap();
+        let mut provider = fx.provider.clone();
+        assert_eq!(started_on(&provider.start(spec)), Some("a"));
+        let seen = Observed::Present { host: host("a") };
+        assert_eq!(provider.observe(&lease(1)), seen);
+        let reply = beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!(reply.exclusive, None);
+        let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+        assert_eq!(queued.unwrap().state, RunState::Queued);
+        let reply = beat_with(&fx, "a", epoch, |_| {});
+        assert_eq!((starts(&reply), reply.exclusive), (1, None));
+    });
 }

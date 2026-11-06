@@ -16,6 +16,10 @@ pub(crate) struct Asking<'a> {
     pub(crate) hosts: &'a [HostCapacity],
     /// The hosts that reported a taint.
     pub(crate) tainted: &'a BTreeSet<HostId>,
+    /// The hosts a placer that keeps the request leaves out of its placements for the rest
+    /// of its life ([`crate::Placer::whole_record`]), beside those the registry's own
+    /// record bars.
+    pub(crate) for_life: &'a BTreeSet<HostId>,
 }
 
 /// Whether some listed host could ever be given whole to the request: it could hold it
@@ -30,7 +34,8 @@ pub(crate) fn capable(asking: &Asking<'_>, requests: &Requests) -> bool {
             &wanted.capabilities,
             asking.tainted,
         );
-        let barred = requests.barred_for_life(asking.key, &host.host);
+        let barred =
+            requests.barred_for_life(asking.key, &host.host) | asking.for_life.contains(&host.host);
         holds & !barred
     })
 }

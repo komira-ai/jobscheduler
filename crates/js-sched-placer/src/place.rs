@@ -66,14 +66,17 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use js_lease::Clock;
 use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
-use js_registry::{MarkedTails, Placer, ProbeHost, Reservation, WholeRound};
+use js_registry::{
+    MarkedTails, Placer, PrepareFailure, ProbeHost, RequestRecord, Reservation, WholeRound,
+};
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, RequestId, Shape};
 
 use tracing::warn;
 
@@ -380,6 +383,47 @@ impl Placer for SchedPlacer {
     fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
         let now = self.now();
         Some(self.engine().whole_round(round.clone(), now))
+    }
+
+    /// The engine keeps the deadline of each lease it committed from its whole-node queue
+    /// ([`super::engine::prepare`]).
+    fn prepare_overdue(&self, lease: &LeaseId) -> Option<bool> {
+        let now = self.now();
+        self.engine().prepare_overdue(lease, now)
+    }
+
+    fn prepare_ready(&self, lease: &LeaseId) {
+        self.engine().prepare_ready(lease);
+    }
+
+    fn prepare_again(&self, lease: &LeaseId) {
+        let now = self.now();
+        self.engine().prepare_again(lease, now);
+    }
+
+    /// The engine counts the failure, bars the host and lets the lease go for a lease it
+    /// committed from its queue ([`super::engine::prepare`]).
+    fn prepare_failed(&self, lease: &LeaseId, failure: &PrepareFailure) -> bool {
+        let now = self.now();
+        self.engine().prepare_failed(lease, failure, now)
+    }
+
+    fn whole_start(&self, id: &RequestId) -> bool {
+        let now = self.now();
+        self.engine().whole_start(id, now)
+    }
+
+    fn whole_record(&self, id: &RequestId) -> Option<RequestRecord> {
+        self.engine().whole_record(id)
+    }
+
+    fn whole_forget(&self, id: &RequestId) {
+        self.engine().whole_forget(id);
+    }
+
+    fn whole_sweep(&self, horizon: Duration) {
+        let now = self.now();
+        self.engine().whole_sweep(horizon, now);
     }
 }
 

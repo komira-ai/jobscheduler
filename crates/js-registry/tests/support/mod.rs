@@ -4,7 +4,7 @@
 pub mod world;
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Hello, Phase, ProtocolRange, Welcome, WireShape};
@@ -13,6 +13,8 @@ use js_provider::{StartAck, StartSpec};
 use js_registry::{
     Credential, PoolConfig, Refusal, RegisteredProvider, Registry, SequentialSessions,
 };
+use js_sched_placer::engine::Settings;
+use js_sched_placer::place::SchedPlacer;
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
@@ -52,6 +54,41 @@ pub fn world_shape() -> Shape {
 pub fn config(max_machines: usize) -> PoolConfig {
     let name = ProviderId::new("builders").unwrap();
     PoolConfig::new(name, class(), pool_shape(), max_machines)
+}
+
+/// What places a test's whole-node requests: the registry's own pass (`--placement
+/// registry`), or the js-sched engine the registry hands its queue to (`--placement
+/// js-sched`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    /// The registry's own whole-node pass: no placer.
+    Registry,
+    /// A `SchedPlacer` on the fixture's clock, as the lease server sets one.
+    Sched,
+}
+
+/// Runs `test` under each engine, the registry's first: a test that runs here asserts the
+/// same of both. A failure names the engine it failed under.
+pub fn over_both(test: impl Fn(Engine)) {
+    for engine in [Engine::Registry, Engine::Sched] {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(engine)));
+        if let Err(cause) = run {
+            eprintln!("failed under {engine:?}");
+            std::panic::resume_unwind(cause);
+        }
+    }
+}
+
+/// A fixture over `config` placed by `engine`: under [`Engine::Sched`] the registry is
+/// given a js-sched placer before any host says hello. Its hosts must report the `arch`
+/// the pool's shape names ([`Fixture::join_world`]), as js-sched describes a host by it.
+pub fn fixture_on(config: PoolConfig, engine: Engine) -> Fixture {
+    let fx = fixture_of(config);
+    if engine == Engine::Sched {
+        let placer = SchedPlacer::new(Settings::default(), fx.clock.clone());
+        fx.registry.set_placer(Arc::new(placer));
+    }
+    fx
 }
 
 /// A pool of up to `max_machines` hosts on a clock that moves only when a test says.
@@ -115,6 +152,11 @@ impl Fixture {
         self.hello(&hello(host), &cred(token)).unwrap().epoch
     }
 
+    /// Admits `host` with token `t`, reporting the architecture [`world_shape`] names.
+    pub fn join_world(&self, host: &str) -> u64 {
+        self.hello(&world_hello(host), &cred("t")).unwrap().epoch
+    }
+
     pub fn beat(&self, host: &str, epoch: u64) {
         self.registry
             .heartbeat(&self.heartbeat(host, epoch), &cred("t"))
@@ -152,6 +194,13 @@ pub fn hello(host: &str) -> Hello {
         accepts_host_credential: false,
         identity: None,
     }
+}
+
+/// [`hello`], reporting the architecture [`world_shape`] names.
+pub fn world_hello(host: &str) -> Hello {
+    let mut said = hello(host);
+    said.capabilities.insert("arch".into(), WORLD_ARCH.into());
+    said
 }
 
 pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {

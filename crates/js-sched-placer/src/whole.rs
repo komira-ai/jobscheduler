@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_lease::Timestamp;
 use js_provider::Candidate;
 use js_provider::StartSpec;
-use js_registry::{Exclusion, Reservation, Standing, WaitingWhole, WholeRound};
+use js_registry::{Reservation, Standing, WaitingWhole, WholeRound};
 use js_sched::{Bar, Event, NodePhase, OpState, Request, RestoredMark, RestoredWhole, Scheduler};
 use js_types::sched::{
     FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey,
@@ -58,6 +58,7 @@ use js_types::sched::{
 };
 use js_types::{Admission, HostId, RequestId};
 
+use super::prepare::{bar_of, stronger};
 use super::{Engine, Placed, TERM};
 use crate::map;
 
@@ -109,6 +110,7 @@ impl Engine {
         };
         let at = open.iter().position(|c| map::worker(&c.host) == worker);
         let committed = at.inspect(|index| {
+            self.start_prepare((spec.lease(), id), (operation, &worker), now);
             self.whole.remove(id);
             let placed = Placed { lease, operation };
             self.hold(&open[*index].host, spec.lease(), placed);
@@ -125,6 +127,9 @@ impl Engine {
             self.sched = sched.with_whole_node(round.settings.clone());
         }
         self.take_lives(&round.lives);
+        let rules = &round.settings;
+        self.prepare
+            .take_rules(rules.prepare_timeout_ms, rules.max_replace);
         let waiting: BTreeSet<&RequestId> = round.waiting.iter().map(|w| &w.id).collect();
         // A request that left the wait list is cancelled; one whose operation the
         // scheduler finished (refused as unservable) is cancelled and queued again.
@@ -138,6 +143,7 @@ impl Engine {
             .map(|(id, operation)| (id.clone(), *operation))
             .collect();
         for (id, operation) in left {
+            self.prepare.dequeue(&id);
             self.whole.remove(&id);
             let _ = self.sched.cancel_whole(operation);
         }
@@ -272,7 +278,15 @@ impl Engine {
         };
         self.feed(now, submit);
         self.sched.set_max_wall(operation, waiting.max_wall);
-        let (give_ups, bars) = self.carried.remove(&waiting.id).unwrap_or_default();
+        let (give_ups, mut bars) = self.carried.remove(&waiting.id).unwrap_or_default();
+        // A request whose prepare failed is queued again from when it was first queued,
+        // with its give-ups and the bars its failures set ([`super::prepare`]).
+        let (kept_give_ups, kept_bars) = self.prepare.kept(&waiting.id);
+        for (worker, bar) in kept_bars {
+            let carried = bars.get(&worker).copied();
+            bars.insert(worker, stronger(carried, bar));
+        }
+        let queued_at = self.prepare.queue(&waiting.id, farm(waiting.since));
         // A pending grant is not a mark: a request that had one takes its quiet host again.
         let mark = waiting.mark.as_ref().filter(|mark| !mark.assigned);
         let mark = mark.map(|mark| RestoredMark {
@@ -283,8 +297,8 @@ impl Engine {
         });
         let restored = |mark| RestoredWhole {
             operation,
-            queued_at: farm(waiting.since),
-            give_ups: give_ups.max(waiting.give_ups),
+            queued_at,
+            give_ups: give_ups.max(waiting.give_ups).max(kept_give_ups),
             bars: bars.clone(),
             mark,
         };
@@ -408,6 +422,7 @@ impl Engine {
     pub(super) fn carry_whole(&mut self, old: &Self, now: FarmTime) {
         self.whole_seq = old.whole_seq;
         self.carried = old.carried.clone();
+        self.prepare = old.prepare.clone();
         for (id, operation) in &old.whole {
             let give_ups = old.sched.whole_give_ups(*operation);
             let bars = old.sched.whole_barred(*operation, now);
@@ -422,15 +437,6 @@ impl Engine {
             waiting.mark = mark.cloned();
         }
         self.apply_round(round, now);
-    }
-}
-
-/// The hard bar of `exclusion`: the host is neither marked for the request nor granted to
-/// it while it holds.
-fn bar_of(exclusion: Exclusion) -> Bar {
-    match exclusion {
-        Exclusion::Until(end) => Bar::Until(farm(end)),
-        Exclusion::ForLife => Bar::ForLife,
     }
 }
 

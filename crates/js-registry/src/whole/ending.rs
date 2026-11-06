@@ -12,7 +12,8 @@ use crate::runs::Runs;
 
 use super::exclusive::Exclusive;
 use super::reasons::{Cause, HostEffect};
-use super::requests::{FailedPrepare, Failure, Requests, Rules};
+use super::requests::{FailedPrepare, Failure, NotReady, Requests, Rules, exclusion};
+use crate::PrepareFailure;
 
 /// The parts of the state a failed prepare changes besides the host's own record.
 pub(crate) struct Ending<'a> {
@@ -28,8 +29,10 @@ pub(crate) struct Ending<'a> {
 impl Ending<'_> {
     /// Ends `lease`, committed to `host` and not ready, as a failed prepare: the lease
     /// reads `Absent` from now on, its runs are asked to stop, the host restores, the
-    /// host takes the row's effect and the request counts one failure. `detail` is kept as
-    /// received and read by nothing here. `taint` and `exclusive` are the host's record.
+    /// host takes the row's effect and the request counts one failure: in the placer when
+    /// it keeps the lease's request ([`crate::Placer::prepare_failed`]), else here.
+    /// `detail` is kept as received and read by nothing here. `taint` and `exclusive` are
+    /// the host's record.
     /// The failure is noted ([`Requests::note_failed`]) for the record of the booking's end.
     pub(crate) fn fail(
         &mut self,
@@ -49,7 +52,22 @@ impl Ending<'_> {
             backoff_end: self.now.plus(backoff),
             max_replace: self.rules.max_replace,
         };
-        self.requests.fail(&lease, cause, detail, failure);
+        // A placer that keeps the whole-node queue keeps the request's count and bars: the
+        // registry only lets go of the lease as its request's.
+        let handed = PrepareFailure {
+            exclusion: exclusion(cause, failure.backoff_end),
+            not_ready: NotReady {
+                code: cause.code(),
+                detail: detail.to_string(),
+            },
+        };
+        let kept = self
+            .placer
+            .is_some_and(|placer| placer.prepare_failed(&lease, &handed));
+        match kept {
+            true => self.requests.release(&lease),
+            false => self.requests.fail(&lease, cause, detail, failure),
+        }
         self.requests.note_failed(FailedPrepare {
             lease,
             host: host.clone(),
