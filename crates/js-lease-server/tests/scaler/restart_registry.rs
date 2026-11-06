@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, Hello, Phase, ProtocolRange, WireShape};
 use js_elastic::{
-    AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, SchedulerId, Secret,
+    AcquireId, Acquired, Demand, Held, HostRef, Offer, ProviderError, Released, SchedulerId, Secret,
 };
+use js_jobs::JobStoreError;
 use js_lease::{ManualClock, Timestamp};
-use js_lease_server::{Call, Effects, Scaler, SharedClock, UnremovedFile};
+use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock, UnremovedFile};
 use js_provider::{Pool, StartAck, StartSpec};
-use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions, Waiting};
+use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions};
 use js_scaler::{AcquirePlan, Health, Phase as Stage, Records};
 use js_testkit::dir::TestDir;
 use js_types::{
@@ -36,15 +37,24 @@ struct Wired {
 }
 
 impl Effects for Wired {
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
-        self.registry.snapshot()
+    fn hosts(&self) -> Vec<HostView> {
+        self.registry.hosts()
     }
 
-    fn leased(&self, host: &str) -> bool {
+    fn jobs(&self) -> Result<JobTables, JobStoreError> {
+        self.fake.jobs()
+    }
+
+    fn whole_host(&self) -> Demand {
+        self.fake.whole_host()
+    }
+
+    fn holds_work(&self, host: &str) -> bool {
         let hosts = self.registry.hosts();
-        hosts
+        let leased = hosts
             .iter()
-            .any(|each| each.id.as_str() == host && each.lease.is_some())
+            .any(|each| each.id.as_str() == host && each.lease.is_some());
+        leased | self.fake.holds_work(host)
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {

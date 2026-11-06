@@ -6,9 +6,23 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
-use js_registry::{Busy, HostView, Waiting};
+use js_elastic::{
+    AcquireId, Acquired, Demand, Held, HostRef, Offer, ProviderError, Released, Secret,
+};
+use js_jobs::{AllocationRecord, JobRecord, JobStoreError};
+use js_registry::{Busy, HostView};
 use js_scaler::{AcquirePlan, Health, Records};
+
+/// What the scaler reads of the job tables at a tick: the demand and the hosts in use.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobTables {
+    /// Every queued job, in queue order. A job read here that is also among `live` (it was
+    /// placed between the two reads) is taken as placed.
+    pub queued: Vec<JobRecord>,
+    /// Every live (booked or releasing) allocation, a whole-host one included, read after
+    /// `queued`.
+    pub live: Vec<AllocationRecord>,
+}
 
 /// A call on the registry that names one host, other than the removal of a host. None of
 /// them returns anything the scaler acts on: it reads the registry's marks back at its next
@@ -31,12 +45,26 @@ pub enum Call {
 /// and the disk. Every method blocks and none holds a lock another part of the server
 /// waits on across a provider call.
 pub trait Effects: Send + Sync {
-    /// The hosts the registry holds and the whole-node requests that found no host, as of
-    /// one moment (one lock of the registry).
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>);
+    /// The hosts the registry holds, as of one moment (one lock of the registry). Their
+    /// leases are not read: what a host holds is the job tables' ([`Effects::jobs`]).
+    fn hosts(&self) -> Vec<HostView>;
 
-    /// Whether the registry books a lease on the host `host`.
-    fn leased(&self, host: &str) -> bool;
+    /// The queued jobs and then the live allocations of the job tables; both empty for a
+    /// server that holds no job tables.
+    ///
+    /// # Errors
+    ///
+    /// The [`JobStoreError`] of a read that failed: the tables are never read as empty.
+    fn jobs(&self) -> Result<JobTables, JobStoreError>;
+
+    /// What a queued job that books the whole host asks a machine to bring, besides its own
+    /// constraints: the least every host of the pool brings (its floor).
+    fn whole_host(&self) -> Demand;
+
+    /// Whether the host `host` holds work its machine must not be released under, read at
+    /// the moment of the release: a lease the registry books on it, or a live job
+    /// allocation. A read of the job tables that fails counts as work.
+    fn holds_work(&self, host: &str) -> bool;
 
     /// What the pool's checks say, and the offers they read: the scaler launches only while
     /// the checks pass, and only from these offers.

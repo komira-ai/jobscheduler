@@ -1,12 +1,17 @@
 //! The scaler's shell: [`js_scaler::step`] run on the server's tick.
 //!
-//! Once per tick the shell reads the registry and the provider, calls the pure step, and
-//! runs the actions it returns in order. Everything it does to the world goes through
+//! Once per tick the shell reads the job tables, the registry's hosts and the provider,
+//! calls the pure step, and runs the actions it returns in order. Everything it does to the world goes through
 //! [`Effects`], and every tick runs on the pool for blocking calls, because the calls block
 //! (a file sync, a provider's HTTP request). No lock of the registry or the lease table is
 //! held across any of them, and neither is the shell's own memory: a tick works on a copy
 //! of it and swaps the copy in when it is done, so the status page and the checks never
 //! wait for a provider's call.
+//!
+//! What waits for a machine and which hosts are in use are the job tables', not the
+//! registry's leases (the `jobs` module): each queued job without an allocation is a waiting
+//! request, and a host is busy while a live allocation is on it. A tick whose read of the
+//! tables fails does nothing else, since an unknown host is not an idle one.
 //!
 //! What the shell keeps between ticks, besides the step's [`State`] (whose records are the
 //! only part on disk):
@@ -17,6 +22,8 @@
 //!   at the start of every tick, and the host's `Release` is not sent until the revoke has
 //!   gone through, so a machine is never terminated while its token still works;
 //! - the alerts it has raised, so that each is said once while it holds;
+//! - the queued jobs set aside for the machines launched for them (the `jobs` module), in
+//!   memory only;
 //! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. The
 //!   set is kept in its own file ([`UnremovedFile`]) and is a write-ahead: a host is added
 //!   to the set and the file is written before the registry is asked to remove it, and the
@@ -45,6 +52,10 @@
 //!   and the step's result is dropped, so the next tick decides again from the same state.
 //!   No mint, launch, drain, release or revoke runs before the file holds the records they
 //!   depend on.
+//! - A machine is not released while its host holds work, read again just before the release
+//!   ([`Effects::holds_work`]): a lease the registry books on it or a live job allocation.
+//!   The registry's own marks look at its leases and runs only, so a job placed between the
+//!   tick's read and a mark is caught here, and the release waits until the job is done.
 //! - A join token that could not be minted sends no launch: the shell answers the step's
 //!   acquire with a deferral, and the step plans it again, minting again.
 //! - A machine whose record is `Releasing` is marked ending in the registry before the
@@ -54,7 +65,7 @@
 //! - The shell vouches for what the step cannot know: a registry view is complete only
 //!   once the server has been listening for [`REGISTRY_FLOOR`] and every host it knows of
 //!   has said hello again or [`REGISTRY_QUIET`] has passed (the `complete` module); a
-//!   silent host books nothing when the registry shows no lease on it; a machine is "not
+//!   silent host books nothing when no live job allocation is on it; a machine is "not
 //!   found" when a read by id says the provider no longer has it; the acquire ids the
 //!   provider has an unresolved call for are the provider's own.
 //! - It says what an operator must act on, once while it holds: an orphan, a record of a
@@ -67,6 +78,7 @@ mod alert;
 mod build;
 mod complete;
 mod effects;
+mod jobs;
 mod launch;
 mod live;
 mod store;
@@ -79,16 +91,18 @@ use std::time::Duration;
 
 use js_alert::{AlertSink, Notifier};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
+use js_jobs::JobId;
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
-    AcquireResult, Action, Budgets, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
-    Settings, State, launchable, step,
+    AcquireResult, Action, Budgets, HostFacts, Input, Millis, Phase, PoolInput, Records,
+    ReleaseResult, Settings, State, launchable, step,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, HostId, RequestId};
 use tracing::{debug, warn};
 
 use crate::adapt::SharedClock;
+use crate::sched::engine::jobs::open_to_jobs;
 use crate::util::blocking;
 
 /// The most alerts waiting for the sink; beyond it the oldest is dropped and counted.
@@ -96,7 +110,7 @@ const ALERT_QUEUE: usize = 64;
 
 pub(crate) use build::{Parts, build};
 pub use complete::{REGISTRY_FLOOR, REGISTRY_QUIET};
-pub use effects::{Call, Effects};
+pub use effects::{Call, Effects, JobTables};
 pub use launch::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
 pub(crate) use live::Live;
 pub use store::RecordsFile;
@@ -128,6 +142,8 @@ struct Memory {
     /// The alerts that hold now, by key, with their text.
     alerts: BTreeMap<String, String>,
     save_errors: u64,
+    /// The queued jobs set aside for the machines launched for them (the `jobs` module).
+    reserved: jobs::Reservations,
 }
 
 /// What a tick's calls answered, for the next tick's input.
@@ -221,6 +237,7 @@ impl Scaler {
             unremoved_failed: false,
             alerts: BTreeMap::new(),
             save_errors: 0,
+            reserved: jobs::Reservations::default(),
         };
         let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
         let core = Core {
@@ -391,7 +408,10 @@ impl Core {
         work.unremoved_failed = false;
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
-        let mut input = self.input(&work, now);
+        let Some((mut input, jobs)) = self.input(&mut work, now) else {
+            *self.memory() = work;
+            return;
+        };
         let asked = std::mem::take(
             &mut *self
                 .brake_resets
@@ -411,6 +431,7 @@ impl Core {
             return;
         };
         self.report(&mut work, (&next, &input), now);
+        work.reserved.note(&next.launched, &jobs);
         work.state = next.clone();
         work.acquired = answers.acquired;
         work.released = answers.released;
@@ -530,10 +551,25 @@ impl Core {
         asked.map(|record| record.name.clone()).collect()
     }
 
-    /// The step's input: the registry, the pool's checks and the provider's list, the
-    /// answers of the last tick's calls, and random values for the launches this step may
-    /// make.
-    fn input(&self, memory: &Memory, now: Millis) -> Input {
+    /// The step's input: the job tables, the registry's hosts, the pool's checks and the
+    /// provider's list, the answers of the last tick's calls, and random values for the
+    /// launches this step may make; with the job of each waiting request, by request id.
+    /// The reservations of `memory` that no longer hold are let go first (the `jobs`
+    /// module). `None`, and nothing read but the tables, when the job tables cannot be
+    /// read: demand and the hosts in use are not known, and an unknown host is not idle, so
+    /// the tick does nothing and the next one reads again.
+    fn input(
+        &self,
+        memory: &mut Memory,
+        now: Millis,
+    ) -> Option<(Input, BTreeMap<RequestId, JobId>)> {
+        let tables = match self.effects.jobs() {
+            Ok(tables) => tables,
+            Err(err) => {
+                warn!(%err, "cannot read the job tables; the scaler does nothing this tick");
+                return None;
+            }
+        };
         let (health, offers) = self.effects.checks();
         let held = match self.effects.list() {
             Ok(held) => Some(held),
@@ -543,14 +579,48 @@ impl Core {
             }
         };
         let pool = &self.settings.pool;
-        let (views, waiting) = self.effects.registry();
+        let views = self.effects.hosts();
         let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
-        let hosts = views
+        let at = self.clock.now();
+        let open: BTreeSet<HostId> = views
+            .iter()
+            .filter(|view| open_to_jobs(view, at))
+            .map(|view| view.id.clone())
+            .collect();
+        let used = jobs::in_use(&tables.live);
+        let hosts: Vec<HostFacts> = views
             .into_iter()
-            .map(|host| view::host_facts(host, pool, self.exec));
+            .map(|host| {
+                let allocated = used.contains(&host.id);
+                view::host_facts(host, pool, self.exec, allocated)
+            })
+            .collect();
+        // A job read queued and then found among the live allocations was placed between
+        // the two reads: it waits for nothing.
+        let placed: BTreeSet<&JobId> = tables.live.iter().map(|live| &live.job).collect();
+        let whole_host = self.effects.whole_host();
+        let queued: Vec<jobs::Queued> = tables
+            .queued
+            .iter()
+            .filter(|job| !placed.contains(&job.id))
+            .filter_map(|job| {
+                jobs::request_id(&job.id).map(|request| jobs::Queued {
+                    job: job.id.clone(),
+                    request,
+                    demand: jobs::demand(job, &whole_host),
+                })
+            })
+            .collect();
+        memory
+            .reserved
+            .settle(&queued, &memory.state.records, (&hosts, &open));
+        let ids = queued
+            .iter()
+            .map(|queued| (queued.request.clone(), queued.job.clone()))
+            .collect();
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
-        Input {
+        let input = Input {
             scheduler: self.scheduler.clone(),
             pools: vec![PoolInput {
                 settings: self.settings.clone(),
@@ -559,8 +629,8 @@ impl Core {
                 held,
                 unresolved: self.effects.unresolved(),
             }],
-            waiting: waiting.into_iter().map(view::waiting).collect(),
-            hosts: hosts.collect(),
+            waiting: memory.reserved.waiting(queued),
+            hosts,
             registry_complete: complete,
             acquired: memory.acquired.clone(),
             released: memory.released.clone(),
@@ -568,7 +638,8 @@ impl Core {
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
             budgets: self.budgets.clone(),
             brake_resets: Vec::new(),
-        }
+        };
+        Some((input, ids))
     }
 
     /// Runs the step's actions in order. `None` when the records could not be written,
@@ -611,8 +682,8 @@ impl Core {
                 Action::Release { host, id } => {
                     if memory.unrevoked.contains(&host) {
                         debug!(%host, "the token is not revoked yet; the machine is not released");
-                    } else if self.effects.leased(&host) {
-                        warn!(%host, "the registry books a lease on the host; the machine is not released until it ends");
+                    } else if self.effects.holds_work(&host) {
+                        warn!(%host, "the host holds a lease or a job allocation; the machine is not released until it ends");
                     } else {
                         let answer = self.effects.release(&id);
                         say_release(&host, &answer);

@@ -1,9 +1,9 @@
-//! The registry's words turned into the scaler's: a host as [`HostFacts`], a waiting
-//! request as [`Waiting`].
+//! The registry's words turned into the scaler's: a host as [`HostFacts`]. What waits for a
+//! host is the job tables' (the `jobs` module), not the registry's.
 
 use js_elastic::{Offer, PriceUnit};
-use js_registry::{HostMark, HostState, HostView, Waiting as Request};
-use js_scaler::{HostFacts, HostState as Hearing, Mark, Waiting};
+use js_registry::{HostMark, HostState, HostView};
+use js_scaler::{HostFacts, HostState as Hearing, Mark};
 use js_types::{ExecMode, IsaLevel, Shape, normalise_arch};
 
 /// Bytes in a GiB, the unit of the `disk-gib` capability.
@@ -34,7 +34,7 @@ const GIB: u64 = 1 << 30;
 /// Today only agent pools and static host files can book disk; elastic and joined pools
 /// have no `disk_bytes` key, so a request for disk there is refused before the scaler
 /// sees it.
-fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
+pub(super) fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
     let resources = shape.resources();
     let capabilities = shape.capabilities();
     let text = |key: &str| capabilities.get(key).cloned().unwrap_or_default();
@@ -85,16 +85,20 @@ fn hearing(state: HostState) -> Hearing {
     }
 }
 
-/// `host`, a host of the pool `pool` whose jobs run in `exec` mode, as the scaler reads it.
-/// What it holds is what it announced, if it did. It is busy when it holds a lease or still has runs to finish. It has given
-/// up its leases when the registry does not hear from it and books no lease on it: a silent
-/// host that never held one included.
+/// `host`, a host of the pool `pool` whose jobs run in `exec` mode, as the scaler reads it,
+/// where `allocated` says whether a live (booked or releasing) job allocation is on it. It
+/// is busy when it holds a live allocation, a whole-host one included, or the registry
+/// still has runs of it to finish (`releasing`); a lease the registry books on it does not
+/// count. It has given up its work when the registry does not hear from it and no live
+/// allocation is on it: a silent host that never held one included. Silence frees no
+/// allocation (only the host's confirmation or the provider's absence does), so a silent
+/// host that holds one stays busy and is kept.
 ///
 /// `shape` is `Some` only when the host announced one (the registry's `claim`), and `None`
 /// for a host that has announced none since the registry was put back after a restart. The
 /// shell never stands in the pool's floor (`host.shape`) or a stored shape: the floor is
 /// below any offer and would read as a hello that falls short.
-pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode) -> HostFacts {
+pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode, allocated: bool) -> HostFacts {
     let shape = host
         .claim
         .as_ref()
@@ -104,19 +108,10 @@ pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode) -> HostFact
         pool: pool.to_owned(),
         state: hearing(host.state),
         mark: host.mark.map(mark_of),
-        busy: host.lease.is_some() | host.releasing,
-        lease_given_up: (host.state != HostState::Live) & host.lease.is_none(),
+        busy: allocated | host.releasing,
+        lease_given_up: (host.state != HostState::Live) & !allocated,
         id: host.id,
         heard_since_hello: host.heard_since_hello,
-    }
-}
-
-/// `request`, a waiting request, as the scaler reads it.
-pub(super) fn waiting(request: Request) -> Waiting {
-    Waiting {
-        id: request.id,
-        demand: request.demand,
-        reserved: request.reserved,
     }
 }
 

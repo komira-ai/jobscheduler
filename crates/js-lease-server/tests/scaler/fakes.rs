@@ -1,6 +1,7 @@
 //! A fake for everything the scaler's shell reads and does: it logs each call that changes
-//! something, keeps a provider that holds machines, and keeps a registry whose marks move
-//! the way the real one's do. A test changes what the fake answers and reads its log.
+//! something, keeps a provider that holds machines, a registry whose marks move the way the
+//! real one's do, and the job tables' queued jobs and live allocations. A test changes what
+//! the fake answers and reads its log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{Receiver, Sender};
@@ -10,20 +11,23 @@ use std::time::Duration;
 use js_agent_wire::Phase as WirePhase;
 use js_elastic::AcquireId;
 use js_elastic::{
-    Acquired, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released, SchedulerId,
-    Secret,
+    Acquired, Demand, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released,
+    SchedulerId, Secret,
+};
+use js_jobs::{
+    AllocationRecord, Booked, Constraints, JobId, JobRecord, JobSpec, JobStore, JobStoreError,
+    Needs, NetworkPolicy, NewJob, RandomIds,
 };
 use js_lease::{ManualClock, Timestamp};
-use js_lease_server::{Call, Effects, Scaler, SharedClock};
-use js_registry::{
-    Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource, Waiting,
-};
+use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock};
+use js_registry::{Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource};
 use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
+use js_state::fake::{Fake, Flaw};
 use js_types::{
-    AcceleratorNeed, ExecMode, HostId, JobNetwork, MemoryHeadroom, Model, RequestId, Requirements,
-    Resources, Shape, accelerator_of,
+    AcceleratorNeed, ExecMode, HostId, ImageDigestRef, JobNetwork, Labels, MemoryHeadroom, Model,
+    Requirements, Resources, Shape, accelerator_of,
 };
 
 /// The wall time every test clock starts at.
@@ -33,7 +37,14 @@ pub const START: u64 = 1_000_000_000_000;
 pub struct World {
     /// Every call that changes something, as text, in order.
     pub log: Vec<String>,
-    pub waiting: Vec<Waiting>,
+    /// The queued jobs, in queue order.
+    pub queued: Vec<JobRecord>,
+    /// The live job allocations.
+    pub live: Vec<AllocationRecord>,
+    /// The job tables cannot be read.
+    pub jobs_fail: bool,
+    /// What a whole-host job asks a machine to bring: the pool's floor.
+    pub whole_host: Demand,
     pub hosts: Vec<HostView>,
     pub health: Health,
     pub offers: Vec<Offer>,
@@ -61,6 +72,9 @@ pub struct World {
     /// The registry's hosts as they are after the next save: a host that says hello and is
     /// booked between the shell's read of the registry and its calls.
     pub after_save: Option<Vec<HostView>>,
+    /// The live job allocations as they are after the next save: a job placed between the
+    /// shell's read of the tables and its calls.
+    pub after_save_live: Option<Vec<AllocationRecord>>,
     /// When set, every release is answered with this and the machine is left as it is.
     pub release_answer: Option<Released>,
     /// When set, the provider's `list` says it has been called and then waits to be let go.
@@ -115,15 +129,33 @@ impl World {
 }
 
 impl Effects for Handle {
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
-        let world = self.world();
-        (world.hosts.clone(), world.waiting.clone())
+    fn hosts(&self) -> Vec<HostView> {
+        self.world().hosts.clone()
     }
 
-    fn leased(&self, host: &str) -> bool {
+    fn jobs(&self) -> Result<JobTables, JobStoreError> {
+        let world = self.world();
+        match world.jobs_fail {
+            true => Err(JobStoreError::Store(js_state::StoreError::Failed(
+                "the job tables are gone".to_owned(),
+            ))),
+            false => Ok(JobTables {
+                queued: world.queued.clone(),
+                live: world.live.clone(),
+            }),
+        }
+    }
+
+    fn whole_host(&self) -> Demand {
+        self.world().whole_host.clone()
+    }
+
+    fn holds_work(&self, host: &str) -> bool {
         let world = self.world();
         let on = world.hosts.iter().find(|view| view.id.as_str() == host);
-        on.is_some_and(|view| view.lease.is_some())
+        let leased = on.is_some_and(|view| view.lease.is_some());
+        let allocated = world.live.iter().any(|live| live.host.as_str() == host);
+        leased | allocated
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {
@@ -173,6 +205,9 @@ impl Effects for Handle {
                 world.saved = Some(records.clone());
                 if let Some(hosts) = world.after_save.take() {
                     world.hosts = hosts;
+                }
+                if let Some(live) = world.after_save_live.take() {
+                    world.live = live;
                 }
                 Ok(())
             }
@@ -231,10 +266,12 @@ impl Effects for Handle {
         world
             .log
             .push(format!("release:{}", name.unwrap_or_default()));
-        // The registry must already have marked the host, and it must be quiet.
-        let unsafe_release = world
-            .host_of(id)
-            .is_some_and(|view| view.mark != Some(HostMark::Releasing) || view.lease.is_some());
+        // The registry must already have marked the host, and it must hold no lease and no
+        // job allocation.
+        let allocated = |view: &HostView| world.live.iter().any(|live| live.host == view.id);
+        let unsafe_release = world.host_of(id).is_some_and(|view| {
+            view.mark != Some(HostMark::Releasing) || view.lease.is_some() || allocated(view)
+        });
         if unsafe_release {
             world
                 .log
@@ -343,7 +380,10 @@ pub fn new_world() -> Arc<Mutex<World>> {
     trace_everything();
     Arc::new(Mutex::new(World {
         log: Vec::new(),
-        waiting: Vec::new(),
+        queued: Vec::new(),
+        live: Vec::new(),
+        jobs_fail: false,
+        whole_host: request_demand(),
         hosts: Vec::new(),
         health: Health::Available,
         offers: vec![offer()],
@@ -362,6 +402,7 @@ pub fn new_world() -> Arc<Mutex<World>> {
         remove_ok: true,
         marks_refused: false,
         after_save: None,
+        after_save_live: None,
         release_answer: None,
         gate: None,
         lifetimes: Vec::new(),
@@ -452,28 +493,96 @@ pub fn offer() -> Offer {
     }
 }
 
-/// A whole-node request for one a10.
-pub fn request(id: &str) -> Waiting {
-    Waiting {
-        id: RequestId::new(id).unwrap(),
-        demand: Requirements {
-            resources: Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap(),
-            disk_bytes: None,
-            os: None,
-            arch: None,
-            isa_level: None,
-            exec: None,
-            accelerator: Some(AcceleratorNeed {
-                model: Some(Model::parse("nvidia-a10").unwrap()),
-                count: 1,
-                ..AcceleratorNeed::default()
-            }),
-            network: JobNetwork::None,
-            host_ports: Vec::new(),
-        },
-        since: Timestamp::from_millis(START),
-        reserved: None,
+/// What [`job`] asks of a host: one core, 1 GiB and one a10. It is also the pool's floor a
+/// whole-host job asks for in the fake world.
+pub fn request_demand() -> Requirements {
+    Requirements {
+        resources: a10_share(),
+        disk_bytes: None,
+        os: None,
+        arch: None,
+        isa_level: None,
+        exec: None,
+        accelerator: Some(AcceleratorNeed {
+            model: Some(Model::parse("nvidia-a10").unwrap()),
+            count: 1,
+            ..AcceleratorNeed::default()
+        }),
+        network: JobNetwork::None,
+        host_ports: Vec::new(),
     }
+}
+
+/// One core, 1 GiB and one a10.
+pub fn a10_share() -> Resources {
+    Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap()
+}
+
+/// Job tables over a store of their own, from which a test takes the rows it puts in the
+/// fake world.
+fn tables() -> JobStore<Fake, RandomIds> {
+    let store = Fake::with_flaw(Arc::default(), Flaw::None);
+    JobStore::new(Arc::new(store), RandomIds).unwrap()
+}
+
+/// A job that asks for `needs`.
+pub fn spec_of(needs: Needs) -> JobSpec {
+    JobSpec {
+        image: ImageDigestRef::parse(&format!("team/app@sha256:{}", "a".repeat(64))).unwrap(),
+        command: vec!["run".to_owned()],
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        needs,
+        constraints: Constraints::default(),
+        wall_limit_secs: 600,
+        network: NetworkPolicy::None,
+        ports: Vec::new(),
+        files: BTreeMap::new(),
+        labels: Labels::default(),
+    }
+}
+
+/// The job `id`, queued with `spec`, as the job tables return it.
+pub fn job_with(id: &str, spec: JobSpec) -> JobRecord {
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec,
+        priority: 0,
+        client: None,
+    };
+    tables().insert_queued(new).unwrap().record
+}
+
+/// The queued job `id`, asking for one core, 1 GiB and one a10.
+pub fn job(id: &str) -> JobRecord {
+    job_with(id, spec_of(Needs::Shape(a10_share())))
+}
+
+/// The live allocation of the job `id` on `host`, booking `booked`.
+pub fn allocation_of(id: &str, host: &str, booked: Booked) -> AllocationRecord {
+    let jobs = tables();
+    let new = NewJob {
+        id: Some(JobId::parse(id).unwrap()),
+        spec: spec_of(Needs::Shape(a10_share())),
+        priority: 0,
+        client: None,
+    };
+    let job = jobs.insert_queued(new).unwrap().record.id;
+    let (_, allocation) = jobs
+        .place(&job, HostId::new(host).unwrap(), booked)
+        .unwrap();
+    allocation
+}
+
+/// The live allocation of the job `id` on `host`, booking one core, 1 GiB and one a10.
+pub fn allocation(id: &str, host: &str) -> AllocationRecord {
+    let booked = Booked::Shape {
+        cpu_millis: 1000,
+        memory_bytes: 1 << 30,
+        disk_bytes: 0,
+        accelerators: 1,
+    };
+    allocation_of(id, host, booked)
 }
 
 /// A registered host: live, unmarked, holding nothing. The pool books its floor for it, and

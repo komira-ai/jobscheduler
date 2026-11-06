@@ -13,7 +13,9 @@
 //! # What a step decides
 //!
 //! * Demand. A waiting request is covered, and gets no machine, when it holds a
-//!   reservation, when a free host that fits is not set aside for another request, or
+//!   reservation ([`Waiting::reserved`]: the host or the machine on its way it is set aside
+//!   for is then matched to no other request, and the host is not drained as idle), when a
+//!   free host that fits is not set aside for another request, or
 //!   when a machine on its way (planned, launching, unresolved or booting) has an offer
 //!   that fits it. Matching is greedy in queue order, one request to one host or machine,
 //!   across all the pools before any pool launches. A request that fits a draining host
@@ -64,8 +66,8 @@
 //!   silent for `unknown_hold`, the machine is released, since it costs money and holds
 //!   nothing: drained and marked for release, which the registry checks when the actions
 //!   run, then released when the mark is read back; [`State::silent_released`] names it for
-//!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
-//!   mark is never released, except that a silent host whose leases the registry gave up
+//!   the shell to log. A host that shows work ([`HostFacts::busy`]) or a `Held` or
+//!   `Reserved` mark is never released, except that a silent host with nothing booked on it
 //!   ([`HostFacts::lease_given_up`]) is not kept by the runs and streams it lists, which a
 //!   job that can no longer report leaves behind. A registered host never heard from since
 //!   its hello ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books
@@ -176,6 +178,7 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     // a request a later pool's host or machine on its way covers gets nothing from an
     // earlier one.
     let mut claims = Claims::default();
+    pass.hold_reserved(&mut claims);
     let mut waiting: Vec<&Waiting> = input
         .waiting
         .iter()

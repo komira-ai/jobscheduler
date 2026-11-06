@@ -884,7 +884,7 @@ pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
 pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
-    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    Call, Effects, JobTables, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
     RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};

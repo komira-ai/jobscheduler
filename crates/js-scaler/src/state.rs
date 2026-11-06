@@ -118,6 +118,12 @@ pub struct State {
     /// restart does not start it again; the time the scaler was down does not count, see
     /// [`Records::last_step`].
     pub silent: BTreeMap<String, Millis>,
+    /// The machines this step launched, by name, each with the waiting request it was
+    /// launched for ([`Waiting::id`](crate::Waiting::id)). A launch the provider told to wait
+    /// and that is tried again is not here: it was named in the step that first launched it.
+    /// Not written to disk: the caller reads it after the step, to set the request aside for
+    /// its machine ([`Waiting::reserved`](crate::Waiting::reserved)) in the steps that follow.
+    pub launched: BTreeMap<String, RequestId>,
     /// The machines released this step because their host was silent for `unknown_hold`
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
     /// a paid machine was released on silence.

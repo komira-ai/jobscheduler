@@ -9,17 +9,19 @@ use js_types::{HostId, RequestId};
 use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
 
-/// One whole-node request on the registry's wait list (`js_registry::Waiting`), in queue
-/// order. The registry's `since` is not here: no rule of the step reads how long a request
-/// has waited.
+/// One request waiting for a host, in queue order: the server's shell gives one for each
+/// queued job that holds no allocation. No rule of the step reads how long a request has
+/// waited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
     /// The request id.
     pub id: RequestId,
     /// What the request needs of a host.
     pub demand: Demand,
-    /// The host set aside for it, free or busy, if it holds one. Such a request already
-    /// has a host coming and is never given a machine.
+    /// The host set aside for it, free or busy, or the name of the machine on its way that
+    /// was launched for it ([`State::launched`](crate::State::launched)), if it holds one.
+    /// Such a request already has a host coming and is never given a machine; the host or
+    /// machine so named is matched to no other request, and the host is not drained as idle.
     pub reserved: Option<HostId>,
 }
 
@@ -77,26 +79,23 @@ pub struct HostFacts {
     pub shape: Option<Offer>,
     /// How the host is set aside, if it is.
     pub mark: Option<Mark>,
-    /// Whether the host holds a lease, a run or a stream.
+    /// Whether the host holds work: the server's shell sets it when a live (booked or
+    /// releasing) job allocation is on the host, a whole-host one included, or the registry
+    /// still has runs of it to finish; a lease the registry books does not count.
     ///
-    /// For a host that is not `Live` it means one thing: a lease booked on it in the lease
-    /// table. The shell never sets it from the runs the host last listed; those listings
-    /// are stale once the host stops talking and the registry keeps them until it forgets
-    /// the host, so a host that went lost in the middle of a job would otherwise look busy
-    /// for a day. So for a silent host `busy` and
-    /// [`lease_given_up`](Self::lease_given_up) are never both `true`: the first says a
-    /// lease is booked, the second says none is. A `Held` or `Reserved` mark keeps a silent
-    /// host as well. For a `Live` host `busy` is leases, runs and streams, as the
-    /// registry's `releasing` reads them.
+    /// The shell never sets it from the runs a silent host last listed; those listings are
+    /// stale once the host stops talking and the registry keeps them until it forgets the
+    /// host. So for a silent host `busy` and [`lease_given_up`](Self::lease_given_up) are
+    /// never both `true`: the first says an allocation is on it, the second says none is.
+    /// Silence frees no allocation, so a silent host with one stays busy. A `Held` or
+    /// `Reserved` mark keeps a silent host as well.
     pub busy: bool,
-    /// Whether the registry books nothing on the host: its lease grace gave up the leases
-    /// it held, or it held none. The shell sets it for a silent host from the lease table,
-    /// and it is `true` for a silent host that has no bookings at all (one that never held
-    /// a lease included); it is `false` for a host that still holds a lease or whose
-    /// bookings the shell cannot read. It never holds together with
-    /// [`busy`](Self::busy) on a silent host. A silent host marked `Releasing` needs no
-    /// flag: the registry booked nothing on it when it set the mark. The scaler also reads
-    /// `mark` and never releases a host that shows work, whatever this says.
+    /// Whether nothing is booked on a silent host: no live job allocation is on it (one that
+    /// never held one included). It is `false` for a host that still holds one. It never
+    /// holds together with [`busy`](Self::busy) on a silent host. A silent host marked
+    /// `Releasing` needs no flag: the registry booked nothing on it when it set the mark. The
+    /// scaler also reads `mark` and never releases a host that shows work, whatever this
+    /// says. (The name is the one it had when the registry's leases were the work.)
     pub lease_given_up: bool,
     /// Whether the registry has heard a heartbeat from the host since its latest hello. The
     /// shell sets it from the registry's record of the host; it is `false` for a host that
@@ -159,7 +158,8 @@ pub struct Input {
     pub scheduler: SchedulerId,
     /// The elastic pools, in the order requests fall through them.
     pub pools: Vec<PoolInput>,
-    /// The wait list, in queue order.
+    /// The requests waiting for a host (the queued jobs without an allocation), in queue
+    /// order.
     pub waiting: Vec<Waiting>,
     /// The hosts the registry knows.
     pub hosts: Vec<HostFacts>,

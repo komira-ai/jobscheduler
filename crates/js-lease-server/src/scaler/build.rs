@@ -138,6 +138,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         Arc::clone(&plan.provider),
         launcher,
         (file, unremoved_file, parts.health),
+        plan.floor_demand.clone(),
     );
     let wiring = (
         plan.scheduler.clone(),

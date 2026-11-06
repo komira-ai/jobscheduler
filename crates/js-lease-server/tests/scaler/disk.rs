@@ -9,20 +9,19 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_registry::Waiting;
+use js_jobs::{JobRecord, Needs};
 use js_types::Shape;
 
 use js_scaler::Records;
 
-use crate::fakes::{live, request, rig, view};
+use crate::fakes::{a10_share, job_with, live, rig, spec_of, view};
 
 const GIB: u64 = 1 << 30;
 
-/// A request like [`request`] that books `disk` bytes of scratch disk.
-fn wants(id: &str, disk: u64) -> Waiting {
-    let mut waiting = request(id);
-    waiting.demand.resources = waiting.demand.resources.with_disk_bytes(disk);
-    waiting
+/// A queued job like [`crate::fakes::job`] that books `disk` bytes of scratch disk.
+fn wants(id: &str, disk: u64) -> JobRecord {
+    let needs = Needs::Shape(a10_share().with_disk_bytes(disk));
+    job_with(id, spec_of(needs))
 }
 
 /// A free live host of the pool that the pool books `disk` bytes of scratch disk for.
@@ -48,7 +47,7 @@ fn launches(log: &[String]) -> usize {
 #[tokio::test]
 async fn a_request_for_more_disk_than_every_offer_has_launches_nothing() {
     let big = rig(Records::default(), live());
-    big.world().waiting = vec![wants("big", 512 * GIB + 1)];
+    big.world().queued = vec![wants("big", 512 * GIB + 1)];
     for _ in 0..4 {
         big.scaler.tick().await;
         big.advance(Duration::from_secs(5));
@@ -57,7 +56,7 @@ async fn a_request_for_more_disk_than_every_offer_has_launches_nothing() {
     assert!(big.scaler.state().records.instances.is_empty());
 
     let fits = rig(Records::default(), live());
-    fits.world().waiting = vec![wants("fits", 512 * GIB)];
+    fits.world().queued = vec![wants("fits", 512 * GIB)];
     fits.scaler.tick().await;
     assert_eq!(launches(&fits.log()), 1, "{:?}", fits.log());
 }
@@ -70,19 +69,19 @@ async fn a_request_for_more_disk_than_every_offer_has_launches_nothing() {
 async fn a_host_covers_a_request_only_if_it_books_the_disk() {
     let roomy = rig(Records::default(), live());
     roomy.world().hosts = vec![host("h-roomy", 20 * GIB)];
-    roomy.world().waiting = vec![wants("r1", 10 * GIB)];
+    roomy.world().queued = vec![wants("r1", 10 * GIB)];
     roomy.scaler.tick().await;
     assert_eq!(launches(&roomy.log()), 0, "{:?}", roomy.log());
 
     let small = rig(Records::default(), live());
     small.world().hosts = vec![host("h-small", 5 * GIB)];
-    small.world().waiting = vec![wants("r2", 10 * GIB)];
+    small.world().queued = vec![wants("r2", 10 * GIB)];
     small.scaler.tick().await;
     assert_eq!(launches(&small.log()), 1, "{:?}", small.log());
 
     let none = rig(Records::default(), live());
     none.world().hosts = vec![host("h-none", 0)];
-    none.world().waiting = vec![wants("r3", 1)];
+    none.world().queued = vec![wants("r3", 1)];
     none.scaler.tick().await;
     assert_eq!(launches(&none.log()), 1, "{:?}", none.log());
 }
