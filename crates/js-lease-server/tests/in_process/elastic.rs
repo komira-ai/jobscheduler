@@ -266,7 +266,7 @@ fn queue_job(scratch: &Scratch, id: &str) {
         wall_limit_secs: 600,
         network: NetworkPolicy::None,
         ports: Vec::new(),
-        files: BTreeMap::new(),
+        files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
     };
     let new = NewJob {

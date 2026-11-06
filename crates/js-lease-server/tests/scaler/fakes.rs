@@ -567,7 +567,7 @@ pub fn spec_of(needs: Needs) -> JobSpec {
         wall_limit_secs: 600,
         network: NetworkPolicy::None,
         ports: Vec::new(),
-        files: BTreeMap::new(),
+        files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
     }
 }
