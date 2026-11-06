@@ -180,6 +180,22 @@ impl Shared {
         self.ticking.store(false, Ordering::SeqCst);
     }
 
+    /// Whether the state store has said this process is no longer its writer.
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.agents
+            .as_ref()
+            .is_some_and(|agents| agents.fence.is_tripped())
+    }
+
+    /// Completes once the state store has said this process is no longer its writer
+    /// ([`crate::fence`]); never without agents, which hold the only store.
+    pub(crate) async fn fenced(&self) {
+        match &self.agents {
+            Some(agents) => agents.fence.tripped().await,
+            None => std::future::pending().await,
+        }
+    }
+
     /// How many ticks failed to write the lease file.
     pub(crate) fn save_errors(&self) -> u64 {
         self.save_errors.load(Ordering::SeqCst)

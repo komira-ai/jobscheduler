@@ -102,6 +102,10 @@ impl Store for Meddled {
     ) -> Result<js_state::Changes, StoreError> {
         self.inner.changes(after, limit)
     }
+    fn trim_feed(&self, before: js_state::Revision) -> Result<u64, StoreError> {
+        self.inner.trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.inner.reap_expired()
     }

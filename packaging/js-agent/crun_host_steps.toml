@@ -1,0 +1,45 @@
+# The steps `crun_host_setup.sh` takes on a host, in the order it takes them: the one list that
+# the table "What it sets up" of docs/runbooks/crun-host-setup.md shows (its `step` and `what`
+# columns, row for row) and that the machine image recipe (`cargo xtask image-recipe`,
+# docs/runbooks/machine-images.md) carries as its crun host setup. `function` is the script's
+# function for the step, in the order of its `setup_pass`. The script's own checks before the
+# steps (`step_preflight`) and its `systemctl daemon-reload` after them (`step_reload`) are not
+# steps of the table.
+#
+# crates/xtask/tests/image_recipe.rs fails when the runbook's table, the script's `setup_pass` or
+# the recipe differs from this list.
+
+[[step]]
+name = "packages"
+what = "`crun` (1.14 or newer, owned by the distribution's package at `/usr/bin/crun`) and `uidmap` from apt"
+function = "step_packages"
+
+[[step]]
+name = "job user"
+what = "a system account (default `jsjob`), no login, no home"
+function = "step_user"
+
+[[step]]
+name = "subids"
+what = "a block of 65536 ids in `/etc/subuid` and `/etc/subgid` for that user, the first free block from 200000 that overlaps no range, uid or gid on the host"
+function = "step_subids"
+
+[[step]]
+name = "scratch quota"
+what = "`prjquota` added to the `Options=` of the scratch mount unit (the options it has are kept), then the filesystem is unmounted and mounted again through the unit"
+function = "step_scratch_quota"
+
+[[step]]
+name = "directories"
+what = "`/etc/js-agent` 0700, `/var/lib/js-agent` 0711, its `state` 0700, `scratch` 0711 and `scratch/runs` 0711, all root's"
+function = "step_dirs"
+
+[[step]]
+name = "AppArmor"
+what = "where `kernel.apparmor_restrict_unprivileged_userns` is 1, the distribution's profile for `/usr/bin/crun` is loaded"
+function = "step_apparmor"
+
+[[step]]
+name = "unit"
+what = "`/etc/systemd/system/js-agent-crun.service` (with `--server`, `--pool` and `--job-user` written in) and `/etc/tmpfiles.d/js-agent-crun.conf`"
+function = "step_files"

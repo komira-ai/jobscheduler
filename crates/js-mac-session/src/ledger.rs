@@ -1,27 +1,41 @@
-//! The ledger: every lease id the helper ever made a user for, kept across reboots.
+//! The ledger: every lease id the helper ever gave a user to, and the state of each
+//! user of the pool, kept across reboots.
 //!
-//! A lease user's name derives from its lease id, and an id is used once: a second
-//! `user-create` for it is refused, so a name is never reused and a gate grant (which
-//! names one lease) is single-use. The ledger also holds each lease's uid, so `run`,
-//! `kill-uid` and `user-delete` act on the uid the helper handed out rather than on
-//! whatever a directory lookup says, and the uid a deleted lease held is free again
-//! only once its deletion is recorded.
+//! Two append-only text files in the helper's state directory, one record per line, each
+//! written with a single `write` and then `fsync`ed before the helper acts on it.
 //!
-//! It is an append-only text file, one record per line, each written with a single
-//! `write` and then `fsync`ed before the helper acts on it:
+//! `ledger`, the lease ids. An id is used once: a second `user-create` for it is
+//! refused, so a gate grant (which names one lease) is single-use. It holds the uid each
+//! lease got, so `run`, `kill-uid` and `user-delete` act on the uid the ledger names
+//! rather than on whatever a directory lookup says:
 //!
 //! ```text
 //! created <term>.<seq> <uid>
 //! deleted <term>.<seq>
 //! ```
 //!
+//! `deleted` records that the lease is over: its pool user went back to the pool (or was
+//! replaced), or, for a lease a release before the pool created, its own user was
+//! deleted. This file's format is the one releases before the pool wrote and read, so
+//! they can still read it.
+//!
+//! `pool` (the [`pool`] module), the state of each slot of the pool: free, leased (to
+//! which lease), resetting or broken.
+//!
 //! A crash can leave a last line without its newline. That record's action never
 //! started (it follows the `fsync`), so on opening the fragment is cut off. Any other
 //! line that does not parse stops the helper from starting: the ledger is root's own
-//! file, and guessing past corruption could reuse a name or a uid.
+//! file, and guessing past corruption could reuse a lease id or hand out a user twice.
 //!
-//! The file grows by about 30 bytes per lease and is never compacted (a later change
-//! can drop records of deleted leases older than any grant once ids are known to grow).
+//! When a lease takes a slot, the slot's `leased` record is written before the lease's
+//! `created`; when it ends, `deleted` is written before the slot's `resetting`. So a crash
+//! between the two never leaves a live lease without its slot: it leaves a slot leased
+//! to a lease that is not live, which the boot reset resets.
+//!
+//! `ledger` grows by about 30 bytes per lease and `pool` by about 40, and neither is
+//! compacted (a later change can drop records of ended leases older than any grant).
+
+pub mod pool;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -31,64 +45,93 @@ use std::path::Path;
 
 use js_types::LeaseId;
 
-use crate::lease::{Dotted, parse_lease};
+use crate::lease::{Dotted, Slot, parse_lease};
+use pool::{Pool, SlotEntry, SlotState};
+
+/// The pool's file name, beside the ledger's.
+pub const POOL_FILE: &str = "pool";
 
 /// One lease's record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The uid the lease's user was given.
+    /// The uid the lease's user had.
     pub uid: u32,
-    /// Whether the user has been deleted; a deleted lease's name is never reused.
+    /// Whether the lease is over (its user returned to the pool, replaced, or deleted);
+    /// a lease id that is over is never used again.
     pub deleted: bool,
 }
 
-/// The ledger file and what it says.
+/// The ledger's two files and what they say.
 #[derive(Debug)]
 pub struct Ledger {
     file: File,
     leases: BTreeMap<LeaseId, Entry>,
-    /// The uid of the last `created` record: allocation continues after it.
-    last_uid: Option<u32>,
+    pool: Pool,
+}
+
+/// Opens (creating, mode 0600, never through a link) the record file at `path` and
+/// reads it whole, cutting off a last line a crash left without its newline. Returns
+/// the file and its complete lines.
+fn open_records(path: &Path) -> io::Result<(File, String)> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let whole = text.rfind('\n').map_or(0, |i| i + 1);
+    if whole < text.len() {
+        tracing::warn!(
+            fragment = &text[whole..],
+            "dropping a ledger record cut short by a crash"
+        );
+        file.set_len(whole as u64)?;
+        file.sync_all()?;
+    }
+    text.truncate(whole);
+    Ok((file, text))
+}
+
+/// The error for line `number` (from 0) of `path`, which `why` refuses.
+fn bad_line(path: &Path, number: usize, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{}: line {}: {why}", path.display(), number + 1),
+    )
+}
+
+/// Writes `line` and its newline to `file` in one `write`, then `fsync`s.
+fn write_record(file: &mut File, line: &str) -> io::Result<()> {
+    file.write_all(format!("{line}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+}
+
+/// A record refused before it was written.
+fn refused(why: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, why)
 }
 
 impl Ledger {
-    /// Opens (creating, mode 0600) and reads the ledger at `path`.
+    /// Opens (creating, mode 0600) and reads the ledger at `path`, and the pool's file
+    /// ([`POOL_FILE`]) beside it.
     ///
     /// # Errors
-    /// The file cannot be opened, read or trimmed, or a complete line does not parse.
+    /// A file cannot be opened, read or trimmed, or a complete line does not parse or
+    /// does not follow from the lines before it.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        let mut text = String::new();
-        file.read_to_string(&mut text)?;
-        let whole = text.rfind('\n').map_or(0, |i| i + 1);
-        if whole < text.len() {
-            tracing::warn!(
-                fragment = &text[whole..],
-                "dropping a ledger record cut short by a crash"
-            );
-            file.set_len(whole as u64)?;
-            file.sync_all()?;
-        }
+        let (file, text) = open_records(path)?;
         let mut ledger = Self {
             file,
             leases: BTreeMap::new(),
-            last_uid: None,
+            pool: Pool::open(&path.with_file_name(POOL_FILE))?,
         };
-        for (number, line) in text[..whole].lines().enumerate() {
+        for (number, line) in text.lines().enumerate() {
             let record = Record::parse(line)
                 .and_then(|record| ledger.admit(record).map(|()| record))
-                .map_err(|why| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{}: line {}: {why}", path.display(), number + 1),
-                    )
-                })?;
+                .map_err(|why| bad_line(path, number, &why))?;
             ledger.commit(record);
         }
         Ok(ledger)
@@ -115,7 +158,6 @@ impl Ledger {
                     deleted: false,
                 };
                 self.leases.insert(lease, entry);
-                self.last_uid = Some(uid);
             }
             Record::Deleted(lease) => {
                 // Admitted, so the lease is live.
@@ -128,11 +170,8 @@ impl Ledger {
 
     /// Writes `record` and its newline in one `write`, `fsync`s, then applies it.
     fn append(&mut self, record: Record) -> io::Result<()> {
-        self.admit(record)
-            .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
-        self.file
-            .write_all(format!("{record}\n").as_bytes())
-            .and_then(|()| self.file.sync_all())?;
+        self.admit(record).map_err(refused)?;
+        write_record(&mut self.file, &record.to_string())?;
         self.commit(record);
         Ok(())
     }
@@ -141,12 +180,6 @@ impl Ledger {
     #[must_use]
     pub fn get(&self, lease: LeaseId) -> Option<Entry> {
         self.leases.get(&lease).copied()
-    }
-
-    /// The uid handed out last.
-    #[must_use]
-    pub fn last_uid(&self) -> Option<u32> {
-        self.last_uid
     }
 
     /// The leases created and not yet deleted, in order.
@@ -169,10 +202,20 @@ impl Ledger {
             .collect()
     }
 
-    /// Makes every later write fail, as a full or failing disk would.
+    /// Makes every later write fail, as a full or failing disk would: of the ledger's
+    /// file, and of the pool's when `pool`.
     #[cfg(test)]
-    pub(crate) fn fail_writes(&mut self, path: &Path) {
+    pub(crate) fn fail_writes(&mut self, path: &Path, pool: bool) {
         self.file = File::open(path).unwrap();
+        if pool {
+            self.pool.fail_writes(&path.with_file_name(POOL_FILE));
+        }
+    }
+
+    /// Makes every write to the pool's file after the next `writes` fail.
+    #[cfg(test)]
+    pub(crate) fn fail_pool_after(&mut self, writes: usize) {
+        self.pool.fail_after(writes);
     }
 
     /// Records that `lease` got `uid`, durably.
@@ -183,12 +226,126 @@ impl Ledger {
         self.append(Record::Created(lease, uid))
     }
 
-    /// Records that `lease`'s user is gone, durably.
+    /// Records that `lease` is over, durably.
     ///
     /// # Errors
     /// The lease is not live, or the write or `fsync` failed.
     pub fn record_deleted(&mut self, lease: LeaseId) -> io::Result<()> {
         self.append(Record::Deleted(lease))
+    }
+
+    /// The slot's record, if the slot was ever made.
+    #[must_use]
+    pub fn slot(&self, slot: Slot) -> Option<SlotEntry> {
+        self.pool.get(slot)
+    }
+
+    /// Every slot that was made, in order, with its record.
+    #[must_use]
+    pub fn slots(&self) -> Vec<(Slot, SlotEntry)> {
+        self.pool.all()
+    }
+
+    /// The slot `lease` holds: the one leased to it.
+    #[must_use]
+    pub fn slot_of(&self, lease: LeaseId) -> Option<Slot> {
+        self.pool.leased_to(lease)
+    }
+
+    /// Records, durably, that the user of `slot`, with `uid`, is being made: the slot is
+    /// resetting until [`Self::record_free`] (or broken, [`Self::record_broken`]).
+    ///
+    /// # Errors
+    /// The slot was made before, another slot has `uid`, or the write failed.
+    pub fn record_slot(&mut self, slot: Slot, uid: u32) -> io::Result<()> {
+        self.pool.append(pool::Record::Made(slot, uid))
+    }
+
+    /// Records, durably, that `lease` takes the free `slot` (as an administrator when
+    /// `admin`): first the slot's `leased`, then the lease's `created` with the slot's
+    /// uid.
+    ///
+    /// # Errors
+    /// The lease was created before, the slot is not free, or a write failed (a failed
+    /// `created` leaves the slot leased to a lease that is not live, which the boot reset
+    /// resets).
+    pub fn record_leased(&mut self, slot: Slot, lease: LeaseId, admin: bool) -> io::Result<()> {
+        let Some(SlotEntry {
+            uid,
+            state: SlotState::Free,
+        }) = self.slot(slot)
+        else {
+            return Err(refused(format!("slot {slot} is not free")));
+        };
+        self.admit(Record::Created(lease, uid)).map_err(refused)?;
+        self.pool.append(pool::Record::Leased(slot, lease, admin))?;
+        self.append(Record::Created(lease, uid))
+    }
+
+    /// Records, durably, that `lease`, which holds `slot`, is over: first the lease's
+    /// `deleted`, then the slot's `resetting` (`resetting <slot> replace` for an
+    /// administrator's lease).
+    ///
+    /// # Errors
+    /// The lease is not live, `slot` is not leased to it, or a write failed (a failed
+    /// `resetting` leaves the slot leased to a lease that is not live, which the boot
+    /// reset resets).
+    pub fn record_released(&mut self, slot: Slot, lease: LeaseId) -> io::Result<()> {
+        self.admit(Record::Deleted(lease)).map_err(refused)?;
+        self.pool.admit_reset(slot, Some(lease)).map_err(refused)?;
+        let replace = self.leased_admin(slot);
+        self.append(Record::Deleted(lease))?;
+        self.pool.append(pool::Record::Resetting(slot, replace))
+    }
+
+    /// Records, durably, that `slot`, leased to a lease that is not live, is resetting.
+    ///
+    /// # Errors
+    /// The slot is not leased, or is leased to a live lease, or the write failed.
+    pub fn record_orphan_reset(&mut self, slot: Slot) -> io::Result<()> {
+        if let Some(SlotEntry {
+            state: SlotState::Leased { lease, .. },
+            ..
+        }) = self.slot(slot)
+            && self.get(lease).is_some_and(|entry| !entry.deleted)
+        {
+            return Err(refused(format!(
+                "slot {slot} is leased to lease {}, which is live",
+                Dotted(lease)
+            )));
+        }
+        self.pool.admit_reset(slot, None).map_err(refused)?;
+        let replace = self.leased_admin(slot);
+        self.pool.append(pool::Record::Resetting(slot, replace))
+    }
+
+    /// Whether `slot` is leased to an administrator's lease: its user is then replaced,
+    /// never reset, and its `resetting` says so.
+    fn leased_admin(&self, slot: Slot) -> bool {
+        matches!(
+            self.slot(slot),
+            Some(SlotEntry {
+                state: SlotState::Leased { admin: true, .. },
+                ..
+            })
+        )
+    }
+
+    /// Records, durably, that `slot`'s user is clean (or new): the slot is free.
+    ///
+    /// # Errors
+    /// The slot is neither resetting nor broken, or the write failed.
+    pub fn record_free(&mut self, slot: Slot) -> io::Result<()> {
+        self.pool.append(pool::Record::Free(slot))
+    }
+
+    /// Records, durably, that `slot`'s user could be neither reset nor replaced: the slot
+    /// is broken, and leased to no one.
+    ///
+    /// # Errors
+    /// The slot is not resetting, or the write failed.
+    pub fn record_broken(&mut self, slot: Slot) -> io::Result<()> {
+        self.pool.append(pool::Record::Broken(slot))
     }
 }
 
@@ -293,7 +450,6 @@ mod tests {
             })
         );
         assert_eq!(ledger.get(LeaseId::new(1, 3)), None);
-        assert_eq!(ledger.last_uid(), Some(601));
         assert_eq!(ledger.held_uids(), BTreeSet::from([601]));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "created 1.1 600\ncreated 1.2 601\ndeleted 1.1\n");
@@ -315,7 +471,7 @@ mod tests {
         let never = ledger.record_deleted(LeaseId::new(2, 9)).unwrap_err();
         assert!(never.to_string().contains("not live"), "{never}");
         // The refused records were not written, and nothing changed in memory.
-        assert_eq!(ledger.last_uid(), Some(600));
+        assert!(ledger.live_leases().is_empty());
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "created 2.1 600\ndeleted 2.1\n");
     }
@@ -377,9 +533,9 @@ mod tests {
         let path = _path_own.join("ledger");
         let mut ledger = Ledger::open(&path).unwrap();
         ledger.record_created(LeaseId::new(5, 1), 600).unwrap();
-        ledger.fail_writes(&path);
+        ledger.fail_writes(&path, false);
         assert!(ledger.record_created(LeaseId::new(5, 2), 601).is_err());
         assert_eq!(ledger.get(LeaseId::new(5, 2)), None);
-        assert_eq!(ledger.last_uid(), Some(600));
+        assert_eq!(ledger.held_uids(), BTreeSet::from([600]));
     }
 }
