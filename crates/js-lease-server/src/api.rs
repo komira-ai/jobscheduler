@@ -59,6 +59,10 @@ pub(crate) struct Shared {
     /// private one and the routes answer as if they did not exist. A request whose peer
     /// is not a private address is answered so too.
     status: Option<Arc<Status>>,
+    /// The status of the pools that the job service's `ListPools` and `ListProviders` read,
+    /// whatever the listen address: the job port takes a client's token. `None` when the
+    /// server was given none.
+    pools: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
     /// The whole-node counts the last tick logged.
@@ -82,6 +86,7 @@ impl Shared {
             agents,
             scaler: None,
             status: None,
+            pools: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
@@ -116,6 +121,18 @@ impl Shared {
     pub(crate) fn with_status(mut self, status: Option<Arc<Status>>) -> Self {
         self.status = status;
         self
+    }
+
+    /// The same state with `pools` as the status of the pools the job service reads.
+    #[must_use]
+    pub(crate) fn with_pools(mut self, pools: Arc<Status>) -> Self {
+        self.pools = Some(pools);
+        self
+    }
+
+    /// The status of the pools the job service reads; `None` when the server was given none.
+    pub(crate) fn pools(&self) -> Option<&Arc<Status>> {
+        self.pools.as_ref()
     }
 
     /// The lease table behind its lock. A handler that also needs the registry takes this

@@ -432,13 +432,14 @@ pub(crate) fn open(
         warn!("{warning}");
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status =
-        Status::new(pool, registry, scaler.clone(), warnings, clock.clone()).with_logs(logs);
-    let status = serves_status.then(|| Arc::new(status));
+    let pools = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let pools = Arc::new(pools.with_logs(logs));
+    let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(
         Shared::new(table, token, agents)
             .with_admit(admit)
             .with_status(status)
+            .with_pools(pools)
             .with_scaler(scaler.clone()),
     );
     Ok(Opened {

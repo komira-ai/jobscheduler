@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
@@ -29,6 +30,7 @@ use js_state::Store;
 use js_state::fake::{Fake, Flaw};
 use js_state::sqlite::{Options, SqliteStore};
 use js_testkit::dir::TestDir;
+use js_types::HostId;
 use prost_types::FileDescriptorSet;
 use tokio::io::DuplexStream;
 use tonic::client::Grpc;
@@ -47,7 +49,9 @@ use super::{
 };
 use crate::adapt::SharedClock;
 use crate::config::{Clients, LiveClients, parse_token};
+use crate::hosts::{HostList, LeasesOn};
 use crate::job_store::ServerJobs;
+use crate::status::Status as PoolStatus;
 
 /// The token the services under test are built with.
 pub(super) const TOKEN: &str = "job-api-test-token-0123456789abcdef";
@@ -86,6 +90,17 @@ pub(super) const SERVICE: &str = "jobscheduler.v1.JobService";
 /// The methods a group serves over a service built with every context at its default
 /// (`read.rs` and `cancel.rs`): they answer what the call answers, not `UNIMPLEMENTED`.
 const SERVED: [&str; 5] = ["GetJob", "ListJobs", "CancelJob", "GetResult", "GetLogs"];
+
+/// The methods the fleet group (`fleet.rs`) serves once its context is given the server's
+/// handles ([`fleet::Ctx::served`]), as the server's service is.
+const FLEET: [&str; 6] = [
+    "ListHosts",
+    "CordonHost",
+    "UncordonHost",
+    "ListPools",
+    "ListProviders",
+    "GetUsage",
+];
 
 /// The time the services' clock reads, in milliseconds since the Unix epoch.
 const NOW_MS: u64 = 1_800_000_000_000;
@@ -403,13 +418,40 @@ async fn the_same_token_opens_both_transports() {
     }
 }
 
+/// The hosts of a server that holds none: an empty listing, and every cordon and uncordon
+/// refused as of a host the registry does not hold.
+struct NoHosts;
+
+#[tonic::async_trait]
+impl fleet::Hosts for NoHosts {
+    async fn hosts(&self) -> (HostList, LeasesOn) {
+        (HostList::of(Vec::new(), Vec::new(), None), LeasesOn::new())
+    }
+
+    async fn cordon(&self, _: &HostId, _: Duration) -> Result<bool, fleet::Refused> {
+        Err(fleet::Refused::UnknownHost)
+    }
+
+    async fn uncordon(&self, _: &HostId) -> Result<bool, fleet::Refused> {
+        Err(fleet::Refused::UnknownHost)
+    }
+}
+
+/// Whether `method` is one no group serves yet: neither in [`SERVED`] nor in [`FLEET`].
+fn unserved(method: &str) -> bool {
+    !SERVED.contains(&method) && !FLEET.contains(&method)
+}
+
 /// Asserts that the methods of the service definition are the gateway's routes, one each in
-/// the same order, and that, over the fake store and over SQLite, every one of them that no
-/// group serves yet (all but [`SERVED`]) answers `UNIMPLEMENTED` over gRPC with the stubs' own
-/// message (not the generated default's, so a method added to the proto that reaches no stub
-/// of [`JobApi`] fails here) and 501 `unimplemented` over the gateway, both transports calling
-/// one [`JobApi`]. The served calls have tests of their own (`read_tests.rs`,
-/// `submit_tests.rs`, `cancel_tests.rs`). The production
+/// the same order, and that, over the fake store and over SQLite, with the fleet group served
+/// (over no hosts, the status of no pool and no usage history), every method that no group
+/// serves yet (all but [`SERVED`] and [`FLEET`]) answers `UNIMPLEMENTED` over gRPC with the
+/// stubs' own message (not the generated default's, so a method added to the proto that
+/// reaches no stub of [`JobApi`] fails here) and 501 `unimplemented` over the gateway, both
+/// transports calling one [`JobApi`], while every other method answers neither: so the list
+/// of unserved methods is exact both ways, and a method taken off it that is not served, or
+/// a served one left on it, fails here. The served calls have tests of their own
+/// (`read_tests.rs`, `submit_tests.rs`, `cancel_tests.rs`, `fleet_tests.rs`). The production
 /// builders `grpc` and `gateway` also refuse a request without the token
 /// (`UNAUTHENTICATED`, 401), as the recording tests show for the generic ones.
 #[tokio::test]
@@ -418,16 +460,23 @@ async fn every_unserved_call_answers_unimplemented() {
     assert_eq!(methods, routed());
     let dir = scratch("every_call");
     for jobs in [over_fake(), over_sqlite(&dir)] {
-        let api = Arc::new(JobApi::new(jobs, clock()));
+        let pools = PoolStatus::new(None, None, None, Vec::new(), clock());
+        let fleet = fleet::Ctx::served(Arc::new(NoHosts), Arc::new(pools), None);
+        let api = Arc::new(JobApi::new(jobs, clock()).with_fleet(fleet));
         let channel = connect(grpc(api.clone(), token())).await;
         let authorization = format!("Bearer {TOKEN}");
-        let unserved = || {
-            methods
-                .iter()
-                .filter(|method| !SERVED.contains(&method.as_str()))
-        };
-        assert_eq!(unserved().count(), methods.len() - SERVED.len());
-        for method in unserved() {
+        let not_served = || methods.iter().filter(|method| unserved(method));
+        assert_eq!(
+            not_served().count(),
+            methods.len() - SERVED.len() - FLEET.len()
+        );
+        for method in methods.iter().filter(|method| !unserved(method)) {
+            let code = call(&channel, method, Some(&authorization))
+                .await
+                .map_or_else(|status| status.code(), |()| Code::Ok);
+            assert_ne!(code, Code::Unimplemented, "{method}");
+        }
+        for method in not_served() {
             let status = call(&channel, method, Some(&authorization))
                 .await
                 .expect_err("a call not served yet fails");
@@ -447,16 +496,18 @@ async fn every_unserved_call_answers_unimplemented() {
             assert_eq!((status, body), (StatusCode::UNAUTHORIZED, Bytes::new()));
         }
         let answers = send_all(&router, Some(value(&authorization))).await;
-        let answers = methods.iter().zip(answers);
-        for (method, answer) in answers.filter(|(method, _)| !SERVED.contains(&method.as_str())) {
-            assert_eq!(
-                answer,
-                (
-                    StatusCode::NOT_IMPLEMENTED,
-                    Bytes::from_static(UNIMPLEMENTED_BODY.as_bytes())
+        for (method, answer) in methods.iter().zip(answers) {
+            match unserved(method) {
+                true => assert_eq!(
+                    answer,
+                    (
+                        StatusCode::NOT_IMPLEMENTED,
+                        Bytes::from_static(UNIMPLEMENTED_BODY.as_bytes())
+                    ),
+                    "{method}"
                 ),
-                "{method}"
-            );
+                false => assert_ne!(answer.0, StatusCode::NOT_IMPLEMENTED, "{method}"),
+            }
         }
     }
 }
