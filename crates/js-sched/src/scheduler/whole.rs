@@ -16,7 +16,8 @@
 //! is placed, is cancelled or gives the hold up at its deadline, and is never traded for a
 //! worker that has become cheaper to drain, nor taken by another request's hold or mark
 //! ([`Scheduler::hold_whole`]). It moves only when its worker can no longer hold the
-//! request (gone, cordoned, barred to it).
+//! request (gone, cordoned, barred to it). A worker a whole-machine lease holds is never
+//! marked: no request waits behind another one's whole-machine lease.
 //!
 //! The whole-node state of each operation is kept in memory only: its queue time, its
 //! mark (the worker, when it was made, its deadline and the end of the tail the worker
@@ -577,7 +578,9 @@ impl Scheduler {
     /// backfills under it.
     ///
     /// Head holds are not marks: `reserved` keeps a request off a worker a head holds, and
-    /// no cap counts it.
+    /// no cap counts it. A worker a whole-machine lease holds, or a whole-machine request
+    /// was placed on this round, is never marked: the lease is not touched, and the worker
+    /// is counted once, as held.
     pub(super) fn hold_whole(
         &self,
         servable: &mut Servable,
@@ -595,6 +598,16 @@ impl Scheduler {
         let mut out: BTreeSet<WorkerId> = reserved.union(&turn.barred).cloned().collect();
         // Another request's mark is never taken: it stays on its worker.
         out.extend(self.marked_workers(id).cloned());
+        // A worker a whole-machine lease holds, granted before or placed this round, is
+        // whole already: it is never marked, so no request waits behind another one's
+        // whole-machine lease (that lease is never touched) and the caps count the worker
+        // once, as held.
+        out.extend(self.whole_held().into_keys().cloned());
+        let whole_placed = placed.iter().filter(|(operation, _)| {
+            let op = self.ops.get(operation);
+            op.is_some_and(|op| op.request.kind == LeaseKind::WholeMachine)
+        });
+        out.extend(whole_placed.map(|(_, at)| at.worker.clone()));
         let avoid = Drain::avoiding(&op.avoid, &turn.barred);
         let kept = turn.kept.as_ref().map(|m| &m.worker);
         let drain = self.drain_order(placed);

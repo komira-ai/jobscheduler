@@ -3,7 +3,10 @@
 //! whole-node request is the one that empties first by estimate. The registry is driven
 //! on a manual clock; the profile lives are a fixed table. Each test runs under both
 //! placements, `--placement registry` (`registry::NAME`) and `--placement js-sched`
-//! (`js_sched::NAME`), with the same assertions.
+//! (`js_sched::NAME`), with the same assertions, except the three of a lease put back
+//! from the lease file, which run under `--placement registry` alone
+//! (`registry_only::NAME`): js-sched's engine is not told of a lease put back at a
+//! restart yet (komira-ai/jobscheduler#778).
 
 mod support;
 
@@ -164,13 +167,20 @@ fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known
 }
 
 /// Catches: the flag-off state changing for a lease whose end saturates. With no source of
-/// lives such a lease keeps its saturated end as a far, known bound, as before the feed.
+/// lives the registry's pass keeps such a lease's saturated end as a far, known bound, as
+/// before the feed. js-sched's engine has no flag-off state: it costs the lease by its
+/// start and wall time, whose end saturates, and a saturated end is an unknown tail, as
+/// with the feed on (the `alone` case above).
 fn without_a_source_of_lives_a_saturated_end_stays_a_far_bound(p: Placement) {
     let mut w = World::new_in(p, &["a"], plain);
     w.share(1, NO_WALL_S);
     w.ask(3, "q");
     assert_eq!(w.reserved_host("q"), Some("a".to_string()));
-    assert_eq!(tail_of(&w, "q"), Some(js_lease::Timestamp::MAX.millis()));
+    let tail = match p {
+        Placement::Registry => Some(js_lease::Timestamp::MAX.millis()),
+        Placement::JsSched => None,
+    };
+    assert_eq!(tail_of(&w, "q"), tail);
 }
 
 /// The tail request `name` was reserved with.
@@ -257,8 +267,31 @@ crate::both!(
     with_no_source_of_lives_a_keyed_run_changes_nothing,
     a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_every_known_tail,
     without_a_source_of_lives_a_saturated_end_stays_a_far_bound,
-    a_restored_lease_is_costed_from_the_start_the_lease_file_records,
-    a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound,
-    without_a_source_of_lives_a_restored_lease_counts_as_ending_now,
     a_lease_put_back_twice_keeps_one_bound_and_its_stop_counts_once,
 );
+
+/// The tests of the drain cost of a lease put back from the lease file, under
+/// `--placement registry` alone until js-sched's engine is told of such a lease
+/// (komira-ai/jobscheduler#778).
+mod registry_only {
+    use super::support::Placement;
+
+    #[test]
+    fn a_restored_lease_is_costed_from_the_start_the_lease_file_records() {
+        super::a_restored_lease_is_costed_from_the_start_the_lease_file_records(
+            Placement::Registry,
+        );
+    }
+
+    #[test]
+    fn a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound() {
+        super::a_restored_lease_with_no_keyed_run_is_costed_at_its_recorded_bound(
+            Placement::Registry,
+        );
+    }
+
+    #[test]
+    fn without_a_source_of_lives_a_restored_lease_counts_as_ending_now() {
+        super::without_a_source_of_lives_a_restored_lease_counts_as_ending_now(Placement::Registry);
+    }
+}

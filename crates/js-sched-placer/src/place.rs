@@ -73,7 +73,7 @@ use js_provider::{RefusalCode, StartSpec};
 use js_registry::{MarkedTails, Placer, ProbeHost, Reservation, WholeRound};
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, RequestId, Shape};
 
 use tracing::warn;
 
@@ -380,6 +380,12 @@ impl Placer for SchedPlacer {
     fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
         let now = self.now();
         Some(self.engine().whole_round(round.clone(), now))
+    }
+
+    /// The holds the engine's whole-node requests have given up at their deadline
+    /// ([`Engine::whole_give_ups`]).
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        self.engine().whole_give_ups()
     }
 }
 
@@ -798,6 +804,8 @@ mod tests {
             .map(|mark| (mark.host.to_string(), mark.assigned))
             .collect();
         assert_eq!(held, [("b".to_owned(), true)]);
+        // A grant gives nothing up: the registry is told of no give-up.
+        assert!(placer.whole_give_ups().is_empty());
         let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id);
         assert_eq!(placer.pick(&start, &open[..1], &unmarked()), None);
         assert_eq!(placer.pick(&start, &open, &unmarked()), Some(1));

@@ -307,3 +307,42 @@ fn at_max_draining_one_the_hold_survives_every_round() {
         assert!(f.s.whole_mark(whole).is_some());
     }
 }
+
+/// Catches: a mark made on a worker a whole-machine lease holds (the request would wait
+/// behind that lease, which is never touched, and the caps would count the worker twice,
+/// held and marked). `a` holds a whole-machine lease that ends in a minute, `b` an
+/// ordinary lease of an hour: the next whole-machine request marks `b`, though `a`'s
+/// tail is the shorter.
+#[test]
+fn a_worker_a_whole_machine_lease_holds_is_never_marked() {
+    let mut f = with_settings(2);
+    f.worker("a");
+    let first = f.submit_whole(Some(secs(60)));
+    let grants = f.grants();
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert_eq!((grants[0].operation, &grants[0].worker), (first, &w("a")));
+    f.start(&grants[0]);
+    f.worker("b");
+    f.lease_on("b", secs(3_600));
+    let second = f.whole();
+    assert_eq!(f.held_for(second), Some(&w("b")));
+}
+
+/// Catches: a mark made on a worker a whole-machine request was placed on earlier in the
+/// same round (the two would hold one worker). `a` is empty and `b` holds an ordinary
+/// lease of an hour; two whole-machine requests are submitted before one round: the first
+/// is placed on `a`, and the second marks `b`, though `a`'s tail (the first's minute) is
+/// the shorter.
+#[test]
+fn a_worker_a_whole_machine_request_was_placed_on_this_round_is_not_marked() {
+    let mut f = with_settings(2);
+    f.worker("a");
+    f.worker("b");
+    f.lease_on("b", secs(3_600));
+    let first = f.submit_whole(Some(secs(60)));
+    let second = f.submit_whole(Some(secs(60)));
+    let grants = f.grants();
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert_eq!((grants[0].operation, &grants[0].worker), (first, &w("a")));
+    assert_eq!(f.held_for(second), Some(&w("b")));
+}

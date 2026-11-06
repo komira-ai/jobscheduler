@@ -233,6 +233,57 @@ fn a_mark_stays_on_its_host_and_goes_with_its_request() {
     assert_eq!(e.sched.state(op), None);
 }
 
+/// Catches: a give-up at a mark's deadline that the registry is not told of (its record of
+/// the request, which its history and its ledger read, would count none), or a request
+/// that gave nothing up reported. `r` marks `a` and gives it up at its deadline: one
+/// give-up, reported for `r`; nothing is reported before.
+#[test]
+fn the_give_ups_of_the_queue_are_reported_by_request() {
+    let hosts = live(&["a", "b"]);
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    e.whole_round(round(vec![waiting("r", 0)], &hosts), at(11_000));
+    assert!(e.whole_give_ups().is_empty());
+    for now in (16_000..=72_000).step_by(5_000) {
+        beat(&mut e, &["a", "b"], now);
+        e.whole_round(round(vec![waiting("r", 0)], &hosts), at(now));
+    }
+    assert_eq!(e.whole_give_ups(), BTreeMap::from([(id("r"), 1)]));
+}
+
+/// Catches: a pending grant kept when the whole-node ceiling falls below the hosts held
+/// whole (the scheduler counts a pending grant as a held whole worker, which its own drop
+/// at the round's start never touches, while the registry drops its newest reservations,
+/// an assigned one included), or a committed lease dropped in its place. `r` is granted
+/// `a` and commits there; `s` is granted `b`. With two of the three hosts kept for
+/// ordinary work the ceiling is one: `s`'s grant is put back and not made again, and
+/// `r`'s lease stays. With the ceiling back, `s` is granted again.
+#[test]
+fn a_falling_ceiling_puts_back_the_newest_pending_grant_and_never_a_committed_lease() {
+    let names = ["a", "b", "c"];
+    let mut e = engine(&[("a", &[]), ("b", &[]), ("c", &[])]);
+    let both = vec![waiting("r", 0), waiting("s", 0)];
+    let marks = e.whole_round(round(both, &live(&names)), at(1_000));
+    assert_eq!(held(&marks), ["r@a*", "s@b*"]);
+    let open = [
+        candidate("a", &[]),
+        candidate("b", &[]),
+        candidate("c", &[]),
+    ];
+    let committed = e.commit_whole(&whole_spec(7, "r"), &open, at(2_000));
+    assert_eq!(committed, Some(Some(0)));
+    let mut low = round(vec![waiting("s", 0)], &live(&names));
+    low.settings.keep_for_ordinary = 2;
+    let marks = e.whole_round(low.clone(), at(3_000));
+    assert!(marks.is_empty(), "{marks:?}");
+    let a = map::worker(&host("a"));
+    assert_eq!(e.sched.leases_on(&a).len(), 1);
+    assert!(e.on[&host("a")].contains_key(&LeaseId::new(1, 7)));
+    let marks = e.whole_round(low, at(4_000));
+    assert!(marks.is_empty(), "{marks:?}");
+    let marks = e.whole_round(round(vec![waiting("s", 0)], &live(&names)), at(5_000));
+    assert_eq!(held(&marks), ["s@b*"]);
+}
+
 /// Catches: the engine's own queue order used in place of the registry's wait list (the
 /// requests would be served by name). `zeta` was presented before `alpha`: the one quiet
 /// host goes to `zeta`.
