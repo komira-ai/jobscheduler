@@ -92,6 +92,14 @@ fn a_cancel_that_ends_a_running_job_fails_cancel_follows_the_state() {
 }
 
 #[test]
+fn a_cancel_mark_kept_after_the_end_fails_cancel_follows_the_state() {
+    assert_eq!(
+        failed_by(Defect::CancelKeptOnEnd),
+        [Scenario::CancelFollowsTheState]
+    );
+}
+
+#[test]
 fn an_empty_result_before_the_end_fails_result_waits_for_the_end() {
     assert_eq!(
         failed_by(Defect::ResultBeforeEnd),

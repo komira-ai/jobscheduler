@@ -393,6 +393,16 @@ async fn cancel_follows_the_state<H: JobHarness>(harness: &mut H, notes: &mut No
         state_is(&job, JobState::Cancelled),
         "a queued job is cancelled at once",
     );
+    let cleared = |job: &Option<v1::Job>| job.as_ref().is_some_and(|job| !job.cancel_requested);
+    notes.expect(
+        cleared(&job),
+        "a queued job cancelled at once has ended and shows no cancel_requested",
+    );
+    let reread = read(&mut client, notes, "queued").await;
+    notes.expect(
+        cleared(&reread),
+        "a cancelled job read again shows no cancel_requested",
+    );
     let result = result_of(&mut client, notes, "queued").await;
     let seen = result.map(|result| (result.state, result.reason, result.exit_code));
     let want = (
@@ -426,6 +436,12 @@ async fn cancel_follows_the_state<H: JobHarness>(harness: &mut H, notes: &mut No
     notes.expect(
         job == again,
         "a second cancel answers the job as the first left it",
+    );
+    drive(harness, notes, "running", &[Step::Exit(0)]);
+    let exited = read(&mut client, notes, "running").await;
+    notes.expect(
+        state_is(&exited, JobState::Succeeded) && cleared(&exited),
+        "a marked job that then exits has ended and shows no cancel_requested",
     );
 
     ended(harness, notes, "done", 0).await;

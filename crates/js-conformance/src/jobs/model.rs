@@ -50,6 +50,9 @@ pub enum Defect {
     /// A cancel of a running job ends it as cancelled at once instead of only marking
     /// `cancel_requested`.
     CancelEndsRunning,
+    /// A job that ended after its cancel was asked for, a queued job cancelled at once
+    /// included, still shows `cancel_requested` instead of clearing it at the end.
+    CancelKeptOnEnd,
     /// `GetResult` of a job that has not ended answers an empty result instead of
     /// `FAILED_PRECONDITION`.
     ResultBeforeEnd,
@@ -88,7 +91,8 @@ impl Stored {
         self.result.is_some()
     }
 
-    /// Ends the job in `state` at `now`, with a result of `reason` and `exit_code`.
+    /// Ends the job in `state` at `now`, with a result of `reason` and `exit_code`. The job no
+    /// longer shows `cancel_requested`: the model has no lost end, the one end that keeps it.
     fn end(
         &mut self,
         state: v1::JobState,
@@ -110,6 +114,7 @@ impl Stored {
             ..v1::JobResult::default()
         });
         self.retention_ends = Some(now.saturating_add(retention_ms));
+        self.job.cancel_requested = false;
     }
 }
 
@@ -248,6 +253,7 @@ impl Inner {
 
     fn cancel(&mut self, text: &str) -> Result<v1::Job, Status> {
         let ends_running = self.has(Defect::CancelEndsRunning);
+        let kept = self.has(Defect::CancelKeptOnEnd);
         let (stored, clock) = self.find(text)?;
         if !stored.ended() && !stored.job.cancel_requested {
             stored.job.cancel_requested = true;
@@ -255,6 +261,7 @@ impl Inner {
             if ends {
                 let cancelled = v1::JobState::Cancelled;
                 stored.end(cancelled, None, v1::ResultReason::Cancelled, clock);
+                stored.job.cancel_requested = kept;
             }
         }
         Ok(stored.job.clone())
@@ -265,6 +272,7 @@ impl Inner {
         let any = self.has(Defect::AnyStepIsTaken);
         let ignores_code = self.has(Defect::ExitCodeIgnored);
         let loses_code = self.has(Defect::ResultLosesExitCode);
+        let kept = self.has(Defect::CancelKeptOnEnd);
         let (now, retention_ms) = self.clock();
         let stored = self.jobs.get_mut(job).ok_or(Refused)?;
         let to = match step {
@@ -299,7 +307,9 @@ impl Inner {
         if let Step::Exit(code) = step {
             let code = Some(code).filter(|_| !loses_code);
             let clock = (now, retention_ms);
+            let asked = stored.job.cancel_requested;
             stored.end(to, code, v1::ResultReason::Exit, clock);
+            stored.job.cancel_requested = asked && kept;
         }
         Ok(())
     }
