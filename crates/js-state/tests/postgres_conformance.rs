@@ -12,10 +12,12 @@ use std::thread;
 use std::time::Duration;
 
 use js_state::conformance::{
-    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry,
+    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry, c5_feed_trim,
     c5_ordered_feed, c6_durable_ack, c7_group_commit, c8_bounded_range_scan,
 };
-use js_state::postgres::{ConfigError, Flaw, PostgresBackend, PostgresConfig, PostgresStore};
+use js_state::postgres::{
+    ConfigError, Flaw, PostgresBackend, PostgresConfig, PostgresStore, TlsMode,
+};
 use js_state::{Cond, Event, Revision, Store, StoreError, StoreTime, Txn};
 use postgres::{Client, NoTls};
 
@@ -59,6 +61,11 @@ fn c4_expiry_follows_the_store_clock() {
 #[test]
 fn c5_the_feed_skips_no_row() {
     c5_ordered_feed(&backend(Flaw::None));
+}
+
+#[test]
+fn c5_the_feed_trims_and_refuses_a_stale_cursor() {
+    c5_feed_trim(&backend(Flaw::None));
 }
 
 #[test]
@@ -366,17 +373,33 @@ fn a_schema_name_over_the_limit_is_refused() {
         .expect("63 bytes is the longest");
 }
 
-// Catches a TLS request quietly downgraded to a plain connection.
+// Catches an `sslmode` read as another mode (a `require` taken as `prefer` would connect
+// plain to a server without TLS), a URL with no `sslmode` that asks for TLS (a store on a
+// local socket would then fail), and a `verify` mode accepted with no root certificate to
+// check against.
 #[test]
-fn a_tls_url_is_refused_not_downgraded() {
-    assert_eq!(
-        PostgresConfig::parse("postgres://u@db.example/kbf?sslmode=require").unwrap_err(),
-        ConfigError::TlsUnsupported
-    );
-    PostgresConfig::parse("postgres://u@db.example/kbf?sslmode=prefer")
-        .expect("prefer connects plain");
-    PostgresConfig::parse("postgres://u@db.example/kbf?sslmode=disable")
-        .expect("disable connects plain");
+fn each_sslmode_is_its_own_mode() {
+    let mode = |url: &str| PostgresConfig::parse(url).map(|config| config.tls_mode());
+    let base = "postgres://u@db.example/kbf";
+    assert_eq!(mode(base), Ok(TlsMode::Disable));
+    for (value, want) in [
+        ("disable", TlsMode::Disable),
+        ("prefer", TlsMode::Prefer),
+        ("require", TlsMode::Require),
+    ] {
+        assert_eq!(
+            mode(&format!("{base}?sslmode={value}")),
+            Ok(want),
+            "{value}"
+        );
+    }
+    for value in ["verify-ca", "verify-full"] {
+        assert_eq!(
+            mode(&format!("{base}?sslmode={value}")),
+            Err(ConfigError::NoRootCert),
+            "{value}"
+        );
+    }
 }
 
 #[test]

@@ -85,8 +85,8 @@ use tonic::{Request, Response, Status};
 
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
+use super::submit::unavailable_if_fenced;
 use super::{JobApi, logs};
-use crate::job_store::ServerJobs;
 
 pub(crate) mod view;
 
@@ -197,14 +197,16 @@ fn invalid(field: &str) -> Status {
 }
 
 /// The answer to a read of the store that failed. The cause is logged, never answered.
-fn read_failed(error: &js_jobs::JobStoreError) -> Status {
+/// `UNAVAILABLE` `state-fenced` instead when the store says this process is no longer its
+/// writer, which trips the fence ([`super::submit::unavailable_if_fenced`]).
+fn read_failed(api: &JobApi, error: &js_jobs::JobStoreError) -> Status {
     tracing::warn!(%error, "a read of the job tables failed");
-    Status::internal("internal")
+    unavailable_if_fenced(api, error, Status::internal("internal"))
 }
 
 /// The reads the read calls (and the logs group's follows) make of the job tables, and
 /// nothing else.
-pub(super) struct Reads<'a>(pub(super) &'a ServerJobs);
+pub(super) struct Reads<'a>(pub(super) &'a JobApi);
 
 impl Reads<'_> {
     /// The job `text` names, as `caller` may read it: refused when `text` is not a job id,
@@ -212,7 +214,11 @@ impl Reads<'_> {
     /// the job is not the caller's to read.
     pub(super) fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
         let id = JobId::parse(text).map_err(|_| invalid(JOB_ID_FIELD))?;
-        let found = self.0.get_job(&id).map_err(|error| read_failed(&error))?;
+        let found = self
+            .0
+            .jobs
+            .get_job(&id)
+            .map_err(|error| read_failed(self.0, &error))?;
         let job = found.ok_or_else(unknown_job)?;
         match caller.owns(&job) {
             true => Ok(job),
@@ -229,8 +235,9 @@ impl Reads<'_> {
         window: NonZeroUsize,
     ) -> Result<JobPage, Status> {
         self.0
+            .jobs
             .list_jobs(state, resume, window)
-            .map_err(|error| read_failed(&error))
+            .map_err(|error| read_failed(self.0, &error))
     }
 }
 
@@ -254,7 +261,7 @@ pub(super) async fn get_job(
     caller: &Caller,
     request: Request<GetJobRequest>,
 ) -> Result<Response<GetJobResponse>, Status> {
-    let job = Reads(&api.jobs).job(&request.into_inner().job_id, caller)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
     Ok(Response::new(GetJobResponse {
         job: Some(shown(&api.read, &job)),
     }))
@@ -266,7 +273,7 @@ pub(super) async fn get_result(
     caller: &Caller,
     request: Request<GetResultRequest>,
 ) -> Result<Response<GetResultResponse>, Status> {
-    let job = Reads(&api.jobs).job(&request.into_inner().job_id, caller)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
     let job = unexpired(api, job)?;
     match job.state.is_ended() {
         true => Ok(Response::new(GetResultResponse {
@@ -285,7 +292,7 @@ pub(super) async fn get_logs(
     request: Request<GetLogsRequest>,
 ) -> Result<Response<GetLogsResponse>, Status> {
     let request = request.into_inner();
-    let job = Reads(&api.jobs).job(&request.job_id, caller)?;
+    let job = Reads(api).job(&request.job_id, caller)?;
     let job = unexpired(api, job)?;
     let answer = match logs::stream_of(&request) {
         None => tails(&job),
@@ -418,7 +425,7 @@ pub(super) async fn list_jobs(
         client: request.client,
         owner: caller.only_jobs_of().cloned(),
     };
-    let (jobs, next) = list(&api.read, Reads(&api.jobs), &filter, resume, size)?;
+    let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size)?;
     Ok(Response::new(ListJobsResponse {
         jobs: jobs.iter().map(|job| shown(&api.read, job)).collect(),
         next_page_token: next.map(|token| token.key().to_owned()).unwrap_or_default(),

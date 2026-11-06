@@ -1,0 +1,34 @@
+# Coverage-guided fuzz target for the gateway's request decoder (`cargo fuzz run request`).
+# A package of its own, outside the workspace: CI build-checks it with `cargo check --locked
+# --manifest-path crates/js-api-gateway/fuzz/Cargo.toml` and runs no fuzzing; `src/props.rs`
+# in the crate runs seeded property tests of the same decoder.
+[package]
+name = "js-api-gateway-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cap = "0.1.2"
+js-api-gateway = { path = ".." }
+js-proto = { path = "../../js-proto" }
+axum = { version = "0.8.9", default-features = false }
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.2", features = ["rt"] }
+tonic = { version = "0.14.9", default-features = false, features = ["codegen"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

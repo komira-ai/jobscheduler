@@ -1,0 +1,27 @@
+# Coverage-guided fuzz target for the agent wire's frame decode (`cargo fuzz run frames`). A
+# package of its own, outside the workspace: CI build-checks it (`cargo check --locked`) so
+# it keeps compiling against the crate, but runs no fuzzing; a campaign is run by hand.
+[package]
+name = "js-agent-wire-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+js-agent-wire = { path = ".." }
+serde = "1"
+cap = "0.1.2"
+serde_json = "1"
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

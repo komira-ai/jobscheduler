@@ -6,8 +6,10 @@
 //! serves adds its `with_<group>` line here when the server handles that group's context
 //! needs exist. Today the read group's is (it reads host silence from the registry), the
 //! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
-//! and the pool's launching providers), and the logs group's (the log store of the `[logs]`
-//! table, built before the configuration is consumed). The cancel group needs nothing but the tables.
+//! and the pool's launching providers), the fleet group's (the server's hosts and their
+//! cordons, the status of its pools, and the usage sink's ended bookings, none with
+//! `--usage-off`), and the logs group's (the log store of the `[logs]` table, built before
+//! the configuration is consumed). The cancel group needs nothing but the tables.
 //!
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
@@ -29,16 +31,18 @@ use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
 use super::auth::is_grpc;
+use super::fleet::{self, History, Hosts, Pools, SinkHistory};
 use super::{Bearer, JobApi, gateway, grpc, logs, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
 use crate::config::LiveClients;
+use crate::status::Status;
 
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall` and logs read as
 /// `logs` says. `None` when the server holds no job store: the job service is off.
 pub(crate) fn from_server(
-    state: &Shared,
+    state: &Arc<Shared>,
     max_job_wall: Duration,
     logs: logs::Ctx,
 ) -> Option<JobApi> {
@@ -48,8 +52,31 @@ pub(crate) fn from_server(
     let read = read::Ctx::default().with_silence(silence);
     let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
+    let shared: Arc<Shared> = Arc::clone(state);
+    let hosts: Arc<dyn Hosts> = shared;
+    let pools: Arc<dyn Pools> = match state.pools() {
+        Some(pools) => Arc::clone(pools) as Arc<dyn Pools>,
+        // A state given no status of its pools has no elastic pool: the status of none.
+        None => Arc::new(Status::new(
+            None,
+            state.registry(),
+            None,
+            Vec::new(),
+            agents.clock.clone(),
+        )),
+    };
+    let history = state
+        .usage()
+        .map(|usage| Arc::new(SinkHistory(usage.sink())) as Arc<dyn History>);
+    let fleet = fleet::Ctx::served(hosts, pools, history);
     let api = JobApi::new(jobs, agents.clock.clone());
-    Some(api.with_read(read).with_submit(submit).with_logs(logs))
+    Some(
+        api.with_read(read)
+            .with_submit(submit)
+            .with_fleet(fleet)
+            .with_fence(agents.fence.clone())
+            .with_logs(logs),
+    )
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the

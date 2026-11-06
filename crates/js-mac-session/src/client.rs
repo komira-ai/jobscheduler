@@ -8,7 +8,8 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::proto::{self, Call, Limits, Reply, Request, Session};
+use crate::helper::POOL_EXHAUSTED;
+use crate::proto::{self, Call, Limits, PoolState, Reply, Request, Session};
 
 /// Why a call did not succeed.
 #[derive(Debug)]
@@ -17,6 +18,9 @@ pub enum ClientError {
     Io(io::Error),
     /// The helper refused or failed, and said why.
     Refused(String),
+    /// `user-create` found no free user in the pool (the reason, which starts with
+    /// [`POOL_EXHAUSTED`]); the call may be repeated once a lease ends.
+    Exhausted(String),
     /// The helper answered something the request does not expect.
     Unexpected(Reply),
 }
@@ -25,7 +29,9 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(why) => write!(f, "kbf-mac-session: {why}"),
-            Self::Refused(why) => write!(f, "kbf-mac-session refused: {why}"),
+            Self::Refused(why) | Self::Exhausted(why) => {
+                write!(f, "kbf-mac-session refused: {why}")
+            }
             Self::Unexpected(reply) => write!(f, "kbf-mac-session answered {reply:?}"),
         }
     }
@@ -92,10 +98,11 @@ impl Client {
         call_on(UnixStream::connect(&self.socket)?, request, fds)
     }
 
-    /// `user-create`: returns the new user's uid.
+    /// `user-create`: returns the uid of the pool user the lease got.
     ///
     /// # Errors
-    /// The call failed or was refused.
+    /// The call failed or was refused; [`ClientError::Exhausted`] when the pool had no
+    /// free user.
     pub fn user_create(&self, lease: &str, grant: Option<&str>) -> Result<u32, ClientError> {
         let request = Request::UserCreate {
             lease: lease.to_owned(),
@@ -103,6 +110,33 @@ impl Client {
         };
         match self.call(&request, &[])?.1 {
             Reply::Created { uid } => Ok(uid),
+            Reply::Refused { reason } if reason.starts_with(POOL_EXHAUSTED) => {
+                Err(ClientError::Exhausted(reason))
+            }
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// `pool-create`: makes the pool's missing users and replaces its broken ones, and
+    /// returns the pool's state.
+    ///
+    /// # Errors
+    /// The call failed or was refused.
+    pub fn pool_create(&self) -> Result<PoolState, ClientError> {
+        self.pool_call(&Request::PoolCreate)
+    }
+
+    /// `pool-status`: the pool's state.
+    ///
+    /// # Errors
+    /// The call failed or was refused.
+    pub fn pool_status(&self) -> Result<PoolState, ClientError> {
+        self.pool_call(&Request::PoolStatus)
+    }
+
+    fn pool_call(&self, request: &Request) -> Result<PoolState, ClientError> {
+        match self.call(request, &[])?.1 {
+            Reply::Pool(state) => Ok(*state),
             other => Err(unexpected(other)),
         }
     }
