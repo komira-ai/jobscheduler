@@ -63,7 +63,7 @@ pub fn launch_answer(error: &ApiError) -> Acquired {
             .reason()
             .and_then(|reason| TABLE.iter().find(|(listed, _)| *listed == reason.as_str()))
             .map_or(Acquired::Unknown, |(listed, constant)| {
-                refused(*constant, *listed)
+                refused(*constant, listed)
             }),
     }
 }

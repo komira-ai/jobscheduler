@@ -178,7 +178,7 @@ impl ServiceAccountKey {
 #[derive(Debug)]
 pub enum Credentials {
     /// A service account's key, exchanged for tokens at the key's token address.
-    ServiceAccount(ServiceAccountKey),
+    ServiceAccount(Box<ServiceAccountKey>),
     /// The service account of the machine, read from the metadata server.
     MetadataServer,
 }
@@ -201,7 +201,7 @@ impl Credentials {
             None => Ok(Self::MetadataServer),
             Some(path) => {
                 let bytes = read(Path::new(&path)).map_err(CredentialError::Read)?;
-                ServiceAccountKey::from_json(&bytes).map(Self::ServiceAccount)
+                ServiceAccountKey::from_json(&bytes).map(|key| Self::ServiceAccount(Box::new(key)))
             }
         }
     }

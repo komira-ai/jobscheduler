@@ -114,7 +114,7 @@ fn credentials_never_appear_in_debug_or_logs() {
     let echoing = format!("{{\"error\":{{\"message\":\"{PAYLOAD} {SERVICE_TOKEN}\"}}}}");
     let key = ServiceAccountKey::from_json(&fixture()).unwrap();
     let (service, service_script) = over_with(
-        Credentials::ServiceAccount(key),
+        Credentials::ServiceAccount(Box::new(key)),
         vec![
             answer(&exchange),
             answer(operation),
@@ -134,7 +134,7 @@ fn credentials_never_appear_in_debug_or_logs() {
         clock(),
     );
     let (rejected_key, rejected_script) = over_with(
-        Credentials::ServiceAccount(ServiceAccountKey::from_json(&fixture()).unwrap()),
+        Credentials::ServiceAccount(Box::new(ServiceAccountKey::from_json(&fixture()).unwrap())),
         vec![status(400, &echoing)],
         clock(),
     );
@@ -176,7 +176,7 @@ fn credentials_never_appear_in_debug_or_logs() {
     shown.push(format!("{:?}", insert_request()));
     let key = ServiceAccountKey::from_json(&fixture()).unwrap();
     shown.push(format!("{key:?}"));
-    shown.push(format!("{:?}", Credentials::ServiceAccount(key)));
+    shown.push(format!("{:?}", Credentials::ServiceAccount(Box::new(key))));
     shown.push(format!("{:?}", Credentials::MetadataServer));
     let every_error = [
         ApiError::answered("rateLimitExceeded"),

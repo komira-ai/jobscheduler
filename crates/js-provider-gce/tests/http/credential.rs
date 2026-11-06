@@ -365,7 +365,7 @@ fn a_service_account_exchanges_a_signed_assertion_for_the_token() {
     for _ in 0..2 {
         let key = ServiceAccountKey::from_json(&fixture()).unwrap();
         let (client, script) = over_with(
-            Credentials::ServiceAccount(key),
+            Credentials::ServiceAccount(Box::new(key)),
             vec![answer(exchange), instance(), instance()],
             clock(),
         );
@@ -414,7 +414,7 @@ fn an_assertion_without_a_key_id_has_no_kid_and_a_refused_exchange_is_no_credent
     let mut body = fixture_value();
     body.as_object_mut().unwrap().remove("private_key_id");
     let (client, script) = over_with(
-        Credentials::ServiceAccount(key_with(&body).unwrap()),
+        Credentials::ServiceAccount(Box::new(key_with(&body).unwrap())),
         vec![status(400, "{\"error\":\"invalid_grant\"}")],
         clock(),
     );

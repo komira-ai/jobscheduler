@@ -3,6 +3,7 @@
 //! that is not read is left out, never an error; a SKU that is read and whose price cannot
 //! be read is an error, never a free price.
 
+use js_caps::NVIDIA_B200;
 use serde_json::Value;
 
 use super::unreadable;
@@ -72,7 +73,8 @@ const ROWS: [(&str, Row); 16] = [
         "Nvidia RTX PRO 6000 GPU",
         Row::Accelerator("nvidia-rtx-pro-6000"),
     ),
-    ("Nvidia B200 GPU", Row::Accelerator("nvidia-b200")),
+    // Google's name of the B200 is the family's own spelling, so it is `js-caps`'s constant.
+    ("Nvidia B200 GPU", Row::Accelerator(NVIDIA_B200)),
 ];
 
 /// The words that begin the description of a Spot SKU, before the words of [`ROWS`]
