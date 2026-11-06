@@ -805,7 +805,7 @@ pub const ALLOWED: &[Allowed] = &[
         item: "draw",
         token: Token::Getrandom,
         sites: 2,
-        reason: "the job service's id source behind IdSource; the cell runs the server with the job service off, so it mints no job id",
+        reason: "the job store's default id source; the cell gives the server js-jobs's ScriptedIds drawn from the seed instead (js-sim-cell server/ids.rs)",
     },
     Allowed {
         file: "crates/js-jobs/src/ids.rs",
@@ -882,21 +882,21 @@ pub const ALLOWED: &[Allowed] = &[
         item: "SystemClock::now",
         token: Token::SystemTimeNow,
         sites: 1,
-        reason: "the state store's wall clock; the cell runs the server with the job service and usage recording off",
+        reason: "the state store's default wall clock; the cell gives the job store its own clock (StoreClock, js-sim-cell server/ids.rs), and usage is off",
     },
     Allowed {
         file: "crates/js-state/src/sqlite/mod.rs",
         item: "SqliteStore::call",
         token: Token::InstantNow,
         sites: 1,
-        reason: "times a SQLite commit; the cell opens no SqliteStore",
+        reason: "a call's queue time, read only by the writer's latency metric; a cell with the job service on reaches it, and nothing decides by it",
     },
     Allowed {
         file: "crates/js-state/src/sqlite/writer.rs",
         item: "Writer::run",
         token: Token::InstantNow,
         sites: 2,
-        reason: "the SQLite writer's group-commit window; the cell opens no SqliteStore",
+        reason: "the writer's group-commit wait; a cell's calls come one at a time from its one thread and each blocks for its reply, so a group is one call",
     },
     Allowed {
         file: "crates/js-testkit/src/act.rs",
