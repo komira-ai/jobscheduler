@@ -1,8 +1,9 @@
 //! A server with the job tables over a store that can fail a commit, hosts registered with or
 //! without the `per-job` capability, and a fake of an agent that speaks the per-job messages,
 //! for the tests of the heartbeat's per-job half and of the job pass. Nothing here waits on
-//! time: the registry's clock and the store's clock are manual, and move only in a rig made by
-//! [`clocked_rig`] or [`logging_rig`], where they are one clock a test moves ([`Rig::advance`]).
+//! time: the registry's clock and the store's clock are manual. In a rig made by
+//! [`clocked_rig`] they are one clock a test moves ([`Rig::advance`]); in one made by
+//! [`logging_rig`] the test moves the registry's, and the store keeps a clock of its own.
 //!
 //! A server with a log sink ([`logging_rig`]) mints its host credentials with js-logmint's
 //! fake minter over js-logstore's fake store, both on the server's clock; its hosts say hello
@@ -122,8 +123,10 @@ pub(crate) fn placed(
 /// The server under test and the store under it.
 pub(crate) struct Rig {
     pub(crate) agents: Arc<Agents>,
-    /// The store's clock; in a rig made by [`clocked_rig`], also the registry's and the
-    /// server's.
+    /// The clock [`Rig::advance`] moves: the store's; in a rig made by [`clocked_rig`], also
+    /// the registry's and the server's. In a rig made by [`logging_rig`] it is the registry's,
+    /// the server's and the minter's, and the store has a clock of its own, which only the
+    /// store's syncs move, so that a commit does not move the time the log tests count.
     pub(crate) clock: Arc<StoreClock>,
     /// The server's clock.
     pub(crate) shared: SharedClock,
@@ -159,8 +162,9 @@ pub(crate) fn logging_rig(name: &str, grace_ms: u64) -> (Rig, Logs) {
 
 /// [`logging_rig`] over the job tables of `tables` (a store a server ran on before) when
 /// given (and on its clock), with the clock at `now_ms`: a server rebuilt on the same store,
-/// with a new registry and nothing of the log credentials held before. Its registry, server,
-/// store and minter read one manual clock, which [`Rig::advance`] moves.
+/// with a new registry and nothing of the log credentials held before. Its registry, server
+/// and minter read one manual clock, which [`Rig::advance`] moves; fresh job tables get a
+/// clock of their own, which a commit's sync moves and nothing else.
 pub(crate) fn logging_over(
     name: &str,
     grace_ms: u64,
@@ -183,6 +187,7 @@ pub(crate) fn logging_over(
         grace_ms: Some(grace_ms),
         logs: Some(Arc::clone(&grants)),
         tables: tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs))),
+        store_clock: Some(Arc::default()),
     };
     let kept = (JobLimits::default(), Retention::DEFAULT);
     let rig = rig_on(name, (true, false), kept, (clock, shared.clone()), extra);
@@ -255,13 +260,15 @@ impl Logs {
 type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
 
 /// What a [`logging_rig`] gives a server beyond [`rig_on`]'s: the grace after which a silent
-/// host is lost (the pool's own when `None`), the grants it mints with, and the job tables of
-/// a server that ran before (fresh ones when `None`).
+/// host is lost (the pool's own when `None`), the grants it mints with, the job tables of a
+/// server that ran before (fresh ones when `None`), and the clock of fresh tables (the rig's
+/// clock when `None`).
 #[derive(Default)]
 struct Extra {
     grace_ms: Option<u64>,
     logs: Option<Arc<LogGrants>>,
     tables: Option<Tables>,
+    store_clock: Option<Arc<StoreClock>>,
 }
 
 /// A server named `name`, holding the job tables when `with_jobs`, placing with the
@@ -351,8 +358,9 @@ fn rig_on(
     placer
         .iter()
         .for_each(|placer| registry.set_placer(placer.clone()));
+    let store_clock = extra.store_clock.unwrap_or_else(|| Arc::clone(&clock));
     let fresh = || {
-        let (store, jobs) = tables_on(Arc::clone(&clock), retention);
+        let (store, jobs) = tables_on(store_clock, retention);
         (store, Arc::new(jobs))
     };
     let (store, jobs) = extra.tables.unwrap_or_else(fresh);
