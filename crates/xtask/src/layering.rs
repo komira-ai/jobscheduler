@@ -128,8 +128,9 @@ pub enum Violation {
 
 /// The crates this repository may take from kbf's repository, and only as dev-dependencies:
 /// kbf's update-hook contract crate, whose conformance harness the js-agent hook's tests run,
-/// and the host updater's declaration rules (`update-rights`), which load the js-agent
-/// declaration the release ships (crates/xtask/tests/js_agent_declaration.rs). Neither depends
+/// and the host updater's declaration rules (`update-rights`), which load the js-agent and
+/// js-lease-server declarations the release ships (crates/xtask/tests/js_agent_declaration.rs,
+/// crates/xtask/tests/js_lease_server_declaration.rs). Neither depends
 /// on another crate of kbf but `update-hook` (kbf's own layering test keeps them so), and both
 /// are pinned by one revision. Anything else from kbf's repository is refused, by any name.
 const KBF_TEST_CRATES: [&str; 2] = ["update-hook", "update-rights"];

@@ -56,7 +56,7 @@ pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
     parse_job_retention,
 };
-pub(crate) use store::{StoreNames, StoreSetting};
+pub(crate) use store::{StoreNames, StoreSetting, hook_store_target};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
 

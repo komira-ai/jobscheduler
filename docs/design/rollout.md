@@ -9,7 +9,7 @@ This file replaces the first version of the plan, which assumed a separate jobsc
 action as a run through its run API (the placement libraries run inside kbf's frontends); `js-agent` is standalone on every host (no kbf
 process beside it on the task path); and there is no `kbf-executor`. A release therefore coordinates three things: the kbf service (frontends
 with the embedded libraries and the lease client, and kbf's storage and daemon roles), the `js-agent` service (both roll through kbf's update
-coordinator), and the lease server, whose update path is open (design Q23). This file says who updates what, which versions must
+coordinator), and the lease server, whose update hook restarts it in place ([lease-server-update.md](../lease-server-update.md)). This file says who updates what, which versions must
 work together, and in what order a change rolls out.
 
 ## What exists: kbf's update coordinator
@@ -29,7 +29,7 @@ The facts below are from kbf at commit `89af8f2ef` and describe the coordinator 
 | Part | Updated by | How |
 |---|---|---|
 | kbf frontends with the embedded jobscheduler libraries | kbf's update coordinator, service `kbf` | The libraries are a git dependency at one revision, raised by a pull request of its own in kbf (`Cargo.toml`). The embedded server version is whatever kbf pins. |
-| js-lease-server | jobscheduler's release | Deployed. Its runs live in memory, so an update drops all of them (`410 run-forgotten`) and kbf re-queues; roll it with no run in flight or accept the requeue. |
+| js-lease-server | jobscheduler's release; on a host with the generic updater, its update hook (`js-lease-server update-hook`, [lease-server-update.md](../lease-server-update.md)), which restarts it in place | Deployed. Its runs live in memory, so an update drops all of them (`410 run-forgotten`) and kbf re-queues; roll it with no run in flight or accept the requeue. |
 | `js-agent` | kbf's update coordinator, service `js-agent`, `after = ["kbf"]` | A service defined in the coordinator's services file. The agent ships from jobscheduler's release; until the signer decision below it is republished under kbf's signer. |
 | Action images and `kbf-task` | the job (action image), kbf (`kbf-task`) | Action images are digest-pinned and pre-pulled; `kbf-task` is mounted from the `kbf-tools` agent root. The frontend names the image digest and the tools version in each run, and both are on every host before frontend N places work. |
 | Tierstore front | kbf's release workflow | A tarball and example unit, not started at install and not managed by the host updater. Its presigned-PUT verifier is rolled before the frontend that mints for it. |
