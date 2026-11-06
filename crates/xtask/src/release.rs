@@ -6,7 +6,7 @@
 //! - [`stamp`]: sets the release version in the CI checkout (`Cargo.toml` and `Cargo.lock`)
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
-//!   Linux archives of `js-agent` and `js-lease-server`, the host updater's declaration.
+//!   Linux archives of `js-lease-server`, the host updater's declaration.
 //! - [`hostkeeper_package`], [`hostkeeper_index`]: the hostkeeper package of `js-agent` for one
 //!   platform, and the release index of the three.
 //!
@@ -15,8 +15,10 @@
 //! dependencies (`cargo metadata`). Every file of such a crate ships (`src/**`, manifest,
 //! `build.rs`, an `include_str!`'d sample configuration) except its `tests/`, `benches/`,
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
-//! `rust-toolchain.toml` and everything under `.cargo/`, and the host updater's declarations
-//! ([`stage::DECLARATIONS`]), which the js-agent and js-lease-server archives carry as they are.
+//! `rust-toolchain.toml` and everything under `.cargo/`, the host updater's declarations
+//! ([`stage::DECLARATIONS`]), which the js-lease-server archives carry as they are, and the
+//! files of the hostkeeper packages of js-agent ([`HOSTKEEPER_DIRS`]), which
+//! `release hostkeeper-package` compiles in.
 //! Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
 //! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
@@ -314,7 +316,17 @@ fn is_archived(path: &str) -> bool {
     stage::DECLARATIONS
         .iter()
         .any(|(_, source)| *source == path)
+        || (HOSTKEEPER_DIRS.iter().any(|dir| path.starts_with(dir)) && !path.ends_with(".md"))
 }
+
+/// The directories of the files the hostkeeper packages of js-agent are made of (manifest
+/// templates, units, the plist, the tmpfiles file): `release hostkeeper-package` compiles them
+/// in, so a change to one is a change of a release asset; the markdown beside them is not
+/// compiled in and does not ship.
+pub const HOSTKEEPER_DIRS: [&str; 2] = [
+    "packaging/js-agent/hostkeeper/",
+    "packaging/js-agent-macos/hostkeeper/",
+];
 
 /// The directory at the root whose files (`config.toml`: rustflags, linker, build settings)
 /// change how every binary is built.
