@@ -158,6 +158,8 @@ fn a_pull_over_the_budget_evicts_the_image_used_least_recently() {
     pull(&images, 'a').unwrap();
     pull(&images, 'b').unwrap();
     using(&images, 'a');
+    // A lease name that holds nothing lets nothing go: A stays the latest use.
+    images.release("js-host-none");
     pull(&images, 'c').unwrap();
     assert_eq!(fake.held(), [digest('a'), digest('c')]);
     assert_eq!(fake.removed(), [digest('b')]);

@@ -293,7 +293,7 @@ pub(super) async fn admit(
             Err(_) if before => return Ok(()),
             Err(full) => {
                 let fixed = budget.book().fixed(&image.digest);
-                if !before && !fixed && store.remove(image).await.is_ok() {
+                if !fixed && store.remove(image).await.is_ok() {
                     budget.book().held.remove(&image.digest);
                 }
                 return Err(full.to_string());
