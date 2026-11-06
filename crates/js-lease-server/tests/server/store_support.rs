@@ -178,6 +178,22 @@ pub fn end_the_holder(url: &str) {
     assert_eq!(holder(url), None, "the lock is free");
 }
 
+/// Makes the database `url` names acknowledge commits it has not flushed
+/// (`synchronous_commit` off for every new session), which a store refuses to open on, while
+/// the writer lock is still taken. Call it outside an async runtime.
+pub fn unflushed(url: &str) {
+    let mut admin = Client::connect(url, NoTls).unwrap();
+    let name: String = admin
+        .query_one("SELECT current_database()", &[])
+        .unwrap()
+        .get(0);
+    admin
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{name}\" SET synchronous_commit = off"
+        ))
+        .unwrap();
+}
+
 /// How far the store in the database `url` has been written: the cursor after every change
 /// in its feed, read on a store of the test's own (which takes no writer lock).
 pub fn revision(url: &str) -> Revision {

@@ -208,8 +208,9 @@ mod tests {
         assert_eq!(refused.err().map(|err| err.to_string()), Some(must));
     }
 
-    /// Asserts that a Postgres URL that does not parse, or asks for TLS, is refused without
-    /// repeating any part of it.
+    /// Asserts that a Postgres URL that does not parse, or asks to verify the server's
+    /// certificate with no root certificate to check it against, is refused without
+    /// repeating any part of it, and that a URL asking for TLS is read.
     #[test]
     fn a_postgres_url_that_is_refused_is_not_repeated() {
         let cases = [
@@ -218,14 +219,19 @@ mod tests {
                 "the connection URL does not parse",
             ),
             (
-                "postgres://js:pw-0123@db.example.org/js?sslmode=require",
-                "the state store URL asks for TLS (sslmode), which this client does not support",
+                "postgres://js:pw-0123@db.example.org/js?sslmode=verify-full",
+                "the state store's sslmode verify-ca and verify-full need a root certificate (sslrootcert)",
             ),
         ];
         for (text, reason) in cases {
             let said = read(text, false).err().unwrap();
             assert_eq!(said, format!("--store: /etc/js/store: {reason}"));
         }
+        let tls = read(
+            "postgres://js:pw-0123@db.example.org/js?sslmode=require",
+            false,
+        );
+        assert!(tls.is_ok(), "{:?}", tls.err());
     }
 
     /// Asserts that a `sqlite:` store is refused without the gate, naming the flag or the

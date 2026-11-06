@@ -1,8 +1,10 @@
 //! Starting the server, running it, and stopping it.
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +29,7 @@ use crate::listener::{Slots, serve, serve_both};
 use crate::pool::{Pool, Setup};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
-use crate::store::{Fence, LockLost, ServerStore};
+use crate::store::{LockLost, LockWatch, ServerStore};
 use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
 use crate::usage::ProfileCurves;
@@ -50,7 +52,7 @@ pub struct Running {
     scaler: Option<Scaler>,
     tls: Option<tls::Tls>,
     /// Where the tick announces the loss of the store's writer lock.
-    fence: Fence,
+    lock_watch: LockWatch,
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
@@ -153,7 +155,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     let limits = listeners.limits;
     let split = agent_listener.is_some();
     // Every listener stops at its own stop or at the loss of the store's writer lock.
-    let fence = Fence::new();
+    let lock_watch = LockWatch::new();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(limits.max_connections));
     let serving = serve(
@@ -162,7 +164,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         router(shared.clone(), !split),
         limits,
         slots.clone(),
-        fence.or_stopped(stopped),
+        lock_watch.or_stopped(stopped),
     );
     let agent = agent_listener.map(|(listener, addr)| {
         let (stop, stopped) = oneshot::channel::<()>();
@@ -174,7 +176,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
             app,
             limits,
             slots,
-            fence.or_stopped(stopped),
+            lock_watch.or_stopped(stopped),
         );
         info!(%addr, "listening for agents");
         Port {
@@ -191,7 +193,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
             let (stop, stopped) = oneshot::channel::<()>();
             let slots = Arc::new(Slots::new(limits.max_connections));
             let app = job_api::port(api, clients);
-            let stopped = fence.or_stopped(stopped);
+            let stopped = lock_watch.or_stopped(stopped);
             let serving = serve_both(listener, job_acceptor, app, limits, slots, stopped);
             info!(%addr, tls = served_tls, "listening for the job service");
             Port {
@@ -200,12 +202,13 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
                 serving: tokio::spawn(serving),
             }
         });
-    let ticking = Ticking(tokio::spawn(tick_loop(
+    let ticking = Box::pin(tick_loop(
         shared.clone(),
         ticker,
         scaler.clone().map(|scaler| (scaler, cached)),
-        fence.clone(),
-    )));
+        lock_watch.clone(),
+    ));
+    let ticking = Ticking(tokio::spawn(until_fenced(shared.clone(), ticking)));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
@@ -220,7 +223,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         _checking: checking,
         scaler,
         tls,
-        fence,
+        lock_watch,
     })
 }
 
@@ -506,7 +509,8 @@ impl Drop for Alive {
 
 /// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
 /// elastic pool when the server has one, with the cache of its provider's catalog, forever;
-/// the caller aborts it. The scaler ticks on a task of its own (a provider's slow call must
+/// the caller aborts it, or drops it once the state store says this process is no longer its
+/// writer ([`until_fenced`]). The scaler ticks on a task of its own (a provider's slow call must
 /// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
 /// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
 /// table, the fetch and the scaler are done, or at once when the scaler is still busy with
@@ -518,20 +522,20 @@ impl Drop for Alive {
 /// twice.
 ///
 /// With a store, each tick first asks whether the store's writer lock is still held. A tick
-/// that finds it lost announces the loss on `fence` (which stops the listeners), does
+/// that finds it lost announces the loss on `lock_watch` (which stops the listeners), does
 /// nothing else, and ends the loop: no tick of the table or the scaler follows.
 async fn tick_loop<T: Ticker>(
     shared: Arc<Shared>,
     mut ticker: T,
     scaler: Option<(Scaler, Cached)>,
-    fence: Fence,
+    lock_watch: LockWatch,
 ) {
     let _alive = Alive(shared.clone());
     let side = scaler.map(|(scaler, cached)| ScalerLoop::spawn(shared.clone(), scaler, cached));
     loop {
         let tick = ticker.next().await;
         if let Err(lost) = shared.check_store().await {
-            fence.lose(lost);
+            lock_watch.lose(lost);
             tick.finish();
             return;
         }
@@ -584,6 +588,49 @@ impl Drop for ScalerLoop {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Why a server whose state store has a newer writer stops with an error.
+pub(crate) const FENCED: &str =
+    "the state store has a newer writer, so this server may no longer write to it";
+
+/// Completes when `signalled` does (a termination signal), or, logging one error line, when
+/// the state store says this process is no longer its writer: the server cannot write again,
+/// so the caller stops it ([`Running::shutdown`], which then answers an error) and the process
+/// exits with a failure for a restart to open a new handle.
+pub(crate) async fn stop_or_fence(
+    running: &Running,
+    signalled: impl Future<Output = io::Result<()>>,
+) -> io::Result<()> {
+    tokio::select! {
+        biased;
+        () = running.fenced() => {
+            error!("the state store has a newer writer: this server can write no more and is stopping");
+            Ok(())
+        }
+        stopped = signalled => stopped,
+    }
+}
+
+/// Runs `ticking` (the tick loop) until the state store says this process is no longer its
+/// writer, when it is dropped: a tick under way is cut at its next wait, nothing is begun
+/// after it, and the loop's guards run ([`Alive`] marks `/healthz`, the scaler's task ends).
+async fn until_fenced(shared: Arc<Shared>, ticking: Pin<Box<dyn Future<Output = ()> + Send>>) {
+    tokio::select! { biased; () = shared.fenced() => {}, () = ticking => {} }
+}
+
+/// The tick that ends a shutdown, and the usage side's last flush; an error when the tick
+/// could not write the lease file.
+async fn final_tick(shared: &Shared, state_file: &Path) -> io::Result<()> {
+    let report = shared.tick().await;
+    if let Some(usage) = shared.usage() {
+        usage.finish().await;
+    }
+    report.save_error.map_or(Ok(()), |err| {
+        let file = state_file.display();
+        let reason = format!("the final tick could not write the lease file {file}: {err}");
+        Err(io::Error::other(reason))
+    })
 }
 
 impl Running {
@@ -651,7 +698,7 @@ impl Running {
     /// [`Running::shutdown`] answers the loss. It never completes without a store, or while
     /// the lock is held.
     pub async fn lock_lost(&self) -> LockLost {
-        self.fence.wait().await
+        self.lock_watch.wait().await
     }
 
     /// The store the server holds under its writer lock (`--store`, `server.store`), shared;
@@ -697,6 +744,14 @@ impl Running {
         self.slots.waits()
     }
 
+    /// Completes when the state store has said this process is no longer its writer, which
+    /// the server cannot go on from: the caller stops it ([`Running::shutdown`], which then
+    /// answers an error) and exits with a failure. Never completes for a server without
+    /// agents or without the job service, which have no state store.
+    pub async fn fenced(&self) {
+        self.shared.fenced().await;
+    }
+
     /// Stops the server: no new connections, the requests in flight finish (those still
     /// open after `--drain-timeout` are cut), the table is ticked once more (so an expiry
     /// that fell due is stopped before the process ends) and the lease table is released.
@@ -707,6 +762,10 @@ impl Running {
     ///
     /// After the store's writer lock was lost ([`Running::lock_lost`]) there is no last tick
     /// (nothing more is written) and the error is the loss.
+    ///
+    /// When the state store has said this process is no longer its writer, the last tick is
+    /// not run (it would write the job tables and the lease file of a server that no longer
+    /// owns them) and the stop is an error that says so.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
         let ports = [self.agent.take(), self.job.take()];
@@ -717,18 +776,17 @@ impl Running {
         }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
-        if let Some(lost) = self.fence.lost() {
+        if let Some(lost) = self.lock_watch.lost() {
             return served.and(Err(io::Error::other(lost)));
         }
-        let report = self.shared.tick().await;
-        if let Some(usage) = self.shared.usage() {
-            usage.finish().await;
-        }
-        let saved = report.save_error.map_or(Ok(()), |err| {
-            let file = self.state_file.display();
-            let reason = format!("the final tick could not write the lease file {file}: {err}");
-            Err(io::Error::other(reason))
-        });
+        let saved = match self.shared.is_fenced() {
+            true => Err(io::Error::other(FENCED)),
+            false => final_tick(&self.shared, &self.state_file).await,
+        };
         served.and(saved)
     }
 }
+
+#[cfg(test)]
+#[path = "server_fence_tests.rs"]
+mod fence_tests;

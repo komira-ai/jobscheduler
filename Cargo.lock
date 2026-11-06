@@ -1744,12 +1744,16 @@ version = "0.1.0"
 dependencies = [
  "js-state",
  "js-testkit",
+ "percent-encoding",
  "postgres",
+ "rcgen",
  "rusqlite",
  "rustix",
+ "rustls",
  "sha2 0.11.1",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

@@ -674,3 +674,21 @@ async fn fleet_calls_need_the_service_token() {
     let hosts = client.list_hosts(request).await.unwrap().into_inner().hosts;
     assert_eq!(hosts.len(), 1);
 }
+
+/// Asserts that a host listing whose read of the job tables meets `Fenced` is `UNAVAILABLE`
+/// `state-fenced` (not `store-unavailable`) and trips the service's fence. It catches a fenced
+/// store taken for one that may answer again, so a server with no heartbeats and nothing
+/// queued keeps running without a store.
+#[tokio::test]
+async fn a_listing_that_meets_a_fenced_store_is_unavailable_and_trips_the_fence() {
+    let s = server("store-fenced", true);
+    s.register("h1");
+    s.store.fail_with(js_state::StoreError::Fenced);
+    s.store.fail_read_after(0);
+    let answer = list_hosts(&s.api, Request::new(ListHostsRequest {})).await;
+    assert_eq!(
+        refused(answer),
+        (Code::Unavailable, "state-fenced".to_owned())
+    );
+    assert!(s.api.fence.is_tripped());
+}

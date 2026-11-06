@@ -26,12 +26,12 @@ impl ExtensionPool {
     /// [`StoreError::Failed`] when the server cannot be reached or refuses the schema.
     pub fn open(config: &PostgresConfig) -> Result<ExtensionPool, StoreError> {
         let pool = Pool::open(
-            config.pg.clone(),
+            config.dial(),
             config.schema.clone(),
             config.max_connections,
             config.supported,
         )
-        .map_err(Fail::into_store)?;
+        .map_err(Fail::into_failed)?;
         Ok(ExtensionPool { pool })
     }
 
@@ -40,7 +40,7 @@ impl ExtensionPool {
     /// # Errors
     /// [`StoreError::Failed`] when a new connection was needed and could not be made.
     pub fn checkout(&self) -> Result<Loan<'_>, StoreError> {
-        let loan = self.pool.checkout().map_err(Fail::into_store)?;
+        let loan = self.pool.checkout().map_err(Fail::into_failed)?;
         Ok(Loan(loan))
     }
 }

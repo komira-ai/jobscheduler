@@ -358,7 +358,8 @@
 //! The file holds one line: `postgres://...` or `postgresql://...`, or `sqlite:<absolute
 //! path>` with `--allow-sqlite-store` (`server.allow_sqlite_store = true`). The URL is never
 //! printed in a log line or an error; a Postgres server's refusal is said by its SQLSTATE.
-//! A Postgres store must hold the state schema already: the server creates none.
+//! The URL's `sslmode` (`disable` to `verify-full`) and `sslrootcert` choose its TLS. A
+//! Postgres store must hold the state schema already: the server creates none.
 //!
 //! The server takes the store's writer lock first, before it reads or locks the lease file
 //! and before it binds a listener, and holds it for its life: on Postgres a session-level
@@ -367,7 +368,9 @@
 //! wait: it exits 2 with one line, `--store: another process holds the store's writer lock`,
 //! having opened nothing else. Every tick asks the lock's session first; a tick that finds
 //! it gone does nothing more, and the server stops serving and ticking, writes nothing more
-//! (there is no final tick), logs the loss and exits 1 ([`LockLost`]).
+//! (there is no final tick), logs the loss and exits 1 ([`LockLost`]). The lock takes the
+//! store's next writer generation and every commit checks it, so once another process takes
+//! the lock no commit of this one succeeds, between ticks too.
 //!
 //! Nothing of the server's state is kept in the store yet: the lease file, the files beside
 //! it and the usage file are kept as without the setting. Until they move, a server that
@@ -830,6 +833,7 @@ mod checks;
 mod config;
 mod cordon;
 mod error;
+mod fence;
 mod file;
 mod file_checks;
 mod flags;

@@ -10,7 +10,10 @@
 //! - **Postgres**: the lock is a session-level advisory lock on a connection of its own.
 //!   Every tick asks that session first ([`ServerStore::check`]); when the session is gone,
 //!   so is the lock, and the tick does nothing more: the server stops serving, does not tick
-//!   again, writes nothing more, and the process exits 1 ([`LockLost`]).
+//!   again, writes nothing more, and the process exits 1 ([`LockLost`]). Taking the lock also
+//!   takes the store's next writer generation, and the store is opened fenced by it
+//!   ([`PostgresStore::fenced`]): once another process takes the lock, every commit of this
+//!   one is refused, between ticks too.
 //! - **SQLite**: the store holds the `flock` beside its file from before its open to its end
 //!   ([`SqliteStore::open_locked`]), so a lock this process holds cannot be lost to another.
 //!
@@ -63,6 +66,12 @@ impl ServerStore {
         let (store, lock): (Arc<dyn Store>, _) = match target {
             WriterTarget::Postgres(config) => {
                 let store = PostgresStore::open(&config).map_err(|err| refused(err.to_string()))?;
+                // Every commit checks the store still holds the generation this lock took
+                // (always one on Postgres), so none succeeds once another process took it.
+                let store = lock
+                    .generation()
+                    .into_iter()
+                    .fold(store, PostgresStore::fenced);
                 (Arc::new(store), Some(Mutex::new(lock)))
             }
             WriterTarget::Sqlite(file) => {
@@ -135,11 +144,11 @@ impl From<StoreError> for LockLost {
 /// Where the loss of the writer lock is announced: the tick that finds it says so here, and
 /// the listeners, [`crate::Running::lock_lost`] and the shutdown read it.
 #[derive(Clone)]
-pub(crate) struct Fence {
+pub(crate) struct LockWatch {
     lost: watch::Sender<Option<LockLost>>,
 }
 
-impl Fence {
+impl LockWatch {
     pub(crate) fn new() -> Self {
         Self {
             lost: watch::Sender::new(None),
@@ -157,7 +166,7 @@ impl Fence {
         self.lost.borrow().clone()
     }
 
-    /// Completes when the loss is announced, with the loss. (The fence holds the sender, so
+    /// Completes when the loss is announced, with the loss. (The watch holds the sender, so
     /// the wait ends only with a loss.)
     pub(crate) async fn wait(&self) -> LockLost {
         let mut lost = self.lost.subscribe();
@@ -168,15 +177,15 @@ impl Fence {
     /// A stop signal for a listener that fires at `stopped` (or when its sender is dropped)
     /// or at the loss, whichever comes first: after a loss the server serves nothing more.
     pub(crate) fn or_stopped(&self, stopped: oneshot::Receiver<()>) -> oneshot::Receiver<()> {
-        let (stop, fenced) = oneshot::channel();
-        let fence = self.clone();
+        let (stop, either) = oneshot::channel();
+        let watch = self.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = stopped => {}
-                _ = fence.wait() => {}
+                _ = watch.wait() => {}
             }
             let _ = stop.send(());
         });
-        fenced
+        either
     }
 }

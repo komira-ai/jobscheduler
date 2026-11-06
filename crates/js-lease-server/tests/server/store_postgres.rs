@@ -1,5 +1,6 @@
 //! The writer lock over a Postgres store: a second server refused, a lost lock that stops the
-//! server, and refusals that never show the connection URL.
+//! server, a store fenced by the lock's generation, and refusals that never show the
+//! connection URL.
 //!
 //! Each test has a database of its own (`js_state::postgres::test_database`, the state schema
 //! applied), and an advisory lock is scoped to its database, so the tests do not see each
@@ -12,14 +13,15 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use js_lease_server::LockLost;
-use js_state::postgres::{TestDatabase, test_database};
+use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
+use js_state::{Cond, Store, StoreError, Txn, WriterLock, WriterTarget};
 use rustix::process::{Pid, Signal, kill_process};
 use tokio::runtime::Runtime;
 
 use crate::binary::launch;
 use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
-    store_args, taken_address, with_userinfo,
+    store_args, taken_address, unflushed, with_userinfo,
 };
 use crate::support::{Harness, Scratch, TOKEN, lease_body, replace, request};
 
@@ -186,15 +188,43 @@ fn the_store_url_is_never_in_an_error_or_a_log_line() {
     }
 }
 
-/// Asserts that a Postgres store without the state schema is refused at start naming
-/// `--store`, saying the store could not be opened, after the lock was taken (the refusal
-/// releases it), with no part of the URL. It catches a server that runs on a database it
-/// cannot keep its state in, or that creates a schema of its own.
+/// Asserts that a Postgres database without the state schema is refused at start with exit
+/// status 2 when the writer lock is taken (the lock takes the schema's writer generation),
+/// naming `--store` with the line that says what to run, that the refusal releases the lock
+/// and made no lease file, and that no part of the URL is printed. It catches a server that
+/// runs on a database it cannot keep its state in, or that creates a schema of its own.
 #[test]
 fn a_store_without_the_schema_is_refused_at_start() {
     let database = TestDatabase::empty();
     let url = database.url();
     let scratch = Scratch::new("store_pg_no_schema");
+    let ended = run_to_end(&store_args(&scratch, &url, &[]));
+    assert_eq!(ended.code, Some(2), "{}", ended.stderr);
+    assert!(
+        ended.stderr.contains(
+            "js-lease-server: --store: the store's writer lock could not be taken: the state \
+             schema has no writer generation table (it is older than version 2): run the \
+             installer to bring it forward\n"
+        ),
+        "{}",
+        ended.stderr
+    );
+    assert_unquoted(&url, &ended.stderr);
+    assert!(!scratch.state().exists(), "no lease file was made");
+    assert_eq!(holder(&url), None, "the refusal released the lock");
+}
+
+/// Asserts that a store whose writer lock was taken but that does not open (its database
+/// does not flush commits: `synchronous_commit` is off) is refused at start with exit status
+/// 2, naming `--store`, saying the store could not be opened and why; that the refusal
+/// released the lock and made no lease file; and that no part of the URL is printed. It
+/// catches a refused open that keeps the lock, or a server that goes on to serve.
+#[test]
+fn a_store_that_does_not_open_is_refused_after_the_lock() {
+    let database = test_database();
+    let url = database.url();
+    unflushed(&url);
+    let scratch = Scratch::new("store_pg_unflushed");
     let ended = run_to_end(&store_args(&scratch, &url, &[]));
     assert_eq!(ended.code, Some(2), "{}", ended.stderr);
     assert!(
@@ -204,7 +234,42 @@ fn a_store_without_the_schema_is_refused_at_start() {
         "{}",
         ended.stderr
     );
+    assert!(
+        ended.stderr.contains("synchronous_commit"),
+        "{}",
+        ended.stderr
+    );
     assert_unquoted(&url, &ended.stderr);
     assert!(!scratch.state().exists(), "no lease file was made");
     assert_eq!(holder(&url), None, "the refusal released the lock");
+}
+
+/// Asserts that the server's store is opened fenced by the generation its writer lock took:
+/// a commit succeeds while the server holds the lock, and once its session is ended and
+/// another process takes the lock, a commit of the server's store is refused `Fenced` and
+/// writes nothing, with no tick run in between. It catches a store opened without the
+/// fence, whose commits would land after another writer took over.
+#[test]
+fn a_commit_after_another_process_took_the_lock_is_refused() {
+    let database = test_database();
+    let url = database.url();
+    let scratch = Scratch::new("store_pg_fenced");
+    let args = store_args(&scratch, &url, &[]);
+    let runtime = Runtime::new().unwrap();
+    let h = runtime.block_on(Harness::with(scratch, args, None));
+    let store = h.running.store().expect("the server has a store");
+    let put = |key: &str| Txn::new().put(key, "v", Cond::Any);
+    let committed = store.txn(put("before"));
+    assert!(committed.is_ok(), "{committed:?}");
+
+    end_the_holder(&url);
+    let target = WriterTarget::Postgres(Box::new(PostgresConfig::parse(&url).unwrap()));
+    let next = WriterLock::acquire(&target).expect("another process takes the lock");
+    let before = revision(&url);
+    assert_eq!(store.txn(put("after")).err(), Some(StoreError::Fenced));
+    assert_eq!(revision(&url), before, "the fenced commit wrote nothing");
+    drop(next);
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
 }

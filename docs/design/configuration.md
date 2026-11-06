@@ -138,8 +138,9 @@ are kept as without it.
 - **The file.** One line: `postgres://...` or `postgresql://...` for Postgres, or `sqlite:<absolute path>` for SQLite. Blank lines and
   the whitespace around the line are ignored; anything else (two lines, another scheme, a relative path) is refused. The file must be
   owner-only, as `--token-file`'s is, and its content is never printed: a refusal names the file and says what is wrong, a URL that
-  does not parse is refused as one, and a Postgres server's refusal is reported by its SQLSTATE alone. A Postgres store must hold the
-  state schema already; the server creates none.
+  does not parse is refused as one, and a Postgres server's refusal is reported by its SQLSTATE alone. The URL's `sslmode` (`disable`
+  to `verify-full`) and `sslrootcert` choose its TLS. A Postgres store must hold the state schema already; the server creates none, and
+  a database without it is refused when the lock is taken.
 - **The dev flag.** `--allow-sqlite-store` (`server.allow_sqlite_store = true`) accepts a `sqlite:` store. Without it such a store is
   refused at start with exit status 2: `--store: <file> names a sqlite: store, which is accepted only with --allow-sqlite-store: SQLite
   is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
@@ -152,7 +153,9 @@ are kept as without it.
   login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2.
 - **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
   it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
-  nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1.
+  nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
+  lock also takes the store's next writer generation, and every commit checks it: once another process takes the lock, no commit of
+  this one succeeds, between ticks too.
 - **Not yet.** Until the server's state moves into the store, a server that registers agents (an elastic pool, a `joined` pool or
   `--agent-pool-config`) is refused at start with a store setting, after the lock is taken and before any listener is bound:
   `--store: store-backed server state is not available yet for a server that registers agents ...`.
