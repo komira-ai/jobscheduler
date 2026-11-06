@@ -731,6 +731,13 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the crun runtime's wall clock, the default of its Seams; the cell's real agents run the in-memory runtime",
     },
     Allowed {
+        file: "crates/js-agent/src/native/mod.rs",
+        item: "system_clock",
+        token: Token::SystemTimeNow,
+        sites: 1,
+        reason: "the native runtime's wall clock, set by NativeRuntime::open; the cell's real agents run the in-memory runtime",
+    },
+    Allowed {
         file: "crates/js-agent/src/quota/xfs.rs",
         item: "probe_name",
         token: Token::Getrandom,
