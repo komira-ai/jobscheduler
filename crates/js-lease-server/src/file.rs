@@ -52,6 +52,7 @@ mod server;
 
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
+use limits::Failover;
 pub use limits::ProviderLimits;
 pub use logs::{AccessKey, LogsConfig, Minting, ObjectStoreLogs};
 use network::read_network;
@@ -229,12 +230,8 @@ pub struct ElasticPlan {
     pub(crate) share: u32,
     /// The pool's `provider_limits` on the provider, as admission reads them.
     pub(crate) limits: PoolLimits,
-    /// How long pass 2 passes over an instance type in a region after a quota refusal: its
-    /// `provider_limits` `quota_backoff`.
-    pub(crate) quota_backoff: Duration,
-    /// How long a request whose every offer was refused or passed over waits before pass 2
-    /// asks again: its `provider_limits` `acquire_retry`.
-    pub(crate) acquire_retry: Duration,
+    /// Pass 2's failover timing: its `provider_limits` `quota_backoff` and `acquire_retry`.
+    pub(crate) failover: Failover,
     /// How long the provider's cached catalog is used before it is fetched again: its
     /// `provider_limits` `catalog_refresh`.
     pub(crate) catalog_refresh: Duration,
@@ -311,8 +308,7 @@ impl Registering {
                 allowed_instance_types: limit.allowed_instance_types.clone(),
                 max_price_cents_per_hour: limit.max_price_cents_per_hour,
             };
-            plan.quota_backoff = limit.quota_backoff;
-            plan.acquire_retry = limit.acquire_retry;
+            plan.failover = limit.failover();
             plan.catalog_refresh = limit.catalog_refresh;
             plan.offer_cooldown = limit.offer_cooldown;
         });
@@ -886,8 +882,7 @@ impl Elastic<'_> {
             provider: Arc::from(built.provider),
             share: u32::try_from(max).unwrap_or(u32::MAX),
             limits: PoolLimits::default(),
-            quota_backoff: ProviderLimits::default().quota_backoff,
-            acquire_retry: ProviderLimits::default().acquire_retry,
+            failover: ProviderLimits::default().failover(),
             catalog_refresh: ProviderLimits::default().catalog_refresh,
             offer_cooldown: ProviderLimits::default().offer_cooldown,
         };

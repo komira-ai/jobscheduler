@@ -40,6 +40,15 @@ const DEFAULT_CATALOG_REFRESH: Duration = Duration::from_secs(3600);
 /// The `offer_cooldown` of a provider whose table does not give it.
 const DEFAULT_OFFER_COOLDOWN: Duration = Duration::from_secs(3600);
 
+/// What pass 2's failover takes from a provider's limits ([`ProviderLimits::failover`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Failover {
+    /// [`ProviderLimits::quota_backoff`].
+    pub(crate) quota_backoff: Duration,
+    /// [`ProviderLimits::acquire_retry`].
+    pub(crate) acquire_retry: Duration,
+}
+
 /// What a pool lets one machine provider launch. Read and checked at start, and read by
 /// admission, by the cache of the provider's catalog and by the pick of an offer (design
 /// 5.6, pass 2) in the scaler.
@@ -70,6 +79,16 @@ pub struct ProviderLimits {
     /// How long one of the provider's offers cools down once it is cooled down
     /// (`offer_cooldown`); one hour when not given. Never zero.
     pub offer_cooldown: Duration,
+}
+
+impl ProviderLimits {
+    /// The timing of pass 2's failover these limits give.
+    pub(crate) fn failover(&self) -> Failover {
+        Failover {
+            quota_backoff: self.quota_backoff,
+            acquire_retry: self.acquire_retry,
+        }
+    }
 }
 
 impl Default for ProviderLimits {
