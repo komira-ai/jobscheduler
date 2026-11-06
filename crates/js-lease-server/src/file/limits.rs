@@ -22,15 +22,32 @@ const KEYS: &[&str] = &[
     "max_price_cents_per_hour",
     "max_machines",
     "max_spot_machines",
+    "quota_backoff",
+    "acquire_retry",
     "catalog_refresh",
     "offer_cooldown",
 ];
+
+/// The `quota_backoff` of a provider whose table does not give it.
+const DEFAULT_QUOTA_BACKOFF: Duration = Duration::from_secs(3600);
+
+/// The `acquire_retry` of a provider whose table does not give it.
+const DEFAULT_ACQUIRE_RETRY: Duration = Duration::from_secs(60);
 
 /// The `catalog_refresh` of a provider whose table does not give it.
 const DEFAULT_CATALOG_REFRESH: Duration = Duration::from_secs(3600);
 
 /// The `offer_cooldown` of a provider whose table does not give it.
 const DEFAULT_OFFER_COOLDOWN: Duration = Duration::from_secs(3600);
+
+/// What pass 2's failover takes from a provider's limits ([`ProviderLimits::failover`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Failover {
+    /// [`ProviderLimits::quota_backoff`].
+    pub(crate) quota_backoff: Duration,
+    /// [`ProviderLimits::acquire_retry`].
+    pub(crate) acquire_retry: Duration,
+}
 
 /// What a pool lets one machine provider launch. Read and checked at start, and read by
 /// admission, by the cache of the provider's catalog and by the pick of an offer (design
@@ -48,12 +65,30 @@ pub struct ProviderLimits {
     pub max_machines: Option<u64>,
     /// The most of those that may be spot machines; `None`: no bound of its own.
     pub max_spot_machines: Option<u64>,
+    /// How long pass 2 passes over an instance type in a region (a zone, for providers whose
+    /// zones are regions) after the provider refused it for quota (`quota_backoff`); one hour
+    /// when not given. Never zero. The provider as a whole is not braked.
+    pub quota_backoff: Duration,
+    /// How long a request whose every offer was refused or passed over waits before pass 2
+    /// asks again (`acquire_retry`); 60 seconds when not given. Never zero. A completed
+    /// catalog refresh asks again at once.
+    pub acquire_retry: Duration,
     /// How long the provider's cached catalog is used before it is fetched again
     /// (`catalog_refresh`); one hour when not given. Never zero.
     pub catalog_refresh: Duration,
     /// How long one of the provider's offers cools down once it is cooled down
     /// (`offer_cooldown`); one hour when not given. Never zero.
     pub offer_cooldown: Duration,
+}
+
+impl ProviderLimits {
+    /// The timing of pass 2's failover these limits give.
+    pub(crate) fn failover(&self) -> Failover {
+        Failover {
+            quota_backoff: self.quota_backoff,
+            acquire_retry: self.acquire_retry,
+        }
+    }
 }
 
 impl Default for ProviderLimits {
@@ -64,6 +99,8 @@ impl Default for ProviderLimits {
             max_price_cents_per_hour: None,
             max_machines: None,
             max_spot_machines: None,
+            quota_backoff: DEFAULT_QUOTA_BACKOFF,
+            acquire_retry: DEFAULT_ACQUIRE_RETRY,
             catalog_refresh: DEFAULT_CATALOG_REFRESH,
             offer_cooldown: DEFAULT_OFFER_COOLDOWN,
         }
@@ -112,6 +149,8 @@ pub(super) fn read(
             max_price_cents_per_hour: at_least_one(&mut s, "max_price_cents_per_hour")?,
             max_machines: at_least_one(&mut s, "max_machines")?,
             max_spot_machines: s.integer("max_spot_machines")?,
+            quota_backoff: s.duration_or("quota_backoff", DEFAULT_QUOTA_BACKOFF)?,
+            acquire_retry: s.duration_or("acquire_retry", DEFAULT_ACQUIRE_RETRY)?,
             catalog_refresh: s.duration_or("catalog_refresh", DEFAULT_CATALOG_REFRESH)?,
             offer_cooldown: s.duration_or("offer_cooldown", DEFAULT_OFFER_COOLDOWN)?,
         };
