@@ -247,6 +247,9 @@ mod tests {
         assert_eq!(error.to_string(), "65 labels are more than the 64 allowed");
     }
 
+    /// One case of the claim table: an instance's name, its labels and the claim they make.
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], Claim);
+
     /// Asserts the claim of every combination of the marks: both labels and the name whole
     /// is ours; the scheduler label alone, the name alone, the scheduler label with the
     /// name and no acquire label, and an acquire label with no scheduler label are
@@ -260,7 +263,7 @@ mod tests {
         let mine = mine.as_str();
         let theirs = name_of("two");
         let theirs = theirs.as_str();
-        let cases: [(&str, &[(&str, &str)], Claim); 10] = [
+        let cases: [Case<'_>; 10] = [
             (
                 mine,
                 &[(SCHEDULER_LABEL, "one"), (ACQUIRE_LABEL, "a")],
