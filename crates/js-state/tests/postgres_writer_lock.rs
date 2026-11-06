@@ -1,5 +1,6 @@
 //! The writer lock on Postgres: a session-level advisory lock on a connection of its own,
-//! taken once (no waiting), released when the holder is dropped or its session ends.
+//! taken once (no waiting), released when the holder is dropped or its session ends; and
+//! [`WriterLock::probe`], which reads the holder from `pg_locks` without trying the lock.
 //!
 //! Each test has a database of its own (`test_database`), and advisory locks are scoped
 //! to a database, so the tests do not see each other's locks. The tests need the server
@@ -17,9 +18,10 @@ use js_state::postgres::{
 };
 use js_state::sqlite::{Options, SqliteError, SqliteStore};
 use js_state::{
-    Clock, Cond, LockRefused, ManualClock, Store, StoreError, Txn, WriterGeneration, WriterLock,
-    WriterTarget,
+    Clock, Cond, LockRefused, LockState, ManualClock, Store, StoreError, Txn, WriterGeneration,
+    WriterLock, WriterTarget,
 };
+use js_testkit::database::{ddl, server_url};
 use js_testkit::dir::TestDir;
 use postgres::{Client, NoTls};
 
@@ -404,4 +406,156 @@ fn an_increment_the_server_refuses_is_its_refusal_and_frees_the_lock() {
         ))
     );
     assert_eq!(holder(&mut admin), None, "the lock was given back");
+}
+
+fn probe(target: &WriterTarget) -> LockState {
+    WriterLock::probe(target).expect("the probe")
+}
+
+/// The holder text of a held probe, which fails the test on `Free`.
+fn holder_text(state: LockState) -> String {
+    match state {
+        LockState::Held { holder } => holder.to_string(),
+        LockState::Free => panic!("the lock reads as free"),
+    }
+}
+
+/// When the backend `pid` started, in microseconds since the Unix epoch, as `admin` sees it.
+fn backend_start(admin: &mut Client, pid: i32) -> i64 {
+    admin
+        .query_one(
+            "SELECT (extract(epoch FROM backend_start) * 1000000)::bigint \
+             FROM pg_stat_activity WHERE pid = $1",
+            &[&pid],
+        )
+        .expect("the activity view")
+        .get(0)
+}
+
+// Catches a probe that calls a free lock held (an update would wait on a writer that is not
+// there), and one that leaves a lock behind on the server.
+#[test]
+fn a_probe_of_a_free_postgres_lock_is_free() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    assert_eq!(probe(&target(&database)), LockState::Free);
+    drop(WriterLock::acquire(&target(&database)).expect("acquired"));
+    assert_eq!(probe(&target(&database)), LockState::Free, "after the drop");
+    assert_eq!(holder(&mut admin), None, "the probe left no lock");
+}
+
+// Catches a probe that reports a held lock as free, or names a backend other than the
+// holder's (the probe's own, or another database's holder: the lock is per database), or
+// leaves out when the holder's backend started (a restarted holder reusing the pid would
+// look the same).
+#[test]
+fn a_probe_of_a_held_postgres_lock_names_the_holders_backend_and_its_start() {
+    let database = test_database();
+    let other = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    let held = WriterLock::acquire(&target(&database)).expect("acquired");
+    let elsewhere = WriterLock::acquire(&target(&other)).expect("another database's lock");
+    let pid = holder(&mut admin).expect("the holder's backend");
+    assert_eq!(
+        holder_text(probe(&target(&database))),
+        format!("{pid}@{}", backend_start(&mut admin, pid))
+    );
+    drop(held);
+    assert_eq!(probe(&target(&database)), LockState::Free);
+    drop(elsewhere);
+}
+
+/// A role of its own for the test that owns `database`, with no privilege beyond logging in
+/// (so it may not see when another role's backend started), dropped with this value. Roles
+/// are shared by the server, so the DDL goes through the catalog guard (`ddl`).
+struct UnprivilegedRole {
+    name: String,
+}
+
+impl UnprivilegedRole {
+    fn for_test(database: &TestDatabase) -> UnprivilegedRole {
+        let name = format!("{}_probe", database.name());
+        ddl(&server_url(), &format!("CREATE ROLE {name} LOGIN")).expect("creates the role");
+        UnprivilegedRole { name }
+    }
+
+    /// The target of `database` as this role (no password: the test server trusts it).
+    fn target(&self, database: &TestDatabase) -> WriterTarget {
+        let url = database.url();
+        let (scheme, rest) = url.split_once("://").expect("a URL");
+        let rest = rest.split_once('@').map_or(rest, |(_, tail)| tail);
+        let url = format!("{scheme}://{}@{rest}", self.name);
+        WriterTarget::Postgres(Box::new(
+            PostgresConfig::parse(&url).expect("the URL parses"),
+        ))
+    }
+}
+
+impl Drop for UnprivilegedRole {
+    fn drop(&mut self) {
+        let _ = ddl(&server_url(), &format!("DROP ROLE IF EXISTS {}", self.name));
+    }
+}
+
+// Catches a probe that fails, or calls the lock free, when the probing role may not see the
+// holder's session (`backend_start` is NULL to it): it names the holder by its pid alone.
+#[test]
+fn a_probe_by_a_role_that_cannot_see_the_holders_session_names_its_pid_alone() {
+    let database = test_database();
+    let role = UnprivilegedRole::for_test(&database);
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    let held = WriterLock::acquire(&target(&database)).expect("acquired");
+    let pid = holder(&mut admin).expect("the holder's backend");
+    assert_eq!(holder_text(probe(&role.target(&database))), pid.to_string());
+    drop(held);
+    assert_eq!(probe(&role.target(&database)), LockState::Free);
+}
+
+// Catches a probe that tries the lock to look (`pg_try_advisory_lock` and an unlock: a
+// writer starting in that instant would be refused as held), ends or changes the holder's
+// session, or bumps the writer generation: the holder keeps its backend and its session,
+// a second acquire is still refused, and the next holder's generation is one past it.
+#[test]
+fn probing_a_held_postgres_lock_does_not_disturb_its_holder() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    let mut held = WriterLock::acquire(&target(&database)).expect("acquired");
+    let generation = held.generation().expect("a generation");
+    let pid = holder(&mut admin).expect("the holder's backend");
+    let named = holder_text(probe(&target(&database)));
+    for _ in 0..3 {
+        assert_eq!(holder_text(probe(&target(&database))), named);
+    }
+    assert_eq!(held.check(), Ok(()));
+    assert_eq!(holder(&mut admin), Some(pid), "the same backend holds it");
+    assert_eq!(
+        WriterLock::acquire(&target(&database)).err(),
+        Some(LockRefused::Held)
+    );
+    drop(held);
+    let next = WriterLock::acquire(&target(&database)).expect("free after the drop");
+    assert_eq!(
+        next.generation(),
+        Some(WriterGeneration::new(generation.get() + 1))
+    );
+}
+
+// Catches a probe failure that quotes the URL, the password or the server's text (which
+// names the role), or that is reported as a free lock.
+#[test]
+fn probe_errors_never_contain_the_url_or_password() {
+    let password = "wrong-password-5c1e";
+    let (port, server) = refusing_server();
+    let url = format!("postgres://writer:{password}@127.0.0.1:{port}/state");
+    let config = PostgresConfig::parse(&url).expect("the URL parses");
+    let failed = WriterLock::probe(&WriterTarget::Postgres(Box::new(config)))
+        .expect_err("the login is refused");
+    server.join().expect("the server thread");
+    assert_eq!(
+        failed.to_string(),
+        "the store's writer lock could not be probed: the server refused (SQLSTATE 28P01)"
+    );
+    let debug = format!("{failed:?}");
+    assert!(!debug.contains(password), "{debug}");
+    assert!(!debug.contains(&url), "{debug}");
 }

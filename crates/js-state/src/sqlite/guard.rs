@@ -3,8 +3,13 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io;
+use std::io::{self, Read as _};
+use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use rustix::io::Errno;
+use rustix::process::{Pid, test_kill_process};
 
 use super::SqliteError;
 
@@ -25,6 +30,10 @@ const NETWORK_FILESYSTEMS: &[(u32, &str)] = &[
 
 /// How many symbolic links [`canonical_db`] follows from one name, as Linux does.
 const MAX_LINKS: usize = 40;
+
+/// How much of a lock file [`recorded_holder`] reads: a token is a few dozen bytes, and a
+/// lock file holding more is read no further.
+const TOKEN_MAX: u64 = 256;
 
 /// The lock file of the state file `db`: its name with `.lock` after it.
 pub(super) fn lock_path(db: &Path) -> PathBuf {
@@ -137,27 +146,61 @@ pub(super) fn refuse_hard_link(db: &Path) -> Result<(), SqliteError> {
 /// copy until it execs, so closing the file would leave the state file locked for as
 /// long as that takes. Dropping unlocks first, which no copy outlives, so the state file
 /// can be opened again once the drop returns.
+///
+/// A holder (what [`take_lock`] returns) has written its token into the file
+/// ([`LockFile::record`]); dropping it empties the file before it unlocks, so the token
+/// is gone before another process can take the lock and write its own.
 #[derive(Debug)]
-pub(super) struct LockFile(File);
+pub(super) struct LockFile {
+    file: File,
+    recorded: bool,
+}
 
 impl LockFile {
     /// Takes an exclusive lock on `file` without waiting.
     fn try_take(file: File) -> Result<LockFile, TryLockError> {
-        file.try_lock().map(|()| LockFile(file))
+        file.try_lock().map(|()| LockFile {
+            file,
+            recorded: false,
+        })
+    }
+
+    /// Writes `token` as the whole content of the held lock file. On an error the lock is
+    /// dropped (and whatever part of the token was written, emptied).
+    fn record(mut self, token: &str) -> io::Result<LockFile> {
+        self.recorded = true;
+        self.file.write_all_at(token.as_bytes(), 0)?;
+        self.file.set_len(token.len() as u64)?;
+        Ok(self)
     }
 }
 
 impl Drop for LockFile {
     fn drop(&mut self) {
+        // An error leaves the token in the file, which then names a process that is alive
+        // but no longer holds the lock, until that process ends.
+        if self.recorded {
+            let _ = self.file.set_len(0);
+        }
         // An error leaves the close that follows to release the lock, as before.
-        let _ = self.0.unlock();
+        let _ = self.file.unlock();
     }
 }
 
-/// Creates `db`'s lock file if missing and takes an exclusive `flock` on it; returns it
-/// and its name. The lock file is beside the file's one name ([`canonical_db`]), so a
-/// link to the file, or a linked directory, names the same lock. Dropping the lock, or
-/// the process ending, releases it.
+/// The token a holder writes into its lock file: this process's id and the time it took
+/// the lock, in microseconds since the Unix epoch, as `<pid>@<micros>`. Opaque to readers
+/// but for the process id before the `@`, which [`live_holder`] checks.
+fn holder_token() -> String {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}@{}\n", std::process::id(), since_epoch.as_micros())
+}
+
+/// Creates `db`'s lock file if missing, takes an exclusive `flock` on it and records this
+/// process in it ([`holder_token`]); returns it and its name. The lock file is beside the
+/// file's one name ([`canonical_db`]), so a link to the file, or a linked directory, names
+/// the same lock. Dropping the lock, or the process ending, releases it.
 pub(super) fn take_lock(db: &Path) -> Result<(LockFile, PathBuf), SqliteError> {
     let lock = canonical_lock(db)?;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -168,8 +211,64 @@ pub(super) fn take_lock(db: &Path) -> Result<(LockFile, PathBuf), SqliteError> {
         .mode(0o600)
         .open(&lock)?;
     match LockFile::try_take(file) {
-        Ok(taken) => Ok((taken, lock)),
+        Ok(taken) => recorded(taken.record(&holder_token()), lock),
         Err(error) => Err(lock_failed(db, lock, error)),
+    }
+}
+
+/// The lock [`take_lock`] took, once its token is written: a token that could not be
+/// written fails the take (the lock is already released), since a holder no probe can see
+/// would be reported free.
+pub(super) fn recorded(
+    taken: io::Result<LockFile>,
+    lock: PathBuf,
+) -> Result<(LockFile, PathBuf), SqliteError> {
+    match taken {
+        Ok(file) => Ok((file, lock)),
+        Err(error) => Err(SqliteError::Io(format!(
+            "could not record the holder in {}: {error}",
+            lock.display()
+        ))),
+    }
+}
+
+/// The holder the lock file of `db` names, read without locking, creating or changing
+/// anything: `None` when nobody may hold the lock (no lock file, an empty one, or a token
+/// whose process is gone), else the token ([`live_holder`]). The answer can be stale the
+/// moment it is given, and a holder that has taken the `flock` but not yet written its
+/// token (or one of a release that wrote none) reads as `None`.
+///
+/// # Errors
+/// The file's name cannot be resolved, or the lock file cannot be read.
+pub(crate) fn recorded_holder(db: &Path) -> Result<Option<String>, SqliteError> {
+    let read = canonical_lock(db).and_then(|lock| {
+        let mut token = Vec::new();
+        File::open(lock)?.take(TOKEN_MAX).read_to_end(&mut token)?;
+        Ok(token)
+    });
+    match read {
+        Ok(token) => Ok(live_holder(&String::from_utf8_lossy(&token))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(SqliteError::Io(format!(
+            "the lock of {}: {error}",
+            db.display()
+        ))),
+    }
+}
+
+/// The holder `token` names, unless it names nobody: `None` for an empty token and for
+/// one whose process id (the text before the first `@`) is a process that does not
+/// exist. A token whose process id cannot be read is kept as it is: it cannot be shown
+/// to be stale, so it is not reported free.
+pub(super) fn live_holder(token: &str) -> Option<String> {
+    let holder = token.trim();
+    if holder.is_empty() {
+        return None;
+    }
+    let pid = holder.split('@').next().unwrap_or_default();
+    match pid.parse::<i32>().ok().and_then(Pid::from_raw) {
+        Some(pid) if test_kill_process(pid) == Err(Errno::SRCH) => None,
+        _ => Some(holder.to_owned()),
     }
 }
 
