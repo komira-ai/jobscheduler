@@ -9,7 +9,7 @@
 //! its own spelling (lower case, words joined by `-`), so a request that names exactly
 //! that spelling still matches it.
 
-use js_caps::{Accelerator, Model, accelerator_of};
+use js_caps::{Accelerator, Model, NVIDIA_A100, NVIDIA_B200, accelerator_of};
 
 use crate::model::{AcceleratorTypeName, MachineTypeName};
 
@@ -24,10 +24,10 @@ const GIB: u64 = 1 << 30;
 pub(crate) const ACCELERATOR_ROWS: [(&str, &str, u64); 5] = [
     // A2 Standard: "these machine types have A100 40GB GPUs (`nvidia-tesla-a100`)" (GPU
     // machine types). The form factor is not stated, so the family, with its memory.
-    ("nvidia-tesla-a100", "nvidia-a100", 40),
+    ("nvidia-tesla-a100", NVIDIA_A100, 40),
     // A2 Ultra: "these machine types have A100 80GB GPUs (`nvidia-a100-80gb`)" (GPU machine
     // types). The form factor is not stated, so the family, with its memory.
-    ("nvidia-a100-80gb", "nvidia-a100", 80),
+    ("nvidia-a100-80gb", NVIDIA_A100, 80),
     // A3 High and A3 Edge: "these machine types have H100 SXM GPUs (`nvidia-h100-80gb`)",
     // 80 GB of HBM3 (GPU machine types): the SXM5 module of 80 GB HBM3.
     ("nvidia-h100-80gb", "nvidia-h100-80gb-hbm3", 80),
@@ -36,7 +36,8 @@ pub(crate) const ACCELERATOR_ROWS: [(&str, &str, u64); 5] = [
     ("nvidia-h100-mega-80gb", "nvidia-h100-80gb-hbm3", 80),
     // A4: "A4 (NVIDIA B200) (`nvidia-b200`)", 180 GB of HBM3e per GPU (GPU machine types).
     // The family, with its memory.
-    ("nvidia-b200", "nvidia-b200", 180),
+    // Google's name is the family's own spelling, so both are `js-caps`'s constant.
+    (NVIDIA_B200, NVIDIA_B200, 180),
 ];
 
 /// The machine types that take attached accelerators: the N1 general-purpose types ("N1

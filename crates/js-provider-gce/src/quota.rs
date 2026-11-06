@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use js_caps::NVIDIA_B200;
 use js_elastic::{Quota, QuotaLimit};
 
 use crate::api::PurchaseKind;
@@ -75,7 +76,8 @@ pub(crate) const GPU_ROWS: [(&str, Option<&str>, Option<&str>); 14] = [
         Some("PREEMPTIBLE_NVIDIA_H200_GPUS"),
     ),
     // A4, B200: no standard quota.
-    ("nvidia-b200", None, Some("PREEMPTIBLE_NVIDIA_B200_GPUS")),
+    // (Google's name, `nvidia-b200`, is the family's own spelling: `js-caps`'s constant.)
+    (NVIDIA_B200, None, Some("PREEMPTIBLE_NVIDIA_B200_GPUS")),
     // G2, L4: preemptible only (the standard quota is a GPU family).
     ("nvidia-l4", None, Some("PREEMPTIBLE_NVIDIA_L4_GPUS")),
     // G2, L4 virtual workstation.
