@@ -36,6 +36,13 @@
 //! because both are conformance suites that a defect is shown red against, and it needs
 //! nothing the crate does not already have.
 //!
+//! The job-service suite, which holds a server of `jobscheduler.v1.JobService` (the real one
+//! or a fake that a client's tests talk to) to the answers of the real service, is the
+//! [`jobs`] module. It takes a harness that gives a tonic client and a few hooks (the
+//! scheduler's and the agent's moves, the clock, the retention sweep) and ships an in-memory
+//! reference service ([`jobs::ReferenceJobs`]) that each of its scenarios is shown able to
+//! fail against.
+//!
 //! # Follow-ups
 //!
 //! - Labels on created resources (design 13.2: labels are present on every created
@@ -46,6 +53,7 @@
 pub mod agent;
 mod checks;
 pub mod core;
+pub mod jobs;
 
 use std::collections::BTreeMap;
 
