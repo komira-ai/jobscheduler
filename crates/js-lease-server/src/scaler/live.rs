@@ -117,6 +117,10 @@ impl Effects for Live {
         self.provider.is_gone(id)
     }
 
+    fn catalog_fetches(&self) -> u64 {
+        self.launcher.catalog_fetches()
+    }
+
     fn save(&self, records: &Records) -> Result<(), String> {
         match self.file.save(records) {
             Ok(()) => Ok(()),

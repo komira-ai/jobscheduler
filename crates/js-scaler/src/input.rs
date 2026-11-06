@@ -130,6 +130,10 @@ pub struct PoolInput {
     /// `Planned` record with one of these ids is kept when no request waits for it, so its
     /// retry settles the call instead of leaving a machine nobody counts.
     pub unresolved: Vec<AcquireId>,
+    /// Whether a fetch of the pool's provider's catalog completed since the last step. A
+    /// request waiting `acquire_retry` after every offer was refused for it is asked about
+    /// again at once (design 5.6, step 5).
+    pub catalog_refreshed: bool,
 }
 
 /// The provider's answer to an acquire the caller ran for an earlier step.

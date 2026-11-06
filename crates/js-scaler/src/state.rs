@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Dimension, HostRef, Offer};
+use js_sched::failover::{AcquireMemory, Refused};
 use js_types::RequestId;
 
 use crate::record::Records;
@@ -128,6 +129,15 @@ pub struct State {
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
     /// a paid machine was released on silence.
     pub silent_released: Vec<String>,
+    /// The acquires refused for `capacity` or `quota` whose answers this step took in, with
+    /// what each recorded (for `quota`, the instance type and region passed over and until
+    /// when). The shell logs each.
+    pub refusals: Vec<Refused>,
+    /// What pass 2 remembers of refused acquires: each waiting request's attempt, and the
+    /// instance types passed over after a `quota` answer. Not written to disk: after a
+    /// restart every request starts a new attempt and nothing is passed over, which costs
+    /// at most one refused acquire per offer.
+    pub(crate) acquire: AcquireMemory,
     /// Since when each registered machine has been missing from complete registry views,
     /// unbroken. Kept in [`Records::missing_since`] too.
     pub(crate) missing: BTreeMap<String, Millis>,

@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 use js_sched::acquire::needs_acquire;
+use js_types::RequestId;
 
 use crate::budget;
 use crate::caps::{check, holding, nearest_miss};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
-use crate::pick::decide;
+use crate::pick::walk;
 use crate::record::{CooldownReason, Phase, Record, Records};
 use crate::settings::{Blocked, Health, LaunchMode, Settings};
 use crate::state::{AcquirePlan, Action, PlanLine, State};
@@ -583,12 +584,13 @@ impl Pass<'_> {
             .into_iter()
             .all(|ok| ok);
             let machines = holding(settings, &self.records.instances, &staged, &BTreeSet::new());
-            let decided = decide(
+            let decided = walk(
                 settings,
-                &pool.offers,
-                &self.declined,
-                &request.demand,
+                (&pool.offers, pool.catalog_refreshed),
+                (&request.id, &request.demand),
                 machines.len(),
+                &mut self.memory,
+                self.now,
             );
             held_back = held_back.or(decided.as_ref().err().copied().flatten());
             let offer = decided.ok().filter(|_| room);
@@ -616,9 +618,18 @@ impl Pass<'_> {
             if !staged.is_empty() {
                 self.note_kind(settings);
             }
-            for (record, request) in staged.into_iter().zip(served) {
+            // Each staged launch carries the acquire id `stage` minted for it.
+            let launches = staged.iter().zip(&served).flat_map(|(record, request)| {
+                record.acquire.iter().map(move |acquire| (request, acquire))
+            });
+            for (request, acquire) in launches {
+                self.memory.launched(&request.id, acquire);
+            }
+            for (record, request) in staged.iter().zip(&served) {
                 self.launched
                     .insert(record.name.clone(), request.id.clone());
+            }
+            for record in staged {
                 self.actions.extend(launch_actions(
                     &record,
                     settings.token_life(),
@@ -789,6 +800,17 @@ impl Pass<'_> {
                 .all(|ok| ok)
             })
             .collect();
+        let waiting: BTreeSet<&RequestId> = input.waiting.iter().map(|each| &each.id).collect();
+        let pending: BTreeSet<&AcquireId> = self
+            .records
+            .instances
+            .iter()
+            .filter_map(|record| record.acquire.as_ref())
+            .collect();
+        self.memory.retain(
+            |request| waiting.contains(request),
+            |acquire| pending.contains(acquire),
+        );
         let credited = std::mem::take(&mut self.credited)
             .into_iter()
             .filter(|name| self.records.instances.iter().any(|each| each.name == *name))
@@ -806,6 +828,8 @@ impl Pass<'_> {
             silent: self.silent_now,
             silent_released: self.silent_released,
             launched: self.launched,
+            refusals: self.refusals,
+            acquire: self.memory,
             missing: self.missing_now,
             unheard: self.unheard_now,
             restored: false,

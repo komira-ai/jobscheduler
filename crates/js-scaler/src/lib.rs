@@ -27,8 +27,13 @@
 //!   choose): with the pool as its one machine provider, the cheapest available fitting
 //!   offer inside the pool's `provider_limits` (`allowed_instance_types`,
 //!   `max_price_cents_per_hour`), then the fewest accelerators, the least spare CPU and
-//!   memory, and the offer id and zone, never one a provider refused for capacity in the
-//!   same step. An offer with no price, or a price of zero, is never launched (zero would
+//!   memory, and the offer id and zone. A provider's refusal is failed over within the
+//!   request's attempt ([`js_sched::failover`]): an offer refused for `capacity` is not
+//!   asked again in the attempt and its other zones are asked next, an instance type refused
+//!   for `quota` is passed over in its region for [`Settings::quota_backoff`] for every
+//!   request, and a request every offer was refused for waits [`Settings::acquire_retry`],
+//!   or until the pool's catalog is fetched again ([`PoolInput::catalog_refreshed`]). Neither
+//!   answer cools the pool or counts toward its brake. An offer with no price, or a price of zero, is never launched (zero would
 //!   pass both spend caps; a request that fits only such an offer shows
 //!   [`Blocked::Unpriced`]), and a provider that holds its share ([`Settings::provider_share`])
 //!   launches nothing and shows [`Blocked::MaxInstances`]. A launch is made when the pool
@@ -47,7 +52,7 @@
 //!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
 //!   their billed time has left the 30 days.
 //!   The failure brake ([`Brake`], in `brake`) keeps a pool from looping on failures: each
-//!   refusal (quota, denied, shape), boot given up on and spot preemption counts, the cooldown
+//!   refusal (denied, shape), boot given up on and spot preemption counts, the cooldown
 //!   after the n-th in a row is `boot_fail_cooldown` doubled n-1 times up to
 //!   `boot_fail_cooldown_max`, and `boot_fail_trip_after` in a row trip the pool to `Plan`
 //!   ([`Blocked::Tripped`]) until the step is given the pool's name in
@@ -155,8 +160,8 @@ pub use record::{
     StoredOffer, VERSION,
 };
 pub use settings::{
-    BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked, Health,
-    LaunchMode, Settings, UNNAMED_PROVIDER,
+    ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
+    Health, LaunchMode, QUOTA_BACKOFF, Settings, UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
@@ -232,7 +237,7 @@ pub fn launchable(state: &State, input: &Input, now: Millis, demand: &Demand) ->
             .map(|record| record.name.clone())
             .collect();
         let machines = holding(settings, &state.records.instances, &[], &idle).len();
-        let price = decide(settings, &pool.offers, &[], demand, machines)
+        let price = decide(settings, &pool.offers, demand, machines)
             .ok()
             .and_then(|offer| offer.price_cents_per_hour);
         let within = price.is_some_and(|price| {
