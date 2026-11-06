@@ -291,7 +291,7 @@ fn a_role_run_waits_for_the_vm_user_s_session() {
     let reply =
         |request: Request, fds: Vec<std::os::fd::OwnedFd>| match rig.helper.handle(request, fds) {
             Outcome::Reply(reply) => reply,
-            Outcome::Running(child) => panic!("a process started: {child:?}"),
+            other => panic!("not a reply: {other:?}"),
         };
     assert_eq!(
         reply(Request::RoleSessionReady, Vec::new()),

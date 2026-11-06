@@ -1,0 +1,18 @@
+# The scratch file system of a jobscheduler machine image, installed by the image build as
+# /etc/systemd/system/var-lib-js\x2dagent-scratch.mount, the default `--scratch-mount-unit` of
+# crun_host_setup.sh (docs/runbooks/machine-images.md). An XFS file system in a sparse file of
+# 16 GiB on the root disk, mounted with project quota, so the agent's per-run quota works on a
+# machine that has no disk of its own for scratch. The file is made by the image build; a host
+# with a scratch disk replaces `What=` and `Options=` with a drop-in.
+[Unit]
+Description=jobscheduler agent scratch (XFS in a file, with project quota)
+Documentation=https://github.com/komira-ai/jobscheduler/blob/main/docs/runbooks/machine-images.md
+
+[Mount]
+What=/var/lib/js-agent-scratch.xfs
+Where=/var/lib/js-agent/scratch
+Type=xfs
+Options=loop,prjquota
+
+[Install]
+WantedBy=local-fs.target

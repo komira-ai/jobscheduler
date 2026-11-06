@@ -50,10 +50,10 @@ pub const INVALID_PROGRAM: &str = "invalid-program";
 /// entries, or a name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
 pub const INVALID_ENV: &str = "invalid-env";
 /// As the detail of a `failed_to_start` result: a job start with a non-empty `env` on an
-/// agent whose runtime does not carry a job start's environment, today the macOS native
-/// runtime; nothing runs. Before the container runtimes set a job's environment, every
-/// agent answered it so. No container agent of this release or later sends it. Kept, as
-/// every code is: a deployed peer may still match on it.
+/// agent whose runtime does not carry a job start's environment; nothing runs. Before the
+/// container runtimes set a job's environment every agent answered it so, and the macOS
+/// native runtime did until it carried the environment too. No agent of this release or
+/// later sends it. Kept, as every code is: a deployed peer may still match on it.
 pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.

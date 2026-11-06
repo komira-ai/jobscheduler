@@ -1,4 +1,5 @@
-//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in
+//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in [`runs`]
+//! `watch` and `stop` and the deadline of a `run`, in
 //! [`switch`] the session switch and the boot reset, and in [`leak`] the leak scan's
 //! `scan`, `baseline` and `reboot-dirty`, over a [`Host`] that does what only the OS
 //! can (user records, launchd, processes, the programs the switch and the scan run),
@@ -10,8 +11,11 @@
 //!   range; a uid outside it is never touched.
 //! - `user-create` is refused for a lease id used before (so names are never reused
 //!   and a grant is single-use) and makes an administrator only with a valid grant.
-//! - `run`, `kill-uid` and `user-delete` act only on a lease the ledger holds; `run`
-//!   and `kill-uid` refuse a deleted one (its uid may belong to a newer lease).
+//! - `run`, `kill-uid`, `stop` and `user-delete` act only on a lease the ledger holds;
+//!   `run`, `kill-uid` and `stop` refuse a deleted one (its uid may belong to a newer
+//!   lease). `stop` kills only as `kill-uid` does, after a `SIGTERM` to the run's own
+//!   process group and its grace; `watch` reads the helper's table of runs and acts on
+//!   nothing.
 //! - `run` in the GUI session, and `session-ready`, act only for the lease the session
 //!   switch's intent record names (the one `session-login` logged in); `run` there is
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
@@ -68,7 +72,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use js_types::LeaseId;
 use rustix::fs::{CWD, Gid, Mode, OFlags, Uid};
@@ -87,11 +91,13 @@ mod image;
 mod leak;
 mod reap;
 mod role;
+mod runs;
 mod switch;
 mod teardown;
 mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
+pub use runs::{Ended, MAX_WAIT, NO_RUN};
 pub use switch::Reset;
 
 /// How many attempts `kill-uid` makes (kill, boot out the uid's launchd domains, look at
@@ -236,6 +242,12 @@ pub trait Host: Send + Sync {
     /// # Errors
     /// The signal could not be sent.
     fn kill_group(&self, pgid: i32) -> io::Result<()>;
+    /// Sends `SIGTERM` to the process group `pgid` (`killpg`), for `stop`; a group with no
+    /// process is not an error.
+    ///
+    /// # Errors
+    /// The signal could not be sent.
+    fn term_group(&self, pgid: i32) -> io::Result<()>;
 }
 
 /// A process as the table shows it, for `role-reap`.
@@ -330,8 +342,11 @@ pub struct Settings {
 pub enum Outcome {
     /// One reply, and the request is done.
     Reply(Reply),
-    /// A process started; the caller reports its exit.
+    /// A process started; the caller reports its exit ([`Helper::wait`]).
     Running(Child),
+    /// `watch` found the run of this lease, whose process is this pid: the caller answers
+    /// `started` and then, when [`Helper::wait_watched`] returns, how it ended.
+    Watching(String, u32),
 }
 
 /// The helper: settings, the host, and the ledger behind one lock.
@@ -347,6 +362,8 @@ pub struct Helper {
     /// Held while an image verb runs: one at a time, apart from the ledger's lock, which
     /// a minutes-long `js-vmm` must not hold back the other verbs with.
     images: Mutex<()>,
+    /// The last run of each lease ([`runs`]).
+    runs: runs::Runs,
 }
 
 impl Helper {
@@ -360,6 +377,7 @@ impl Helper {
             reset_done: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
             images: Mutex::new(()),
+            runs: runs::Runs::default(),
         }
     }
 
@@ -381,10 +399,18 @@ impl Helper {
                 env,
                 session,
                 limits,
+                deadline_ms,
             } => {
+                let started = self.run_limited(&lease, argv, env, fds, session, limits);
+                if let (Ok(child), Some(after)) = (&started, deadline_ms) {
+                    self.set_deadline(&lease, child.id(), Duration::from_millis(after));
+                }
+                return started.map_or_else(refused, Outcome::Running);
+            }
+            Request::Watch { lease } => {
                 return self
-                    .run_limited(&lease, argv, env, fds, session, limits)
-                    .map_or_else(refused, Outcome::Running);
+                    .watch(&lease)
+                    .map_or_else(refused, |pid| Outcome::Watching(lease, pid));
             }
             Request::RoleRun { argv, env } => {
                 return self
@@ -396,9 +422,13 @@ impl Helper {
                 .user_create(&lease, grant.as_deref())
                 .map(|uid| Reply::Created { uid }),
             Request::KillUid { lease } => self.kill_uid(&lease).map(|()| Reply::Killed),
-            Request::UserDelete { lease } => self
-                .user_delete(&lease)
-                .map(|existed| Reply::Deleted { existed }),
+            Request::Stop { lease, grace_ms } => self
+                .stop(&lease, Duration::from_millis(grace_ms))
+                .map(|()| Reply::Killed),
+            Request::UserDelete { lease } => self.user_delete(&lease).map(|existed| {
+                self.forget_run(&lease);
+                Reply::Deleted { existed }
+            }),
             Request::SessionLogin { lease } => {
                 self.session_login(&lease).map(|()| Reply::Restarting)
             }
@@ -609,6 +639,7 @@ impl Helper {
         .map_err(|why| format!("starting {program}: {why}"))?;
         drop(ledger);
         tracing::info!(lease = %Dotted(lease), uid, pid = child.id(), ?session, "started {program}");
+        self.runs.started(lease, child.id(), None);
         Ok(child)
     }
 
