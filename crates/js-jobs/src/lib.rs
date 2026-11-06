@@ -12,7 +12,10 @@
 //!
 //! # Results and retention
 //!
-//! A job ends only through [`JobStore::end_job`], which writes the end state, the result and
+//! A result keeps, beside the tails, the length of each output stream and the bytes each
+//! dropped ([`LogLengths`]) when the agent reported them, so that a reader of the job's live
+//! logs knows where each stream ends; they go with the result and its retention. A job ends
+//! only through [`JobStore::end_job`], which writes the end state, the result and
 //! the retention end (the store's clock plus the store's [`Retention`], seven days unless
 //! [`JobStore::with_retention`] sets another) in the transaction that ends it; so a restart
 //! loses no result, and no job is ever ended without them. The window is read when the store
@@ -129,8 +132,8 @@ pub use record::{
     JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 pub use result::{
-    BOOT_GRACE, JobEnd, JobResult, JobTiming, Output, ResourceUsage, ResultReason, Retention,
-    RetentionError, SWEEP_BATCH, sweep,
+    BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,
+    Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
     Backfill, Beside, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, Row,

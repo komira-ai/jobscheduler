@@ -35,8 +35,8 @@ use js_agent_wire::{
     Outcome,
 };
 use js_jobs::{
-    AllocationRecord, AllocationStep, JobEnd, JobId, JobRecord, JobState, JobStoreError, Output,
-    StartFailure,
+    AllocationRecord, AllocationStep, JobEnd, JobId, JobRecord, JobState, JobStoreError,
+    LogLengths, Output, StartFailure,
 };
 use js_types::HostId;
 use tracing::warn;
@@ -44,6 +44,7 @@ use tracing::warn;
 use crate::job_alloc::{self, Freed};
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
+use crate::logs::LogGrants;
 
 /// The exit code a failure is recorded with when the agent reports it with none (a job
 /// stopped without a cancel, a failure the agent could not read a status for).
@@ -74,12 +75,15 @@ struct Reported {
 /// What a heartbeat's per-job half knows of the host it serves. It is the one argument the
 /// start builder ([`start_of`]) and the result commit ([`commit_result`]) take beside the
 /// job, so what a later change needs of the host reaches both from here.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) struct BeatContext<'a> {
     /// The host whose heartbeat this is.
     pub(crate) host: &'a HostId,
     /// The most network the host's agent reported it gives a job.
     pub(crate) ceiling: &'a NetworkCeiling,
+    /// The sinks of live logs a start carries, when the server has one and the host's agent
+    /// reported that it uploads ([`crate::logs`]); `None` otherwise.
+    pub(crate) logs: Option<&'a LogGrants>,
 }
 
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
@@ -263,14 +267,24 @@ fn advance(
 
 /// The end a listed result records for `job`, or `None` for an outcome this version does not
 /// know. A stop the client asked for is a cancel; a stop it did not ask for, and a failure
-/// with no exit status, is a failure with [`NO_EXIT_CODE`].
+/// with no exit status, is a failure with [`NO_EXIT_CODE`]. The stream lengths of the
+/// result's `logs` are kept with it when the report is consistent
+/// ([`JobResult::logs_report`]); an inconsistent one is dropped and the result recorded
+/// without it, so that a reader of the job's live logs knows where each stream ends.
 pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     let tail = result.log_tail.clone().unwrap_or_default();
+    let logs = result.logs_report().map(|report| LogLengths {
+        stdout_bytes: report.stdout_bytes,
+        stderr_bytes: report.stderr_bytes,
+        stdout_dropped: report.stdout_dropped,
+        stderr_dropped: report.stderr_dropped,
+    });
     let output = Output {
         stdout: tail.stdout,
         stderr: tail.stderr,
         truncated: tail.truncated,
         usage: None,
+        logs,
     };
     let code = result.exit_code;
     let failed = code.filter(|code| *code != 0).unwrap_or(NO_EXIT_CODE);
