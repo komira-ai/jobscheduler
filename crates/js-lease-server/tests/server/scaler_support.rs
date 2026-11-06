@@ -179,6 +179,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
+        idle_costs: false,
     }))
 }
 
