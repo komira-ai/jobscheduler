@@ -10,7 +10,7 @@ use js_elastic::{
     Released, SchedulerId, Secret,
 };
 use js_jobs::JobStoreError;
-use js_registry::{Busy, HostView};
+use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
@@ -66,8 +66,8 @@ impl Live {
 }
 
 impl Effects for Live {
-    fn hosts(&self) -> Vec<HostView> {
-        self.agents.registry.hosts()
+    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        self.agents.registry.snapshot()
     }
 
     /// The queued jobs first and the live allocations after, so that a job placed between
@@ -425,7 +425,9 @@ mod tests {
         };
         let token = Secret::new("token".to_owned());
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
-        assert!(live.hosts().is_empty());
+        let (hosts, waiting) = live.registry();
+        assert!(hosts.is_empty());
+        assert!(waiting.is_empty());
         assert_eq!(live.jobs(), Ok(JobTables::default()));
         assert_eq!(live.whole_host(), floor());
         assert!(!live.holds_work("js-nobody"));

@@ -1,6 +1,6 @@
 //! The scaler's shell: [`js_scaler::step`] run on the server's tick.
 //!
-//! Once per tick the shell reads the job tables, the registry's hosts and the provider,
+//! Once per tick the shell reads the job tables, the registry and the provider,
 //! calls the pure step, and runs the actions it returns in order. Everything it does to the world goes through
 //! [`Effects`], and every tick runs on the pool for blocking calls, because the calls block
 //! (a file sync, a provider's HTTP request). No lock of the registry or the lease table is
@@ -8,10 +8,12 @@
 //! of it and swaps the copy in when it is done, so the status page and the checks never
 //! wait for a provider's call.
 //!
-//! What waits for a machine and which hosts are in use are the job tables', not the
-//! registry's leases (the `jobs` module): each queued job without an allocation is a waiting
-//! request, and a host is busy while a live allocation is on it. A tick whose read of the
-//! tables fails does nothing else, since an unknown host is not an idle one.
+//! What waits for a machine and which hosts are in use are read from both the job tables
+//! (the `jobs` module) and the registry's lease side, until the lease API is deleted: the
+//! registry's waiting whole-node requests and then each queued job without an allocation
+//! are waiting requests, and a host is busy while a live allocation or a lease is on it. A
+//! tick whose read of the tables fails does nothing else, since an unknown host is not an
+//! idle one.
 //!
 //! What the shell keeps between ticks, besides the step's [`State`] (whose records are the
 //! only part on disk):
@@ -96,7 +98,7 @@ use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
     AcquireResult, Action, Budgets, HostFacts, Input, Millis, Phase, PoolInput, Records,
-    ReleaseResult, Settings, State, launchable, step,
+    ReleaseResult, Settings, State, Waiting, launchable, step,
 };
 use js_types::{ExecMode, HostId, RequestId};
 use tracing::{debug, warn};
@@ -579,7 +581,7 @@ impl Core {
             }
         };
         let pool = &self.settings.pool;
-        let views = self.effects.hosts();
+        let (views, requests) = self.effects.registry();
         let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
         let at = self.clock.now();
@@ -615,10 +617,18 @@ impl Core {
         memory
             .reserved
             .settle(&queued, &memory.state.records, (&hosts, &open));
+        // A launch is set aside for a job only when its request id names no lease request
+        // as well: a job and a lease request that share an id are matched by fit alone.
+        let leases: BTreeSet<RequestId> = requests.iter().map(|each| each.id.clone()).collect();
         let ids = queued
             .iter()
+            .filter(|queued| !leases.contains(&queued.request))
             .map(|queued| (queued.request.clone(), queued.job.clone()))
             .collect();
+        // The registry's wait list first, as before the job tables were read, then the jobs
+        // in queue order.
+        let mut waiting: Vec<Waiting> = requests.into_iter().map(view::waiting).collect();
+        waiting.extend(memory.reserved.waiting(queued));
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
         let input = Input {
             scheduler: self.scheduler.clone(),
@@ -629,7 +639,7 @@ impl Core {
                 held,
                 unresolved: self.effects.unresolved(),
             }],
-            waiting: memory.reserved.waiting(queued),
+            waiting,
             hosts,
             registry_complete: complete,
             acquired: memory.acquired.clone(),

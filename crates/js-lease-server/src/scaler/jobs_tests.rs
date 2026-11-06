@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_elastic::{AcquireId, Offer, PriceUnit};
 use js_jobs::{Booked, DeclaredPort, JobSpec, NetworkPolicy, NewJob};
 use js_scaler::{HostState, Millis, Record, StoredOffer};
-use js_types::{ExecMode, IsaLevel, JobNetwork, Model, Resources, X86Level, accelerator_of};
+use js_types::JobNetwork as Reach;
+use js_types::{ExecMode, IsaLevel, Model, Resources, X86Level, accelerator_of};
 
 use super::*;
 use crate::agent_api::job_rig::{placed, spec, tables};
@@ -36,7 +37,7 @@ fn floor() -> Demand {
         arch: None,
         isa_level: None,
         exec: Some(ExecMode::Container),
-        network: JobNetwork::None,
+        network: Reach::None,
         host_ports: Vec::new(),
     }
 }
@@ -113,7 +114,7 @@ fn a_share_job_asks_for_what_admission_asked() {
         isa_level: Some(IsaLevel::X86_64(X86Level::V3)),
         exec: Some(ExecMode::SandboxExec),
         accelerator,
-        network: JobNetwork::Open,
+        network: Reach::Open,
         host_ports: vec![8000, 9000],
     };
     assert_eq!(wanted, expected);
@@ -175,7 +176,7 @@ fn a_whole_host_job_asks_for_the_pools_floor() {
     let expected = Demand {
         arch: Some("x86_64".to_owned()),
         exec: Some(ExecMode::SandboxExec),
-        network: JobNetwork::AllowList,
+        network: Reach::AllowList,
         host_ports: vec![7000],
         ..floor()
     };

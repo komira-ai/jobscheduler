@@ -1,8 +1,8 @@
 //! The scaler's demand and busy hosts read from the job tables through the shell, over a
 //! fake world: a queued job launches one machine and is held to it, a host with a live job
-//! allocation is never idled, a whole-host job launches one machine of the pool's shape, a
-//! lease the registry books counts for neither, and a tick that cannot read the tables does
-//! nothing. Time is an injected clock; nothing sleeps.
+//! allocation is never idled, a whole-host job launches one machine of the pool's shape, the
+//! registry's lease side still counts beside the jobs, and a tick that cannot read the tables
+//! does nothing. Time is an injected clock; nothing sleeps.
 
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ use js_scaler::{Phase, Records};
 use js_types::{LeaseId, Model, Resources, accelerator_of};
 
 use crate::fakes::{
-    Rig, allocation, allocation_of, job, job_with, live, offer, record, records, rig, spec_of, view,
+    Rig, allocation, allocation_of, job, job_with, live, offer, record, records, request, rig,
+    spec_of, view,
 };
 
 fn mins(n: u64) -> Duration {
@@ -176,34 +177,47 @@ async fn whole_host_job_launch_sized_to_shape() {
     assert_eq!(acquired(&rig).len(), 1, "{:?}", rig.log());
 }
 
-/// Asserts that a lease the registry books, with no job row and no allocation, launches
-/// nothing and keeps no host: the leased host is drained once it has been quiet for the
-/// pool's idle time, while the release itself still waits for the lease (the guard just
-/// before a release asks the registry too). It catches the registry's leases still read as
-/// demand or as work.
+/// Asserts that the registry's lease side still counts beside the job tables, until the
+/// lease API is deleted: a whole-node lease request on the wait list, with no job queued,
+/// launches one machine and no more; a registered host with only a registry lease is not
+/// drained however long; and with both a lease request and a job waiting, each gets a
+/// machine of its own. It catches the lease side dropped while leases are still served,
+/// which leaves lease requests without machines and drains hosts under leases.
 #[tokio::test]
-async fn registry_lease_no_longer_counts() {
-    let rig = rig(
+async fn the_registrys_lease_side_still_counts() {
+    let rig = rig(Records::default(), live());
+    rig.world().waiting = vec![request("r1")];
+    for _ in 0..3 {
+        rig.scaler.tick().await;
+        rig.advance(Duration::from_secs(5));
+    }
+    assert_eq!(acquired(&rig).len(), 1, "{:?}", rig.log());
+
+    let both = rig_with_limit(2);
+    both.world().waiting = vec![request("r1")];
+    both.world().queued = vec![job("j1")];
+    both.scaler.tick().await;
+    assert_eq!(acquired(&both).len(), 2, "{:?}", both.log());
+
+    let held = crate::fakes::rig(
         records(vec![record("js-leased", Phase::Registered)]),
         live(),
     );
     let mut leased = view("js-leased");
     leased.lease = Some(LeaseId::new(1, 1));
-    rig.world().hosts = vec![leased];
-    rig.scaler.tick().await;
-    rig.advance(mins(10));
-    rig.scaler.tick().await;
-    assert!(drained(&rig, "js-leased"), "{:?}", rig.log());
-    assert!(acquired(&rig).is_empty(), "{:?}", rig.log());
-    for _ in 0..4 {
-        rig.advance(Duration::from_secs(5));
-        rig.scaler.tick().await;
+    held.world().hosts = vec![leased];
+    for _ in 0..6 {
+        held.scaler.tick().await;
+        held.advance(mins(60));
     }
-    assert!(
-        !rig.log().iter().any(|each| each.starts_with("release:")),
-        "{:?}",
-        rig.log()
-    );
+    assert!(!drained(&held, "js-leased"), "{:?}", held.log());
+}
+
+/// A rig whose pool launches up to `max_step` machines a step.
+fn rig_with_limit(max_step: usize) -> Rig {
+    let mut settings = live();
+    settings.max_step = max_step;
+    rig(Records::default(), settings)
 }
 
 /// Asserts that a job read queued and also found among the live allocations (it was placed

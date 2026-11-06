@@ -641,7 +641,8 @@ neither knows the other. The renderer quotes every argv element, so no step can 
 Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes the previous `State`, one
 `Input` and the time now, and returns the next `State` and the `Vec<Action>`. The shell lives in
 `crates/js-lease-server/src/scaler/` and runs on the tick (`--tick`, `ticker.rs`, 5 s default): once per tick it reads the job tables
-(the queued jobs, then the live allocations) and the registry's hosts, calls `step`, runs the actions on a `blocking()` task
+(the queued jobs, then the live allocations) and snapshots the registry (hosts and wait list
+under one lock), calls `step`, runs the actions on a `blocking()` task
 (`util.rs`), and feeds the answers into the next step. The scaler ticks on a task of its own, so a
 slow provider call does not hold back the table's lease expiry, and a tick that finds the scaler
 still at the last one skips it. No lock is held across a provider call, nor the lock of the shell's
@@ -653,17 +654,17 @@ again at every tick, and alerted. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
 the pool until the injected clock passes it.
 
-Demand. As built, the scaler's demand is the job tables', not the registry's wait list
-(`crates/js-lease-server/src/scaler/jobs.rs`): each queued job without a live allocation is
-one `Waiting`, in queue order. A share job asks for its resources and constraints as admission
+Demand. As built, the scaler's demand is the registry's wait list (below) followed by the
+job tables' queued jobs (`crates/js-lease-server/src/scaler/jobs.rs`): each queued job
+without a live allocation is one `Waiting`, in queue order. The wait list stays an input
+until the lease API is deleted. A share job asks for its resources and constraints as admission
 read them; a whole-host job asks for the pool's floor (the least every host of the pool
 brings) with its own platform constraints, so one machine of the pool's shape is launched for
 it. When a step launches a machine for a job (`State::launched` names each new machine with
 its request), the shell sets the job aside for that machine (`reserved` names it) until the
 job leaves the queue or the machine can no longer take it; the step then holds that machine,
 on its way or registered, for the job alone, and does not drain the registered host as idle.
-The rest of this paragraph is the design of the registry's wait list, which the scaler no
-longer reads. The registry keeps a wait list of whole-node requests that found no host
+The registry keeps a wait list of whole-node requests that found no host
 (`crates/js-registry/src/whole/queue.rs`: in memory, capped at 1024, an entry lives while
 the consumer presents it again within `regain_grace`). It has no public read. PR 7 adds
 `Registry::waiting() -> Vec<Waiting { id, demand: Demand, since, reserved: Option<HostId> }>`.
@@ -712,9 +713,9 @@ What the shell owes the host facts, because the step cannot tell otherwise:
   the first hello is compared with the offer, and a floor below the offer would condemn a
   healthy machine and start the boot cooldown. A host with no shape covers no request.
 - `busy` is a live (booked or releasing) job allocation on the host, a whole-host one
-  included, or runs the registry still has the host finish (`releasing`); a lease the
-  registry books does not count. For a silent host `busy` and `lease_given_up` never hold
-  together: `lease_given_up` says no live allocation is on it. Silence frees no allocation,
+  included, a lease the registry books on it, or runs the registry still has the host
+  finish (`releasing`). For a silent host `busy` and `lease_given_up` never hold together:
+  `lease_given_up` says neither a live allocation nor a lease is on it. Silence frees no allocation,
   so a silent host that holds one is kept until its host confirms the job gone or the
   provider reads it absent. A `Held` or `Reserved` mark still keeps the host. The release
   itself asks again just before it runs (`Effects::holds_work`): a lease the registry books

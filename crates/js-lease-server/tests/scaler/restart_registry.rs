@@ -16,7 +16,7 @@ use js_jobs::JobStoreError;
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, JobTables, Scaler, SharedClock, UnremovedFile};
 use js_provider::{Pool, StartAck, StartSpec};
-use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions};
+use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSessions, Waiting};
 use js_scaler::{AcquirePlan, Health, Phase as Stage, Records};
 use js_testkit::dir::TestDir;
 use js_types::{
@@ -37,8 +37,8 @@ struct Wired {
 }
 
 impl Effects for Wired {
-    fn hosts(&self) -> Vec<HostView> {
-        self.registry.hosts()
+    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        self.registry.snapshot()
     }
 
     fn jobs(&self) -> Result<JobTables, JobStoreError> {
