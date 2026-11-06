@@ -5,8 +5,9 @@ in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of
 start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
 (`js-logmint` and its signer in `js-logstore`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
 credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
-stored with the result); and the agent's uploader (`js-agent/src/logs`, with the progress record of 3.5) of a `crun` job and of a
-macOS native job (3.7), which fills `log_grant_state` and `logs`. Nothing reads a log yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+stored with the result); the agent's uploader (`js-agent/src/logs`, with the progress record of 3.5) of a `crun` job and of a
+macOS native job (3.7), which fills `log_grant_state` and `logs`; and the reader of section 8
+(`js-lease-server`'s `job_api/logs`: `GetLogs` with a stream, the long poll, and its gateway route). `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design
@@ -91,7 +92,9 @@ no `log_sink`).
   and chunks never overlap.
 - **A reused job id.** A job id is reusable once the retention window of the job that held it has passed (design section 5.3), and the
   lifecycle rule may keep that job's objects longer. The reader therefore ignores every object of `P` last modified before the job was
-  placed (the placement time is in the job record): those belong to the earlier job.
+  placed (the placement time is in the job record): those belong to the earlier job. The reader allows a margin of 5 minutes before
+  the placement, for a store's clock behind the server's and timestamps in whole seconds; an earlier job's objects are older than that
+  by at least its retention window.
 
 **The stream's length** is what the job printed, which the agent reports in the result (`logs.stdout_bytes`, `logs.stderr_bytes`). A
 reader knows a stream is complete when its next offset equals that length. `logs.stdout_dropped` and `logs.stderr_dropped` are the
@@ -528,11 +531,12 @@ The capture files are on the host's disk, in the lease directories: at the defau
 
 **Crates (Planned, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
-`js-proto` (with its comment, which today promises a running job's tail, rewritten to the answers of section 8); the
+`js-proto` (with its comment rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
 credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
-fields in `js-agent-wire`, and the agent's `logs` module (the uploader, the progress record, the end) for `crun` and the native
-runtime (3.7).
+fields in `js-agent-wire`, the agent's `logs` module (the uploader, the progress record, the end) for `crun` and the native
+runtime (3.7), the server's host credential table, and `GetLogs`'s fields in `js-proto` with the server's `job_api/logs` (the reader
+and the long poll).
 
 **Decided: an object store without `AssumeRole`** (design section 13, question 28). The scheduler has a second minting kind,
 `credentials = "presigned_prefix"` (4.1): the farm's store (tierstore) has no STS, and a grant derived from a signing key needs no call

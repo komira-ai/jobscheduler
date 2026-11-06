@@ -151,3 +151,46 @@ fn gpu_flags_are_validated_naming_the_flag() {
     assert_eq!(status, code(2), "{err}");
     assert!(err.contains("--gpu-device: needs --runtime crun"), "{err}");
 }
+
+/// `js-agent crun-gpu-dropin` is answered by `main_with` before the signal handlers are
+/// installed, over the machine's own commands and nodes: on a `/dev` with no NVIDIA node it
+/// writes no drop-in and exits 0, and an `nvidia-smi` that cannot be started is a warning, not
+/// a failure. Catches the verb falling through to the agent's own flags (exit 2, `--out` unknown).
+#[test]
+fn main_with_answers_the_gpu_dropin_verb_before_it_installs_the_signal_handlers() {
+    let dir = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "crun-gpu-dropin");
+    std::fs::create_dir(dir.join("dev")).expect("dev");
+    let out = dir.join("zz-gpu.conf");
+    let smi = dir.join("no-nvidia-smi");
+    let installed = std::cell::Cell::new(false);
+    let install = || {
+        installed.set(true);
+        Err(std::io::Error::other("no signal handlers for the drop-in"))
+    };
+    let args: Vec<std::ffi::OsString> = vec![
+        "js-agent".into(),
+        "crun-gpu-dropin".into(),
+        "--out".into(),
+        out.clone().into(),
+        "--dev-root".into(),
+        dir.join("dev").into(),
+        "--nvidia-smi".into(),
+        smi.clone().into(),
+    ];
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let status = js_agent::main_with(&install, args, &mut stdout, &mut stderr);
+    assert!(!installed.get(), "the verb installed the signal handlers");
+    assert_eq!(format!("{status:?}"), code(0));
+    assert!(!out.exists(), "a drop-in was written");
+    let stdout = String::from_utf8(stdout).expect("utf-8");
+    assert_eq!(
+        stdout,
+        format!(
+            "crun-gpu-dropin: no GPU node in {}: no drop-in written\n",
+            dir.join("dev").display()
+        )
+    );
+    let stderr = String::from_utf8(stderr).expect("utf-8");
+    let warning = format!("crun-gpu-dropin: warning: {} -L: ", smi.display());
+    assert!(stderr.starts_with(&warning), "{stderr}");
+}

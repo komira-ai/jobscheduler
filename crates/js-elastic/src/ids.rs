@@ -146,14 +146,29 @@ impl fmt::Display for HostRef {
 }
 
 /// What a machine's agent says in its first hello that a provider can match to one of its
-/// launches: the host name it was given and, when it read one, its instance id as its cloud
-/// spells it. The join token and every other secret of the hello are not part of it.
+/// launches: the host name it was given, when it read one its instance id as its cloud
+/// spells it, and when it sent one the cloud's signed identity of the machine. The join
+/// token and every other secret of the hello are not part of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     /// The host name the agent was launched with.
     pub name: String,
     /// The cloud's id of the machine, when the agent knows it.
     pub instance_id: Option<String>,
+    /// The cloud's signed identity of the machine, when the agent sent one. The agent
+    /// sends none yet.
+    pub identity: Option<SignedIdentity>,
+}
+
+/// The identity document a cloud's metadata service serves to the machine, and its
+/// signature, as served. It is public data, not a secret: anyone may read it, and only
+/// the cloud's key can make a signature that verifies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedIdentity {
+    /// The document, as served.
+    pub document: String,
+    /// The signature over the document, base64 text, as served.
+    pub signature: String,
 }
 
 #[cfg(test)]
@@ -228,6 +243,29 @@ mod tests {
             );
         }
         assert_eq!(HostName::parse(&one, ""), None);
+    }
+
+    /// Asserts that a hello carries the signed identity it was given and compares by it, so
+    /// a verifier can read the document and the signature from the hello. It catches a
+    /// hello that drops the identity.
+    #[test]
+    fn a_hello_carries_its_identity_and_compares_by_it() {
+        let identity = SignedIdentity {
+            document: "{}".to_owned(),
+            signature: "c2ln".to_owned(),
+        };
+        let hello = Hello {
+            name: "n".to_owned(),
+            instance_id: None,
+            identity: Some(identity.clone()),
+        };
+        assert_eq!(hello.identity.as_ref(), Some(&identity));
+        assert_eq!(hello.clone(), hello);
+        let bare = Hello {
+            identity: None,
+            ..hello.clone()
+        };
+        assert_ne!(bare, hello);
     }
 
     /// Asserts that a host reference keeps the provider's text and prints it.

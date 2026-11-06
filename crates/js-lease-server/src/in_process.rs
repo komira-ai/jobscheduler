@@ -80,6 +80,7 @@ impl InProcess {
     /// when the configuration has one. Each failure to start names the flag at fault, as
     /// [`crate::start_with_checks`] does, except that no listen address can fail.
     pub fn start(config: Config, clock: SharedClock) -> Result<Self, StartupError> {
+        let log_reads = job_api::logs::Ctx::from_config(config.logs(), &clock);
         let (prepared, listeners) = prepare(config, &clock)?;
         let Opened {
             shared,
@@ -92,7 +93,7 @@ impl InProcess {
             checker,
             schedule: Schedule::first(clock.now()),
         });
-        let job = job_api::from_server(&shared, listeners.max_job_wall)
+        let job = job_api::from_server(&shared, listeners.max_job_wall, log_reads)
             .map(|api| job_api::port(api, listeners.clients));
         Ok(Self {
             shared,

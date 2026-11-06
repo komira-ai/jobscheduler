@@ -228,7 +228,9 @@ fn image_recipe_rejects_secret_material() {
 /// Asserts that the recipe enables js-agent's crun unit, hostkeeper's unit, the user-data reader
 /// and the scratch mount, that the build's last `systemctl enable` enables exactly those, that the
 /// reader is baked as a unit and asserts every required user-data path (and no optional one),
-/// and that the agent's unit requires the reader and starts after it.
+/// that the agent's unit requires the reader and starts after it, and that the agent's GPU
+/// oneshot starts after the reader too: it extends the `ExecStart` the user data's drop-in sets,
+/// and before the reader it would write the build's placeholder server into its own drop-in.
 #[test]
 fn image_recipe_units_enable_agent_and_hostkeeper() {
     let (_out, recipes) = repo_recipes("units");
@@ -288,6 +290,12 @@ fn image_recipe_units_enable_agent_and_hostkeeper() {
         }
         let drop_in = file("/etc/systemd/system/js-agent-crun.service.d/10-image.conf");
         assert!(drop_in.contains(&format!("\nRequires={READER_UNIT}\nAfter={READER_UNIT}\n")));
+        file(image::CRUN_GPU_UNIT);
+        let gpu = file("/etc/systemd/system/js-agent-crun-gpu.service.d/10-image.conf");
+        assert!(
+            gpu.contains(&format!("\n[Unit]\nAfter={READER_UNIT}\n")),
+            "{gpu}"
+        );
     }
 }
 
@@ -383,6 +391,10 @@ fn image_recipe_matches_crun_runbook() {
                 image::CRUN_UNIT,
                 "--unit-sha256",
                 &sha("packaging/js-agent/js-agent-crun.service"),
+                "--gpu-unit",
+                image::CRUN_GPU_UNIT,
+                "--gpu-unit-sha256",
+                &sha("packaging/js-agent/js-agent-crun-gpu.service"),
                 "--tmpfiles",
                 image::CRUN_TMPFILES,
                 "--tmpfiles-sha256",

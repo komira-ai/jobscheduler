@@ -378,6 +378,7 @@ mod tests {
         let hello = Hello {
             name: "js-0-0".to_owned(),
             instance_id: None,
+            identity: None,
         };
         assert_eq!(Bare.verify_instance(&hello), None);
     }

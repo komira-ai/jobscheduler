@@ -6,9 +6,10 @@
 //! serves adds its `with_<group>` line here when the server handles that group's context
 //! needs exist. Today the read group's is (it reads host silence from the registry), the
 //! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
-//! and the pool's launching providers), and the fleet group's (the server's hosts and their
+//! and the pool's launching providers), the fleet group's (the server's hosts and their
 //! cordons, the status of its pools, and the usage sink's ended bookings, none with
-//! `--usage-off`). The cancel group needs nothing but the tables.
+//! `--usage-off`), and the logs group's (the log store of the `[logs]` table, built before
+//! the configuration is consumed). The cancel group needs nothing but the tables.
 //! [`SERVED_CALLS`] names the calls a service so built serves; every other call answers
 //! `UNIMPLEMENTED`, and a group task that adds a `with_<group>` line adds its calls there.
 //!
@@ -34,7 +35,7 @@ use tower::Service;
 
 use super::auth::is_grpc;
 use super::fleet::{self, History, Hosts, Pools, SinkHistory};
-use super::{Bearer, JobApi, gateway, grpc, read, submit};
+use super::{Bearer, JobApi, gateway, grpc, logs, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
 use crate::config::LiveClients;
@@ -62,9 +63,13 @@ pub const SERVED_CALLS: [Rpc; 12] = [
 ];
 
 /// The job service over the server's state: its job store and its clock, with each served
-/// group's context, a submitted job's wall limit held to `max_job_wall`. `None` when the
-/// server holds no job store: the job service is off.
-pub(crate) fn from_server(state: &Arc<Shared>, max_job_wall: Duration) -> Option<JobApi> {
+/// group's context, a submitted job's wall limit held to `max_job_wall` and logs read as
+/// `logs` says. `None` when the server holds no job store: the job service is off.
+pub(crate) fn from_server(
+    state: &Arc<Shared>,
+    max_job_wall: Duration,
+    logs: logs::Ctx,
+) -> Option<JobApi> {
     let agents = state.agents()?;
     let jobs = agents.jobs.clone()?;
     let silence: Arc<dyn read::Silence> = Arc::new(agents.registry.clone());
@@ -93,7 +98,8 @@ pub(crate) fn from_server(state: &Arc<Shared>, max_job_wall: Duration) -> Option
         api.with_read(read)
             .with_submit(submit)
             .with_fleet(fleet)
-            .with_fence(agents.fence.clone()),
+            .with_fence(agents.fence.clone())
+            .with_logs(logs),
     )
 }
 

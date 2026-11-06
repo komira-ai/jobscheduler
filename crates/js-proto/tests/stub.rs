@@ -253,6 +253,7 @@ mod requests {
     pub fn get_logs() -> GetLogsRequest {
         GetLogsRequest {
             job_id: "logs-job".to_owned(),
+            ..GetLogsRequest::default()
         }
     }
 
@@ -396,6 +397,7 @@ mod answers {
             stdout_tail: b"stdout so far".to_vec(),
             stderr_tail: b"stderr so far".to_vec(),
             truncated: true,
+            ..GetLogsResponse::default()
         }
     }
 
