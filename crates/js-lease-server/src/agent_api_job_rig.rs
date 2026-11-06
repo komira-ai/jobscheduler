@@ -226,6 +226,13 @@ fn rig_on(
 }
 
 impl Rig {
+    /// This rig's server trimming the job store's change feed through `feed` on each tick.
+    pub(crate) fn with_feed(mut self, feed: crate::job_store::FeedTrim) -> Rig {
+        let agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        self.agents = Arc::new(agents.with_job_feed(feed));
+        self
+    }
+
     /// Registers `host`, whose agent reports the `per-job` capability when `per_job`.
     pub(crate) fn register(&mut self, host: &str, per_job: bool) {
         let capabilities = match per_job {

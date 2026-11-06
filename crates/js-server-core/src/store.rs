@@ -110,13 +110,16 @@ impl Writer for StoreWriter {
 /// outage; a write that lost a compare-and-set or found its row gone is the store working;
 /// a write for a node another frontend owns is dropped, and so is one that cannot be encoded
 /// or reads a row that is not the scheduler's; a store that says a newer writer holds it
-/// supersedes this core.
+/// supersedes this core. A stale feed cursor is the answer to a read of the change feed and
+/// no write is given it; were one to be, the write is not an outage and retrying it cannot
+/// help, so it is dropped like a row the scheduler cannot use.
 pub(crate) const fn classify(error: &StateError) -> Attempt {
     match error {
         StateError::Store(StoreError::Failed(_)) => Attempt::Transient,
         StateError::Missing(_) | StateError::Conflict(_) => Attempt::Stale,
         StateError::StaleOwner(_) => Attempt::Disowned,
         StateError::Store(StoreError::Fenced) => Attempt::Superseded,
+        StateError::Store(StoreError::StaleCursor { .. }) => Attempt::Dropped,
         StateError::Corrupt { .. } | StateError::Codec(_) => Attempt::Dropped,
     }
 }
@@ -730,5 +733,24 @@ impl Engine {
             self.remote = remote;
             self.republish_stuck(a);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use js_state::{Revision, StoreError};
+    use js_store::StateError;
+
+    use super::{Attempt, classify};
+
+    // Catches a stale feed cursor read as an outage or a newer writer: either would stop
+    // the scheduler's grants for a refusal that says nothing about the store's health.
+    #[test]
+    fn a_stale_feed_cursor_is_dropped_not_an_outage() {
+        let stale = StateError::Store(StoreError::StaleCursor {
+            after: Revision(1),
+            floor: Revision(5),
+        });
+        assert!(matches!(classify(&stale), Attempt::Dropped));
     }
 }

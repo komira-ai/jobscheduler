@@ -56,3 +56,45 @@ fn job_retention_flag_and_config_key_agree() {
         "server.job_retention: must be a string"
     );
 }
+
+/// Asserts that the flag and the file key read a count of feed changes to the same value,
+/// that neither given is 100000 on both, and that the file refuses a zero or a non-number with
+/// a message naming the key that does not repeat the value. It catches a key parsed
+/// differently from its flag, one read and dropped, and a refusal that names the wrong place.
+#[test]
+fn job_feed_retention_flag_and_config_key_agree() {
+    let scratch = Scratch::new("job_feed_retention_agree");
+    let pool = PoolText::static_pool(&scratch, "hosts");
+    let from_file = |line: &str| {
+        load(&scratch, &file(&server(&scratch, line), &[&pool]))
+            .map(|config| config.job_feed_retention().keep())
+    };
+    assert_eq!(
+        config(base_args(&scratch))
+            .map(|config| config.job_feed_retention().keep())
+            .ok(),
+        Some(100_000),
+        "the flag's default"
+    );
+    assert_eq!(from_file("").ok(), Some(100_000), "the key's default");
+    for count in [1_u64, 500, 250_000] {
+        let flag = format!("--job-feed-retention={count}");
+        let by_flag =
+            config(args_with(&scratch, &[&flag])).map(|config| config.job_feed_retention().keep());
+        let by_key = from_file(&format!("job_feed_retention = \"{count}\""));
+        assert_eq!(by_flag.ok(), Some(count), "the flag {count}");
+        assert_eq!(by_key.ok(), Some(count), "the key {count}");
+    }
+    let said = |line: &str| refusal(&scratch, &file(&server(&scratch, line), &[&pool]));
+    for bad in ["0", "-1", "1.5", "7d", "many"] {
+        assert_eq!(
+            said(&format!("job_feed_retention = \"{bad}\"")),
+            "server.job_feed_retention: must be a whole number of feed changes to keep, at least 1, such as 100000",
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        said("job_feed_retention = 7"),
+        "server.job_feed_retention: must be a string"
+    );
+}

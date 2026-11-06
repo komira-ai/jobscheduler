@@ -16,6 +16,7 @@ use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     self, GetJobRequest, GetLogsRequest, GetResultRequest, JobResult, StartFailureCode,
 };
+use js_state::Store;
 use js_types::{HostId, Resources};
 use tonic::{Request, Status};
 
@@ -23,10 +24,12 @@ use super::{Passed, run, store_time};
 use crate::agent_api::job_rig::{
     FakeAgent, Rig, clocked_rig, clocked_rig_keeping, spec, starts, stops,
 };
+use crate::config::FeedRetention;
 use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};
 use crate::job_expiry::JobLimits;
 use crate::job_loss::{Observe, Seen};
+use crate::job_store::FeedTrim;
 
 const SECOND: Duration = Duration::from_secs(1);
 const MINUTE: Duration = Duration::from_secs(60);
@@ -658,4 +661,100 @@ async fn a_failed_pass_changes_nothing_and_the_next_one_acts() {
     );
     let without = crate::agent_api::job_rig::rig("pass_no_tables", false);
     without.agents.job_pass();
+}
+
+/// A rig whose server keeps the newest `keep` changes of its job store's feed, trimming on each
+/// tick.
+fn trimming(name: &str, keep: u64) -> Rig {
+    let rig = clocked_rig(name, false, NEVER);
+    let feed = FeedTrim::new(rig.store.clone(), FeedRetention::new(keep).unwrap());
+    rig.with_feed(feed)
+}
+
+/// The head of the rig's store, read as the trim reads it.
+fn head(rig: &Rig) -> u64 {
+    let commit = rig.store.txn(js_state::Txn::new()).unwrap().unwrap();
+    commit.revision.0
+}
+
+/// The revisions of the rows `rig`'s store serves after `after`.
+fn feed_after(rig: &Rig, after: u64) -> Result<Vec<u64>, js_state::StoreError> {
+    let page = rig.store.changes(js_state::Revision(after), 1000)?;
+    Ok(page.rows.iter().map(|row| row.revision.0).collect())
+}
+
+// Catches a tick that never trims the job store's feed, one that keeps more or fewer than
+// the newest N changes, and one that trims by a clock: the clock does not move between the
+// writes and the tick, and the feed ends at exactly the newest five revisions with the
+// cursor of every older reader refused.
+#[test]
+fn the_job_pass_trims_the_feed_to_the_newest_changes() {
+    let rig = trimming("pass_feed_trim", 5);
+    for n in 0..8 {
+        queue(&rig, &format!("job-{n}"), spec());
+    }
+    let head = head(&rig);
+    assert!(head > 5, "the writes made {head} changes");
+    rig.tick();
+    assert_eq!(
+        feed_after(&rig, head - 5),
+        Ok(((head - 4)..=head).collect::<Vec<_>>())
+    );
+    assert_eq!(
+        feed_after(&rig, head - 6),
+        Err(js_state::StoreError::StaleCursor {
+            after: js_state::Revision(head - 6),
+            floor: js_state::Revision(head - 5),
+        })
+    );
+    rig.tick();
+    assert_eq!(
+        feed_after(&rig, head - 5).map(|rows| rows.len()),
+        Ok(5),
+        "a second tick with no new change trims nothing more"
+    );
+}
+
+// Catches a feed trim whose failure fails the pass, or one that is never tried again: the
+// store refuses the trim's read of the head after the pass has ended the queued job that
+// outlived its wait, the job is ended all the same, the feed is untouched, and the next
+// tick trims.
+#[test]
+fn a_failed_feed_trim_does_not_fail_the_pass_and_the_next_tick_trims() {
+    let limits = JobLimits {
+        max_queue_wait: MINUTE,
+        start_timeout: HOUR,
+    };
+    let rig = clocked_rig("pass_feed_fail", false, limits);
+    let feed = FeedTrim::new(rig.store.clone(), FeedRetention::new(1).unwrap());
+    let rig = rig.with_feed(feed);
+    let id = queue(&rig, "job-wait", spec());
+    rig.advance(2 * MINUTE);
+    rig.store.fail_after(1);
+    rig.tick();
+    assert_eq!(
+        rig.job(&id).state,
+        JobState::FailedToStart(StartFailure::NoCapacity),
+        "the pass ran though the trim failed"
+    );
+    assert!(
+        feed_after(&rig, 0).unwrap().len() > 1,
+        "the failed trim deleted nothing"
+    );
+    rig.tick();
+    assert!(matches!(
+        feed_after(&rig, 0),
+        Err(js_state::StoreError::StaleCursor { .. })
+    ));
+}
+
+// Catches a server that was never given a feed to trim (the job tables of a test, or no
+// job service) trimming one: its feed is whole after a tick.
+#[test]
+fn a_server_without_a_feed_handle_trims_nothing() {
+    let rig = clocked_rig("pass_no_feed", false, NEVER);
+    queue(&rig, "job-a", spec());
+    rig.tick();
+    let rows = feed_after(&rig, 0).unwrap();
+    assert_eq!(rows.len() as u64, head(&rig));
 }

@@ -44,11 +44,16 @@ pub(super) fn job_listen(cli: &Cli) -> Option<JobListen> {
 }
 
 /// The job store's setup when `--job-listen` turns the job service on: named by the flag,
-/// keeping an ended job for `--job-retention`.
+/// keeping an ended job for `--job-retention` and the newest `--job-feed-retention` changes
+/// of its feed.
 pub(super) fn job_store(cli: &Cli) -> Option<JobStoreSetup> {
     let flag = "--job-listen";
-    let retention = cli.job_retention;
-    cli.job_listen.map(|_| JobStoreSetup { flag, retention })
+    let (retention, feed_retention) = (cli.job_retention, cli.job_feed_retention);
+    cli.job_listen.map(|_| JobStoreSetup {
+        flag,
+        retention,
+        feed_retention,
+    })
 }
 
 /// The TLS files of `--tls-cert` and `--tls-key`, both or neither, and the refusal of the

@@ -218,6 +218,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--profile-store-bytes", "5"),
         key("--history-retention-days", "5"),
         key("--job-retention", "3d"),
+        key("--job-feed-retention", "500"),
         key("--job-listen", "127.0.0.1:0"),
         key("--max-job-wall", "12h"),
     ];

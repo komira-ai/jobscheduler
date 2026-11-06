@@ -58,6 +58,11 @@ pub(super) struct Statements {
     pub due: Statement,
     /// `$1` after, `$2` upper bound, `$3` limit: feed rows.
     pub changes: Statement,
+    /// `$1` the revision to trim through: deletes the feed rows at or below the lesser of
+    /// it and the head (which the trimming transaction holds locked); how many rows go.
+    pub trim: Statement,
+    /// The feed's floor: one below its oldest row, or the head when it has none.
+    pub floor: Statement,
     /// `$1` prefix, `$2` now, `$3` limit: live rows under a prefix, locked, skipping rows
     /// another transaction holds.
     pub claim: Statement,
@@ -118,6 +123,11 @@ impl Statements {
             changes: client.prepare(
                 "SELECT rev, key, kind, value FROM feed WHERE rev > $1 AND rev <= $2 \
                  ORDER BY rev LIMIT $3",
+            )?,
+            trim: client
+                .prepare("DELETE FROM feed WHERE rev <= least($1::bigint, (SELECT rev FROM head))")?,
+            floor: client.prepare(
+                "SELECT coalesce((SELECT min(rev) FROM feed) - 1, (SELECT rev FROM head))",
             )?,
             claim: client.prepare(&claim(" SKIP LOCKED"))?,
             claim_waiting: client.prepare(&claim(""))?,
