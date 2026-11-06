@@ -955,7 +955,11 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
-    let args: Vec<OsString> = args.into_iter().collect();
+    run_words(args.into_iter().collect(), out, err)
+}
+
+/// [`run`] on the collected words: one body for every caller's iterator.
+fn run_words(args: Vec<OsString>, out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
     if update_hook::is_verb(&args) {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
     }
