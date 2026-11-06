@@ -61,6 +61,11 @@ fn two_gpus(_: &str) -> Result<String, String> {
     Ok("GPU 0: NVIDIA A100 (UUID: GPU-a)\nGPU 1: NVIDIA A100 (UUID: GPU-b)\n".to_owned())
 }
 
+/// What `nvidia-smi -L` prints on a host whose driver sees no GPU.
+fn no_gpus(_: &str) -> Result<String, String> {
+    Ok("No devices were found\n".to_owned())
+}
+
 /// The `-L` list of a host with three GPUs.
 fn three_gpus(_: &str) -> Result<String, String> {
     Ok("GPU 0: A (UUID: GPU-a)\nGPU 1: A (UUID: GPU-b)\nGPU 2: A (UUID: GPU-c)\n".to_owned())
@@ -483,7 +488,9 @@ fn the_units_own_dropins_are_read_but_not_the_verbs() {
 
 /// The check runs against the GPUs `nvidia-smi -L` lists, which are the ones the agent checks
 /// at start: a GPU it lists with no node is refused (nothing written, exit 1), even where `/dev`
-/// has no GPU node at all; a MIG device's line is not a GPU.
+/// has no GPU node at all; and a host with GPU nodes whose `nvidia-smi` lists no GPU is refused
+/// too (the agent would offer no GPU and refuse the flags at start). A MIG device's line is not a
+/// GPU.
 #[test]
 fn the_check_uses_the_gpus_nvidia_smi_lists() {
     let rig = Rig::new("dropin-smi-nodes", &[]);
@@ -501,6 +508,21 @@ fn the_check_uses_the_gpus_nvidia_smi_lists() {
              crun-gpu-dropin: --gpu-device: {}/nvidia0 is not a character device; no drop-in \
              written\n",
             rig.dev.display(),
+            rig.dev.display()
+        )
+    );
+    assert!(!rig.out.exists());
+
+    let rig = Rig::new("dropin-smi-none", &["nvidia0", "nvidiactl"]);
+    let ran = rig.run_with(&["--nvidia-smi", "/usr/bin/nvidia-smi"], no_gpus);
+    assert_eq!(ran.code, status(1));
+    assert_eq!(
+        ran.err,
+        format!(
+            "crun-gpu-dropin: warning: /usr/bin/nvidia-smi -L lists the GPUs {{}} and {} has \
+             the GPU nodes {{0}}\n\
+             crun-gpu-dropin: --gpu-device: the host offers no GPU to give a job; no drop-in \
+             written\n",
             rig.dev.display()
         )
     );

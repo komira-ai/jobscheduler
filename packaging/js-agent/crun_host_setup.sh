@@ -20,8 +20,8 @@
 #   7. unit        /etc/systemd/system/js-agent-crun.service, /etc/systemd/system/js-agent-crun-gpu.service and
 #                  /etc/tmpfiles.d/js-agent-crun.conf, from the files packaging/js-agent/js-agent-crun.service,
 #                  js-agent-crun-gpu.service and tmpfiles-crun.conf of the jobscheduler release, pinned by sha256; the
-#                  units are NOT enabled or started. The GPU unit is a oneshot the crun unit pulls in before each
-#                  start: it runs `js-agent crun-gpu-dropin`, which writes the --gpu-* flags for the host's NVIDIA
+#                  unit is NOT enabled or started, nor is the GPU unit: a oneshot the crun unit pulls in before each
+#                  start, which runs `js-agent crun-gpu-dropin`, which writes the --gpu-* flags for the host's NVIDIA
 #                  nodes as a drop-in in /run, then reloads systemd (on a host with no GPU node it writes nothing)
 #
 # Usage:
