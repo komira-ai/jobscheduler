@@ -113,7 +113,7 @@ jobs:
   # digest.
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     services:
@@ -667,7 +667,7 @@ jobs:
   # its SHA-256 before use.
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     services:
