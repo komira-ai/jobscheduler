@@ -194,7 +194,7 @@ pub(crate) fn read(store: &LogStore, ask: &Ask) -> Result<Page, StoreError> {
     if let Some(page) = walk.at_end() {
         return Ok(page);
     }
-    if let Some(page) = walk.from_final()? {
+    if let Some(page) = walk.final_page()? {
         return Ok(page);
     }
     match list(store, ask)? {
@@ -241,7 +241,7 @@ impl Walk<'_> {
 
     /// The page the final serves from the position, when the job has ended, the final may
     /// still be asked for, and it is there.
-    fn from_final(&mut self) -> Result<Option<Page>, StoreError> {
+    fn final_page(&mut self) -> Result<Option<Page>, StoreError> {
         let wanted = self.finals > 0 && self.ask.end.is_some_and(|end| end.kept.is_none());
         self.finals = self.finals.saturating_sub(1);
         if !wanted {
@@ -295,7 +295,7 @@ impl Walk<'_> {
                 if !(settled(written_ms, self.ask.now_ms) || self.ask.end_settled()) {
                     return Ok(self.page(false));
                 }
-                if let Some(page) = self.from_final()? {
+                if let Some(page) = self.final_page()? {
                     return Ok(page);
                 }
                 self.skip_to(to);
@@ -307,7 +307,7 @@ impl Walk<'_> {
                 if let Some(page) = self.data(&listing.objects[at..])? {
                     return Ok(page);
                 }
-                if let Some(page) = self.from_final()? {
+                if let Some(page) = self.final_page()? {
                     return Ok(page);
                 }
                 listing.objects.remove(at);
@@ -320,7 +320,7 @@ impl Walk<'_> {
         if truncated || !self.ask.end_settled() {
             return Ok(self.page(false));
         }
-        if let Some(page) = self.from_final()? {
+        if let Some(page) = self.final_page()? {
             return Ok(page);
         }
         // Settled and past every object: the rest up to the reported length is a gap, and
