@@ -20,6 +20,10 @@
 //! so an older build that takes generations is refused by the store and none is started
 //! beside the sharing frontends.
 //!
+//! **One writer**: [`WriterLock`] is the lock the active writer of a store holds for its
+//! life, on either backend ([`WriterTarget`]): an advisory lock on Postgres, the state
+//! file's lock on SQLite.
+//!
 //! With the `postgres` feature, [`postgres`] is the Postgres backend.
 //!
 //! With the `test-support` feature (and in this crate's own unit tests) `conformance`
@@ -45,6 +49,7 @@ mod shared;
 pub mod sqlite;
 mod store;
 mod types;
+mod writer;
 
 use std::time::Duration;
 
@@ -55,6 +60,7 @@ pub use types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,
 };
+pub use writer::{LockRefused, WriterLock, WriterTarget};
 
 /// The longest a write may wait for the group it commits with (target 5 ms).
 pub const GROUP_COMMIT_WINDOW: Duration = Duration::from_millis(5);
