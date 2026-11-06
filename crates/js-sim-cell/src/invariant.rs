@@ -146,8 +146,10 @@ pub enum Invariant {
     /// it ([`Observations::job_replies`]).
     LostIsTerminal,
     /// Step check. An allocation the server's table reads freed was freed on the host's
-    /// word or the provider's: the host's agent sent, after the allocation was committed
-    /// and by the read, a heartbeat whose listing left the job out (or named it retired);
+    /// word or the provider's: the host's agent sent, by the read, a heartbeat whose listing
+    /// left the job out (or named it retired), after the allocation was committed, after the
+    /// agent read the job's start and after it read a verdict on the job's result (each when
+    /// it read one);
     /// or the server's listing read with the tables does not name the host (the provider
     /// reads it absent); or it ended as a failed whole-host prepare before any container of
     /// the placement was launched. Never on silence, never on an unknown.

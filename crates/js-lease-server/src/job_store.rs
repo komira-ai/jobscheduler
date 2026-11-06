@@ -65,7 +65,6 @@ impl IdSource for ServerIds {
 
 /// The clock the job store stamps its rows with and the source it mints ids from: the
 /// system's clock and random source unless the in-process seam gives others.
-#[derive(Clone)]
 pub(crate) struct JobSources {
     /// The store's clock.
     pub(crate) clock: Arc<dyn Clock>,

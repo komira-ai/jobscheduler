@@ -47,6 +47,8 @@ pub(super) struct Indices {
     outstanding: BTreeMap<HostId, BTreeMap<JobId, FarmTime>>,
     /// When each host first read a verdict on each job's result.
     acked: BTreeMap<(HostId, JobId), FarmTime>,
+    /// When each host first read a start of each job.
+    started: BTreeMap<(HostId, JobId), FarmTime>,
     /// The first `Accepted` verdict on each job's result: the host that read it, and when.
     accepted: BTreeMap<JobId, (HostId, FarmTime)>,
     /// The hosts each job was seen running on and, when last asked, still ran it.
@@ -63,9 +65,9 @@ impl Indices {
     ) {
         self.index_beats(observations);
         self.read_jobs(observations, found);
-        self.read_allocations(observations, found);
         self.read_results(observations);
         self.read_replies(observations, found);
+        self.read_allocations(observations, found);
         self.judge_starts(observations, found);
         self.check_beats(observations, found);
         for host in &touched.agents {
@@ -121,7 +123,7 @@ impl Indices {
             }
             let was_freed = before.is_some_and(|b| b.step == AllocationStep::Freed);
             if (row.step == AllocationStep::Freed) & !was_freed {
-                freed(observations, &self.beats_of, row, read.at, found);
+                self.freed(observations, row, read.at, found);
             }
             let allocations = self.by_job.entry(row.job.clone()).or_default();
             allocations.insert(row.allocation);
@@ -163,6 +165,10 @@ impl Indices {
                 if *verdict == Verdict::Accepted {
                     self.accept(job, reply, found);
                 }
+            }
+            for start in &reply.starts {
+                let key = (reply.host.clone(), start.job.clone());
+                self.started.entry(key).or_insert(reply.at);
             }
             let starts = reply.starts.iter().cloned();
             self.pending
@@ -316,44 +322,57 @@ fn reused(before: &AllocationRow, row: &AllocationRow, at: FarmTime, found: &mut
     found.flag(Invariant::OneAllocationPerJob, detail);
 }
 
-/// `FreedOnlyWhenConfirmed` for one allocation read freed at `at`: the host's agent sent,
-/// after the allocation was committed and by `at`, a heartbeat that did not list the job
-/// (or listed it retired), or the server's listing read with the tables does not name the
-/// host (the provider reads it absent), or a whole-host prepare failed before any container
-/// of the placement was launched.
-fn freed(
-    observations: &Observations,
-    beats_of: &BTreeMap<HostId, Vec<usize>>,
-    row: &AllocationRow,
-    at: FarmTime,
-    found: &mut Found,
-) {
-    let beats = beats_of.get(&row.host).into_iter().flatten();
-    let beats = beats.filter_map(|index| observations.job_beats.get(*index));
-    let mut since = beats.filter(|beat| (beat.at >= row.created_at) & (beat.at <= at));
-    let gone = since.any(|beat| {
-        let listed = beat.running.contains(&row.job) | beat.results.contains(&row.job);
-        !listed
-    });
-    let absent = !observations.server.hosts.contains_key(&row.host);
-    let launched = format!("{}/{}", row.job, row.allocation);
-    let never_ran = !observations
-        .ledger
-        .iter()
-        .any(|l| l.run.as_str() == launched);
-    let failed_prepare = (row.end_reason == Some(EndReason::FailedPrepare)) & never_ran;
-    if gone | absent | failed_prepare {
-        return;
+impl Indices {
+    /// `FreedOnlyWhenConfirmed` for one allocation read freed at `at`: the host's agent
+    /// sent, by `at`, a heartbeat that did not list the job (or listed it retired), after
+    /// the allocation was committed, after the agent read the job's start (when it read
+    /// one) and after it read a verdict on the job's result (when it read one); or the
+    /// server's listing read with the tables does not name the host (the provider reads it
+    /// absent); or a whole-host prepare failed before any container of the placement was
+    /// launched. A heartbeat sent before the agent knew of the job, or while it still held
+    /// its result, is not the host's word that the container is gone.
+    fn freed(
+        &self,
+        observations: &Observations,
+        row: &AllocationRow,
+        at: FarmTime,
+        found: &mut Found,
+    ) {
+        let key = (row.host.clone(), row.job.clone());
+        let started = self.started.get(&key).copied();
+        let acked = self.acked.get(&key).copied();
+        let beats = self.beats_of.get(&row.host).into_iter().flatten();
+        let beats = beats.filter_map(|index| observations.job_beats.get(*index));
+        let mut since = beats.filter(|beat| {
+            let after = (beat.at >= row.created_at)
+                & started.is_none_or(|started| beat.at > started)
+                & acked.is_none_or(|acked| beat.at > acked);
+            after & (beat.at <= at)
+        });
+        let gone = since.any(|beat| {
+            let listed = beat.running.contains(&row.job) | beat.results.contains(&row.job);
+            !listed
+        });
+        let absent = !observations.server.hosts.contains_key(&row.host);
+        let launched = format!("{}/{}", row.job, row.allocation);
+        let never_ran = !observations
+            .ledger
+            .iter()
+            .any(|l| l.run.as_str() == launched);
+        let failed_prepare = (row.end_reason == Some(EndReason::FailedPrepare)) & never_ran;
+        if gone | absent | failed_prepare {
+            return;
+        }
+        let detail = format!(
+            "allocation {} of job {} on host {} was read freed at {} with no listing of the host since {} that left the job out, while the server lists the host",
+            row.allocation,
+            row.job,
+            text::host(&row.host),
+            time(at),
+            time(row.created_at)
+        );
+        found.flag(Invariant::FreedOnlyWhenConfirmed, detail);
     }
-    let detail = format!(
-        "allocation {} of job {} on host {} was read freed at {} with no listing of the host since {} that left the job out, while the server lists the host",
-        row.allocation,
-        row.job,
-        text::host(&row.host),
-        time(at),
-        time(row.created_at)
-    );
-    found.flag(Invariant::FreedOnlyWhenConfirmed, detail);
 }
 
 /// Whether the cell killed the process of `host` at or after `from` and by `to`.
@@ -363,7 +382,7 @@ fn killed_between(
     from: FarmTime,
     to: FarmTime,
 ) -> bool {
-    let kills = observations.kills.iter();
+    let mut kills = observations.kills.iter();
     kills.any(|kill| (&kill.host == host) & (kill.at >= from) & (kill.at <= to))
 }
 

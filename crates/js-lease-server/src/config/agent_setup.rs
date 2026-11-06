@@ -1,13 +1,15 @@
-//! What the configuration decided for the agents that register hosts: [`AgentSetup`].
+//! What the configuration decided for the agents that register hosts: [`AgentSetup`], and
+//! the clock and id source its job store is opened on ([`Config::with_job_sources`]).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_registry::PoolConfig;
 
-use super::{CpuSlack, Placement};
+use super::{Config, CpuSlack, Hosts, Placement};
 use crate::agent_tokens::AgentTokens;
 use crate::job_expiry::JobLimits;
-use crate::job_store::{JobSources, JobStoreSetup};
+use crate::job_store::{JobSources, JobStoreSetup, ServerIds};
 use crate::rate::HelloLimit;
 
 /// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
@@ -37,4 +39,25 @@ pub(crate) struct AgentSetup {
     /// The clock and id source the job store is opened on: the system's, unless
     /// [`crate::Config::with_job_sources`] gave others.
     pub(crate) job_sources: JobSources,
+}
+
+impl Config {
+    /// The same configuration with the job store (when the job service is on) stamping its
+    /// rows with `clock` and minting its ids from `ids`, in place of the system's clock and
+    /// random source: how a simulation makes its job and allocation ids, and the times it
+    /// stores, a function of its seed and its virtual clock. Without agent registration
+    /// there is no job store, and the configuration is unchanged.
+    pub fn with_job_sources(
+        mut self,
+        clock: Arc<dyn js_state::Clock>,
+        ids: Arc<dyn js_jobs::IdSource>,
+    ) -> Self {
+        if let Hosts::Layered { agents, .. } = &mut self.hosts {
+            agents.job_sources = JobSources {
+                clock,
+                ids: ServerIds::new(ids),
+            };
+        }
+        self
+    }
 }

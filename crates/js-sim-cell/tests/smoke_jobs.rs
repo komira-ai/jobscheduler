@@ -128,8 +128,8 @@ fn a_partition_of_ten_agents_that_heals_settles_every_run() -> Scenario {
 /// that heals settles every item; each under every invariant, the five job invariants too.
 /// Over the job front, red for a server that books a job twice or reuses an allocation id
 /// (`one-allocation-per-job`), frees an allocation on silence (`freed-only-when-confirmed`),
-/// sends a start before it commits the allocation (`no-start-without-allocation`), revives a
-/// lost job (`lost-is-terminal`), stores a resent result twice
+/// sends a start before it commits the allocation (`no-start-without-allocation`), stores a
+/// resent result twice
 /// (`result-kept-until-acknowledged`), or loses or fails jobs (the expected count of
 /// successes).
 #[test]

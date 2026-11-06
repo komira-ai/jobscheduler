@@ -29,8 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{
-    Command, HeartbeatReply, HeldJob, HeldState, JobResult, JobStartSpec, Outcome,
-    PER_JOB_CAPABILITY,
+    Command, HeartbeatReply, HeldJob, HeldState, JobResult, JobResultAck, JobStartSpec, Outcome,
+    PER_JOB_CAPABILITY, ReplyCheck,
 };
 use js_conformance::agent::{AgentHarness, FakeAgent};
 use js_jobs::{AllocationId, JobId};
@@ -70,6 +70,33 @@ pub(super) struct Listing {
     running: BTreeSet<JobId>,
     results: BTreeSet<JobId>,
     retired_ids: BTreeSet<JobId>,
+}
+
+/// The verdicts and the retired ids an answer acknowledges, each list as the wire's check let
+/// it pass: a list that fails its check is ignored whole, as the wire says.
+pub(super) struct Acks<'a> {
+    job_acks: &'a [JobResultAck],
+    retired_acks: &'a [String],
+}
+
+impl<'a> Acks<'a> {
+    /// The acknowledgements of `reply`, as `check` (its check) lets them pass.
+    pub(super) fn of(reply: &'a HeartbeatReply, check: &ReplyCheck<'_>) -> Self {
+        let job_acks: &[JobResultAck] = if check.job_acks.is_ok() {
+            &reply.job_acks
+        } else {
+            &[]
+        };
+        let retired_acks: &[String] = if check.retired_acks.is_ok() {
+            &reply.retired_acks
+        } else {
+            &[]
+        };
+        Self {
+            job_acks,
+            retired_acks,
+        }
+    }
 }
 
 /// The per-job half of one agent process.
@@ -215,12 +242,12 @@ impl PerJob {
 
     /// Acts on the answer (200) to the heartbeat sent as call `id`: each start and stop of
     /// `commands` (the reply's commands that passed the wire's checks), then each verdict
-    /// and retired id the reply acknowledges, and writes what it read into the ledger.
+    /// and retired id of `acks`, and writes what it read into the ledger.
     pub(super) fn answered(
         &mut self,
         id: CallId,
         commands: &[&Command],
-        reply: &HeartbeatReply,
+        acks: &Acks<'_>,
         capacity: &Resources,
         io: &mut Io,
     ) {
@@ -242,14 +269,14 @@ impl PerJob {
                 _ => {}
             }
         }
-        for ack in &reply.job_acks {
+        for ack in acks.job_acks {
             let (Ok(job), Some(verdict)) = (JobId::parse(&ack.job_id), verdict(ack.ack)) else {
                 continue;
             };
             self.fake.ack(job.as_str());
             read.acks.push((job, verdict));
         }
-        let acked = &reply.retired_acks;
+        let acked = acks.retired_acks;
         self.retired
             .retain(|job| !acked.iter().any(|id| id == job.as_str()));
         io.ledger.job_reply(read);

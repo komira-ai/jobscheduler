@@ -28,7 +28,7 @@ use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
 
 use super::exclusive::Exclusive;
-use super::per_job::PerJob;
+use super::per_job::{Acks, PerJob};
 use super::real::RealAgent;
 use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
@@ -593,7 +593,8 @@ impl Process {
             }
         }
         if let Some(jobs) = self.jobs.as_mut() {
-            jobs.answered(id, &check.commands, &reply, capacity, io);
+            let acks = Acks::of(&reply, &check);
+            jobs.answered(id, &check.commands, &acks, capacity, io);
         }
     }
 

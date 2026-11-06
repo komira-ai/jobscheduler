@@ -1,8 +1,6 @@
 //! The per-job half of a fake agent's process, driven call by call with no server: what it
 //! launches, lists, retires and acknowledges, and what it writes into the ledger.
 
-use std::collections::BTreeMap;
-
 use js_agent_wire::{Ack, BookedResources, JobResultAck};
 use js_conformance::agent::Defect;
 use js_types::HostId;
@@ -50,7 +48,7 @@ fn agent(defect: Option<Defect>) -> PerJob {
     PerJob::of(&spec(AgentKind::Fake(defect), Some("true"))).expect("speaks per-job")
 }
 
-fn io() -> Io {
+fn fresh_io() -> Io {
     Io {
         now: FarmTime::from_millis(1_000),
         host: HostId::new("h000").expect("a host id"),
@@ -121,14 +119,15 @@ fn answer(
     };
     let commands: Vec<&Command> = reply.commands.iter().collect();
     let call = CallId(io.next_call.saturating_sub(1));
-    agent.answered(call, &commands, &reply, &capacity(), io);
+    let check = reply.validate();
+    agent.answered(call, &commands, &Acks::of(&reply, &check), &capacity(), io);
 }
 
+/// What a heartbeat lists in `jobs`, as `(job, state, outcome)`.
+type Listed = Vec<(String, HeldState, Option<Outcome>)>;
+
 /// A heartbeat: what it lists as `(job, state, outcome)` and the retired ids it lists.
-fn beat(
-    agent: &mut PerJob,
-    io: &mut Io,
-) -> (Vec<(String, HeldState, Option<Outcome>)>, Vec<String>) {
+fn beat(agent: &mut PerJob, io: &mut Io) -> (Listed, Vec<String>) {
     let listing = agent.listing();
     let held = listing.held.iter().map(|held| {
         let outcome = held.result.as_ref().map(|result| result.outcome);
@@ -163,7 +162,7 @@ fn launches(io: &Io) -> Vec<String> {
 #[test]
 fn a_repeated_jobstart_for_a_held_job_runs_once() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     let named = format!("{JOB}/{}", allocation());
@@ -183,7 +182,7 @@ fn a_repeated_jobstart_for_a_held_job_runs_once() {
         Some("true"),
     ))
     .expect("speaks per-job");
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut broken, &mut io, vec![start(JOB)], &[], &[]);
     answer(&mut broken, &mut io, vec![start(JOB)], &[], &[]);
     assert_eq!(launches(&io), [named.clone(), named]);
@@ -196,7 +195,7 @@ fn a_repeated_jobstart_for_a_held_job_runs_once() {
 #[test]
 fn a_jobstop_for_an_unknown_job_retires_its_id() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![stop(JOB)], &[], &[]);
     let (held, retired) = beat(&mut agent, &mut io);
     assert!(held.is_empty());
@@ -217,7 +216,7 @@ fn a_jobstop_for_an_unknown_job_retires_its_id() {
 #[test]
 fn a_result_is_resent_until_acked() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     assert_eq!(
         beat(&mut agent, &mut io).0,
@@ -257,7 +256,7 @@ fn a_result_is_resent_until_acked() {
         Some("true"),
     ))
     .expect("speaks per-job");
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut broken, &mut io, vec![start(JOB)], &[], &[]);
     assert!(run_out(&mut broken, &mut io));
     broken.disconnect();
@@ -271,7 +270,7 @@ fn a_result_is_resent_until_acked() {
 #[test]
 fn a_retired_id_is_listed_until_acked() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![stop(JOB), stop(OTHER)], &[], &[]);
     assert_eq!(beat(&mut agent, &mut io).1, [JOB, OTHER]);
     assert_eq!(beat(&mut agent, &mut io).1, [JOB, OTHER]);
@@ -290,7 +289,7 @@ fn a_retired_id_is_listed_until_acked() {
 #[test]
 fn a_stop_of_a_running_job_ends_it_killed_and_its_result_rides_on() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(
         &mut agent,
         &mut io,
@@ -336,7 +335,7 @@ fn a_stop_of_a_running_job_ends_it_killed_and_its_result_rides_on() {
 #[test]
 fn a_start_or_stop_that_names_no_valid_id_is_refused() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     let commands = vec![
         start_of("a/b", &allocation(), &["500"]),
         start_of(JOB, "xyz", &["500"]),
@@ -378,7 +377,7 @@ fn only_a_fake_that_reports_the_capability_speaks_per_job() {
 #[test]
 fn an_answer_is_ledgered_with_the_heartbeat_it_answers() {
     let mut agent = agent(None);
-    let mut io = io();
+    let mut io = fresh_io();
     answer(&mut agent, &mut io, vec![start(JOB)], &[], &[]);
     io.now = FarmTime::from_millis(2_000);
     beat(&mut agent, &mut io);
@@ -389,4 +388,28 @@ fn an_answer_is_ledgered_with_the_heartbeat_it_answers() {
     assert_eq!(last.beat_at, FarmTime::from_millis(2_000));
     assert_eq!(last.at, FarmTime::from_millis(2_500));
     assert_eq!(last.listed, [job(JOB)].into());
+}
+
+/// Asserts that a list of verdicts or of retired ids that fails the wire's check (an id
+/// named twice) is ignored whole: the result rides on and the retired id stays listed, and
+/// the answer's ledger entry reads no verdict. Catches an agent that acts on a list the wire
+/// says to ignore.
+#[test]
+fn an_ack_list_that_fails_the_wires_check_is_ignored() {
+    let mut agent = agent(None);
+    let mut io = fresh_io();
+    answer(&mut agent, &mut io, vec![start(JOB), stop(OTHER)], &[], &[]);
+    assert!(run_out(&mut agent, &mut io));
+    let twice = [(JOB, Ack::Accepted), (JOB, Ack::Accepted)];
+    answer(&mut agent, &mut io, Vec::new(), &twice, &[OTHER, OTHER]);
+    let (held, retired) = beat(&mut agent, &mut io);
+    let unacked = [(
+        JOB.to_owned(),
+        HeldState::ExitedUnacked,
+        Some(Outcome::Succeeded),
+    )];
+    assert_eq!(held, unacked);
+    assert_eq!(retired, [OTHER]);
+    let replies = io.ledger.jobs_after([0; 3]).1;
+    assert!(replies.iter().all(|reply| reply.acks.is_empty()));
 }

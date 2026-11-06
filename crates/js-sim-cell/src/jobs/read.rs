@@ -1,7 +1,7 @@
 //! The cell's read of the server's job and allocation tables, through the in-process
 //! handle, into [`Observations::job_reads`] and [`Observations::allocation_reads`].
 //!
-//! A read lists every job (one scan, in pages) and every live allocation (one scan), and
+//! A read lists every job (one scan, in pages of 64 rows) and every live allocation (one scan), and
 //! reads one allocation more for each job whose state changed and each allocation that was
 //! live at the read before and no longer is (it was freed, or a new placement took its
 //! row): so a placement freed between two reads is still read freed. Only what differs from
@@ -91,10 +91,13 @@ impl Reader {
     }
 }
 
-/// Every job of `tables`, page by page, in id order.
+/// How many rows of the job table one page of a read holds.
+const PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(63);
+
+/// Every job of `tables`, [`PAGE`] rows at a time, in id order.
 fn all_jobs(tables: &Tables) -> Vec<JobRecord> {
     let page = |resume: Option<&ResumeToken>| {
-        let page = tables.list_jobs(None, resume, NonZeroUsize::MAX).ok();
+        let page = tables.list_jobs(None, resume, PAGE).ok();
         page.map(|page| (page.jobs, page.resume))
             .unwrap_or_default()
     };

@@ -120,7 +120,7 @@
 //!
 //! # Jobs
 //!
-//! A fake agent whose hello reports [`js_agent_wire::PER_JOB_CAPABILITY`] (the cell's
+//! A fake agent whose hello reports [`js_agent_wire::PER_JOB_CAPABILITY`] (the cell's fake
 //! agents do for a server of [`crate::ServerSpec::jobs`]) also speaks the per-job messages:
 //! it acts on `JobStart` and `JobStop`, lists its jobs with their state in every heartbeat,
 //! sends each result until an answer acknowledges it, and lists the ids it retired until

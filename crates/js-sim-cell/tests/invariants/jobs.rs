@@ -287,8 +287,9 @@ fn a_lost_job_a_host_lists_later_is_answered_with_a_stop() {
 /// is flagged as `FreedOnlyWhenConfirmed` while the server lists the host, and is not when
 /// a heartbeat in between left the job out, or named it retired, or the server no longer
 /// lists the host, or it ended as a failed whole-host prepare before any launch; and that a
-/// heartbeat that listed the job, or one sent before the allocation was committed, is no
-/// confirmation, nor a failed prepare whose placement was launched. Catches a server that
+/// heartbeat that listed the job, one sent before the allocation was committed, one sent
+/// before its host read the job's start, and one sent before its host read the verdict on the
+/// job's result, is no confirmation, nor a failed prepare whose placement was launched. Catches a server that
 /// frees an allocation on silence, or on a listing it cannot have read.
 #[test]
 fn an_allocation_freed_on_silence_is_flagged() {
@@ -323,6 +324,26 @@ fn an_allocation_freed_on_silence_is_flagged() {
         .with_lost(host(0), false)
         .with_allocation_read(prepare, ms(5_000));
     clear(flagged(&failed));
+    let mut started = reply(0, 2_000, 1_900, &[]);
+    started.starts.push(JobStartSeen {
+        job: job(0),
+        allocation: allocation(1),
+    });
+    let read_start = || freed_on_silence().with_job_reply(started.clone());
+    let before_start = read_start().with_job_beat(beat(0, 1_500, &[], &[]));
+    assert_eq!(flagged(&before_start), [line.clone()]);
+    clear(flagged(&read_start().with_job_beat(beat(
+        0,
+        2_500,
+        &[],
+        &[],
+    ))));
+    let mut acked = reply(0, 3_000, 2_900, &[]);
+    acked.acks.push((job(0), Verdict::Accepted));
+    let read_ack = || freed_on_silence().with_job_reply(acked.clone());
+    let before_ack = read_ack().with_job_beat(beat(0, 2_500, &[], &[]));
+    assert_eq!(flagged(&before_ack), [line.clone()]);
+    clear(flagged(&read_ack().with_job_beat(beat(0, 3_500, &[], &[]))));
     let launched = format!("sim-job-0/{}", allocation(1));
     let ran = failed.with_launch(RunId::new(launched), host(0), ms(150));
     assert_eq!(flagged(&ran).len(), 1);

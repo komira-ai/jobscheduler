@@ -28,7 +28,7 @@ use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
 use crate::job_expiry::JobLimits;
-use crate::job_store::{JobSources, ServerIds};
+use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
@@ -635,25 +635,6 @@ impl Config {
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
         })
-    }
-
-    /// The same configuration with the job store (when the job service is on) stamping its
-    /// rows with `clock` and minting its ids from `ids`, in place of the system's clock and
-    /// random source: how a simulation makes its job and allocation ids, and the times it
-    /// stores, a function of its seed and its virtual clock. Without agent registration
-    /// there is no job store, and the configuration is unchanged.
-    pub fn with_job_sources(
-        mut self,
-        clock: Arc<dyn js_state::Clock>,
-        ids: Arc<dyn js_jobs::IdSource>,
-    ) -> Self {
-        if let Hosts::Layered { agents, .. } = &mut self.hosts {
-            agents.job_sources = JobSources {
-                clock,
-                ids: ServerIds::new(ids),
-            };
-        }
-        self
     }
 
     /// The same configuration with every alert of the scaler also sent to `sink`, in
