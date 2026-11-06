@@ -379,8 +379,9 @@ impl Registry {
                 );
             }
         }
-        // Nothing waits and nothing is set aside: there is nothing to place or to drop.
-        if state.waiting.is_empty() & state.marks.is_empty() {
+        // Nothing waits or is set aside: nothing to place or drop (a placer that keeps the
+        // queue is still asked, so it lets go of the requests that left the wait list).
+        if state.waiting.is_empty() & state.marks.is_empty() & self.shared.placer.get().is_none() {
             return;
         }
         let settings = whole_settings(&self.shared.config);

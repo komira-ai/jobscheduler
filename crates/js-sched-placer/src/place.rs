@@ -40,6 +40,14 @@
 //! enforces) ends, with a minute to spare, by then ([`js_sched::Scheduler::with_backfill`]).
 //! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
+//! The engine also keeps the registry's whole-node queue ([`Placer::whole_round`],
+//! [`super::engine::whole`]): at each pass the registry hands it the wait list and its view
+//! of the hosts, and shows the marks the engine answers as its reservations. A host one of
+//! the engine's own requests has set aside is held by that request in the engine, not
+//! outside it, and is backfilled by the same rule against the tail the mark was made with;
+//! the hosts held outside are those of requests put back from the ledger and not presented
+//! since. A whole-node request's start books the host of its pending grant.
+//!
 //! The same engine places the queued jobs when the server holds the job tables
 //! ([`super::engine::jobs`]), and holds their allocations beside the leases: a start is
 //! placed only where both leave room.
@@ -62,7 +70,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_lease::Clock;
 use js_provider::Candidate;
 use js_provider::{RefusalCode, StartSpec};
-use js_registry::{MarkedTails, Placer, ProbeHost};
+use js_registry::{MarkedTails, Placer, ProbeHost, Reservation, WholeRound};
 use js_types::sched::FarmTime;
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, Shape};
@@ -270,6 +278,10 @@ impl Placer for SchedPlacer {
     /// declined and logged. A host in `marked` is booked only when the engine places the
     /// start there as backfill.
     ///
+    /// The start of a whole-node request the engine queues ([`Placer::whole_round`]) books
+    /// the host of the request's pending grant when it is among `open`, and none otherwise
+    /// (the request waits); nothing is counted.
+    ///
     /// A probe never falls back: the engine places it on its host, or the start books
     /// none (`NoCapacity`). Its host is cordoned in the engine for that start, as the
     /// registry found it when the probe was admitted there ([`Placer::admit_probe`]).
@@ -283,6 +295,13 @@ impl Placer for SchedPlacer {
         // The registry never asks with no host; there is nothing to place or count.
         if open.is_empty() {
             return None;
+        }
+        // A whole-node request the engine queues books the host of its pending grant, or
+        // none while it has none among `open`: it waits, which is no decline.
+        let now = self.now();
+        let committed = self.engine().commit_whole(spec, open, now);
+        if let Some(committed) = committed {
+            return committed;
         }
         let granted = self.grant(spec, open, marked, every);
         if spec.request().probe_host.is_some() {
@@ -355,6 +374,12 @@ impl Placer for SchedPlacer {
     /// confirmation or the provider's absence frees that allocation (design section 6.3).
     fn holds_work_on(&self, host: &HostId) -> bool {
         self.engine().holds_jobs_on(host)
+    }
+
+    /// The engine keeps the whole-node queue ([`super::engine::whole`]): it runs the pass.
+    fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
+        let now = self.now();
+        Some(self.engine().whole_round(round.clone(), now))
     }
 }
 

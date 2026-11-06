@@ -58,6 +58,17 @@
 //!
 //! The pass reads the table as [`HostFacts`], which the registry builds under its lock, so
 //! it holds no clock and no lock of its own.
+//!
+//! # Under a placer that keeps the queue
+//!
+//! With a placer that keeps the whole-node queue ([`crate::Placer::whole_round`], the engine
+//! of `--placement js-sched`) [`advance`] is not run: the placer's pass makes the marks, and
+//! the registry takes them ([`Marks::adopt`]) for the requests it presented, keeping the
+//! marks put back from the ledger of requests not presented since, which it hands the
+//! placer to hold ([`Marks::outside`]). What reads the marks here (the start's
+//! [`may_start`], the caps' room, backfill, the hosts API, the ledger, a drain or a retire)
+//! reads them as before. [`Marks::stand`] still drops a put-back mark whose host never came
+//! back, and counts it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -166,6 +177,47 @@ impl Marks {
         self.1.extend(placed.then_some(request));
     }
 
+    /// The mark of request `id`, as an operator sees it.
+    pub(crate) fn reservation_of(&self, id: &RequestId) -> Option<Reservation> {
+        self.of(id).map(|(host, mark)| reservation(host, &mark))
+    }
+
+    /// The marks of the requests not in `presented`, as [`Marks::tails_left`] gives them:
+    /// what a placer that runs the queue holds outside its own requests
+    /// ([`crate::WholeRound::outside`]).
+    pub(crate) fn outside(
+        &self,
+        presented: &BTreeSet<RequestId>,
+        now: Timestamp,
+    ) -> crate::MarkedTails {
+        let mut tails = self.tails_left(now);
+        tails.retain(|host, _| {
+            let holder = self.holder(host);
+            holder.is_some_and(|id| !presented.contains(id))
+        });
+        tails
+    }
+
+    /// Takes `marks`, a placer's pass over the requests in `presented`, as the marks of
+    /// those requests: their earlier marks go, and the marks of every other request (put
+    /// back from the ledger, not presented since) stay. A host keeps one mark and a request
+    /// holds one ([`Marks::place`]).
+    pub(crate) fn adopt(&mut self, marks: Vec<Reservation>, presented: &BTreeSet<RequestId>) {
+        self.0.retain(|_, mark| !presented.contains(&mark.request));
+        for taken in marks {
+            let mark = Mark {
+                request: taken.request,
+                at: taken.at,
+                deadline: taken.deadline,
+                assigned: taken.assigned,
+                capped: false,
+                tail_end: taken.tail_end,
+                claim_by: None,
+            };
+            self.place(taken.host, mark);
+        }
+    }
+
     /// Whether request `id` has held a mark while it waited, whether or not it holds one now.
     pub(crate) fn ever_marked(&self, id: &RequestId) -> bool {
         self.1.contains(id)
@@ -197,7 +249,7 @@ impl Marks {
     /// from the ledger and its host still has until `claim_by` to say hello. A host that
     /// is known clears the wait. How many put-back marks were dropped for their host
     /// never coming back.
-    fn stand(&mut self, pass: &Pass<'_>) -> u64 {
+    pub(crate) fn stand(&mut self, pass: &Pass<'_>) -> u64 {
         let mut gone = 0;
         self.0.retain(|host, mark| {
             let fact = pass.hosts.iter().find(|fact| fact.id == *host);
@@ -232,14 +284,7 @@ impl Marks {
     /// The marks, host order.
     pub(crate) fn reservations(&self) -> Vec<Reservation> {
         let marks = self.0.iter();
-        let view = marks.map(|(host, mark)| Reservation {
-            request: mark.request.clone(),
-            host: host.clone(),
-            at: mark.at,
-            deadline: mark.deadline,
-            assigned: mark.assigned,
-            tail_end: mark.tail_end,
-        });
+        let view = marks.map(|(host, mark)| reservation(host.clone(), mark));
         view.collect()
     }
 
@@ -251,6 +296,18 @@ impl Marks {
     /// Marks that drain something: assigned marks do not.
     fn draining(&self) -> usize {
         self.0.values().filter(|mark| !mark.assigned).count()
+    }
+}
+
+/// `mark` on `host`, as an operator sees it.
+fn reservation(host: HostId, mark: &Mark) -> Reservation {
+    Reservation {
+        request: mark.request.clone(),
+        host,
+        at: mark.at,
+        deadline: mark.deadline,
+        assigned: mark.assigned,
+        tail_end: mark.tail_end,
     }
 }
 

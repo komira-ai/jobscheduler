@@ -11,7 +11,7 @@
 //! | `Resources` gpu class | the `gpu.kind` platform key, on the host's `NodeCaps` and on the request's `needs`, as the canonical family of the class through the alias table (a class that is not a model name stays as written) |
 //! | `Shape` accelerator ([`Shape::accelerator`]) | the host's `accelerator.*` report entries ([`Accelerator::to_capabilities`]), and its `gpu.kind` |
 //! | a request's `accelerator.*` capabilities | passed to the scheduler's `needs` as they are; `gpu.kind` is the family of `accelerator.model`, else of the class |
-//! | `Shape` | the host's capacity and the `NodeCaps` its node report would give |
+//! | `Shape` | the host's capacity and the `NodeCaps` its node report would give, serving ordinary and whole-machine leases |
 //! | `HostId` | `WorkerId`, same text |
 //! | `LeaseId` | `sched::LeaseId`, printed `<term>-<seq>` |
 
@@ -27,6 +27,11 @@ use js_types::{HostId, IdError, Request, Resources, Shape};
 
 /// The driver a shape's node reports: jobs run in containers.
 const DRIVER: &str = "container";
+
+/// The driver of a whole-machine lease ([`LeaseKind::WholeMachine`]): a host of a pool
+/// serves the pool's whole-node requests, which the engine queues as whole-machine
+/// requests (`crate::engine::whole`).
+const WHOLE_DRIVER: &str = "native-whole-machine";
 
 /// The platform key that carries a GPU class.
 const GPU_KIND: &str = "gpu.kind";
@@ -76,7 +81,8 @@ pub fn booking(resources: &Resources) -> js_types::sched::Resources {
 /// entries from its accelerator ([`Shape::accelerator`]: the canonical family, the count and
 /// whatever the alias table or the shape's own `accelerator.*` capabilities state of the
 /// variant; a class that is not a model name is reported as `gpu.kind` as written), the
-/// `container` driver, and every capability entry the scheduler reads. A capability named
+/// `container` driver and the whole-machine one, and every capability entry the scheduler
+/// reads. A capability named
 /// like one of those the resources or the accelerator decide is ignored. A shape must name
 /// its `arch`.
 ///
@@ -94,6 +100,7 @@ pub fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCaps), Map
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     entries.push(("drivers".into(), DRIVER.into()));
+    entries.push(("drivers".into(), WHOLE_DRIVER.into()));
     entries.push(("cpus".into(), (resources.cpu_millis() / 1000).to_string()));
     entries.push((
         "mem_gib".into(),
@@ -289,6 +296,12 @@ mod tests {
         assert_eq!(caps.exact["gpu.kind"], "conformance-gpu");
         assert!(
             LeaseKind::Action
+                .drivers()
+                .iter()
+                .any(|d| caps.drivers.contains(*d))
+        );
+        assert!(
+            LeaseKind::WholeMachine
                 .drivers()
                 .iter()
                 .any(|d| caps.drivers.contains(*d))
