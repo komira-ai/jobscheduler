@@ -434,20 +434,17 @@ fn a_statement_of_the_scenarios_own_fails_the_seed_with_what_it_found() {
 }
 
 /// Asserts that a restart of the server of an elastic pool keeps the pool's cloud: the
-/// machine launched before it still runs and its agent still beats, the calls recorded
-/// before it stay first in the record, and a demand made after it is met by a second
-/// machine, launched under an acquire id of its own (the scaler's entropy goes on from
-/// where it was, rather than starting the seed's again). Catches a restart that starts a
-/// second cloud (the first machine and its record lost to the invariants), and one that
-/// draws the scaler's entropy afresh, which could name a new machine as an earlier one.
+/// calls recorded before it stay first in the record, the machine launched before it
+/// joins the restarted server, and when two whole hosts are asked for after it (the
+/// restart forgets the run in flight, so the first machine is free for one of them) the
+/// other is met by a second machine, launched under an acquire id of its own (the
+/// scaler's entropy goes on from where it was, rather than starting the seed's again).
+/// Catches a restart that starts a second cloud (the first machine and its record lost
+/// to the invariants), and one that draws the scaler's entropy afresh, which could name
+/// a new machine as an earlier one.
 #[test]
 fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
-    // The first item runs past the end, so the second item can only be met by a second
-    // machine. The horizon leaves the restarted scaler its wait for the hosts it restored
-    // (a machine of before the restart covers demand while it is awaited, up to the
-    // pool's boot timeout of 15 minutes), the boot of the second machine, and its hello.
-    let run = Duration::from_secs(3_000);
-    let mut cell = cell_running("a_restarted_elastic_server", 1, small_pool(), run);
+    let mut cell = cell_of("a_restarted_elastic_server", 1, small_pool());
     cell.run_until(LOOK_AT).expect("no invariant fails");
     let cloud = cell.cloud().expect("an elastic pool").clone();
     let before = cloud.calls();
@@ -457,6 +454,10 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
     let after = cell.cloud().expect("the same pool");
     assert!(after.calls().starts_with(&before), "the record is kept");
     cell.submit(&Work::whole_host(LONG_RUN));
+    cell.submit(&Work::whole_host(LONG_RUN));
+    // The horizon leaves the restarted scaler its wait for the hosts it restored (a
+    // machine of before the restart covers demand while it is awaited, up to the pool's
+    // boot timeout of 15 minutes), the boot of the second machine, and its hello.
     cell.run_until(FarmTime::from_millis(2_400_000))
         .expect("no invariant fails");
     let calls = cell.cloud().expect("the same pool").calls();
@@ -485,10 +486,8 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
         );
     }
     assert_eq!(cloud.fake().launched(), 2);
-    assert_eq!(cloud.fake().running().len(), 2);
-    assert!(
-        cell.machine(0).and_then(|m| m.truth()).is_some(),
-        "machine 0 still runs"
-    );
+    let facts = cell.observations().cloud.clone().expect("cloud facts");
+    let joined = facts.machines.values().filter(|machine| machine.joined);
+    assert_eq!(joined.count(), 2, "both machines joined");
     assert!(cell.machine(1).is_some(), "the second machine booted");
 }
