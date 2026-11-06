@@ -100,7 +100,10 @@ pub use ids::ScriptedIds;
 
 pub use codec::DecodeError;
 pub use error::JobStoreError;
-pub use ids::{AllocationId, IdSource, JobId, JobIdError, MAX_JOB_ID_LEN, MintError, RandomIds};
+pub use ids::{
+    AllocationId, ClientName, ClientNameError, DEFAULT_CLIENT_NAME, IdSource, JobId, JobIdError,
+    MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
+};
 pub use record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, HostBooking,
     JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,

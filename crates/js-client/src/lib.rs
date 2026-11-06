@@ -10,7 +10,9 @@
 //! With the `jobs` feature (off by default; js-cli turns it on), `jobs` is the client of
 //! the job service (`jobscheduler.v1`, gRPC), under the same rules: `jobs::JobClient`, whose
 //! methods are generated from the service definition, and `jobs::JobError`, which says
-//! whether a failed call may have taken effect.
+//! whether a failed call may have taken effect. It sends the one token it is given; the
+//! server knows it as one of its clients' (`--token-file` or a `--client-token` entry there)
+//! and records that client's name on each job it submits.
 
 mod client;
 mod error;

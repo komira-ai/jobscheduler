@@ -37,6 +37,7 @@ fn queue(jobs: &ServerJobs, text: &str) -> JobId {
         id: Some(id.clone()),
         spec: spec(),
         priority: 0,
+        client: None,
     };
     jobs.insert_queued(new).unwrap();
     id

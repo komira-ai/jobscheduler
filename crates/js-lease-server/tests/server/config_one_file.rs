@@ -242,6 +242,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
             "add a [[pool]] with an elastic provider",
         ),
         ("--agent-token-file", "set join_token_file of the [[pool]]"),
+        ("--client-token", "add a [[client]] table"),
     ];
     for (flag, instead) in moved {
         let said = format!("{flag}: not allowed with --config; {instead}");

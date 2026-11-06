@@ -66,7 +66,7 @@ pub(crate) const SURFACE: &[Command] = &[
     Command {
         path: &["job", "list"],
         rpc: "ListJobs",
-        doc: "Lists jobs by state, label and the time they were queued, a page at a time. Changes nothing.",
+        doc: "Lists jobs by state, label, client and the time they were queued, a page at a time. Changes nothing.",
         idempotency: Idempotency::Unknown,
         request: "jobscheduler.v1.ListJobsRequest",
         response: "jobscheduler.v1.ListJobsResponse",
@@ -77,6 +77,7 @@ pub(crate) const SURFACE: &[Command] = &[
             Flag { name: "labels", field: &["labels"], kind: Kind::Pair(&Kind::Text, &Kind::Text), repeated: true, required: false, oneof: None, doc: "Only jobs that carry every one of these labels with the same value. Empty: any labels." },
             Flag { name: "queued-after-ms", field: &["queued_after_ms"], kind: Kind::U64, repeated: false, required: false, oneof: None, doc: "Only jobs queued at or after this time, in milliseconds since the Unix epoch." },
             Flag { name: "queued-before-ms", field: &["queued_before_ms"], kind: Kind::U64, repeated: false, required: false, oneof: None, doc: "Only jobs queued before this time, in milliseconds since the Unix epoch." },
+            Flag { name: "client", field: &["client"], kind: Kind::Text, repeated: false, required: false, oneof: None, doc: "Only jobs submitted by the client of this name (Job.client). Absent: every client's." },
             Flag { name: "page-size", field: &["page_size"], kind: Kind::U32, repeated: false, required: false, oneof: None, doc: "The most jobs in one answer. 0: the server's own page size. A server may answer fewer." },
             Flag { name: "page-token", field: &["page_token"], kind: Kind::Text, repeated: false, required: false, oneof: None, doc: "Where to continue: the next page token of the previous answer of the same listing. Empty: the first page." },
         ],

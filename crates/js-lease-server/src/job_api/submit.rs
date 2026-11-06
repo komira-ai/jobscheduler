@@ -17,8 +17,10 @@
 //! 2. **Idempotency.** For a job with an id, the tables are read first. An existing job with
 //!    the same id and the same job (every field but the priority, compared on the decoded
 //!    job [`js_jobs::JobSpec`]) is the answer, as it is now, in whatever state, with its own
-//!    priority: the same shape as a new job's (gRPC `OK`, 201 over the gateway), so a retry
-//!    cannot tell. A different job is the refusal `job-id-conflict` (`ALREADY_EXISTS`, 409).
+//!    priority and the client that recorded it: the same shape as a new job's (gRPC `OK`, 201
+//!    over the gateway), so a retry cannot tell. A different job is the refusal
+//!    `job-id-conflict` (`ALREADY_EXISTS`, 409). Job ids are one namespace: the answers are
+//!    the same whichever client sends the retry.
 //!    An id is held as long as the job's row is: until the retention sweep deletes it once
 //!    the retention window has passed. A job without an id has the store mint one, so a
 //!    repeated submit without an id makes a second job.
@@ -29,7 +31,8 @@
 //!    catalog the cache has not read may offer. A job nothing could serve is the refusal `no-capable-host`
 //!    (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row, no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
-//!    store ([`js_jobs::JobStore::insert_queued`]); only after it returns is the answer
+//!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
+//!    layer named (never a value of the request); only after it returns is the answer
 //!    built, from the record it returns. A store that fails is `INTERNAL` with the message
 //!    `state-write-failed` (500 `state-write-failed`), the cause logged and never answered,
 //!    and nothing happened: the handler holds nothing outside the store, so there is
@@ -174,6 +177,7 @@ pub(super) async fn submit_job(
     let Some(served) = &api.submit.served else {
         return super::unimplemented();
     };
+    let client = super::client_of(&request);
     let request = request.into_inner();
     let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
     let held = match &valid.id {
@@ -187,6 +191,7 @@ pub(super) async fn submit_job(
         id: valid.id,
         spec: valid.spec,
         priority: valid.priority,
+        client,
     };
     let inserted = api.jobs.insert_queued(new).map_err(not_written)?;
     Ok(Response::new(SubmitJobResponse {

@@ -214,6 +214,7 @@ fn a_freed_job_allocation_writes_one_usage_row() {
             id: Some(id.clone()),
             spec: spec(),
             priority: 0,
+            client: None,
         };
         jobs.insert_queued(new).unwrap();
         time.advance(2 * second);
