@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use js_elastic::{Offer, ProviderError, Quota};
+use js_elastic::{Offer, ProviderError, Quota, QuotaLimit};
 
 use crate::api::{Action, Ec2Api, PurchaseKind};
 use crate::error::{ApiError, CallError, SettingsError};
@@ -331,8 +331,11 @@ impl Quotas {
                 let quota = self.read.entry((family, kind)).or_insert_with(|| {
                     match api.vcpu_quota(settings.region(), family, kind) {
                         Ok(quota) => quota.map(|quota| Quota {
-                            vcpus_limit: quota.limit,
-                            vcpus_in_use: quota.in_use,
+                            vcpus: Some(QuotaLimit {
+                                limit: quota.limit,
+                                in_use: quota.in_use,
+                            }),
+                            accelerators: None,
                         }),
                         Err(error) => {
                             self.notes.push(CatalogNote {

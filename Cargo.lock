@@ -1601,6 +1601,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-provider-gce"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-elastic",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "js-provider-lambdalabs"
 version = "0.1.0"
 dependencies = [
