@@ -3,24 +3,31 @@
 //! advertised ceiling is below what a job asks is not capable of it, and a job that asks for
 //! neither is placed as before. Every clock is manual; nothing sleeps.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use js_agent_wire::PortRange;
-use js_jobs::{DeclaredPort, JobSpec, JobState, NetworkPolicy};
+use js_agent_wire::{NetworkCeiling, PortRange};
+use js_jobs::{Booked, DeclaredPort, JobId, JobRecord, JobSpec, JobState, NetworkPolicy};
 use js_lease::ManualClock;
 use js_registry::Credential;
-use js_sched::ceiling::BeyondCeiling;
+use js_sched::Prediction;
+use js_sched::ceiling::{BeyondCeiling, within_ceiling};
+use js_sched_placer::engine::Placed;
+use js_sched_placer::engine::jobs::{JOB_TERM, JobStarts, NoStarts, ServerJobs, job_request};
+use js_sched_placer::map;
+use js_sched_placer::place::SchedPlacer;
 // The job's network level, named `Level` here as in `job_start.rs`: the server's own
 // `network` module is the only place that path may be named.
 use js_types::JobNetwork as Level;
+use js_types::{HostId, JobNetwork, Resources};
 
 use super::tests::{
     NONE, booked, clock, finish, host, pass, placer_on, queue, queue_spec, run_to_exit, sized,
     state,
 };
-use super::*;
 use crate::agent_api::job_rig::{placed, spec, tables};
-use crate::agents::assemble_placed;
+use crate::agents::{Agents, assemble_placed};
 use crate::job_alloc::{Freed, answer_retired, free_allocation};
 use crate::sched::engine_rig::{GIB, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
@@ -311,9 +318,9 @@ fn whole_host_granted(placer: &SchedPlacer, template: &JobRecord, host_name: &st
     };
     let only = BTreeSet::from([map::worker(&host(host_name))]);
     let mut engine = placer.engine();
-    let operation = engine.sched.next_operation();
+    let operation = engine.sched_mut().next_operation();
     engine
-        .sched
+        .sched_mut()
         .recover(JOB_TERM, operation, operation.0, Vec::new());
     let wall = Duration::from_secs(60);
     let granted = engine.place_one((operation, request), (wall, charge), only, now);
@@ -323,7 +330,7 @@ fn whole_host_granted(placer: &SchedPlacer, template: &JobRecord, host_name: &st
             operation,
         });
     }
-    let _ = engine.sched.forget_queued(operation);
+    let _ = engine.sched_mut().forget_queued(operation);
     granted.is_some()
 }
 

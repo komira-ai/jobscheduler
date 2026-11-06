@@ -57,7 +57,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_lease::Clock;
 use js_provider::Candidate;
@@ -70,13 +70,12 @@ use js_types::{HostId, LeaseId, Shape};
 use tracing::warn;
 
 use super::engine::{Engine, Settings};
-use crate::adapt::SharedClock;
 
 /// Places the starts of a registry with `js-sched`, and counts the starts it could not
 /// place and those that found its picture out of date.
-pub(crate) struct SchedPlacer {
+pub struct SchedPlacer {
     settings: Settings,
-    clock: SharedClock,
+    clock: Arc<dyn Clock + Send + Sync>,
     engine: Mutex<Engine>,
     /// Held for each pass over the queued jobs, so two passes never decide at once
     /// ([`super::engine::jobs`]); taken before the engine's lock, never under it.
@@ -91,25 +90,26 @@ pub(crate) struct SchedPlacer {
     /// How many removals were recorded.
     removals: AtomicU64,
     /// How many engines this placer built, counted for the tests that hold it to one.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     built: AtomicU64,
 }
 
 /// How many starts fell back to the registry's first host or were placed nowhere, by
 /// cause.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Fallbacks {
+pub struct Fallbacks {
     /// The scheduler could not take the hosts or the request: the first host was booked.
-    pub(crate) unmappable: u64,
+    pub unmappable: u64,
     /// The scheduler placed the start nowhere: none was booked.
-    pub(crate) declined: u64,
+    pub declined: u64,
 }
 
 impl SchedPlacer {
     /// A placer whose engine is built with `settings`, on `clock` (the registry's).
-    pub(crate) fn new(settings: Settings, clock: SharedClock) -> Self {
-        let now = farm_time(&clock);
+    pub fn new(settings: Settings, clock: impl Clock + Send + Sync + 'static) -> Self {
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(clock);
+        let now = farm_time(&*clock);
         Self {
             settings,
             engine: Mutex::new(Engine::build(settings, &[], now)),
@@ -120,12 +120,13 @@ impl SchedPlacer {
             resynced: AtomicU64::new(0),
             gone: Mutex::default(),
             removals: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             built: AtomicU64::new(1),
         }
     }
 
-    pub(super) fn engine(&self) -> MutexGuard<'_, Engine> {
+    /// The engine, under its lock.
+    pub fn engine(&self) -> MutexGuard<'_, Engine> {
         self.engine.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -134,8 +135,9 @@ impl SchedPlacer {
         self.passes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(super) fn now(&self) -> FarmTime {
-        farm_time(&self.clock)
+    /// The farm time of the placer's clock now.
+    pub fn now(&self) -> FarmTime {
+        farm_time(&*self.clock)
     }
 
     fn removed(&self) -> MutexGuard<'_, BTreeMap<HostId, u64>> {
@@ -145,20 +147,20 @@ impl SchedPlacer {
     /// The hosts the registry removed that the job pass has not settled yet, each with the
     /// number of its removal: the provider reads each of them absent (design section 6.3).
     /// A host that says hello again is taken off at its hello.
-    pub(crate) fn gone(&self) -> BTreeMap<HostId, u64> {
+    pub fn gone(&self) -> BTreeMap<HostId, u64> {
         self.removed().clone()
     }
 
     /// Takes off each of `settled`, removals the job pass has settled (every job allocation on
     /// the host freed), unless the host was removed again since.
-    pub(crate) fn settle_gone(&self, settled: &BTreeMap<HostId, u64>) {
+    pub fn settle_gone(&self, settled: &BTreeMap<HostId, u64>) {
         self.removed()
             .retain(|host, removal| settled.get(host) != Some(&*removal));
     }
 
     /// The fallbacks so far.
-    #[cfg(test)]
-    pub(crate) fn fallbacks(&self) -> Fallbacks {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fallbacks(&self) -> Fallbacks {
         Fallbacks {
             unmappable: self.unmappable.load(Ordering::Relaxed),
             declined: self.declined.load(Ordering::Relaxed),
@@ -167,27 +169,27 @@ impl SchedPlacer {
 
     /// The starts at which the engine was built again because it disagreed with the
     /// registry.
-    #[cfg(test)]
-    pub(crate) fn resynced(&self) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resynced(&self) -> u64 {
         self.resynced.load(Ordering::Relaxed)
     }
 
     /// How many engines this placer built.
-    #[cfg(test)]
-    pub(crate) fn built(&self) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn built(&self) -> u64 {
         self.built.load(Ordering::Relaxed)
     }
 
     /// What the engine charges `host` by its load, for a test that reads it: `None` for a
     /// host that is no worker of the engine.
-    #[cfg(test)]
-    pub(crate) fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn load_of(&self, host: &str) -> Option<js_sched::LoadView> {
         self.engine().load_of(host)
     }
 
     /// How many hosts the engine keeps, for a test that holds it to the registry's.
-    #[cfg(test)]
-    pub(crate) fn hosts_kept(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hosts_kept(&self) -> usize {
         self.engine().hosts_kept()
     }
 
@@ -206,7 +208,7 @@ impl SchedPlacer {
         if !engine.agrees(open, spec.lease().sequence()) {
             let rebuilt = engine.rebuild(self.settings, &every(), now);
             *engine = rebuilt;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.built.fetch_add(1, Ordering::Relaxed);
             let count = self.resynced.fetch_add(1, Ordering::Relaxed) + 1;
             warn!(lease = %spec.lease(), count, "the placement engine disagreed with the registry and was rebuilt");
@@ -233,17 +235,17 @@ impl SchedPlacer {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Default for SchedPlacer {
     /// A placer with the default settings on a clock that stands still at zero.
     fn default() -> Self {
         let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
-        Self::new(Settings::default(), SharedClock::new(clock))
+        Self::new(Settings::default(), clock)
     }
 }
 
 /// The farm time of `clock`: its milliseconds.
-fn farm_time(clock: &SharedClock) -> FarmTime {
+fn farm_time(clock: &dyn Clock) -> FarmTime {
     FarmTime::from_millis(clock.now().millis())
 }
 
@@ -651,7 +653,7 @@ mod tests {
             ..Settings::default()
         };
         let clock = js_lease::ManualClock::new(js_lease::Timestamp::from_millis(0));
-        SchedPlacer::new(settings, SharedClock::new(clock))
+        SchedPlacer::new(settings, clock)
     }
 
     /// `hosts` marked, each with the time left until its tail ends in seconds (`None`: not

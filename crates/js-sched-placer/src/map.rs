@@ -37,7 +37,7 @@ const FROM_RESOURCES: [&str; 4] = ["cpus", "mem_gib", "gpu", GPU_KIND];
 
 /// Why a conversion was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum MapError {
+pub enum MapError {
     /// The shape's capabilities are not a node report.
     #[error("shape does not describe a node: {0}")]
     Report(#[from] ReportError),
@@ -62,7 +62,7 @@ pub(crate) enum MapError {
 
 /// The booking vector of `resources`: CPU, memory, GPU count and disk. The GPU class has no
 /// place in it; see [`needs`] and [`node_caps`].
-pub(crate) fn booking(resources: &Resources) -> js_types::sched::Resources {
+pub fn booking(resources: &Resources) -> js_types::sched::Resources {
     js_types::sched::Resources::new(resources.cpu_millis(), resources.memory_bytes())
         .with_gpus(resources.gpus())
         .with_disk_bytes(resources.disk_bytes())
@@ -83,7 +83,7 @@ pub(crate) fn booking(resources: &Resources) -> js_types::sched::Resources {
 /// # Errors
 /// [`MapError::Report`] when a capability is not a valid report entry (no `arch`, an unknown `arch`,
 /// a countable entry that is not a whole number).
-pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCaps), MapError> {
+pub fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCaps), MapError> {
     let resources = shape.resources();
     let accelerator: Option<Accelerator> = shape.accelerator();
     let mut entries: Vec<(String, String)> = shape
@@ -136,7 +136,7 @@ fn family_of(text: &str) -> String {
 /// [`MapError::Needs`] when a capability is not a platform key;
 /// [`MapError::GpuClass`] when a `gpu.kind` capability names another family than the
 /// request's model or class.
-pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
+pub fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
     needs_of(&request.capabilities, &request.resources)
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
 ///
 /// # Errors
 /// As [`needs`].
-pub(crate) fn needs_of(
+pub fn needs_of(
     capabilities: &js_types::Capabilities,
     resources: &Resources,
 ) -> Result<js_caps::Request, MapError> {
@@ -185,7 +185,7 @@ pub(crate) fn needs_of(
 ///
 /// # Errors
 /// As [`needs`].
-pub(crate) fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapError> {
+pub fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapError> {
     Ok(SchedRequest {
         key: WorkKey::new(request.class.as_str(), dedup),
         qos: Qos::Batch,
@@ -200,7 +200,7 @@ pub(crate) fn job(request: &Request, dedup: &str) -> Result<SchedRequest, MapErr
 }
 
 /// The scheduler's name for `host`: the same text.
-pub(crate) fn worker(host: &HostId) -> WorkerId {
+pub fn worker(host: &HostId) -> WorkerId {
     WorkerId::new(host.as_str())
 }
 
@@ -208,12 +208,12 @@ pub(crate) fn worker(host: &HostId) -> WorkerId {
 ///
 /// # Errors
 /// [`MapError::Host`] when the worker's name is not a host id.
-pub(crate) fn host_id(worker: &WorkerId) -> Result<HostId, MapError> {
+pub fn host_id(worker: &WorkerId) -> Result<HostId, MapError> {
     Ok(HostId::new(worker.as_str())?)
 }
 
 /// The text of `lease` in the API: `<term>-<seq>`.
-pub(crate) fn lease_text(lease: SchedLeaseId) -> String {
+pub fn lease_text(lease: SchedLeaseId) -> String {
     format!("{}-{}", lease.term, lease.seq)
 }
 
@@ -222,7 +222,7 @@ pub(crate) fn lease_text(lease: SchedLeaseId) -> String {
 ///
 /// # Errors
 /// [`MapError::LeaseText`] for anything else.
-pub(crate) fn lease_id(text: &str) -> Result<SchedLeaseId, MapError> {
+pub fn lease_id(text: &str) -> Result<SchedLeaseId, MapError> {
     let refuse = || MapError::LeaseText(text.to_owned());
     let (term, seq) = text.split_once('-').ok_or_else(refuse)?;
     let id = SchedLeaseId::new(

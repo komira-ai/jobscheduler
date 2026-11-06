@@ -25,6 +25,7 @@ js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-registry = { path = "../js-registry" }
 js-scaler = { path = "../js-scaler" }
 js-sched = { path = "../js-sched" }
+js-sched-placer = { path = "../js-sched-placer" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 js-usage = { path = "../js-usage" }
@@ -66,6 +67,9 @@ js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
 js-provider-fake = { path = "../js-provider-fake" }
+# What the server's tests read of the placer: its fallback counters, the engines it built and
+# its scheduler (src/sched/*_tests.rs).
+js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }
 # The store wrapper that fails a commit (`interfere`), for the heartbeat's failed-commit tests.
 js-jobs = { path = "../js-jobs", features = ["test-support"] }
 js-state = { path = "../js-state", features = ["test-support"] }
