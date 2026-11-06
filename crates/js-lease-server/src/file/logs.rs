@@ -3,8 +3,11 @@
 //!
 //! Its keys are `sink` (`"none"`, the default, or `"object_store"`) and, for an object store,
 //! `url`, `region`, `endpoint`, `path_style`, `read_key_file`, `credentials`, `sts_endpoint`,
-//! `role_arn`, `mint_key_file`, `credential_ttl` and `max_follow` ([`LogsConfig`]). The table
-//! and its two key files are read and checked at start.
+//! `role_arn`, `mint_key_file`, `signing_key_file`, `credential_ttl` and `max_follow`
+//! ([`LogsConfig`]). `credentials` is `"sts"` (the default: `sts_endpoint`, `role_arn` and
+//! `mint_key_file`) or `"presigned_prefix"` (`signing_key_file` alone, for a store with no
+//! STS); the keys of the other kind are refused. The table and its two key files are read and
+//! checked at start.
 //!
 //! It is the only way to set a sink: no flag sets one, and a server run from flags has none.
 //! Every rule is checked at start, offline, and a refusal names the key and never repeats its
@@ -16,7 +19,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use js_logmint::{Bucket, LogPrefix, RoleArn, StsEndpoint};
+use js_logmint::{Bucket, LogPrefix, RoleArn, StsEndpoint, host_prefix};
 use js_logstore::Endpoint;
 use serde_json::Value;
 
@@ -36,6 +39,7 @@ const LOGS_KEYS: &[&str] = &[
     "sts_endpoint",
     "role_arn",
     "mint_key_file",
+    "signing_key_file",
     "credential_ttl",
     "max_follow",
 ];
@@ -61,8 +65,20 @@ const MAX_KEY_ID_LEN: usize = 128;
 /// The longest secret access key a key file may hold, in bytes.
 const MAX_SECRET_LEN: usize = 1024;
 
+/// The keys of `credentials = "sts"`, in the order a refusal beside another kind looks for
+/// them.
+const STS_KEYS: &[&str] = &["sts_endpoint", "role_arn", "mint_key_file"];
+
+/// The keys of `credentials = "presigned_prefix"`.
+const PRESIGNED_KEYS: &[&str] = &["signing_key_file"];
+
 /// What a key file must hold.
 const KEY_FILE_MUST: &str = "must hold JSON {\"access_key_id\": ..., \"secret_access_key\": ...} and nothing else: an id of 1 to 128 letters and digits and a secret of 1 to 1024 printable ASCII bytes";
+
+/// Why a prefix is refused when it leaves no room for a host's prefix: the host's segment and
+/// its `/` (36 bytes) must fit under it within the layout's 512.
+const NO_ROOM_FOR_HOST: &str =
+    "must leave room for a host's prefix under it: a prefix of at most 476 bytes";
 
 /// What `url` must be.
 const URL_MUST: &str =
@@ -125,6 +141,13 @@ pub enum Minting {
         /// `role_arn`: the role assumed.
         role_arn: RoleArn,
         /// `mint_key_file`: the key that calls `AssumeRole`.
+        key: AccessKey,
+    },
+    /// `credentials = "presigned_prefix"`: a prefix grant per host, scoped to the host's own
+    /// prefix under the log prefix (`js_logmint::host_prefix`), derived from a signing key the
+    /// store also holds. No call is made to mint.
+    PresignedPrefix {
+        /// `signing_key_file`: the key grants are derived from.
         key: AccessKey,
     },
 }
@@ -204,6 +227,7 @@ fn read_object_store(
 ) -> Result<ObjectStoreLogs, StartupError> {
     let url = s.required_string("url")?;
     let (bucket, prefix) = parse_url(&url).map_err(|reason| s.fail("url", &reason))?;
+    host_prefix(&prefix, "").map_err(|_| s.fail("url", NO_ROOM_FOR_HOST))?;
     let region = s.required_string("region")?;
     if !region_ok(&region) {
         return Err(s.fail("region", "must be 1 to 64 bytes of [a-z0-9-]"));
@@ -215,17 +239,18 @@ fn read_object_store(
     let endpoint = Endpoint::parse(&store_url, &region, bucket.as_str(), path_style)
         .map_err(|err| s.fail("endpoint", &err.to_string()))?;
     let read = read_key(s, "read_key_file", files)?;
-    let credentials = s.string("credentials")?;
-    if credentials.is_some_and(|kind| kind != "sts") {
-        let reason = "must be sts: no other way of minting a host credential is built";
-        return Err(s.fail("credentials", reason));
-    }
-    let sts_url = s.string("sts_endpoint")?.unwrap_or(store_url);
-    let sts_endpoint = StsEndpoint::parse(&sts_url, &region)
-        .map_err(|err| s.fail("sts_endpoint", &err.to_string()))?;
-    let role_arn = s.required_string("role_arn")?;
-    let role_arn = RoleArn::new(&role_arn).map_err(|err| s.fail("role_arn", &err.to_string()))?;
-    let mint_key = read_key(s, "mint_key_file", files)?;
+    let minting = match s.string("credentials")?.as_deref() {
+        None | Some("sts") => {
+            refuse_beside(s, PRESIGNED_KEYS, "sts")?;
+            read_sts(s, store_url, &region, files)?
+        }
+        Some("presigned_prefix") => {
+            refuse_beside(s, STS_KEYS, "presigned_prefix")?;
+            let key = read_key(s, "signing_key_file", files)?;
+            Minting::PresignedPrefix { key }
+        }
+        Some(_) => return Err(s.fail("credentials", "must be sts or presigned_prefix")),
+    };
     let credential_ttl = s.duration("credential_ttl")?.unwrap_or(DEFAULT_TTL);
     if !(SHORTEST_TTL..=LONGEST_TTL).contains(&credential_ttl) {
         return Err(s.fail("credential_ttl", "must be from 15m to 12h"));
@@ -236,14 +261,42 @@ fn read_object_store(
         prefix,
         endpoint,
         read_key: read,
-        minting: Minting::Sts {
-            endpoint: sts_endpoint,
-            role_arn,
-            key: mint_key,
-        },
+        minting,
         credential_ttl,
         max_follow,
     })
+}
+
+/// The keys of `credentials = "sts"`: the STS at `sts_endpoint` (`endpoint` unless given), the
+/// role and the mint key.
+fn read_sts(
+    s: &mut Section,
+    store_url: String,
+    region: &str,
+    files: &dyn SecretFiles,
+) -> Result<Minting, StartupError> {
+    let sts_url = s.string("sts_endpoint")?.unwrap_or(store_url);
+    let endpoint = StsEndpoint::parse(&sts_url, region)
+        .map_err(|err| s.fail("sts_endpoint", &err.to_string()))?;
+    let role_arn = s.required_string("role_arn")?;
+    let role_arn = RoleArn::new(&role_arn).map_err(|err| s.fail("role_arn", &err.to_string()))?;
+    let key = read_key(s, "mint_key_file", files)?;
+    Ok(Minting::Sts {
+        endpoint,
+        role_arn,
+        key,
+    })
+}
+
+/// Refuses the first of `keys` the table holds: a key of another kind than `kind`.
+fn refuse_beside(s: &Section, keys: &[&str], kind: &str) -> Result<(), StartupError> {
+    match keys.iter().find(|key| s.map.contains_key(**key)) {
+        Some(key) => {
+            let reason = format!("not allowed with logs.credentials = \"{kind}\"");
+            Err(s.fail(key, &reason))
+        }
+        None => Ok(()),
+    }
 }
 
 /// The bucket and the log prefix of `url`, `s3://BUCKET` or `s3://BUCKET/PREFIX`.

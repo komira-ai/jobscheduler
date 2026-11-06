@@ -333,7 +333,8 @@ impl std::io::Write for Buffer {
 }
 
 impl Captured {
-    /// Captures what this thread logs until it is dropped.
+    /// Captures what this thread logs until it is dropped. The interest cache is rebuilt once
+    /// the subscriber is installed, in case another test registered a callsite first.
     fn start() -> Captured {
         let text = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&text);
@@ -341,9 +342,11 @@ impl Captured {
             .with_ansi(false)
             .with_writer(move || Buffer(Arc::clone(&sink)))
             .finish();
+        let scope = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
         Captured {
             text,
-            _scope: tracing::subscriber::set_default(subscriber),
+            _scope: scope,
         }
     }
 
