@@ -230,6 +230,8 @@ mod s3_compat {
         Drop,
         /// The store takes the request, and its answer is lost on the way back.
         LoseAnswer,
+        /// The proxy answers in the store's place, with this status and S3 error code.
+        Answer(u16, &'static str),
     }
 
     /// The transport between the uploader and the store: it records every request, and does
@@ -289,6 +291,11 @@ mod s3_compat {
                     self.store.send(request).expect("the store answers");
                     Err(TransportError::Io(ErrorKind::ConnectionReset))
                 }
+                Some(Fault::Answer(status, code)) => Ok(HttpResponse {
+                    status,
+                    headers: Vec::new(),
+                    body: format!("<Error><Code>{code}</Code></Error>").into_bytes(),
+                }),
             }
         }
     }
@@ -735,5 +742,97 @@ mod s3_compat {
     #[ignore = "needs the S3-compatible test store: JS_TEST_S3_URL and JS_TEST_S3_REGION (CI's test job)"]
     fn a_put_whose_answer_was_lost_is_retried_without_a_repeat() {
         fails_once("s3-lost", Fault::LoseAnswer, Some(b"the first chunk\n"));
+    }
+
+    /// What a test of a credential the store will not take checks: the host holds `held` (the
+    /// first heartbeat's reply brought it), the first put is refused, the next heartbeat reports
+    /// the credential stale, its reply brings a renewal the store's STS minted, and the same
+    /// chunk is put again with it at once, so the stream has no gap and no repeat.
+    fn renewed_after_a_refusal(
+        name: &str,
+        held: impl FnOnce(&Rig) -> LogGrant,
+        fault: Option<Fault>,
+    ) {
+        let rig = Rig::new(name);
+        let held = held(&rig);
+        let renewal = rig.mint(RENEWED);
+        let mut server = Server {
+            grants: VecDeque::from([held.clone(), renewal.clone()]),
+            states: Vec::new(),
+        };
+        let mut session =
+            Session::new(hello(&rig.host), &mut server, lowest()).with_log_grant(rig.grant.clone());
+        session.tick();
+        session.tick();
+
+        let job = rig.job("job-refused");
+        let (uploader, wake) = rig.start(&job);
+        if let Some(fault) = fault {
+            rig.proxy.fail_next(fault);
+        }
+        let first = b"put again with the renewal\n";
+        append(&job.stdout, first);
+        assert_eq!(wake.step(), Settled::Asleep);
+        let key = job.prefix.chunk_key(Stream::Stdout, 0);
+        assert_eq!(rig.read(&key), None, "the refused put stored nothing");
+
+        session.tick();
+        assert_eq!(rig.grant.generation(), 2, "the renewal is held");
+        assert_eq!(wake.step(), Settled::Asleep);
+        let second = b"and the stream goes on\n";
+        append(&job.stdout, second);
+        assert_eq!(wake.step(), Settled::Asleep);
+        drop(session);
+        assert_eq!(
+            server.states,
+            [state(true, None), state(true, Some(&held))],
+            "the refusal is reported stale"
+        );
+        let puts = rig.proxy.puts();
+        let signers: Vec<&str> = puts.iter().map(|put| put.key_id.as_str()).collect();
+        let renewed = renewal.access_key_id.as_str();
+        assert_eq!(signers, [held.access_key_id.as_str(), renewed, renewed]);
+        assert_eq!(puts[0].key, puts[1].key, "the refused chunk is put again");
+        let out = [first.as_slice(), second].concat();
+        assert_eq!(whole(&rig.chunks(&job.prefix, Stream::Stdout)), out);
+        uploader.finish((out.len() as u64, 0));
+        run_out(&wake);
+        assert_eq!(rig.read(&job.prefix.final_key(Stream::Stdout)), Some(out));
+    }
+
+    /// Proves a credential the store no longer takes (its session token is not one the store
+    /// issued, as after a revocation) is reported stale in the next heartbeat on the store's own
+    /// refusal, and the upload goes on with the renewal that heartbeat's reply brings. Catches a
+    /// store's refusal of the token read as a refusal to retry with the same credential, which
+    /// stops the upload until the credential's expiry nears.
+    #[test]
+    #[ignore = "needs the S3-compatible test store: JS_TEST_S3_URL and JS_TEST_S3_REGION (CI's test job)"]
+    fn a_credential_the_store_refuses_is_renewed_and_the_upload_goes_on() {
+        let revoked = |rig: &Rig| {
+            let mut grant = rig.mint(SHORTEST);
+            grant.session_token = grant.session_token.map(|token| format!("{token}x"));
+            grant
+        };
+        renewed_after_a_refusal("s3-revoked", revoked, None);
+    }
+
+    /// Proves a credential the store answers as expired (the explicit expiry step: the proxy
+    /// gives, in the store's place, the answer to a temporary key past its expiry) is reported
+    /// stale in the next heartbeat, and the upload goes on with the renewal that heartbeat's
+    /// reply brings: for the test store's own answer (403 `InvalidAccessKeyId`: it forgets an
+    /// expired temporary key) and for S3's (400 `ExpiredToken`). Catches an uploader that keeps
+    /// retrying the dead key, or gives up, instead of asking for and taking the renewal.
+    #[test]
+    #[ignore = "needs the S3-compatible test store: JS_TEST_S3_URL and JS_TEST_S3_REGION (CI's test job)"]
+    fn a_credential_the_store_answers_as_expired_is_renewed_and_the_upload_goes_on() {
+        let answers = [(403, "InvalidAccessKeyId"), (400, "ExpiredToken")];
+        for (status, code) in answers {
+            let expired = Fault::Answer(status, code);
+            renewed_after_a_refusal(
+                &format!("s3-{code}"),
+                |rig| rig.mint(SHORTEST),
+                Some(expired),
+            );
+        }
     }
 }

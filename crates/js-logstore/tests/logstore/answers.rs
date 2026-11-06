@@ -61,6 +61,18 @@ fn each_refusal_is_the_error_its_status_and_code_say() {
                 code: "InvalidToken".to_owned(),
             },
         ),
+        (
+            s3_error(403, "InvalidAccessKeyId"),
+            StoreError::Expired {
+                code: "InvalidAccessKeyId".to_owned(),
+            },
+        ),
+        (
+            s3_error(403, "InvalidTokenId"),
+            StoreError::Expired {
+                code: "InvalidTokenId".to_owned(),
+            },
+        ),
         (s3_error(400, "SlowDown"), unavailable(400, "SlowDown")),
         (s3_error(503, "SlowDown"), unavailable(503, "SlowDown")),
         (s3_error(429, ""), unavailable(429, "")),

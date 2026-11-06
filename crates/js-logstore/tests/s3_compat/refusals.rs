@@ -92,10 +92,14 @@ fn a_request_signed_outside_the_stores_window_is_refused() {
     ahead(14).expect("a signing time inside the window");
 }
 
-/// Proves the store takes a minted credential only with the session token it was issued with:
-/// the credential without its token, and with a token one byte longer, are each refused, and
-/// nothing is stored. Catches a token sent in a header other than the one the store reads, or
-/// left out of the signed headers.
+/// Proves the store takes a minted credential only with the session token it was issued with,
+/// and that the client reads its refusal of any other as an expired credential, so the agent
+/// asks for a new one: the credential without its token, and with a token one byte longer
+/// (one the store did not issue, as after a revocation), are each refused with the store's
+/// `InvalidTokenId`, and nothing is stored. Catches a token sent in a header other than the one
+/// the store reads or left out of the signed headers, and a store's refusal of the token read
+/// as a refusal to retry with the same credential, which stops an upload until the
+/// credential's expiry nears.
 #[test]
 #[ignore = "needs the S3-compatible test store: JS_TEST_S3_URL and JS_TEST_S3_REGION (CI's test job)"]
 fn a_minted_credential_is_refused_without_its_own_session_token() {
@@ -112,8 +116,7 @@ fn a_minted_credential_is_refused_without_its_own_session_token() {
         rig.client(credential)
             .put(&key, b"x".to_vec(), &Metadata::new())
     };
-    let refused = Err(StoreError::Denied {
-        status: 403,
+    let refused = Err(StoreError::Expired {
         code: "InvalidTokenId".to_owned(),
     });
     assert_eq!(put(bare), refused);

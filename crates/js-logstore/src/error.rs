@@ -7,8 +7,17 @@
 
 use crate::http::TransportError;
 
-/// The S3 error codes that mean the credential is no longer valid.
-const EXPIRY_CODES: [&str; 3] = ["ExpiredToken", "RequestExpired", "InvalidToken"];
+/// The S3 error codes that mean the credential is no longer valid, so a new one is the remedy:
+/// S3's (`ExpiredToken`, `RequestExpired`, `InvalidToken`), and MinIO's, an S3-compatible store
+/// with STS: `InvalidAccessKeyId` for a temporary key past its expiry (it forgets the key) and
+/// `InvalidTokenId` for a session token it did not issue or no longer takes.
+const EXPIRY_CODES: [&str; 5] = [
+    "ExpiredToken",
+    "RequestExpired",
+    "InvalidToken",
+    "InvalidAccessKeyId",
+    "InvalidTokenId",
+];
 
 /// The longest S3 error code kept.
 const MAX_CODE_LEN: usize = 64;
@@ -30,7 +39,8 @@ pub enum StoreError {
         code: String,
     },
     /// The credential has expired, by the client's clock before any request or by the store's
-    /// answer (`ExpiredToken`, `RequestExpired`, `InvalidToken`): ask for a new one.
+    /// answer (`ExpiredToken`, `RequestExpired`, `InvalidToken`, `InvalidAccessKeyId`,
+    /// `InvalidTokenId`: the store no longer takes it): ask for a new one.
     #[error("the credential has expired (code `{code}`)")]
     Expired {
         /// The S3 error code, or empty when the client's own clock said so.
