@@ -68,6 +68,12 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The decoders' cargo-fuzz packages are packages of their own, outside the workspace,
+      # so the steps above do not build them: these check that each still compiles against
+      # its crate. No fuzzing runs here; a campaign is `cargo +nightly fuzz run <target>`.
+      - run: cargo check --locked --manifest-path crates/js-agent-wire/fuzz/Cargo.toml --target-dir target/fuzz-check
+      - run: cargo check --locked --manifest-path crates/js-api-gateway/fuzz/Cargo.toml --target-dir target/fuzz-check
+      - run: cargo check --locked --manifest-path crates/js-jobs/fuzz/Cargo.toml --target-dir target/fuzz-check
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
@@ -107,7 +113,7 @@ jobs:
   # digest.
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     services:
@@ -661,7 +667,7 @@ jobs:
   # its SHA-256 before use.
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     services:

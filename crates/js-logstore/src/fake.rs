@@ -21,11 +21,20 @@
 //! policy, valid for the `DurationSeconds` asked (or for what
 //! [`FakeStore::answer_sts_with_lifetime`] says).
 //!
+//! It also checks prefix grants ([`crate::presigned`]) as a store without STS does: a key of
+//! [`FakeStore::prefix_signing_key`] signs no request itself, but a grant derived from it signs
+//! puts and deletes under the grant's prefix until its expiry, in the header form or as a
+//! presigned URL (query form). A grant whose token does not parse, names a key the fake did not
+//! issue as a signing key, names another bucket, or does not match its access key id is 403
+//! `InvalidAccessKeyId`; an expired grant is 403 `ExpiredToken`; a presigned URL past its own
+//! `X-Amz-Expires` is 403 `AccessDenied`, as S3 answers.
+//!
 //! A refused request changes nothing. [`FakeStore::operations`] lists the accepted ones in
 //! order. A put can be held ([`FakeStore::block_puts`]) until the test releases it, never for a
 //! time, and the answer of a stored put can be lost
 //! ([`FakeStore::lose_response_of_next_put`]).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io;
@@ -40,6 +49,7 @@ use crate::credential::{Credential, Endpoint};
 use crate::http::{HttpRequest, HttpResponse, Method, Transport, TransportError};
 use crate::sigv4::{Scope, Unsigned, sign};
 
+mod presigned;
 mod sts;
 
 pub use sts::{MAX_DURATION_SECS, MIN_DURATION_SECS};
@@ -168,17 +178,32 @@ struct Stored {
     last_modified: SystemTime,
 }
 
+/// What kind of key [`FakeStore::issue_in`] issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A temporary credential with a session token.
+    Temporary,
+    /// A long-lived key (no session token) that may call `AssumeRole`.
+    Minting,
+    /// A long-lived key (no session token) prefix grants are derived from.
+    Signing,
+}
+
+#[derive(Clone)]
 struct Issued {
     credential: Credential,
     policy: Policy,
     /// Whether the key may call `AssumeRole`: a key of [`FakeStore::minting_key`].
     may_assume: bool,
+    /// Whether prefix grants may be derived from the key: a key of
+    /// [`FakeStore::prefix_signing_key`].
+    signs_grants: bool,
 }
 
 /// A request whose signature the fake checked: the credential that signed it, and its URL's
 /// path and decoded query.
 struct Verified<'s, 'r> {
-    issued: &'s Issued,
+    issued: Cow<'s, Issued>,
     path: &'r str,
     query: Vec<(String, String)>,
 }
@@ -250,7 +275,7 @@ impl FakeStore {
     /// A new temporary credential (with a session token) that may do what `policy` allows,
     /// until `lifetime` after the fake's clock now.
     pub fn issue_for(&self, policy: Policy, lifetime: Duration) -> Credential {
-        self.issue_in(&mut self.lock(), policy, lifetime, false)
+        self.issue_in(&mut self.lock(), policy, lifetime, Kind::Temporary)
     }
 
     /// A new long-lived key (no session token) that may call `AssumeRole` and nothing else,
@@ -260,7 +285,7 @@ impl FakeStore {
             actions: Vec::new(),
             prefix: String::new(),
         };
-        self.issue_in(&mut self.lock(), none, MINTING_KEY_TTL, true)
+        self.issue_in(&mut self.lock(), none, MINTING_KEY_TTL, Kind::Minting)
     }
 
     /// Makes the credential `access_key_id` expire now, as the store sees it: every later
@@ -280,27 +305,27 @@ impl FakeStore {
         self.lock().sts_lifetime = lifetime;
     }
 
-    /// Issues a credential: a minting key (no session token, may call `AssumeRole`) when
-    /// `minting`, else a temporary credential with a session token.
+    /// Issues a credential of `kind`.
     fn issue_in(
         &self,
         state: &mut State,
         policy: Policy,
         lifetime: Duration,
-        minting: bool,
+        kind: Kind,
     ) -> Credential {
         state.issued += 1;
         let n = state.issued;
         let credential = Credential {
             access_key_id: format!("FAKEKEY{n:012}"),
             secret_access_key: format!("fake-secret-{n}"),
-            session_token: (!minting).then(|| format!("fake-session-token-{n}")),
+            session_token: (kind == Kind::Temporary).then(|| format!("fake-session-token-{n}")),
             expires_at: self.shared.clock.now() + lifetime,
         };
         let issued = Issued {
             credential: credential.clone(),
             policy,
-            may_assume: minting,
+            may_assume: kind == Kind::Minting,
+            signs_grants: kind == Kind::Signing,
         };
         state.keys.insert(credential.access_key_id.clone(), issued);
         credential
@@ -381,14 +406,17 @@ impl FakeStore {
         request: &'r HttpRequest,
         service: &str,
     ) -> Result<Verified<'s, 'r>, HttpResponse> {
+        if let Some((path, query)) = presigned::presigned_url(request) {
+            return self.verify_presigned(state, request, service, path, query);
+        }
         let mismatch = || error(403, "SignatureDoesNotMatch");
         let (key_id, signed_names) = request
             .header("authorization")
             .and_then(parse_authorization)
             .ok_or_else(mismatch)?;
-        let issued = state
-            .keys
-            .get(key_id)
+        let token = request.header("x-amz-security-token");
+        let issued = self
+            .issued(state, key_id, token)
             .ok_or_else(|| error(403, "InvalidAccessKeyId"))?;
         if issued.credential.is_expired(self.shared.clock.now()) {
             return Err(error(403, "ExpiredToken"));

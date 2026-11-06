@@ -10,6 +10,10 @@ use super::parse_duration;
 /// The default of `--job-retention` and `server.job_retention`: seven days.
 pub const DEFAULT_JOB_RETENTION: &str = "7d";
 
+/// The default of `--job-allocation-retention` and `server.job_allocation_retention`: fourteen
+/// days, [`Retention::ALLOCATION_DEFAULT`].
+pub const DEFAULT_JOB_ALLOCATION_RETENTION: &str = "14d";
+
 /// What a refused window must be. It never repeats the value: a file's refusal does not.
 pub(crate) const JOB_RETENTION_MUST: &str =
     "must be a duration of at least one minute, such as 7d, 36h or 90m";

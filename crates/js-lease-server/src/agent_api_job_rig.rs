@@ -20,7 +20,7 @@ use js_agent_wire::{
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
-    JobStore, Needs, NetworkPolicy, NewJob, RandomIds, Retention,
+    JobStore, Needs, NetworkPolicy, NewJob, Retention,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
@@ -82,7 +82,7 @@ pub(crate) fn tables_on(
 ) -> (Arc<Interfere<Fake>>, ServerJobs) {
     let store = Arc::new(Interfere::new(Fake::with_flaw(clock, Flaw::None)));
     let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
+    let jobs = JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     (store, jobs.with_retention(retention))
 }
 
@@ -391,6 +391,13 @@ fn rig_on(
 }
 
 impl Rig {
+    /// This rig's server trimming the job store's change feed through `feed` on each tick.
+    pub(crate) fn with_feed(mut self, feed: crate::job_store::FeedTrim) -> Rig {
+        let agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        self.agents = Arc::new(agents.with_job_feed(feed));
+        self
+    }
+
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {

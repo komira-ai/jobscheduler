@@ -664,8 +664,9 @@ impl Runtime for NativeRuntime {
         self.journal
             .add(&lease)
             .map_err(|why| fail(&"the lease journal", &why))?;
-        // The helper records the lease, and the uid it holds, before it makes the home and
-        // the account, so a refusal may leave a live lease: it is removed again.
+        // The helper records the lease, and the uid of the pool user it lends, before it
+        // finishes (an administrator's user is made for it), so a refusal may leave a live
+        // lease: it is removed again.
         let uid = match self.helper.user_create(&lease, None) {
             Ok(uid) => uid,
             Err(why) => {

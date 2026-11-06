@@ -6,6 +6,13 @@
 //! so revisions commit in the order they were taken and the feed has no gap a poller
 //! could step over (C5). Every writer takes the locks in the same order, head then keys,
 //! so none deadlocks on another.
+//!
+//! A transaction of a fenced store ([`super::PostgresStore::fenced`]) reads the writer
+//! generation row `FOR SHARE` last, just before its commit, and rolls back when the row holds
+//! another generation. Taking the writer lock updates that row, so it waits for every commit
+//! that holds the row shared, and every commit that begins after it sees the new generation.
+//! The row is the last lock a writer takes, and the lock's taker takes no other, so the order
+//! is the same for all and none deadlocks.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -19,6 +26,11 @@ use crate::{Commit, Cond, Conflict, Op, Revision, Txn};
 const KIND_PUT: i16 = 0;
 const KIND_DELETE: i16 = 1;
 const KIND_EXPIRE: i16 = 2;
+
+/// The writer generation, held shared to the commit. Not a prepared statement: a store
+/// that is not fenced never runs it, and a schema older than the table's migration has no
+/// table to prepare it on.
+const FENCE: &str = "SELECT generation FROM writer_generation FOR SHARE";
 
 /// How a transaction sees the database.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +83,8 @@ pub(super) struct Tx<'p> {
     /// The store's time for this transaction, read once after the head lock.
     now: i64,
     alloc: Alloc,
+    /// The writer generation the commit must find, when the store is fenced.
+    fence: Option<i64>,
     /// Every key this transaction has loaded or written, as it stands now. The head lock
     /// keeps other writers out, so a loaded row stays what was loaded.
     cache: BTreeMap<String, Option<Row>>,
@@ -81,21 +95,27 @@ pub(super) struct Tx<'p> {
 
 impl<'p> Tx<'p> {
     /// Opens a transaction and takes the head lock. `over` is an injected clock reading,
-    /// or `None` for the database's own clock.
+    /// or `None` for the database's own clock; `fence` the writer generation the commit
+    /// checks.
     pub(super) fn begin(
         mut session: Pooled<'p>,
         level: Level,
         over: Option<i64>,
         flaw: Flaw,
+        fence: Option<i64>,
     ) -> Result<Tx<'p>, Fail> {
-        session.client.batch_execute(match level {
+        let begin = session.client.batch_execute(match level {
             Level::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
             Level::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
-        })?;
+        });
+        // The session is judged here, as no transaction exists to roll back on drop: one that
+        // met a closed connection must not go back to the pool.
+        begin.inspect_err(|err| session.note_failure(err))?;
         let mut tx = Tx {
             session,
             now: 0,
             alloc: Alloc::Sequence,
+            fence,
             cache: BTreeMap::new(),
             dirty: false,
             open: true,
@@ -127,8 +147,23 @@ impl<'p> Tx<'p> {
         self.dirty
     }
 
-    /// Makes the transaction durable.
+    /// Makes the transaction durable, unless the store is fenced and the writer generation
+    /// is no longer its own: then [`Fail::Fenced`], and the drop rolls it back.
     pub(super) fn commit(mut self) -> Result<(), Fail> {
+        if let Some(generation) = self.fence {
+            // At SERIALIZABLE a row changed since the snapshot cannot be read: that is a
+            // serialization failure, run again by the caller like any other, and the run
+            // again reads the new generation. It is not taken for a fence here: the server
+            // raises the same code for other conflicts, and a fence stops the writer for good.
+            let held: Option<i64> = self
+                .session
+                .client
+                .query_opt(FENCE, &[])?
+                .map(|row| row.get(0));
+            if held != Some(generation) {
+                return Err(Fail::Fenced);
+            }
+        }
         if let Alloc::Locked { head, last } = self.alloc
             && last != head
         {
@@ -229,6 +264,19 @@ impl<'p> Tx<'p> {
             self.expire(key)?;
         }
         Ok(keys.len())
+    }
+
+    /// Deletes the feed rows at or below `before` or the head this transaction holds
+    /// locked, whichever is lower; how many. No revision can still commit at or below
+    /// the head, and none above it is touched. (Under the sequence flaw nothing locks
+    /// the head and nothing moves it, so a trim deletes nothing.)
+    pub(super) fn trim(&mut self, before: i64) -> Result<u64, Error> {
+        let s: &mut Session = &mut self.session;
+        let removed = s.client.execute(&s.st.trim, &[&before])?;
+        if removed > 0 {
+            self.dirty = true;
+        }
+        Ok(removed)
     }
 
     /// Locks up to `limit` live rows under `prefix`, in key order. With `skip_locked`

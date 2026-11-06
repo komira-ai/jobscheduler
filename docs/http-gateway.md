@@ -233,10 +233,9 @@ the line is the record of who cancelled.
 
 Both transports are served on the port of `--job-listen` (off by default). Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it (the fleet calls, until the server gives their group its handles); the
-read calls, `SubmitJob` and `CancelJob` are served (below). A request carries at most 64 KiB
-over either transport: a larger gateway body is 413 `request-too-large`, and a larger gRPC
-message is not decoded (`OUT_OF_RANGE`).
+directory serves it; the read calls, `SubmitJob`, `CancelJob` and the fleet calls are served
+(below). A request carries at most 64 KiB over either transport: a larger gateway body is 413
+`request-too-large`, and a larger gRPC message is not decoded (`OUT_OF_RANGE`).
 
 | calls | file |
 |---|---|
@@ -378,7 +377,9 @@ them: any other client is answered `PERMISSION_DENIED` `operator-only` (403).
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
   status (the next launch's plan, the alerts, the orphans) is carried. A server with no elastic
-  pool answers empty lists.
+  pool answers empty lists. Both are served whatever the listen address: unlike
+  `GET /v1/pools`, which takes no token and is served only on a private address, they take a
+  client's token.
 - `GetUsage` reads the ended bookings of the usage store (see `usage-store.md`), oldest end
   first, from `from_ms` included to `to_ms` excluded, of one host or one job when asked. A page
   holds `page_size` records (100 when 0, at most 1000); the filters apply before the page is
@@ -386,6 +387,11 @@ them: any other client is answered `PERMISSION_DENIED` `operator-only` (403).
   it, so no record is read twice or skipped while records are written; it is empty on the last
   page. A token no answer gave is `INVALID_ARGUMENT` `invalid-page-token`. A server started
   with `--usage-off` answers an empty page.
+
+Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
+but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`
+(`NOT_FOUND`), and `cordon-unsaved`, `store-unavailable` and `usage-unavailable`
+(`UNAVAILABLE`), each answer 500 `internal`.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written
 `GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies; the

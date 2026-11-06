@@ -10,26 +10,15 @@ use std::collections::VecDeque;
 use super::*;
 use crate::autologin::{Intent, write_intent};
 
-/// A rig of ONE uid, the test's own, holding lease `lease`.
+/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
+/// the uid only once its user is deleted and the pool's slot made.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    let rig = rig(name, 1);
-    let uid = rig.helper.user_create(lease, None).unwrap();
-    log(&rig);
-    (rig, uid)
+    legacy(name, lease)
 }
 
 /// How many logged calls are exactly `call`.
 fn count(calls: &[String], call: &str) -> usize {
     calls.iter().filter(|c| *c == call).count()
-}
-
-/// Asserts that no other lease can have the uid: the lease is held.
-fn uid_held(rig: &Rig) {
-    let range = rig.helper.settings.range;
-    assert_eq!(
-        rig.helper.user_create("99.1", None),
-        Err(format!("no free uid in {range}"))
-    );
 }
 
 /// The record that `uid`'s GUI domain is owed a teardown, in the rig.
@@ -90,6 +79,7 @@ fn a_failed_gui_teardown_stays_owed_across_a_retry_and_a_direct_delete() {
     assert_eq!(count(&calls, &format!("bootout {gui}")), 3, "{calls:#?}");
     assert!(!owed(&rig, uid));
     assert!(rig.host.state().domains.is_empty());
+    assert!(rig.helper.pool_create().errors.is_empty());
     assert_eq!(rig.helper.user_create("61.2", None), Ok(uid));
 }
 

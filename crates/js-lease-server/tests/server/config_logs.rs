@@ -21,6 +21,9 @@ const READ_SECRET: &str = "ReadSecretNeverPrinted";
 /// The secret of the mint key file. It must appear in no output.
 const MINT_SECRET: &str = "MintSecretNeverPrinted";
 
+/// The secret of the signing key file. It must appear in no output.
+const SIGNING_SECRET: &str = "SigningSecretNeverPrinted";
+
 /// The program.
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js-lease-server");
 
@@ -104,7 +107,10 @@ fn sts(sink: &ObjectStoreLogs) -> (String, String, String) {
         endpoint,
         role_arn,
         key,
-    } = &sink.minting;
+    } = &sink.minting
+    else {
+        panic!("the sink mints with sts");
+    };
     (
         endpoint.url(),
         role_arn.as_str().to_owned(),
@@ -185,7 +191,10 @@ fn logs_defaults_to_none_and_a_none_sink_refuses_other_keys() {
 /// the reason given exactly: the url's scheme, a bucket of 2 and of 64 characters, a prefix
 /// with `..`, `.`, an empty segment, a leading or trailing `/`, `*`, `?`, `$` or `{`, or of 513
 /// bytes; a missing url, region, read key, role or mint key; a bad region, endpoint, path
-/// style, STS endpoint or role; `credentials = "iam"`; a TTL of 14 minutes, of 13 hours and
+/// style, STS endpoint or role; `credentials = "iam"` (the error names the key and both kinds);
+/// a `signing_key_file` beside `sts`, given or by default; an STS key (`role_arn`,
+/// `sts_endpoint`, `mint_key_file`) beside `presigned_prefix`, and that kind without its signing
+/// key; a prefix of 477 bytes, which leaves no room for a host's prefix; a TTL of 14 minutes, of 13 hours and
 /// one that is not a duration; `max_follow` of 0 and 4097; a key file that is group-readable,
 /// missing or not the key JSON; and an unknown key. It catches any bad value accepted and any
 /// error that does not name its key.
@@ -271,7 +280,49 @@ fn a_logs_table_is_checked_key_by_key() {
         ),
         (
             good.clone().set("credentials", "\"iam\""),
-            "logs.credentials: must be sts: no other way of minting a host credential is built"
+            "logs.credentials: must be sts or presigned_prefix".to_owned(),
+        ),
+        (
+            good.clone().set("signing_key_file", "\"/signing-key\""),
+            "logs.signing_key_file: not allowed with logs.credentials = \"sts\"".to_owned(),
+        ),
+        (
+            good.clone()
+                .set("credentials", "\"sts\"")
+                .set("signing_key_file", "\"/signing-key\""),
+            "logs.signing_key_file: not allowed with logs.credentials = \"sts\"".to_owned(),
+        ),
+        (
+            good.clone().set("credentials", "\"presigned_prefix\""),
+            "logs.role_arn: not allowed with logs.credentials = \"presigned_prefix\"".to_owned(),
+        ),
+        (
+            good.clone()
+                .without("role_arn")
+                .without("mint_key_file")
+                .set("sts_endpoint", "\"https://sts.example\"")
+                .set("credentials", "\"presigned_prefix\""),
+            "logs.sts_endpoint: not allowed with logs.credentials = \"presigned_prefix\""
+                .to_owned(),
+        ),
+        (
+            good.clone()
+                .without("role_arn")
+                .set("credentials", "\"presigned_prefix\""),
+            "logs.mint_key_file: not allowed with logs.credentials = \"presigned_prefix\""
+                .to_owned(),
+        ),
+        (
+            good.clone()
+                .without("role_arn")
+                .without("mint_key_file")
+                .set("credentials", "\"presigned_prefix\""),
+            "logs.signing_key_file: required".to_owned(),
+        ),
+        (
+            good.clone()
+                .set("url", &format!("\"s3://logs/{}\"", "p".repeat(477))),
+            "logs.url: must leave room for a host's prefix under it: a prefix of at most 476 bytes"
                 .to_owned(),
         ),
         (
@@ -313,7 +364,7 @@ fn a_logs_table_is_checked_key_by_key() {
         ),
         (
             good.clone().set("colour", "\"blue\""),
-            "logs.colour: unknown field; known: sink, url, region, endpoint, path_style, read_key_file, credentials, sts_endpoint, role_arn, mint_key_file, credential_ttl, max_follow".to_owned(),
+            "logs.colour: unknown field; known: sink, url, region, endpoint, path_style, read_key_file, credentials, sts_endpoint, role_arn, mint_key_file, signing_key_file, credential_ttl, max_follow".to_owned(),
         ),
     ];
     for prefix in [
@@ -423,7 +474,9 @@ fn a_good_logs_table_loads_with_its_defaults() {
             "MINTKEYID".to_owned()
         )
     );
-    let Minting::Sts { key, .. } = &least.minting;
+    let Minting::Sts { key, .. } = &least.minting else {
+        panic!("the sink mints with sts");
+    };
     assert_eq!(key.secret_access_key(), MINT_SECRET);
     assert_eq!(least.credential_ttl, Duration::from_secs(3600));
     assert_eq!(least.max_follow, 256);
@@ -479,6 +532,49 @@ fn a_good_logs_table_loads_with_its_defaults() {
     }
     let slashes = good.clone().set("url", "\"s3://logs//a//b/\"");
     assert!(refused(&scratch, &slashes).starts_with("logs.url: the log prefix must be"));
+}
+
+/// Asserts the two minting kinds: a table with no `credentials` key and one with
+/// `credentials = "sts"` both load as [`Minting::Sts`]; a table with
+/// `credentials = "presigned_prefix"`, no STS key and a `signing_key_file` loads as
+/// [`Minting::PresignedPrefix`] holding that file's key, with the same TTL and follow defaults;
+/// the longest prefix that leaves room for a host's prefix (476 bytes) loads under either kind;
+/// and the `Debug` of the presigned sink names the signing key id and never its secret. It
+/// catches a default kind that is not `sts`, a signing key read from the wrong file, a bound off
+/// by one, and a signing secret printed.
+#[test]
+fn credentials_defaults_to_sts_and_presigned_prefix_loads_its_signing_key() {
+    let scratch = Scratch::new("logs_kinds");
+    let good = Logs::good(&scratch);
+    for table in [good.clone(), good.clone().set("credentials", "\"sts\"")] {
+        let loaded = sink(&scratch, &table.text());
+        assert!(matches!(loaded.minting, Minting::Sts { .. }), "{loaded:?}");
+    }
+    let signing = scratch.write("signing-key", &key_json("SIGNKEYID", SIGNING_SECRET), 0o600);
+    let presigned = good
+        .clone()
+        .without("role_arn")
+        .without("mint_key_file")
+        .set("credentials", "\"presigned_prefix\"")
+        .set("signing_key_file", &quoted(&signing));
+    let loaded = sink(&scratch, &presigned.text());
+    let Minting::PresignedPrefix { key } = &loaded.minting else {
+        panic!("the sink mints prefix grants: {loaded:?}");
+    };
+    assert_eq!(key.access_key_id(), "SIGNKEYID");
+    assert_eq!(key.secret_access_key(), SIGNING_SECRET);
+    assert_eq!(loaded.prefix.as_str(), "js/live/");
+    assert_eq!(loaded.credential_ttl, Duration::from_secs(3600));
+    assert_eq!(loaded.max_follow, 256);
+    let shown = format!("{loaded:?}");
+    assert!(shown.contains("SIGNKEYID"), "{shown}");
+    assert!(!shown.contains(SIGNING_SECRET), "{shown}");
+
+    let longest = format!("\"s3://logs/{}\"", "p".repeat(476));
+    for table in [good, presigned] {
+        let loaded = sink(&scratch, &table.set("url", &longest).text());
+        assert_eq!(loaded.prefix.as_str().len(), 477);
+    }
 }
 
 /// Asserts that no secret of the key files is printed: the `Debug` of a loaded sink shows both

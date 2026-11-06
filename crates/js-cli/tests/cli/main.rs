@@ -10,6 +10,7 @@ mod failures;
 mod fake_jobs;
 mod flags;
 mod help;
+mod job_conformance;
 mod jobs;
 mod lost_reply;
 mod native;
