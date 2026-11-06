@@ -38,6 +38,7 @@ use tower::Service;
 
 use super::*;
 use crate::adapt::{BoxedPool, SharedClock};
+use crate::agents::Agents;
 use crate::agent_api::job_rig::{BOOKED, placed, spec};
 use crate::config::parse_token;
 use crate::job_store::ServerJobs;
