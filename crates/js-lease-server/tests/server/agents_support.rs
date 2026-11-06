@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::support::{Harness, Reply, Scratch, base_args, replace, request};
+use crate::support::{Harness, Kept, Reply, Scratch, base_args, replace, request};
 
 /// The join token in the token file at the start.
 pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
@@ -56,20 +56,27 @@ pub fn agent_args(scratch: &Scratch, keep_static: bool) -> Vec<OsString> {
 
 /// A server with agent registration on, over a fresh scratch directory.
 pub async fn start_agents(name: &str, keep_static: bool) -> Harness {
-    let scratch = Scratch::new(name);
-    let args = agent_args(&scratch, keep_static);
+    start_agents_in(name, keep_static, Kept::Files).await
+}
+
+/// [`start_agents`], keeping the bindings and the join tokens as `kept` says.
+pub async fn start_agents_in(name: &str, keep_static: bool, kept: Kept) -> Harness {
+    let scratch = Scratch::new(&kept.named(name));
+    let args = kept.args(&scratch, agent_args(&scratch, keep_static));
     Harness::with(scratch, args, None).await
 }
 
 /// Stops `first` and starts another server over its scratch directory with
 /// `--boot resume`, as the program does after a restart: a new registry, nothing carried
-/// over but the files.
+/// over but the files, and the store when `first` kept its hosts in one.
 pub async fn restarted(first: Harness, keep_static: bool) -> Harness {
+    let kept = Kept::of(&first);
     let Harness {
         running, scratch, ..
     } = first;
     running.shutdown().await.unwrap();
-    let args = replace(agent_args(&scratch, keep_static), "--boot", "resume");
+    let args = kept.args(&scratch, agent_args(&scratch, keep_static));
+    let args = replace(args, "--boot", "resume");
     Harness::with(scratch, args, None).await
 }
 

@@ -17,10 +17,11 @@
 //! - **SQLite**: the store holds the `flock` beside its file from before its open to its end
 //!   ([`SqliteStore::open_locked`]), so a lock this process holds cannot be lost to another.
 //!
-//! Nothing of the server's state is kept in the store yet. Until it is, a server whose state
-//! would need it (agent registration, which an elastic pool also turns on) is refused at
-//! start, after the lock is taken and before any listener is bound; every other server takes
-//! and holds the lock and serves as it does without the setting.
+//! What the store keeps: the host bindings, with their taints and cordons, and the join
+//! tokens' digests ([`crate::host_keys`]), read once at start after the lock is taken. The
+//! scaler's records are not kept in the store yet, so a server with an elastic pool is
+//! refused at start, after the lock is taken and before any listener is bound. The lease
+//! file, the job store and the usage database are where they are without the setting.
 
 use std::fs::{OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -37,8 +38,8 @@ use crate::config::{StoreNames, StoreSetting};
 use crate::error::StartupError;
 use crate::util::or_pending;
 
-/// What a start with a store setting refuses until the server's state is kept in the store.
-const NOT_AVAILABLE: &str = "store-backed server state is not available yet for a server that registers agents (an elastic pool or agent registration); start this server without a store setting";
+/// What a start with a store setting refuses until the scaler's records are kept in the store.
+const NOT_AVAILABLE: &str = "store-backed server state is not available yet for a server with an elastic pool; start this server without a store setting";
 
 /// The store, opened under the writer lock the server holds for its life.
 pub(crate) struct ServerStore {
@@ -83,13 +84,19 @@ impl ServerStore {
         Ok(Self { store, lock, names })
     }
 
-    /// Refuses the start of a server that registers agents: their state is not kept in the
-    /// store yet (see the module docs).
-    pub(crate) fn refuse_agents(&self, registers_agents: bool) -> Result<(), StartupError> {
-        match registers_agents {
-            true => Err(self.names.refuse(NOT_AVAILABLE)),
+    /// Refuses the start of a server with an elastic pool: the scaler's records are not kept
+    /// in the store yet (see the module docs).
+    pub(crate) fn refuse_elastic(&self, elastic: bool) -> Result<(), StartupError> {
+        match elastic {
+            true => Err(self.refuse(NOT_AVAILABLE)),
             false => Ok(()),
         }
+    }
+
+    /// A refusal of the start for `reason`, naming the store's flag or key: what the store
+    /// holds cannot be read as written.
+    pub(crate) fn refuse(&self, reason: impl std::fmt::Display) -> StartupError {
+        self.names.refuse(reason)
     }
 
     /// Whether the writer lock is still held: on Postgres a trivial query on the lock's own

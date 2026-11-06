@@ -10,9 +10,10 @@ use serde_json::{Value, json};
 
 use crate::agents_support::{
     JOIN, Session, agent_args, hello_body, hosts, listed, post, restarted, session, start_agents,
+    start_agents_in,
 };
 use crate::joins::{MINT, beat_with, code, hello, minted};
-use crate::support::{Harness, LogCapture, Reply, Scratch};
+use crate::support::{Harness, Kept, LogCapture, Reply, Scratch, kept_joins};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -52,6 +53,13 @@ fn joins_text(h: &Harness) -> String {
     let mut joins = h.scratch.state().into_os_string();
     joins.push(".joins");
     fs::read_to_string(joins).unwrap()
+}
+
+/// Whether the file `<state file>.joins` exists; a server with a store writes none.
+fn joins_file_exists(h: &Harness) -> bool {
+    let mut joins = h.scratch.state().into_os_string();
+    joins.push(".joins");
+    std::path::Path::new(&joins).exists()
 }
 
 /// Asserts the whole life of a credential: a hello that asks and registers a host with an
@@ -145,12 +153,23 @@ async fn an_older_agent_and_a_pool_token_keep_the_token_path() {
 /// Asserts that the credential outlives a restart of the server: the file still holds its
 /// digest and the host, so a hello with it after the restart is admitted without a second
 /// credential, its heartbeats serve, and the retired token is still a 401. It catches a
-/// credential kept in memory only, and a retired token that a restart gives back.
+/// credential kept in memory only, and a retired token that a restart gives back. It runs
+/// with the tokens in the file and in the state store; in the store it also catches a
+/// credential kept in a file beside the lease file (none is written).
 #[tokio::test]
 async fn the_credential_outlives_a_restart() {
-    let h = start_agents("cred_restart", false).await;
+    for kept in Kept::BOTH {
+        the_credential_outlives_a_restart_in(kept).await;
+    }
+}
+
+async fn the_credential_outlives_a_restart_in(kept: Kept) {
+    let h = start_agents_in("cred_restart", false, kept).await;
     let token = minted(&h, "i-1").await;
     let secret = credential(&asking(&h, &token, "burst-1", "i-1").await);
+    let kept_text = kept_joins(&h);
+    assert!(kept_text.contains("burst-1"), "{kept_text}");
+    assert!(!kept_text.contains(&secret), "{kept_text}");
     let h = restarted(h, false).await;
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 401);
     let welcome = asking(&h, &secret, "burst-1", "i-1").await;
@@ -158,6 +177,7 @@ async fn the_credential_outlives_a_restart() {
     assert!(welcome.json().get("host_credential").is_none());
     let held = session(&welcome, "burst-1");
     assert_eq!(beat_with(&h, &secret, &held).await.status, 200);
+    assert_eq!(joins_file_exists(&h), kept == Kept::Files);
 }
 
 /// Asserts that the welcome that carries the credential can be lost: the host holds
@@ -191,11 +211,18 @@ async fn a_lost_welcome_leaves_no_way_in_until_the_instance_is_released() {
 
 /// Asserts that the revoke of the instance (the terminate path) ends the credential: its
 /// heartbeat and its hello get the 401 of an unknown secret, also after a restart, and
-/// the file holds no row for the host. It catches a credential that survives the release
-/// of its instance.
+/// the file holds no row for the host. It runs with the tokens in the file and in the
+/// state store; in the store it checks the rows and that no file is written. It catches a
+/// credential that survives the release of its instance, and a store row left behind.
 #[tokio::test]
 async fn a_revoke_ends_the_credential() {
-    let h = start_agents("cred_revoke", false).await;
+    for kept in Kept::BOTH {
+        a_revoke_ends_the_credential_in(kept).await;
+    }
+}
+
+async fn a_revoke_ends_the_credential_in(kept: Kept) {
+    let h = start_agents_in("cred_revoke", false, kept).await;
     let token = minted(&h, "i-1").await;
     let welcome = asking(&h, &token, "burst-1", "i-1").await;
     let secret = credential(&welcome);
@@ -210,7 +237,8 @@ async fn a_revoke_ends_the_credential() {
         assert_eq!(refused.status, 401, "{}", refused.body);
         assert!(refused.body.is_empty());
     }
-    assert!(!joins_text(&h).contains("burst-1"));
+    assert!(!kept_joins(&h).contains("burst-1"));
+    assert_eq!(joins_file_exists(&h), kept == Kept::Files);
     let h = restarted(h, false).await;
     assert_eq!(asking(&h, &secret, "burst-1", "i-1").await.status, 401);
 }

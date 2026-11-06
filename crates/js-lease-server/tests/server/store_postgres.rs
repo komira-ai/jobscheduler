@@ -16,12 +16,15 @@ use js_lease_server::LockLost;
 use js_state::postgres::{PostgresConfig, TestDatabase, test_database};
 use js_state::{Cond, Store, StoreError, Txn, WriterLock, WriterTarget};
 use rustix::process::{Pid, Signal, kill_process};
+use serde_json::json;
 use tokio::runtime::Runtime;
 
+use crate::agents_support::{JOIN, JOIN_B, agent_args, hello_with, post, session};
 use crate::binary::launch;
+use crate::joins::{code, hello, minted};
 use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
-    store_args, taken_address, unflushed, with_userinfo,
+    store_args, store_file, taken_address, unflushed, with_userinfo,
 };
 use crate::support::{Harness, Scratch, TOKEN, lease_body, replace, request};
 
@@ -269,6 +272,70 @@ fn a_commit_after_another_process_took_the_lock_is_refused() {
     assert_eq!(store.txn(put("after")).err(), Some(StoreError::Fenced));
     assert_eq!(revision(&url), before, "the fenced commit wrote nothing");
     drop(next);
+    drop(store);
+    let Harness { running, .. } = h;
+    let _ = runtime.block_on(running.shutdown());
+}
+
+/// Asserts that the host bindings and the join tokens survive a restart over a Postgres store
+/// as they do over SQLite (`hosts_store.rs`): after the restart a tainted host's binding
+/// refuses another credential (403 `host-bound`) and the host still shows its taint, a used
+/// one-time token is refused for another host as used and goes on serving its own, and the
+/// store holds the token's digest and never its text, with no `.agents` or `.joins` file
+/// beside the lease file. It catches a Postgres store that loses what SQLite keeps.
+#[test]
+fn bindings_and_join_tokens_survive_a_restart_on_postgres() {
+    let database = test_database();
+    let url = database.url();
+    let flags = |scratch: &Scratch| {
+        let mut args = agent_args(scratch, false);
+        args.extend(["--store".into(), store_file(scratch, &url).into_os_string()]);
+        args
+    };
+    let scratch = Scratch::new("store_pg_hosts");
+    let args = flags(&scratch);
+    let runtime = Runtime::new().unwrap();
+    let (h, token) = runtime.block_on(async {
+        let first = Harness::with(scratch, args, None).await;
+        let me = session(&hello_with(&first, JOIN, "burst-1").await, "burst-1");
+        let mut beat = me.beat();
+        beat["taint"] = json!({ "reason": "residue" });
+        let reply = post(&first, "/v1/agent/heartbeat", Some(JOIN), &beat).await;
+        assert_eq!(reply.json()["taint_ack"], true, "{}", reply.body);
+        let token = minted(&first, "i-2").await;
+        assert_eq!(hello(&first, &token, "burst-2", "i-2").await.status, 200);
+        let Harness {
+            running, scratch, ..
+        } = first;
+        running.shutdown().await.unwrap();
+        let resumed = replace(flags(&scratch), "--boot", "resume");
+        (Harness::with(scratch, resumed, None).await, token)
+    });
+    runtime.block_on(async {
+        let other = hello_with(&h, JOIN_B, "burst-1").await;
+        assert_eq!((other.status, code(&other)), (403, "host-bound".to_owned()));
+        let listing = request(h.addr(), "GET", "/v1/hosts", Some(TOKEN), None).await;
+        assert!(listing.body.contains("residue"), "{}", listing.body);
+        let taken = hello(&h, &token, "burst-3", "i-2").await;
+        assert_eq!(
+            (taken.status, code(&taken)),
+            (403, "join-token-used".to_owned())
+        );
+        assert_eq!(hello(&h, &token, "burst-2", "i-2").await.status, 200);
+    });
+    let store = h.running.store().expect("the server holds the store");
+    let rows = store.scan_prefix("hosts/").unwrap();
+    let keys: Vec<&str> = rows.iter().map(|(key, _)| key.as_str()).collect();
+    assert!(keys.contains(&"hosts/binding/burst-1"), "{keys:?}");
+    assert!(keys.contains(&"hosts/binding/burst-2"), "{keys:?}");
+    let mut values = rows
+        .iter()
+        .map(|(_, row)| String::from_utf8_lossy(&row.value));
+    assert!(values.all(|value| !value.contains(token.as_str())));
+    for suffix in [".agents", ".joins"] {
+        let file = h.scratch.path(&format!("leases.toml{suffix}"));
+        assert!(!file.exists(), "{suffix}");
+    }
     drop(store);
     let Harness { running, .. } = h;
     let _ = runtime.block_on(running.shutdown());

@@ -222,12 +222,11 @@ async fn a_second_process_cannot_take_the_writer_lock_on_sqlite() {
     assert_eq!((changes.rows.len(), changes.cursor), (0, Revision::ZERO));
 }
 
-/// Asserts that a store setting beside an elastic pool, or beside agent registration from the
-/// flags, is refused at start with the message that store-backed server state is not available
-/// yet, naming the setting, before any listener is bound (the listen address is taken, which
-/// would have been refused naming `--listen`) and before the scaler writes anything; and that
-/// the writer lock the refused start took is released with it. It catches a missing guard,
-/// which would start a server whose agent state is not in the store it holds.
+/// Asserts that a store setting beside an elastic pool is refused at start with the message
+/// that store-backed server state is not available yet for it, naming the setting, before any
+/// listener is bound and before the scaler writes anything, and that the writer lock the
+/// refused start took is released with it. It catches a missing guard, which would start a
+/// server whose scaler records are not in the store it holds.
 #[tokio::test]
 async fn a_store_with_an_elastic_pool_refuses_with_the_not_available_message() {
     let scratch = Scratch::new("store_elastic");
@@ -238,37 +237,35 @@ async fn a_store_with_an_elastic_pool_refuses_with_the_not_available_message() {
     let refused = start_refused(&scratch, &text).await;
     assert_eq!(
         refused,
-        "server.store: store-backed server state is not available yet for a server that registers agents (an elastic pool or agent registration); start this server without a store setting"
+        "server.store: store-backed server state is not available yet for a server with an elastic pool; start this server without a store setting"
     );
     assert!(!records_path(&scratch).exists(), "the scaler wrote nothing");
     assert!(!scratch.state().exists(), "no lease file was made");
     let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
     assert!(free.is_ok(), "the refused start released the lock");
-    drop(free);
+}
 
+/// Asserts that agent registration from the flags, whose bindings and join tokens the store
+/// keeps, starts over a SQLite store with the dev flag and serves, and that a tick writes no
+/// agent state or join token file beside the lease file. It catches a guard that still
+/// refuses agent registration with a store setting, and a store mode that writes the files.
+#[tokio::test]
+async fn agent_registration_starts_over_a_store_and_writes_no_files() {
     let scratch = Scratch::new("store_agents");
-    let listen = taken_address();
     let mut args = agent_args(&scratch, true);
     args.extend([
         "--store".into(),
         store_file(&scratch, &sqlite_line(&scratch)).into(),
     ]);
     args.push("--allow-sqlite-store".into());
-    let args = replace(args, "--listen", listen.local_addr().unwrap().to_string());
-    let (_ticks, ticker) = js_lease_server::channel_ticker();
-    let (_checks, checks) = js_lease_server::channel_ticker();
-    let checked = config(args).unwrap();
-    let refused = js_lease_server::start_with_checks(checked, clock(), ticker, checks).await;
-    let refused = refused.err().unwrap();
-    assert_eq!(refused.flag(), "--store");
-    assert!(
-        refused
-            .reason()
-            .starts_with("store-backed server state is not available yet")
-    );
-    assert!(!scratch.state().exists(), "no lease file was made");
-    let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
-    assert!(free.is_ok(), "the refused start released the lock");
+    let h = Harness::with(scratch, args, None).await;
+    assert!(h.running.store().is_some(), "the server holds the store");
+    let health = request(h.addr(), "GET", "/healthz", None, None).await;
+    assert_eq!(health.status, 200);
+    h.ticks.step().await;
+    assert!(!h.scratch.path("leases.toml.agents").exists());
+    assert!(!h.scratch.path("leases.toml.joins").exists());
+    h.running.shutdown().await.unwrap();
 }
 
 /// Asserts that a SQLite store that cannot be made owner-only (a directory in its place), or

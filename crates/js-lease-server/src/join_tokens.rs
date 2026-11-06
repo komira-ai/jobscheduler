@@ -51,20 +51,24 @@
 //! If the answer carrying the credential is lost, the host holds nothing that
 //! authenticates: it cannot register again, and whoever launched it releases it when its
 //! boot time is up. If the registry refuses the hello that issued the credential, the
-//! answer is not sent, so [`JoinTokens::release`] takes the credential back and puts the
-//! token back as it was.
+//! answer is not sent, so [`JoinTokens::release_writing`] takes the credential back and
+//! puts the token back as it was.
 //!
 //! The instance a hello names is the hello's own claim: the binding guards against
 //! mix-ups (a token delivered to the wrong machine, a host id reused by another
 //! instance), not against a holder of the token, who can name the instance too. The
 //! client token can mint for any instance id.
 //!
-//! A hello that the registry then refuses gives the use back ([`JoinTokens::release`]):
-//! the token stays unused for the instance, unless a hello of the same host was served
-//! with it in between (the host is then registered with it, and the token stays its).
-//! That mark is kept in memory only: a restart in between leaves the use standing, which
-//! errs on the side of one token, one host. When that write fails the token stays tied to
-//! the host, which says hello again with it; if that host cannot register, mint another.
+//! A hello that the registry then refuses gives the use back
+//! ([`JoinTokens::release_writing`]): the token stays unused for the instance. The server
+//! takes its hellos one at a time, from the use to the registry's answer and the release
+//! ([`crate::agents::Agents::host_writes`]), so no other hello of the host is served in
+//! between. The release still leaves the use standing when a hello of the same host was
+//! admitted with the token since the use (the host may then be registered with it, and the
+//! token stays its); that mark is kept in memory only, and a restart in between leaves the
+//! use standing too, which errs on the side of one token, one host. When the release's
+//! write fails the token stays tied to the host, which says hello again with it; if that
+//! host cannot register, mint another.
 //!
 //! The scheduler's terminate path revokes the token of the instance it terminates
 //! (`DELETE /v1/agent/join-tokens`, see [`crate::join_api`]): [`JoinTokens::revoke`] drops
@@ -97,22 +101,40 @@
 //!
 //! Every change is made on a copy, written, and kept only when the write succeeded: a
 //! token is never consumed in memory alone, because a restart would give it back.
+//!
+//! # Where the tokens are kept
+//!
+//! Without a store setting the tokens are kept in `<state file>.joins`, as above. With one
+//! (`--store`, `server.store`) no file is read or written: each row is the key
+//! `hosts/join/<digest>` of the state store ([`crate::host_keys`]), a JSON object with a
+//! `version` and the fields of a file row (all but `hash`, which is the key), read once at
+//! start. Fields of a value that this build does not know are kept and written back. A
+//! change is committed as the file is written, before it is held: a mint, a use, a release
+//! and a revoke each commit the rows they change in one transaction, and the use of a token
+//! by a hello commits the host's binding in the same transaction
+//! ([`JoinTokens::admit_writing`]), as does the release that gives it back. A renewal
+//! makes no store call on a hello or a heartbeat: a credential time that comes due for a
+//! write is committed by the next tick ([`JoinTokens::flush`]), and is moved in memory
+//! only then.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_agent_wire::{HostCredential, InstanceIdentity};
 use js_lease::Clock;
 use js_registry::{Credential, SessionSource};
+use js_state::Store;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tracing::error;
 
 use crate::adapt::SharedClock;
 use crate::agent_state::{read_if_present, replace};
 use crate::error::StartupError;
+use crate::host_keys::{self, Extra, JOINS, Writes};
 
 /// The flag the refusals name: the file lives beside the lease file.
 const FLAG: &str = "--state-file";
@@ -148,8 +170,11 @@ struct Entry {
     used: Option<Used>,
     /// On the entry of a host credential: the digest of the one-time token it replaced.
     /// `expires_at_ms` is then that token's expiry, which gives the token back to a
-    /// [`JoinTokens::release`].
+    /// [`JoinTokens::release_writing`].
     replaces: Option<String>,
+    /// The fields of the stored value that this build does not know (none from the file,
+    /// whose reader drops them), written back with the row.
+    extra: Extra,
 }
 
 /// The host a token registered and how long the token stays its credential.
@@ -158,7 +183,7 @@ struct Used {
     host: String,
     credential_expires_at_ms: u64,
     /// Whether a hello of `host` was served with the token after the hello that used it.
-    /// Kept in memory only (a loaded token has it unset): it stops [`JoinTokens::release`]
+    /// Kept in memory only (a loaded token has it unset): it stops [`JoinTokens::release_writing`]
     /// from freeing a token whose host the registry accepted by that later hello.
     again_served: bool,
 }
@@ -205,6 +230,30 @@ struct Row {
     replaces: Option<String>,
 }
 
+/// A row as the store holds it under `hosts/join/<digest>`: the fields of a file row but
+/// the hash, and the fields this build does not know.
+#[derive(Debug, Serialize, Deserialize)]
+struct Stored {
+    version: u32,
+    provider: String,
+    instance_id: String,
+    expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaces: Option<String>,
+    #[serde(flatten)]
+    extra: Extra,
+}
+
+/// Where the tokens are kept: the file beside the lease file, or the state store.
+enum Keeper {
+    File(PathBuf),
+    Store(Arc<dyn Store>),
+}
+
 /// A token just made. The text is shown once, in the answer to the request that made it.
 pub(crate) struct Minted {
     pub(crate) token: String,
@@ -218,14 +267,14 @@ pub(crate) enum MintError {
     NoRandom,
     /// [`MAX_WAITING`] tokens already wait to be used.
     Full,
-    /// The file could not be written; nothing was made.
+    /// The file or the store could not be written; nothing was made.
     Unsaved,
 }
 
 /// Why no token was revoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RevokeError {
-    /// The file could not be written; nothing was dropped.
+    /// The file or the store could not be written; nothing was dropped.
     Unsaved,
 }
 
@@ -269,12 +318,15 @@ impl JoinRefusal {
 
 /// The one-time tokens of the server.
 pub(crate) struct JoinTokens {
-    path: PathBuf,
+    keeper: Keeper,
     clock: SharedClock,
     random: Box<dyn SessionSource>,
     /// Refuse the first hello of an unused token that does not ask for a host credential.
     require_credential: bool,
     entries: Mutex<Entries>,
+    /// With the store: the digests whose credential time a hello or a heartbeat found due
+    /// for a write, which the next [`JoinTokens::flush`] commits. Taken after `entries`.
+    due: Mutex<BTreeSet<String>>,
 }
 
 impl JoinTokens {
@@ -286,13 +338,54 @@ impl JoinTokens {
         random: Box<dyn SessionSource>,
     ) -> Result<Self, StartupError> {
         let entries = load(&path)?;
-        Ok(Self {
-            path,
+        Ok(Self::over(Keeper::File(path), entries, clock, random))
+    }
+
+    /// The tokens `store` holds under `hosts/join/`, read once at start. A value that cannot
+    /// be read as written is a refusal, as a damaged file is.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read, or a value is not a row (the reason names its key).
+    pub(crate) fn in_store(
+        store: Arc<dyn Store>,
+        clock: SharedClock,
+        random: Box<dyn SessionSource>,
+    ) -> Result<Self, String> {
+        let mut entries = Entries::new();
+        for (hash, bytes) in host_keys::scan(&*store, JOINS)? {
+            let named = format!("{JOINS}{hash}");
+            let stored: Stored = host_keys::decode(&named, &bytes)?;
+            let row = Row {
+                hash,
+                provider: stored.provider,
+                instance_id: stored.instance_id,
+                expires_at_ms: stored.expires_at_ms,
+                used_by: stored.used_by,
+                credential_expires_at_ms: stored.credential_expires_at_ms,
+                replaces: stored.replaces,
+            };
+            let (hash, entry) = entry_of(row).map_err(|reason| format!("{named}: {reason}"))?;
+            let extra = stored.extra;
+            entries.insert(hash, Entry { extra, ..entry });
+        }
+        Ok(Self::over(Keeper::Store(store), entries, clock, random))
+    }
+
+    fn over(
+        keeper: Keeper,
+        entries: Entries,
+        clock: SharedClock,
+        random: Box<dyn SessionSource>,
+    ) -> Self {
+        Self {
+            keeper,
             clock,
             random,
             require_credential: false,
             entries: Mutex::new(entries),
-        })
+            due: Mutex::new(BTreeSet::new()),
+        }
     }
 
     /// These tokens with the first hello of an unused one required to ask for a host
@@ -308,9 +401,29 @@ impl JoinTokens {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Makes the file hold `entries`.
-    fn write(&self, entries: &Entries) -> io::Result<()> {
-        replace(&self.path, render(entries)?.as_bytes())
+    fn due(&self) -> MutexGuard<'_, BTreeSet<String>> {
+        self.due.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes the file hold `next`, or commits to the store the rows `next` changes from
+    /// `held` with `extra` in one transaction.
+    fn write(&self, held: &Entries, next: &Entries, extra: Writes) -> io::Result<()> {
+        match &self.keeper {
+            Keeper::File(path) => replace(path, render(next)?.as_bytes()),
+            Keeper::Store(store) => {
+                let mut writes = changes(held, next);
+                writes.extend(extra);
+                host_keys::commit(&**store, writes)
+            }
+        }
+    }
+
+    /// Commits `extra` alone to the store; nothing in file mode, which has no such writes.
+    fn write_extra(&self, extra: Writes) -> io::Result<()> {
+        match &self.keeper {
+            Keeper::File(_) => Ok(()),
+            Keeper::Store(store) => host_keys::commit(&**store, extra),
+        }
     }
 
     /// The credential of `given` when it is a token of this set, used or not.
@@ -350,10 +463,11 @@ impl JoinTokens {
             expires_at_ms,
             used: None,
             replaces: None,
+            extra: Extra::new(),
         };
         next.insert(Credential::of_token(&token).to_hex(), entry);
-        self.write(&next).map_err(|err| {
-            error!(error = %err, "cannot write the join token file");
+        self.write(&entries, &next, Writes::new()).map_err(|err| {
+            error!(error = %err, "cannot write the join tokens");
             MintError::Unsaved
         })?;
         *entries = next;
@@ -376,6 +490,18 @@ impl JoinTokens {
             .map(|admitted| admitted.admission)
     }
 
+    /// [`JoinTokens::admit_writing`] with nothing else to commit.
+    #[cfg(test)]
+    pub(crate) fn admit_with(
+        &self,
+        credential: &Credential,
+        host: &str,
+        instance: Option<&InstanceIdentity>,
+        issue: bool,
+    ) -> Result<Admitted, JoinRefusal> {
+        self.admit_writing(credential, host, instance, issue, Writes::new())
+    }
+
     /// Lets the hello of `host`, naming `instance`, register with the token or host
     /// credential whose digest is `credential`, and consumes the token when it was unused.
     ///
@@ -384,19 +510,25 @@ impl JoinTokens {
     /// when it is unused, not expired, and `instance` is the one it is bound to. The
     /// check, the use and the write happen under one lock, so of two hellos that race for
     /// an unused token one wins. A caller whose hello is then refused elsewhere gives a
-    /// [`Admission::Fresh`] use back with [`JoinTokens::release`].
+    /// [`Admission::Fresh`] use back with [`JoinTokens::release_writing`].
     ///
     /// With `issue`, the use of an unused token also retires it: in the same write the
     /// token's row is replaced by one for a new host credential, which is returned. The
     /// hello that loses the race for the token finds it gone, so one credential is made
     /// for one token. Nothing is made for a token that already registered its host, or
     /// for a host credential.
-    pub(crate) fn admit_with(
+    ///
+    /// `extra` is what the store commits with the use, in the same transaction: the host's
+    /// binding (always empty in file mode). For a token that already registered its host it
+    /// is committed alone, when there is any; a failed commit refuses the hello, as a failed
+    /// write of the use does.
+    pub(crate) fn admit_writing(
         &self,
         credential: &Credential,
         host: &str,
         instance: Option<&InstanceIdentity>,
         issue: bool,
+        extra: Writes,
     ) -> Result<Admitted, JoinRefusal> {
         let now = self.clock.now().millis();
         let key = credential.to_hex();
@@ -412,6 +544,7 @@ impl JoinTokens {
             let held = entries.get_mut(&key).and_then(|entry| entry.used.as_mut());
             held.into_iter().for_each(|used| used.again_served = true);
             self.renew(&mut entries, &key, now);
+            self.write_extra(extra).map_err(unsaved)?;
             return Ok(Admitted {
                 admission: Admission::Again,
                 issued: None,
@@ -447,10 +580,7 @@ impl JoinTokens {
                 )
             }
         };
-        self.write(&next).map_err(|err| {
-            error!(error = %err, "cannot write the join token file");
-            JoinRefusal::Unsaved
-        })?;
+        self.write(&entries, &next, extra).map_err(unsaved)?;
         *entries = next;
         Ok(Admitted {
             admission: Admission::Fresh,
@@ -483,23 +613,45 @@ impl JoinTokens {
             .unwrap_or_else(|| presented.clone())
     }
 
-    /// Gives back the use that [`JoinTokens::admit_with`] just made for `host` with the
-    /// token whose credential is `credential`: the registry refused the hello, and the token
-    /// stays good for the instance it was minted for. It does nothing when a hello of
-    /// `host` was admitted [`Admission::Again`] since the use: that hello may have been
-    /// the one the registry accepted, and the token is then the host's. A host credential
-    /// the use issued is dropped and the token comes back unused: the answer that would have
-    /// carried the credential was never sent. Written like the use; when the write fails the
-    /// token stays tied to `host` (a restart agrees with the memory), and the operator mints
-    /// again if that host cannot register.
+    /// [`JoinTokens::release_writing`] with nothing else to commit.
+    #[cfg(test)]
     pub(crate) fn release(&self, credential: &Credential, host: &str) {
+        self.release_writing(credential, host, Writes::new());
+    }
+
+    /// Gives back the use that [`JoinTokens::admit_writing`] just made for `host` with the
+    /// token whose credential is `credential`: the registry refused the hello, and the token
+    /// stays good for the instance it was minted for. A host credential the use issued is
+    /// dropped and the token comes back unused: the answer that would have carried the
+    /// credential was never sent.
+    ///
+    /// `extra` is committed in the same transaction: with the store, the write that puts
+    /// the host's binding back as it was before the use. True when the use was given back
+    /// and that was written. False, with nothing written, when a hello of `host` was admitted
+    /// [`Admission::Again`] since the use: that hello may have been the one the registry
+    /// accepted, so the token stays the host's, and its binding with it. False too when the
+    /// write failed: memory then stays as the use left it, as the file or the store does
+    /// (the token tied to `host`; with the store, the binding kept too), and the operator
+    /// mints again if that host cannot register.
+    pub(crate) fn release_writing(
+        &self,
+        credential: &Credential,
+        host: &str,
+        extra: Writes,
+    ) -> bool {
         let mut entries = self.lock();
         let Some(next) = given_back(&entries, &credential.to_hex(), host) else {
-            return;
+            return false;
         };
-        match self.write(&next) {
-            Ok(()) => *entries = next,
-            Err(err) => error!(error = %err, "cannot write the join token file"),
+        match self.write(&entries, &next, extra) {
+            Ok(()) => {
+                *entries = next;
+                true
+            }
+            Err(err) => {
+                error!(error = %err, "cannot write the join tokens");
+                false
+            }
         }
     }
 
@@ -514,8 +666,8 @@ impl JoinTokens {
         if dropped == 0 {
             return Ok(0);
         }
-        self.write(&next).map_err(|err| {
-            error!(error = %err, "cannot write the join token file");
+        self.write(&entries, &next, Writes::new()).map_err(|err| {
+            error!(error = %err, "cannot write the join tokens");
             RevokeError::Unsaved
         })?;
         *entries = next;
@@ -543,19 +695,92 @@ impl JoinTokens {
 
     /// Moves the time of the credential at `key` to [`CREDENTIAL_TTL`] after `now`, when
     /// that gains [`REFRESH_STEP`] over the time held, and only when the file took it: a
-    /// failed write leaves the time as it was and the next call tries again.
+    /// failed write leaves the time as it was and the next call tries again. With the store
+    /// nothing is written here: the key is left for the next [`JoinTokens::flush`].
     fn renew(&self, entries: &mut Entries, key: &str, now: u64) {
         let renewed = entries.get(key).and_then(|entry| entry.renewed(key, now));
         let Some(renewed) = renewed else {
             return;
         };
+        if let Keeper::Store(_) = self.keeper {
+            self.due().insert(key.to_owned());
+            return;
+        }
         let mut next = entries.clone();
         next.insert(key.to_owned(), renewed);
-        match self.write(&next) {
+        match self.write(entries, &next, Writes::new()) {
             Ok(()) => *entries = next,
-            Err(err) => error!(error = %err, "cannot write the join token file"),
+            Err(err) => error!(error = %err, "cannot write the join tokens"),
         }
     }
+
+    /// Commits the credential times that hellos and heartbeats found due since the last
+    /// flush, in one transaction, and moves them in memory once that succeeded: each is set
+    /// [`CREDENTIAL_TTL`] after now, when that still gains its step (a row revoked or
+    /// renewed meanwhile is left as it is). The tick calls it. Nothing is due in file mode,
+    /// where a hello or a heartbeat writes its renewal itself. False when the commit failed:
+    /// the times stay as they were, still due, and the next flush tries again.
+    pub(crate) fn flush(&self) -> bool {
+        let mut entries = self.lock();
+        let mut due = self.due();
+        if due.is_empty() {
+            return true;
+        }
+        let now = self.clock.now().millis();
+        let renewed = due.iter().filter_map(|key| {
+            let entry = entries.get(key).and_then(|entry| entry.renewed(key, now));
+            entry.map(|entry| (key.clone(), entry))
+        });
+        let mut next = entries.clone();
+        next.extend(renewed);
+        match self.write(&entries, &next, Writes::new()) {
+            Ok(()) => {
+                *entries = next;
+                due.clear();
+                true
+            }
+            Err(err) => {
+                error!(error = %err, "cannot write the join tokens");
+                false
+            }
+        }
+    }
+}
+
+/// The refusal of a use that could not be written down.
+fn unsaved(err: io::Error) -> JoinRefusal {
+    error!(error = %err, "cannot write the join tokens");
+    JoinRefusal::Unsaved
+}
+
+/// The writes that make the store hold `next` instead of `held`: a delete for each row gone
+/// and a put for each row new or changed (the in-memory mark of a hello served again is not
+/// stored, and changes nothing).
+fn changes(held: &Entries, next: &Entries) -> Writes {
+    let gone = held.keys().filter(|hash| !next.contains_key(*hash));
+    let gone = gone.map(|hash| (format!("{JOINS}{hash}"), None));
+    let changed = next.iter().filter_map(|(hash, entry)| {
+        let value = stored_value(entry);
+        let same = held.get(hash).map(stored_value) == Some(value.clone());
+        (!same).then(|| (format!("{JOINS}{hash}"), Some(value)))
+    });
+    gone.chain(changed).collect()
+}
+
+/// The value of a row's key: the fields of the row and those it kept.
+fn stored_value(entry: &Entry) -> Vec<u8> {
+    let used = entry.used.as_ref();
+    let mut fields = Map::new();
+    let provider = entry.instance.provider.clone();
+    fields.insert("provider".to_owned(), Value::from(provider));
+    let instance_id = entry.instance.instance_id.clone();
+    fields.insert("instance_id".to_owned(), Value::from(instance_id));
+    fields.insert("expires_at_ms".to_owned(), Value::from(entry.expires_at_ms));
+    host_keys::field(&mut fields, "used_by", used.map(|used| used.host.clone()));
+    let until = used.map(|used| used.credential_expires_at_ms);
+    host_keys::field(&mut fields, "credential_expires_at_ms", until);
+    host_keys::field(&mut fields, "replaces", entry.replaces.clone());
+    host_keys::encode(fields, &entry.extra)
 }
 
 impl Entry {
@@ -667,45 +892,52 @@ fn parse(text: &str) -> Result<Entries, String> {
     let document: Document = toml::from_str(text).map_err(|err| err.message().to_string())?;
     let mut entries = Entries::new();
     for row in document.join {
-        if Credential::from_hex(&row.hash).is_none() {
-            return Err("a token hash is not 64 lower-case hex digits".to_string());
-        }
-        let used = match (row.used_by, row.credential_expires_at_ms) {
-            (None, None) => None,
-            (Some(host), Some(credential_expires_at_ms)) => Some(Used {
-                host,
-                credential_expires_at_ms,
-                again_served: false,
-            }),
-            _ => {
-                let both = "a token has only one of used_by and credential_expires_at_ms";
-                return Err(both.to_string());
-            }
-        };
-        let replaces = row.replaces;
-        if replaces
-            .as_deref()
-            .is_some_and(|hash| Credential::from_hex(hash).is_none())
-        {
-            return Err("a replaced token hash is not 64 lower-case hex digits".to_string());
-        }
-        if replaces.is_some() && used.is_none() {
-            return Err("a host credential has no host".to_string());
-        }
-        let entry = Entry {
-            instance: InstanceIdentity {
-                provider: row.provider,
-                instance_id: row.instance_id,
-            },
-            expires_at_ms: row.expires_at_ms,
-            used,
-            replaces,
-        };
-        if entries.insert(row.hash, entry).is_some() {
+        let (hash, entry) = entry_of(row)?;
+        if entries.insert(hash, entry).is_some() {
             return Err("a token hash is listed twice".to_string());
         }
     }
     Ok(entries)
+}
+
+/// The digest and the entry of a row, or what is wrong with it.
+fn entry_of(row: Row) -> Result<(String, Entry), String> {
+    if Credential::from_hex(&row.hash).is_none() {
+        return Err("a token hash is not 64 lower-case hex digits".to_string());
+    }
+    let used = match (row.used_by, row.credential_expires_at_ms) {
+        (None, None) => None,
+        (Some(host), Some(credential_expires_at_ms)) => Some(Used {
+            host,
+            credential_expires_at_ms,
+            again_served: false,
+        }),
+        _ => {
+            let both = "a token has only one of used_by and credential_expires_at_ms";
+            return Err(both.to_string());
+        }
+    };
+    let replaces = row.replaces;
+    if replaces
+        .as_deref()
+        .is_some_and(|hash| Credential::from_hex(hash).is_none())
+    {
+        return Err("a replaced token hash is not 64 lower-case hex digits".to_string());
+    }
+    if replaces.is_some() && used.is_none() {
+        return Err("a host credential has no host".to_string());
+    }
+    let entry = Entry {
+        instance: InstanceIdentity {
+            provider: row.provider,
+            instance_id: row.instance_id,
+        },
+        expires_at_ms: row.expires_at_ms,
+        used,
+        replaces,
+        extra: Extra::new(),
+    };
+    Ok((row.hash, entry))
 }
 
 /// The text of the file that holds `entries`.

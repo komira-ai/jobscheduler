@@ -9,10 +9,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hello_body, hosts, join, post, restarted, start_agents,
+    JOIN, Session, entry, hello_body, hosts, join, post, restarted, start_agents, start_agents_in,
 };
 use crate::runs_support::{beat, held, lease, queue, queued, run_body, runs, state, stop, words};
-use crate::support::{Harness, lease_body};
+use crate::support::{Harness, Kept, kept_bindings, lease_body};
 
 /// `GET /v1/leases/{lease}/runs/{run}`.
 async fn show(h: &Harness, lease: &str, run: &str) -> crate::support::Reply {
@@ -220,10 +220,19 @@ async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
 /// Asserts that a taint outlives a restart: a tainted host that holds a lease and one that
 /// holds none are both put back awaiting with their taint, the first keeps its lease, a
 /// run on the first is refused `host-tainted` after its agent says hello again, and the
-/// taint is still in the state file. It catches a restart that makes a host clean.
+/// taint is still kept (in the state file, or in the store's host bindings). It runs with
+/// the bindings in files and in the store, and in the store it also asserts that no
+/// `.agents` file is written. It catches a restart that makes a host clean, and a store
+/// that loses a taint.
 #[tokio::test]
 async fn a_taint_survives_a_restart() {
-    let first = start_agents("runs_taint_restart", false).await;
+    for kept in Kept::BOTH {
+        a_taint_survives_a_restart_in(kept).await;
+    }
+}
+
+async fn a_taint_survives_a_restart_in(kept: Kept) {
+    let first = start_agents_in("runs_taint_restart", false, kept).await;
     let a = join(&first, "burst-1").await;
     let b = join(&first, "burst-2").await;
     let lease = lease(&first).await;
@@ -247,8 +256,14 @@ async fn a_taint_survives_a_restart() {
         (refused.status, refused.json()),
         (409, json!({ "error": "host-tainted" }))
     );
-    let text = fs::read_to_string(agent_file(&h)).unwrap();
+    let text = kept_bindings(&h);
     assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
+    for id in ["burst-1", "burst-2"] {
+        assert!(text.contains(id), "{text}");
+    }
+    if kept == Kept::Store {
+        assert!(!agent_file(&h).exists());
+    }
 }
 
 /// Asserts that a start the agent refused as `host-tainted` taints the host although no
