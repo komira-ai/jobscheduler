@@ -18,7 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use js_jobs::{ClientName, JobRecord};
-use tonic::{Code, Request, Response, Status};
+use tonic::{Code, Request, Status};
 
 pub(crate) use crate::config::Role;
 
@@ -94,12 +94,13 @@ pub(crate) fn hidden() -> Status {
     status
 }
 
-/// What a call's log line says of `answer`: `ok`; `denied` (a fleet call of a client, a job
+/// What a call's log line says of the status a call failed with (`None`: it answered):
+/// `ok`; `denied` (a fleet call of a client, a job
 /// of another client, a request no bearer layer admitted); `not-found`; `refused` (the
 /// request is at fault: an argument, a conflict, a precondition, a size); or `failed` (the
 /// server could not answer: a store, a save, a call not served yet).
-pub(crate) fn outcome<T>(answer: &Result<Response<T>, Status>) -> &'static str {
-    let Err(status) = answer else {
+pub(crate) fn outcome(failed: Option<&Status>) -> &'static str {
+    let Some(status) = failed else {
         return "ok";
     };
     if status.source().is_some_and(|source| source.is::<Hidden>()) {

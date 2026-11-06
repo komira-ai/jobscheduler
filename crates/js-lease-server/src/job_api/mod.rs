@@ -199,7 +199,13 @@ fn logged<T>(
     target: Target<'_>,
     answer: &Result<Response<T>, Status>,
 ) {
-    let code = answer.as_ref().err().map_or(Code::Ok, Status::code);
+    line(call, caller, target, answer.as_ref().err());
+}
+
+/// The line of [`logged`], for the status a call failed with (`None`: it answered). Not
+/// generic, so every call writes its line through the same code.
+fn line(call: &'static str, caller: Option<&Caller>, target: Target<'_>, failed: Option<&Status>) {
+    let code = failed.map_or(Code::Ok, Status::code);
     let client = caller.map_or("", |caller| caller.name.as_str());
     let role = caller.map_or("", |caller| caller.role.as_str());
     let (job, target) = match target {
@@ -207,7 +213,7 @@ fn logged<T>(
         Target::Host(host) => ("", host),
         Target::None => ("", ""),
     };
-    let outcome = roles::outcome(answer);
+    let outcome = roles::outcome(failed);
     tracing::info!(call, client, role, job, target, outcome, code = ?code, "job service call");
 }
 

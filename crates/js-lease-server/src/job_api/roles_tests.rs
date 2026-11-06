@@ -3,7 +3,7 @@
 
 use js_proto::refusal::refusal_status;
 use js_proto::v1::RefusalCode;
-use tonic::{Code, Response, Status};
+use tonic::{Code, Status};
 
 use super::*;
 
@@ -17,7 +17,7 @@ fn caller(name: &str, role: Role) -> Caller {
 
 /// The outcome of an answer that is `status`.
 fn of(status: Status) -> &'static str {
-    outcome::<()>(&Err(status))
+    outcome(Some(&status))
 }
 
 /// Asserts the outcome of every gRPC code, of a hidden job and of a refusal: `ok`, `denied`
@@ -28,7 +28,7 @@ fn of(status: Status) -> &'static str {
 /// job whose answer differs on the wire from an unknown one.
 #[test]
 fn every_answer_has_its_outcome() {
-    assert_eq!(outcome(&Ok(Response::new(()))), "ok");
+    assert_eq!(outcome(None), "ok");
     let hidden = hidden();
     assert_eq!(
         (hidden.code(), hidden.message()),
