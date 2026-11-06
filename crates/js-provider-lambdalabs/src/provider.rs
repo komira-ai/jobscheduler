@@ -652,6 +652,7 @@ impl LambdaProvider {
             offer: launch.instance_type.clone(),
             zone: Some(launch.region.clone()),
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         };
         let due = now + self.config.unknown_hold;
         gate.answered.push(Answered {
@@ -903,6 +904,7 @@ pub(crate) fn held_of(instance: &Instance) -> Held {
         offer: instance.instance_type.clone(),
         zone: Some(instance.region.clone()),
         status: instance.status.clone(),
+        ends_unix_seconds: None,
     }
 }
 

@@ -119,6 +119,7 @@ fn accepted() -> Acquired {
             offer: "x".to_owned(),
             zone: None,
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         },
         extras: Vec::new(),
     }

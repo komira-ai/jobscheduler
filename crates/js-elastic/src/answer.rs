@@ -67,6 +67,9 @@ pub struct Held {
     pub zone: Option<String>,
     /// The status.
     pub status: HostStatus,
+    /// When the machine's reserved block ends, in seconds since the Unix epoch (UTC): the
+    /// provider takes it back then. `None` for a machine that runs until it is released.
+    pub ends_unix_seconds: Option<u64>,
 }
 
 /// What the markers of a machine say about whose it is.

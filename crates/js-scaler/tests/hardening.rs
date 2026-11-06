@@ -243,6 +243,7 @@ fn an_orphan_the_catalog_prices_at_zero_counts_at_the_hourly_cap() {
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status: HostStatus::Active,
+        ends_unix_seconds: None,
     }]);
     rig.tick(at(0));
     assert_eq!(rig.phase(0), Phase::Orphan);
@@ -290,6 +291,7 @@ fn write_at(rig: &mut Rig, n: u64, now: u64) {
         offer: "a10".to_owned(),
         zone: None,
         status: HostStatus::Active,
+        ends_unix_seconds: None,
     };
     rig.pool().held.as_mut().unwrap().push(held);
     assert_eq!(kinds(&rig.tick(at(now))), ["Save"]);

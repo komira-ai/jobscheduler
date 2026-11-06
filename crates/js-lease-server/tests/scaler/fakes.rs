@@ -273,6 +273,7 @@ impl Effects for Handle {
             offer: plan.offer.id.clone(),
             zone: plan.offer.zone.clone(),
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         };
         world.machines.push(held.clone());
         Acquired::Accepted {
