@@ -48,7 +48,19 @@
 //! hash. The ids themselves are compared between two runs of one seed, and between two
 //! seeds, in the cell's ledger, where each job's launch is named by its job and allocation
 //! ids.
+//!
+//! And one elastic scenario, family `elastic`: an EC2-like pool scaled up to forty machines
+//! by a hundred whole-host runs and back to none (`cell/elastic.rs`, about 19,200 agent
+//! requests a seed) over [`ELASTIC_SEEDS`] seed, so a change to a decision of the scaler,
+//! to how the cell boots, joins or ends a launched machine, or a machine name that does
+//! not follow the seed, moves a hash.
 
+#[path = "cell/elastic.rs"]
+#[allow(
+    dead_code,
+    reason = "the elastic scenarios are shared with tests/elastic.rs, which runs the Lambda-like one this binary does not pin"
+)]
+mod elastic;
 #[path = "cell/jobs.rs"]
 mod jobs;
 #[path = "cell/lossy_wire.rs"]
@@ -140,6 +152,11 @@ const FAULTS_FAMILY: &str = "faults";
 const JOBS_SEEDS: u64 = 1;
 const JOBS_FAMILY: &str = "jobs";
 
+/// How many seeds of the elastic scenario the golden file pins, and the family they are
+/// kept under.
+const ELASTIC_SEEDS: u64 = 1;
+const ELASTIC_FAMILY: &str = "elastic";
+
 /// The jobs of the cell whose ids are compared: four hosts, eight jobs of [`JOB_RUN`].
 const JOB_HOSTS: usize = 4;
 const JOBS: usize = 8;
@@ -219,7 +236,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// scenario with real agents, run twice, whose items all succeed, and for one seed of the
 /// whole-host scenario and one of the cancelled whole-host request, each run twice under
 /// each placement, and for one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
-/// whose items end alike. Catches a handler path that reads a
+/// whose items end alike, and for one seed of the EC2-like elastic scenario
+/// (`cell/elastic.rs`), run twice, whose items end alike. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
 /// whose lines depend on whether they are kept. Also that a seed of the fault scenario of
@@ -275,6 +293,12 @@ fn a_seed_replays_to_the_same_trace_hash() {
     let again = jobs::jobs_on_a_lossy_wire().run_seeds(1).runs.remove(0);
     assert_eq!(once.hash, again.hash);
     assert_eq!(once.outcomes, again.outcomes);
+
+    let once = elastic::an_ec2_like_pool().run_seeds(1).runs.remove(0);
+    let again = elastic::an_ec2_like_pool().run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes, again.outcomes);
+    assert_eq!(once.outcomes.len(), elastic::RUNS as usize);
 }
 
 /// The cell whose job and allocation ids are compared, for `setup`: [`JOB_HOSTS`] hosts
@@ -444,6 +468,29 @@ fn the_job_scenario_matches_the_golden_file() {
     golden_of(JOBS_FAMILY).assert_matches(&jobs_runs());
 }
 
+/// The hash of each pinned seed of the elastic scenario, which must pass.
+fn elastic_runs() -> Vec<(String, TraceHash)> {
+    let passed = elastic::an_ec2_like_pool().run_seeds(ELASTIC_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!(
+            "an_ec2_like_pool_scales_up_to_demand_and_back_to_zero/seed-{}",
+            run.seed
+        );
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
+/// Asserts that the hashes of the pinned seeds of the elastic scenario equal the golden
+/// file's (family `elastic`). Catches any change to a decision of the scaler as the cell
+/// drives it, to how the cell boots, joins and ends a launched machine, or to the trace
+/// text, and an elastic run that differs between processes (a machine name drawn from
+/// the operating system's random source rather than the seed).
+#[test]
+fn the_elastic_scenario_matches_the_golden_file() {
+    golden_of(ELASTIC_FAMILY).assert_matches(&elastic_runs());
+}
+
 /// The hash of each pinned seed of the fault scenario, which must pass.
 fn faults_runs() -> Vec<(String, TraceHash)> {
     let scenario =
@@ -506,6 +553,9 @@ fn regenerate_golden_hashes() {
     golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
     golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
     golden_of(JOBS_FAMILY).regenerate(&jobs_runs()).unwrap();
+    golden_of(ELASTIC_FAMILY)
+        .regenerate(&elastic_runs())
+        .unwrap();
 }
 
 /// The hash of each pinned seed of the whole-host scenario under each placement, which

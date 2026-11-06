@@ -40,6 +40,7 @@ fn spec(kind: AgentKind, per_job: Option<&str>) -> AgentSpec {
         labels: BTreeMap::new(),
         hello_interval: Duration::from_secs(1),
         kind,
+        instance: None,
     }
 }
 

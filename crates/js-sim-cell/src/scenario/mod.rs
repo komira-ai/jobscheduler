@@ -94,6 +94,10 @@ struct Hosts {
 /// What a seed's statements judged at a virtual time found unmet, in the order judged.
 type Unmet = Rc<RefCell<Vec<String>>>;
 
+/// A named statement of a scenario's own, judged on the settled cell: what it found
+/// wrong, or `None`.
+type Statement = (String, Rc<dyn Fn(&mut Cell) -> Option<String>>);
+
 /// A named predicate over a seed's counters.
 #[derive(Clone)]
 struct Witness {
@@ -112,6 +116,7 @@ pub struct Scenario {
     actions: Vec<(FarmTime, Rc<dyn Action>)>,
     expects: Vec<Expect>,
     timed: Vec<(FarmTime, Expect)>,
+    statements: Vec<Statement>,
     witnesses: Vec<Witness>,
     settle_within: Duration,
     front: FrontFactory,
@@ -221,6 +226,7 @@ impl Scenario {
             actions: Vec::new(),
             expects: Vec::new(),
             timed: Vec::new(),
+            statements: Vec::new(),
             witnesses: Vec::new(),
             settle_within: DEFAULT_SETTLE,
             front: LeaseFront::factory(),
@@ -339,6 +345,21 @@ impl Scenario {
         self
     }
 
+    /// This scenario, expecting a statement of its own of every seed, named `name`: `judge`
+    /// reads the settled cell, after the end check and every [`Expect`], and answers what
+    /// it found wrong, which fails the seed as unmet (`<name>: <what it found>`), or
+    /// `None`. For a fact the closed set of [`Expect`]s does not read, such as what an
+    /// elastic pool's cloud billed.
+    #[must_use]
+    pub fn expect_that(
+        mut self,
+        name: &str,
+        judge: impl Fn(&mut Cell) -> Option<String> + 'static,
+    ) -> Self {
+        self.statements.push((name.to_owned(), Rc::new(judge)));
+        self
+    }
+
     /// This scenario, failing unless at least one seed's agents' counts, added together,
     /// satisfy `holds`.
     #[must_use]
@@ -420,7 +441,13 @@ impl Scenario {
         let mut cell = ran.map_err(|failure| self.failed(seed, failure))?;
         let first = timed.borrow().first().cloned();
         let at_end = |cell: &mut Cell| self.expects.iter().find_map(|e| e.unmet(cell));
-        let unmet = first.or_else(|| at_end(&mut cell));
+        let own = |cell: &mut Cell| {
+            let found = self.statements.iter();
+            found.find_map(|(name, judge)| judge(cell).map(|why| format!("{name}: {why}")))
+        };
+        let unmet = first
+            .or_else(|| at_end(&mut cell))
+            .or_else(|| own(&mut cell));
         match unmet {
             Some(detail) => Err(ScenarioFailure::Unmet {
                 scenario: self.name.clone(),

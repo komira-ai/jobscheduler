@@ -13,9 +13,11 @@ use std::time::Duration;
 use clap::ValueEnum;
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS};
 use js_lease::{Clock, ManualClock, Monotonic};
-use js_lease_server::{Cli, Config, Placement, StartupError};
-use js_registry::DEFAULT_LOST_RETENTION_MS;
+use js_lease_server::{Cli, Config, Placement, SharedClock, StartupError};
+use js_registry::{DEFAULT_LOST_RETENTION_MS, SessionSource};
 use js_types::Resources;
+
+use crate::elastic::{self, Cloud, ElasticPool};
 
 /// The client token of every cell's server: the bearer of [`super::ServerNode::client_call`].
 pub const CLIENT_TOKEN: &str = "sim-cell-client-token-0123456789-abcdef";
@@ -119,6 +121,8 @@ pub struct ServerSpec {
     resume: bool,
     /// Whether the job service is on ([`ServerSpec::jobs`]).
     jobs: bool,
+    /// The elastic pool, for a server of [`ServerSpec::elastic_pool`].
+    elastic: Option<ElasticPool>,
 }
 
 impl ServerSpec {
@@ -139,7 +143,34 @@ impl ServerSpec {
             whole_keys: BTreeMap::new(),
             resume: false,
             jobs: false,
+            elastic: None,
         }
+    }
+
+    /// A server whose one pool is the elastic pool `pool`, of class [`WHOLE_CLASS`]: its
+    /// machines are launched by the server's scaler on the pool's cloud, which the server
+    /// node makes and owns ([`crate::Cloud`]), and each is a host of `shape`. The node
+    /// reads the server's configuration from a file ([`crate::elastic`]), not from the
+    /// command line; the spec's placement, and no job service, are what that file says of
+    /// the server. A host of an elastic pool beats at the registry's defaults (5 s, with a
+    /// grace of 15 s), which an elastic pool does not set: [`ServerSpec::heartbeat`] and
+    /// the whole-node keys do not apply to it. The client asks for `shape`'s capabilities,
+    /// and the pool's floor has none, so a scenario gives a shape without any. The pool's
+    /// shape names no architecture, so only the default placement (`registry`) starts:
+    /// `js-sched` refuses a pool without one.
+    #[must_use]
+    pub fn elastic_pool(pool: ElasticPool, shape: Shape) -> Self {
+        let name = pool.name().to_owned();
+        Self {
+            elastic: Some(pool),
+            ..Self::whole_node_pool(&name, shape, 0)
+        }
+    }
+
+    /// The elastic pool of a server of [`ServerSpec::elastic_pool`].
+    #[must_use]
+    pub fn elastic(&self) -> Option<&ElasticPool> {
+        self.elastic.as_ref()
     }
 
     /// A server whose one pool, `pool_name`, of class [`WHOLE_CLASS`], books `shape` for
@@ -331,8 +362,7 @@ impl ServerSpec {
             &format!("{JOIN_TOKEN}\n"),
             "--agent-token-file",
         )?;
-        let placement = self.placement.to_possible_value();
-        let placement = placement.map(|value| value.get_name().to_owned());
+        let placement = self.placement_spelled();
         let mut flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
@@ -340,7 +370,7 @@ impl ServerSpec {
             ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
-            ("--placement", placement.unwrap_or_default().into()),
+            ("--placement", placement.into()),
         ];
         let job = self
             .jobs
@@ -354,18 +384,60 @@ impl ServerSpec {
         Ok(head.chain(pairs).chain(tail).collect())
     }
 
+    /// The `--placement` value, as the server spells it.
+    fn placement_spelled(&self) -> String {
+        let placement = self.placement.to_possible_value();
+        placement.map_or_else(String::new, |value| value.get_name().to_owned())
+    }
+
     /// The server's configuration, read from [`ServerSpec::args`] by its own parser, with
     /// the lease table's save timings read from `clock`, so nothing reads the system's
     /// monotonic clock.
     ///
     /// # Errors
     ///
-    /// When a file cannot be written, or the server refuses its command line.
+    /// When a file cannot be written, or the server refuses its command line; and for a
+    /// spec of [`ServerSpec::elastic_pool`], whose server the server node configures over
+    /// the cloud it owns.
     pub fn config(&self, dir: &Path, clock: &ManualClock) -> Result<Config, StartupError> {
+        if self.elastic.is_some() {
+            let reason =
+                "an elastic pool's server is configured by the server node, over its cloud";
+            return Err(StartupError::new("elastic", reason));
+        }
         let cli =
             Cli::try_parse_from(self.args(dir)?).map_err(StartupError::because("command line"))?;
         let config = Config::from_cli(cli)?;
         Ok(config.with_monotonic(Arc::new(Virtual(clock.clone()))))
+    }
+}
+
+impl ServerSpec {
+    /// The configuration of the server of `cloud`'s elastic pool, with this spec's
+    /// placement: the client token file and the configuration file written into `dir`
+    /// ([`elastic::config::text`]), read by the server with the cell's `sim-cloud` kind
+    /// over `cloud`, on `clock`, the lease table timing its saves on `clock`, and the
+    /// scaler drawing its acquire ids from `entropy`.
+    ///
+    /// # Errors
+    ///
+    /// When a file cannot be written, or the server refuses the file.
+    pub(crate) fn elastic_config(
+        &self,
+        dir: &Path,
+        clock: &ManualClock,
+        cloud: &Cloud,
+        entropy: Arc<dyn SessionSource>,
+    ) -> Result<Config, StartupError> {
+        let token = write(dir, "token", CLIENT_TOKEN, "client_token_file")?;
+        let state = dir.join("leases.toml");
+        let text =
+            elastic::config::text(cloud, &state, Path::new(&token), &self.placement_spelled());
+        let file = write(dir, "js.toml", &text, "--config")?;
+        let shared = SharedClock::new(clock.clone());
+        let config = elastic::config::read(Path::new(&file), cloud, shared)?;
+        let config = config.with_monotonic(Arc::new(Virtual(clock.clone())));
+        Ok(config.with_entropy(entropy))
     }
 }
 

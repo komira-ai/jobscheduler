@@ -17,7 +17,7 @@
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Sixteen
+//!   step and once at the end, and the one-line [`Violation`] it reports. Twenty-one
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
@@ -40,7 +40,14 @@
 //!   ([`Invariant::FreedOnlyWhenConfirmed`]), every job start naming an allocation
 //!   committed before it ([`Invariant::NoStartWithoutAllocation`]), and every result kept
 //!   by its agent until acknowledged and stored once
-//!   ([`Invariant::ResultKeptUntilAcknowledged`]).
+//!   ([`Invariant::ResultKeptUntilAcknowledged`]); and the five of an elastic pool's
+//!   cloud: no more of the scheduler's machines running than the pool's `max_instances`
+//!   ([`Invariant::InstancesWithinLimits`]), no release of a machine the scheduler did not
+//!   launch ([`Invariant::OnlyOwnMachinesReleased`]), no acquire once the pool's brake
+//!   has tripped until it is reset ([`Invariant::NoAcquireWhilePlanOnly`]), no acquire
+//!   inside the throttle wait of a 429 ([`Invariant::ThrottleHonoured`]), and every
+//!   launched machine released, gone or preempted once quiet, none left running idle and
+//!   undrained ([`Invariant::LaunchedMachinesSettle`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -56,6 +63,14 @@
 //!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]);
 //!   with [`ServerSpec::jobs`], its job service too, its job store minting ids from the
 //!   seed.
+//! - [`elastic`]: an elastic pool ([`ElasticPool`]): its cloud ([`Cloud`]), the elastic
+//!   fake on the cell's clock behind a recording wrapper the server's scaler is handed,
+//!   which writes down each acquire, release and list with its arguments, its answer and
+//!   its virtual time ([`CloudCall`]); the launch payload a machine's agent reads its join
+//!   token and host id from ([`Payload`]); the seed's entropy the scaler names machines
+//!   with ([`SeededEntropy`]); and what the invariants read of the cloud ([`CloudFacts`]).
+//!   A machine the scaler launches boots into a fake agent the pool's boot time later,
+//!   and one the cloud stops running has its agent killed in the same step.
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
 //!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
@@ -85,7 +100,9 @@
 //!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
 //!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
 //!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
-//!   path, and the ways its handshake fails, under every value of `--placement`.
+//!   path, and the ways its handshake fails, under every value of `--placement`; the
+//!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
+//!   demand and releases once idle, billed as EC2 and as Lambda bill.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
@@ -113,6 +130,7 @@ pub mod agreement;
 pub mod bus;
 pub mod cell;
 mod counters;
+pub mod elastic;
 pub mod front;
 pub mod invariant;
 pub mod jobs;
@@ -131,6 +149,10 @@ pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differ
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
+pub use elastic::{
+    AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
+    Payload, ReleaseAnswer, SeededEntropy,
+};
 pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
 pub use jobs::{
