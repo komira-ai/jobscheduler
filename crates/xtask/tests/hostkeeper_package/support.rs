@@ -53,28 +53,13 @@ pub const FLAGS: &str = "/etc/js-agent/flags";
 /// The flags file of a sample host: the flags a package cannot carry.
 pub const SAMPLE_FLAGS: &str = "# this host's own flags\n--server=https://js.example.com:8443\n--pool=farm\n--instance-file=/etc/js-agent/instance\n--host-id=node-5\n";
 
-/// The params the update hook reads, from `[params]` of the manifest. The hook part imports no
-/// list from here; it must read exactly these keys (the test
-/// `the_params_are_exactly_the_keys_the_update_hook_reads` pins the manifests to this list).
-pub const HOOK_PARAMS: [&str; 17] = [
-    "cleanup_timeout_secs",
-    "cordon_lease_secs",
-    "cordon_max_secs",
-    "cutover_timeout_secs",
-    "defer_retry_secs",
-    "drain_wait_secs",
-    "flags_file",
-    "prepare_timeout_secs",
-    "release_link",
-    "rollback_timeout_secs",
-    "runtime",
-    "state_dir",
-    "state_root",
-    "token_file",
-    "unit",
-    "verify_deadline_secs",
-    "verify_timeout_secs",
-];
+/// The params the update hook reads from `[params]` of the manifest, sorted as the manifest's
+/// table is: the agent's own list (`js_agent::update_hook::params::KEYS`).
+pub fn hook_params() -> Vec<&'static str> {
+    let mut keys = js_agent::update_hook::params::KEYS.to_vec();
+    keys.sort_unstable();
+    keys
+}
 
 /// The release version as the verb's type.
 pub fn version() -> Version {

@@ -36,14 +36,6 @@ contents:
     dst: /usr/share/js-agent/crun_host_setup.sh
     file_info:
       mode: 0755
-  # The host updater's declaration, the file the release archive of js-agent carries as
-  # updater.d/js-agent.toml. Not in /etc/updater.d: installing it there is the updater's own
-  # step, which approves the rights it grants, and it names js-agent-crun.service, the unit
-  # of the host setup and not this package's.
-  - src: packaging/js-agent/updater.d/js-agent.toml
-    dst: /usr/share/js-agent/updater.d/js-agent.toml
-    file_info:
-      mode: 0644
   - src: LICENSE
     dst: /usr/share/doc/js-agent/copyright
     file_info:

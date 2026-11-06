@@ -1,16 +1,13 @@
 //! The macOS installer package: what `pkg stage-macos` lays down, what `pkg check-macos`
 //! refuses, the files under `packaging/js-agent-macos` read as they are in the repository
-//! (the plists are flags the programs accept, the update hook's declaration is one the hook
-//! takes), and the workflow that builds the package. The real `pkgbuild` run is
-//! `tests/macos_pkg_real.rs`, on a Mac.
+//! (the plists are flags the programs accept), and the workflow that builds the package. The
+//! real `pkgbuild` run is `tests/macos_pkg_real.rs`, on a Mac.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-#[cfg(target_os = "linux")]
-use js_mac_provision::daemon::{AGENT_LABEL, SESSION_LABEL};
 use js_mac_provision::daemon::{Daemon, RELEASE_LINK};
 use js_testkit::dir::TestDir;
 use xtask::macpkg::{
@@ -32,16 +29,6 @@ struct Check {
     args: xtask::macpkg::CheckArgs,
 }
 
-#[cfg(target_os = "linux")]
-fn root() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-}
-
-#[cfg(target_os = "linux")]
-fn read(path: &str) -> String {
-    std::fs::read_to_string(root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
-}
-
 fn entry<'a>(all: &'a [Entry], path: &str) -> &'a Entry {
     all.iter()
         .find(|e| e.path == path)
@@ -49,7 +36,7 @@ fn entry<'a>(all: &'a [Entry], path: &str) -> &'a Entry {
 }
 
 #[test]
-fn the_payload_holds_the_release_the_plists_the_declaration_and_three_directories() {
+fn the_payload_holds_the_release_the_plists_and_three_directories() {
     let all = entries(VERSION);
     let files: BTreeSet<&str> = all
         .iter()
@@ -63,7 +50,6 @@ fn the_payload_holds_the_release_the_plists_the_declaration_and_three_directorie
         "usr/local/js-agent/releases/1.2.3/LICENSE",
         "usr/local/js-agent/share/com.komira.js-agent.plist",
         "usr/local/js-agent/share/com.komira.js-mac-session.plist",
-        "usr/local/js-agent/share/updater.d/js-agent.toml",
     ]
     .into_iter()
     .collect();
@@ -163,7 +149,7 @@ fn sources(name: &str) -> Sources {
         std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o600))
             .unwrap();
     }
-    for file in ["LICENSE", "agent.plist", "session.plist", "updater.toml"] {
+    for file in ["LICENSE", "agent.plist", "session.plist"] {
         std::fs::write(at.join(file), format!("bytes of {file}")).unwrap();
     }
     let args = Stage::parse_from([
@@ -178,8 +164,6 @@ fn sources(name: &str) -> Sources {
         at.join("agent.plist").to_str().unwrap(),
         "--session-plist",
         at.join("session.plist").to_str().unwrap(),
-        "--declaration",
-        at.join("updater.toml").to_str().unwrap(),
         "--out",
         at.join("out").to_str().unwrap(),
     ])
@@ -238,10 +222,6 @@ fn staging_lays_down_exactly_the_payload_with_the_sources_bytes_and_the_listed_m
             "session.plist",
             "usr/local/js-agent/share/com.komira.js-mac-session.plist",
         ),
-        (
-            "updater.toml",
-            "usr/local/js-agent/share/updater.d/js-agent.toml",
-        ),
     ] {
         assert_eq!(
             std::fs::read_to_string(root.join(to)).unwrap(),
@@ -294,8 +274,6 @@ fn the_program_stages_the_package_when_asked_to() {
         .arg(&a.agent_plist)
         .arg("--session-plist")
         .arg(&a.session_plist)
-        .arg("--declaration")
-        .arg(&a.declaration)
         .arg("--out")
         .arg(&a.out)
         .output()
@@ -546,10 +524,7 @@ fn every_part_of_an_lsbom_line_is_needed() {
     assert_eq!(refused(&p).len(), 5);
 }
 
-// ---- the files of packaging/js-agent-macos ----
-
-#[cfg(target_os = "linux")]
-const DIR: &str = "packaging/js-agent-macos";
+// ---- the plists of js-mac-provision ----
 
 /// The `<string>` items of a plist's `ProgramArguments`, XML characters unescaped.
 fn program_arguments(plist: &str) -> Vec<String> {
@@ -599,124 +574,4 @@ fn the_helpers_plist_names_flags_the_helper_accepts_and_a_socket_the_agent_dials
         .map(|at| PathBuf::from(&agent[at + 1]))
         .unwrap();
     assert_eq!(args.socket, socket);
-}
-
-// Like the readers of the repository's files above, this test runs on Linux only.
-#[cfg(target_os = "linux")]
-#[test]
-fn the_declaration_is_one_the_hook_takes_for_the_unit_the_plist_labels() {
-    use js_agent::update_hook::{Declaration, PREPARE_MARGIN_SECS, Params};
-    let text = read(&format!("{DIR}/updater.toml"));
-    let declaration = Declaration::parse(&text).unwrap();
-    assert_eq!(declaration.units, [AGENT_LABEL]);
-    assert_ne!(AGENT_LABEL, SESSION_LABEL);
-
-    // The hook params: the keys the hook reads, and the release link the cutover will.
-    let table: toml::Table = text.parse().unwrap();
-    let mut params = table["hook"]["params"].as_table().unwrap().clone();
-    let link = PathBuf::from(params["release_link"].as_str().unwrap());
-    assert_eq!(link, Path::new(RELEASE_LINK));
-    let inside = declaration
-        .write_paths
-        .iter()
-        .any(|dir| link.starts_with(dir) && link != *dir && *dir != declaration.state_dir);
-    assert!(
-        inside,
-        "the release link is in no write path but the state directory"
-    );
-    for (key, value) in [
-        (
-            "updater.artifact_digest",
-            format!("sha256:{}", "a".repeat(64)),
-        ),
-        ("updater.staged_release", "/staged".to_owned()),
-        ("updater.target_version", "1.4.0".to_owned()),
-    ] {
-        params.insert(key.to_owned(), toml::Value::String(value));
-    }
-    let text: String = params
-        .iter()
-        .map(|(key, value)| match value {
-            toml::Value::Integer(n) => format!("\"{key}\" = {n}\n"),
-            toml::Value::String(v) => format!("\"{key}\" = \"{v}\"\n"),
-            other => panic!("{key}: {other:?}"),
-        })
-        .collect();
-    let parsed = Params::parse(&text).unwrap();
-    assert!(declaration.timeouts.prepare >= parsed.drain_wait_secs + PREPARE_MARGIN_SECS);
-}
-
-// The hook reaches the lease server and the agent's state by the values of the agent's own
-// flags: the declaration must say what the plist of the agent says.
-#[cfg(target_os = "linux")]
-#[test]
-fn the_declaration_reaches_the_server_and_the_state_the_agents_plist_names() {
-    use js_agent::update_hook::Params;
-    use js_mac_provision::daemon::{GATE, UNSET_SERVER};
-    let table: toml::Table = read(&format!("{DIR}/updater.toml")).parse().unwrap();
-    let params = table["hook"]["params"].as_table().unwrap();
-    let agent = Daemon::agent(UNSET_SERVER, "pool");
-    let flag = |name: &str| {
-        let at = agent.args.iter().position(|arg| arg == name).unwrap();
-        agent.args[at + 1].clone()
-    };
-    assert_eq!(params["server"].as_str(), Some(flag("--server").as_str()));
-    assert_eq!(
-        params["state_root"].as_str(),
-        Some(flag("--state-root").as_str())
-    );
-    assert_eq!(
-        params["token_file"].as_str(),
-        Some(flag("--token-file").as_str())
-    );
-    assert_eq!(flag("--token-file"), GATE);
-    // And the hook reads them as it reads any other table.
-    let mut text: String = params
-        .iter()
-        .filter_map(|(key, value)| value.as_str().map(|v| format!("\"{key}\" = \"{v}\"\n")))
-        .collect();
-    text.push_str(&format!(
-        "cordon_lease_secs = 300\ncordon_max_secs = 17355\ndrain_wait_secs = 3600\ndefer_retry_secs = 300\n\"updater.artifact_digest\" = \"sha256:{}\"\n\"updater.staged_release\" = \"/staged\"\n\"updater.target_version\" = \"1.4.0\"\n",
-        "a".repeat(64)
-    ));
-    let read = Params::parse(&text).unwrap().connect;
-    assert_eq!(read.server.as_deref(), Some(UNSET_SERVER));
-    assert_eq!(
-        read.state_root.as_deref(),
-        Some(Path::new("/var/db/js-agent/state"))
-    );
-    assert_eq!(read.token_file.as_deref(), Some(Path::new(GATE)));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn the_declaration_names_the_native_runtime_for_the_unit_the_plist_labels() {
-    use js_agent::update_hook::Declaration;
-    let declaration = Declaration::parse(&read(&format!("{DIR}/updater.toml"))).unwrap();
-    assert_eq!(declaration.runtime, "native");
-}
-
-// Like the readers of the repository's files above, this test runs on Linux only.
-#[cfg(target_os = "linux")]
-#[test]
-fn the_declaration_paths_are_the_ones_the_package_makes() {
-    use js_agent::update_hook::Declaration;
-    let declaration = Declaration::parse(&read(&format!("{DIR}/updater.toml"))).unwrap();
-    let all = entries(VERSION);
-    let state = declaration
-        .state_dir
-        .strip_prefix("/")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert_eq!(entry(&all, state).mode, 0o700);
-    for dir in &declaration.write_paths {
-        let rel = dir.strip_prefix("/").unwrap().to_str().unwrap();
-        // The releases directory is the parent of the release the package lays down.
-        assert!(
-            all.iter()
-                .any(|e| e.path == rel || e.path.starts_with(&format!("{rel}/"))),
-            "{rel}"
-        );
-    }
 }

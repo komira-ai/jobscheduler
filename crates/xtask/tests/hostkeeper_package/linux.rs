@@ -12,8 +12,8 @@ use hostkeeper_placed::lint::{check_unit_text, through_current, wanted_by};
 use js_agent::{Cli, RuntimeKind};
 
 use crate::support::{
-    CURRENT_BINARY, FLAGS, HOOK_PARAMS, LINUX, PACKAGES, SAMPLE_FLAGS, Scratch, TOKEN, VERSION,
-    assignments, expand, hk, load_edited, manifest_toml, package, running, text, unit_value,
+    CURRENT_BINARY, FLAGS, LINUX, PACKAGES, SAMPLE_FLAGS, Scratch, TOKEN, VERSION, assignments,
+    expand, hk, hook_params, load_edited, manifest_toml, package, running, text, unit_value,
     unpack,
 };
 
@@ -61,7 +61,7 @@ pub fn param_int(manifest: &Manifest, key: &str) -> u64 {
 /// hook is given are the ones hostkeeper holds it to.
 pub fn check_params_mirror_the_manifest(manifest: &Manifest) {
     let keys: Vec<&str> = manifest.params.keys().map(String::as_str).collect();
-    assert_eq!(keys, HOOK_PARAMS);
+    assert_eq!(keys, hook_params());
     let timeouts = manifest.hook.timeout_secs;
     assert_eq!(
         param_int(manifest, "prepare_timeout_secs"),
@@ -214,8 +214,8 @@ fn the_loader_refuses_an_install_bound_or_an_unknown_key_and_the_package_has_nei
     }
 }
 
-/// The params are exactly the keys the update hook reads (`HOOK_PARAMS` in support.rs, the list
-/// the hook's own tests import), the step bounds in them are the manifest's own, and
+/// The params are exactly the keys the update hook reads (`js_agent::update_hook::params::KEYS`,
+/// the list the hook itself requires), the step bounds in them are the manifest's own, and
 /// hostkeeper's rule that a verify and a rollback fit in the deadline holds. Catches a param
 /// the hook does not read (hostkeeper passes it on regardless), a param the hook needs and the
 /// manifest lacks (the hook refuses its params), and a bound the manifest changes while the

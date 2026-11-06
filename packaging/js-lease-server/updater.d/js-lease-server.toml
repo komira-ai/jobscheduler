@@ -20,7 +20,7 @@
 #                   TLS on every listener cannot be checked this way
 #
 # Top-level keys come first: in TOML a key after a table header belongs to that table.
-# crates/xtask/tests/js_lease_server_declaration.rs loads this file with the updater's own validator
+# crates/xtask/tests/js_lease_server_declaration.rs reads this file as the declaration's shape
 # and with the hook's, and pins the rules said here.
 name   = "js-lease-server"
 binary = "js-lease-server"

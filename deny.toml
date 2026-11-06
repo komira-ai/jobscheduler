@@ -120,8 +120,7 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# kbf's update-hook contract crate and its declaration rules (update-rights), and nothing else
-# of kbf: dev-dependencies of js-agent and xtask, pinned by one revision in Cargo.toml. The
-# layering test refuses any other dependency from kbf's repository, by any name, and these two
-# as anything but dev-dependencies (docs/layering.md).
-allow-git = ["https://github.com/komira-ai/hostkeeper", "https://github.com/komira-ai/kbf"]
+# hostkeeper's own crates (the hook contract and its conformance harness, and the readers a host
+# runs on a package), pinned by one revision in Cargo.toml. Nothing from kbf is allowed: the
+# layering test refuses any dependency from kbf's repository (docs/layering.md).
+allow-git = ["https://github.com/komira-ai/hostkeeper"]

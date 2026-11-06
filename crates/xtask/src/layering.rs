@@ -22,6 +22,7 @@
 //!   ([`Violation::Unknown`]: a `kbf-*` crate, an unlisted path or git dependency), or an
 //!   external one that a member declares with something other than `workspace = true`
 //!   ([`Violation::NotWorkspace`]);
+//! - a dependency taken from kbf's repository, of any kind ([`Violation::FromKbf`]);
 //! - with [`check_closure`], a pure crate that reaches, through its resolved normal
 //!   dependencies, an async runtime, network stack or random source ([`FORBIDDEN`]);
 //! - a package named in `single_source` (`js-types`) that has a second copy: it must
@@ -116,8 +117,7 @@ pub enum Violation {
         /// The package.
         package: String,
     },
-    /// A dependency from kbf's repository other than the ones it allows: `update-hook` and
-    /// `update-rights`, as dev-dependencies.
+    /// A dependency from kbf's repository, of any kind: normal, build, dev or target-specific.
     FromKbf {
         /// The manifest.
         manifest: String,
@@ -125,15 +125,6 @@ pub enum Violation {
         package: String,
     },
 }
-
-/// The crates this repository may take from kbf's repository, and only as dev-dependencies:
-/// kbf's update-hook contract crate, whose conformance harness the js-agent hook's tests run,
-/// and the host updater's declaration rules (`update-rights`), which load the js-agent and
-/// js-lease-server declarations the release ships (crates/xtask/tests/js_agent_declaration.rs,
-/// crates/xtask/tests/js_lease_server_declaration.rs). Neither depends
-/// on another crate of kbf but `update-hook` (kbf's own layering test keeps them so), and both
-/// are pinned by one revision. Anything else from kbf's repository is refused, by any name.
-const KBF_TEST_CRATES: [&str; 2] = ["update-hook", "update-rights"];
 
 /// Whether a dependency's declaration names kbf's repository as its git source.
 fn from_kbf_repo(dep: &toml::Value) -> bool {
@@ -185,8 +176,7 @@ impl fmt::Display for Violation {
             ),
             Violation::FromKbf { manifest, package } => write!(
                 f,
-                "{manifest} takes {package} from kbf's repository; only {}, as dev-dependencies, may come from there",
-                KBF_TEST_CRATES.join(" and ")
+                "{manifest} takes {package} from kbf's repository; nothing may come from there, as any kind of dependency"
             ),
         }
     }
@@ -548,8 +538,8 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
         }
     }
 
-    // From kbf's repository: only the test crates, declared once at the root and taken by
-    // members as dev-dependencies.
+    // From kbf's repository: nothing, as any kind of dependency, at the root or in a member
+    // (by git source, or through a root entry the member takes with `workspace = true`).
     let root_deps = root_manifest
         .get("workspace")
         .and_then(|w| w.get("dependencies"))
@@ -563,10 +553,7 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
             real.unwrap_or(key).to_owned()
         })
         .collect();
-    for package in kbf_at_root
-        .iter()
-        .filter(|p| !KBF_TEST_CRATES.contains(&p.as_str()))
-    {
+    for package in &kbf_at_root {
         violations.insert(Violation::FromKbf {
             manifest: "Cargo.toml".to_owned(),
             package: package.clone(),
@@ -580,12 +567,10 @@ pub fn check(root: &Path) -> Result<Vec<Violation>, Error> {
             .join("Cargo.toml")
             .display()
             .to_string();
-        for (dep, value, dev) in &m.deps {
+        for (dep, value, _) in &m.deps {
             let via_root = value.get("workspace").and_then(toml::Value::as_bool) == Some(true)
                 && kbf_at_root.contains(dep);
-            if (from_kbf_repo(value) || via_root)
-                && (!dev || !KBF_TEST_CRATES.contains(&dep.as_str()))
-            {
+            if from_kbf_repo(value) || via_root {
                 violations.insert(Violation::FromKbf {
                     manifest: manifest.clone(),
                     package: dep.clone(),
