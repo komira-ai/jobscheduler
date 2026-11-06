@@ -82,6 +82,7 @@ fn unavailable_pool() -> PoolsView {
     PoolsView {
         pools: vec![pool_view(State::Unavailable, true)],
         warnings: Vec::new(),
+        logs: None,
     }
 }
 
@@ -177,6 +178,7 @@ async fn pools_and_providers_agree_with_the_json_status() {
             pool_view(State::Unavailable, false),
         ],
         warnings: Vec::new(),
+        logs: None,
     };
     let api = api_over(Arc::new(FakeHosts::new()), Arc::new(FakePools(fine)), None);
     let (pools, providers) = pools_of(&api).await;
@@ -238,6 +240,7 @@ fn marked_pool() -> PoolsView {
     PoolsView {
         pools: vec![pool],
         warnings: vec!["MARK-WARNING".to_owned()],
+        logs: None,
     }
 }
 
