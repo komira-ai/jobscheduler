@@ -566,6 +566,7 @@ pub fn main_with(
         let host = gpu_dropin::Host {
             smi: &smi,
             read: crun::read_node,
+            expand: &flags_file::expand,
         };
         return gpu_dropin::run(&args, out, err, &host);
     }
