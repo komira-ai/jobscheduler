@@ -13,7 +13,9 @@
 //! slack for a later change to spend: `js-coverage tighten` ([`tighten`]) lowers it
 //! from the measured file CI uploads, and refuses any rise, so running it when
 //! coverage improves is required and is not a bypass. The table CI prints also shows each
-//! crate's percentages and gap to 100%, the project's target.
+//! crate's percentages and gap to 100%, the project's target, and, for each crate that
+//! misses more than its baseline (or a new crate that misses anything), the lines and
+//! branches no test runs ([`uncovered`]).
 //!
 //! The file of the same change is not a check on itself, so CI also compares it with the
 //! base branch's file ([`base`]): no count may rise, and a new crate enters at zero.
@@ -23,9 +25,11 @@
 
 pub mod base;
 pub mod baseline;
+pub mod check;
 pub mod lcov;
 pub mod ratchet;
 pub mod tighten;
+pub mod uncovered;
 
 use std::fmt;
 
