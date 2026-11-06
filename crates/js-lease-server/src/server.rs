@@ -33,6 +33,7 @@ use crate::pool::{Pool, Setup};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
 use crate::store::{LockLost, LockWatch, ServerStore};
+use crate::store_health::{LockState, StoreHealth};
 use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
 use crate::usage::ProfileCurves;
@@ -297,6 +298,8 @@ pub(crate) struct Prepared {
     cached: Cached,
     /// The store, opened under its writer lock, when the configuration names one.
     store: Option<ServerStore>,
+    /// The health of the store paths, which the tick records and `/healthz` reads.
+    store_health: StoreHealth,
 }
 
 /// What a start has built once the lease table is open: the state the routes and the tick
@@ -348,6 +351,7 @@ pub(crate) fn prepare(
         logs,
         max_job_wall,
         store,
+        store_unreachable_after,
         ..
     } = config;
     // The store's writer lock before anything else (design 6.7, step 1): before the store or
@@ -401,6 +405,16 @@ pub(crate) fn prepare(
         }
         _ => None,
     };
+    // The store's alert goes to the same sink as the scaler's, through a dedupe of its own.
+    let store_health = StoreHealth::new(clock.clone(), store_unreachable_after);
+    let store_health = match &alerts {
+        Some(sink) => store_health.with_sink(Arc::clone(sink), alert_repeat),
+        None => store_health,
+    };
+    store_health.set_lock(match &store {
+        Some(_) => LockState::Held,
+        None => LockState::None,
+    });
     if let (Some(scaler), Some(sink)) = (&scaler, alerts) {
         scaler.set_sink(sink, alert_repeat);
     }
@@ -434,6 +448,7 @@ pub(crate) fn prepare(
         admit,
         cached,
         store,
+        store_health,
     };
     let listeners = Listeners {
         listen,
@@ -477,6 +492,7 @@ pub(crate) fn open(
         admit,
         cached,
         store,
+        store_health,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
     let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
@@ -509,8 +525,13 @@ pub(crate) fn open(
         warn!("{warning}");
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
+    let store_health = Arc::new(store_health);
     let pools = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
-    let pools = Arc::new(pools.with_logs(logs));
+    let pools = Arc::new(
+        pools
+            .with_logs(logs)
+            .with_store_health(Arc::clone(&store_health)),
+    );
     let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(
         Shared::new(table, token, agents)
@@ -518,7 +539,8 @@ pub(crate) fn open(
             .with_status(status)
             .with_pools(pools)
             .with_scaler(scaler.clone())
-            .with_store(store),
+            .with_store(store)
+            .with_store_health(store_health),
     );
     Ok(Opened {
         shared,
@@ -586,6 +608,10 @@ async fn tick_loop<T: Ticker>(
     loop {
         let tick = ticker.next().await;
         if let Err(lost) = shared.check_store().await {
+            let health = shared.store_health();
+            health
+                .iter()
+                .for_each(|health| health.set_lock(LockState::Lost));
             lock_watch.lose(lost);
             tick.finish();
             return;

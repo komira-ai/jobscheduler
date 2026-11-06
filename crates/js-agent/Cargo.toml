@@ -40,6 +40,8 @@ js-mac-session = { path = "../js-mac-session" }
 js-oci = { path = "../js-oci" }
 js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
+# The update hook's service-independent parts (src/update_hook).
+js-update-hook = { path = "../js-update-hook" }
 async-trait.workspace = true
 clap.workspace = true
 getrandom.workspace = true

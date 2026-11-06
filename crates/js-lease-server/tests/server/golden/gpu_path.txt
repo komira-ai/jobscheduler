@@ -34,6 +34,7 @@
 --require-host-credential default=none required=false values=true|false
 --state-file default=none required=false
 --store default=none required=false
+--store-unreachable-after default=60s required=false
 --tick default=5s required=false
 --tls-cert default=none required=false
 --tls-key default=none required=false

@@ -1050,6 +1050,7 @@ dependencies = [
  "js-testkit",
  "js-treestore",
  "js-types",
+ "js-update-hook",
  "libc",
  "rustix",
  "serde",
@@ -1873,6 +1874,17 @@ dependencies = [
 name = "js-types"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "js-update-hook"
+version = "0.1.0"
+dependencies = [
+ "js-testkit",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

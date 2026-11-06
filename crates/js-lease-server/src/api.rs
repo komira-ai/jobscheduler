@@ -31,6 +31,7 @@ use crate::run_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
 use crate::store::{LockLost, ServerStore};
+use crate::store_health::{StoreHealth, TickStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
@@ -46,8 +47,8 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
 
 /// What every request handler and the tick loop share: the table behind its one lock,
-/// the token, the count of lease-file writes that failed, and the agent side when agents
-/// register hosts.
+/// the token, the count of lease-file writes that failed, the health of the store paths, and
+/// the agent side when agents register hosts.
 pub(crate) struct Shared {
     table: Mutex<Table>,
     /// How long the table's saves and the handlers' waits for its lock took.
@@ -66,6 +67,9 @@ pub(crate) struct Shared {
     pools: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
+    /// How the tick's store paths fared ([`crate::store_health`]); `None` only in a test
+    /// that builds the state without it, where nothing records or reads it.
+    store_health: Option<Arc<StoreHealth>>,
     /// The whole-node counts the last tick logged.
     counted: std::sync::Mutex<WholeCounts>,
     /// The reservation ledger the last tick handed the table.
@@ -92,6 +96,7 @@ impl Shared {
             pools: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
+            store_health: None,
             counted: std::sync::Mutex::new(WholeCounts::default()),
             handed,
             admit: Admit::default(),
@@ -125,6 +130,19 @@ impl Shared {
     pub(crate) fn with_store(mut self, store: Option<ServerStore>) -> Self {
         self.store = store;
         self
+    }
+
+    /// The same state recording the tick's store paths in `health`, which `/healthz` and the
+    /// status routes read.
+    #[must_use]
+    pub(crate) fn with_store_health(mut self, health: Arc<StoreHealth>) -> Self {
+        self.store_health = Some(health);
+        self
+    }
+
+    /// The health of the store paths; `None` when the state was built without it.
+    pub(crate) fn store_health(&self) -> Option<&Arc<StoreHealth>> {
+        self.store_health.as_ref()
     }
 
     /// The store the server holds; `None` without a store setting.
@@ -249,7 +267,8 @@ impl Shared {
     /// advances the agent registry (when the server has one) so its reservations and prepare
     /// deadlines act on this tick, logs what changed and counts a failed write; then runs a pass
     /// over the queued jobs ([`Agents::place_jobs`]): the order of design section 6.1. The
-    /// table's lock is held for the tick alone.
+    /// table's lock is held for the tick alone. How the lease file's write and the job pass
+    /// went is recorded as one reading of the store's health ([`StoreHealth::record`]).
     pub(crate) async fn tick(&self) -> TickReport {
         let report = {
             let mut table = self.table.lock().await;
@@ -259,12 +278,22 @@ impl Shared {
             let agents = self.agents.as_ref();
             table.tick_then(|| agents.and_then(|agents| handed.changed(&agents.registry)))
         };
-        if let Some(agents) = &self.agents {
+        let pass = match &self.agents {
             // The job pass reads and writes the job tables, so it runs on the pool for
             // blocking calls; it holds no lock of the table or the registry while it does.
-            let passing = Arc::clone(agents);
-            crate::util::blocking(move || passing.job_pass()).await;
-        }
+            Some(agents) => {
+                let passing = Arc::clone(agents);
+                crate::util::blocking(move || passing.job_pass()).await
+            }
+            None => None,
+        };
+        let store = TickStore {
+            lease_file_failed: report.save_error.is_some(),
+            pass,
+        };
+        self.store_health
+            .iter()
+            .for_each(|health| health.record(store));
         let counts = match &self.agents {
             Some(agents) => {
                 // The marks are brought up to this tick, so the counts and the next
@@ -388,12 +417,20 @@ pub(crate) fn bearer(value: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }
 
-/// 200 `ok` while the tick loop runs; 503 once it has stopped, since a server that no
-/// longer ticks expires nothing and a load balancer should stop sending it work.
+/// 200 `ok` while the tick loop runs and the store answers; 503 once the loop has stopped
+/// (`tick loop stopped`), since a server that no longer ticks expires nothing, or while the
+/// store has been failing for the window ([`crate::store_health`]: `store unreachable`),
+/// since its heartbeats and job calls fail. A load balancer should stop sending it work. The
+/// body's first word names the cause; a stopped loop is named first.
 async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
-    match shared.ticking() {
-        true => "ok".into_response(),
-        false => (StatusCode::SERVICE_UNAVAILABLE, "tick loop stopped").into_response(),
+    let unreachable = shared
+        .store_health
+        .as_ref()
+        .is_some_and(|health| health.unreachable());
+    match (shared.ticking(), unreachable) {
+        (true, false) => "ok".into_response(),
+        (false, _) => (StatusCode::SERVICE_UNAVAILABLE, "tick loop stopped").into_response(),
+        (true, true) => (StatusCode::SERVICE_UNAVAILABLE, "store unreachable").into_response(),
     }
 }
 

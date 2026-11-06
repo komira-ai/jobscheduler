@@ -38,7 +38,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::update_hook::plain::is_plain;
+use js_update_hook::is_plain;
+
 use crate::update_hook::{
     CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params,
     Reason, Record, Report, START_WAIT_SECS, UnitState,
