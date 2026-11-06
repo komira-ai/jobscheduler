@@ -793,6 +793,51 @@ fn job_run_ends_at_once_when_its_wait_fails() {
     );
 }
 
+/// Asserts that when the job's end is read while both streams are still open, `job run`
+/// goes on writing the streams to their end before it prints the end and exits with the
+/// job's status. The streams are held open (empty, not at their end) until the job has been
+/// read as ended and then for a few more reads, and only after that carry their last bytes
+/// and their end, so the wait has ended before either stream can. Catches a run that exits
+/// at the job's end and drops what the streams still had to write.
+#[test]
+fn job_run_writes_the_streams_to_their_end_after_the_job_has_ended() {
+    let scratch = Scratch::new("run_drain_after_end");
+    let fake = Fake::new();
+    let ended = Arc::new(Mutex::new(false));
+    let seen_end = ended.clone();
+    fake.respond("GetJob", move |_| {
+        *seen_end.lock().unwrap() = true;
+        job(JobState::Succeeded)
+    });
+    let after = Arc::new(Mutex::new([0_u32; 2]));
+    fake.respond("GetLogs", move |message| {
+        let read = GetLogsRequest::decode(message).unwrap();
+        let (index, tail): (usize, &[u8]) = match LogStream::try_from(read.stream).unwrap() {
+            LogStream::Stdout => (0, b"out tail"),
+            _ => (1, b"err tail"),
+        };
+        let mut after = after.lock().unwrap();
+        if *ended.lock().unwrap() {
+            after[index] += 1;
+        }
+        let page = if after[index] > 8 {
+            page(0, tail, true)
+        } else {
+            page(0, b"", false)
+        };
+        Answer::Message(page.encode_to_vec())
+    });
+    let paces = Arc::new(Paces::default());
+    let words = ["job", "run", "--id", "j-1", "--spec.image", IMAGE];
+    let got = quiet(&scratch, &fake, &paces, &words);
+    assert_eq!(
+        (got.code, got.out.as_str(), got.err.as_str()),
+        (0, "out tail", "err tailjob j-1 succeeded\n")
+    );
+    let reads: Vec<GetJobRequest> = sent(&fake, "GetJob");
+    assert_eq!(reads.len(), 1);
+}
+
 /// Asserts that `job wait`, `job follow` and `job run` refuse a token file that others can
 /// read before any call, with exit 2 and the same words as a generated job command. Catches
 /// a hand-written command that skips the client's token check or names it differently.
