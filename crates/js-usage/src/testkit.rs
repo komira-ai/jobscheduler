@@ -103,6 +103,10 @@ impl Store for TestStore {
         self.fake.changes(after, limit)
     }
 
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        self.fake.trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.fake.reap_expired()
     }
@@ -142,6 +146,7 @@ mod tests {
             1
         );
         assert_eq!(store.reap_expired().unwrap(), 0);
+        assert_eq!(store.trim_feed(Revision(1)).unwrap(), 1);
         assert_eq!(store.commit_stats(), store.fake.commit_stats());
         assert_eq!(store.now(), store.fake.now());
     }

@@ -26,7 +26,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
 <rect x="0" y="0" width="1120" height="1016" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" text-anchor="start" font-size="16">A job on macOS: a throwaway user under a sandbox, torn down by the helper</text>
+<text x="20" y="28" class="b" text-anchor="start" font-size="16">A job on macOS: a pool user under a sandbox, reset by the helper</text>
 <text x="40" y="60" class="b" text-anchor="start">js-agent (root)</text>
 <text x="400" y="60" class="b" text-anchor="start">js-mac-session helper (root)</text>
 <text x="790" y="60" class="b" text-anchor="start">kernel / launchd</text>
@@ -35,8 +35,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="190.0" y="130.5" class="t-m" text-anchor="middle">synced</text>
 <rect x="400" y="172" width="300" height="70" rx="5" class="box-o"/>
 <text x="550.0" y="194.0" class="b" text-anchor="middle">2  user-create</text>
-<text x="550.0" y="211.0" class="t-m" text-anchor="middle">throwaway user, uid from range,</text>
-<text x="550.0" y="228.0" class="t-m" text-anchor="middle">name never reused, ledger</text>
+<text x="550.0" y="211.0" class="t-m" text-anchor="middle">a free pool user, its fixed uid,</text>
+<text x="550.0" y="228.0" class="t-m" text-anchor="middle">slot leased in the ledger</text>
 <rect x="40" y="268" width="300" height="56" rx="5" class="box-b"/>
 <text x="190.0" y="291.5" class="b" text-anchor="middle">3  make run dir</text>
 <text x="190.0" y="308.5" class="t-m" text-anchor="middle">exec/ and tmp/, chown to user</text>
@@ -61,7 +61,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="550.0" y="768.0" class="t-m" text-anchor="middle">no launchd domain</text>
 <rect x="400" y="808" width="300" height="70" rx="5" class="box-o"/>
 <text x="550.0" y="838.5" class="b" text-anchor="middle">8  user-delete</text>
-<text x="550.0" y="855.5" class="t-m" text-anchor="middle">home, per-user temp entry, record</text>
+<text x="550.0" y="855.5" class="t-m" text-anchor="middle">reset: home, IPC, temp entry</text>
 <rect x="40" y="904" width="300" height="44" rx="5" class="box-b"/>
 <text x="190.0" y="930.0" class="b" text-anchor="middle">9  journal entry done</text>
 <path d="M190,146 L190,159 L550,159 L550,172" class="ln" marker-end="url(#mac-execution-ak)"/>
@@ -78,7 +78,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="940.0" y="202.5" class="b" text-anchor="middle">account database</text>
 <text x="940.0" y="219.5" class="t-m" text-anchor="middle">user record, home</text>
 <path d="M700,207.0 L810,207.0" class="ln" marker-end="url(#mac-execution-ak)"/>
-<text x="755" y="201.0" class="t-m lbl" text-anchor="middle">create record</text>
+<text x="755" y="201.0" class="t-m lbl" text-anchor="middle">made once, by pool-create</text>
 <rect x="810" y="432" width="260" height="70" rx="5" class="box-b"/>
 <text x="940.0" y="462.5" class="b" text-anchor="middle">packet filter</text>
 <text x="940.0" y="479.5" class="t-m" text-anchor="middle">anchor for the uid range</text>
@@ -91,11 +91,11 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="755" y="741.0" class="t-m lbl" text-anchor="middle">kill-uid rounds</text>
 <rect x="810" y="808" width="260" height="70" rx="5" class="box-b"/>
 <text x="940.0" y="838.5" class="b" text-anchor="middle">account database</text>
-<text x="940.0" y="855.5" class="t-m" text-anchor="middle">record removed</text>
+<text x="940.0" y="855.5" class="t-m" text-anchor="middle">record kept, home made again</text>
 <path d="M700,843.0 L810,843.0" class="ln" marker-end="url(#mac-execution-ak)"/>
-<text x="755" y="837.0" class="t-m lbl" text-anchor="middle">delete record</text>
+<text x="755" y="837.0" class="t-m lbl" text-anchor="middle">replace if reset not clean</text>
 <rect x="40" y="712" width="300" height="166" rx="5" class="box-r"/>
-<text x="190.0" y="782.0" class="t-r" text-anchor="middle">fails: uid stays quarantined in ledger,</text>
+<text x="190.0" y="782.0" class="t-r" text-anchor="middle">fails: slot broken, lent to no one,</text>
 <text x="190.0" y="799.0" class="t-r" text-anchor="middle">booking stays in journal,</text>
 <text x="190.0" y="816.0" class="t-r" text-anchor="middle">reclaim at next start</text>
 <path d="M400,747.0 L340,747.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
@@ -103,7 +103,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <path d="M400,843.0 L340,843.0" class="ln-r" marker-end="url(#mac-execution-ar)"/>
 <text x="370" y="837.0" class="t-r lbl" text-anchor="middle">fails</text>
 <rect x="790" y="918" width="300" height="68" rx="5" class="box-gd"/>
-<text x="940.0" y="940.0" class="t-m" text-anchor="middle">not built: stage inputs / collect</text>
-<text x="940.0" y="956.0" class="t-m" text-anchor="middle">outputs, adopt after restart, soft stop,</text>
-<text x="940.0" y="972.0" class="t-m" text-anchor="middle">reused user pool, VM runtime</text>
+<text x="940.0" y="940.0" class="t-m" text-anchor="middle">not built: stage inputs (no store</text>
+<text x="940.0" y="956.0" class="t-m" text-anchor="middle">of stage trees),</text>
+<text x="940.0" y="972.0" class="t-m" text-anchor="middle">VM runtime</text>
 </svg>

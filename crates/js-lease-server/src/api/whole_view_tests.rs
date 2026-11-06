@@ -28,6 +28,7 @@ use super::*;
 use crate::adapt::BoxedPool;
 use crate::agents::Agents;
 use crate::config::parse_token;
+use crate::logs::LogGrants;
 
 pub(super) const T0: u64 = 1_000_000;
 
@@ -75,12 +76,18 @@ enum Start {
 
 impl Rig {
     pub(super) async fn new(name: &str) -> Self {
-        Self::build(name, false, Start::Fresh).await
+        Self::build(name, false, Start::Fresh, None).await
     }
 
     /// A rig whose server serves the status routes (to private peers).
     pub(super) async fn serving_status(name: &str) -> Self {
-        Self::build(name, true, Start::Fresh).await
+        Self::build(name, true, Start::Fresh, None).await
+    }
+
+    /// A rig whose server serves the status routes (to private peers), with the counters of
+    /// the host credentials of live logs that `logs` holds.
+    pub(super) async fn serving_status_with_logs(name: &str, logs: Arc<LogGrants>) -> Self {
+        Self::build(name, true, Start::Fresh, Some(logs)).await
     }
 
     /// The server started again over the files of this one, on the same clock, with
@@ -90,7 +97,7 @@ impl Rig {
     pub(super) async fn restart(self, host_back: bool) -> Self {
         let (name, clock) = (self.name.clone(), self.clock.clone());
         drop(self);
-        Self::build(&name, false, Start::Again { clock, host_back }).await
+        Self::build(&name, false, Start::Again { clock, host_back }, None).await
     }
 
     /// A server resumed over a lease file whose text is `text`, on a fresh clock, with
@@ -105,7 +112,7 @@ impl Rig {
             clock,
             host_back: true,
         };
-        Self::build(name, false, start).await
+        Self::build(name, false, start, None).await
     }
 
     fn dir(name: &str) -> std::path::PathBuf {
@@ -114,7 +121,7 @@ impl Rig {
             .join(name)
     }
 
-    async fn build(name: &str, status: bool, start: Start) -> Self {
+    async fn build(name: &str, status: bool, start: Start, logs: Option<Arc<LogGrants>>) -> Self {
         let dir = Self::dir(name);
         let (clock, boot, host_back) = match start {
             Start::Fresh => {
@@ -198,13 +205,8 @@ impl Rig {
             registry.hello(&hello, &Credential::of_token("t")).unwrap();
         }
         let served = status.then(|| {
-            Arc::new(Status::new(
-                None,
-                None,
-                None,
-                Vec::new(),
-                shared_clock.clone(),
-            ))
+            let status = Status::new(None, None, None, Vec::new(), shared_clock.clone());
+            Arc::new(status.with_logs(logs))
         });
         let shared = Arc::new(shared.with_status(served));
         Self {
@@ -338,7 +340,7 @@ const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live"
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Lines(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Lines {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -363,7 +365,8 @@ impl<'a> MakeWriter<'a> for Lines {
 }
 
 impl Lines {
-    fn take(&self) -> String {
+    /// The lines written since the last take.
+    pub(crate) fn take(&self) -> String {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         String::from_utf8(std::mem::take(&mut *held)).unwrap()
     }

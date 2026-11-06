@@ -9,13 +9,23 @@
 //! every client call goes through [`off_runtime`]: where a runtime is current, the call
 //! runs on a short-lived scoped thread that has none, and the caller waits for it, as it
 //! would wait on the socket. Where no runtime is current the call runs in place.
+//!
+//! [`Conn::connect`] is the one place a connection is made: with the configuration's TLS
+//! ([`super::tls`]) and network limits, and, for the store's own sessions, its server limits
+//! ([`super::timeouts`]).
 
+use std::error::Error as _;
+use std::io;
 use std::panic::resume_unwind;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use postgres::ToStatement;
+use postgres::error::SqlState;
 use postgres::types::ToSql;
-use postgres::{Client, Config, NoTls, Row, Statement};
+use postgres::{Client, Config, Row, Statement, ToStatement};
+
+use super::tls::{Tls, TlsError};
 
 /// Runs `f` on a thread that is not inside a tokio runtime and returns its result. A
 /// panic in `f` is raised again in the caller.
@@ -31,6 +41,60 @@ pub(super) fn off_runtime<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 
 type Params<'a> = &'a [&'a (dyn ToSql + Sync)];
 
+/// How to make a connection: the client's settings with the network limits and the TLS mode
+/// in them, the TLS settings, and the statements a new session runs first.
+#[derive(Clone)]
+pub(super) struct Dial {
+    pub(super) pg: Config,
+    pub(super) tls: Tls,
+    pub(super) session: String,
+}
+
+/// Why [`Conn::connect`] failed.
+#[derive(Debug)]
+pub(super) enum DialError {
+    /// The client's error: the network, the server's refusal, a session setting refused.
+    Pg(postgres::Error),
+    /// The TLS the configuration asks for could not be had.
+    Tls(TlsError),
+}
+
+/// The first I/O error among the causes of `err`: the network failed under the call.
+pub(super) fn io_cause(err: &postgres::Error) -> Option<&io::Error> {
+    let mut cause = err.source();
+    while let Some(e) = cause {
+        if let Some(io) = e.downcast_ref::<io::Error>() {
+            return Some(io);
+        }
+        cause = e.source();
+    }
+    None
+}
+
+/// Whether `err` means the connection is gone, so the call can be run again on a new one: the
+/// client found it closed, the network failed under it, or the server ended the session (an
+/// administrator's or a crash's shutdown, an idle timeout, a connection exception). A
+/// statement the server refused (a syntax error, a lock wait or a statement timed out, a
+/// serialization failure) leaves the connection as it was and is not one.
+///
+/// Which of the three a killed connection shows first depends on when the client reads the
+/// server's last message, so every test is asked of every error (`|`, not `||`).
+pub(super) fn connection_lost(err: &postgres::Error) -> bool {
+    let ended = err
+        .code()
+        .is_some_and(|code| code.code().starts_with("08") | ENDED.contains(code));
+    ended | err.is_closed() | io_cause(err).is_some()
+}
+
+/// The server's codes for a session it ended, outside class 08 (connection exception).
+const ENDED: [SqlState; 5] = [
+    SqlState::ADMIN_SHUTDOWN,
+    SqlState::CRASH_SHUTDOWN,
+    SqlState::CANNOT_CONNECT_NOW,
+    SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+    SqlState::IDLE_SESSION_TIMEOUT,
+];
+
 /// A `postgres::Client` whose calls, and whose drop, are safe inside a runtime.
 pub struct Conn {
     // Present until `drop`.
@@ -38,11 +102,25 @@ pub struct Conn {
 }
 
 impl Conn {
-    pub(super) fn connect(config: &Config) -> Result<Conn, postgres::Error> {
-        let client = off_runtime(|| config.connect(NoTls))?;
-        Ok(Conn {
+    /// Connects as `dial` says and runs its session statements.
+    ///
+    /// # Errors
+    /// [`DialError::Tls`] when the TLS the mode asks for could not be had, [`DialError::Pg`]
+    /// for any other failure.
+    pub(super) fn connect(dial: &Dial) -> Result<Conn, DialError> {
+        let started = Arc::new(AtomicBool::new(false));
+        let connector = dial.tls.connector(&started);
+        let client = off_runtime(|| dial.pg.connect(connector)).map_err(|err| {
+            match dial.tls.refusal(err, started.load(Ordering::Relaxed)) {
+                Ok(tls) => DialError::Tls(tls),
+                Err(err) => DialError::Pg(err),
+            }
+        })?;
+        let mut conn = Conn {
             client: Some(client),
-        })
+        };
+        conn.batch_execute(&dial.session).map_err(DialError::Pg)?;
+        Ok(conn)
     }
 
     fn client(&mut self) -> &mut Client {

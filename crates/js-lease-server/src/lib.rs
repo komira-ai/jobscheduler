@@ -48,7 +48,7 @@
 //! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets, and books the host it names among the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable): for a class that books part of a host, the hosts' load readings choose among those that still fit, then the host the lease fits most tightly, so the most booked first, equal hosts by a hash of the lease and the host; a lease that books a whole host is not scored and takes the first free host by id, as under `registry`. A start costs time in the open hosts plus their leases, under the registry's lock; the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings (the two windows its load is read from), and the start is counted. A class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room (CPU up to `--cpu-slack` over a host's cores) and makes the booking. The pool's `memory_schedulable_percent` is the scheduler's rule under this placement: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; a request above the percent still fits no host (`no-fit`), and `GET /v1/hosts` still shows the cut memory as `shape.memory_bytes`, beside the percent. A request the scheduler cannot describe is booked on the first host with room for it within the pool's memory percent (none if no host has, and the start answers `no-capacity`); one the scheduler places nowhere is booked nowhere (`no-capacity`); each is counted and logged. A host a whole-node request has set aside takes, under `js-sched`, a lease of the pool's `share_class` (not a probe) only as backfill: when its max wall time ends, with a minute to spare, by the end of the host's tail as the mark took it, a wall time above `server.max_lease_wall` never does, and a host whose tail is unknown or past takes none; the registry's own placement keeps such a host for its request alone. The flag is refused at start for a pool whose capabilities name no `arch`. Leases restored from the lease file are seated with the resources it records whatever the flag says now. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler of `--placement js-sched` may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. The registry's book lets the leases sharing a host book that much CPU and no more of anything else. Needs `--placement js-sched` (refused naming it otherwise) and `--agent-pool-config` |
 //! | `--estimate-feed` | off by default. When a whole-node request has to pick a host to drain, each lease is costed at its estimated end, cut to its max-wall bound: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. A lease with no such run is costed at its bound, as every lease is without the flag, and a lease with neither (no such run, and a max wall so long that its end saturates) ranks its host after every host whose tail is known. A usage sink that keeps no curves leaves every lease at its bound. A lease restored from the lease file keeps the start and the bound the file records (its acquire, or for a whole-node lease the moment it was ready). Needs `--agent-pool-config`; not with `--usage-off` |
-//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of the lease routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`) and the file of its own token, checked as `--token-file`'s is. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
+//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of the lease routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), `NAME=PATH` or `NAME:ROLE=PATH`: its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`), its role (`client`, the default, or `operator`; the client `default` is an operator) and the file of its own token, checked as `--token-file`'s is and read again at every tick. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
@@ -63,7 +63,7 @@
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
-//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. A freed allocation's row is not part of it: `--job-allocation-retention <duration>`, `14d`, same forms and rules, is how long that row is kept after its free before the tick deletes it (at most 500 a tick; the allocation's usage history is kept). `--job-feed-retention <count>`, `100000`, is the third window of the job store: how many of the newest changes of its change feed each tick keeps (a whole number of at least 1, never a time); older rows are trimmed, and a reader behind them is told to start again from the tables. Zero or a non-number is refused at start naming the flag |
 //! | `--max-job-wall <duration>` | the most a submitted job's wall limit may be, `30d` (the job service's `DEFAULT_MAX_JOB_WALL`, the longest `server.max_lease_wall` accepts): a whole count of days (`30d`) or a duration (`12h`, `90m`), at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag. A job asking for more is refused `wall-time-above-ceiling`. Read once at start; it does not read `server.max_lease_wall`. Without `--job-listen` it is checked and kept, and nothing reads it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
@@ -110,7 +110,7 @@
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
-//! # job_retention ("7d"): the flag's name, default and rules
+//! # job_retention ("7d"), job_feed_retention (100000), job_allocation_retention ("14d"): rules
 //! # max_job_wall ("30d"): the flag's name, default and rules
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
@@ -127,12 +127,9 @@
 //! provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
 //! ```
 //!
-//! A `[logs]` table says where live logs go (`docs/design/live-logs.md`, section 6): `sink`
-//! (`"none"`, the default, or `"object_store"`) and, for an object store, `url`, `region`,
-//! `endpoint`, `path_style`, `read_key_file`, `credentials`, `sts_endpoint`, `role_arn`,
-//! `mint_key_file`, `credential_ttl` and `max_follow` ([`LogsConfig`]). No flag sets a sink.
-//! The table and its two key files are read and checked at start; nothing uses it yet, and the
-//! start log line names the sink (`logs=object_store` or `logs=none`).
+//! A `[logs]` table says where live logs go ([`LogsConfig`], whose module lists its keys); no
+//! flag sets one, and the start log line names it. With an object store the `logs` module
+//! mints, delivers and renews the agents' upload credentials, and each start carries its sink.
 //!
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
@@ -170,11 +167,11 @@
 //! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
 //! passed) and `live_until_ms`.
 //!
-//! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
+//! Failure brake. A refused launch (denied, a shape that fits nothing), a boot given up
 //! on, and a spot preemption count as failures, but a pool is struck at most once in a step
 //! (a wave of reclaims, or several launches of one step refused together, is one failure). A
 //! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, from
-//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or such a refusal the pool launches nothing for 10 minutes, doubled
 //! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, from 10
 //! minutes to 24 hours); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
 //! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
@@ -286,8 +283,8 @@
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
-//! below); `catalog_refresh` (a positive duration, one hour when not given; zero is
-//! refused) is how long the provider's cached catalog is used before the tick fetches it
+//! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
+//! `catalog_refresh` (a positive duration, one hour, zero refused) is how long the provider's cached catalog is used before the tick fetches it
 //! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
 //! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
 //! whole-node request of the pool waits once no host could serve it (the registry's
@@ -330,14 +327,15 @@
 //! HTTP/1.1 and HTTP/2 on it, whichever the client starts with: a request whose content type
 //! is `application/grpc` (with any suffix) goes to the gRPC service, every other request to
 //! its HTTP/JSON gateway (`js-api-gateway`, routes under `/v1/`, listed in
-//! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records; `docs/design/configuration.md`):
+//! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records and whose role says what it may call; `docs/design/configuration.md`):
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
 //! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
-//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
-//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
+//! held to `--max-job-wall`), `CancelJob`, and the reads; so are the fleet calls
+//! (`ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`), over
+//! the server's hosts, the status of its pools and its usage store. The answers of each call
+//! are in `docs/http-gateway.md`. The port has the connection cap and the
 //! timeouts of the other listeners, and stops with them. The lease routes are not served on
 //! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
 //! routes than the lease server's of those names, so the two cannot share a port while both
@@ -803,6 +801,7 @@ mod checks;
 mod config;
 mod cordon;
 mod error;
+mod fence;
 mod file;
 mod file_checks;
 mod flags;
@@ -829,6 +828,7 @@ mod join_tokens;
 mod kinds;
 mod layered;
 mod listener;
+mod logs;
 pub mod network;
 mod per_job;
 mod platform;
@@ -884,7 +884,7 @@ pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
 pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
-    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    Call, Effects, JobTables, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
     RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
@@ -969,16 +969,18 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
     let running = start(config, SharedClock::new(SystemClock), ticker).await?;
     let _ = writeln!(out, "listening on {}", running.addr());
     let _ = out.flush();
-    let mut stopping = std::pin::pin!(termination());
-    loop {
-        tokio::select! {
-            stopped = &mut stopping => {
-                stopped.map_err(Failure::Runtime)?;
-                break;
-            }
-            _ = hangup.recv() => {
-                // The refusal is logged by the reload; the old pair stays.
-                let _ = running.reload_tls();
+    {
+        let mut stopping = std::pin::pin!(server::stop_or_fence(&running, termination()));
+        loop {
+            tokio::select! {
+                stopped = &mut stopping => {
+                    stopped.map_err(Failure::Runtime)?;
+                    break;
+                }
+                _ = hangup.recv() => {
+                    // The refusal is logged by the reload; the old pair stays.
+                    let _ = running.reload_tls();
+                }
             }
         }
     }

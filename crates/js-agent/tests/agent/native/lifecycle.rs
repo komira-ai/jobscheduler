@@ -48,7 +48,7 @@ fn canonical(dir: &Scratch, name: &str) -> AbsPath {
 }
 
 impl Native {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         Self::with(name, None)
     }
 
@@ -214,9 +214,9 @@ fn a_native_job_runs_to_its_result_and_its_user_is_removed() {
     assert!(h.life.held().is_empty());
 }
 
-/// Asserts that a stop kills the user through the helper and the run ends as stopped, and
-/// that the removal kills again before it deletes. It catches a stop that leaves the
-/// program running and a result that reports the kill's signal as the job's own failure.
+/// Asserts that a stop ends the run through the helper's `stop` and the run ends as stopped,
+/// and that the removal kills before it deletes. It catches a stop that leaves the program
+/// running and a result that reports the stop's signal as the job's own failure.
 #[test]
 fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     let mut h = Native::new("stop");
@@ -232,11 +232,11 @@ fn a_stop_kills_the_user_and_the_run_ends_as_killed() {
     assert_eq!((result.outcome, result.exit_code), (Outcome::Killed, None));
     assert_eq!(
         h.fake.verbs()[3..],
-        ["kill-uid 7.0", "kill-uid 7.0", "user-delete 7.0"]
+        ["stop 7.0", "kill-uid 7.0", "user-delete 7.0"]
     );
 }
 
-/// Asserts that a run past its wall limit is killed and reported timed out. It catches a
+/// Asserts that a run past its wall limit is stopped and reported timed out. It catches a
 /// native job that runs for ever.
 #[test]
 fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
@@ -246,7 +246,7 @@ fn a_run_past_its_wall_limit_is_killed_and_timed_out() {
     h.until(|life| !life.results().is_empty());
     let result = &h.life.results()[0];
     assert_eq!(result.outcome, Outcome::TimedOut);
-    assert_eq!(h.fake.verbs()[3], "kill-uid 7.0");
+    assert_eq!(h.fake.verbs()[3], "stop 7.0");
 }
 
 /// Asserts that a start named by its image, an image alone and an image with a `run`,
@@ -309,73 +309,61 @@ fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
     }
 }
 
-/// Asserts that a job start with an environment on the native runtime is answered
-/// `failed_to_start` with `env-unsupported`, before the image is looked at, and makes
-/// nothing (the helper sees no user, no scratch directory, the booking intact); and that
-/// the same start without an environment is answered for its image instead
-/// (`image-unsupported-here`). It catches the native path running a job without the
-/// environment it names, and the environment refusal lost behind the image's.
+/// Asserts that a job start with an environment on the native runtime is no longer refused
+/// for it: a job start named by its image on a runtime with no bundle store is answered for
+/// its image (`image-unsupported-here`) whether or not it carries an environment, and
+/// nothing is made. It catches the environment refusal kept for a runtime that now carries
+/// the environment, which would refuse every kbf action on a Mac.
 #[test]
-fn the_native_runtime_still_answers_env_unsupported() {
+fn a_native_job_start_with_env_is_answered_for_its_image_not_its_env() {
     let mut h = Native::new("job-env");
     let events = h.apply(vec![job_start("j1", &[("A", "1")]), job_start("j2", &[])]);
+    let refused = format!("refused j1 {}", refusal::IMAGE_UNSUPPORTED_HERE);
     assert_eq!(
         events,
         [
-            format!("refused j1 {}", refusal::ENV_UNSUPPORTED),
-            format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE),
+            refused,
+            format!("refused j2 {}", refusal::IMAGE_UNSUPPORTED_HERE)
         ]
     );
     assert_eq!(h.fake.verbs(), ["boot-reset"]);
     assert!(!h.scratch_of("j1").exists());
     assert_eq!(h.life.free().cpu_millis, 4000);
-    let details: Vec<(String, Option<String>)> = h
-        .life
-        .held_jobs()
-        .into_iter()
-        .map(|job| {
-            let result = job.result.expect("a result");
-            assert_eq!(result.outcome, Outcome::FailedToStart);
-            (job.job_id, result.detail)
-        })
-        .collect();
-    assert_eq!(
-        details,
-        [
-            ("j1".to_owned(), Some(refusal::ENV_UNSUPPORTED.to_owned())),
-            (
-                "j2".to_owned(),
-                Some(refusal::IMAGE_UNSUPPORTED_HERE.to_owned())
-            ),
-        ]
-    );
 }
 
 /// Asserts the starts this runtime refuses before it makes anything, each with the code
-/// the server reads: a program outside the tool roots (`invalid-program`), and inputs and
-/// a working directory it cannot stage (`native-unsupported`). Nothing is made: the helper
-/// sees no user, the scratch directory is not made and the booking is intact. It catches a
-/// refused start that still costs a user, and a job whose inputs are dropped without a
-/// word. (Outputs and run files are served: `native/outputs.rs` and `native/files.rs`.)
+/// the server reads: a program outside the tool roots (`invalid-program`), a `stage` input
+/// it keeps no tree for (`native-unsupported`), a mount input whose path is not below the
+/// root (`invalid-mount`). (A working directory that leaves `exec/` is refused by the wire
+/// before it gets here, `invalid-job`.) Nothing is made: the helper sees no user, the scratch directory is not made and the
+/// booking is intact. It catches a refused start that still costs a user, and a job whose
+/// inputs are dropped without a word. (Outputs and run files are served:
+/// `native/outputs.rs` and `native/files.rs`.)
 #[test]
 fn a_start_the_runtime_cannot_serve_is_refused_and_makes_nothing() {
-    let input = InputRef::Mount {
-        root_name: "data".to_owned(),
-        rel: "x".to_owned(),
-        dest: "in".to_owned(),
+    let with_input = |input: InputRef| {
+        let mut spec = job("r1", "/bin/sh");
+        spec.native.as_mut().unwrap().inputs.push(input);
+        spec
     };
     let table: Vec<(&str, JobSpec)> = vec![
         ("invalid-program", job("r1", "/opt/tool/run")),
-        ("native-unsupported", {
-            let mut spec = job("r1", "/bin/sh");
-            spec.native.as_mut().unwrap().inputs.push(input);
-            spec
-        }),
-        ("native-unsupported", {
-            let mut spec = job("r1", "/bin/sh");
-            spec.native.as_mut().unwrap().cwd = "sub".to_owned();
-            spec
-        }),
+        (
+            "native-unsupported",
+            with_input(InputRef::Stage {
+                stage_id: format!("sha256:{}", "a".repeat(64)),
+                dest: "in".to_owned(),
+                placement: Default::default(),
+            }),
+        ),
+        (
+            "invalid-mount",
+            with_input(InputRef::Mount {
+                root_name: "data".to_owned(),
+                rel: "missing".to_owned(),
+                dest: "in".to_owned(),
+            }),
+        ),
     ];
     for (n, (code, spec)) in table.into_iter().enumerate() {
         let mut h = Native::new(&format!("refuse{n}"));
@@ -653,21 +641,18 @@ fn an_image_reference_whose_entrypoint_is_missing_makes_no_user() {
 /// A start named by its image that this runtime cannot run is refused with the code that says
 /// why before its bundle is fetched, though the registry would serve it and the image is
 /// allowed: an image with no `run` (`image-unsupported-here`, a bundle has no command of its
-/// own), and a `run` that stages inputs or names a working directory (`native-unsupported`).
-/// The registry sees no request and no user is made. It catches an image start that begins a download for
-/// a job that can never run, and one answered with the wrong code.
+/// own), and a `run` with a `stage` input (`native-unsupported`: this agent keeps no stage
+/// trees). The registry sees no request and no user is made. It catches an image start that
+/// begins a download for a job that can never run, and one answered with the wrong code.
 #[test]
 fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched() {
-    let table: [SpecCase; 3] = [
+    let table: [SpecCase; 2] = [
         ("image-unsupported-here", |spec| spec.run = None),
         ("native-unsupported", |spec| {
-            spec.run.as_mut().unwrap().cwd = "sub".to_owned();
-        }),
-        ("native-unsupported", |spec| {
-            spec.run.as_mut().unwrap().inputs.push(InputRef::Mount {
-                root_name: "data".to_owned(),
-                rel: "x".to_owned(),
+            spec.run.as_mut().unwrap().inputs.push(InputRef::Stage {
+                stage_id: format!("sha256:{}", "a".repeat(64)),
                 dest: "in".to_owned(),
+                placement: Default::default(),
             });
         }),
     ];
@@ -682,22 +667,22 @@ fn an_image_start_the_runtime_cannot_run_is_refused_before_its_bundle_is_fetched
 }
 
 /// Asserts that a job start with a `run` and an environment, on a Mac runtime that runs
-/// image starts (it holds a bundle store), is still refused `env-unsupported` before its
-/// bundle is fetched or a user is made: the native runtime does not carry a job start's
-/// environment, and the job must not run without it. It catches the job's environment
-/// dropped on the one path where a job start reaches the native runtime.
+/// image starts (it holds a bundle store), starts once its bundle is held and runs with the
+/// job's environment in the helper's `run`. It catches the job's environment dropped on the
+/// one path where a job start reaches the native runtime.
 #[test]
-fn an_image_job_start_with_env_is_refused_env_unsupported_before_its_bundle_is_fetched() {
+fn an_image_job_start_with_env_runs_with_its_env() {
     let mut s = imaged("job-env");
+    s.fetched();
     let mut spec = job_start_spec("j1", &[("A", "1")]);
     spec.image = s.image();
     spec.run = Some(RunSpec::from(native("@bundle/tool", &[])));
     spec.os = Some(Os::Macos);
     spec.arch = Some(Arch::Arm64);
     let events = s.h.apply(vec![Command::JobStart(Box::new(spec))]);
-    assert_eq!(events, [format!("refused j1 {}", refusal::ENV_UNSUPPORTED)]);
-    assert!(s.served.fx.requests().is_empty());
-    s.made_no_user();
+    assert_eq!(events, ["started j1"]);
+    let env = s.h.fake.run_of("7.0").env;
+    assert!(env.contains(&("A".to_owned(), "1".to_owned())), "{env:?}");
 }
 
 /// An image run that asks for the network is held to the packet-filter check as a native

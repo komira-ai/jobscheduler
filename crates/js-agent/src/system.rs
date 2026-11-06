@@ -27,9 +27,13 @@ use crate::usage::UsageClock;
 /// most 13 digits (40 bits is below 10^13) and leaves room for a sequence of seven.
 const TERM_BITS: u32 = 40;
 
-/// The native runtime over the helper `native` names. Its term is random, so a second
-/// process of the agent never asks the helper for a lease user the first one had.
-fn native_runtime(native: &NativeSettings) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
+/// The native runtime over the helper `native` names, whose runs the helper also bounds by
+/// their wall limit and `stop_grace`. Its term is random, so a second process of the agent
+/// never asks the helper for a lease user the first one had.
+fn native_runtime(
+    native: &NativeSettings,
+    stop_grace: Duration,
+) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
     let mut bytes = [0u8; 8];
     // A source of randomness that fails leaves a term of zero, which the helper's ledger
     // refuses the second time: the start fails, loudly, and never runs as a used user.
@@ -39,7 +43,9 @@ fn native_runtime(native: &NativeSettings) -> Result<(Box<dyn Runtime>, Vec<Stri
         .map_err(|why| format!("--native-helper-socket: the sandbox self-test failed: {why}"))?;
     let helper = Client::new(native.socket());
     let opened = NativeRuntime::open(helper, native.config().clone(), term);
-    let runtime = opened.map_err(|why| format!("--native-helper-socket: {why}"))?;
+    let runtime = opened
+        .map_err(|why| format!("--native-helper-socket: {why}"))?
+        .with_stop_grace(stop_grace);
     let runtime = match native.bundles() {
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
@@ -201,7 +207,7 @@ impl Machine for System {
     fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         let settings = match build.backend {
             Backend::Container(settings) => settings,
-            Backend::Native(native) => return native_runtime(native),
+            Backend::Native(native) => return native_runtime(native, build.stop_grace),
         };
         #[cfg(target_os = "linux")]
         if let Some(plan) = settings.crun() {

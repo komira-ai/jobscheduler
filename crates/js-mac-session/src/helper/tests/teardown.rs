@@ -16,13 +16,10 @@ fn quarantined(uid: u32) -> String {
     format!("uid {uid} is quarantined: no other lease gets it until a delete succeeds")
 }
 
-/// A rig of ONE uid, the test's own, holding lease `lease`: a later lease gets a uid
-/// only if this one was freed.
+/// A rig of ONE uid holding `lease` from before the pool ([`legacy`]): a later lease gets
+/// the uid only once its user is deleted and the pool's slot made.
 fn one(name: &str, lease: &str) -> (Rig, u32) {
-    let rig = rig(name, 1);
-    let uid = rig.helper.user_create(lease, None).unwrap();
-    log(&rig);
-    (rig, uid)
+    legacy(name, lease)
 }
 
 /// Asserts what a failed step must leave: the user's record, the lease live (its uid
@@ -33,12 +30,7 @@ fn held(rig: &Rig, user: &str, got: Result<impl std::fmt::Debug, String>, want: 
         rig.host.state().users.contains_key(user),
         "{user} was deleted"
     );
-    let range = rig.helper.settings.range;
-    assert_eq!(
-        rig.helper.user_create("99.1", None),
-        Err(format!("no free uid in {range}")),
-        "the uid of {user} was handed out again"
-    );
+    uid_held(rig);
 }
 
 /// What launchd has after the teardown: the domains, and the uid's processes at two
@@ -389,6 +381,7 @@ fn a_delete_repeated_after_the_record_went_completes_without_the_darwin_user_dir
     rig.host.state().users.clear();
     assert_eq!(rig.helper.user_delete("30.1"), Ok(false));
     assert!(!log(&rig).iter().any(|c| c.starts_with("user_dir")));
+    assert!(rig.helper.pool_create().errors.is_empty());
     assert!(
         rig.helper.user_create("30.2", None).is_ok(),
         "uid {uid} is free"

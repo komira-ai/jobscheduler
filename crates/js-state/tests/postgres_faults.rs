@@ -8,9 +8,9 @@
 //! has a bound so a lost wake-up fails the test and does not hang it.
 #![cfg(feature = "postgres")]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,9 @@ use js_state::postgres::{Flaw, PostgresBackend, PostgresConfig, PostgresStore, s
 use js_state::{Cond, Revision, Store, StoreError, Txn};
 use js_testkit::database::{CatalogGuard, batch_execute_retrying, ddl};
 use postgres::{Client, NoTls};
+
+#[path = "postgres_faults/tls.rs"]
+mod tls;
 
 const BOUND: Duration = Duration::from_secs(60);
 
@@ -183,72 +186,157 @@ fn limited_config(url: &str, schema: &str) -> PostgresConfig {
     config
 }
 
-// Catches a pool that keeps a session the server killed: the call that meets the dead
-// session fails, and the next calls must run on a new connection. A store that handed
-// the dead session out again would fail every call after.
-#[test]
-fn a_session_the_server_killed_fails_one_call_and_is_replaced() {
-    let backend = PostgresBackend::new(&url(), Flaw::None);
-    let config = config(&backend);
-    let store = PostgresStore::open(&config).expect("opens");
-    store.txn(put("k")).expect("store").expect("commits");
-    let mut admin = admin();
-    kill(&mut admin, &app(&config));
-    let first = store.get("k");
-    assert!(
-        matches!(first, Err(StoreError::Failed(_))),
-        "the dead session fails the call that meets it: {first:?}"
-    );
-    assert!(
-        store.get("k").expect("a new connection").is_some(),
-        "the next call runs on a new connection and sees the row"
-    );
+/// Terminates every connection named `app` other than `admin`'s own, each waited for until its
+/// backend has exited (the timeout argument of `pg_terminate_backend`), so no poll is needed.
+fn terminate(admin: &mut Client, app: &str) {
+    admin
+        .execute(
+            "SELECT pg_terminate_backend(pid, 60000) FROM pg_stat_activity \
+             WHERE application_name = $1 AND pid <> pg_backend_pid()",
+            &[&app],
+        )
+        .expect("terminates");
 }
 
-// Catches a write on a dead session that reports success or leaves a half-open
-// transaction: the call fails, nothing is written, and the store takes the next write.
+/// A hook for [`PostgresStore::with_reconnect_hook`] that counts the reconnects and, while
+/// `armed`, terminates the new connection before the call runs on it: a second loss.
+struct Reconnects {
+    count: AtomicU64,
+    armed: AtomicBool,
+    admin: Mutex<Client>,
+    app: String,
+}
+
+impl Reconnects {
+    fn hooked(store: PostgresStore, app: &str) -> (PostgresStore, Arc<Reconnects>) {
+        let hook = Arc::new(Reconnects {
+            count: AtomicU64::new(0),
+            armed: AtomicBool::new(false),
+            admin: Mutex::new(admin()),
+            app: app.to_owned(),
+        });
+        let seen = Arc::clone(&hook);
+        let store = store.with_reconnect_hook(Arc::new(move || {
+            seen.count.fetch_add(1, Ordering::SeqCst);
+            if seen.armed.load(Ordering::SeqCst) {
+                terminate(&mut seen.admin.lock().expect("the admin client"), &seen.app);
+            }
+        }));
+        (store, hook)
+    }
+
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+// Catches a pool that keeps a session the server killed (a store that handed the dead
+// session out again fails every call after), a call that meets the dead session and fails
+// instead of running once more on a new connection, and a reconnect that runs more than
+// once or keeps the dead idle sessions: after the kill, a read and a write each succeed, and
+// only the first of them reconnects. Before this change the first call after the kill failed.
 #[test]
-fn a_write_on_a_killed_session_fails_writes_nothing_and_the_store_recovers() {
+fn a_session_the_server_killed_is_replaced_once_and_the_call_succeeds() {
+    let backend = PostgresBackend::new(&url(), Flaw::None);
+    let config = config(&backend).with_max_connections(2);
+    let (store, reconnects) =
+        Reconnects::hooked(PostgresStore::open(&config).expect("opens"), &app(&config));
+    store.txn(put("k")).expect("store").expect("commits");
+    let mut admin = admin();
+    terminate(&mut admin, &app(&config));
+    assert!(store.get("k").expect("runs again and reads").is_some());
+    assert_eq!(reconnects.count(), 1);
+    store.txn(put("k2")).expect("store").expect("commits");
+    assert_eq!(
+        reconnects.count(),
+        1,
+        "the new connection serves the next call"
+    );
+
+    terminate(&mut admin, &app(&config));
+    store
+        .txn(put("after"))
+        .expect("store")
+        .expect("begun again and commits");
+    assert_eq!(reconnects.count(), 2);
+    assert!(store.get("after").expect("reads").is_some());
+}
+
+// Catches a call retried for ever on a server that keeps ending its connections (the tick
+// would never get its answer), a second loss reported as a plain failure (the caller could
+// not tell a lost connection, which a later call can cure, from a refused one), and a
+// transaction that writes on its way down: with the new connection ended too (by the hook,
+// as it is made), a read and a write each fail as `Disconnected` after exactly one reconnect,
+// nothing is written, and the store serves calls once the server stops ending them.
+#[test]
+fn a_second_loss_on_the_new_connection_is_disconnected() {
     let backend = PostgresBackend::new(&url(), Flaw::None);
     let config = config(&backend);
-    let store = PostgresStore::open(&config).expect("opens");
+    let (store, reconnects) =
+        Reconnects::hooked(PostgresStore::open(&config).expect("opens"), &app(&config));
+    store.txn(put("k")).expect("store").expect("commits");
+    reconnects.armed.store(true, Ordering::SeqCst);
     let mut admin = admin();
-    kill(&mut admin, &app(&config));
-    let lost = store.txn(put("lost"));
-    assert!(
-        matches!(lost, Err(StoreError::Failed(_))),
-        "a write on a dead session is an error: {lost:?}"
+
+    terminate(&mut admin, &app(&config));
+    let read = store.get("k");
+    assert!(matches!(read, Err(StoreError::Disconnected(_))), "{read:?}");
+    assert_eq!(reconnects.count(), 1);
+
+    // The failed read left no session; this one, on a connection of its own, is the one the
+    // next kill ends.
+    reconnects.armed.store(false, Ordering::SeqCst);
+    assert!(store.get("k").expect("reads").is_some());
+    assert_eq!(
+        reconnects.count(),
+        1,
+        "a pool with no session connects without a retry"
     );
+    reconnects.armed.store(true, Ordering::SeqCst);
+    terminate(&mut admin, &app(&config));
+    let write = store.apply_batch(vec![put("lost"), put("lost2")]);
+    assert!(
+        matches!(write, Err(StoreError::Disconnected(_))),
+        "{write:?}"
+    );
+    assert_eq!(reconnects.count(), 2);
+
+    reconnects.armed.store(false, Ordering::SeqCst);
     assert!(
         store.get("lost").expect("reads").is_none(),
         "nothing was written"
     );
-    store
-        .txn(put("after"))
-        .expect("store")
-        .expect("the store recovered");
+    assert!(
+        store.get("lost2").expect("reads").is_none(),
+        "nothing was written"
+    );
 }
 
 // Catches a commit whose connection died being taken for a success (the caller would
-// believe a write that never happened): it is an error, the row is absent, and the
-// session is not reused.
+// believe a write that never happened), reported as anything but `Disconnected`, or run again
+// on a new connection (the commit may have happened, and a second run could apply it twice):
+// the transaction under way is rolled back, none of its rows is visible, no reconnect runs
+// for it, and the store takes the next write.
 #[test]
-fn a_commit_that_loses_its_connection_is_an_error_and_writes_nothing() {
+fn a_transaction_whose_connection_dies_rolls_back_and_is_not_run_again() {
     let backend = PostgresBackend::new(&url(), Flaw::None);
     let config = config(&backend);
-    let store = PostgresStore::open(&config).expect("opens");
-    let pending = store.begin(put("k")).expect("runs to the commit");
+    let (store, reconnects) =
+        Reconnects::hooked(PostgresStore::open(&config).expect("opens"), &app(&config));
+    let both = Txn::new()
+        .put("a", "v", Cond::Any)
+        .put("b", "v", Cond::Absent);
+    let pending = store.begin(both).expect("runs to the commit");
     let mut admin = admin();
-    kill(&mut admin, &app(&config));
+    terminate(&mut admin, &app(&config));
     let committed = pending.commit();
     assert!(
-        matches!(committed, Err(StoreError::Failed(_))),
+        matches!(committed, Err(StoreError::Disconnected(_))),
         "the lost commit is an error: {committed:?}"
     );
-    assert!(
-        store.get("k").expect("reads").is_none(),
-        "the write did not happen"
-    );
+    assert_eq!(reconnects.count(), 0, "the transaction was not run again");
+    assert!(store.get("a").expect("reads").is_none(), "no partial write");
+    assert!(store.get("b").expect("reads").is_none(), "no partial write");
     store
         .txn(put("after"))
         .expect("store")

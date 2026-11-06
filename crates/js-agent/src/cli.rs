@@ -224,7 +224,7 @@ pub struct Cli {
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
     /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
-    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// agent runs native jobs, programs started as a user the helper lends from its pool for each run, under
     /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
     /// and `--state-root`, the agent must run as root, and it cannot be combined with
     /// `--container-bin`. The agent checks at start that `sandbox-exec` applies a profile.
@@ -232,10 +232,11 @@ pub struct Cli {
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
     /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
-    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
-    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
-    /// died runs; until then they run on, and their wall limit is enforced only while an
-    /// agent runs.
+    /// are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts
+    /// each run the lease journal in the state root recorded and ends the rest, as the rescue
+    /// of an agent whose worker died does; meanwhile the helper ends a run at its own
+    /// deadline, its wall limit plus `--stop-grace` (a helper from before that deadline holds
+    /// none, and its runs are bounded only while an agent runs).
     /// The profile does not deny System V or POSIX shared memory, semaphores or message
     /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
     /// run that gets the same uid: an open channel between runs on one Mac.

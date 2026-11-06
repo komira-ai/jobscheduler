@@ -22,7 +22,11 @@ mod boundaries;
 // The invariants of the fault family, a module of this test binary too.
 #[path = "invariants/faults.rs"]
 mod faults;
-// The whole-host invariants' cases, likewise.
+// The whole-host invariants' cases, likewise, the job invariants', and the names.
+#[path = "invariants/jobs.rs"]
+mod jobs;
+#[path = "invariants/names.rs"]
+mod names;
 #[path = "invariants/whole_host.rs"]
 mod whole_host;
 
@@ -938,7 +942,7 @@ fn a_step_that_touched_one_agent_is_not_checked_against_every_agent() {
 }
 
 /// Asserts that every member of `Invariant::ALL` has a negative case in
-/// `NEGATIVE_CASES` or the whole-host module's table, that no two members share a name, and that each case is flagged
+/// `NEGATIVE_CASES` or the whole-host or job module's table, that no two members share a name, and that each case is flagged
 /// by exactly the invariant of its row. Catches an invariant added without a negative
 /// case, two invariants reported under one name, and a negative case that passes by
 /// tripping another invariant.
@@ -950,7 +954,7 @@ fn every_invariant_has_a_negative_case_in_the_table() {
         Invariant::ALL.len(),
         "two invariants share a name"
     );
-    let table = || NEGATIVE_CASES.iter().chain(whole_host::NEGATIVE_CASES);
+    let table = || jobs::table(NEGATIVE_CASES.iter().chain(whole_host::NEGATIVE_CASES));
     for invariant in Invariant::ALL {
         let rows = table().filter(|(row, _)| *row == invariant);
         assert!(
@@ -969,43 +973,4 @@ fn every_invariant_has_a_negative_case_in_the_table() {
             lines(&found)
         );
     }
-}
-
-/// Asserts each invariant's name and when it is checked, and each way an item ends'
-/// name, as the failure lines spell them. Catches a renamed invariant (a scenario's
-/// recorded failure would stop matching) and two answers spelled alike.
-#[test]
-fn names_are_stable_and_distinct() {
-    let invariants: Vec<(&str, Checked)> = Invariant::ALL
-        .iter()
-        .map(|i| (i.name(), i.checked()))
-        .collect();
-    assert_eq!(
-        invariants,
-        [
-            ("no-double-booking", Checked::EveryStep),
-            ("at-most-one-launch", Checked::EveryStep),
-            ("one-terminal-answer", Checked::EveryStep),
-            ("settles-when-quiet", Checked::AtEnd),
-            ("bookings-match-agents", Checked::AtEnd),
-            ("no-lease-on-a-lost-host", Checked::EveryStep),
-            ("no-result-lost", Checked::AtEnd),
-            ("whole-host-is-exclusive", Checked::EveryStep),
-            ("held-means-ready", Checked::EveryStep),
-            ("drain-kills-nothing", Checked::EveryStep),
-            ("marked-hosts-serve-no-ordinary-start", Checked::EveryStep),
-        ]
-    );
-    let ends: Vec<&str> = HowEnded::ALL.iter().map(|h| h.name()).collect();
-    assert_eq!(
-        ends,
-        [
-            "succeeded",
-            "failed",
-            "cancelled",
-            "lost",
-            "forgotten",
-            "gave-up"
-        ]
-    );
 }

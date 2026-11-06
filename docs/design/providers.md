@@ -18,6 +18,7 @@ Provider crates in code today:
 |---|---|---|
 | `js-provider-lambdalabs` | Lambda Labs | Implements `CapacityProvider`: catalog, acquire, list, release. |
 | `js-provider-ec2` | AWS EC2 | Catalog only: `Ec2Catalog::catalog` reads instance types, zone offerings, on-demand, spot and Capacity Block prices and vCPU quotas through a read-only port (`Ec2Api`, with an in-memory fake) and translates them into offers in code. It has no network client and does not implement `CapacityProvider` yet. |
+| `js-provider-gce` | GCP Compute Engine | Catalog only: `GceCatalog::catalog` reads machine types (with their built-in accelerators and architecture), the accelerator types each zone offers to attach to N1, Cloud Billing SKU prices and region quotas through a read-only port (`GceApi`, with an in-memory fake) and translates them into offers in code, for the provisioning models (`on-demand`, `spot`) each series is sold on. It has no network client and does not implement `CapacityProvider` yet. |
 
 A deployment always has a `default` provider. If the file declares none, one named `default` exists with no deny file. A pool admits
 registering hosts only when it has a `join_token_file` (registration.md); without one it has no registered hosts of its own, and only

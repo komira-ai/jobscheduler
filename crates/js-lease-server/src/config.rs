@@ -15,7 +15,6 @@ use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 
-use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -27,6 +26,7 @@ use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
 use crate::job_expiry::JobLimits;
+use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
@@ -35,6 +35,7 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod feed_retention;
 mod job_wall;
 mod listen;
 mod placement;
@@ -42,13 +43,21 @@ mod resolve;
 mod retention;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
+use agent_setup::with_pool_settings;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub use feed_retention::FeedRetention;
+pub(crate) use feed_retention::{
+    DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
+};
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
-pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub(crate) use retention::{
+    DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
+    parse_job_retention,
+};
 pub use tokens::Token;
-pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
+pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -237,6 +246,18 @@ pub struct Cli {
     /// window affects only the jobs that end after the restart.
     #[arg(long, default_value = DEFAULT_JOB_RETENTION, value_parser = parse_job_retention)]
     pub job_retention: Retention,
+    /// How many of the newest changes the job store's change feed keeps: a whole number,
+    /// at least 1; 100000 unless given. The tick trims the feed to them (counted in feed
+    /// changes, never by time), so a reader that has fallen further behind is told to start
+    /// again from the tables. Read once at start.
+    #[arg(long, default_value = DEFAULT_JOB_FEED_RETENTION, value_parser = parse_job_feed_retention)]
+    pub job_feed_retention: FeedRetention,
+    /// How long a freed allocation's row is kept after its free: a whole count of days
+    /// (`14d`) or a duration such as `36h` or `90m`, at least one minute; fourteen days unless
+    /// given. The tick deletes a freed row once the window has passed, a bounded batch a tick;
+    /// the usage history of the allocation is kept. Read once at start.
+    #[arg(long, default_value = DEFAULT_JOB_ALLOCATION_RETENTION, value_parser = parse_job_retention)]
+    pub job_allocation_retention: Retention,
     /// The most a submitted job's wall limit may be: a whole count of days (`30d`) or a
     /// duration such as `12h` or `90m`, at least one second; 30 days unless given. A job
     /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
@@ -403,8 +424,9 @@ pub struct Config {
     pub(crate) settings: Settings,
     pub(crate) tick: Duration,
     pub(crate) token: Token,
-    /// The clients of the job service, the token of `--token-file` among them.
-    pub(crate) clients: Clients,
+    /// The clients of the job service, the token of `--token-file` among them, behind the
+    /// handle the bearer layer reads and the tick reloads.
+    pub(crate) clients: LiveClients,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
@@ -417,6 +439,12 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    /// How many of the newest feed changes the job store keeps (`--job-feed-retention`,
+    /// `server.job_feed_retention`).
+    pub(crate) job_feed_retention: FeedRetention,
+    /// How long a freed allocation's row is kept (`--job-allocation-retention`,
+    /// `server.job_allocation_retention`).
+    pub(crate) job_allocation_retention: Retention,
     /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
@@ -455,7 +483,7 @@ impl Config {
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
-        let clients = tokens::from_flags(&token, &cli)?;
+        let clients = LiveClients::new(tokens::from_flags(&token, &cli)?);
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &clients)?;
         let settings = with_pool_settings(settings, &hosts)?;
@@ -494,6 +522,8 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            job_feed_retention: cli.job_feed_retention,
+            job_allocation_retention: cli.job_allocation_retention,
             max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
         })
@@ -563,7 +593,8 @@ impl Config {
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
-                    jobs: server.agents.job_store(server.job_retention),
+                    jobs: server.agents.job_store(server.job_store_windows()),
+                    job_sources: JobSources::default(),
                 });
                 (
                     Hosts::Layered {
@@ -614,6 +645,8 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            job_feed_retention: server.job_feed_retention,
+            job_allocation_retention: server.job_allocation_retention,
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
         })
@@ -764,6 +797,19 @@ impl Config {
         self.job_retention
     }
 
+    /// How many of the newest changes the job store's change feed keeps
+    /// (`--job-feed-retention`, or `server.job_feed_retention`): 100000 unless set.
+    pub fn job_feed_retention(&self) -> FeedRetention {
+        self.job_feed_retention
+    }
+
+    /// How long a freed allocation's row is kept after its free
+    /// (`--job-allocation-retention`, or `server.job_allocation_retention`): fourteen days
+    /// unless set.
+    pub fn job_allocation_retention(&self) -> Retention {
+        self.job_allocation_retention
+    }
+
     /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
     pub fn profile_store_bytes(&self) -> u64 {
         self.usage.profile_store_bytes
@@ -803,34 +849,6 @@ impl Config {
     }
 }
 
-/// `settings` with what the registered pool's file decides about whole-node leases: the
-/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
-/// (the lease table counts it; the registry counts the same figure per commit). A pool
-/// without whole-node settings, or no registered pool, leaves `settings` as the flags
-/// made them.
-fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
-    match hosts {
-        Hosts::Layered { agents, .. } => {
-            let whole = agents.pool.whole_node();
-            let settings = with_whole_node(settings, whole)?;
-            Ok(crate::reservations::with_restart_grace(settings, whole))
-        }
-        Hosts::Static(_) => Ok(settings),
-    }
-}
-
-fn with_whole_node(
-    settings: Settings,
-    whole: Option<&WholeNodeConfig>,
-) -> Result<Settings, StartupError> {
-    let Some(whole) = whole else {
-        return Ok(settings);
-    };
-    settings
-        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
-        .map_err(|err| StartupError::new("--agent-pool-config", err))
-}
-
 /// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
@@ -839,7 +857,7 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
 
 /// The sources of hosts the flags name. At least one is required; the shared join token
 /// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
+fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
         .as_ref()
@@ -854,7 +872,7 @@ fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
         (tokens, Some(pool)) => {
             let tokens = match tokens {
                 Some(path) => AgentTokens::open(path, clients)?,
-                None => AgentTokens::none(),
+                None => AgentTokens::none(clients),
             };
             let pool = agent_pool::read(pool)?;
             cli.placement.check(&pool, "--placement")?;
@@ -877,6 +895,7 @@ fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
                     max_lease_wall: None,
                     job_limits: JobLimits::default(),
                     jobs: listen::job_store(cli),
+                    job_sources: JobSources::default(),
                 }),
             })
         }

@@ -28,7 +28,8 @@ fn a_silence_kills_every_native_run_once() {
     }
     let kills = |h: &Native| {
         let verbs = h.fake.verbs();
-        verbs.iter().filter(|v| v.starts_with("kill-uid ")).count()
+        let ends = |v: &&String| v.starts_with("kill-uid ") || v.starts_with("stop ");
+        verbs.iter().filter(ends).count()
     };
     h.clock.advance(299_999);
     h.life.step();
