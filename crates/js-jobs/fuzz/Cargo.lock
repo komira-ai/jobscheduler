@@ -161,9 +161,19 @@ dependencies = [
 name = "js-agent-wire"
 version = "0.1.0"
 dependencies = [
+ "js-elastic",
  "js-types",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "js-elastic"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "sha2",
  "thiserror",
 ]
 
