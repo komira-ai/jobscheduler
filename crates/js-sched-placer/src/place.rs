@@ -757,6 +757,57 @@ mod tests {
         assert_eq!(backfilling().pick(&spec(), &open, &fits), Some(1));
     }
 
+    /// Catches: the start of a whole-node request the engine queues placed as an ordinary
+    /// start (it would book the first host it is shown, not the one granted to it), or
+    /// counted as a decline while it waits. The placer keeps the queue: `a` is not
+    /// bookable, so `r` is granted the quiet `b`. Shown `a` alone, its start books
+    /// nothing; shown both, it books `b`. Nothing is counted.
+    #[test]
+    fn a_whole_node_start_books_the_host_of_its_pending_grant() {
+        use js_lease::Timestamp;
+        use js_registry::{Standing, WaitingWhole, WholeHost, WholeNodeConfig};
+        let placer = SchedPlacer::default();
+        let open = [host("a", x86(), &[]), host("b", x86(), &[])];
+        for candidate in &open {
+            placer.host_up(&candidate.host, &candidate.shape);
+        }
+        let id = js_types::RequestId::new("r").unwrap();
+        let waiting = WaitingWhole {
+            id: id.clone(),
+            max_wall: Duration::from_secs(600),
+            since: Timestamp::from_millis(0),
+            give_ups: 0,
+            exclusions: BTreeMap::new(),
+            mark: None,
+        };
+        let stand = |name: &str, open: bool| WholeHost {
+            id: HostId::new(name).unwrap(),
+            standing: Standing::Live,
+            open,
+        };
+        let round = WholeRound {
+            settings: WholeNodeConfig::dedicated(2),
+            waiting: vec![waiting],
+            hosts: vec![stand("a", false), stand("b", true)],
+            outside: MarkedTails::new(),
+            lives: BTreeMap::new(),
+        };
+        let marks = placer.whole_round(&round).unwrap();
+        let held: Vec<(String, bool)> = marks
+            .iter()
+            .map(|mark| (mark.host.to_string(), mark.assigned))
+            .collect();
+        assert_eq!(held, [("b".to_owned(), true)]);
+        let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id);
+        assert_eq!(placer.pick(&start, &open[..1], &unmarked()), None);
+        assert_eq!(placer.pick(&start, &open, &unmarked()), Some(1));
+        let none = Fallbacks {
+            unmappable: 0,
+            declined: 0,
+        };
+        assert_eq!(placer.fallbacks(), none);
+    }
+
     /// Catches: the default placer backfilling: it books no marked host, whatever its
     /// tail.
     #[test]
