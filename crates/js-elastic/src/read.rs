@@ -248,6 +248,7 @@ mod tests {
         let hello = Hello {
             name: "n".to_owned(),
             instance_id: None,
+            identity: None,
         };
         assert_eq!(provider.verify_instance(&hello), None);
         let log = provider.0.lock().unwrap().clone();

@@ -116,11 +116,12 @@ enum Failure {
 }
 
 impl Upload {
-    /// The upload of the job whose sink is `sink`, tailing `files` (stdout, stderr) from where
-    /// `streams` says each is, and keeping its progress record with `recorder`.
+    /// The upload of the job whose sink is `sink`, tailing the first `cap` bytes of each of
+    /// `files` (stdout, stderr) from where `streams` says each is, and keeping its progress
+    /// record with `recorder`.
     pub(super) fn new(
         sink: Sink,
-        files: [Arc<File>; 2],
+        (files, cap): ([Arc<File>; 2], u64),
         (transport, clock, grant): (Arc<dyn Transport>, Arc<dyn Clock>, Arc<HostGrant>),
         limits: Limits,
         (recorder, streams): (Recorder, Streams),
@@ -141,8 +142,8 @@ impl Upload {
             limits,
             store: None,
             streams: [
-                Tail::new(Stream::Stdout, stdout, streams.stdout),
-                Tail::new(Stream::Stderr, stderr, streams.stderr),
+                Tail::new(Stream::Stdout, stdout, streams.stdout, cap),
+                Tail::new(Stream::Stderr, stderr, streams.stderr, cap),
             ],
             recorder,
             deadline: None,

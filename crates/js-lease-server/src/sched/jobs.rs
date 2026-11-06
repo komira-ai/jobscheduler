@@ -68,6 +68,7 @@ use crate::agents::Agents;
 use crate::fence::is_fenced;
 use crate::job_start::job_network;
 use crate::job_store::ServerJobs;
+use crate::metrics::MetricsSink;
 
 /// The term of the leases the engine places for jobs: each is numbered by its operation, so
 /// none is a lease of the registry's (term 1) or one taken up (term 0).
@@ -409,7 +410,9 @@ impl SchedPlacer {
     /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now, each
     /// with the network ceiling it advertises, handing each committed placement to `starts` (the
     /// steps of the module docs): the jobs it placed, in queue order. A placement whose commit
-    /// fails is logged and let go; its job stays queued for the next pass.
+    /// fails is logged and let go; its job stays queued for the next pass. Each committed
+    /// placement, with how long its job waited since its submit, and each placement that did
+    /// not commit, are told to `metrics`.
     ///
     /// # Errors
     /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A commit the
@@ -419,7 +422,7 @@ impl SchedPlacer {
         &self,
         jobs: &ServerJobs,
         open: &BTreeMap<HostId, NetworkCeiling>,
-        starts: &dyn JobStarts,
+        (starts, metrics): (&dyn JobStarts, &dyn MetricsSink),
     ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
         let live = jobs.live_allocations()?;
@@ -433,11 +436,14 @@ impl SchedPlacer {
         let mut placed = Vec::new();
         for (job, host, booked) in decided {
             match jobs.place(&job, host.clone(), booked) {
-                Ok(_) => {
+                Ok((record, _)) => {
+                    let at = record.placed_at.unwrap_or(record.submitted_at);
+                    metrics.job_placed(at.since(record.submitted_at));
                     starts.placed(&job, &host);
                     placed.push(job);
                 }
                 Err(error) => {
+                    metrics.store_write_failed();
                     self.engine().job_failed(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
                     // A store with a newer writer commits nothing more: the pass ends here
@@ -487,7 +493,9 @@ impl Agents {
             let ceiling = claim.map(|claim| ceiling_of(claim.capabilities()));
             (view.id, ceiling.unwrap_or_default())
         });
-        if let Err(error) = placer.place_jobs(jobs, &open.collect(), &NoStarts) {
+        if let Err(error) =
+            placer.place_jobs(jobs, &open.collect(), (&NoStarts, self.meter().sink()))
+        {
             self.fence.note(&error);
             warn!(%error, "the queued jobs could not be read; the next pass places them");
         }

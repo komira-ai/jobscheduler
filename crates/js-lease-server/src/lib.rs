@@ -25,20 +25,21 @@
 //!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
 //!   same way and before the registry is asked to remove a host, so that a restart tries
 //!   them again.
-//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
-//!   [`Ticker`]) so a test steps both.
+//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`], [`Ticker`]) so a test steps both.
 //!
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The secrets,
-//! the bearer tokens, are read from files that only their owner can use.
+//! below has a key in the file, and a flag given beside `--config` is refused. The secrets, the bearer tokens, are read from files that only their owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
+//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the lease file |
+//! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
+//! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
@@ -94,6 +95,8 @@
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
 //! tls_cert          = "/run/credentials/js/tls-cert"
 //! tls_key           = "/run/credentials/js/tls-key"
+//! # store: the path of an owner-only file holding the store's connection (never the
+//! # connection itself); allow_sqlite_store (false): refused as true without store
 //! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
@@ -232,8 +235,8 @@
 //! `[[machine_provider]]` has a `name` (the grammar of pool names) and a `kind`: `static`
 //! (the hosts that run `js-agent` and register themselves; no other key) or a provider kind
 //! compiled in, such as `lambdalabs`, whose other keys are that kind's, as under a pool's
-//! `provider` (`api_key_file` and the rest; secrets stay paths). `ec2` and `gce` are refused
-//! as not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
+//! `provider` (`api_key_file` and the rest; secrets stay paths). `gce` is refused as
+//! not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
 //! (`kubernetes`, `cloud_run` and `ecs` are refused as not built), and its
 //! `machine_providers` lists declared machine providers first to last. A pool's `platforms`
 //! lists declared platforms first to last; it is refused beside `provider`. Each declared
@@ -330,22 +333,50 @@
 //! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records and whose role says what it may call; `docs/design/configuration.md`):
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
-//! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
-//! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads; so are the fleet calls
-//! (`ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`), over
-//! the server's hosts, the status of its pools and its usage store. The answers of each call
-//! are in `docs/http-gateway.md`. The port has the connection cap and the
-//! timeouts of the other listeners, and stops with them. The lease routes are not served on
-//! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
-//! routes than the lease server's of those names, so the two cannot share a port while both
-//! exist.
+//! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
+//! over the registered hosts and the pool's catalog, committed before it answers; its wall
+//! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
+//! `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
+//! hosts, the status of its pools and its usage store. `docs/http-gateway.md` has the answers
+//! of each call. The port has the connection cap and the timeouts of the other listeners, and
+//! stops with them. The lease routes are not served on it, nor the job routes on `--listen`:
+//! the gateway's `/v1/hosts` and `/v1/pools` are other routes than the lease server's of those
+//! names, so the two cannot share a port while both exist.
 //!
 //! The job store is a SQLite file beside the lease file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. It moves into the shared store with the server's other
 //! state. The server opens it once and holds that one handle: the job service and the
 //! per-job heartbeat both read it. Without `--job-listen` no store is opened and no file is
 //! made.
+//!
+//! # The store
+//!
+//! `--store <path>` (`server.store`) is the design's `store` setting
+//! (`docs/design/jobscheduler-design.md`, section 4.1: "The Postgres connection, as a path to
+//! a file that holds it. SQLite is accepted only for tests and single-node development.").
+//! The file holds one line: `postgres://...` or `postgresql://...`, or `sqlite:<absolute
+//! path>` with `--allow-sqlite-store` (`server.allow_sqlite_store = true`). The URL is never
+//! printed in a log line or an error; a Postgres server's refusal is said by its SQLSTATE.
+//! The URL's `sslmode` (`disable` to `verify-full`) and `sslrootcert` choose its TLS. A
+//! Postgres store must hold the state schema already: the server creates none.
+//!
+//! The server takes the store's writer lock first, before it reads or locks the lease file
+//! and before it binds a listener, and holds it for its life: on Postgres a session-level
+//! advisory lock (`js_state::postgres::WRITER_LOCK_KEY`) on a connection of its own, on
+//! SQLite the lock file beside the store's file. A second server on the same store does not
+//! wait: it exits 2 with one line, `--store: another process holds the store's writer lock`,
+//! having opened nothing else. Every tick asks the lock's session first; a tick that finds
+//! it gone does nothing more, and the server stops serving and ticking, writes nothing more
+//! (there is no final tick), logs the loss and exits 1 ([`LockLost`]). The lock takes the
+//! store's next writer generation and every commit checks it, so once another process takes
+//! the lock no commit of this one succeeds, between ticks too.
+//!
+//! Nothing of the server's state is kept in the store yet: the lease file, the files beside
+//! it and the usage file are kept as without the setting. Until they move, a server that
+//! registers agents (`--agent-pool-config`, or an elastic pool) is refused at start with a
+//! store setting, after the lock is taken and before any listener is bound, with
+//! `--store: store-backed server state is not available yet ...`. Without the setting
+//! nothing is opened and the server is as it was.
 //!
 //! # Who may do what
 //!
@@ -829,10 +860,12 @@ mod kinds;
 mod layered;
 mod listener;
 mod logs;
+mod metrics;
 pub mod network;
 mod per_job;
 mod platform;
 mod pool;
+mod program;
 mod rate;
 mod reservations;
 mod run_api;
@@ -840,6 +873,7 @@ mod scaler;
 mod sched;
 mod server;
 mod status;
+mod store;
 mod ticker;
 mod tls;
 mod usage;
@@ -855,11 +889,6 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use js_lease::SystemClock;
-use tokio::runtime::Builder;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
-
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
@@ -874,6 +903,7 @@ pub use file::{
     ObjectStoreLogs, PoolSettings, ProviderLimits, Resolved, ResolvedMachineProvider,
     ResolvedPlatform, ResolvedPool,
 };
+pub use job_api::SERVED_CALLS;
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
     SecretFiles,
@@ -888,6 +918,7 @@ pub use scaler::{
     RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
+pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
     BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
@@ -925,7 +956,7 @@ pub fn run(
     };
     let result = Config::from_cli(cli)
         .map_err(Failure::from)
-        .and_then(|config| serve(config, out));
+        .and_then(|config| program::serve(config, out));
     exit_code(result, err)
 }
 
@@ -947,57 +978,4 @@ fn exit_code(result: Result<(), Failure>, err: &mut dyn Write) -> ExitCode {
             failure.code()
         }
     }
-}
-
-/// Serves `config` on a runtime of its own until a termination signal.
-fn serve(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
-    Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Failure::Runtime)
-        .and_then(|runtime| runtime.block_on(serve_until_signal(config, out)))
-}
-
-async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
-    // The subscriber is global; a second server in one process keeps the first's.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .try_init();
-    let ticker = IntervalTicker::new(config.tick_period());
-    // Before the address is printed, so a SIGHUP sent once it is known is not lost.
-    let mut hangup = signal(SignalKind::hangup()).map_err(Failure::Runtime)?;
-    let running = start(config, SharedClock::new(SystemClock), ticker).await?;
-    let _ = writeln!(out, "listening on {}", running.addr());
-    let _ = out.flush();
-    {
-        let mut stopping = std::pin::pin!(server::stop_or_fence(&running, termination()));
-        loop {
-            tokio::select! {
-                stopped = &mut stopping => {
-                    stopped.map_err(Failure::Runtime)?;
-                    break;
-                }
-                _ = hangup.recv() => {
-                    // The refusal is logged by the reload; the old pair stays.
-                    let _ = running.reload_tls();
-                }
-            }
-        }
-    }
-    running.shutdown().await.map_err(Failure::Runtime)
-}
-
-/// Completes at SIGTERM or SIGINT.
-async fn termination() -> std::io::Result<()> {
-    let (sender, mut received) = mpsc::channel(2);
-    for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
-        let mut stream = signal(kind)?;
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            stream.recv().await;
-            let _ = sender.send(()).await;
-        });
-    }
-    received.recv().await;
-    Ok(())
 }

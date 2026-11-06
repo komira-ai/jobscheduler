@@ -30,6 +30,7 @@ use crate::reservations::{self, Handed};
 use crate::run_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
+use crate::store::{LockLost, ServerStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
@@ -71,6 +72,8 @@ pub(crate) struct Shared {
     handed: Handed,
     /// Admission of a lease request: the pool's launching machine providers.
     admit: Admit,
+    /// The store, under the writer lock the server holds for its life (`--store`).
+    store: Option<ServerStore>,
 }
 
 impl Shared {
@@ -92,6 +95,7 @@ impl Shared {
             counted: std::sync::Mutex::new(WholeCounts::default()),
             handed,
             admit: Admit::default(),
+            store: None,
         }
     }
 
@@ -114,6 +118,26 @@ impl Shared {
     pub(crate) fn with_scaler(mut self, scaler: Option<Scaler>) -> Self {
         self.scaler = scaler;
         self
+    }
+
+    /// The same state holding `store` and its writer lock.
+    #[must_use]
+    pub(crate) fn with_store(mut self, store: Option<ServerStore>) -> Self {
+        self.store = store;
+        self
+    }
+
+    /// The store the server holds; `None` without a store setting.
+    pub(crate) fn server_store(&self) -> Option<&ServerStore> {
+        self.store.as_ref()
+    }
+
+    /// Whether the store's writer lock is still held; always without a store.
+    pub(crate) async fn check_store(&self) -> Result<(), LockLost> {
+        match &self.store {
+            Some(store) => store.check().await,
+            None => Ok(()),
+        }
     }
 
     /// The same state serving the status routes from `status`.
@@ -375,7 +399,7 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
 
 /// The peer of the connection a request came in on, as the listener sets it. Absent when
 /// the listener could not name the peer; a status route then refuses.
-type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+pub(crate) type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 
 /// Whether a peer may read the status pages, which take no token: only a private address
 /// ([`is_private_address`]; an IPv4-mapped IPv6 address counts as its IPv4 form). An
@@ -421,7 +445,7 @@ fn page_response(status: &Arc<Status>) -> Response {
 }
 
 /// The answer of a status route that is not served: that of a route that does not exist.
-fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     ApiError::no_route().into_response()
 }
 

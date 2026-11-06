@@ -5,8 +5,9 @@ in `js-contain`); the object-store client (`js-logstore`); the `[logs]` table of
 start; the mint of section 4 (`js-logmint`) and its second kind for a store with no STS, the prefix grant of section 4.1
 (`js-logmint` and its signer in `js-logstore`); the server's side of sections 3.1, 4 and 5 (`js-lease-server`'s `logs` module: one
 credential per uploading host, minted, delivered and renewed in heartbeat replies, a sink in each start, and the stream lengths
-stored with the result); and the agent's uploader of a `crun` job (`js-agent/src/logs`, without the progress record of 3.5: a
-restarted agent uploads nothing more for a job it adopted), which fills `log_grant_state` and `logs`. Nothing reads a log yet. `jobscheduler-design.md` links here for the detail of live logs; it is cited as
+stored with the result); the agent's uploader (`js-agent/src/logs`, with the progress record of 3.5) of a `crun` job and of a
+macOS native job (3.7), which fills `log_grant_state` and `logs`; and the reader of section 8
+(`js-lease-server`'s `job_api/logs`: `GetLogs` with a stream, the long poll, and its gateway route). `jobscheduler-design.md` links here for the detail of live logs; it is cited as
 "design section N", and a bare section number is this page's own. The step that builds it is step 31 of design section 12.1.
 
 A job's output reaches a client today only as the 8 KiB tail of each stream in the job's result (design section 5.3). This page is the design
@@ -45,7 +46,8 @@ Inside that, the design takes these choices; each is explained where it applies:
 - **D3.** A final file needs the whole stream on the host and at most `MAX_PUT_BYTES`; otherwise the chunks stay and are the log (3.4).
 - **D4.** The scheduler never deletes log objects. Their retention is the operator's bucket lifecycle rule (section 10).
 - **D5.** A failed mint costs a host's jobs their live upload until a later mint succeeds, never a start (section 5).
-- **D6.** This release uploads from the Linux `crun` runtime only (section 10).
+- **D6.** This release uploads from the Linux `crun` runtime and the macOS native runtime (3.7, which says how the native runtime's files differ from the capture files of 3.2); the
+  container-engine fallback does not upload (section 10).
 - **D7.** The agent reads the capture files, not the pipes (3.2).
 
 ## 2. The object layout
@@ -90,7 +92,9 @@ no `log_sink`).
   and chunks never overlap.
 - **A reused job id.** A job id is reusable once the retention window of the job that held it has passed (design section 5.3), and the
   lifecycle rule may keep that job's objects longer. The reader therefore ignores every object of `P` last modified before the job was
-  placed (the placement time is in the job record): those belong to the earlier job.
+  placed (the placement time is in the job record): those belong to the earlier job. The reader allows a margin of 5 minutes before
+  the placement, for a store's clock behind the server's and timestamps in whole seconds; an earlier job's objects are older than that
+  by at least its retention window.
 
 **The stream's length** is what the job printed, which the agent reports in the result (`logs.stdout_bytes`, `logs.stderr_bytes`). A
 reader knows a stream is complete when its next offset equals that length. `logs.stdout_dropped` and `logs.stderr_dropped` are the
@@ -230,6 +234,26 @@ chunks and markers it put. The record is written before the first put and replac
 4. **The end of a stream** is known from the result: once the job has ended, `eof` is set when `next_offset` equals the reported length.
    A result without `logs` (an agent that never got to report one) leaves the length unknown: then `eof` is set once the job ended
    `LOG_SETTLE` before the read, at the end of the last object found.
+
+### 3.7 The macOS native runtime
+
+A native job has no supervisor and no capture pipe: the agent makes its standard output and error as two files in the run's scratch
+directory (which only the agent can enter) and the helper gives them to the job, which writes them itself
+(`js-agent/src/native/logs.rs`). Each file holds the whole stream, up to the run's file-size limit (`--native-max-file-mib`), whether
+or not an agent runs. The uploader of a run whose start carried a sink is the same as `crun`'s (same requests, keys, offsets, chunk
+loop and end), started once the program has started, with two differences:
+
+- **It reads at most `--log-file-cap` bytes of each file.** What lies past the cap counts as dropped, so the store gets what `crun`'s
+  capture would give for the same output: chunks up to the cap and, for a longer stream, the gap marker at the cap and no final. The
+  result's tail is the end of each file, the same text as a capture's ring of the last bytes. A run without a sink is as before.
+- **The end** is told at the first poll that reads the run's exit, before its result is reported, with each file's length as the
+  stream's total; a run whose exit was never read is told it at its removal, after its processes were killed. The result never waits for the upload. The progress record is kept in the scratch directory and is stopped and
+  removed before the directory is.
+
+**A restart.** The helper keeps a native run's process while no agent runs, and the job keeps writing its files; the next agent
+adopts the run (`js-agent/src/native/adopt.rs`) with its scratch directory. A run whose directory holds a progress record has its
+upload go on from it as 3.5 says: a chunk in flight is put again at the same key, and the bytes written while no agent ran go out as
+ordinary chunks, their first-byte time the resuming poll. Its end is then told as any run's. Without a record it uploads nothing more.
 
 ## 4. The host credential (D1)
 
@@ -400,7 +424,7 @@ The agent has one new flag, `--log-file-cap` (section 9): the local cap of each 
 ## 7. The wire (additive, major 1)
 
 The fields are added to `js-agent-wire` in protocol major 1, announced by the hello capability **`log-upload`**. An agent reports it
-only when its runtime uploads (the Linux `crun` runtime, D6). The server checks it before it sends any of the fields below: an agent
+only when its runtime uploads (the Linux `crun` runtime and the macOS native runtime, D6; a native agent always reports it). The server checks it before it sends any of the fields below: an agent
 that did not report it gets no `log_sink` and no `log_grant`. Each field is optional and absent when empty, and an older receiver
 ignores it (the compatibility rule of `agent-wire.md`, section 1).
 
@@ -507,10 +531,12 @@ The capture files are on the host's disk, in the lease directories: at the defau
 
 **Crates (Planned, step 31 of design section 12.1).** `js-logstore`, the object-store client (put, delete, list, ranged get, Signature Version
 4, `MAX_PUT_BYTES`); `js-logmint`, the `AssumeRole` call and the session policy; the log fields in `js-agent-wire` and `GetLogs`'s in
-`js-proto` (with its comment, which today promises a running job's tail, rewritten to the answers of section 8); the
+`js-proto` (with its comment rewritten to the answers of section 8); the
 agent's `logs` module (the uploader, the progress record, the end); the server's `job_api/logs` (the reader, the long poll) and its host
 credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
-fields in `js-agent-wire`, and the agent's `logs` module without the progress record (the uploader and the end).
+fields in `js-agent-wire`, the agent's `logs` module (the uploader, the progress record, the end) for `crun` and the native
+runtime (3.7), the server's host credential table, and `GetLogs`'s fields in `js-proto` with the server's `job_api/logs` (the reader
+and the long poll).
 
 **Decided: an object store without `AssumeRole`** (design section 13, question 28). The scheduler has a second minting kind,
 `credentials = "presigned_prefix"` (4.1): the farm's store (tierstore) has no STS, and a grant derived from a signing key needs no call
@@ -520,8 +546,10 @@ same host prefix. Checking grants in tierstore, and testing against the real tie
 
 **Later and open.**
 
-- **Other runtimes (D6).** The container-engine fallback and the macOS native runtime do not report `log-upload` and ignore a sink if
-  one came; their results carry no `logs`. Live logs for them are later work.
+- **Other runtimes (D6).** The container-engine fallback does not report `log-upload` and ignores a sink if one came; its results
+  carry no `logs`. Live logs for it are later work. The macOS native runtime uploads (3.7) and reports `log-upload`, but a sink comes
+  only in a job start (`JobStartSpec.log_sink`), which the server sends only to a host that reports `per-job`, and a native agent does
+  not report it yet: until it does, a native agent holds the host's credential and its runs (lease starts) carry no sink.
 - **Who deletes old logs (D4).** The scheduler never deletes log objects: retention of finals, and of the chunks of streams that had no
   final, is the operator's bucket lifecycle rule on the prefix, which must be at least `--job-retention`. A job whose record was swept
   answers `unknown-job`. Whether the scheduler should delete instead is design section 13, question 26.

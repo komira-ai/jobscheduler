@@ -52,6 +52,7 @@ fn native_runtime(
         Some(store) => runtime.with_bundles(Arc::clone(store)),
         None => runtime,
     };
+    let runtime = runtime.with_live_logs(native.logs().live());
     Ok((Box::new(runtime), Vec::new()))
 }
 

@@ -33,6 +33,8 @@ mod facts;
 mod flags;
 #[cfg(target_os = "linux")]
 mod helper_modes;
+#[cfg(target_os = "linux")]
+mod image_budget;
 mod integrity;
 mod jobs;
 mod lifecycle;

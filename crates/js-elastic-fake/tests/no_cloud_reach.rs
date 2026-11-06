@@ -48,6 +48,17 @@ struct Rule {
 /// production host.
 const LAMBDA_CRATE: &str = "crates/js-provider-lambdalabs/";
 
+/// The EC2 provider crate: its purchase calls sit behind the same guarded launch path.
+const EC2_CRATE: &str = "crates/js-provider-ec2/";
+
+/// The EC2 provider's live-port files, by path prefix (`src/http.rs`, `src/http/`): the only
+/// places in that crate that name the regional and pricing hosts. Its `tests/http/` files
+/// build the hosts the wire layer must sign for.
+const EC2_HOST_FILES: [&str; 2] = [
+    "crates/js-provider-ec2/src/http",
+    "crates/js-provider-ec2/tests/http/",
+];
+
 /// The one file that may name the production host: the default address of the
 /// `lambdalabs` kind, which a pool's `api_url` overrides.
 const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs";
@@ -97,7 +108,7 @@ fn rules() -> Vec<Rule> {
                 joined(&["windows", ".net"]),
                 joined(&["oracle", "cloud.com"]),
             ],
-            allowed: vec![LAMBDA_DEFAULT_ADDRESS],
+            allowed: vec![LAMBDA_DEFAULT_ADDRESS, EC2_HOST_FILES[0], EC2_HOST_FILES[1]],
         },
         Rule {
             what: "a purchase API",
@@ -109,7 +120,7 @@ fn rules() -> Vec<Rule> {
                 joined(&["queued", "Resources"]),
                 joined(&["CreateQueued", "Resource"]),
             ],
-            allowed: vec![LAMBDA_CRATE],
+            allowed: vec![LAMBDA_CRATE, EC2_CRATE],
         },
         Rule {
             what: "the raw API of a provider",
@@ -332,6 +343,31 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
         assert!(at.starts_with(path), "{at}");
         assert!(at.contains("host"), "{at}");
     }
+
+    // The EC2 crate may name its hosts only in its live-port files and may name the purchase
+    // API anywhere in the crate; its other files still may not name a host, and no other crate
+    // may name either.
+    let ec2_host = joined(&["ec2.us-east-1.", "amazon", "aws.com"]);
+    let ec2_call = joined(&["Run", "Instances"]);
+    let ec2_guarded = [
+        file("crates/js-provider-ec2/src/http.rs", &ec2_host),
+        file("crates/js-provider-ec2/src/http/pricing.rs", &ec2_host),
+        file("crates/js-provider-ec2/tests/http/wire.rs", &ec2_host),
+        file("crates/js-provider-ec2/src/provider.rs", &ec2_call),
+    ];
+    assert_eq!(violations(&ec2_guarded, &rules), Vec::<String>::new());
+    let ec2_misses = [
+        file("crates/js-provider-ec2/src/provider.rs", &ec2_host),
+        file("crates/js-provider-ec2/tests/offline/rig.rs", &ec2_host),
+        file("crates/js-provider-ec2x/src/http.rs", &ec2_call),
+        file("crates/js-scaler/src/http.rs", &ec2_host),
+    ];
+    let found = violations(&ec2_misses, &rules);
+    assert_eq!(found.len(), 4, "{found:#?}");
+    assert!(found[0].starts_with("crates/js-provider-ec2/src/provider.rs "));
+    assert!(found[1].starts_with("crates/js-provider-ec2/tests/offline/rig.rs "));
+    assert!(found[2].starts_with("crates/js-provider-ec2x/src/http.rs "));
+    assert!(found[3].starts_with("crates/js-scaler/src/http.rs "));
 
     let other_file_of_the_provider = file("crates/js-provider-lambdalabs/tests/t.rs", &host);
     assert_eq!(violations(&[other_file_of_the_provider], &rules).len(), 1);

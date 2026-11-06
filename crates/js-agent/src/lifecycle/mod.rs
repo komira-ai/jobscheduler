@@ -72,8 +72,9 @@
 //! - **Live logs are outside the job's critical path.** A job start's checked sink goes to
 //!   the runtime ([`RunSpec::log_sink`]; one that fails its check is dropped with a
 //!   `log-sink-ignored` note and the job starts as without one), and a runtime that uploads
-//!   (`crun`, [`crate::logs`]) does so on a thread of its own per job: the result, with its
-//!   tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot never wait for it.
+//!   (`crun` and the native runtime, [`crate::logs`]) does so on a thread of its own per job:
+//!   the result, with its tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot
+//!   never wait for it.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each
@@ -256,7 +257,7 @@ pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
 pub use mounts::{MountError, MountRoots};
-pub use prefetch::{Prefetcher, PullFuture};
+pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
 pub use quota_flags::{

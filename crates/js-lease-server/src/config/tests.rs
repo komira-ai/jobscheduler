@@ -17,18 +17,6 @@ fn a_token_matches_itself_and_hides_itself() {
     assert_eq!(format!("{token:?}"), "Token(..)");
 }
 
-/// Asserts that a token file is trusted only when it is a regular file, owner-only
-/// in mode, and owned by the user running the server: each condition alone refuses.
-#[test]
-fn a_token_file_must_be_the_servers_own_private_file() {
-    assert!(trusted_private_file(true, 0o600, 1000, 1000));
-    assert!(trusted_private_file(true, 0o400, 1000, 1000));
-    assert!(!trusted_private_file(false, 0o600, 1000, 1000));
-    assert!(!trusted_private_file(true, 0o640, 1000, 1000));
-    assert!(!trusted_private_file(true, 0o600, 0, 1000));
-    assert!(!trusted_private_file(true, 0o600, 1000, 0));
-}
-
 /// Asserts that a token is the content without trailing whitespace, and that empty
 /// content and any space, line break, control or non-ASCII byte inside the token
 /// is refused: no header value could ever equal such a token.

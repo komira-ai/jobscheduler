@@ -34,6 +34,7 @@ use js_types::HostId;
 
 use crate::job_alloc;
 use crate::job_store::ServerJobs;
+use crate::metrics::MetricsSink;
 
 /// What the machine provider reads of a host (design section 6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +56,8 @@ pub(crate) trait Observe {
 
 /// Settles the live allocations of each host `observer` reads absent (the first way of the
 /// module docs), one commit per allocation, and returns the jobs it made lost. Each host that
-/// holds a live allocation is read once; only [`Seen::Absent`] changes anything.
+/// holds a live allocation is read once; only [`Seen::Absent`] changes anything. Each job it
+/// loses is told to `metrics` as its commit lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -63,6 +65,7 @@ pub(crate) trait Observe {
 pub(crate) fn lose_absent(
     jobs: &ServerJobs,
     observer: &dyn Observe,
+    metrics: &dyn MetricsSink,
 ) -> Result<Vec<JobId>, JobStoreError> {
     let live = jobs.live_allocations()?;
     let hosts: BTreeSet<&HostId> = live.iter().map(|allocation| &allocation.host).collect();
@@ -73,7 +76,10 @@ pub(crate) fn lose_absent(
     let mut lost = Vec::new();
     for allocation in live.iter().filter(|live| absent.contains(&live.host)) {
         let ended = job_alloc::lose_on_absent(jobs, &allocation.job)?;
-        lost.extend(ended.map(|job| job.id));
+        lost.extend(ended.map(|job| {
+            metrics.job_lost();
+            job.id
+        }));
     }
     Ok(lost)
 }
@@ -81,7 +87,8 @@ pub(crate) fn lose_absent(
 /// The jobs of `host` that are starting or running and that its listing `held` (the ids the
 /// host listed or retired) does not name, each lost in one commit with its allocation's move to
 /// releasing (the second way of the module docs), returned in id order. Called on the first
-/// listing of the host after its hello.
+/// listing of the host after its hello. Each job it loses is told to `metrics` as its commit
+/// lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -90,6 +97,7 @@ pub(crate) fn lose_unlisted(
     jobs: &ServerJobs,
     host: &HostId,
     held: &BTreeSet<&str>,
+    metrics: &dyn MetricsSink,
 ) -> Result<Vec<JobId>, JobStoreError> {
     let mut lost = Vec::new();
     for (allocation, job) in jobs.live_on(host)? {
@@ -97,6 +105,7 @@ pub(crate) fn lose_unlisted(
             job.is_some_and(|job| matches!(job.state, JobState::Starting | JobState::Running));
         if ran && !held.contains(allocation.job.as_str()) {
             jobs.end_job(&allocation.job, JobEnd::Lost)?;
+            metrics.job_lost();
             lost.push(allocation.job);
         }
     }

@@ -87,8 +87,10 @@ service JobService {
       get: "/v1/jobs/{job_id}/result"
     };
   }
-  // Reads the log tail held so far, also for a running job, and for the retention window
-  // after the job ended. Changes nothing.
+  // Reads a job's output. Without a stream: the job's state and its result's tails. With a
+  // stream: one page of that stream's bytes from an offset, read from the log store, while
+  // the job runs and for the retention window after it ended, optionally waiting a bounded
+  // time for new bytes. Changes nothing.
   rpc GetLogs(GetLogsRequest) returns (GetLogsResponse) {
     option (google.api.http) = {
       get: "/v1/jobs/{job_id}/logs"
@@ -214,24 +216,79 @@ message GetResultResponse {
   JobResult result = 1;
 }
 
-// The request of GetLogs. The call is unary: it answers the tail held at the time of the
-// call.
-message GetLogsRequest {
-  // The id of the job whose log tail to read.
-  string job_id = 1;
+// One of a job's two output streams, as GetLogs reads it.
+enum LogStream {
+  // No stream: GetLogs answers the result's tails, as it did before streams were added.
+  LOG_STREAM_UNSPECIFIED = 0;
+  // The job's standard output.
+  LOG_STREAM_STDOUT = 1;
+  // The job's standard error.
+  LOG_STREAM_STDERR = 2;
 }
 
-// The answer of GetLogs.
+// The request of GetLogs. The call is unary. A request without a stream is the call as it
+// was before streams were added and gets the same answer: the job's state and its result's
+// tails. A request with a stream reads one page of that stream from the log store; with
+// follow, the server waits a bounded time for new bytes before it answers, and the client
+// calls again from the next offset it was given.
+message GetLogsRequest {
+  // The id of the job whose output to read.
+  string job_id = 1;
+  // The stream to read. Unspecified: the result's tails, and the other fields below are
+  // not read.
+  LogStream stream = 2;
+  // The offset of the first byte wanted, counted from the stream's first byte. Absent: 0.
+  // Past the length of an ended job's stream: refused, OUT_OF_RANGE.
+  optional uint64 from_offset = 3;
+  // The most bytes of data in the answer. Absent: 262144 (256 KiB). A larger value than
+  // 1048576 (1 MiB) is cut to it; 0 is refused.
+  optional uint32 max_bytes = 4;
+  // Whether to wait, up to 20 seconds, for new bytes when none are there yet, then answer;
+  // an answer at the cap has no data. Absent: false. A job that has ended answers at once.
+  optional bool follow = 5;
+}
+
+// Bytes of a stream that are not in the log store and never will be: never uploaded, or
+// past what the host could keep.
+message LogGap {
+  // The offset of the gap's first byte.
+  uint64 offset = 1;
+  // How many bytes the gap holds; at least 1.
+  uint64 length = 2;
+}
+
+// The answer of GetLogs. A request without a stream gets state and the three tail fields
+// and nothing else; a request with a stream gets state and the fields from data on, with
+// empty tails.
 message GetLogsResponse {
-  // The job's state when the tail was read.
+  // The job's state when the logs were read.
   JobState state = 1;
-  // The last bytes the job wrote to its standard output so far: at most 8 KiB (8192
-  // bytes).
+  // The last bytes the job wrote to its standard output: at most 8 KiB (8192 bytes), from
+  // its result. Empty while the job runs.
   bytes stdout_tail = 2;
-  // The last bytes the job wrote to its standard error so far: at most 8 KiB (8192 bytes).
+  // The last bytes the job wrote to its standard error: at most 8 KiB (8192 bytes), from its
+  // result. Empty while the job runs.
   bytes stderr_tail = 3;
   // A stream was cut to that cap: the job wrote more to it than its tail holds.
   bool truncated = 4;
+  // Contiguous bytes of the stream from offset, exactly as the job wrote them: at most the
+  // request's max_bytes. Empty when nothing new is there yet.
+  bytes data = 5;
+  // The offset of the first byte of data: the request's from_offset, or above it when gaps
+  // were skipped.
+  uint64 offset = 6;
+  // Where the next call starts: offset plus the length of data. A client that calls again
+  // from it reads each byte of the stream once.
+  uint64 next_offset = 7;
+  // The gaps between the request's from_offset and offset, in order.
+  repeated LogGap gaps = 8;
+  // The job has ended and next_offset is the stream's length: there is nothing more to
+  // read.
+  bool eof = 9;
+  // When the first byte of data reached the host's capture, in milliseconds since the Unix
+  // epoch on the host's clock, as the log store recorded it. Absent when data is empty or
+  // came from the stream's final file.
+  optional uint64 first_byte_at_ms = 10;
 }
 
 // The request of ListHosts.

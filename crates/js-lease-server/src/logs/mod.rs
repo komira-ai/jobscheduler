@@ -74,9 +74,7 @@ use crate::adapt::SharedClock;
 mod setup;
 mod sink;
 
-#[cfg(test)]
-pub(crate) use setup::StoreClock;
-pub(crate) use setup::from_config;
+pub(crate) use setup::{StoreClock, from_config};
 pub(crate) use sink::SinkTemplate;
 
 /// The most mints that run at once, for all hosts together.

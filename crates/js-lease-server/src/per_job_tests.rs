@@ -11,6 +11,7 @@ use js_state::Store;
 
 use super::{BeatContext, Command, serve};
 use crate::agent_api::job_rig::{BOOKED, placed, result, spec, starts, stops, tables};
+use crate::metrics::NoMetrics;
 
 fn host() -> HostId {
     HostId::new("host-a").unwrap()
@@ -38,6 +39,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             host: &host(),
             ceiling: &ceiling,
             logs: None,
+            metrics: &NoMetrics,
         },
         &[],
         std::slice::from_ref(&long),
@@ -68,6 +70,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             host: &host(),
             ceiling: &ceiling,
             logs: None,
+            metrics: &NoMetrics,
         },
         &listing,
         &[],
@@ -106,6 +109,7 @@ fn a_failed_end_commit_is_an_error() {
             host: &host(),
             ceiling: &ceiling,
             logs: None,
+            metrics: &NoMetrics,
         },
         &listing,
         &[],
@@ -145,6 +149,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             host: &host(),
             ceiling: &ceiling,
             logs: None,
+            metrics: &NoMetrics,
         },
         &[],
         &[],
@@ -166,6 +171,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             host: &host(),
             ceiling: &ceiling,
             logs: None,
+            metrics: &NoMetrics,
         },
         &[],
         &[],

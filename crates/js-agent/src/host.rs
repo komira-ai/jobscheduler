@@ -15,6 +15,7 @@ use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
 use crate::cli::Cli;
+use crate::disk::{ImageReserve, image_budget_bytes, image_reserve_bytes};
 use crate::facts::{
     self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
 };
@@ -108,10 +109,22 @@ pub fn offered_disk_bytes(free: u64, low_water_gib: Option<u64>) -> u64 {
     free.saturating_sub(low_water).min(MAX_DISK_BYTES)
 }
 
+/// What the image budget leaves out of the disk offered, with a warning when the image
+/// store cannot be read ([`image_reserve_bytes`]): none without `--image-budget-gib` (a
+/// value of 0 leaves nothing out here; the runtime's flags refuse it) or without
+/// `--scratch-root`.
+fn image_reserve(cli: &Cli) -> Option<(u64, Option<String>)> {
+    let budget = image_budget_bytes(cli.image_budget_gib).ok().flatten();
+    let root = cli.scratch_root.as_deref()?;
+    ImageReserve::of(budget, root)
+        .as_ref()
+        .map(image_reserve_bytes)
+}
+
 /// What the work volume offers: the volume that holds `--scratch-root`, where every run
 /// gets its directory. The bytes are its free space minus the part of the bundle store's
-/// budget the store has not used (`kept_back`, 0 without a store) minus
-/// `--scratch-low-water-gib`; they
+/// budget the store has not used and the part of the image budget the image store does not
+/// hold (`kept_back`, 0 without either) minus `--scratch-low-water-gib`; they
 /// are the shape's `disk_bytes`, and the capability `disk-gib` says them in GiB, so there
 /// are never two numbers. Without the flag there is no work volume to speak of and nothing
 /// is offered or reported. A volume that cannot be read is a warning, and nothing is
@@ -219,7 +232,10 @@ pub fn offer(
     let (kept_back, reserve_warning) = store
         .map(|view| reserve_bytes(view.settings, view.host))
         .unzip();
-    let (disk_bytes, advisory, disk_warning) = disk(cli, runner, kept_back.unwrap_or_default());
+    let (images, image_warning) = image_reserve(cli).unzip();
+    let kept_back = kept_back.unwrap_or_default();
+    let kept_back = kept_back.saturating_add(images.unwrap_or_default());
+    let (disk_bytes, advisory, disk_warning) = disk(cli, runner, kept_back);
     capabilities.extend(advisory);
     let long_values = store.is_some_and(|view| view.long_values);
     let reported = store.map(|view| report(view.settings, view.host, view.long_values));
@@ -266,6 +282,7 @@ pub fn offer(
             .into_iter()
             .chain(disk_warning)
             .chain(reserve_warning.flatten())
+            .chain(image_warning.flatten())
             .chain(reported.into_iter().flat_map(|found| found.warnings))
             .collect(),
     })

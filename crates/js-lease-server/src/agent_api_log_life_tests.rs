@@ -25,6 +25,7 @@ use super::log_tests::{LONG_GRACE, capture, sink_of, start_of, tick};
 use crate::adapt::SharedClock;
 use crate::api::whole_view_tests::Lines;
 use crate::job_store::ServerJobs;
+use crate::metrics::NoMetrics;
 use crate::per_job::{self, BeatContext};
 use crate::status::{Status, page};
 
@@ -441,6 +442,7 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
         host: &host,
         ceiling: &NetworkCeiling::default(),
         logs: Some(&*logs.grants),
+        metrics: &NoMetrics,
     };
     let served = per_job::serve(&jobs, &context, &listing, &[], 16).unwrap();
     assert_eq!(served.job_acks.len(), 3);
@@ -477,6 +479,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
         host: &host,
         ceiling: &NetworkCeiling::default(),
         logs: Some(&*grants),
+        metrics: &NoMetrics,
     };
     let start = crate::job_start::start_of(&job, &allocation, &context).unwrap();
     assert_eq!(start.log_sink, None);

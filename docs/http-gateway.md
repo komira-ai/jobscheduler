@@ -27,9 +27,12 @@ the gateway and the gRPC service together on a port of their own, `--job-listen`
 
 ## Routes
 
-The table is `js_api_gateway::ROUTES`, in the order of the service definition; a test of the
-crate fails when this page differs from it.
+The table is `js_api_gateway::ROUTES`, in the order of the service definition, which the
+gateway's build reads from the `google.api.http` options. `cargo xtask gen-job-surface --out .`
+writes it between the markers below, and `cargo xtask gen-job-surface --check --out .` (run by
+`cargo test -p xtask --test job_surface`) fails naming this page when it differs.
 
+<!-- gen-job-surface routes begin -->
 | route | method of `JobService` | success |
 |---|---|---|
 | `POST /v1/jobs` | `SubmitJob` | 201 |
@@ -44,6 +47,7 @@ crate fails when this page differs from it.
 | `GET /v1/pools` | `ListPools` | 200 |
 | `GET /v1/providers` | `ListProviders` | 200 |
 | `GET /v1/usage` | `GetUsage` | 200 |
+<!-- gen-job-surface routes end -->
 
 A call that succeeds answers its response with the status of the last column: 200, or the
 status the method's `http_success_status` option names. A submit answers 201, also when it is
@@ -53,8 +57,13 @@ needs no branch for a first and a repeated submit.
 A call that changes state is a POST and a read is a GET. Cancel is
 `POST /v1/jobs/{job_id}:cancel`, not `DELETE /v1/jobs/{job_id}`: a cancel keeps the job's
 record and its result, where a `DELETE` would read as removal. It is idempotent on the job, so
-a repeat answers 200 with the same final state. `GetLogs` answers the tail held at the time of
-the call; there is no offset, limit or stream.
+a repeat answers 200 with the same final state. `GetLogs` without a `stream` answers the job's
+state and its result's tails. With a stream it reads one page of that stream from the log
+store. Its query parameters are `stream` (`LOG_STREAM_STDOUT` or `LOG_STREAM_STDERR`, the
+names of the `LogStream` enum), `fromOffset`, `maxBytes` and `follow`. In the answer `data` is
+base64 of the bytes, `offset` and `nextOffset` are decimal strings, `gaps` is a list of
+`{"offset", "length"}` objects with decimal strings, and `firstByteAtMs` is a decimal string
+when present. The mapping is the generic one of the other calls.
 
 ## Requests
 
@@ -133,6 +142,11 @@ cause.
 | an unknown job | 404 | `unknown-job` |
 | a result or logs past retention | 410 | `expired` |
 | the result of a job that has not ended | 409 | `not-finished` |
+| logs asked of a server whose log sink is `none` | 409 | `no-log-sink` |
+| live logs asked of a job that ran without them | 409 | `no-live-logs` |
+| a log offset past the end of the stream | 400 | `out-of-range`, `field` `fromOffset` |
+| too many follows open at once | 429 | `too-many-follows` |
+| the log store cannot be read | 503 | `log-store-unavailable` |
 | a fleet call of a client that is no operator (`PERMISSION_DENIED`, `operator-only`) | 403 | `operator-only` |
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
@@ -143,7 +157,10 @@ cause.
 How the service's answer selects a row: a gRPC status that carries a `Refusal` in its details
 is answered by the refusal's code. Any other status is answered by its gRPC code and its
 message, which the service sets to the code of the table: `NOT_FOUND` with `unknown-job` (404)
-or `expired` (410), `FAILED_PRECONDITION` with `not-finished` (409), `INTERNAL` with
+or `expired` (410), `FAILED_PRECONDITION` with `not-finished`, `no-log-sink` or `no-live-logs` (409),
+`OUT_OF_RANGE` with `field: fromOffset` (400 `out-of-range`), `RESOURCE_EXHAUSTED` with
+`too-many-follows` (429), `UNAVAILABLE` with `log-store-unavailable` (503),
+`PERMISSION_DENIED` with `operator-only` (403), `INTERNAL` with
 `state-write-failed` (500 `state-write-failed`), `UNIMPLEMENTED` (501), and `INVALID_ARGUMENT`
 (400, where a message `field: <name>` gives the `field`). Every other status, and a refusal
 code this version does not know, is a 500 `internal`. The crate's goldens
@@ -231,10 +248,15 @@ This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost` an
 reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
 the line is the record of who cancelled.
 
-Both transports are served on the port of `--job-listen` (off by default). Every call answers
-`UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it; the read calls, `SubmitJob`, `CancelJob` and the fleet calls are served
-(below). A request carries at most 64 KiB over either transport: a larger gateway body is 413
+Both transports are served on the port of `--job-listen` (off by default). The paragraph
+between the markers below is written by `cargo xtask gen-job-surface` from the server's list
+of the calls it serves, which a test of the server holds to what its service answers:
+
+<!-- gen-job-surface served begin -->
+The server serves every call of the service (`js_lease_server::SERVED_CALLS`).
+<!-- gen-job-surface served end -->
+
+A request carries at most 64 KiB over either transport: a larger gateway body is 413
 `request-too-large`, and a larger gRPC message is not decoded (`OUT_OF_RANGE`).
 
 | calls | file |
@@ -279,6 +301,72 @@ result (lost, or failed to start) answers its state and times alone.
 job the same tails as `GetResult` (at most 8 KiB a stream, with `truncated`), and for a job
 that has not ended (queued, placed, starting or running) empty tails and `truncated` false,
 never an error. Live output is read with a stream.
+
+### Reading logs
+
+`GetLogs` has two forms. Without `stream` (or with `LOG_STREAM_UNSPECIFIED`) it is the call
+as it was before streams were added and answers the tails above, with every field below
+empty. With `stream` set to `LOG_STREAM_STDOUT` or `LOG_STREAM_STDERR` it answers the job's
+`state` and one page of that stream, read from the log store the server's `[logs]` table
+names (`docs/design/live-logs.md`, sections 3.6 and 8), with empty tails. The job's row is
+read first, by the rules of the table above, so an unknown, swept or expired job answers
+as `GetJob` and `GetResult` do, whatever the store still holds (`logs.rs`).
+
+The bytes pass through the service: each page is read from the store with the server's read
+key for the answer and kept nowhere, neither in the job tables nor in the server's memory.
+A client needs no store credential.
+
+**Offsets.** A stream is addressed by byte offset from its first byte. The request gives
+`fromOffset` (absent: 0) and `maxBytes` (absent: 262,144; above 1,048,576 it is cut to
+1,048,576; 0 is refused). The answer gives `data`, contiguous bytes exactly as the job wrote
+them (no line parsing, no re-encoding), at most `maxBytes` of them; `offset`, the offset of
+the first byte of `data`; `nextOffset`, `offset` plus the length of `data`; `gaps`; `eof`;
+and `firstByteAtMs`, the time the host's capture first saw the first byte of `data`, from
+the chunk it came from (absent for an empty page and for a page read from a stream's final
+file). To read a stream exactly once, call again with `fromOffset` set to the `nextOffset`
+of the last answer, until `eof`.
+
+**Gaps.** Bytes that are not in the store and never will be (the host dropped them past its
+local cap, or they were never uploaded) are reported, not invented: `gaps` holds the range
+from `fromOffset` to `offset` when the page skipped one, and `data` begins after it. A range
+no object covers yet may still be uploaded; it is waited for (an empty page at
+`fromOffset`) until 30 seconds after the object after it was written or the job ended, and
+reported as a gap after that. A page ends before a gap, so the next call reports it.
+
+**The end.** `eof` is set once the job has ended and `nextOffset` is the stream's length,
+which the agent reported with the result; for a job lost without a result, once 30 seconds
+have passed since it ended, where its stored bytes end. A queued job answers an empty page.
+
+**Follow.** With `follow=true`, a page with nothing new (no gap, no data, not at the end) of
+a job that has not ended is a long poll: the server reads the store again every second and
+answers as soon as there is something or the job ends, and after 20 seconds answers the empty
+page; the client calls again from the same `nextOffset`. A job that has ended answers at
+once. At most `max_follow` (the `[logs]` key, 256 by default) follows wait at once; one more
+is refused with 429 `too-many-follows`, which a client retries after a backoff. A follow whose
+client goes away gives its place back at once. The call stays unary: a long poll, not a
+stream.
+
+| case | gRPC | gateway |
+|---|---|---|
+| the server's `[logs]` table has `sink = "none"` | `FAILED_PRECONDITION`, `no-log-sink` | 409 `no-log-sink` |
+| a job without live logs: its id has no log prefix, or it ended with a result that reports no stream lengths | `FAILED_PRECONDITION`, `no-live-logs` | 409 `no-live-logs` |
+| `maxBytes` of 0 | `INVALID_ARGUMENT`, `field: maxBytes` | 400 `invalid-argument`, `field` `maxBytes` |
+| `fromOffset` past the length of an ended job's stream | `OUT_OF_RANGE`, `field: fromOffset` | 400 `out-of-range`, `field` `fromOffset` |
+| more than `max_follow` follows waiting | `RESOURCE_EXHAUSTED`, `too-many-follows` | 429 `too-many-follows` |
+| the store unreachable, slow, failing, or refusing the read key | `UNAVAILABLE`, `log-store-unavailable` | 503 `log-store-unavailable` |
+
+A store failure never carries the store's words, a URL or a key. The server's log line says
+only whether the store refused the read key (an error: check `read_key_file` and `url`) or
+could not be read (a warning). The call changes nothing, so a client retries it.
+
+For example, `GET /v1/jobs/build-42/logs?stream=LOG_STREAM_STDOUT&fromOffset=0&follow=true`
+answers, while the job runs and has printed `hello\n`:
+
+```json
+{"state": "JOB_STATE_RUNNING", "data": "aGVsbG8K", "nextOffset": "6", "firstByteAtMs": "1800000000123"}
+```
+
+(`offset` is 0, a default, so the answer leaves it out.)
 
 **`ListJobs`** keeps the jobs in any of the `states` (a state this server does not know
 matches none), carrying every one of the `labels` with the same value, submitted by the
@@ -357,7 +445,9 @@ commit is `state-write-failed` and the job is as it was.
 
 The service's calls that are not about one job are an operator's view of the fleet. They
 take the same bearer token as the job calls, and only a client of the role `operator` may call
-them: any other client is answered `PERMISSION_DENIED` `operator-only` (403).
+them: any other client is answered `PERMISSION_DENIED` `operator-only` (403). This is what
+`fleet.rs` does with the server's handles; whether the server serves these calls is the
+generated paragraph above.
 
 - `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
   the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or

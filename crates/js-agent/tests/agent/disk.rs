@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use js_agent::bundle::Settings;
-use js_agent::disk::{DiskGauge, REREAD_MS, Reserve, ScratchDisk};
+use js_agent::disk::{DiskGauge, ImageReserve, REREAD_MS, Reserve, ScratchDisk};
 use js_agent::{Cli, CommandRunner, HEARTBEAT_PATH, Session};
 
 use crate::bundle::fake::FakeHost;
@@ -228,6 +228,36 @@ fn the_gauge_leaves_out_the_unused_budget_of_the_store() {
     host.set(|s| s.used = Ok(20 * GIB));
     clock.advance(REREAD_MS);
     assert_eq!(disk.gib(), Some(100));
+}
+
+/// Asserts that the part of the image budget the image store does not hold is left out of
+/// what the gauge says, as in the hello, follows the store as it fills, and leaves out
+/// nothing more once the store is at its budget. It catches a gauge that offers disk the
+/// image store may still take, and one that counts the held images twice.
+#[test]
+fn the_gauge_leaves_out_the_unused_image_budget() {
+    let clock = Arc::new(TestClock::default());
+    let df = Df::gib(100);
+    let dir = js_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "disk-image-gauge");
+    let store = dir.path().join("oci-images");
+    let images = ImageReserve {
+        budget_bytes: 20 * GIB,
+        store: store.clone(),
+    };
+    let disk = gauge(&df, &clock, None, None).with_images(Some(images));
+    assert_eq!(disk.gib(), Some(80));
+    let rootfs = store.join("a".repeat(64)).join("rootfs");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::File::create(rootfs.join("big"))
+        .unwrap()
+        .set_len(25 * GIB)
+        .unwrap();
+    clock.advance(REREAD_MS);
+    assert_eq!(disk.gib(), Some(100));
+    assert_eq!(
+        gauge(&df, &clock, None, None).with_images(None).gib(),
+        Some(100)
+    );
 }
 
 /// Asserts the interval: a second look inside it runs no program and repeats the last
