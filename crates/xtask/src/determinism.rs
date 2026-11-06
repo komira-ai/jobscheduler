@@ -93,6 +93,7 @@ pub const CRATES: &[&str] = &[
     "js-treestore",
     "js-types",
     "js-usage",
+    "js-vm-lease",
     "js-whole",
 ];
 

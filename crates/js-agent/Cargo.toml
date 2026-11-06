@@ -40,6 +40,8 @@ js-mac-session = { path = "../js-mac-session" }
 js-oci = { path = "../js-oci" }
 js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
+# The update hook's service-independent parts (src/update_hook).
+js-update-hook = { path = "../js-update-hook" }
 # The seam of a VM lease's VM (src/vm) and the protocol of `js-vmm lease`, which runs the real
 # driver: the agent starts that binary and links nothing of it.
 js-vm-lease = { path = "../js-vm-lease" }
