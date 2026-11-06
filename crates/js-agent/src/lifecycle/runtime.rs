@@ -107,9 +107,9 @@ pub struct RunSpec {
     /// What the run executes.
     pub body: Body,
     /// The environment a job start names, by name in order, which the runtime sets in the
-    /// container over the image's own variables (a name in both takes this value). Empty
-    /// for a run start and for a native body, whose environment is its own
-    /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
+    /// container over the image's own variables (a name in both takes this value), and the
+    /// native runtime over the environment it builds from the body's own
+    /// ([`NativeSpec::env`]). Empty for a run start. A runtime checks it before it creates anything
     /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one
     /// ([`Runtime::check_env`]).
     pub env: Vec<(String, String)>,
@@ -121,7 +121,8 @@ pub struct RunSpec {
     pub pids: Option<u64>,
     /// The GPU device indices the job may use.
     pub gpu_indices: Vec<u32>,
-    /// The mounts, already resolved.
+    /// The mounts, already resolved. For a native body, its `mount` inputs, resolved
+    /// read-only below their roots, each with the input's `dest` as its `target`.
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
@@ -413,9 +414,10 @@ pub trait Runtime {
     /// Whether this runtime carries a job start's environment (`env`, by name in order),
     /// asked at admission for every start, before anything is created and before
     /// [`Runtime::check_image`], so a start the runtime cannot give its environment is
-    /// answered for that and not for another reason. The default carries it, which is every
-    /// container runtime; the runtime a Mac agent has refuses a non-empty one
-    /// (`env-unsupported`): a job must never run without the environment it names.
+    /// answered for that and not for another reason. The default carries it, which every
+    /// runtime of this agent does (the container ones and the Mac's native one); a runtime
+    /// that could not refuses a non-empty one (`env-unsupported`): a job must never run
+    /// without the environment it names.
     ///
     /// # Errors
     ///

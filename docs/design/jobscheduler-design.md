@@ -260,7 +260,7 @@ trait CapacityProvider {
     async fn list(&self, scope: Scope) -> Vec<Instance>;      // for reaping and re-adoption                            (Built)
     async fn observe(&self, i: &InstanceId) -> Observed;      // Present | Absent | Unknown                             (Planned for elastic)
     fn verify_instance(&self, hello: &Hello) -> Option<InstanceId>; // match a first hello to an acquire            (Planned)
-    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices                              (Planned)
+    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices        (Built: Reclaimed; Interruption planned)
 }
 ```
 
@@ -766,7 +766,7 @@ A Mac agent uses `NativeRuntime` (`js-agent/src/native/`) with a root helper, `j
 
 Evidence: an isolation test (`js-agent/tests/native_isolation/`) plants one item of each kind of leftover (files, processes, keychain, defaults, launchd agents, shared memory and semaphores), removes the run, starts a second run on the same uid and looks for the items. It prints one of four verdicts. It runs on a Mac only, on manual dispatch.
 
-A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. Not done: staging inputs and collecting outputs for a native run (a start with `files` is refused `native-unsupported`, `native/mod.rs`), adopting a job after an agent restart, soft stop (the helper only kills), and the reuse pool of fixed users. Native runs are not stopped when the agent stops; the wall limit runs only while an agent runs.
+A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. A native run carries a job start's environment, stages its mount inputs into `exec/` and runs in its `cwd` below it, is adopted by the agent's next process (the lease journal's run record and the helper's `watch`), is stopped softly (the helper's `stop`: `SIGTERM`, `kill-uid` after the grace), and is bounded by a deadline of its wall limit and the stop grace that the helper holds itself, so it ends while no agent runs (`native/mod.rs`). Not done: `stage` inputs (no store of stage trees; refused `native-unsupported`) and the reuse pool of fixed users.
 
 ## 6. Background work
 
@@ -890,7 +890,7 @@ Rows 2, 7, 8, 27 and 29 are properties of the file store; step 2 of section 12.1
 | 2 | Ignored second save on a booking | Open | As built, the `acquire-settled` and `release-settled` saves are ignored. A failed `release-settled` save converges (the lease is stopped again); a failed `acquire-settled` save leaves a pending lease with no host that the tick drops as `Absent`, so a client told 201 gets 404 on renew. Untested. | Fail the second save of each, restart, assert dropped (acquire) and stopped again (release). |
 | 3 | Runs are not persisted | Open | As built a server restart cancels every run on every host and the work is lost; the client sees 410. Jobs are durable by design. | Restart with a job in flight: the host keeps it and lists it; the client reads the job. |
 | 4 | Agent restart loses crun jobs | Open | Containers are in the runtime's memory. The new process removes what its predecessor left and lists none. The job becomes lost with no result (section 6.7); as built the lease stays held and renewable and the run is `Ended` with no result (section 5.7, item 7). The Docker and Podman path adopts by label. | Kill agent mid-job; assert cleanup and what the client reads. |
-| 5 | No agent self-fence | Open | Documented in older designs; absent in code. A partitioned agent keeps running until the job's wall limit; a cancel or a given-up job is not stopped by any token. Native Mac jobs are unbounded while the agent is down. | Partition an agent after a cancel; assert the job stops within a bound. |
+| 5 | No agent self-fence | Open | Documented in older designs; absent in code. A partitioned agent keeps running until the job's wall limit; a cancel or a given-up job is not stopped by any token. Native Mac jobs are bounded while the agent is down only by the deadline the helper holds (the wall limit plus the stop grace). | Partition an agent after a cancel; assert the job stops within a bound. |
 | 6 | No fencing token on a start | Open | The wire's `fence` field is not built. A cancelled job's container can overlap the host's next job until its wall limit (as built, an expired lease's run). | Cancel a running job; assign the host; assert the old job cannot write. |
 | 7 | Single writer is flock only | Open | Local `flock` stops a second process on one filesystem. On a network filesystem it may not hold and two tables could issue the same ids. | Not testable in CI; document. |
 | 8 | Restoring an older store | Open | As built, restoring an older lease file can reissue `(term, sequence)`; the fix is hand-editing `term` and `next_sequence`. Target: no id repeats, but a restored backup forgets the jobs accepted since; the hosts still list them and are told to stop them (section 6.7). | A restore verb; restore, then assert hosts' jobs are stopped and clients can resubmit. |
@@ -1058,7 +1058,7 @@ Order that follows from the dependencies: 1, 2, 5, 12 and 25 can start now. 3 an
 
 **Whole-host jobs.** Built: the tail rule; registry marks, drain, give-up, caps; wait list; persisted ledger; estimate feed; tail counters; backfill gate. In review: `request_id` on a whole-node lease acquire, which makes the whole path reachable from HTTP today; the job API makes it reachable as a job (steps 8, 27). Remaining: a proof that queue order is respected (step 8); the restart test of section 8 row 10; rows 25 and 28 of section 8 close by design in steps 8, 27 and 28; rows 39 and 40 in step 8.
 
-**Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process. Remaining: staging inputs and collecting outputs (step 17); the pool of reused users; adoption after restart; soft stop; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
+**Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process; a job start's environment; mount inputs and `cwd`; adoption after restart; soft stop; a deadline the helper holds. Remaining: `stage` inputs (step 17); the pool of reused users; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
 
 **Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a safe restore verb; reservations of capacity (question 24).
 
