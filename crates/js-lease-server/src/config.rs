@@ -36,12 +36,14 @@ use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
 mod cpu_slack;
+mod job_wall;
 mod listen;
 mod placement;
 mod resolve;
 mod retention;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
@@ -227,6 +229,11 @@ pub struct Cli {
     /// window affects only the jobs that end after the restart.
     #[arg(long, default_value = DEFAULT_JOB_RETENTION, value_parser = parse_job_retention)]
     pub job_retention: Retention,
+    /// The most a submitted job's wall limit may be: a whole count of days (`30d`) or a
+    /// duration such as `12h` or `90m`, at least one second; 30 days unless given. A job
+    /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
+    #[arg(long, value_parser = parse_max_job_wall)]
+    pub max_job_wall: Option<Duration>,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -430,6 +437,8 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
+    pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
 }
 
@@ -503,6 +512,7 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
         })
     }
@@ -620,6 +630,7 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
         })
     }

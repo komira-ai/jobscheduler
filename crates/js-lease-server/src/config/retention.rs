@@ -25,7 +25,15 @@ const SECS_PER_DAY: u64 = 24 * 60 * 60;
 /// # Errors
 /// [`JOB_RETENTION_MUST`] as text when `text` is not such a window.
 pub fn parse_job_retention(text: &str) -> Result<Retention, String> {
-    let window = match text.strip_suffix('d') {
+    days_or_duration(text)
+        .and_then(|window| Retention::new(window).ok())
+        .ok_or_else(|| JOB_RETENTION_MUST.to_owned())
+}
+
+/// A whole count of days (`7d`), or a duration as [`parse_duration`] reads it; `None` for
+/// anything else, zero included.
+pub(super) fn days_or_duration(text: &str) -> Option<Duration> {
+    match text.strip_suffix('d') {
         // Digits only: `u64`'s parser would also take a leading `+`.
         Some(days) => Some(days)
             .filter(|days| days.bytes().all(|byte| byte.is_ascii_digit()))
@@ -33,10 +41,7 @@ pub fn parse_job_retention(text: &str) -> Result<Retention, String> {
             .and_then(|days| days.checked_mul(SECS_PER_DAY))
             .map(Duration::from_secs),
         None => parse_duration(text).ok(),
-    };
-    window
-        .and_then(|window| Retention::new(window).ok())
-        .ok_or_else(|| JOB_RETENTION_MUST.to_owned())
+    }
 }
 
 #[cfg(test)]
