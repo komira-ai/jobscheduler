@@ -1,4 +1,4 @@
-//! `rollback` (host-updates design, 4.2): put the previous release back. It is run after a
+//! `rollback` (host-updates design, 4.2): start the previous release again. It is run after a
 //! failed, killed or deferred `prepare` or `cutover`, and after a `verify` that failed; it
 //! decides from the record and from what the machine shows, and a rerun after a kill at any
 //! point goes on from there and makes no act twice.
@@ -17,19 +17,22 @@
 //!    of the same release go forward from where it stopped. It stops no agent: that agent may
 //!    hold a job, no cordon was placed to drain it under, and a stop inside a job's owed-checks
 //!    window taints the host for good;
-//! 4. otherwise the unit and the release link are read, and the first row that matches is taken
-//!    (the system is believed over the marks): a unit that is `deactivating` is waited for and
-//!    then taken as stopped; a unit that is up on the staged release is the new agent and is
-//!    drained and stopped; a unit that is up on the previous release needs no act; a unit that
-//!    is up on any other release is `state_invalid`, nothing done; a stopped unit needs the
-//!    link and the start;
+//! 4. otherwise the release link must be on the previous release (`link_failed`, class
+//!    environment, nothing done, if it is not): the updater moves it back before this step runs,
+//!    and the hook reads it and never writes it. The link cannot say which agent runs, so the
+//!    record does: the first row that matches is taken (the system is believed over the marks):
+//!    a unit that is `deactivating` is waited for and then taken as stopped; a unit that is up
+//!    after `cutover` issued the start, and before this step has, is the new agent and is drained
+//!    and stopped; any other unit that is up is the previous agent and needs no act; a stopped
+//!    unit needs the start;
 //! 5. drain (new agent only; the cordon is kept up, or put back if it lapsed, within the cap):
 //!    wait up to the drain bound for the host to hold no lease, then mark `rb.drained`. A lease
 //!    after the bound fails the step (`drain_bound`, class environment) with nothing stopped
 //!    and the cordon left to lapse: the SIGTERM would land on a job of unknown phase;
-//! 6. stop (`rb.stop_begun` first, then the stop and a wait for the unit to be down), the link
-//!    back to the previous release (`rb.link_restored` first), the start (`rb.start_issued`
-//!    first) and the wait for the previous agent's hello, and then `rb.hello_ok`, after it;
+//! 6. stop (`rb.stop_begun` first, then the stop and a wait for the unit to be down), the mark
+//!    that the link is on the previous release (`rb.link_restored`, first), the start
+//!    (`rb.start_issued` first) and the wait for the previous agent's hello, and then
+//!    `rb.hello_ok`, after it;
 //! 7. the cordon is lifted if this update placed it and it has not lapsed or been left
 //!    unconfirmed, and the record is deleted. A lease server that does not answer the lift
 //!    does not hold the step: the cordon is ours and nothing renews it any more, so it lapses
@@ -39,12 +42,12 @@
 //! showed in the last reading before this step's first act (recorded with the mark of that act
 //! as `rb_pre_stop_session_ms`, and compared by equality: both are the server's stamps), of the
 //! previous version, on the execution mode the declared runtime names
-//! (`Declaration::hello_runtime`). A step that makes no act (the previous agent already runs on
+//! (`Settings::hello_runtime`). A step that makes no act (the previous agent already runs on
 //! the previous release) asks for no other session.
 //!
 //! A hello that names no runtime is accepted by version alone. Only a previous agent from before
 //! the hello carried the runtime can send one, and neither the record (which holds the previous
-//! version as a string) nor the declaration says which versions report it; requiring it would
+//! version as a string) nor the settings say which versions report it; requiring it would
 //! refuse exactly the old agents a rollback exists to bring back. A hello that names one must
 //! name the declared mode.
 //!
@@ -81,8 +84,7 @@ use crate::update_hook::{
 };
 
 use super::cutover::{
-    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause,
-    release_link, show,
+    Life, begun, bring_up, environment, irreversible, life, linked, mark, ours, pause, show,
 };
 use super::prepare::{place, refuse_host, renew};
 use super::{Env, failure, lease_failure, open_state, save, state_failure, success};
@@ -128,68 +130,57 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         ));
     };
     if !record.rb.hello_ok {
-        let link = release_link(env, params)?;
-        restore(env, params, held, record, &link, &previous)?;
+        restore(env, params, held, record, &previous)?;
     }
     finish(env, held, record)
 }
 
-/// Where the release link points, among the two releases of the update.
-enum At {
-    Previous,
-    Staged,
-    Other,
-}
-
-fn link_at(env: &Env<'_>, link: &Path, record: &Record, previous: &Path) -> Result<At, Done> {
-    if linked(env, link, previous)? {
-        Ok(At::Previous)
-    } else if linked(env, link, &record.update.staged)? {
-        Ok(At::Staged)
-    } else {
-        Ok(At::Other)
-    }
-}
-
-/// Everything from the unit's state to the previous agent's hello.
+/// Everything from the unit's state to the previous agent's hello. The updater has moved the
+/// release link back to the previous release; the hook reads it and never writes it.
+///
+/// Which agent runs is not read from the link (it points at the previous release in every case):
+/// the record says. A unit that is up after `cutover` issued the start, and before this step
+/// has, is the new agent; one that is up otherwise is the previous agent, which the stop never
+/// reached or this step started.
 fn restore(
     env: &Env<'_>,
     params: &Params,
     held: &Held,
     record: &mut Record,
-    link: &Path,
     previous: &Path,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
+    if !linked(env, &params.release_link, previous)? {
+        return Err(environment(
+            Reason::LinkFailed,
+            format!(
+                "the release link {} is not on the previous release {}: the updater moves it back before rollback",
+                params.release_link.display(),
+                previous.display()
+            ),
+        ));
+    }
     let state = show(env, &unit, Reason::StopFailed)?;
-    let at = link_at(env, link, record, previous)?;
     let mut down = matches!(life(&state), Life::Down);
     if matches!(life(&state), Life::Stopping) {
         wait_down(env, params, held, record, &unit)?;
         down = true;
     }
     if !down {
-        match at {
-            At::Previous => return await_hello(env, params, held, record),
-            At::Other => {
-                return Err(failure(
-                    Reason::StateInvalid,
-                    format!(
-                        "{unit} runs from a release link that is neither the staged nor the previous release"
-                    ),
-                ));
-            }
-            At::Staged => {
-                drain(env, params, held, record)?;
-                stop(env, params, held, record, &unit)?;
-            }
+        let new_agent = record.start_issued && !record.rb.start_issued;
+        if !new_agent {
+            return await_hello(env, params, held, record);
         }
+        drain(env, params, held, record)?;
+        stop(env, params, held, record, &unit)?;
     }
     refuse_host(env)?;
-    relink(env, held, record, link, previous)?;
+    if !record.rb.link_restored {
+        mark_act(env, params, held, record, set_link_restored)?;
+    }
     refuse_host(env)?;
     if !record.rb.start_issued {
-        mark_act(env, held, record, set_start_issued)?;
+        mark_act(env, params, held, record, set_start_issued)?;
     }
     bring_up(env, held, record, params)?;
     await_hello(env, params, held, record)
@@ -220,10 +211,10 @@ fn set_hello_ok(record: &mut Record) {
 /// step fails as an environment matter (`lease_unreachable`): asked only before this step's
 /// first act, so nothing is half-done. The bound is of this one wait, counted from this call:
 /// the step as a whole is not held to the declared timeout (see the module header).
-fn read_host(env: &Env<'_>) -> Result<HostReading, Done> {
+fn read_host(env: &Env<'_>, params: &Params) -> Result<HostReading, Done> {
     // What is left of the declared bound for the other waits: the start, the hello and a margin.
-    let bound_ms = env
-        .declaration
+    let bound_ms = params
+        .settings
         .timeouts
         .rollback
         .saturating_sub(START_WAIT_SECS)
@@ -250,6 +241,7 @@ fn read_host(env: &Env<'_>) -> Result<HostReading, Done> {
 /// with exit 1, class environment, `lease_unreachable`, and nothing begun.
 fn mark_act(
     env: &Env<'_>,
+    params: &Params,
     held: &Held,
     record: &mut Record,
     set: fn(&mut Record),
@@ -258,7 +250,7 @@ fn mark_act(
     let acted = rb.stop_begun || rb.link_restored || rb.start_issued;
     let mut next = record.clone();
     if !acted {
-        let host = read_host(env)?;
+        let host = read_host(env, params)?;
         next.rb_pre_stop_session_ms = host.session_started_ms;
     }
     set(&mut next);
@@ -297,7 +289,7 @@ fn drain(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Re
     let began = env.ports.clock.now_ms();
     loop {
         refuse_host(env)?;
-        let host = read_host(env)?;
+        let host = read_host(env, params)?;
         keep_out(env, params, held, record, &host)?;
         if host.leases == 0 && !host.releasing {
             break;
@@ -319,8 +311,9 @@ fn drain(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Re
 
 /// The longest the wait for the unit to stop may be: what the declared bound leaves after the
 /// drain, the start, the hello and a margin.
-fn stop_bound_ms(env: &Env<'_>, params: &Params) -> u64 {
-    env.declaration
+fn stop_bound_ms(params: &Params) -> u64 {
+    params
+        .settings
         .timeouts
         .rollback
         .saturating_sub(params.drain_wait_secs)
@@ -340,7 +333,7 @@ fn stop(
 ) -> Result<(), Done> {
     refuse_host(env)?;
     if !record.rb.stop_begun {
-        mark_act(env, held, record, set_stop_begun)?;
+        mark_act(env, params, held, record, set_stop_begun)?;
     }
     env.ports.point();
     env.ports
@@ -357,7 +350,7 @@ fn wait_down(
     record: &mut Record,
     unit: &str,
 ) -> Result<(), Done> {
-    let bound_ms = stop_bound_ms(env, params);
+    let bound_ms = stop_bound_ms(params);
     let began = env.ports.clock.now_ms();
     loop {
         refuse_host(env)?;
@@ -377,35 +370,6 @@ fn wait_down(
         }
         pause(env, held, record, params)?;
     }
-}
-
-/// Marks the link as restored, and moves it unless it is on the previous release already.
-fn relink(
-    env: &Env<'_>,
-    held: &Held,
-    record: &mut Record,
-    link: &Path,
-    previous: &Path,
-) -> Result<(), Done> {
-    // Read before the mark: a read that fails leaves nothing begun.
-    let on_previous = linked(env, link, previous)?;
-    if !record.rb.link_restored {
-        mark_act(env, held, record, set_link_restored)?;
-    }
-    if on_previous {
-        return Ok(());
-    }
-    env.ports.point();
-    env.ports.link.relink(link, previous).map_err(|why| {
-        environment(
-            Reason::LinkFailed,
-            format!(
-                "cannot move {} back to {}: {why}",
-                link.display(),
-                previous.display()
-            ),
-        )
-    })
 }
 
 /// What the last look of the lease server showed.
@@ -480,7 +444,7 @@ fn await_hello(
         if state.active == "active" {
             last = match env.ports.lease.host() {
                 Ok(host) => {
-                    match judge(&host, record, &previous, env.declaration.hello_runtime()) {
+                    match judge(&host, record, &previous, params.settings.hello_runtime()) {
                         Ok(()) => break,
                         Err(look) => look,
                     }

@@ -1,31 +1,42 @@
-//! The verb itself: argument handling, the exit status of each outcome, the machine's steps, the
-//! dispatch in `main_with` and the process.
+//! The verb itself: argument handling in both forms hostkeeper uses (behind `update-hook` and the
+//! bare step), the exit status of each outcome, the machine's steps, the dispatch in `main_with`
+//! and the process.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::process::{Command, ExitCode};
 
 use js_agent::update_hook::{
-    Class, DECLARATION_PATH, Done, Host, Invocation, Machine, Outcome, Params, Reason, Report,
-    Step, VERB, fd_stat, run, run_step,
+    Class, Done, Host, Invocation, Machine, Outcome, Params, Reason, Report, Step, VERB, fd_stat,
+    run, run_step,
 };
 use js_testkit::dir::TestDir;
 
 const PARAMS: &str = concat!(
     "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
     "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+    "unit = \"js-agent-crun.service\"\nstate_dir = \"/nowhere/js-agent-update\"\n",
+    "release_link = \"/nowhere/current\"\nflags_file = \"/nowhere/flags\"\n",
+    "token_file = \"/nowhere/token\"\nstate_root = \"/nowhere/state\"\nruntime = \"crun\"\n",
+    "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
+    "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
     "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
     "\"updater.staged_release\" = \"/staged\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
 );
 
+/// The two ways the updater starts the hook: behind the verb, and with the bare step.
+const FORMS: [bool; 2] = [true, false];
+
 fn status(code: u8) -> String {
     format!("{:?}", ExitCode::from(code))
 }
 
-fn words(list: &[&str]) -> Vec<OsString> {
-    ["js-agent", VERB]
+/// The command line: the program, the verb when `verb`, and `list`.
+fn words(verb: bool, list: &[&str]) -> Vec<OsString> {
+    ["js-agent"]
         .into_iter()
+        .chain(verb.then_some(VERB))
         .chain(list.iter().copied())
         .map(OsString::from)
         .collect()
@@ -46,9 +57,15 @@ struct Ran {
     err: String,
 }
 
+/// Runs the hook behind the verb.
 fn run_with(args: &[&str], host: &Host<'_>) -> Ran {
+    run_in(true, args, host)
+}
+
+/// Runs the hook in the form `verb` says.
+fn run_in(verb: bool, args: &[&str], host: &Host<'_>) -> Ran {
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(&words(args), &mut out, &mut err, host);
+    let code = run(&words(verb, args), &mut out, &mut err, host);
     Ran {
         status: format!("{code:?}"),
         out: String::from_utf8(out).unwrap(),
@@ -83,11 +100,17 @@ fn each_outcome_exits_with_its_status_and_prints_the_report_the_step_gave() {
             outcome,
             report: given.clone(),
         };
-        let ran = run_with(&["verify", "--params", &params], &Host { step: &step });
-        assert_eq!(ran.status, status(code), "{outcome:?}");
-        assert_eq!(outcome.code(), code);
-        assert_eq!(ran.out, format!("{}\n", report.to_line()));
-        assert_eq!(ran.err, "");
+        for verb in FORMS {
+            let ran = run_in(
+                verb,
+                &["verify", "--params", &params],
+                &Host { step: &step },
+            );
+            assert_eq!(ran.status, status(code), "{outcome:?}");
+            assert_eq!(outcome.code(), code);
+            assert_eq!(ran.out, format!("{}\n", report.to_line()));
+            assert_eq!(ran.err, "");
+        }
     }
 }
 
@@ -102,13 +125,18 @@ fn the_step_is_given_the_invocation_and_the_params_it_was_asked_with() {
             report: Report::default(),
         }
     };
-    let ran = run_with(
-        &["prepare", "/staged", "--params", &params],
-        &Host { step: &step },
-    );
-    assert_eq!(ran.status, status(0));
+    for verb in FORMS {
+        let ran = run_in(
+            verb,
+            &["prepare", "/staged", "--params", &params],
+            &Host { step: &step },
+        );
+        assert_eq!(ran.status, status(0));
+    }
     let seen = seen.into_inner();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.len(), 2);
+    // Behind the verb or bare, the step is given the same invocation and the same table.
+    assert_eq!(seen[0], seen[1]);
     assert_eq!(seen[0].0.step, Step::Prepare);
     assert_eq!(
         seen[0].0.artifact.as_deref(),
@@ -116,6 +144,7 @@ fn the_step_is_given_the_invocation_and_the_params_it_was_asked_with() {
     );
     assert_eq!(seen[0].1.cordon_lease_secs, 300);
     assert_eq!(seen[0].1.cordon_max_secs, 17355);
+    assert_eq!(seen[0].1.settings.unit, "js-agent-crun.service");
 }
 
 #[test]
@@ -128,20 +157,27 @@ fn a_refused_command_line_runs_no_step_and_still_ends_with_a_valid_line() {
             report: Report::default(),
         }
     };
-    let cases: [&[&str]; 4] = [
+    // `uninstall` is hostkeeper's step for a service that declares an uninstall bound; the
+    // package declares none, and the word is refused like any other the hook does not know.
+    let cases: [&[&str]; 6] = [
         &[],
         &["restart", "--params", "/p"],
         &["prepare", "--params", "/p"],
         &["cutover"],
+        &["uninstall", "--params", "/p"],
+        &["--release-link=/opt/x", "cutover", "--params", "/p"],
     ];
     for args in cases {
-        let ran = run_with(args, &Host { step: &step });
-        assert_eq!(ran.status, status(1), "{args:?}");
-        let line = last_line(&ran.out);
-        assert_eq!(line["reason"], "bad_args", "{args:?}");
-        assert_eq!(line["class"], "release");
-        assert_eq!(line["reversible"], true);
-        assert!(ran.err.starts_with("js-agent update-hook: "), "{}", ran.err);
+        for verb in FORMS {
+            // Bare, nothing at all is not a command line of the hook's: it needs the verb.
+            let ran = run_in(verb, args, &Host { step: &step });
+            assert_eq!(ran.status, status(1), "{args:?}");
+            let line = last_line(&ran.out);
+            assert_eq!(line["reason"], "bad_args", "{args:?}");
+            assert_eq!(line["class"], "release");
+            assert_eq!(line["reversible"], true);
+            assert!(ran.err.starts_with("js-agent update-hook: "), "{}", ran.err);
+        }
     }
     assert!(!called.get());
 }
@@ -199,100 +235,96 @@ fn an_unreadable_or_incomplete_params_file_runs_no_step() {
     assert!(!called.get());
 }
 
-/// The tests that run the verb as the process does, over the declaration path of the machine
-/// they run on, need that path to be empty.
-fn assert_no_declaration_installed() {
-    assert!(
-        !std::path::Path::new(DECLARATION_PATH).exists(),
-        "this test needs a machine with no declaration installed"
-    );
-}
-
 #[test]
-fn every_step_of_a_machine_reads_the_declaration_before_anything_else() {
-    let (dir, params) = params_file("hook-verb-machine", PARAMS);
-    // A machine whose declaration is not there, whatever this host has installed.
-    let declaration = dir.path().join("no-such-declaration.toml");
+fn every_step_of_a_machine_ends_state_invalid_when_the_state_directory_is_not_there() {
+    let (_dir, params) = params_file("hook-verb-machine", PARAMS);
     let stat = |_: &std::path::Path, fd: std::os::fd::BorrowedFd<'_>| fd_stat(fd);
     let own_id = || Err("unused".to_owned());
     let machine = Machine {
-        declaration: &declaration,
         stat: &stat,
         own_host_id: &own_id,
+        ..Machine::system()
     };
     let run_machine =
         |invocation: &Invocation, params: &Params| run_step(invocation, params, &machine);
     for step in Step::ALL {
-        let mut args = vec![step.name()];
-        if step == Step::Prepare {
-            args.push("/staged");
+        for verb in FORMS {
+            let mut args = vec![step.name()];
+            if step == Step::Prepare {
+                args.push("/staged");
+            }
+            args.extend(["--params", &params]);
+            let ran = run_in(verb, &args, &Host { step: &run_machine });
+            assert_eq!(ran.status, status(1), "{step}");
+            let line = last_line(&ran.out);
+            assert_eq!(line["reason"], "state_invalid", "{step}");
+            assert!(
+                line["detail"].as_str().unwrap().contains("/nowhere"),
+                "{step}: {line}"
+            );
+            assert_eq!(line["class"], "release");
+            assert_eq!(line["reversible"], true);
+            assert_eq!(line["promotion_pending"], false);
         }
-        args.extend(["--params", &params]);
-        let ran = run_with(&args, &Host { step: &run_machine });
-        assert_eq!(ran.status, status(1), "{step}");
-        let line = last_line(&ran.out);
-        assert_eq!(line["reason"], "state_invalid", "{step}");
-        assert!(
-            line["detail"].as_str().unwrap().contains("declaration"),
-            "{step}: {line}"
+    }
+}
+
+#[test]
+fn main_with_answers_the_verb_and_the_bare_steps_before_it_installs_the_signal_handlers() {
+    let (_dir, params) = params_file("hook-verb-dispatch", PARAMS);
+    for verb in FORMS {
+        let installed = Cell::new(false);
+        let install = || {
+            installed.set(true);
+            Err(std::io::Error::other("no signal handlers in a hook"))
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = js_agent::main_with(
+            &install,
+            words(verb, &["verify", "--params", &params]),
+            &mut out,
+            &mut err,
         );
+        assert!(!installed.get(), "the hook installed the signal handlers");
+        assert_eq!(format!("{code:?}"), status(1));
+        let line = last_line(&String::from_utf8(out).unwrap());
+        assert_eq!(line["reason"], "state_invalid");
+    }
+}
+
+#[test]
+fn the_binary_prints_one_valid_last_line_and_exits_1() {
+    let (_dir, params) = params_file("hook-verb-process", PARAMS);
+    for verb in FORMS {
+        let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
+            .args(verb.then_some(VERB))
+            .arg("prepare")
+            .arg("/staged")
+            .args(["--params", &params])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+        let line = last_line(&String::from_utf8(output.stdout).unwrap());
         assert_eq!(line["class"], "release");
+        assert_eq!(line["reason"], "state_invalid");
         assert_eq!(line["reversible"], true);
         assert_eq!(line["promotion_pending"], false);
     }
 }
 
 #[test]
-fn main_with_answers_the_verb_before_it_installs_the_signal_handlers() {
-    assert_no_declaration_installed();
-    let (_dir, params) = params_file("hook-verb-dispatch", PARAMS);
-    let installed = Cell::new(false);
-    let install = || {
-        installed.set(true);
-        Err(std::io::Error::other("no signal handlers in a hook"))
-    };
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = js_agent::main_with(
-        &install,
-        words(&["verify", "--params", &params]),
-        &mut out,
-        &mut err,
-    );
-    assert!(!installed.get(), "the verb installed the signal handlers");
-    assert_eq!(format!("{code:?}"), status(1));
-    let line = last_line(&String::from_utf8(out).unwrap());
-    assert_eq!(line["reason"], "state_invalid");
-}
-
-#[test]
-fn the_binary_prints_one_valid_last_line_and_exits_1() {
-    assert_no_declaration_installed();
-    let (_dir, params) = params_file("hook-verb-process", PARAMS);
-    let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
-        .args([VERB, "prepare"])
-        .arg("/staged")
-        .args(["--params", &params])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    let line = last_line(&String::from_utf8(output.stdout).unwrap());
-    assert_eq!(line["class"], "release");
-    assert_eq!(line["reason"], "state_invalid");
-    assert_eq!(line["reversible"], true);
-    assert_eq!(line["promotion_pending"], false);
-}
-
-#[test]
 fn the_binary_refuses_a_missing_params_flag_with_a_valid_line() {
-    let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
-        .args([VERB, "cutover"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let line = last_line(&String::from_utf8(output.stdout).unwrap());
-    assert_eq!(line["reason"], "bad_args");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--params"));
+    for words in [vec![VERB, "cutover"], vec!["cutover"], vec!["uninstall"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
+            .args(&words)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{words:?}");
+        let line = last_line(&String::from_utf8(output.stdout).unwrap());
+        assert_eq!(line["reason"], "bad_args", "{words:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).starts_with("js-agent update-hook: "));
+    }
 }
 
 #[test]
@@ -322,9 +354,11 @@ fn a_params_file_without_a_good_artifact_digest_runs_no_step_on_any_step() {
                 args.push("/staged");
             }
             args.extend(["--params", file.as_str()]);
-            let ran = run_with(&args, &Host { step: &step });
-            assert_eq!(ran.status, status(1), "{step_name}");
-            assert_eq!(last_line(&ran.out)["reason"], "bad_params", "{step_name}");
+            for verb in FORMS {
+                let ran = run_in(verb, &args, &Host { step: &step });
+                assert_eq!(ran.status, status(1), "{step_name}");
+                assert_eq!(last_line(&ran.out)["reason"], "bad_params", "{step_name}");
+            }
         }
     }
     assert!(!called.get());

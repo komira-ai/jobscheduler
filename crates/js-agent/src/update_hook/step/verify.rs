@@ -1,6 +1,6 @@
 //! `verify` (host-updates design, 4.2): look, again and again until a bound, for proof that the
 //! new agent runs and is serving. It reads and never changes the machine: the cordon, the link
-//! and the unit are left as `cutover` left them, for `rollback` or `cleanup`. The one write is
+//! (the updater's) and the unit are left as `cutover` left them, for `rollback` or `cleanup`. The one write is
 //! the record's `verify_ok`, after the observation it names.
 //!
 //! The proof, at a look where the unit is `active`:
@@ -38,6 +38,7 @@ use crate::update_hook::{
     Class, Done, HostReading, LeaseError, POLL_SECS, Params, Reason, Record, VERIFY_MARGIN_SECS,
 };
 
+use super::cutover::linked;
 use super::prepare::refuse_host;
 use super::{Env, failure, lease_failure, open_state, save, success};
 
@@ -65,17 +66,13 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
             "the record does not say that cutover started the unit",
         ));
     }
-    let on_staged = params.release_link.as_deref().is_some_and(|link| {
-        let target = env.ports.link.target(link);
-        target.ok().flatten().as_deref() == Some(record.update.staged.as_path())
-    });
-    if !on_staged {
+    if !linked(env, &params.release_link, &record.update.staged).unwrap_or(false) {
         return Err(failure(
             Reason::StateInvalid,
             "the release link is not on the staged release",
         ));
     }
-    wait(env, &record)?;
+    wait(env, params, &record)?;
     // After the observation, so that a mark means it was made.
     record.verify_ok = true;
     save(env, &held, &record)?;
@@ -120,10 +117,10 @@ fn judge(host: &HostReading, record: &Record, runtime: &str) -> Result<(), Look>
 }
 
 /// Looks until the new agent is proved, or the bound passes.
-fn wait(env: &Env<'_>, record: &Record) -> Result<(), Done> {
+fn wait(env: &Env<'_>, params: &Params, record: &Record) -> Result<(), Done> {
     let unit = record.update.unit.as_str();
-    let bound_ms = env
-        .declaration
+    let bound_ms = params
+        .settings
         .timeouts
         .verify
         .saturating_sub(VERIFY_MARGIN_SECS)
@@ -152,7 +149,7 @@ fn wait(env: &Env<'_>, record: &Record) -> Result<(), Done> {
         }
         if state.active == "active" {
             last = match env.ports.lease.host() {
-                Ok(host) => match judge(&host, record, env.declaration.hello_runtime()) {
+                Ok(host) => match judge(&host, record, params.settings.hello_runtime()) {
                     Ok(()) => return Ok(()),
                     Err(look) => look,
                 },

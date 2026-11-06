@@ -1,17 +1,28 @@
-//! The `--params` table: a flat table of scalars with two required whole-second keys and the
-//! reserved `updater.*` keys the updater adds.
+//! The `--params` table: a flat table of scalars, the keys the package manifest gives
+//! (`KEYS`, all required) and the reserved `updater.*` keys the updater adds.
 
 use std::path::PathBuf;
 
+use js_agent::update_hook::params::KEYS;
 use js_agent::update_hook::{
-    CA_CERT_KEY, ConnectParams, HOST_ID_KEY, MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError,
-    RELEASE_LINK_KEY, SERVER_KEY, STATE_ROOT_KEY, TOKEN_FILE_KEY,
+    ConnectParams, MIN_CORDON_LEASE_SECS, POLL_SECS, Params, ParamsError, RELEASE_LINK_KEY,
+    STATE_ROOT_KEY, Settings, TOKEN_FILE_KEY, Timeouts,
 };
 use js_testkit::dir::TestDir;
 
 const CORDON: &str = concat!(
     "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
     "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
+);
+/// The manifest's keys but the cordon's: what the package says of the unit, the paths and the
+/// bounds.
+const SETTINGS: &str = concat!(
+    "unit = \"js-agent-crun.service\"\nstate_dir = \"/var/lib/js-agent-update\"\n",
+    "release_link = \"/var/lib/hostkeeper/packages/js-agent/current\"\n",
+    "flags_file = \"/etc/js-agent/flags\"\ntoken_file = \"/etc/js-agent/token\"\n",
+    "state_root = \"/var/lib/js-agent/state\"\nruntime = \"crun\"\n",
+    "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
+    "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
 );
 const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const RELEASES: &str = concat!(
@@ -20,6 +31,12 @@ const RELEASES: &str = concat!(
     "\"updater.previous_release\" = \"/opt/js-agent/releases/old\"\n",
     "\"updater.target_version\" = \"1.4.0\"\n",
     "\"updater.previous_version\" = \"1.3.2\"\n",
+    "unit = \"js-agent-crun.service\"\nstate_dir = \"/var/lib/js-agent-update\"\n",
+    "release_link = \"/var/lib/hostkeeper/packages/js-agent/current\"\n",
+    "flags_file = \"/etc/js-agent/flags\"\ntoken_file = \"/etc/js-agent/token\"\n",
+    "state_root = \"/var/lib/js-agent/state\"\nruntime = \"crun\"\n",
+    "prepare_timeout_secs = 3900\ncutover_timeout_secs = 4320\nverify_timeout_secs = 615\n",
+    "rollback_timeout_secs = 8220\ncleanup_timeout_secs = 120\nverify_deadline_secs = 9000\n",
 );
 /// A first install: the updater sets no previous release or version.
 const FIRST_INSTALL: &str = concat!(
@@ -32,6 +49,22 @@ fn good() -> String {
     format!("{CORDON}{RELEASES}")
 }
 
+/// `good()` but for the line of `key`, which `replacement` (a whole line, or nothing) stands
+/// for.
+fn good_but(key: &str, replacement: &str) -> String {
+    good()
+        .lines()
+        .map(|line| {
+            if line.starts_with(&format!("{key} =")) {
+                replacement.to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 /// The cordon keys and the two required release keys, but for `key`, which is set to `value`
 /// (a TOML value) as the one under test.
 fn with(key: &str, value: &str) -> String {
@@ -41,7 +74,7 @@ fn with(key: &str, value: &str) -> String {
         ("updater.staged_release", "\"/opt/js-agent/releases/new\""),
         ("updater.target_version", "\"1.4.0\""),
     ];
-    let mut text = CORDON.to_owned();
+    let mut text = format!("{CORDON}{SETTINGS}");
     for (name, ok) in required.iter().filter(|(name, _)| *name != key) {
         text.push_str(&format!("\"{name}\" = {ok}\n"));
     }
@@ -54,10 +87,23 @@ fn refused(text: &str) -> ParamsError {
 }
 
 #[test]
-fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
+fn the_manifest_keys_and_the_reserved_release_keys_are_read() {
     assert_eq!(
         Params::parse(&good()).unwrap(),
         Params {
+            settings: Settings {
+                state_dir: PathBuf::from("/var/lib/js-agent-update"),
+                unit: "js-agent-crun.service".to_owned(),
+                runtime: "crun".to_owned(),
+                timeouts: Timeouts {
+                    prepare: 3900,
+                    cutover: 4320,
+                    verify: 615,
+                    rollback: 8220,
+                    cleanup: 120,
+                },
+                verify_deadline_secs: 9000,
+            },
             cordon_lease_secs: 300,
             cordon_max_secs: 17355,
             drain_wait_secs: 3600,
@@ -66,39 +112,58 @@ fn the_cordon_keys_and_the_reserved_release_keys_are_read() {
             promotion_ceiling_secs: None,
             staged_release: PathBuf::from("/opt/js-agent/releases/new"),
             previous_release: Some(PathBuf::from("/opt/js-agent/releases/old")),
-            release_link: None,
+            release_link: PathBuf::from("/var/lib/hostkeeper/packages/js-agent/current"),
+            flags_file: PathBuf::from("/etc/js-agent/flags"),
             target_version: "1.4.0".to_owned(),
             previous_version: Some("1.3.2".to_owned()),
-            connect: ConnectParams::default(),
+            state_root: PathBuf::from("/var/lib/js-agent/state"),
+            token_file: PathBuf::from("/etc/js-agent/token"),
         }
     );
 }
 
+/// `KEYS` is what a manifest must give: dropping any one of them is refused naming it, and a
+/// table with all of them and one more is read. xtask holds the manifests to the same list.
+///
+/// Catches a key the hook reads that `KEYS` leaves out (a manifest could then omit it), and a key
+/// `KEYS` lists that the hook never requires.
 #[test]
-fn the_release_link_is_read_when_the_declaration_names_it_and_absent_otherwise() {
+fn every_key_of_the_list_is_required_and_nothing_else_is() {
+    assert_eq!(KEYS.len(), 17);
+    for key in KEYS {
+        match refused(&good_but(key, "")) {
+            ParamsError::Missing(missing) => assert_eq!(missing, key),
+            other => panic!("{key}: {other}"),
+        }
+    }
+    let extra = format!("{}something_else = \"x\"\n", good());
+    assert!(Params::parse(&extra).is_ok());
     assert_eq!(RELEASE_LINK_KEY, "release_link");
-    assert_eq!(Params::parse(&good()).unwrap().release_link, None);
-    let named = format!(
-        "{}\"release_link\" = \"/opt/js-agent-link/current\"\n",
-        good()
+}
+
+#[test]
+fn the_release_link_is_required_and_read_as_given() {
+    let named = good_but(
+        "release_link",
+        "release_link = \"/opt/js-agent-link/current\"",
     );
     assert_eq!(
         Params::parse(&named).unwrap().release_link,
-        Some(PathBuf::from("/opt/js-agent-link/current"))
+        PathBuf::from("/opt/js-agent-link/current")
     );
 }
 
 #[test]
 fn a_relative_or_non_text_release_link_is_refused() {
-    let relative = format!("{}\"release_link\" = \"current\"\n", good());
+    let relative = good_but("release_link", "release_link = \"current\"");
     assert!(matches!(refused(&relative), ParamsError::Relative(key) if key == RELEASE_LINK_KEY));
-    let number = format!("{}\"release_link\" = 7\n", good());
+    let number = good_but("release_link", "release_link = 7");
     assert!(matches!(refused(&number), ParamsError::NotText(key) if key == RELEASE_LINK_KEY));
 }
 
 #[test]
 fn a_first_install_has_no_previous_release_or_version() {
-    let params = Params::parse(&format!("{CORDON}{FIRST_INSTALL}")).unwrap();
+    let params = Params::parse(&format!("{CORDON}{FIRST_INSTALL}{SETTINGS}")).unwrap();
     assert_eq!(params.previous_release, None);
     assert_eq!(params.previous_version, None);
     assert_eq!(params.target_version, "1.4.0");
@@ -378,67 +443,150 @@ fn a_retry_of_zero_seconds_means_try_again_at_once() {
     assert_eq!(Params::parse(&text).unwrap().defer_retry_secs, 0);
 }
 
+/// The state root and the token file are the agent's own flags by name; the server, the
+/// certificate and the host id are not params keys (they come from the flags file).
 #[test]
-fn the_keys_that_reach_the_lease_server_and_the_state_are_the_agents_flags_by_name() {
+fn the_state_root_and_the_token_file_are_params_and_the_server_is_not() {
     assert_eq!(
-        [
-            SERVER_KEY,
-            STATE_ROOT_KEY,
-            TOKEN_FILE_KEY,
-            CA_CERT_KEY,
-            HOST_ID_KEY
-        ],
-        ["server", "state_root", "token_file", "ca_cert", "host_id"]
+        [STATE_ROOT_KEY, TOKEN_FILE_KEY],
+        ["state_root", "token_file"]
     );
+    let params = Params::parse(&good()).unwrap();
+    assert_eq!(params.state_root, PathBuf::from("/var/lib/js-agent/state"));
+    assert_eq!(params.token_file, PathBuf::from("/etc/js-agent/token"));
+    // A `server` key is just an unknown key: the flags file is where the server is named.
+    let text = format!("{}server = \"https://leases.example:7300\"\n", good());
+    assert!(Params::parse(&text).is_ok());
+    assert_eq!(ConnectParams::default().server, None);
 }
 
+/// A path that is not absolute, or is not text, is refused by key.
 #[test]
-fn how_to_reach_the_server_and_the_state_is_read_when_the_declaration_names_it() {
-    assert_eq!(
-        Params::parse(&good()).unwrap().connect,
-        ConnectParams::default()
-    );
-    let named = format!(
-        concat!(
-            "{}server = \"https://leases.example:7300\"\nstate_root = \"/var/db/js-agent/state\"\n",
-            "token_file = \"/etc/js-agent/token\"\nca_cert = \"/etc/js-agent/ca.pem\"\n",
-            "host_id = \"h-0123\"\n"
-        ),
-        good()
-    );
-    assert_eq!(
-        Params::parse(&named).unwrap().connect,
-        ConnectParams {
-            server: Some("https://leases.example:7300".to_owned()),
-            state_root: Some(PathBuf::from("/var/db/js-agent/state")),
-            token_file: Some(PathBuf::from("/etc/js-agent/token")),
-            ca_cert: Some(PathBuf::from("/etc/js-agent/ca.pem")),
-            host_id: Some("h-0123".to_owned()),
+fn the_paths_of_the_table_must_be_absolute_text() {
+    for key in [
+        "state_dir",
+        "release_link",
+        "flags_file",
+        "token_file",
+        "state_root",
+    ] {
+        let relative = good_but(key, &format!("{key} = \"relative/path\""));
+        assert!(
+            matches!(refused(&relative), ParamsError::Relative(k) if k == key),
+            "{key}"
+        );
+        let number = good_but(key, &format!("{key} = 7"));
+        assert!(
+            matches!(refused(&number), ParamsError::NotText(k) if k == key),
+            "{key}"
+        );
+    }
+}
+
+/// The record's directory must be spelt plainly: it is where the hook's lock and record are, and
+/// a `..` or a doubled slash could name another place than the one that was checked.
+///
+/// Catches a state directory that is taken as given.
+#[test]
+fn the_state_directory_must_be_plain() {
+    for bad in [
+        "/var/lib/../js-agent-update",
+        "/var/lib//js-agent-update",
+        "/var/lib/js-agent-update/",
+        "/var/lib/./js-agent-update",
+    ] {
+        let text = good_but("state_dir", &format!("state_dir = \"{bad}\""));
+        match refused(&text) {
+            ParamsError::NotPlain(key) => assert_eq!(key, "state_dir", "{bad}"),
+            other => panic!("{bad}: {other}"),
         }
+    }
+    assert_eq!(
+        ParamsError::NotPlain("state_dir".to_owned()).to_string(),
+        "params key \"state_dir\" must be an absolute path of plain components"
     );
 }
 
 #[test]
-fn a_server_or_host_id_that_is_not_text_and_a_path_that_is_not_absolute_are_refused() {
-    for (extra, key) in [
-        ("server = 7\n", SERVER_KEY),
-        ("host_id = true\n", HOST_ID_KEY),
-    ] {
-        let error = refused(&format!("{}{extra}", good()));
-        assert!(
-            matches!(&error, ParamsError::NotText(k) if k == key),
-            "{error}"
-        );
+fn the_unit_is_text_and_not_empty() {
+    let empty = good_but("unit", "unit = \"\"");
+    assert!(matches!(refused(&empty), ParamsError::Empty(key) if key == "unit"));
+    let number = good_but("unit", "unit = 7");
+    assert!(matches!(refused(&number), ParamsError::NotText(key) if key == "unit"));
+    assert_eq!(
+        ParamsError::Empty("unit".to_owned()).to_string(),
+        "params key \"unit\" must not be empty"
+    );
+}
+
+/// The runtime is one an agent lists on its `--version`.
+///
+/// Catches a runtime that is taken as given, which would make the staged agent's check pass
+/// or fail for a word no agent has.
+#[test]
+fn the_runtime_is_one_of_crun_docker_native() {
+    for runtime in ["crun", "docker", "native"] {
+        let text = good_but("runtime", &format!("runtime = \"{runtime}\""));
+        assert_eq!(Params::parse(&text).unwrap().settings.runtime, runtime);
     }
-    for (extra, key) in [
-        ("state_root = \"state\"\n", STATE_ROOT_KEY),
-        ("token_file = \"token\"\n", TOKEN_FILE_KEY),
-        ("ca_cert = \"ca.pem\"\n", CA_CERT_KEY),
+    let error = refused(&good_but("runtime", "runtime = \"podman\""));
+    assert!(matches!(&error, ParamsError::UnknownRuntime(r) if r == "podman"));
+    assert_eq!(
+        error.to_string(),
+        "runtime \"podman\" is not one of crun, docker, native"
+    );
+}
+
+#[test]
+fn each_bound_is_a_whole_number_of_seconds() {
+    for key in [
+        "prepare_timeout_secs",
+        "cutover_timeout_secs",
+        "verify_timeout_secs",
+        "rollback_timeout_secs",
+        "cleanup_timeout_secs",
+        "verify_deadline_secs",
     ] {
-        let error = refused(&format!("{}{extra}", good()));
-        assert!(
-            matches!(&error, ParamsError::Relative(k) if k == key),
-            "{error}"
-        );
+        for value in ["\"60\"", "-1", "1.5"] {
+            let text = good_but(key, &format!("{key} = {value}"));
+            assert!(
+                matches!(refused(&text), ParamsError::NotSeconds(k) if k == key),
+                "{key} = {value}"
+            );
+        }
     }
+}
+
+/// The updater rolls a verify back at the deadline: it must leave the verify bound and the
+/// rollback bound room, or a verify that is still allowed to run would be rolled back.
+///
+/// Catches a deadline compared with one bound only, or off by one.
+#[test]
+fn the_verify_deadline_covers_the_verify_bound_and_the_rollback_bound() {
+    let text = |deadline: u64| {
+        good_but(
+            "verify_deadline_secs",
+            &format!("verify_deadline_secs = {deadline}"),
+        )
+    };
+    assert_eq!(
+        Params::parse(&text(8835))
+            .unwrap()
+            .settings
+            .verify_deadline_secs,
+        8835
+    );
+    let error = refused(&text(8834));
+    assert!(matches!(
+        error,
+        ParamsError::VerifyDeadline {
+            deadline: 8834,
+            verify: 615,
+            rollback: 8220
+        }
+    ));
+    assert_eq!(
+        error.to_string(),
+        "verify_deadline_secs 8834 is less than the verify bound 615 plus the rollback bound 8220"
+    );
 }

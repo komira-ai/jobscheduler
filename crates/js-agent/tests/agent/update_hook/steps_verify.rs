@@ -57,7 +57,7 @@ fn only_looked(spy: &Spy<'_>) {
 
 /// How many seconds of the declared bound `verify` waits.
 fn bound_secs(rig: &Rig) -> u64 {
-    rig.declaration.timeouts.verify - VERIFY_MARGIN_SECS
+    rig.params.settings.timeouts.verify - VERIFY_MARGIN_SECS
 }
 
 fn release_failure(done: &Done, reason: Reason) {
@@ -291,7 +291,7 @@ fn verify_ends_at_the_declared_timeout_less_the_margin_and_not_before() {
         usize::try_from(bound_secs(&rig) / POLL_SECS).unwrap()
     );
     assert!(
-        rig.declaration.timeouts.verify * 1000 > waited,
+        rig.params.settings.timeouts.verify * 1000 > waited,
         "inside the declared bound"
     );
     only_looked(&spy);

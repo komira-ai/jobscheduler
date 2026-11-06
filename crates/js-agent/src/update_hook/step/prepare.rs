@@ -8,30 +8,37 @@
 //! 1. the lock, the record (if there is one) and the params agree; a record that breaks a rule
 //!    is `state_invalid` (1);
 //! 2. a taint or an `owed-*` record halts (76);
-//! 3. `<staged>/js-agent --version` names the target version (1);
-//! 4. the record is written, with the cordon marked as ours *before* it is placed unless the
+//! 3. `<staged>/bin/js-agent --version` names the target version (1), and the staged release
+//!    carries the unit the hook manages (`bad_artifact` otherwise);
+//! 4. a first install needs a join token: the token file must be a regular file of the hook's
+//!    user, mode 0600 or 0400, unless the state root already holds a host credential;
+//!    otherwise the step defers (75, `join_token_missing`) and the operator places the file;
+//! 5. the record is written, with the cordon marked as ours *before* it is placed unless the
 //!    host is cordoned already (an operator's cordon is never ours), so that a step killed
 //!    after the placing finds it marked; the reply of the lease server corrects the mark;
-//! 5. the wait: poll the host, renewing the cordon we placed after each pause and never
-//!    asking for more than the declared cap allows.
+//! 6. the wait: poll the host, renewing the cordon we placed after each pause and never
+//!    asking for more than the cap allows.
 //!
-//! A first install has no agent to drain and no host the lease server knows: it ends after 3.
+//! A first install has no agent to drain and no host the lease server knows: it ends after 5.
 //!
-//! TODO: compare the staged unit's flags and cgroup layout (`supervisor`, `actions`) with the
-//! running unit's (design 4.2, "new work" 6). The unit manager port reads `ActiveState` and
-//! `SubState` only, and the staged release carries no unit file the hook is told of.
+//! An update compares the unit the staged release carries with the one the previous release
+//! carried (the installed one, see [`plan`](crate::update_hook::plan)). A difference is recorded
+//! as the record's restart plan and named in the detail of the success; `cutover` acts on it.
 
 use std::time::Duration;
 
 use crate::update_hook::{
-    Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, Reason, Record, Report,
-    UpdateInfo,
+    Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params, PlanError, Reason, Record,
+    Report, UnitRestart, UpdateInfo, plan,
 };
 
 use super::{Env, check, failure, lease_failure, open_state, save, success};
 
+/// The agent's name, the first word of its `--version`.
+const AGENT_NAME: &str = "js-agent";
+
 /// The agent's file in a release directory.
-const AGENT_BINARY: &str = "js-agent";
+const AGENT_BINARY: &str = "bin/js-agent";
 
 /// Runs `prepare` of the release in `params.staged_release`.
 pub fn prepare(env: &Env<'_>, params: &Params) -> Done {
@@ -46,32 +53,97 @@ fn run(env: &Env<'_>, params: &Params) -> Result<Done, Done> {
     let mut record = match loaded {
         Some(record) => record,
         None => {
-            let record = new_record(env, params);
-            check(env, params, &record)?;
+            let record = new_record(params);
+            check(params, &record)?;
             record
         }
     };
     check_agent(env, params)?;
+    let restart = staged_unit(env, params)?;
     if params.previous_version.is_none() {
+        join_token(env, params)?;
         if fresh {
             save(env, &held, &record)?;
         }
         return Ok(success());
     }
+    if fresh {
+        record.unit_restart = restart;
+    }
     place(env, &held, &mut record, params, fresh)?;
-    wait(env, &held, &mut record, params)
+    let done = wait(env, &held, &mut record, params)?;
+    Ok(note_restart(done, &record))
+}
+
+/// The change from the installed unit to the staged one, and the staged unit must be there.
+fn staged_unit(env: &Env<'_>, params: &Params) -> Result<Option<UnitRestart>, Done> {
+    plan(
+        env.manager,
+        &params.settings.unit,
+        &params.staged_release,
+        params.previous_release.as_deref(),
+    )
+    .map_err(|why| match why {
+        PlanError::Staged { .. } => bad_artifact(why),
+        PlanError::Installed { .. } => failure(Reason::StateInvalid, why.to_string()),
+    })
+}
+
+/// A success that says the unit changes, and which keys.
+fn note_restart(mut done: Done, record: &Record) -> Done {
+    if let (Outcome::Success, Some(restart)) = (done.outcome, &record.unit_restart) {
+        done.report.detail = Some(format!(
+            "the unit changes ({}): cutover starts the agent on the new unit",
+            restart.changed.join(", ")
+        ));
+    }
+    done
+}
+
+/// A first install needs the host's join token, which the operator (or the machine image)
+/// places: a regular file of the hook's user, mode 0600 or 0400. A host credential in the state
+/// root does without. Otherwise the step defers, with nothing changed, until the file is right.
+fn join_token(env: &Env<'_>, params: &Params) -> Result<(), Done> {
+    if env.ports.state.has_credential() {
+        return Ok(());
+    }
+    let file = &params.token_file;
+    let problem = match (env.token)(file) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => "is not there".to_owned(),
+        Err(why) => format!("cannot be read: {why}"),
+        Ok(facts) if !facts.regular => "is not a regular file".to_owned(),
+        Ok(facts) if !matches!(facts.mode, 0o600 | 0o400) => {
+            format!("must be mode 0600 or 0400, not {:04o}", facts.mode)
+        }
+        Ok(facts) if facts.uid != env.euid => {
+            format!("must be owned by uid {}, not {}", env.euid, facts.uid)
+        }
+        Ok(_) => return Ok(()),
+    };
+    Err(Done {
+        outcome: Outcome::Deferred,
+        report: Report {
+            reason: Some(Reason::JoinTokenMissing),
+            class: Class::Environment,
+            retry_after_secs: Some(params.defer_retry_secs),
+            detail: Some(format!(
+                "the join token file {} {problem}; place it, root-owned and mode 0600, to install the agent",
+                file.display()
+            )),
+            ..Report::default()
+        },
+    })
 }
 
 /// The record of an update that is just beginning: nothing done, no cordon. The digest is the
 /// updater's; the staged tree is never hashed again.
-fn new_record(env: &Env<'_>, params: &Params) -> Record {
+fn new_record(params: &Params) -> Record {
     Record::new(UpdateInfo {
         target: params.target_version.clone(),
         previous: params.previous_version.clone(),
         staged: params.staged_release.clone(),
         previous_target: params.previous_release.clone(),
-        // The declaration names exactly one unit (it is refused at the parse otherwise).
-        unit: env.declaration.units.first().cloned().unwrap_or_default(),
+        unit: params.settings.unit.clone(),
         artifact_digest: params.artifact_digest.clone(),
     })
 }
@@ -110,7 +182,7 @@ pub(super) fn refuse_host(env: &Env<'_>) -> Result<(), Done> {
 }
 
 /// The staged agent runs and is the version the order names; if it lists its runtimes, the
-/// declaration's (`crun` for the Linux unit, `native` for the Mac one) is among them.
+/// required one (`crun` for the Linux unit, `native` for the Mac one) is among them.
 fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     let binary = params.staged_release.join(AGENT_BINARY);
     let printed = env
@@ -119,8 +191,8 @@ fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
         .map_err(bad_artifact)?;
     let mut words = printed.lines().next().unwrap_or("").split_whitespace();
     match (words.next(), words.next(), words.next()) {
-        (Some(AGENT_BINARY), Some(version), None) if version == params.target_version => {}
-        (Some(AGENT_BINARY), Some(version), None) => {
+        (Some(AGENT_NAME), Some(version), None) if version == params.target_version => {}
+        (Some(AGENT_NAME), Some(version), None) => {
             return Err(failure(
                 Reason::VersionMismatch,
                 format!(
@@ -131,7 +203,7 @@ fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
         }
         _ => {
             return Err(bad_artifact(format!(
-                "{} --version printed {:?}, not `{AGENT_BINARY} <version>`",
+                "{} --version printed {:?}, not `{AGENT_NAME} <version>`",
                 binary.display(),
                 printed.lines().next().unwrap_or("")
             )));
@@ -140,7 +212,7 @@ fn check_agent(env: &Env<'_>, params: &Params) -> Result<(), Done> {
     let runtimes = printed
         .lines()
         .find_map(|line| line.strip_prefix("runtimes:"));
-    let required = env.declaration.runtime.as_str();
+    let required = params.settings.runtime.as_str();
     if runtimes.is_some_and(|list| !list.split_whitespace().any(|name| name == required)) {
         return Err(failure(
             Reason::VersionMismatch,
@@ -322,22 +394,4 @@ fn defer(
             ..Report::default()
         },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::update_hook::DEFAULT_RUNTIME;
-
-    /// The hook refuses a staged agent that names its runtimes without the declaration's; the
-    /// agent of the same build must therefore name the runtime a declaration that names none
-    /// requires. The step's own tests are in `tests/agent`.
-    #[test]
-    fn the_default_runtime_the_hook_requires_is_one_this_builds_version_line_lists() {
-        let line = crate::cli::LONG_VERSION.lines().nth(1).unwrap();
-        let runtimes = line.strip_prefix("runtimes:").unwrap();
-        assert!(
-            runtimes.split_whitespace().any(|r| r == DEFAULT_RUNTIME),
-            "{line}"
-        );
-    }
 }

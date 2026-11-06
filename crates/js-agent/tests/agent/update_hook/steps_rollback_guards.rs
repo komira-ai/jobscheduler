@@ -6,8 +6,8 @@ use js_agent::update_hook::{Class, Clock, Outcome, Reason};
 use serde_json::json;
 
 use super::rollback_entries::{
-    RELINK, assert_restored, first_prepared, link_moved, link_target, staged, start, start_failed,
-    stopped, unit_state, verified, verified_on, verify_failed, verify_failed_on,
+    assert_restored, first_prepared, link_moved, link_target, staged, start, start_failed, stopped,
+    unit_state, verified, verified_on, verify_failed, verify_failed_on,
 };
 use super::step_rig::{Rig, Spy, end_state, line, running};
 
@@ -191,6 +191,7 @@ fn entries() -> Vec<(&'static str, Rig, bool)> {
 fn a_taint_halts_the_rollback_at_every_entry_before_any_act() {
     for (label, rig, reversible) in entries() {
         rig.taint();
+        rig.updater_links_previous();
         let before = (rig.record_bytes(), end_state(&rig));
         let spy = Spy::new(&rig);
         let done = spy.rollback(&rig);
@@ -294,7 +295,7 @@ fn a_taint_that_appears_while_the_previous_agent_is_awaited_halts_there() {
     assert_eq!(done.outcome, Outcome::Halt, "{done:?}");
     assert_eq!(done.report.reason, Some(Reason::Tainted));
     assert!(!done.report.reversible);
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert!(!rig.record().unwrap().rb.hello_ok);
     assert_eq!(uncordons(&spy), 0, "a halt runs nothing further");
 }
@@ -319,6 +320,7 @@ fn a_lease_server_that_stays_down_before_the_first_act_is_waited_for_and_then_fa
         ),
         ("verified", verified("hook-rollback-outage-verified")),
     ] {
+        rig.updater_links_previous();
         let before = (rig.record_bytes(), untimed(&rig));
         let spy = Spy::new(&rig);
         spy.fail("host");
@@ -366,7 +368,7 @@ fn a_lease_server_that_comes_back_while_the_rollback_waits_for_it_lets_it_go_on(
     });
     let done = spy.rollback(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     assert_restored(&rig);
 }
 
@@ -385,7 +387,7 @@ fn a_cordon_that_cannot_be_lifted_is_left_to_lapse_and_the_rollback_ends_in_succ
             .is_some_and(|text| text.contains("cordon left to lapse")),
         "{done:?}"
     );
-    assert_eq!(spy.act_names(), [RELINK.to_owned(), start()]);
+    assert_eq!(spy.act_names(), [start()]);
     // Nothing renews it any more; the record is gone, and a rerun has nothing to do.
     assert_eq!(rig.record(), None);
     assert!(rig.cordon_expiry().is_some(), "it lapses on its own");
