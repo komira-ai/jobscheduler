@@ -239,6 +239,15 @@ pub use events::{
 };
 pub use failure::exit;
 
+/// The whole command line of `js`, as it parses: the lease commands, the job commands
+/// generated from the job service, and the global flags. Read-only: a caller that walks
+/// its subcommands and flags (a check that the documentation names only commands that
+/// exist) sees the tree [`run_with`] parses with.
+#[must_use]
+pub fn command() -> clap::Command {
+    cli::command()
+}
+
 /// The program: runs with the process's arguments and standard streams, and the
 /// program's own [`Services`].
 pub fn main() -> ExitCode {

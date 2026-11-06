@@ -333,15 +333,14 @@
 //! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records; `docs/design/configuration.md`):
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
-//! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
-//! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
-//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
-//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
-//! timeouts of the other listeners, and stops with them. The lease routes are not served on
-//! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
-//! routes than the lease server's of those names, so the two cannot share a port while both
-//! exist.
+//! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
+//! over the registered hosts and the pool's catalog, committed before it answers; its wall
+//! limit held to `--max-job-wall`), `CancelJob` and the reads. Every other call answers
+//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`); `docs/http-gateway.md` has
+//! the answers of each call. The port has the connection cap and the timeouts of the other
+//! listeners, and stops with them. The lease routes are not served on it, nor the job routes
+//! on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other routes than the lease
+//! server's of those names, so the two cannot share a port while both exist.
 //!
 //! The job store is a SQLite file beside the lease file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. It moves into the shared store with the server's other
@@ -874,6 +873,7 @@ pub use file::{
     ObjectStoreLogs, PoolSettings, ProviderLimits, Resolved, ResolvedMachineProvider,
     ResolvedPlatform, ResolvedPool,
 };
+pub use job_api::SERVED_CALLS;
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
     SecretFiles,

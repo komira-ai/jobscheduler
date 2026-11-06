@@ -27,6 +27,10 @@ test = false
 clap.workspace = true
 flate2.workspace = true
 hex.workspace = true
+# `gen-job-surface` renders the route table of docs/http-gateway.md from the gateway's routes,
+# and its served paragraph from the calls the lease server serves.
+js-api-gateway = { path = "../js-api-gateway" }
+js-lease-server = { path = "../js-lease-server" }
 # `gen-job-surface` reads the job service's descriptor set: the one js-proto builds, decoded
 # with prost into prost-types' descriptor messages.
 js-proto = { path = "../js-proto" }

@@ -12,9 +12,12 @@ use js_lease::{Boot, Clock, LeaseTable, ManualClock, Settings, Timestamp};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
 use js_testkit::dir::TestDir;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
+use tonic::Code;
 use tower::ServiceExt;
 
-use super::{from_server, port};
+use super::super::tests::{call, connect, methods, send_all, value};
+use super::super::{gateway, grpc};
+use super::{SERVED_CALLS, from_server, port};
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{spec, tables};
 use crate::agents::Agents;
@@ -190,6 +193,55 @@ async fn the_port_routes_by_content_type() {
             (status, code, body.as_str()),
             (StatusCode::UNAUTHORIZED, None, ""),
             "{other:?}"
+        );
+    }
+}
+
+/// Asserts that the service the server builds serves exactly the calls of [`SERVED_CALLS`],
+/// over both transports: each of them answers neither `UNIMPLEMENTED` nor 501, and every
+/// other call of the service definition answers `UNIMPLEMENTED` over gRPC and 501
+/// `unimplemented` over the gateway. It catches a list that names a call the server does not
+/// serve yet, or leaves out one it serves, so the served calls `docs/http-gateway.md` names
+/// (rendered from the list) are the server's.
+#[tokio::test]
+async fn the_served_calls_are_the_ones_the_server_serves() {
+    let dir = scratch("served");
+    let (_, jobs) = tables();
+    let state = state(&dir, true, Some(Arc::new(jobs)));
+    let api = Arc::new(from_server(&state, WALL).unwrap());
+    let clients = crate::config::Clients::only(&token(), "--token-file");
+    let authorization = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
+    let served = |name: &str| SERVED_CALLS.iter().any(|rpc| rpc.name() == name);
+
+    let channel = connect(grpc(Arc::clone(&api), clients.clone())).await;
+    let methods = methods();
+    for method in &methods {
+        let code = call(&channel, method, Some(&authorization))
+            .await
+            .map_or_else(|status| status.code(), |()| Code::Ok);
+        assert_eq!(
+            code == Code::Unimplemented,
+            !served(method),
+            "{method}: {code:?}"
+        );
+    }
+    for rpc in SERVED_CALLS {
+        assert!(
+            methods.iter().any(|method| method == rpc.name()),
+            "{}",
+            rpc.name()
+        );
+    }
+
+    let router = gateway(api, clients);
+    let answers = send_all(&router, Some(value(&authorization))).await;
+    assert_eq!(answers.len(), js_api_gateway::ROUTES.len());
+    for (route, (status, _)) in js_api_gateway::ROUTES.iter().zip(answers) {
+        assert_eq!(
+            status == StatusCode::NOT_IMPLEMENTED,
+            !served(route.rpc.name()),
+            "{}: {status}",
+            route.template
         );
     }
 }
