@@ -1,10 +1,11 @@
-//! The spelling rule for the paths the hook trusts.
+//! The spelling rule for the paths a hook trusts.
 
 use std::path::{Component, Path, PathBuf};
 
 /// Whether `path` is spelt the way it would be after canonicalising it lexically: absolute,
 /// no `.` or `..`, no doubled or trailing slash.
-pub(crate) fn is_plain(path: &Path) -> bool {
+#[must_use]
+pub fn is_plain(path: &Path) -> bool {
     let rebuilt: PathBuf = path.components().collect();
     path.is_absolute()
         && path

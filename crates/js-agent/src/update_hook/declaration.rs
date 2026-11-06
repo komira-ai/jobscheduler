@@ -29,9 +29,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use js_types::ExecMode;
+use js_update_hook::is_plain;
 use serde::Deserialize;
-
-use super::plain::is_plain;
 
 /// The runtime a declaration that names none requires: what the unit of this platform runs jobs
 /// with.
