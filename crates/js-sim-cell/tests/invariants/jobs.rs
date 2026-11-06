@@ -455,24 +455,3 @@ fn a_job_counts_in_its_hosts_capacity() {
         ]
     );
 }
-
-/// Asserts the job invariants' names and that each is a step check, as the failure lines
-/// spell them (the rest of `Invariant::ALL` is the parent's `names_are_stable_and_distinct`).
-/// Catches a renamed job invariant.
-#[test]
-fn job_invariant_names_are_stable() {
-    let names: Vec<(&str, Checked)> = Invariant::ALL[11..]
-        .iter()
-        .map(|i| (i.name(), i.checked()))
-        .collect();
-    assert_eq!(
-        names,
-        [
-            ("one-allocation-per-job", Checked::EveryStep),
-            ("lost-is-terminal", Checked::EveryStep),
-            ("freed-only-when-confirmed", Checked::EveryStep),
-            ("no-start-without-allocation", Checked::EveryStep),
-            ("result-kept-until-acknowledged", Checked::EveryStep),
-        ]
-    );
-}

@@ -15,11 +15,12 @@
 //!
 //! Every item is looked at in every poll, in item order, every [`POLL_EVERY`] while any
 //! item is not done, and at once after a submit or a cancel. Within one poll an item goes
-//! as far as its answers let it: a terminal job's result is read in the same poll.
+//! as far as its answers let it: an accepted job is read, and a terminal job's result, in
+//! the same poll.
 //!
 //! | call | answer | event, and what follows |
 //! |---|---|---|
-//! | `POST /v1/jobs` (SubmitJob) | 201 | none; the job is read from the next poll |
+//! | `POST /v1/jobs` (SubmitJob) | 201 | none; the job is read (GetJob) in the same poll |
 //! | | 422 (`no-capable-host`: no host has said hello yet), or 5xx | none; submitted again at the next poll |
 //! | | anything else (400, 409 `job-id-conflict`, ...) | `Terminal(Failed)` |
 //! | `GET /v1/jobs/{id}` (GetJob) | 200 with a `hostId` | `Placed { host }`, the first time only |

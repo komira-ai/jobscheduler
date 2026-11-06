@@ -70,10 +70,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use clap::ValueEnum;
+use js_jobs::{AllocationId, IdSource};
 use js_lease_server::{Placement, StartupError};
 use js_sim::golden::GoldenFile;
 use js_sim::{Chance, Faults, TraceHash};
 use js_sim_cell::replay::REPORT_LINES;
+use js_sim_cell::server::seeded;
 use js_sim_cell::{
     Cell, Failure, FailureReport, Invariant, JOB_PREFIX, JobFront, Observations, ServerSpec, Setup,
     Shape, Side, Violation, Work, run,
@@ -143,6 +145,12 @@ const JOB_HOSTS: usize = 4;
 const JOBS: usize = 8;
 const JOB_RUN: Duration = Duration::from_secs(10);
 const JOB_HORIZON_MS: u64 = 60_000;
+
+/// The cell restarted between two batches: [`BATCH`] jobs in each, the restart at
+/// [`RESTART_AT_MS`], and its end.
+const BATCH: usize = 4;
+const RESTART_AT_MS: u64 = 30_000;
+const RESTART_HORIZON_MS: u64 = 120_000;
 
 /// The server of the scenario.
 fn spec() -> ServerSpec {
@@ -363,6 +371,57 @@ fn real_runs() -> Vec<(String, TraceHash)> {
     let passed = real_agents::without_faults(Side::Real).run_seeds(REAL_SEEDS);
     let each = |run: &js_sim_cell::SeedRun| (format!("without_faults/seed-{}", run.seed), run.hash);
     passed.runs.iter().map(each).collect()
+}
+
+/// The cell whose server is restarted between two batches of jobs, for `setup`:
+/// [`JOB_HOSTS`] hosts, [`BATCH`] jobs at time zero, a restart of the server at
+/// [`RESTART_AT_MS`] and [`BATCH`] more jobs a second after it.
+fn restarted_job_cell(setup: Setup) -> Result<Cell, StartupError> {
+    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS).jobs();
+    let mut cell = Cell::new(setup, spec, scratch("job-restart"), Faults::default())?;
+    cell.set_front(Box::new(JobFront::new()));
+    for _ in 0..JOB_HOSTS {
+        cell.add_agent().expect("an agent name is a host id");
+    }
+    let batch = |cell: &mut Cell| {
+        for _ in 0..BATCH {
+            cell.submit(&Work::run_for(JOB_RUN));
+        }
+    };
+    cell.at(ms(0), batch);
+    cell.at(ms(RESTART_AT_MS), Cell::restart_server);
+    cell.at(ms(RESTART_AT_MS + 1_000), batch);
+    Ok(cell)
+}
+
+/// Asserts that a server restarted between two batches of jobs goes on minting the seed's
+/// allocation ids where it stopped: the two batches' launches name exactly the first
+/// `2 * BATCH` ids of the seed's script, none twice. Catches a restart that starts the id
+/// source over (the second batch would reuse the first batch's ids), and one that gives
+/// the restarted server another source.
+#[test]
+fn a_restarted_server_goes_on_minting_the_seeds_ids() {
+    let seed = 5;
+    let end = ms(RESTART_HORIZON_MS);
+    let cell = run("job-restart", seed, end, &restarted_job_cell).expect("the job cell runs");
+    let launches = cell.ledger().launches();
+    assert_eq!(
+        launches.len(),
+        2 * BATCH,
+        "every job of both batches launched once"
+    );
+    let allocation = |run: &str| {
+        let (_, allocation) = run.split_once('/').expect("a job and an allocation");
+        allocation.to_owned()
+    };
+    let launched: BTreeSet<String> = launches
+        .iter()
+        .map(|launch| allocation(launch.run.as_str()))
+        .collect();
+    let script = seeded(seed);
+    let mint = |_| AllocationId::from_bits(script.mint().expect("a scripted id")).to_string();
+    let minted: BTreeSet<String> = (0..2 * BATCH).map(mint).collect();
+    assert_eq!(launched, minted);
 }
 
 /// The hash of each pinned seed of the job smoke scenario, which must pass.
