@@ -24,7 +24,7 @@ The image is the Ubuntu 24.04 server cloud image with:
 | js-agent | the release archive of a jobscheduler release | `/usr/bin/js-agent`, run through `/opt/js-agent/link/current` (`docs/runbooks/crun-host-setup.md`) |
 | crun | Ubuntu 24.04's own `crun` package, with `uidmap` and `xfsprogs` from the archive | `/usr/bin/crun` |
 | hostkeeper | the deb of a hostkeeper release, which enables `hostkeeper.service` | `/usr/bin/hostkeeper` |
-| the crun host setup | `crun_host_setup.sh --apply` of this repository, run once at build time | the job user, its subids, the directories, the AppArmor profile, `js-agent-crun.service` |
+| the crun host setup | `crun_host_setup.sh --apply` of this repository, run once at build time | the job user, its subids, the directories, the AppArmor profile, `js-agent-crun.service` and its GPU oneshot `js-agent-crun-gpu.service` |
 | the scratch file system | an XFS file system in a sparse 16 GiB file, mounted with project quota | `/var/lib/js-agent-scratch.xfs` on `/var/lib/js-agent/scratch` |
 | the user-data reader | `packaging/machine-image/js-agent-user-data.service` | `/etc/systemd/system/js-agent-user-data.service` |
 | its recipe | the recipe it was built from | `/usr/share/js-machine-image/recipe.json` |
@@ -77,7 +77,11 @@ The baked unit's line is:
 It asserts that the two required paths exist and runs `systemctl daemon-reload`, so the agent's
 unit starts with the drop-in. The agent's unit requires the reader (the drop-in `10-image.conf`),
 so a machine booted with no user data, or with user data that lacks a required path, does not
-start the agent; `systemctl status js-agent-user-data` names the missing path.
+start the agent; `systemctl status js-agent-user-data` names the missing path. The crun unit's GPU
+oneshot, which writes the `--gpu-*` flags into a drop-in of its own from the agent unit's
+`ExecStart` (docs/runbooks/crun-host-setup.md, GPU hosts), runs after the reader too (the drop-in
+`js-agent-crun-gpu.service.d/10-image.conf`), so its drop-in carries this host's `--server` and
+`--pool`.
 
 The token is in the user data, so it is also in cloud-init's copy of it under `/var/lib/cloud` and
 can be read from the provider's metadata service by any process of the machine. The image removes
