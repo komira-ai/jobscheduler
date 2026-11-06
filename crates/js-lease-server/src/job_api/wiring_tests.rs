@@ -177,6 +177,7 @@ async fn answer(
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
     let router = port(from_server(&state, WALL).unwrap(), clients);
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {

@@ -202,7 +202,9 @@ pub fn same_id_different_job_is_a_conflict<B: Backend>(backend: &B) {
         ("network", |spec| spec.network = crate::NetworkPolicy::Open),
         ("ports", |spec| spec.ports.clear()),
         ("files", |spec| {
-            spec.files.insert("more".to_owned(), Vec::new());
+            let mut files = spec.files.contents().cloned().unwrap_or_default();
+            files.insert("more".to_owned(), Vec::new());
+            spec.files = crate::JobFiles::Contents(files);
         }),
         ("labels", |spec| spec.labels = js_types::Labels::default()),
     ];

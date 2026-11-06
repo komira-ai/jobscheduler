@@ -166,9 +166,10 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             .collect(),
         files: spec
             .files
-            .keys()
+            .names()
+            .into_iter()
             .map(|name| v1::JobFile {
-                name: name.clone(),
+                name: name.to_owned(),
                 contents: String::new(),
             })
             .collect(),

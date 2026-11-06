@@ -18,8 +18,12 @@
 //! [`JobStore::with_retention`] sets another) in the transaction that ends it; so a restart
 //! loses no result, and no job is ever ended without them. The window is read when the store
 //! is made and applied when a job ends: changing it affects only the jobs that end
-//! afterwards. [`sweep`] lists the jobs past their retention end at a given time and reads no
-//! clock; [`JobStore::tick`] runs it over the table and deletes those jobs' rows,
+//! afterwards. The same transaction replaces the contents of the job's files, which are
+//! secret, by their SHA-256 ([`JobFiles`]): an ended job's row, kept for the window, holds
+//! the file names and no contents, and [`JobStore::raise_at_boot`] does the same to a row of
+//! an ended job that a build before this one left holding them. [`sweep`] lists the jobs past
+//! their retention end at a given time and reads no clock; [`JobStore::tick`] runs it over the
+//! table and deletes those jobs' rows,
 //! [`SWEEP_BATCH`] rows to a transaction; [`JobStore::raise_deadlines_at_boot`] raises every
 //! stored retention end to at least the boot plus [`BOOT_GRACE`] before the first tick, so an
 //! outage longer than the window deletes no result before a client could read it.
@@ -108,8 +112,8 @@ pub use ids::{
     MAX_CLIENT_NAME_LEN, MAX_JOB_ID_LEN, MintError, RandomIds,
 };
 pub use record::{
-    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, HostBooking,
-    JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
+    AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, FileDigest,
+    HostBooking, JobFiles, JobRecord, JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,
