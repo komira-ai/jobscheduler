@@ -26,6 +26,7 @@ use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
+use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
@@ -277,6 +278,11 @@ pub struct Cli {
     /// Postgres store it has no effect. Needs --store.
     #[arg(long)]
     pub allow_sqlite_store: bool,
+    /// How long the store paths of the tick (the lease file's write, the job pass) may fail
+    /// tick after tick before `/healthz` answers 503 `store unreachable` and the alert
+    /// `store:unreachable` holds. The first tick that succeeds clears both.
+    #[arg(long, default_value = DEFAULT_UNREACHABLE_AFTER, value_parser = parse_duration)]
+    pub store_unreachable_after: Duration,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -452,8 +458,8 @@ pub struct Config {
     /// name: the operating system's ([`OsSessions`]) unless [`Config::with_entropy`] gives
     /// another.
     pub(crate) entropy: Arc<dyn SessionSource>,
-    /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
-    /// [`Config::with_alert_sink`].
+    /// Where the scaler's alerts and the store's `store:unreachable` go besides the log; from
+    /// `server.alert_webhook_url`, or [`Config::with_alert_sink`].
     pub(crate) alerts: Option<Arc<dyn AlertSink>>,
     /// How often an alert that keeps holding is sent to the sink again.
     pub(crate) alert_repeat: Duration,
@@ -470,6 +476,8 @@ pub struct Config {
     pub(crate) logs: file::LogsConfig,
     /// The store the server's state is kept in (`--store`, `server.store`); none unless set.
     pub(crate) store: Option<StoreSetting>,
+    /// `--store-unreachable-after`, `server.store_unreachable_after`.
+    pub(crate) store_unreachable_after: Duration,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -552,6 +560,7 @@ impl Config {
             max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
             store,
+            store_unreachable_after: cli.store_unreachable_after,
         })
     }
 
@@ -641,12 +650,6 @@ impl Config {
         let usage = usage_setup(server.usage, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
-        if alerts.is_some() && elastic.is_none() {
-            warnings.push(
-                "server: warning: server.alert_webhook_url is set but no pool launches machines, so no alert has a source and nothing will be sent"
-                    .to_owned(),
-            );
-        }
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
@@ -679,11 +682,12 @@ impl Config {
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
             store,
+            store_unreachable_after: server.store_unreachable_after,
         })
     }
 
-    /// The same configuration with every alert of the scaler also sent to `sink`, in
-    /// place of the one the file names.
+    /// The same configuration with every alert of the scaler, and the store's
+    /// `store:unreachable`, also sent to `sink`, in place of the one the file names.
     pub fn with_alert_sink(mut self, sink: Arc<dyn AlertSink>) -> Self {
         self.alerts = Some(sink);
         self

@@ -50,6 +50,7 @@ use crate::job_loss::{self, Observe, Seen};
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
 use crate::sched::place::SchedPlacer;
+use crate::store_health::{FailureKind, Pass};
 
 /// What one pass changed.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -127,10 +128,14 @@ impl Agents {
     /// next tick passes again, unless the store said it has a newer writer, which trips the
     /// fence ([`crate::fence`]) and ends the server. The pass's duration, the start failures
     /// and losses it made, and a failure of it, are counted on the agent side's meter
-    /// ([`Agents::meter`]). Without the job tables, nothing.
-    pub(crate) fn job_pass(&self) {
+    /// ([`Agents::meter`]).
+    ///
+    /// What the pass says of the store, for [`crate::store_health`]: how long it ran on the
+    /// server's clock, or the kind of the store's failure; `None` when the pass failed for a
+    /// reason that is not the store's. Without the job tables, nothing, and `None`.
+    pub(crate) fn job_pass(&self) -> Option<Pass> {
         let Some(jobs) = &self.jobs else {
-            return;
+            return None;
         };
         let gone = self
             .placer
@@ -141,13 +146,15 @@ impl Agents {
             registry: &self.registry,
             gone: &gone,
         };
-        let now = store_time(self.clock.now().millis());
+        let began = self.clock.now();
+        let now = store_time(began.millis());
         let meter = self.meter();
         let sink = meter.sink();
         let limits = self.job_limits;
         let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
         sink.job_pass_took(took);
-        match passed {
+        let ran = Duration::from_millis(self.clock.now().millis().saturating_sub(began.millis()));
+        let seen = match passed {
             Ok(passed) => {
                 if !passed.is_empty() {
                     let expired = passed.expired.len();
@@ -156,14 +163,17 @@ impl Agents {
                 }
                 let settle = |placer: &Arc<SchedPlacer>| placer.settle_gone(&gone);
                 self.placer.iter().for_each(settle);
+                Some(Pass::Ran(ran))
             }
             Err(error) => {
                 sink.store_write_failed();
                 self.fence.note(&error);
                 warn!(%error, "the job pass failed; the next tick passes again");
+                FailureKind::of(&error).map(Pass::Failed)
             }
-        }
+        };
         self.trim_feed();
+        seen
     }
 
     /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
