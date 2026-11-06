@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{RunFile, validate_files};
-use js_jobs::{Constraints, DeclaredPort, JobId, JobSpec, Needs, NetworkPolicy};
+use js_jobs::{Constraints, DeclaredPort, JobFiles, JobId, JobSpec, Needs, NetworkPolicy};
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,
@@ -332,7 +332,7 @@ fn ports(ports: &[v1::PortForward]) -> Result<Vec<DeclaredPort>, Fault> {
 }
 
 /// The files, checked as a start's run files are, by name.
-fn files(files: &[v1::JobFile]) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
+fn files(files: &[v1::JobFile]) -> Result<JobFiles, Fault> {
     let run: Vec<RunFile> = files
         .iter()
         .map(|file| RunFile {
@@ -341,10 +341,11 @@ fn files(files: &[v1::JobFile]) -> Result<BTreeMap<String, Vec<u8>>, Fault> {
         })
         .collect();
     validate_files(&run).map_err(|_| Fault::Field("spec.files"))?;
-    Ok(run
-        .into_iter()
-        .map(|file| (file.name, file.contents.into_bytes()))
-        .collect())
+    Ok(JobFiles::Contents(
+        run.into_iter()
+            .map(|file| (file.name, file.contents.into_bytes()))
+            .collect(),
+    ))
 }
 
 /// The labels, checked as a lease's are.

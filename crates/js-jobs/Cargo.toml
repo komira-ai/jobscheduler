@@ -24,6 +24,8 @@ getrandom.workspace = true
 js-agent-wire = { path = "../js-agent-wire" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
+# An ended job keeps the SHA-256 of each of its files in place of their contents.
+sha2.workspace = true
 thiserror.workspace = true
 # A row a later build wrote, which this one cannot read, is logged where a list skips it.
 tracing.workspace = true

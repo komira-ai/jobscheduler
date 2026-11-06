@@ -13,7 +13,9 @@ use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{AllocationRecord, AllocationStep, JobRecord, may_move};
-use crate::result::{JobEnd, SWEEP_BATCH, ended, floored_at_boot, past_retention, raised_at_boot};
+use crate::result::{
+    JobEnd, SWEEP_BATCH, digested_at_boot, ended, floored_at_boot, past_retention, raised_at_boot,
+};
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Ends the job `id` as `end` says (design section 3.2): in one transaction the job takes
@@ -194,9 +196,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// to start (queued, placed or starting) gets a deadline floor of at least `boot` plus
     /// [`BOOT_GRACE`](crate::BOOT_GRACE), the earliest instant its queue wait or its start
     /// timeout may end it. A floor is raised to that instant, never by it, so boots in a loop
-    /// do not stretch a wait, and a later floor is kept. Only an ended job has a retention end
-    /// and only a waiting one gets a floor, so no row is put twice. A row a later build wrote
-    /// is left as it is. Returns how many rows it wrote; with none it commits nothing.
+    /// do not stretch a wait, and a later floor is kept. An ended job whose row still holds
+    /// its files' contents (one ended by a build that kept them) has them replaced by their
+    /// digests ([`crate::JobFiles`]), in the same put as its raised retention end when it has
+    /// one. Only an ended job has a retention end or contents to replace and only a waiting
+    /// one gets a floor, so no row is put twice. A row a later build wrote is left as it is.
+    /// Returns how many rows it wrote; with none it commits nothing.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] (naming
@@ -211,7 +216,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 Err(JobStoreError::UnknownRow { .. }) => continue,
                 Err(error) => return Err(error),
             };
-            let raised = raised_at_boot(&job, boot).or_else(|| floored_at_boot(&job, boot));
+            let raised = match raised_at_boot(&job, boot) {
+                Some(raised) => Some(digested_at_boot(&raised).unwrap_or(raised)),
+                None => floored_at_boot(&job, boot).or_else(|| digested_at_boot(&job)),
+            };
             if let Some(raised) = raised {
                 first.get_or_insert_with(|| raised.id.clone());
                 txn = txn.put(key, encode_job(&raised)?, Cond::Version(row.version));

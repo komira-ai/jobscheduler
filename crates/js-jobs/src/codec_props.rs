@@ -15,7 +15,8 @@ use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::result::{JobResult, JobTiming, ResourceUsage, ResultReason};
+use crate::record::{FileDigest, JobFiles};
+use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
 
@@ -117,7 +118,7 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                 Just(NetworkPolicy::Open)
             ],
             vec((any::<u16>(), any::<u16>()), 0..4),
-            btree_map(any_text(), vec(any::<u8>(), 0..8), 0..3),
+            job_files(),
             labels(),
         ),
     )
@@ -145,6 +146,20 @@ fn spec() -> impl Strategy<Value = JobSpec> {
                 }
             },
         )
+}
+
+/// A job's files as either form a row holds: the contents of a job that has not ended, or
+/// the digests that replace them once it has.
+fn job_files() -> impl Strategy<Value = JobFiles> {
+    prop_oneof![
+        btree_map(any_text(), vec(any::<u8>(), 0..8), 0..3).prop_map(JobFiles::Contents),
+        btree_map(any_text(), any::<[u8; 32]>(), 0..3).prop_map(|files| {
+            let digests = files
+                .into_iter()
+                .map(|(name, bytes)| (name, FileDigest::from_bytes(bytes)));
+            JobFiles::Digests(digests.collect())
+        }),
+    ]
 }
 
 fn state() -> impl Strategy<Value = JobState> {
@@ -184,10 +199,14 @@ fn job_result() -> impl Strategy<Value = JobResult> {
             proptest::option::of(store_time()),
             store_time(),
             proptest::option::of((0..u64::MAX, 0..NANOS_PER_SEC, any::<u64>())),
+            proptest::option::of(any::<[u64; 4]>()),
         ),
     )
         .prop_map(
-            |((exit_code, reason, stdout_tail, stderr_tail, truncated), (q, p, s, e, usage))| {
+            |(
+                (exit_code, reason, stdout_tail, stderr_tail, truncated),
+                (q, p, s, e, usage, logs),
+            )| {
                 JobResult {
                     exit_code,
                     reason,
@@ -204,6 +223,14 @@ fn job_result() -> impl Strategy<Value = JobResult> {
                         cpu_time: Duration::new(secs, nanos),
                         peak_memory_bytes: peak,
                     }),
+                    logs: logs.map(
+                        |[stdout_bytes, stderr_bytes, stdout_dropped, stderr_dropped]| LogLengths {
+                            stdout_bytes,
+                            stderr_bytes,
+                            stdout_dropped,
+                            stderr_dropped,
+                        },
+                    ),
                 }
             },
         )

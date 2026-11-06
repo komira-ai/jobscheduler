@@ -25,7 +25,7 @@ use super::writes_rig::{CEILING, Fixed};
 use super::{Bearer, JobApi, grpc};
 use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{BOOKED, OneClock, START_MS, tables_on};
-use crate::config::{Clients, parse_token};
+use crate::config::{Clients, Entry, LiveClients, Role, parse_token};
 use crate::job_store::ServerJobs;
 
 /// The token of the client the harness calls as.
@@ -85,13 +85,16 @@ impl Real {
             &parse_token(b"unused-token-0123456789abcdefghijkl").unwrap(),
             "--token-file",
         );
-        assert_eq!(
-            clients.add(name, &token, "--client-token".to_owned()),
-            Ok(())
-        );
+        let entry = Entry {
+            name,
+            role: Role::Client,
+            place: format!("--client-token {CLIENT}"),
+            file: std::path::PathBuf::new(),
+        };
+        assert_eq!(clients.add(entry, &token), Ok(()));
         let ctx: Ctx = submit::Ctx::served(CEILING, Fixed::new(true));
         let api = Arc::new(JobApi::new(Arc::clone(&jobs), shared).with_submit(ctx));
-        let channel = jobs::channel_to(Presenting(grpc(api, clients)));
+        let channel = jobs::channel_to(Presenting(grpc(api, LiveClients::new(clients))));
         Real {
             jobs,
             clock,

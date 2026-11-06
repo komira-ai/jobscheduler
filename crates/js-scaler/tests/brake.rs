@@ -84,7 +84,7 @@ fn the_cooldown_doubles_from_ten_minutes_up_to_the_ceiling() {
         (minutes(30), vec![10, 20, 30, 30]),
     ];
     for (ceiling, waits) in cases {
-        let mut sim = refused(pool(100, ceiling), RefusalCode::Quota);
+        let mut sim = refused(pool(100, ceiling), RefusalCode::Denied);
         let times = acquire_times(&mut sim, 500);
         assert!(times.len() > waits.len(), "{ceiling:?}: {times:?}");
         for (k, wait) in waits.iter().enumerate() {
@@ -98,14 +98,14 @@ fn the_cooldown_doubles_from_ten_minutes_up_to_the_ceiling() {
     }
 }
 
-/// Asserts the trip for each refusal that counts (quota, denied, a shape that fits
+/// Asserts the trip for each refusal that counts (denied, a shape that fits
 /// nothing): after three, the pool says it is tripped, is in plan, and the cloud is not
 /// asked again for three simulated days; nothing is launched and the records are not written
 /// again by quiet ticks. It catches a refusal that does not count, a trip that time undoes,
 /// and a latch that costs a write per tick.
 #[test]
 fn three_refusals_in_a_row_trip_the_pool_and_the_cloud_is_never_asked_again() {
-    for code in [RefusalCode::Quota, RefusalCode::Denied, RefusalCode::Shape] {
+    for code in [RefusalCode::Denied, RefusalCode::Shape] {
         let mut sim = refused(pool(3, minutes(120)), code);
         learn(&mut sim, 3);
         assert_eq!(sim.blocked(), Some(Blocked::Tripped), "{code:?}");
@@ -157,7 +157,7 @@ fn a_capacity_refusal_does_not_count() {
 #[test]
 fn a_machine_that_boots_ends_the_failures_in_a_row() {
     let mut sim = Sim::new(pool(3, minutes(120)), Billing::Lambda);
-    let refuse = Step::Refuse(RefusalCode::Quota);
+    let refuse = Step::Refuse(RefusalCode::Denied);
     sim.fake.script(
         Call::Acquire,
         &[refuse, refuse, Step::Pass, refuse, refuse, Step::Pass],
@@ -242,7 +242,7 @@ fn a_trip_drains_and_releases_nothing() {
 /// cooldown that restarts with the process.
 #[test]
 fn the_count_and_the_cooldown_survive_a_restart() {
-    let mut sim = refused(pool(100, minutes(120)), RefusalCode::Quota);
+    let mut sim = refused(pool(100, minutes(120)), RefusalCode::Denied);
     learn(&mut sim, 2);
     assert_eq!(brake(&sim).unwrap().failures, 2);
     sim.saved = Records::decode(&sim.saved.encode().unwrap()).unwrap();
@@ -267,7 +267,7 @@ fn the_count_and_the_cooldown_survive_a_restart() {
 /// a trip held in memory only, which a crash would hand back to the loop.
 #[test]
 fn the_trip_survives_a_restart() {
-    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Denied);
     learn(&mut sim, 3);
     assert!(sim.rig.state.records.tripped(POOL));
     sim.saved = Records::decode(&sim.saved.encode().unwrap()).unwrap();
@@ -287,7 +287,7 @@ fn the_trip_survives_a_restart() {
 /// and one that a restart undoes.
 #[test]
 fn a_reset_ends_the_trip_and_the_end_survives_a_restart() {
-    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Denied);
     learn(&mut sim, 3);
     sim.run(2 * 24 * 60);
     assert!(sim.rig.state.records.tripped(POOL));
@@ -421,7 +421,7 @@ fn refusals_answered_in_one_step_are_one_strike() {
         max_step: 3,
         ..pool(3, minutes(120))
     };
-    let mut sim = refused(settings, RefusalCode::Quota);
+    let mut sim = refused(settings, RefusalCode::Denied);
     sim.waiting = 3;
     learn(&mut sim, 3);
     assert_eq!(brake(&sim).unwrap().failures, 1);
@@ -482,7 +482,7 @@ fn a_host_heard_for_ten_minutes_ends_the_count() {
 /// the step's failures, which would erase the new failure.
 #[test]
 fn a_reset_in_the_step_of_a_failure_counts_the_failure_from_one() {
-    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Denied);
     learn(&mut sim, 2);
     assert_eq!(brake(&sim).unwrap().failures, 2);
     while sim.acquires() < 3 {
@@ -503,7 +503,7 @@ fn a_reset_in_the_step_of_a_failure_counts_the_failure_from_one() {
 /// stays tripped. It catches a restart that refuses the file.
 #[test]
 fn a_scaler_starts_from_a_brake_with_an_unknown_field() {
-    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Quota);
+    let mut sim = refused(pool(3, minutes(120)), RefusalCode::Denied);
     learn(&mut sim, 3);
     assert!(sim.rig.state.records.tripped(POOL));
     let text = sim.saved.encode().unwrap();

@@ -186,11 +186,22 @@ impl Endpoint {
     /// The URL of the path `path` (one of [`Endpoint::bucket_path`] or
     /// [`Endpoint::object_path`]), without a query.
     pub fn url(&self, path: &str) -> String {
-        let scheme = match self.https {
+        format!("{}://{}{path}", self.scheme(), self.host())
+    }
+
+    /// The store's own URL, `scheme://authority`, with no bucket in it whatever the style and
+    /// no trailing `/`: what [`Endpoint::parse`] reads back to this endpoint with the same
+    /// region, bucket and style. A job's log sink carries it, so an agent builds the same
+    /// endpoint the server was configured with.
+    pub fn base_url(&self) -> String {
+        format!("{}://{}", self.scheme(), self.authority)
+    }
+
+    fn scheme(&self) -> &'static str {
+        match self.https {
             true => "https",
             false => "http",
-        };
-        format!("{scheme}://{}{path}", self.host())
+        }
     }
 }
 

@@ -119,6 +119,7 @@
 //! | `NOT_FOUND`, message `expired` (result or logs past retention) | 410 | `expired` |
 //! | `FAILED_PRECONDITION`, message `not-finished` (the result of a job that has not ended) | 409 | `not-finished` |
 //! | `INVALID_ARGUMENT` (a message `field: <name>` gives `field`) | 400 | `invalid-argument` |
+//! | `PERMISSION_DENIED`, message `operator-only` (a fleet call of a client that is no operator) | 403 | `operator-only` |
 //! | `UNIMPLEMENTED` | 501 | `unimplemented` |
 //! | `INTERNAL`, message `state-write-failed` (a store write that failed) | 500 | `state-write-failed` |
 //! | any other status, an unknown refusal, a fault of the gateway | 500 | `internal` |

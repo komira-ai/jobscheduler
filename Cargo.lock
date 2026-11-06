@@ -1333,6 +1333,7 @@ dependencies = [
  "js-testkit",
  "js-types",
  "proptest",
+ "sha2 0.11.1",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -1620,6 +1621,18 @@ version = "0.1.0"
 dependencies = [
  "js-provider",
  "js-types",
+]
+
+[[package]]
+name = "js-provider-gce"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-elastic",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
