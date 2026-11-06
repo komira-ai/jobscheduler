@@ -385,16 +385,11 @@ fn a_platform_kind_not_built_is_refused() {
             format!("platform \"later\": kind: {kind:?} is not built in this version")
         );
     }
-    for kind in ["gce"] {
-        let table = format!(
-            "[[machine_provider]]\nname = \"cloud\"\nkind = {}\n",
-            quote(kind)
-        );
-        assert_eq!(
-            refused(&scratch, &beside(&scratch, &table)),
-            format!("machine_provider \"cloud\": kind: {kind:?} is not built in this version")
-        );
-    }
+    let table = "[[machine_provider]]\nname = \"cloud\"\nkind = \"gce\"\n";
+    assert_eq!(
+        refused(&scratch, &beside(&scratch, table)),
+        "machine_provider \"cloud\": kind: \"gce\" is not built in this version"
+    );
     let table = "[[platform]]\nname = \"later\"\nkind = \"nonsense\"\n";
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),

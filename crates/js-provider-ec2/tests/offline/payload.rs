@@ -1,6 +1,8 @@
 //! The boot payload: delivered as it was rendered, never logged, never over the limit.
 
-use js_elastic::{AcquireRequest, Acquired, BootPayload, Reason, Refusal, RefusalCode};
+use js_elastic::{
+    AcquireRequest, Acquired, BootPayload, CapacityProvider, Reason, Refusal, RefusalCode,
+};
 use js_provider_ec2::PAYLOAD_LIMIT;
 use tracing::Level;
 
