@@ -50,6 +50,7 @@ pub fn hello() -> Hello {
             run_id: "run-1".into(),
             state: HeldState::Running,
         }],
+        identity: None,
     }
 }
 

@@ -201,8 +201,10 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         ".cargo/config.toml",
         ".cargo/config",
         ".cargo/other",
-        // The js-agent archive carries the host updater's declaration as it is.
+        // The js-agent and js-lease-server archives carry the host updater's declarations as
+        // they are.
         "packaging/js-agent/updater.d/js-agent.toml",
+        "packaging/js-lease-server/updater.d/js-lease-server.toml",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -226,6 +228,7 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "packaging/js-agent/js-agent-crun.service",
         "packaging/js-agent-macos/updater.toml",
         "packaging/js-agent/updater.d/other.toml",
+        "packaging/js-lease-server/updater.d/js-agent.toml",
         "crates/js-cli/Cargo.lock",
     ] {
         assert!(!is_shipped(path, &shipped), "{path} does not ship");

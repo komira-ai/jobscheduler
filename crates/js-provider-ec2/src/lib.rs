@@ -9,11 +9,13 @@
 //!   over every page of one list, a failure never an empty answer. Its catalog side reads
 //!   instance types, zone offerings, on-demand and spot prices, a vCPU quota and Capacity
 //!   Block offerings; its launch side launches an instance, reads instances and
-//!   terminates them. [`HttpEc2`] is the implementation over the signed HTTPS client
+//!   terminates them, buys a Capacity Block and reads capacity reservations.
+//!   [`HttpEc2`] is the implementation over the signed HTTPS client
 //!   (SigV4, `js_logstore::Transport`), and [`FakeEc2`] the same calls over memory, with
 //!   failures scripted per [`Action`];
 //! - the typed answers ([`InstanceTypeInfo`], [`GpuInfo`], [`ZoneOffering`], [`TypePrice`],
-//!   [`ZonePrice`], [`VcpuQuota`], [`BlockOffering`], [`Instance`]) and the errors
+//!   [`ZonePrice`], [`VcpuQuota`], [`BlockOffering`], [`Instance`],
+//!   [`CapacityReservation`]) and the errors
 //!   ([`ApiError`], matched on the cloud's [`ErrorCode`], never on its message text;
 //!   [`CallError`] naming the action);
 //! - [`Ec2Catalog`] with its [`Ec2CatalogSettings`], whose [`Ec2Catalog::catalog`] returns
@@ -22,18 +24,33 @@
 //!   lease server's configuration.
 //!
 //! **Launching.** An acquire is refused, with nothing sent, unless the provider is enabled,
-//! the offer is on demand or spot in a zone of an allowed type, the host name is this
-//! scheduler's, the boot payload fits [`PAYLOAD_LIMIT`], an image is configured for the
-//! offer's architecture and the labels become tags; in dry-run mode it stops there. A
-//! launch is `RunInstances` for one instance, tagged with the scheduler, the acquire and
-//! the host name ([`SCHEDULER_TAG`], [`ACQUIRE_TAG`], [`NAME_TAG`]), carrying a client
-//! token derived from the scheduler and the acquire, so a repeat of one acquire is the same
-//! launch. When the token's window has passed the provider finds the instance again by its
-//! tags. The answer of a launch that failed is read by the one table of
-//! [`launch_answer`]: a cloud code that says the launch did not happen is a refusal, every
-//! other failure (a throttle, a timeout, a server fault) is unknown, and an unknown acquire
-//! counts toward the machine cap until a list shows it or [`Ec2Config::unknown_hold`]
-//! passes. The user data is the boot payload as it was rendered; it is never logged.
+//! the offer is on demand, spot or a Capacity Block with its terms, in a zone of an allowed
+//! type, the host name is this scheduler's, the boot payload fits [`PAYLOAD_LIMIT`], an
+//! image is configured for the offer's architecture and the labels become tags; in dry-run
+//! mode it stops there, and buys nothing. A launch is `RunInstances` for one instance,
+//! tagged with the scheduler, the acquire and the host name ([`SCHEDULER_TAG`],
+//! [`ACQUIRE_TAG`], [`NAME_TAG`]), carrying a client token derived from the scheduler and
+//! the acquire, so a repeat of one acquire is the same launch. When the token's window has
+//! passed the provider finds the instance again by its tags. The answer of a launch that
+//! failed is read by the one table of [`launch_answer`]: a cloud code that says the launch
+//! did not happen is a refusal, every other failure (a throttle, a timeout, a server
+//! fault) is unknown, and an unknown acquire counts toward the machine cap until a list
+//! shows it or [`Ec2Config::unknown_hold`] passes. The user data is the boot payload as it
+//! was rendered; it is never logged.
+//!
+//! **Capacity Blocks.** An acquire of a block offer first buys the block, then launches
+//! into it. `PurchaseCapacityBlock` has no client token, so before buying the provider
+//! reads the capacity reservations that carry the scheduler's and the acquire's tags
+//! ([`SCHEDULER_TAG`], [`ACQUIRE_TAG`]) and uses the one an earlier attempt bought; a read
+//! that fails launches nothing and buys nothing, and a purchase that got no answer is
+//! unknown, to be settled by that read. A reservation that is not active (`scheduled`,
+//! `payment-pending`, `failed` and the others) is refused as
+//! [`js_elastic::RefusalCode::Capacity`] with the state as the reason, and nothing is
+//! launched; a retry finds the same reservation.
+//! The launch names the reservation and the market type `capacity-block`, and the instance
+//! carries the reservation's end in the [`BLOCK_END_TAG`] tag, which is the end the held
+//! machine states ([`js_elastic::Held::ends_unix_seconds`]) when it is launched and when
+//! it is listed.
 //!
 //! **Which instances are ours.** An instance is ours when it carries the scheduler's tag, an
 //! acquire tag and a name with the scheduler's prefix; one with some of those marks is a
@@ -78,7 +95,9 @@
 //! through AWS sales and P6e UltraServers as reserved through EC2 Capacity Blocks for ML,
 //! so `capacity-block` reads `DescribeCapacityBlockOfferings` for the length the
 //! configuration sets (`capacity_block_hours`) and offers each block with its terms
-//! ([`js_elastic::BlockTerms`]) at its upfront fee spread over its instance hours.
+//! ([`js_elastic::BlockTerms`]) at its upfront fee spread over its instance hours. An
+//! acquire of such an offer buys that block and launches into it (see Capacity Blocks
+//! above).
 //!
 //! **GPU names.** The translation table maps `GpuInfo` (manufacturer, name and memory per
 //! GPU) to a variant spelling of the `js-caps` alias table, which gives the canonical model
@@ -124,8 +143,9 @@ pub use fake::{Call, FakeEc2};
 pub use http::{Credentials, EC2_API_VERSION, HttpEc2, QUOTAS_TARGET, StaticKeys};
 pub use identity::{AwsIdentityVerifier, FakeIdentityVerifier, IdentityDocument, IdentityVerifier};
 pub use launch::{
-    ACQUIRE_TAG, ClientToken, DescribeFilter, ImageId, Instance, InstanceId, InstanceState,
-    LABEL_PREFIX, LaunchPurchase, NAME_TAG, RunRequest, SCHEDULER_TAG, Tag, UserData,
+    ACQUIRE_TAG, BLOCK_END_TAG, BlockPurchase, CapacityReservation, CapacityReservationId,
+    ClientToken, DescribeFilter, ImageId, Instance, InstanceId, InstanceState, LABEL_PREFIX,
+    LaunchPurchase, NAME_TAG, ReservationState, RunRequest, SCHEDULER_TAG, Tag, UserData,
 };
 pub use model::{
     ArchName, BlockOffering, GpuInfo, InstanceType, InstanceTypeInfo, Region, TypePrice, VcpuQuota,

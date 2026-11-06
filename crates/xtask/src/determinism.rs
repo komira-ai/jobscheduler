@@ -67,6 +67,7 @@ pub const CRATES: &[&str] = &[
     "js-conformance",
     "js-contain",
     "js-elastic",
+    "js-elastic-fake",
     "js-jobs",
     "js-lease",
     "js-lease-server",

@@ -1,5 +1,6 @@
 //! The scheduler state machine.
 
+mod builders;
 mod cancel;
 mod commit;
 mod fault;
@@ -7,6 +8,7 @@ mod gate;
 mod give_up;
 mod handoff;
 mod hold;
+mod host_end;
 mod ids;
 pub(crate) mod loss;
 mod machine;
@@ -37,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_types::sched::usage::{CurveSource, LeaseCost, RunEnd};
+use js_types::sched::usage::{LeaseCost, RunEnd};
 use js_types::sched::{
     ControlRecord, Effect, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos,
     RefusalRecord, Resources, WaiterId, Waiting, WorkKey, WorkerId,
@@ -45,7 +47,7 @@ use js_types::sched::{
 
 use js_whole::WholeNodeConfig;
 
-use crate::admission::{Admission, Blocked, LoadConfig, Profile};
+use crate::admission::{Admission, Blocked, Profile};
 use crate::cordon::Cordons;
 use crate::fence::HANDOVER_GRACE;
 use crate::headroom::MemoryPercent;
@@ -270,6 +272,9 @@ pub struct Scheduler {
     /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
     /// the log or the `Eq` memory state.
     max_walls: BTreeMap<OperationId, Duration>,
+    /// The max wall time of each operation placed on a worker whose host ends, cut to the
+    /// time that host had left ([`Scheduler::max_wall`]); `max_walls` keeps what was given.
+    capped_walls: BTreeMap<OperationId, Duration>,
     /// The marks, give-up counts and bars of whole-machine requests
     /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
     drain: whole::Drain,
@@ -312,6 +317,7 @@ impl Scheduler {
             head_holds: BTreeMap::new(),
             whole_node: None,
             max_walls: BTreeMap::new(),
+            capped_walls: BTreeMap::new(),
             drain: whole::Drain::default(),
             backfill: gate::Gate::default(),
         }
@@ -322,45 +328,6 @@ impl Scheduler {
     #[must_use]
     pub const fn with_finished_retention(mut self, retention: Duration) -> Self {
         self.finished_retention = retention;
-        self
-    }
-
-    /// This scheduler, admitting actions as `config` says. A scheduler built with
-    /// [`Scheduler::new`] places by load with the defaults of [`LoadConfig`]: `On`, 5 s
-    /// windows, `f` 1.0, `s_cpu` 0.10, `s_mem` 0, the flat-memory guard at `d` 0 and charges
-    /// ending at the expected life plus 2 minutes. `PlacementLoad::Off` here is the
-    /// rollback switch to the booked rule.
-    #[must_use]
-    pub fn with_load_config(mut self, config: LoadConfig) -> Self {
-        self.admission.configure(config);
-        self
-    }
-
-    /// This scheduler, taking `percent` of the memory a worker reports as that worker's
-    /// capacity: `floor(memory * percent / 100)` bytes, once, when the worker registers or
-    /// its report changes. Every admission path reads the capacity so cut (the load
-    /// predicate, the flat-memory guard, the memory ladder's cap, the whole-host test, VM
-    /// booking, the unservable check) and [`Scheduler::capacity`] shows it. Cores, GPUs,
-    /// VM slots and the lease cap are not cut, and neither is any figure an agent
-    /// measures or a job's learned memory. Set it before the first worker registers.
-    #[must_use]
-    pub const fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
-        self.memory_percent = percent;
-        self
-    }
-
-    /// The share of a worker's reported memory this scheduler takes as its capacity.
-    #[must_use]
-    pub const fn memory_percent(&self) -> MemoryPercent {
-        self.memory_percent
-    }
-
-    /// This scheduler, holding `curves` for the rule that charges a lease by a curve over
-    /// its lifetime. The flat rule does not read them: a key that has a curve is charged
-    /// flat and counted ([`LoadCounters::curve_flat`]).
-    #[must_use]
-    pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
-        self.admission.use_curves(curves);
         self
     }
 
@@ -451,6 +418,7 @@ impl Scheduler {
             self.memory.forget(id);
             self.size_keys.remove(&id);
             self.max_walls.remove(&id);
+            self.capped_walls.remove(&id);
             self.drain.forget(id);
             self.admission.forget(id);
             self.backfill.forget(id);
@@ -674,6 +642,7 @@ impl Scheduler {
             // A whole-machine request is not placed on a worker another request's mark is on.
             let takes_whole = request.kind == LeaseKind::WholeMachine && request.pin.is_none();
             let unmarked = takes_whole.then(|| self.off_marks(&reserved, id)).flatten();
+            servable.for_wall(self.max_walls.get(&id).copied());
             let attempt = Attempt {
                 request,
                 reserved: unmarked.as_ref().unwrap_or(&reserved),
@@ -922,6 +891,7 @@ impl Scheduler {
                     started_at: None,
                 },
             );
+            self.cap_wall(id, &worker);
             effects.push(Effect::Commit(ControlRecord::Lease(LeaseGrant {
                 lease,
                 operation: id,

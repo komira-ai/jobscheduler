@@ -294,6 +294,7 @@ pub fn listed(plan: &AcquirePlan, cloud: &str, status: HostStatus) -> Held {
         offer: plan.offer.id.clone(),
         zone: plan.offer.zone.clone(),
         status,
+        ends_unix_seconds: None,
     }
 }
 
@@ -371,5 +372,6 @@ pub fn record(phase: Phase, price: u64, launched: u64) -> Record {
         clean_lists: 0,
         last_clean: None,
         seen_live: false,
+        ends_at: None,
     }
 }

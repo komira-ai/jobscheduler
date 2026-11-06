@@ -591,3 +591,89 @@ fn a_list_answer_that_cannot_be_read_is_unreadable() {
         assert!(is_unreadable(&result), "{body}");
     }
 }
+
+/// The insert body of an on-demand request for the N1 type `n1-standard-8` with
+/// `attached` accelerators (the type name and the number), as the client sends it.
+fn n1_body(attached: Option<(&str, u32)>) -> Value {
+    let mut request = insert_request(on_demand(), "payload");
+    request.machine_type = MachineTypeName("n1-standard-8".to_owned());
+    request.accelerators = attached.map(|(name, count)| AttachedAccelerator {
+        type_name: AcceleratorTypeName(name.to_owned()),
+        count,
+    });
+    let (client, script) = over(vec![answer(&operation_json("PENDING").to_string())]);
+    client.insert_instance(&request).unwrap();
+    serde_json::from_slice(&api_calls(&script)[0].body).unwrap()
+}
+
+/// Asserts for every count of the attachable accelerator `name` that the whole insert body
+/// is the N1 instance with `guestAccelerators` holding one entry: the zone-relative path of
+/// the accelerator type and the number as a JSON number, and the `TERMINATE` host
+/// maintenance an instance with accelerators needs.
+fn assert_attached_body(name: &str, counts: &[u32]) {
+    for count in counts {
+        assert_eq!(
+            n1_body(Some((name, *count))),
+            json!({
+                "name": "js-vm-one",
+                "machineType": "zones/region-one-a/machineTypes/n1-standard-8",
+                "disks": [{
+                    "boot": true,
+                    "autoDelete": true,
+                    "initializeParams": {
+                        "sourceImage": "projects/image-project/global/images/js-agent-x86",
+                    },
+                }],
+                "networkInterfaces": [{
+                    "network": "global/networks/default",
+                    "subnetwork": "regions/region-one/subnetworks/default",
+                }],
+                "guestAccelerators": [{
+                    "acceleratorType": format!("zones/region-one-a/acceleratorTypes/{name}"),
+                    "acceleratorCount": count,
+                }],
+                "scheduling": {
+                    "provisioningModel": "STANDARD",
+                    "onHostMaintenance": "TERMINATE",
+                    "automaticRestart": false,
+                },
+                "labels": {"js-scheduler": "sched-one", "js-acquire-id": "acquire-1"},
+                "metadata": {"items": [{"key": "user-data", "value": "payload"}]},
+            }),
+            "{name} x {count}"
+        );
+    }
+}
+
+/// Asserts that an insert of the N1 type with 1, 2 or 4 attached `nvidia-tesla-t4` sends
+/// that count and the type path in `guestAccelerators`. Catches a count sent as a string,
+/// and a type path with the wrong form.
+#[test]
+fn an_insert_with_attached_t4_sends_its_guest_accelerators() {
+    assert_attached_body("nvidia-tesla-t4", &[1, 2, 4]);
+}
+
+/// Asserts that an insert of the N1 type with 1, 2 or 4 attached `nvidia-tesla-p4` sends
+/// that count and the type path in `guestAccelerators`. Catches a count sent as a string,
+/// and a type path with the wrong form.
+#[test]
+fn an_insert_with_attached_p4_sends_its_guest_accelerators() {
+    assert_attached_body("nvidia-tesla-p4", &[1, 2, 4]);
+}
+
+/// Asserts that an insert of the N1 type with 1, 2, 4 or 8 attached `nvidia-tesla-v100`
+/// sends that count and the type path in `guestAccelerators`. Catches a count sent as a
+/// string, and a type path with the wrong form.
+#[test]
+fn an_insert_with_attached_v100_sends_its_guest_accelerators() {
+    assert_attached_body("nvidia-tesla-v100", &[1, 2, 4, 8]);
+}
+
+/// Asserts that an insert with no attached accelerator, which is what a CPU-only offer and
+/// an offer of a type that carries its accelerators make, has no `guestAccelerators` key.
+/// Catches an empty list sent for a type whose accelerators are part of the machine type.
+#[test]
+fn an_insert_with_no_attached_accelerator_sends_no_guest_accelerators() {
+    let body = n1_body(None);
+    assert!(body.get("guestAccelerators").is_none(), "{body}");
+}

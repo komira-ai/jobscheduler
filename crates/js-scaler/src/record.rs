@@ -324,6 +324,14 @@ pub struct Record {
     /// rules still release a lost Welcome.
     #[serde(default = "seen_live_default")]
     pub seen_live: bool,
+    /// The end of the machine's reserved block of time, as the provider's last answer or
+    /// listing stated it (`Held::ends_unix_seconds`); `None` for a machine in no block.
+    /// Before it the machine is not released as idle or retired at `max_age`; from it, its
+    /// going is expected and is no loss. It is never written, so a release before this
+    /// field, which refuses an unknown key, still reads a file this release wrote (a
+    /// rollback restarts from it); the first list after a restart states it again.
+    #[serde(default, skip_serializing)]
+    pub ends_at: Option<Millis>,
 }
 
 /// The value of [`Record::seen_live`] for a file that has none: `true`.

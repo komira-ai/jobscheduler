@@ -116,6 +116,7 @@ impl StateMachine for Scheduler {
                             stopped_process: None,
                             phase: NodePhase::Serving,
                             switch_ends: FarmTime::default(),
+                            ends_at: None,
                         };
                         self.adopt(&worker, &mut fresh);
                         self.workers.insert(worker, fresh);
@@ -135,6 +136,12 @@ impl StateMachine for Scheduler {
                     w.raw_memory_bytes = raw_memory_bytes;
                     w.caps = caps;
                     w.last_heard = w.last_heard.max(self.now);
+                }
+                Vec::new()
+            }
+            Event::HostEnd { worker, ends_at } => {
+                if let Some(w) = self.workers.get_mut(&worker) {
+                    w.ends_at = ends_at;
                 }
                 Vec::new()
             }

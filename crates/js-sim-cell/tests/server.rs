@@ -391,6 +391,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
         labels: Default::default(),
         hello_interval: INTERVAL,
         kind: js_sim_cell::AgentKind::Fake(None),
+        instance: None,
     };
     let mut agent = CellNode::Agent(Box::new(AgentNode::new(agent, Ledger::new())));
     assert!(agent.as_server().is_none() && agent.as_server_mut().is_none());

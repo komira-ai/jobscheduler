@@ -143,5 +143,9 @@ pub fn event(event: &Event) -> String {
             format!("drain(worker={worker} deadline={})", text::time(*deadline))
         }
         Event::Uncordon { worker } => format!("uncordon(worker={worker})"),
+        Event::HostEnd { worker, ends_at } => format!(
+            "host_end(worker={worker} ends_at={})",
+            ends_at.map_or_else(|| "none".to_owned(), text::time)
+        ),
     }
 }

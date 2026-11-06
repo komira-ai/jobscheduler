@@ -62,6 +62,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tracing.workspace = true
+# The metadata service of `--identity-source` (src/identity), over plain HTTP.
+ureq.workspace = true
 
 # The crun image source and the image config (src/image), and the helper modes this binary
 # answers when a helper container runs it (`main`), are Linux code: js-contain drives `crun`
@@ -78,6 +80,10 @@ js-logmint = { path = "../js-logmint" }
 # The in-memory log store the uploader's tests put to (src/logs, tests/crun_stand_in).
 js-logstore = { path = "../js-logstore", features = ["fake"] }
 js-provider = { path = "../js-provider" }
+# The providers' verifiers of a signed identity, which the hello of `--identity-source` is
+# checked against (tests/agent/identity.rs).
+js-provider-ec2 = { path = "../js-provider-ec2" }
+js-provider-gce = { path = "../js-provider-gce" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 # The recording VM driver the VM runtime's tests drive (tests/agent/vm).

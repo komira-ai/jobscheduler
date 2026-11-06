@@ -569,6 +569,8 @@ impl Checker {
                 self.cordoned.remove(worker);
                 self.round(effects);
             }
+            // The model places without host ends; this input does nothing there.
+            Event::HostEnd { .. } => self.none(effects, "HostEnd"),
         }
         self.compare(sched);
     }

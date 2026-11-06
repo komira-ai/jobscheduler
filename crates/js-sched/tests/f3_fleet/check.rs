@@ -370,6 +370,8 @@ impl Check {
                 self.cordons.remove(worker);
                 Some(self.round())
             }
+            // The model places without host ends; this input does nothing there.
+            Event::HostEnd { .. } => None,
             Event::Tick => {
                 self.expire();
                 Some(self.round())

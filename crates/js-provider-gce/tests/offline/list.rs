@@ -159,6 +159,7 @@ fn a_list_holds_the_machines_this_scheduler_launched() {
                 offer: "q9-standard-2".to_owned(),
                 zone: Some(ZONE.to_owned()),
                 status: HostStatus::Booting,
+                ends_unix_seconds: None,
             },
             Held {
                 id: host(&stranger(1)),
@@ -167,6 +168,7 @@ fn a_list_holds_the_machines_this_scheduler_launched() {
                 offer: "q9-standard-2".to_owned(),
                 zone: Some(ZONE.to_owned()),
                 status: HostStatus::Active,
+                ends_unix_seconds: None,
             },
         ]
     );

@@ -40,6 +40,7 @@ use js_jobs::{AllocationId, JobId};
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
 
+use crate::elastic::CloudFacts;
 use crate::jobs::{AllocationRead, JobBeat, JobRead, JobReply, ResultMade};
 use crate::ledger::{Acked, Completion};
 
@@ -362,6 +363,8 @@ pub struct ServerHost {
     /// Whether the host is set aside (reserved, held whole, draining or releasing). No
     /// check reads it yet.
     pub set_aside: bool,
+    /// Whether the host is leaving the pool: drained or being released by the scaler.
+    pub leaving: bool,
     /// The whole-host request a reservation sets the host aside for, while the server
     /// holds one for it (the listing's `reserved_for`).
     pub reserved_for: Option<String>,
@@ -479,6 +482,8 @@ pub struct Observations {
     pub job_replies: Vec<JobReply>,
     /// Every result a per-job agent made, oldest first; only ever appended.
     pub results_made: Vec<ResultMade>,
+    /// The cloud of the server's elastic pool; `None` for a server without one.
+    pub cloud: Option<CloudFacts>,
 }
 
 impl Observations {
@@ -643,6 +648,23 @@ impl Observations {
     #[must_use]
     pub fn with_kill(mut self, host: HostId, at: FarmTime) -> Self {
         self.kills.push(Killed { host, at });
+        self
+    }
+
+    /// These observations with `cloud` as the elastic pool's cloud.
+    #[must_use]
+    pub fn with_cloud(mut self, cloud: CloudFacts) -> Self {
+        self.cloud = Some(cloud);
+        self
+    }
+
+    /// These observations with the server listing `host` as leaving the pool (drained or
+    /// being released), keeping what it books there.
+    #[must_use]
+    pub fn with_leaving(mut self, host: HostId) -> Self {
+        let listed = self.server.hosts.entry(host).or_default();
+        listed.leaving = true;
+        listed.set_aside = true;
         self
     }
 

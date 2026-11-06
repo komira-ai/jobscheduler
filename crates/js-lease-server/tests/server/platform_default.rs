@@ -88,6 +88,7 @@ fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
             phase: Phase::Serving,
             held: Vec::new(),
             accepts_host_credential: false,
+            identity: None,
         };
         registry.hello(&hello, &Credential::of_token("t")).unwrap();
     }

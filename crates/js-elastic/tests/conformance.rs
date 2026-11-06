@@ -79,6 +79,7 @@ impl CapacityProvider for Broken {
                 offer: request.offer.id.clone(),
                 zone: None,
                 status: HostStatus::Booting,
+                ends_unix_seconds: None,
             },
             extras: Vec::new(),
         }

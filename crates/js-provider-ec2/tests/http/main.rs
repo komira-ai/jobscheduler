@@ -3,6 +3,7 @@
 //! answer, the timeout, and the credentials, with no socket and no clock but the injected
 //! one.
 
+mod block;
 mod catalog;
 mod credential;
 mod launch;
