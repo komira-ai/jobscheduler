@@ -49,6 +49,10 @@ fn record(w: &World) -> Option<js_registry::RequestRecord> {
 /// The hosts a request is barred from, and until when.
 type Bars = BTreeMap<js_types::HostId, Exclusion>;
 
+/// A row of the reasons table: the code, the hosts it bars the request from given when the
+/// refusal came, and whether it taints the host.
+type Row<'a> = (RefusalReason, &'a dyn Fn(Timestamp) -> Bars, bool);
+
 fn barred(pairs: &[(&str, Exclusion)]) -> Bars {
     pairs.iter().map(|(name, e)| (host(name), *e)).collect()
 }
@@ -130,7 +134,7 @@ fn a_ready_report_that_crosses_the_deadline_wins() {
 fn each_cause_has_its_effect() {
     over_both(|engine| {
         let backoff = |at| barred(&[("a", Exclusion::Until(after(at, BACKOFF)))]);
-        let rows: [(RefusalReason, &dyn Fn(Timestamp) -> Bars, bool); 5] = [
+        let rows: [Row<'_>; 5] = [
             (RefusalReason::NotQuiet, &backoff, false),
             (RefusalReason::NoiseOverBound, &backoff, false),
             (RefusalReason::SetupFailed, &backoff, false),
