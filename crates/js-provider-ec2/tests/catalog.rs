@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use js_caps::{AcceleratorNeed, Model};
-use js_elastic::{BlockTerms, Demand, Dimension, Offer, Purchase, Quota};
+use js_elastic::{BlockTerms, Demand, Dimension, Offer, Purchase, Quota, QuotaLimit};
 use js_provider_ec2::{
     Action, ApiError, ArchName, BlockOffering, CatalogAnswer, CatalogNote, Ec2Catalog,
     Ec2CatalogSettings, ErrorCode, FakeEc2, GpuInfo, InstanceType, InstanceTypeInfo, PurchaseKind,
@@ -527,12 +527,18 @@ fn quota_is_read_into_the_offer_and_never_filters_it() {
             .collect()
     };
     let on_demand = Quota {
-        vcpus_limit: 48,
-        vcpus_in_use: Some(8),
+        vcpus: Some(QuotaLimit {
+            limit: 48,
+            in_use: Some(8),
+        }),
+        accelerators: None,
     };
     let spot = Quota {
-        vcpus_limit: 32,
-        vcpus_in_use: None,
+        vcpus: Some(QuotaLimit {
+            limit: 32,
+            in_use: None,
+        }),
+        accelerators: None,
     };
     assert_eq!(quota_of("p9.24xlarge/on-demand"), [Some(on_demand); 3]);
     assert_eq!(quota_of("p9.24xlarge/spot"), [Some(spot); 3]);
