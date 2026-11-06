@@ -987,3 +987,7 @@ pub(crate) fn rearranged(row: &[u8], without: &[u16]) -> Option<Vec<u8>> {
 #[cfg(test)]
 #[path = "codec_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "codec_props.rs"]
+mod props;

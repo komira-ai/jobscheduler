@@ -80,8 +80,8 @@
 //!
 //! With the `test-support` feature, `suite` states each behaviour as a function generic over
 //! a `js_state::conformance::Backend`, run on the fake, SQLite and Postgres
-//! ([`job_store_tests!`]), and `interfere` is the store wrapper its failure and race checks
-//! use.
+//! ([`job_store_tests!`]), `interfere` is the store wrapper its failure and race checks
+//! use, and `rows` reads and writes a stored row's bytes for the fuzz targets.
 
 mod codec;
 mod error;
@@ -91,6 +91,8 @@ pub mod interfere;
 pub mod keys;
 mod record;
 mod result;
+#[cfg(any(test, feature = "test-support"))]
+pub mod rows;
 mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod suite;

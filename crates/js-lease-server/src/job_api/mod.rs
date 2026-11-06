@@ -93,6 +93,8 @@ pub(crate) use wiring::{from_server, port};
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]
+mod conformance_tests;
+#[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
 mod read_tests;

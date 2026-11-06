@@ -208,4 +208,6 @@ fn conversion_failed(_: prost::DecodeError) -> Answer {
 }
 
 #[cfg(test)]
+mod props;
+#[cfg(test)]
 mod tests;

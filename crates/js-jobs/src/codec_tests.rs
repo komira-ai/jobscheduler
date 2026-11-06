@@ -11,12 +11,12 @@ use super::*;
 use crate::result::{JobResult, JobTiming, ResourceUsage, ResultReason};
 use crate::suite::{full_spec, whole_host_spec};
 
-fn at(secs: u64) -> StoreTime {
+pub(super) fn at(secs: u64) -> StoreTime {
     StoreTime::from_duration(Duration::from_secs(secs))
 }
 
 /// A result with every optional field set.
-fn full_result() -> JobResult {
+pub(super) fn full_result() -> JobResult {
     JobResult {
         exit_code: Some(-9),
         reason: ResultReason::WallLimit,
@@ -37,7 +37,7 @@ fn full_result() -> JobResult {
 }
 
 /// A job with every optional field set.
-fn full_job() -> JobRecord {
+pub(super) fn full_job() -> JobRecord {
     JobRecord {
         id: JobId::parse("full-1").expect("an id"),
         spec: full_spec(),
@@ -59,7 +59,7 @@ fn full_job() -> JobRecord {
 }
 
 /// A job with every optional field unset and every list empty.
-fn bare_job() -> JobRecord {
+pub(super) fn bare_job() -> JobRecord {
     let mut spec = whole_host_spec();
     spec.command.clear();
     spec.args.clear();
@@ -89,7 +89,7 @@ fn bare_job() -> JobRecord {
     }
 }
 
-fn allocation(booked: Booked) -> AllocationRecord {
+pub(super) fn allocation(booked: Booked) -> AllocationRecord {
     AllocationRecord {
         job: JobId::parse("full-1").expect("an id"),
         allocation_id: AllocationId::from_bits([7; 16]),
@@ -104,7 +104,7 @@ fn allocation(booked: Booked) -> AllocationRecord {
     }
 }
 
-fn shape() -> Booked {
+pub(super) fn shape() -> Booked {
     Booked::Shape {
         cpu_millis: 1,
         memory_bytes: 2,
