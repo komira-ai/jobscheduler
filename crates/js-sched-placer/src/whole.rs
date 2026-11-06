@@ -19,9 +19,10 @@
 //!    leaving one draining in the engine, and a lost one is cordoned, so none is marked or
 //!    granted, a mark on it moves and a pending grant there is put back. A host the
 //!    registry would not book now and that carries nothing (restoring after a whole-node
-//!    lease, a run still listed, cordoned by an operator) is cordoned too, unless one of
-//!    the engine's requests holds it: it is granted to no other request until the registry
-//!    would book it, while a mark or pending grant already on it stays.
+//!    lease, a run still listed, cordoned by an operator) is cordoned too while an idle
+//!    host the registry would book is free, unless one of the engine's requests holds it:
+//!    a request takes the bookable host first, a mark or pending grant already on it
+//!    stays, and with no bookable host free a request is granted it, to wait there.
 //! 4. Holds the hosts of [`WholeRound::outside`] outside its queue
 //!    ([`Scheduler::reserve_outside`]), with their tails, for backfill.
 //! 5. Queues each newly presented request as a whole-machine operation, in the order of the
@@ -169,14 +170,20 @@ impl Engine {
     /// documentation).
     fn stand(&mut self, hosts: &[js_registry::WholeHost], now: FarmTime) {
         let own = self.whole_hosts();
+        let idle = |engine: &Self, host: &js_registry::WholeHost| {
+            let worker = map::worker(&host.id);
+            engine.sched.leases_on(&worker).is_empty() & !own.contains(&host.id)
+        };
+        // Whether some idle host the registry would book now is free for a request.
+        let spare = hosts.iter().any(|host| host.open & idle(self, host));
         for host in hosts {
             let worker = map::worker(&host.id);
             // A host the registry would not book now that carries nothing (restoring after
             // a whole-node lease, a run still listed, cordoned by an operator) is granted to
-            // no request until it would; one a request already holds stays held.
-            let idle = self.sched.leases_on(&worker).is_empty() & !own.contains(&host.id);
-            let lost = host.standing == Standing::Lost;
-            let cordon = lost | (idle & !host.open);
+            // no request while one it would book is free; one a request already holds stays
+            // held, and with none free a request takes it, to wait there as on a mark.
+            let shut = idle(self, host) & !host.open & spare;
+            let cordon = (host.standing == Standing::Lost) | shut;
             let cordoned = self.cordoned.contains(&host.id);
             if cordon & !cordoned {
                 self.cordoned.insert(host.id.clone());

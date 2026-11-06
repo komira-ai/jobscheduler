@@ -36,11 +36,12 @@
 //! forgets is kept while it holds one, so the room a lease is offered is what the host's
 //! shape leaves after both.
 //!
-//! Under whole-node settings the engine also keeps the registry's whole-node queue: it marks,
-//! grants and cancels the pool's whole-node requests ([`whole`]), with the registry's
-//! expected lives of its leases as the learned curves its drain cost reads
-//! ([`crate::lives::Lives`]). They give no curve: each lease is charged what it books, and
-//! each host by its load readings when it has fresh ones.
+//! The engine is given no learned curves: each lease is charged what it books, and each
+//! host by its load readings when it has fresh ones. Under whole-node settings the engine
+//! also keeps the registry's whole-node queue: it marks, grants and cancels the pool's
+//! whole-node requests ([`whole`]), and its drain cost reads the registry's expected lives
+//! of its leases through the scheduler's curve source ([`crate::lives::Lives`]), which
+//! gives no curve.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

@@ -103,7 +103,7 @@ fn mark(name: &str, on: &str, at: u64, assigned: bool) -> Reservation {
 /// quiet `b`), the placer's mark not shown, or the placer handed a request in another
 /// shape than the registry holds it. `a` is cordoned and the placer marks it for `r`: the
 /// registry shows that mark, holds `a` for `r` (whose start books nothing while `a` is
-/// cordoned), and hands the placer `r` with its wall time, first presentation and mark.
+/// cordoned, and waits), and hands the placer `r` with its wall time, first presentation and mark.
 #[test]
 fn the_registry_shows_the_placers_marks_and_runs_no_pass_of_its_own() {
     let (mut w, queue) = world(&["a", "b"]);
@@ -111,7 +111,8 @@ fn the_registry_shows_the_placers_marks_and_runs_no_pass_of_its_own() {
     let since = w.now();
     let drain = mark("r", "a", since.millis(), false);
     queue.answer(drain.clone());
-    assert_eq!(w.ask(2, "r"), no_capacity());
+    // It waits: its start answers that the lease is pending.
+    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
     assert_eq!(w.reservations(), std::slice::from_ref(&drain));
     let first = WaitingWhole {
         id: id("r"),

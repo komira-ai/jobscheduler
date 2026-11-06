@@ -289,26 +289,25 @@ fn the_registrys_standing_moves_a_grant_at_once() {
 }
 
 /// Catches: a host the registry would not book now (restoring after a whole-node lease, a
-/// run still listed) granted to a request, which would then wait on it, perhaps for good,
-/// while it could drain another; and a request's own host taken from it while the host
-/// is restoring. The idle `a` is not bookable: `r` is granted nothing, and marks the busy
-/// `b` after `drain_after`. `b`'s lease ends while `b` is not yet bookable: `r` is granted
-/// `b`, which it held. Once `a` is bookable it is no longer kept from the engine's requests.
+/// run still listed) granted to a request while another it would book is free (the
+/// request would wait on it, and on a host whose prepares fail, fail again), or kept from
+/// every request when no other is free (a request could then hold no host while it waits,
+/// and the hosts listing would show none set aside for it). `a` is restoring and `b` is
+/// bookable: `r` is granted `b`; then, with no bookable host free, `s` is granted `a`.
 #[test]
-fn a_host_the_registry_would_not_book_is_granted_to_no_new_request() {
-    let hosts = live(&["a", "b"]);
-    let mut e = engine(&[("a", &[]), ("b", &[1])]);
-    let mut shut = round(vec![waiting("r", 0)], &hosts);
-    shut.hosts[0].open = false;
-    assert!(e.whole_round(shut.clone(), at(1_000)).is_empty());
+fn a_host_the_registry_would_not_book_waits_for_the_free_ones() {
+    let mut e = engine(&[("a", &[]), ("b", &[]), ("c", &[1])]);
+    let mut hosts = round(
+        vec![waiting("r", 0), waiting("s", 0)],
+        &live(&["a", "b", "c"]),
+    );
+    hosts.hosts[0].open = false;
+    hosts.hosts[2].open = false;
+    assert_eq!(held(&e.whole_round(hosts.clone(), at(1_000))), ["r@b*"]);
     let a = map::worker(&host("a"));
     assert!(e.sched.cordon(&a).is_some());
-    assert_eq!(held(&e.whole_round(shut.clone(), at(11_000))), ["r@b"]);
-    e.ended(LeaseId::new(1, 1));
-    shut.hosts[1].open = false;
-    assert_eq!(held(&e.whole_round(shut, at(12_000))), ["r@b*"]);
-    let marks = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(13_000));
-    assert_eq!(held(&marks), ["r@b*"]);
+    let marks = e.whole_round(hosts, at(2_000));
+    assert_eq!(held(&marks), ["r@b*", "s@a*"]);
     assert!(e.sched.cordon(&a).is_none() & e.cordoned.is_empty());
 }
 
@@ -485,8 +484,12 @@ fn a_request_the_scheduler_dropped_is_queued_again() {
 /// whole-node request could be granted a host the registry stands lost or cordoned.
 #[test]
 fn a_probe_leaves_a_host_the_engine_cordons_cordoned() {
-    let mut e = engine(&[("a", &[]), ("b", &[1])]);
-    let hosts = [("a", Standing::Cordoned), ("b", Standing::Live)];
+    let mut e = engine(&[("a", &[]), ("b", &[1]), ("c", &[])]);
+    let hosts = [
+        ("a", Standing::Cordoned),
+        ("b", Standing::Live),
+        ("c", Standing::Live),
+    ];
     e.whole_round(round(vec![waiting("r", 0)], &hosts), at(1_000));
     let id = ClassId::new("share").unwrap();
     let share = ResourceClass::new(id, Admission::Book(Default::default()), 0);
