@@ -400,6 +400,7 @@ fn exit_3() -> JobEnd {
             stderr: stderr(),
             truncated: false,
             usage: Some(used()),
+            logs: None,
         },
     }
 }

@@ -290,6 +290,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
     let context = BeatContext {
         host: &host("host-a"),
         ceiling: &ceiling,
+        logs: None,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -367,6 +368,7 @@ fn only_absent_frees_an_allocation() {
                 let context = BeatContext {
                     host: &host("host-a"),
                     ceiling: &ceiling,
+                    logs: None,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),
@@ -563,7 +565,13 @@ pub(super) fn served(name: &str) -> (Arc<Agents>, Arc<Interfere<Fake>>, js_testk
     let dir = scratch(name);
     let config = config_of(dir.path(), &pool(1, 8000, ""), &["--placement", "js-sched"]);
     let shared = SharedClock::new(clock());
-    let assembled = assemble_placed(config.hosts, config.usage, &shared, &config.state_file);
+    let assembled = assemble_placed(
+        config.hosts,
+        config.usage,
+        &shared,
+        &config.state_file,
+        None,
+    );
     let ((_, agents), _) = assembled.unwrap();
     let (store, jobs) = tables();
     let agents = Arc::try_unwrap(agents.unwrap()).ok().unwrap();
