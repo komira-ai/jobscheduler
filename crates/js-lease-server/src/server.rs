@@ -22,10 +22,11 @@ use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Config, JobListen, Limits, LiveClients, TlsFiles, Token};
+use crate::config::{Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
+use crate::metrics::{self, Meter, Recorder};
 use crate::pool::{Pool, Setup};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
@@ -41,6 +42,7 @@ pub struct Running {
     addr: SocketAddr,
     agent: Option<Port>,
     job: Option<Port>,
+    metrics: Option<Port>,
     state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
@@ -53,7 +55,7 @@ pub struct Running {
 }
 
 /// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
-/// or the job service (`--job-listen`).
+/// the job service (`--job-listen`), or the metrics (`--metrics-listen`).
 struct Port {
     addr: SocketAddr,
     stop: oneshot::Sender<()>,
@@ -130,6 +132,10 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         Some(job) => Some(bind(job.addr, job.flag, None).await?),
         None => None,
     };
+    let metrics_listener = match &listeners.metrics {
+        Some((metrics, _)) => Some(bind(metrics.addr, metrics.flag, None).await?),
+        None => None,
+    };
     let job_acceptor = tls.as_ref().map(tls::Tls::job_acceptor);
     let clients = listeners.clients;
     let served_tls = acceptor.is_some();
@@ -189,6 +195,23 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
                 serving: tokio::spawn(serving),
             }
         });
+    // The metrics, when they are on: plain HTTP whatever the other ports speak, since they
+    // carry no token, on a private address only (`not_private`).
+    let metrics =
+        metrics_listener
+            .zip(listeners.metrics)
+            .map(|((listener, addr), (_, recorder))| {
+                let (stop, stopped) = oneshot::channel::<()>();
+                let slots = Arc::new(Slots::new(limits.max_connections));
+                let app = metrics::router(shared.clone(), recorder);
+                let serving = serve(listener, None, app, limits, slots, stopped);
+                info!(%addr, "serving the metrics");
+                Port {
+                    addr,
+                    stop,
+                    serving: tokio::spawn(serving),
+                }
+            });
     let ticking = Box::pin(tick_loop(
         shared.clone(),
         ticker,
@@ -200,6 +223,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         addr,
         agent,
         job,
+        metrics,
         state_file,
         shared,
         stop,
@@ -219,6 +243,8 @@ pub(crate) struct Listeners {
     bound: Option<std::net::TcpListener>,
     agent_listen: Option<SocketAddr>,
     job_listen: Option<JobListen>,
+    /// Where the metrics are served, with the recorder that counts their events.
+    metrics: Option<(MetricsListen, Arc<Recorder>)>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
     /// The clients the job service's bearer layer admits, as the tick reloads them.
@@ -273,6 +299,7 @@ pub(crate) fn prepare(
         bound,
         agent_listen,
         job_listen,
+        metrics_listen,
         advertise_url,
         warnings,
         status,
@@ -289,6 +316,7 @@ pub(crate) fn prepare(
         hosts,
         usage,
         monotonic,
+        entropy,
         alerts,
         alert_repeat,
         logs,
@@ -334,6 +362,7 @@ pub(crate) fn prepare(
                 health: pool.health.clone(),
                 mode: pool.mode(),
                 catalogs: Arc::clone(cached.catalogs()),
+                entropy,
             };
             Some(build(plan, parts)?)
         }
@@ -341,6 +370,18 @@ pub(crate) fn prepare(
     };
     if let (Some(scaler), Some(sink)) = (&scaler, alerts) {
         scaler.set_sink(sink, alert_repeat);
+    }
+    // With the metrics on, the agent side and the scaler count their events from here on,
+    // before anything is served or ticked.
+    let metrics = metrics_listen.map(|at| (at, Arc::new(Recorder::default())));
+    if let Some((_, recorder)) = &metrics {
+        let meter = Meter::new(recorder.clone(), Arc::clone(&monotonic));
+        agents
+            .iter()
+            .for_each(|agents| agents.set_meter(meter.clone()));
+        scaler
+            .iter()
+            .for_each(|scaler| scaler.set_meter(meter.clone()));
     }
     let seated = source.provider(&bookings)?;
     let prepared = Prepared {
@@ -366,6 +407,7 @@ pub(crate) fn prepare(
         bound,
         agent_listen,
         job_listen,
+        metrics,
         max_job_wall,
         clients,
         tls,
@@ -645,6 +687,12 @@ impl Running {
         self.shared.registry()
     }
 
+    /// The address the metrics are served on (`--metrics-listen`), with the port the system
+    /// chose for port 0; `None` when the metrics are off, and no listener serves them.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics.as_ref().map(|metrics| metrics.addr)
+    }
+
     /// How long the lease table's steps took since the server started.
     pub fn timings(&self) -> js_lease::Timings {
         self.shared.timings()
@@ -714,7 +762,7 @@ impl Running {
     /// owns them) and the stop is an error that says so.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
-        let ports = [self.agent.take(), self.job.take()];
+        let ports = [self.agent.take(), self.job.take(), self.metrics.take()];
         let others: Vec<JoinHandle<()>> = ports.into_iter().flatten().map(Port::stop).collect();
         let mut served = self.serving.await.map_err(io::Error::other);
         for serving in others {

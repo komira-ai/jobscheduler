@@ -31,11 +31,25 @@ the commands from the table and names no call.
 
 3. Move the goldens the change moves (the help texts under
    `crates/js-cli/tests/cli/goldens/job_help/` and `job_surface.json`), and add the call's
-   server side.
+   server side. When the server starts serving a call, add it to
+   `js_lease_server::SERVED_CALLS` (`crates/js-lease-server/src/job_api/wiring.rs`, whose test
+   fails when the list and what the server serves differ) and render the files again.
+
+The same verb writes two blocks of `docs/http-gateway.md`, each between its marker lines
+(`<!-- gen-job-surface routes begin -->` and `... end -->`, and the same for `served`): the
+route table, from `js_api_gateway::ROUTES` (which the gateway's build reads from the
+`google.api.http` options), and the paragraph that says which calls the server serves, from
+`SERVED_CALLS`. The rest of the page is hand-written.
 
 `cargo test -p xtask --test job_surface` runs `cargo xtask gen-job-surface --check --out .`,
-which fails naming each checked-in file that is not what the definition renders, so a
-definition changed without step 2 is red in CI.
+which fails naming each checked-in file that is not what the definition renders (the page
+too, when a block differs or its markers are missing), so a definition changed without
+step 2 is red in CI.
+
+`cargo test -p xtask --test doc_refs` checks the other direction for the operator docs: every
+`js` command, with its flags, in `docs/runbooks/*.md`, and every `/v1/` route there and in
+`docs/http-gateway.md`, must exist in the command tree of `js` (`js_cli::command()`) or among
+the gateway's and the lease server's routes; it fails naming the file, line and word.
 
 ## The rules
 

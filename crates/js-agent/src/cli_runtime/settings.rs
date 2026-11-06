@@ -221,6 +221,9 @@ pub struct CrunPlan {
     /// Live logs: the capture file cap of a run with a sink (`--log-file-cap`) and the host's
     /// credential, set by [`Settings::with_log_file_cap`].
     pub logs: crate::logs::LogPlan,
+    /// The most bytes the unpacked images may take (`--image-budget-gib`), none for no
+    /// budget, set by [`Settings::with_image_budget`].
+    pub image_budget: Option<u64>,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -344,6 +347,7 @@ impl Settings {
                 #[cfg(target_os = "linux")]
                 gpus: None,
                 logs: crate::logs::LogPlan::new(crate::logs::DEFAULT_FILE_CAP),
+                image_budget: None,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -389,6 +393,16 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.logs.file_cap = file_cap);
+        self
+    }
+
+    /// These settings with `budget` as the most bytes the crun runtime's unpacked images may
+    /// take (`--image-budget-gib`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_image_budget(mut self, budget: Option<u64>) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.image_budget = budget);
         self
     }
 

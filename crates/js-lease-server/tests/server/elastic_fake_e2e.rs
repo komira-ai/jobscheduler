@@ -111,13 +111,15 @@ async fn until_release_is_asked(
 /// cloud answers `Terminating` and then the record goes `Gone` when the cloud says it no
 /// longer has the machine. The cloud's bill is then exactly the whole minutes between its
 /// launch and the release call it saw, at the price in its catalog: two cents a minute. The
-/// scaler's record holds the same price. It catches a launch that bills before it happens,
-/// a release that is never sent, a machine left running, and a bill that is not the cloud's.
+/// scaler's record holds the same price, and the server's metrics count the two launches it
+/// asked the cloud for, one of them failed over. It catches a launch that bills before it
+/// happens, a release that is never sent, a machine left running, a bill that is not the
+/// cloud's, and a launch or a failover the metrics do not count.
 #[tokio::test]
 async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and_released() {
     let cloud = cloud();
     cloud.script(Call::Acquire, &[Step::Refuse(RefusalCode::Capacity)]);
-    let rig = Rig::elastic("e2e_cloud_life", cloud.clone()).await;
+    let rig = Rig::elastic_metered("e2e_cloud_life", cloud.clone()).await;
     rig.tick().await;
     rig.wait();
     rig.tick().await;
@@ -133,6 +135,13 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
         }
     }
     assert_eq!((cloud.count(Call::Acquire), cloud.launched()), (2, 1));
+    let scraped = rig.scrape().await;
+    for line in [
+        "\njs_acquires_total{pool=\"burst\"} 2\n",
+        "\njs_acquire_failovers_total{pool=\"burst\"} 1\n",
+    ] {
+        assert!(scraped.contains(line), "{line} is not in:\n{scraped}");
+    }
     let launched_at = cloud.clock().now_ms();
     assert_eq!(rig.phase(), Phase::Launching);
     assert_eq!(rig.state().records.instances.len(), 1);

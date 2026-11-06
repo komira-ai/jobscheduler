@@ -1,7 +1,8 @@
 //! `gen-job-surface --out <dir> [--descriptor <path>] [--check]`: the job commands of `js` and
 //! the methods of `js_client::jobs::JobClient`, generated from the job service's descriptor
 //! set, so that a call added to the definition appears in both with no hand-written code
-//! (design section 3.6). `docs/job-surface.md` says how to add a call.
+//! (design section 3.6), and the generated blocks of the gateway's page. `docs/job-surface.md`
+//! says how to add a call.
 //!
 //! [`generate`] reads the descriptor set into a typed surface (per call its name, its request
 //! with every field and the field's comment, its response, whether the response streams,
@@ -15,9 +16,20 @@
 //!
 //! Both files are checked in, so a build needs no protobuf compiler and the generated code
 //! is reviewed with the change that makes it. Without `--descriptor` the verb reads the set
-//! `js-proto` builds ([`js_proto::FILE_DESCRIPTOR_SET`]). It writes the files under `--out`
-//! (the repository root), or with `--check` renders them in memory and fails naming each
-//! checked-in file that differs; the test `generated_files_are_current` runs it so.
+//! `js-proto` builds ([`js_proto::FILE_DESCRIPTOR_SET`]).
+//!
+//! A third file, [`DOC_FILE`], is hand-written but for two blocks between marker lines
+//! (`docs`, private): the route table, from the gateway's routes (`js_api_gateway::ROUTES`,
+//! which the gateway's build reads from the `google.api.http` options of js-proto's
+//! descriptor set), and the paragraph that says which calls the server serves, from
+//! `js_lease_server::SERVED_CALLS`. Neither depends on `--descriptor`: the page is the job
+//! service's. The verb replaces what stands between the markers of the page under `--out`
+//! and nothing else.
+//!
+//! The verb writes the files under `--out` (the repository root), or with `--check` renders
+//! them in memory and fails naming each checked-in file that differs (the page also when it
+//! is missing or its markers are not each there once, begin before end); the test
+//! `generated_files_are_current` runs it so.
 //!
 //! How a call becomes a command and a field a flag is in the module docs of `cli` (private)
 //! and, for users, in the crate docs of js-cli.
@@ -29,6 +41,7 @@ use prost_types::FileDescriptorSet;
 
 mod cli;
 mod client;
+mod docs;
 mod surface;
 mod words;
 
@@ -40,6 +53,9 @@ pub const CLIENT_FILE: &str = "crates/js-client/src/jobs/generated.rs";
 
 /// The generated command table and dispatcher, from the repository root.
 pub const CLI_FILE: &str = "crates/js-cli/src/jobs/generated.rs";
+
+/// The gateway's page, from the repository root: hand-written but for its generated blocks.
+pub const DOC_FILE: &str = "docs/http-gateway.md";
 
 /// Why the surface could not be generated, or the checked-in files are not current.
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +124,15 @@ pub enum GenError {
         /// Why.
         source: std::io::Error,
     },
+    /// The markers of a generated block of [`DOC_FILE`] are missing, doubled or out of
+    /// order.
+    #[error("{}: {why}", path.display())]
+    Markers {
+        /// The page.
+        path: PathBuf,
+        /// What is wrong with its markers.
+        why: String,
+    },
     /// `--check`: these checked-in files differ from what the generator renders.
     #[error(
         "not what `cargo xtask gen-job-surface --out .` renders from the job service: {}",
@@ -164,8 +189,9 @@ pub struct Args {
 /// # Errors
 ///
 /// [`GenError::Read`] for a `--descriptor` that cannot be read, the errors of
-/// [`generate`], [`GenError::Write`] for a file that cannot be written and, with `--check`,
-/// [`GenError::Stale`].
+/// [`generate`], [`GenError::Write`] for a file that cannot be written, [`GenError::Read`]
+/// and [`GenError::Markers`] for a page under `--out` that cannot be read or whose markers
+/// are wrong (in writing) and, with `--check`, [`GenError::Stale`].
 pub fn run(args: &Args) -> Result<String, GenError> {
     let descriptor = match &args.descriptor {
         Some(path) => std::fs::read(path).map_err(|source| GenError::Read {
@@ -182,30 +208,54 @@ pub fn run(args: &Args) -> Result<String, GenError> {
     }
 }
 
-/// Fails naming each file under `root` whose text is not the rendered one.
+/// Fails naming each file under `root` whose text is not the rendered one, then the page
+/// when its generated blocks are not the rendered ones or it cannot be rendered.
 fn check(root: &Path, files: &[(&str, String)]) -> Result<String, GenError> {
-    let stale: Vec<String> = files
+    let mut stale: Vec<String> = files
         .iter()
         .filter(|(path, text)| std::fs::read_to_string(root.join(path)).ok().as_ref() != Some(text))
         .map(|(path, _)| (*path).to_owned())
         .collect();
+    let page = std::fs::read_to_string(root.join(DOC_FILE)).ok();
+    let rendered = page.as_deref().and_then(|text| docs::page(text).ok());
+    let current = page.as_ref().zip(rendered.as_ref());
+    if current.is_none_or(|(page, rendered)| page != rendered) {
+        stale.push(DOC_FILE.to_owned());
+    }
     match stale.is_empty() {
-        true => Ok(format!("{CLIENT_FILE} and {CLI_FILE} are current")),
+        true => Ok(format!(
+            "{CLIENT_FILE}, {CLI_FILE} and {DOC_FILE} are current"
+        )),
         false => Err(GenError::Stale(stale)),
     }
 }
 
-/// Writes each file under `root`, making its directory when it is missing.
+/// Writes each file under `root`, making its directory when it is missing, then the
+/// generated blocks of the page under `root`.
 fn write(root: &Path, files: &[(&str, String)]) -> Result<String, GenError> {
-    files.iter().try_for_each(|(path, text)| {
-        let path = root.join(path);
+    let written = |path: &Path, text: &str| {
         let failed = |source| GenError::Write {
-            path: path.clone(),
+            path: path.to_path_buf(),
             source,
         };
         let parent = path.parent().unwrap_or(root);
         std::fs::create_dir_all(parent).map_err(failed)?;
-        std::fs::write(&path, text).map_err(failed)
+        std::fs::write(path, text).map_err(failed)
+    };
+    files
+        .iter()
+        .try_for_each(|(path, text)| written(&root.join(path), text))?;
+    let page = root.join(DOC_FILE);
+    let text = std::fs::read_to_string(&page).map_err(|source| GenError::Read {
+        path: page.clone(),
+        source,
     })?;
-    Ok(format!("wrote {CLIENT_FILE} and {CLI_FILE}"))
+    let text = docs::page(&text).map_err(|why| GenError::Markers {
+        path: page.clone(),
+        why,
+    })?;
+    written(&page, &text)?;
+    Ok(format!(
+        "wrote {CLIENT_FILE} and {CLI_FILE}, and the generated blocks of {DOC_FILE}"
+    ))
 }

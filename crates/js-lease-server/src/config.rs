@@ -15,6 +15,7 @@ use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 
+use js_registry::{OsSessions, SessionSource};
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -50,7 +51,7 @@ pub(crate) use feed_retention::{
     DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
 };
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
-pub(crate) use listen::{JobListen, clear_text};
+pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
 pub use placement::Placement;
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
@@ -88,6 +89,11 @@ pub struct Cli {
     /// Off the loopback it needs --tls-cert and --tls-key. Needs --agent-pool-config.
     #[arg(long)]
     pub job_listen: Option<SocketAddr>,
+    /// Serves the operator's metrics (`GET /metrics`, the Prometheus text format, no token)
+    /// here, to private peers only. Off unless given; an address that is not a private one is
+    /// refused.
+    #[arg(long)]
+    pub metrics_listen: Option<SocketAddr>,
     /// The lease file.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
@@ -413,6 +419,8 @@ pub struct Config {
     pub(crate) agent_listen: Option<SocketAddr>,
     /// Where the job service is served (`--job-listen`, `server.job_listen`); off when `None`.
     pub(crate) job_listen: Option<JobListen>,
+    /// Where the metrics are served (`--metrics-listen`, `server.metrics_listen`); off when `None`.
+    pub(crate) metrics_listen: Option<MetricsListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -432,6 +440,10 @@ pub struct Config {
     pub(crate) hosts: Hosts,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
+    /// Where the scaler draws the random part of each acquire id, and so of each machine's
+    /// name: the operating system's ([`OsSessions`]) unless [`Config::with_entropy`] gives
+    /// another.
+    pub(crate) entropy: Arc<dyn SessionSource>,
     /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
     /// [`Config::with_alert_sink`].
     pub(crate) alerts: Option<Arc<dyn AlertSink>>,
@@ -503,6 +515,7 @@ impl Config {
             bound: None,
             agent_listen: None,
             job_listen: listen::job_listen(&cli),
+            metrics_listen: listen::metrics_listen(&cli)?,
             advertise_url: None,
             warnings,
             status,
@@ -519,6 +532,7 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            entropy: Arc::new(OsSessions),
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
@@ -626,6 +640,7 @@ impl Config {
             bound: None,
             agent_listen: server.agent_listen,
             job_listen: server.agents.job_listen(),
+            metrics_listen: server.metrics_listen,
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -642,6 +657,7 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            entropy: Arc::new(OsSessions),
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
@@ -677,6 +693,11 @@ impl Config {
     /// The address the job service is served on, when the flag or the file gives one.
     pub fn job_listen(&self) -> Option<SocketAddr> {
         self.job_listen.map(|job| job.addr)
+    }
+
+    /// The address the metrics are served on, when the flag or the file gives one.
+    pub fn metrics_listen(&self) -> Option<SocketAddr> {
+        self.metrics_listen.map(|metrics| metrics.addr)
     }
 
     /// The URL agents are told to dial, when the file gives one.
@@ -748,6 +769,18 @@ impl Config {
     /// The same configuration timing the lease table's steps on `clock`.
     pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
         self.monotonic = clock;
+        self
+    }
+
+    /// The same configuration drawing the random part of each acquire id the scaler makes
+    /// from `entropy` instead of the operating system ([`OsSessions`], the default). A
+    /// machine's name is derived from its acquire id, so two servers given sources that
+    /// answer the same bytes in the same order name the same machines. The source is shared:
+    /// a server started again with the same `Arc` goes on with the next bytes rather than
+    /// repeating the first ones. Only the scaler reads it; the registry's session secrets
+    /// and the join tokens still come from the operating system.
+    pub fn with_entropy(mut self, entropy: Arc<dyn SessionSource>) -> Self {
+        self.entropy = entropy;
         self
     }
 

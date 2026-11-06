@@ -10,6 +10,7 @@ use super::{JobLimits, deadline, due, expire};
 use crate::agent_api::job_rig::{BOOKED, spec, tables_on};
 use crate::file::PoolSettings;
 use crate::job_store::ServerJobs;
+use crate::metrics::NoMetrics;
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -144,15 +145,18 @@ fn expire_ends_the_jobs_out_of_time_and_releases_their_allocations() {
     clock.advance(LIMITS.start_timeout);
     let fresh = queue(&jobs, "job-fresh");
     let now = jobs_now(&clock);
-    let ended = expire(&jobs, LIMITS, now).unwrap();
+    let ended = expire(&jobs, LIMITS, now, &NoMetrics).unwrap();
     assert_eq!(ended, [(placed.clone(), StartFailure::StartTimeout)]);
     let allocation = jobs.get_allocation(&placed).unwrap().unwrap();
     assert_eq!(allocation.step, js_jobs::AllocationStep::Releasing);
     clock.advance(LIMITS.max_queue_wait - LIMITS.start_timeout);
-    let ended = expire(&jobs, LIMITS, jobs_now(&clock)).unwrap();
+    let ended = expire(&jobs, LIMITS, jobs_now(&clock), &NoMetrics).unwrap();
     assert_eq!(ended, [(queued.clone(), StartFailure::NoCapacity)]);
     assert_eq!(record(&jobs, &fresh).state, JobState::Queued);
-    assert_eq!(expire(&jobs, LIMITS, jobs_now(&clock)).unwrap(), Vec::new());
+    assert_eq!(
+        expire(&jobs, LIMITS, jobs_now(&clock), &NoMetrics).unwrap(),
+        Vec::new()
+    );
 }
 
 fn jobs_now(clock: &ManualClock) -> StoreTime {
@@ -171,7 +175,10 @@ fn a_job_that_moved_since_the_read_is_left_for_the_next_pass() {
     store.before_next(move || {
         racing.place(&raced, host(), BOOKED).unwrap();
     });
-    assert_eq!(expire(&jobs, LIMITS, jobs_now(&clock)), Ok(Vec::new()));
+    assert_eq!(
+        expire(&jobs, LIMITS, jobs_now(&clock), &NoMetrics),
+        Ok(Vec::new())
+    );
     assert_eq!(record(&jobs, &id).state, JobState::Placed);
 }
 
@@ -183,7 +190,7 @@ fn a_failed_commit_ends_the_expiry_with_its_error() {
     let id = queue(&jobs, "job-q");
     clock.advance(LIMITS.max_queue_wait);
     store.fail_next();
-    let failed = expire(&jobs, LIMITS, jobs_now(&clock));
+    let failed = expire(&jobs, LIMITS, jobs_now(&clock), &NoMetrics);
     assert!(
         matches!(failed, Err(JobStoreError::Store(StoreError::Failed(_)))),
         "{failed:?}"

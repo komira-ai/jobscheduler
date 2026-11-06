@@ -22,6 +22,7 @@ use crate::adapt::SharedClock;
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::assemble_placed;
 use crate::job_alloc::{Freed, free_allocation};
+use crate::metrics::NoMetrics;
 use crate::per_job::{BeatContext, serve};
 use crate::sched::engine::Settings;
 use crate::sched::engine_rig::{GIB, T0, hello_of, pool, rig, share_of};
@@ -124,7 +125,9 @@ pub(super) fn finish(jobs: &ServerJobs, id: &JobId) {
 
 /// One pass of `placer` over `jobs` on the hosts `names`: the jobs it placed.
 pub(super) fn pass(placer: &SchedPlacer, jobs: &ServerJobs, names: &[&str]) -> Vec<String> {
-    let placed = placer.place_jobs(jobs, &open(names), &NoStarts).unwrap();
+    let placed = placer
+        .place_jobs(jobs, &open(names), (&NoStarts, &NoMetrics))
+        .unwrap();
     placed.iter().map(ToString::to_string).collect()
 }
 
@@ -231,7 +234,7 @@ fn placement_and_allocation_are_one_commit() {
     };
     queue(&jobs, "job-a", 4, 0);
     let before = store.commit_stats().txns;
-    let placed = placer.place_jobs(&jobs, &open(&["host-a"]), &starts);
+    let placed = placer.place_jobs(&jobs, &open(&["host-a"]), (&starts, &NoMetrics));
     assert_eq!(placed, Ok(vec![JobId::parse("job-a").unwrap()]));
     assert_eq!(store.commit_stats().txns, before + 1);
     let seen = |job: &str, commits| Seen {
@@ -245,7 +248,7 @@ fn placement_and_allocation_are_one_commit() {
 
     queue(&jobs, "job-b", 4, 0);
     store.fail_next();
-    let refused = placer.place_jobs(&jobs, &open(&["host-a"]), &starts);
+    let refused = placer.place_jobs(&jobs, &open(&["host-a"]), (&starts, &NoMetrics));
     assert_eq!(refused, Ok(Vec::new()));
     let b = JobId::parse("job-b").unwrap();
     assert_eq!(
@@ -291,6 +294,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
         host: &host("host-a"),
         ceiling: &ceiling,
         logs: None,
+        metrics: &NoMetrics,
     };
     let holds = [HeldJob {
         job_id: "job-a".to_owned(),
@@ -369,6 +373,7 @@ fn only_absent_frees_an_allocation() {
                     host: &host("host-a"),
                     ceiling: &ceiling,
                     logs: None,
+                    metrics: &NoMetrics,
                 };
                 let holds = [HeldJob {
                     job_id: "job-a".to_owned(),
@@ -458,7 +463,10 @@ fn lease_and_job_bookings_cannot_overbook_a_host() {
     assert_eq!(rig.start(share_of(1, 1000, 6 * GIB)).as_deref(), Some("h1"));
     queue(&jobs, "job-1", 6, 0);
     let placed = |rig: &crate::sched::engine_rig::Rig| {
-        let placed = rig.placer().place_jobs(&jobs, &on_h1, &NoStarts).unwrap();
+        let placed = rig
+            .placer()
+            .place_jobs(&jobs, &on_h1, (&NoStarts, &NoMetrics))
+            .unwrap();
         placed.iter().map(ToString::to_string).collect::<Vec<_>>()
     };
     assert_eq!(placed(&rig), ["job-1"]);
@@ -553,7 +561,7 @@ fn a_pass_that_cannot_read_the_tables_places_nothing() {
     queue(&jobs, "job-a", 2, 0);
     for reads in [0, 1] {
         store.fail_read_after(reads);
-        let failed = placer.place_jobs(&jobs, &open(&["host-a"]), &NoStarts);
+        let failed = placer.place_jobs(&jobs, &open(&["host-a"]), (&NoStarts, &NoMetrics));
         assert!(failed.is_err(), "the read after {reads}");
         assert_eq!(state(&jobs, "job-a"), JobState::Queued);
     }

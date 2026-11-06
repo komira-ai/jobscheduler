@@ -1,7 +1,7 @@
 //! The lease directories the runtime makes or takes: new ones of mode `0755`, and the one
 //! the lifecycle made beside the run's own, checked to be empty and in the run's project;
 //! and the paths of a lease's cgroup files, of the helpers' cgroup and of an older agent's
-//! lease.
+//! lease; and the hand-over of a path that follows no link.
 
 use std::fs::File;
 use std::io;
@@ -115,4 +115,19 @@ pub(super) fn make_helper_cgroup(
 /// The directory of the cgroup `name` (relative to `mount`, starting with `/`).
 pub(super) fn cgroup_dir(mount: &Path, name: &str) -> PathBuf {
     mount.join(name.trim_start_matches('/'))
+}
+
+/// Gives the file or directory `path` to `uid` and `gid` by the descriptor of what it opens,
+/// without following a link: a path replaced by a link is refused, and what is given is what
+/// was opened.
+///
+/// # Errors
+/// The system's reason: the path is not there, is a link, or may not be given away.
+pub fn hand_over_no_follow(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, fchown};
+    use rustix::process::{Gid, Uid};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::empty())
+        .and_then(|fd| fchown(&fd, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))))
+        .map_err(io::Error::from)
 }

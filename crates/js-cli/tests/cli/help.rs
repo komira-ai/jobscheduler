@@ -103,3 +103,30 @@ fn golden_files_are_named_by_the_command() {
     assert_eq!(golden_name(&[]), "js.txt");
     assert_eq!(golden_name(&["lease", "run"]), "js-lease-run.txt");
 }
+
+/// Asserts that `js_cli::command()`, the tree a documentation check walks, is the one the
+/// program parses with: it is named `js`, holds every lease and job command this file holds
+/// to goldens and nothing beside them at the top, and carries the four global flags. It
+/// catches a public tree that leaves out the generated job commands or the lease group.
+#[test]
+fn the_public_command_tree_is_the_parsed_one() {
+    let tree = js_cli::command();
+    assert_eq!(tree.get_name(), "js");
+    for words in LEASE.iter().chain(JOB.iter()) {
+        let found = words
+            .iter()
+            .try_fold(&tree, |at, word| at.find_subcommand(word));
+        assert!(found.is_some(), "{words:?}");
+    }
+    let top: Vec<&str> = tree
+        .get_subcommands()
+        .map(clap::Command::get_name)
+        .collect();
+    assert_eq!(top, ["lease", "job", "host", "pool", "provider", "usage"]);
+    let globals: Vec<&str> = tree
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter_map(clap::Arg::get_long)
+        .collect();
+    assert_eq!(globals, ["server", "token-file", "ca-cert", "json"]);
+}
