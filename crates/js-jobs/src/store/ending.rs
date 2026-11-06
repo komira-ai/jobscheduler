@@ -1,19 +1,36 @@
 //! Ending a job with its result and retention end, deleting the jobs past their retention
-//! end, and raising retention ends and deadline floors at boot (design sections 3.2, 6.1 and
-//! 6.7). Only job rows
-//! are read, written or deleted here, apart from the release of a booked allocation in the
-//! transaction that ends its job; allocation rows are history, kept as long as the placement
-//! estimates need them (design question 14), and no retention deletes them.
+//! end, deleting the freed allocations past their own window, and raising retention ends and
+//! deadline floors at boot (design sections 3.2, 6.1 and 6.7). Apart from the release of a
+//! booked allocation in the transaction that ends its job, the only allocation rows written
+//! here are the freed ones [`JobStore::tick`] deletes: a freed row is kept for the store's
+//! allocation retention after its free ([`JobStore::with_allocation_retention`]) and then
+//! deleted, at most [`SWEEP_BATCH`] rows a tick. The usage history of an allocation is the
+//! `usage/ended` row written beside its free, which no retention here touches; a booked or
+//! releasing row is never deleted.
 
 use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, Version};
 
-use super::{JobStore, ensure, job_at, same_key};
+use super::{JobStore, allocation_at, ensure, job_at, same_key};
 use crate::codec::{DecodeError, decode_job, encode_allocation, encode_job};
 use crate::error::JobStoreError;
 use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{AllocationRecord, AllocationStep, JobRecord, may_move};
-use crate::result::{JobEnd, SWEEP_BATCH, ended, floored_at_boot, past_retention, raised_at_boot};
+use crate::result::{
+    JobEnd, Retention, SWEEP_BATCH, ended, floored_at_boot, past_retention, raised_at_boot,
+};
+
+/// Whether `allocation` is freed and its free is at least `retention` before `now`, so the
+/// tick may delete its row. A freed row that holds no free time (none this build writes)
+/// counts from its booking. A booked or releasing allocation is never collectable.
+pub(crate) fn collectable(
+    allocation: &AllocationRecord,
+    retention: Retention,
+    now: StoreTime,
+) -> bool {
+    let since = allocation.freed_at.unwrap_or(allocation.created_at);
+    (allocation.step == AllocationStep::Freed) & (since.saturating_add(retention.window()) <= now)
+}
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Ends the job `id` as `end` says (design section 3.2): in one transaction the job takes
@@ -106,12 +123,33 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// the store's [`Clock`](js_state::Clock). A row a later build wrote is left as it is and
     /// logged. It returns the ids it deleted.
     ///
+    /// Then it deletes at most one batch of freed allocation rows whose free is the store's
+    /// allocation retention or more before that time ([`JobStore::with_allocation_retention`]),
+    /// in one transaction, each at the version read, so a row placed again since is kept; a
+    /// backlog larger than a batch is cleared over the ticks that follow. A batch that loses to
+    /// such a change deletes nothing and the next tick reads again. A booked or releasing row,
+    /// and a row this build cannot read, is never deleted.
+    ///
     /// # Errors
-    /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] when a
-    /// row of a batch changed before its commit (the batches before it stay deleted);
+    /// [`JobStoreError::Corrupt`] when a job row does not parse; [`JobStoreError::Stale`] when
+    /// a job row of a batch changed before its commit (the batches before it stay deleted);
     /// [`JobStoreError::Store`].
     pub fn tick(&self) -> Result<Vec<JobId>, JobStoreError> {
         let now = self.store.now();
+        let deleted = self.sweep_jobs(now)?;
+        let collected = self.collect_allocations(now)?;
+        if !collected.is_empty() {
+            tracing::info!(
+                collected = collected.len(),
+                "freed allocations past their retention deleted"
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// The job half of [`JobStore::tick`]: every job past its retention end at `now`, deleted
+    /// one transaction per batch.
+    fn sweep_jobs(&self, now: StoreTime) -> Result<Vec<JobId>, JobStoreError> {
         let mut deleted = Vec::new();
         let mut resume: Option<ResumeToken> = None;
         loop {
@@ -159,6 +197,44 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             self.commit(first, txn)?;
         }
         Ok(due)
+    }
+
+    /// The allocation half of [`JobStore::tick`]: deletes, in one transaction at the versions
+    /// read, up to [`SWEEP_BATCH`] freed allocations collectable at `now` ([`collectable`]),
+    /// and returns their jobs' ids. With none, or when the transaction loses to a change of one
+    /// of its rows, it commits nothing and returns none.
+    fn collect_allocations(&self, now: StoreTime) -> Result<Vec<JobId>, JobStoreError> {
+        let mut due = Vec::new();
+        let mut resume: Option<ResumeToken> = None;
+        while due.len() < SWEEP_BATCH.get() {
+            let scan = ScanRange::new(keys::ALLOCATION, SWEEP_BATCH);
+            let scan = match &resume {
+                Some(token) => scan.resume(token),
+                None => scan,
+            };
+            let page = self.store.scan_range(scan)?;
+            for (key, row) in page.rows {
+                // A row this build cannot read is not known to be freed: it is kept.
+                let Ok(allocation) = allocation_at(&key, &row.value) else {
+                    continue;
+                };
+                if collectable(&allocation, self.allocation_retention, now) {
+                    due.push((allocation.job, row.version));
+                }
+            }
+            match page.resume {
+                Some(token) => resume = Some(token),
+                None => break,
+            }
+        }
+        due.truncate(SWEEP_BATCH.get());
+        let txn = due.iter().fold(Txn::new(), |txn, (id, version)| {
+            txn.delete(keys::allocation(id), Cond::Version(*version))
+        });
+        if due.is_empty() || self.store.txn(txn)?.is_err() {
+            return Ok(Vec::new());
+        }
+        Ok(due.into_iter().map(|(id, _)| id).collect())
     }
 
     /// `txn` with every stored retention end raised to at least `boot` plus
@@ -222,5 +298,58 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             self.commit(&first, txn)?;
         }
         Ok(written)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use js_state::ManualClock;
+    use js_state::fake::{Fake, Flaw};
+
+    use super::super::tests::Lines;
+    use crate::ids::RandomIds;
+    use crate::suite::{full_spec, host, share};
+    use crate::{EndReason, JobId, JobStore, NewJob, Retention};
+
+    // Catches a collection that deletes rows without a word: the tick that deletes a freed
+    // allocation logs how many it deleted.
+    #[test]
+    fn a_tick_that_collects_allocations_says_how_many() {
+        let lines = Lines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_ansi(false)
+            .finish();
+        let clock = Arc::new(ManualClock::default());
+        let store = Arc::new(Fake::with_flaw(Arc::clone(&clock), Flaw::None));
+        let window = Retention::new(Duration::from_secs(60)).expect("a window");
+        let jobs = JobStore::new(store, RandomIds)
+            .expect("opens")
+            .with_allocation_retention(window);
+        let id = JobId::parse("logged").expect("an id");
+        let job = NewJob {
+            id: Some(id.clone()),
+            spec: full_spec(),
+            priority: 0,
+            client: None,
+        };
+        jobs.insert_queued(job).expect("queues");
+        jobs.place(&id, host("host-a"), share()).expect("places");
+        jobs.free(&id, EndReason::Exited).expect("frees");
+        clock.advance(window.window());
+        let ticked = tracing::subscriber::with_default(subscriber, || jobs.tick());
+        assert_eq!(ticked, Ok(Vec::new()));
+        assert_eq!(jobs.get_allocation(&id), Ok(None));
+        lines.clone().flush().expect("flushes");
+        let said = String::from_utf8(lines.0.lock().expect("unpoisoned").clone()).expect("text");
+        assert!(
+            said.contains("freed allocations past their retention deleted")
+                & said.contains("collected=1"),
+            "{said}"
+        );
     }
 }

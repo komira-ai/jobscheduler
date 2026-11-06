@@ -4,9 +4,11 @@
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
 //! **allocation** is the scheduler's private record that resources on one host are booked
 //! for one placement of one job ([`AllocationRecord`]). Both are kept after they end: an
-//! ended job, with its [`JobResult`], until its retention end; a freed allocation as
-//! history, as long as the placement estimates need it (design question 14), which no job
-//! retention deletes.
+//! ended job, with its [`JobResult`], until its retention end; a freed allocation for the
+//! store's allocation retention after its free (fourteen days unless
+//! [`JobStore::with_allocation_retention`] sets another), after which [`JobStore::tick`]
+//! deletes its row. The usage history of an allocation is its `usage/ended` row, which
+//! neither retention deletes.
 //!
 //! # Results and retention
 //!
@@ -67,7 +69,7 @@
 //! | [`JobStore::end_and_free`] | put `job/<id>` at its version (ended as [`JobStore::end_job`] ends it) unless it has ended, and put `alloc/<id>` at its version (to freed) unless it is freed; nothing when both are so |
 //! | [`JobStore::end_and_free_with`] | as [`JobStore::end_and_free`], with the caller's rows put beside the free when it frees |
 //! | [`JobStore::delete_swept`] | delete each `job/<id>` past its retention end at its version, or nothing when none is |
-//! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version |
+//! | [`JobStore::tick`] | per batch of [`SWEEP_BATCH`] rows, delete each `job/<id>` past its retention end at its version; then delete up to [`SWEEP_BATCH`] freed `alloc/<id>` rows past the allocation retention, at their versions, in one transaction |
 //! | [`JobStore::raise_deadlines_at_boot`] | adds to the caller's transaction a put of each `job/<id>` whose retention end it raises, at its version |
 //! | [`JobStore::raise_at_boot`] | put each `job/<id>` whose retention end or deadline floor it raises, at its version, or nothing when none is |
 //!

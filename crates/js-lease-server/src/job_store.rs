@@ -42,8 +42,9 @@ pub(crate) type ServerJobs = JobStore<Arc<dyn Store>, RandomIds>;
 
 /// What the job store is opened with: the flag or key of the job service's address (which
 /// turned it on, and names it in a refusal), how long an ended job is kept
-/// (`--job-retention`, `server.job_retention`) and how many changes its feed keeps
-/// (`--job-feed-retention`, `server.job_feed_retention`).
+/// (`--job-retention`, `server.job_retention`), how many changes its feed keeps
+/// (`--job-feed-retention`, `server.job_feed_retention`) and how long a freed allocation's
+/// row is kept (`--job-allocation-retention`, `server.job_allocation_retention`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JobStoreSetup {
     /// `--job-listen` or `server.job_listen`.
@@ -52,6 +53,8 @@ pub(crate) struct JobStoreSetup {
     pub(crate) retention: Retention,
     /// How many of the newest changes of the store's feed the tick keeps.
     pub(crate) feed_retention: FeedRetention,
+    /// The window a freed allocation's row is kept for after its free.
+    pub(crate) allocation_retention: Retention,
 }
 
 /// The job store as [`open`] returns it: the tables, and the state store under them, which
@@ -93,7 +96,10 @@ pub(crate) fn open(state_file: &Path, setup: JobStoreSetup) -> Result<Opened, St
         .map_err(StartupError::because(setup.flag))?;
     info!(file = %path.display(), raised, "the job store is open");
     Ok(Opened {
-        jobs: Arc::new(jobs.with_retention(setup.retention)),
+        jobs: Arc::new(
+            jobs.with_retention(setup.retention)
+                .with_allocation_retention(setup.allocation_retention),
+        ),
         feed,
     })
 }
@@ -127,6 +133,7 @@ mod tests {
             flag: "--job-listen",
             retention: Retention::new(Duration::from_secs(retention_secs)).unwrap(),
             feed_retention: FeedRetention::DEFAULT,
+            allocation_retention: Retention::new(Duration::from_secs(2 * retention_secs)).unwrap(),
         }
     }
 
@@ -141,6 +148,10 @@ mod tests {
         let jobs = open(&state, setup(259_200)).unwrap().jobs;
         assert!(dir.path().join("leases.toml.jobs").is_file());
         assert_eq!(jobs.retention(), setup(259_200).retention);
+        assert_eq!(
+            jobs.allocation_retention(),
+            setup(259_200).allocation_retention
+        );
         let second = open(&state, setup(259_200)).err().unwrap();
         assert_eq!(second.flag(), "--job-listen");
         assert!(second.reason().contains("leases.toml.jobs"), "{second}");

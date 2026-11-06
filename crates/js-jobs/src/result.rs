@@ -192,6 +192,13 @@ impl Retention {
     /// The window unless the operator sets another: seven days (design question 14).
     pub const DEFAULT: Retention = Retention(Duration::from_secs(7 * 24 * 60 * 60));
 
+    /// The window a freed allocation's row is kept for unless the operator sets another:
+    /// fourteen days, twice [`Retention::DEFAULT`], so under the defaults a freed allocation
+    /// outlives the job it booked for (design question 14: allocation history is kept as long
+    /// as the estimates need it; their record is the usage history row, which no retention
+    /// deletes).
+    pub const ALLOCATION_DEFAULT: Retention = Retention(Duration::from_secs(14 * 24 * 60 * 60));
+
     /// The window `window`.
     ///
     /// # Errors

@@ -57,6 +57,46 @@ fn job_retention_flag_and_config_key_agree() {
     );
 }
 
+/// Asserts that the flag and the file key read every form of a freed allocation's window to
+/// the same value, that neither given is fourteen days on both, and that the file refuses a
+/// window the flag refuses with a message naming the key. It catches a key parsed differently
+/// from its flag, one read and dropped, and a default that is the job retention's.
+#[test]
+fn job_allocation_retention_flag_and_config_key_agree() {
+    let scratch = Scratch::new("job_allocation_retention_agree");
+    let pool = PoolText::static_pool(&scratch, "hosts");
+    let from_file = |line: &str| {
+        load(&scratch, &file(&server(&scratch, line), &[&pool]))
+            .map(|config| config.job_allocation_retention())
+    };
+    let fortnight = Retention::new(Duration::from_secs(1_209_600)).expect("a window");
+    assert_eq!(
+        config(base_args(&scratch))
+            .map(|config| config.job_allocation_retention())
+            .ok(),
+        Some(fortnight),
+        "the flag's default"
+    );
+    assert_eq!(from_file("").ok(), Some(fortnight), "the key's default");
+    for (text, secs) in [("90m", 5400), ("36h", 129_600), ("30d", 2_592_000)] {
+        let want = Retention::new(Duration::from_secs(secs)).expect("a window");
+        let flag = format!("--job-allocation-retention={text}");
+        let by_flag =
+            config(args_with(&scratch, &[&flag])).map(|config| config.job_allocation_retention());
+        let by_key = from_file(&format!("job_allocation_retention = \"{text}\""));
+        assert_eq!(by_flag.ok(), Some(want), "the flag {text}");
+        assert_eq!(by_key.ok(), Some(want), "the key {text}");
+    }
+    let said = |line: &str| refusal(&scratch, &file(&server(&scratch, line), &[&pool]));
+    for bad in ["0", "0d", "59s", "soon"] {
+        assert_eq!(
+            said(&format!("job_allocation_retention = \"{bad}\"")),
+            "server.job_allocation_retention: must be a duration of at least one minute, such as 7d, 36h or 90m",
+            "{bad}"
+        );
+    }
+}
+
 /// Asserts that the flag and the file key read a count of feed changes to the same value,
 /// that neither given is 100000 on both, and that the file refuses a zero or a non-number with
 /// a message naming the key that does not repeat the value. It catches a key parsed

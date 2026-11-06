@@ -80,6 +80,8 @@ pub struct JobStore<S, I = RandomIds> {
     schema: u32,
     /// How long an ended job is kept: applied when a job ends.
     retention: Retention,
+    /// How long a freed allocation's row is kept after its free: applied by the tick.
+    allocation_retention: Retention,
 }
 
 /// `Err(error)` unless `ok`.
@@ -169,6 +171,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             ids,
             schema,
             retention: Retention::DEFAULT,
+            allocation_retention: Retention::ALLOCATION_DEFAULT,
         })
     }
 
@@ -184,6 +187,24 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     #[must_use]
     pub fn retention(&self) -> Retention {
         self.retention
+    }
+
+    /// The same job store keeping each freed allocation's row for `retention` after its free,
+    /// in place of [`Retention::ALLOCATION_DEFAULT`]; [`JobStore::tick`] deletes a freed row once that
+    /// window has passed by the store's clock. Unlike a job's retention end, nothing is
+    /// stored: the window applies to every freed row, however long ago it was freed.
+    #[must_use]
+    pub fn with_allocation_retention(self, retention: Retention) -> JobStore<S, I> {
+        JobStore {
+            allocation_retention: retention,
+            ..self
+        }
+    }
+
+    /// How long a freed allocation's row is kept after its free.
+    #[must_use]
+    pub fn allocation_retention(&self) -> Retention {
+        self.allocation_retention
     }
 
     /// The schema version the store holds, which a later build may have raised.
@@ -573,7 +594,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// Frees a job's allocation (design section 6.2): booked or releasing becomes freed, with
-    /// the time and `reason`. The row is kept and books nothing. An allocation already freed
+    /// the time and `reason`. The row books nothing and is kept until [`JobStore::tick`]
+    /// deletes it, the store's allocation retention after the free. An allocation already freed
     /// is returned as it is, unwritten: the first reason stands.
     ///
     /// # Errors
@@ -868,7 +890,7 @@ mod tests {
 
     /// A log sink a test reads back.
     #[derive(Clone, Default)]
-    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(super) struct Lines(pub(super) Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for Lines {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

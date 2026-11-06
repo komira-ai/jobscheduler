@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod clock;
+mod collect;
 mod compat;
 mod failures;
 mod hosts;
@@ -37,6 +38,7 @@ mod retention;
 mod rows;
 
 pub use clock::*;
+pub use collect::*;
 pub use compat::*;
 pub use failures::*;
 pub use hosts::*;
@@ -119,6 +121,9 @@ where
     queued_lists_the_queue_in_order(backend);
     live_allocations_lists_every_booked_or_releasing_allocation(backend);
     a_free_with_rows_beside_it_is_one_commit(backend);
+    the_tick_deletes_only_freed_allocations_past_their_window(backend);
+    a_backlog_of_freed_allocations_clears_over_several_ticks(backend);
+    a_collection_that_loses_to_a_placement_keeps_the_booking(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -202,6 +207,9 @@ macro_rules! job_store_tests {
             queued_lists_the_queue_in_order,
             live_allocations_lists_every_booked_or_releasing_allocation,
             a_free_with_rows_beside_it_is_one_commit,
+            the_tick_deletes_only_freed_allocations_past_their_window,
+            a_backlog_of_freed_allocations_clears_over_several_ticks,
+            a_collection_that_loses_to_a_placement_keeps_the_booking,
         );
     };
 }
