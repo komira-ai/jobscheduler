@@ -8,13 +8,19 @@
 #   profile attaches to), from the `Packages` index of the archive.
 # - hostkeeper: the deb of a hostkeeper release, from the release's SHA256SUMS.
 # - js-agent: the Linux archive of a jobscheduler release, from the release's SHA256SUMS.
+# - tools: not baked into the image. The packages the image-build workflow installs on its runner
+#   to build and boot-check the image (QEMU, its firmware and the seed tool), each by package name,
+#   from the `Packages` index of Ubuntu 24.04's release pocket (`noble`), whose files stay in the
+#   archive. The runner downloads them, checks them with `sha256sum --check` and installs them with
+#   apt, which takes only the libraries they depend on from the archive. Each must be a `.deb`, and
+#   no two may share a file name.
 #
 # Every key is one of these. A key that looks like a secret (a token, a password, a key) is
 # refused by name, and so is a URL that carries a user, a query or a fragment: the image holds no
 # credential, and its configuration comes from the provider's user data at boot.
 #
-# To move a pin, take the URL and the SHA-256 from the release's own SHA256SUMS (or, for crun, the
-# archive's `Packages` index), never from a file you downloaded yourself.
+# To move a pin, take the URL and the SHA-256 from the release's own SHA256SUMS (or, for crun and
+# the tools, the archive's `Packages` index), never from a file you downloaded yourself.
 
 [linux-x86_64]
 base = { url = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img", sha256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94" }
@@ -22,8 +28,23 @@ crun = { url = "https://archive.ubuntu.com/ubuntu/pool/universe/c/crun/crun_1.14
 hostkeeper = { url = "https://github.com/komira-ai/hostkeeper/releases/download/v0.1.35/hostkeeper_0.1.35_amd64.deb", sha256 = "e80ceaaa99420bd513851f563bf186be8e283a71edd40ed1df08b5e3ef24e1d7" }
 js-agent = { url = "https://github.com/komira-ai/jobscheduler/releases/download/v0.1.169/js-agent-0.1.169-x86_64-unknown-linux-musl.tar.gz", sha256 = "6bf3b59221d6b6f83d74e28ba5dcbc56db293cfd99bac4634f060aa4ea8da084" }
 
+[linux-x86_64.tools]
+cloud-image-utils = { url = "https://archive.ubuntu.com/ubuntu/pool/main/c/cloud-utils/cloud-image-utils_0.33-1_all.deb", sha256 = "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e" }
+qemu-system-common = { url = "https://archive.ubuntu.com/ubuntu/pool/main/q/qemu/qemu-system-common_8.2.2+ds-0ubuntu1_amd64.deb", sha256 = "5621403c1d41428f832aa33cc0e030615aa7f6aa3086c4f6e90882caf90cc9d9" }
+qemu-system-data = { url = "https://archive.ubuntu.com/ubuntu/pool/main/q/qemu/qemu-system-data_8.2.2+ds-0ubuntu1_all.deb", sha256 = "1d8753eb4d044449ff2ff37669aa0586d881c62964f8aacb48466a96e0ed991f" }
+qemu-system-x86 = { url = "https://archive.ubuntu.com/ubuntu/pool/main/q/qemu/qemu-system-x86_8.2.2+ds-0ubuntu1_amd64.deb", sha256 = "9c54530778c8def3ed8dedc056b58045564a9af7dce258de49ea434cdf043603" }
+qemu-utils = { url = "https://archive.ubuntu.com/ubuntu/pool/main/q/qemu/qemu-utils_8.2.2+ds-0ubuntu1_amd64.deb", sha256 = "7fb8a8520b77d04351473d77f2cc3541bf00fd1a1181f3c7d0774f4110e1fa89" }
+
 [linux-arm64]
 base = { url = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img", sha256 = "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e" }
 crun = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/universe/c/crun/crun_1.14.1-1_arm64.deb", sha256 = "16b5215f56ff1e8143b1af8d6ad390ba7ba61824532078a90679c3c6db78bc8d" }
 hostkeeper = { url = "https://github.com/komira-ai/hostkeeper/releases/download/v0.1.35/hostkeeper_0.1.35_arm64.deb", sha256 = "ba2d8abb4cf39ae2a85f1ae590614e3f39370fca29f4b354afb7808a5187ddf0" }
 js-agent = { url = "https://github.com/komira-ai/jobscheduler/releases/download/v0.1.169/js-agent-0.1.169-aarch64-unknown-linux-musl.tar.gz", sha256 = "aec8dd4a9af7bec84afecebfa11c591c136871020468781302ca07edee13723f" }
+
+[linux-arm64.tools]
+cloud-image-utils = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/c/cloud-utils/cloud-image-utils_0.33-1_all.deb", sha256 = "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e" }
+qemu-efi-aarch64 = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/e/edk2/qemu-efi-aarch64_2024.02-2_all.deb", sha256 = "9ae5a0a3373296cf37b51fc2470219471bcc0d30fd7876163beddaa01fdd9fe1" }
+qemu-system-arm = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/q/qemu/qemu-system-arm_8.2.2+ds-0ubuntu1_arm64.deb", sha256 = "6a3fc0d41d67cce29eb9497de14b14dc077594d3ddc062cf86ad9a082a87ba70" }
+qemu-system-common = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/q/qemu/qemu-system-common_8.2.2+ds-0ubuntu1_arm64.deb", sha256 = "12d89a0dfbe3c329075e8a3c5f8f27e544b203da88fca542d98b8c6eee492ef2" }
+qemu-system-data = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/q/qemu/qemu-system-data_8.2.2+ds-0ubuntu1_all.deb", sha256 = "1d8753eb4d044449ff2ff37669aa0586d881c62964f8aacb48466a96e0ed991f" }
+qemu-utils = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/main/q/qemu/qemu-utils_8.2.2+ds-0ubuntu1_arm64.deb", sha256 = "425a1832bdd8e85938ac185b9a5cc9d267a0ee87851c6d7b03cba076b1f8d34f" }

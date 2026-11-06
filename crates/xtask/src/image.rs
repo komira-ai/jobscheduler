@@ -1,7 +1,7 @@
 //! `image-recipe --out <dir> [--root <dir>] [--pins <file>]`: the jobscheduler machine images of
 //! `linux-x86_64` and `linux-arm64`, as data (docs/runbooks/machine-images.md).
 //!
-//! For each platform it writes four files under `<out>/<platform>/`:
+//! For each platform it writes six files under `<out>/<platform>/`:
 //!
 //! - `recipe.json`, the image's build description and the one data file of the platform: the
 //!   base image and the archives baked in (crun, hostkeeper, js-agent), each by its HTTPS URL and
@@ -16,6 +16,9 @@
 //!   command that fails ends the build, and a power-off. The last command prints
 //!   `js-image-build-done` on the console.
 //! - `base.sha256`, the base image's SHA-256 as `sha256sum --check` reads it, for `base.img`.
+//! - `tools.urls` and `tools.sha256`: the packages the runner builds and checks the image with
+//!   (QEMU, its firmware and the seed tool), one HTTPS URL a line and their SHA-256 by file name,
+//!   from the platform's `tools` pins. They are not part of the image or its recipe.
 //!
 //! It makes no network call and reads no clock: the same pins and repository files give the same
 //! bytes. Before it writes anything it refuses, naming the file and where in it:
@@ -24,8 +27,11 @@
 //!   key in a baked unit, drop-in or tmpfiles file (a `NAME=` assignment or a `--name` flag, on
 //!   any line, comments included);
 //! - a pin URL that is not HTTPS, or that carries a user, a query or a fragment;
-//! - a pins or steps file that does not parse, has a key it does not know, or lacks one.
+//! - a pins or steps file that does not parse, has a key it does not know, or lacks one;
+//! - a platform with no tool pin, a tool URL that does not name a `.deb`, or two tools that
+//!   download to the same file name.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -322,6 +328,9 @@ pub struct ArchPins {
     pub hostkeeper: Pin,
     /// js-agent's release archive.
     pub js_agent: Pin,
+    /// The packages the image is built and checked with on the runner (QEMU, its firmware and
+    /// the seed tool), by package name: not baked into the image.
+    pub tools: BTreeMap<String, Pin>,
 }
 
 /// The pins of every platform.
@@ -386,7 +395,7 @@ impl Inputs {
 }
 
 /// The files of one platform: name in its directory, and text.
-pub type Platform = [(&'static str, String); 4];
+pub type Platform = [(&'static str, String); 6];
 
 /// Runs the verb: reads and checks every input, then writes both platforms.
 ///
@@ -415,7 +424,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
     ))
 }
 
-/// The four files of `arch`: `recipe.json`, `user-data`, `meta-data` and `base.sha256`.
+/// The six files of `arch`: `recipe.json`, `user-data`, `meta-data`, `tools.urls`, `tools.sha256`
+/// and `base.sha256`.
 #[must_use]
 pub fn platform(arch: Arch, pins: &Pins, inputs: &Inputs) -> Platform {
     let recipe = format!("{:#}\n", recipe(arch, pins, inputs));
@@ -425,10 +435,18 @@ pub fn platform(arch: Arch, pins: &Pins, inputs: &Inputs) -> Platform {
         arch.platform()
     );
     let base = format!("{}  base.img\n", pins.of(arch).base.sha256);
+    let tools = &pins.of(arch).tools;
+    let urls: String = tools.values().map(|t| format!("{}\n", t.url)).collect();
+    let sums: String = tools
+        .values()
+        .map(|t| format!("{}  {}\n", t.sha256, deb_file(&t.url)))
+        .collect();
     [
         ("recipe.json", recipe),
         ("user-data", seed),
         ("meta-data", meta),
+        ("tools.urls", urls),
+        ("tools.sha256", sums),
         ("base.sha256", base),
     ]
 }
@@ -858,13 +876,53 @@ fn pin(path: &Path, at: &str, table: &toml::Table, name: &str) -> Result<Pin, Er
 fn arch_pins(path: &Path, table: &toml::Table, arch: Arch) -> Result<ArchPins, Error> {
     let at = arch.platform();
     let pins = as_table(path, at, field(path, "", table, at)?)?;
-    only(path, at, pins, &["base", "crun", "hostkeeper", "js-agent"])?;
+    only(
+        path,
+        at,
+        pins,
+        &["base", "crun", "hostkeeper", "js-agent", "tools"],
+    )?;
     Ok(ArchPins {
         base: pin(path, at, pins, "base")?,
         crun: pin(path, at, pins, "crun")?,
         hostkeeper: pin(path, at, pins, "hostkeeper")?,
         js_agent: pin(path, at, pins, "js-agent")?,
+        tools: tools(path, &join(at, "tools"), field(path, at, pins, "tools")?)?,
     })
+}
+
+/// The tool packages of a platform (the field `at`): one or more pins, by package name, each a
+/// `.deb` whose file name is unique, since the runner downloads them into one directory.
+fn tools(path: &Path, at: &str, value: &toml::Value) -> Result<BTreeMap<String, Pin>, Error> {
+    let table = as_table(path, at, value)?;
+    if table.is_empty() {
+        return Err(bad(path, at, "must pin one or more packages"));
+    }
+    let mut tools = BTreeMap::new();
+    let mut files = Vec::new();
+    for name in table.keys() {
+        let pin = pin(path, at, table, name)?;
+        let file = deb_file(&pin.url);
+        let here = join(&join(at, name), "url");
+        if !file.ends_with(".deb") {
+            return Err(bad(path, &here, "must name a .deb file"));
+        }
+        if files.contains(&file) {
+            return Err(bad(
+                path,
+                &here,
+                format!("names {file}, which another tool names too"),
+            ));
+        }
+        files.push(file);
+        tools.insert(name.clone(), pin);
+    }
+    Ok(tools)
+}
+
+/// The file name a pin URL downloads to: its last path segment.
+fn deb_file(url: &str) -> String {
+    url.rsplit('/').next().unwrap_or(url).to_owned()
 }
 
 /// The pins file `text` (read from `path`).

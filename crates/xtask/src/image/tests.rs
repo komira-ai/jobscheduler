@@ -6,7 +6,7 @@ use std::path::Path;
 use super::*;
 
 /// The pins file of the tests: every pin, both platforms, with `extra` lines added to the
-/// `linux-x86_64.crun` pin.
+/// `linux-x86_64.crun` pin, and the tools of [`TOOLS`] for each platform.
 fn pins_text(extra: &str) -> String {
     let pin = |n: u8| {
         format!(
@@ -16,7 +16,9 @@ fn pins_text(extra: &str) -> String {
     };
     format!(
         "[linux-x86_64]\nbase = {}\nhostkeeper = {}\njs-agent = {}\n[linux-x86_64.crun]\nurl = \"https://example.org/crun\"\nsha256 = \"{}\"\n{extra}\n\
-         [linux-arm64]\nbase = {}\ncrun = {}\nhostkeeper = {}\njs-agent = {}\n",
+         [linux-x86_64.tools]\n{TOOLS}\n\
+         [linux-arm64]\nbase = {}\ncrun = {}\nhostkeeper = {}\njs-agent = {}\n\
+         [linux-arm64.tools]\n{TOOLS}\n",
         pin(1),
         pin(2),
         pin(3),
@@ -27,6 +29,10 @@ fn pins_text(extra: &str) -> String {
         pin(8),
     )
 }
+
+/// The tools table of each platform in [`pins_text`]: two packages.
+const TOOLS: &str = "qemu-utils = { url = \"https://example.org/pool/qemu-utils_1_amd64.deb\", sha256 = \"9999999999999999999999999999999999999999999999999999999999999999\" }\n\
+                     cloud-image-utils = { url = \"https://example.org/pool/cloud-image-utils_1_all.deb\", sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\" }";
 
 /// A digest of 64 hex digits, all `n`.
 fn hex(n: u8) -> String {
@@ -149,6 +155,25 @@ fn a_whole_pins_file_parses() {
         sha256: hex(n).parse().expect("sha"),
     };
     assert_eq!(pins.of(Arch::X86_64).base, pin("https://example.org/f1", 1));
+    let tools: Vec<(&str, &str)> = pins
+        .of(Arch::Arm64)
+        .tools
+        .iter()
+        .map(|(name, pin)| (name.as_str(), pin.url.as_str()))
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            (
+                "cloud-image-utils",
+                "https://example.org/pool/cloud-image-utils_1_all.deb"
+            ),
+            (
+                "qemu-utils",
+                "https://example.org/pool/qemu-utils_1_amd64.deb"
+            ),
+        ]
+    );
     assert_eq!(
         pins.of(Arch::X86_64).crun,
         pin("https://example.org/crun", 4)
@@ -376,5 +401,53 @@ fn platforms_are_named_for_the_pins_and_the_images_keys() {
     assert_eq!(
         names,
         [("linux-x86_64", "x86_64"), ("linux-arm64", "arm64")]
+    );
+}
+
+/// Asserts each refusal of a platform's tools: none, not a table, empty, a tool that is not a
+/// pin, a URL that does not name a `.deb`, and two tools that download to the same file name.
+#[test]
+fn each_malformed_tools_table_is_refused_with_its_field() {
+    let text = pins_text("");
+    let x86_tools = format!("[linux-x86_64.tools]\n{TOOLS}\n");
+    let with = |tools: &str| text.replacen(&x86_tools, tools, 1);
+    assert_ne!(with(""), text);
+    assert_eq!(
+        pins_error(&with("")),
+        "pins.toml: linux-x86_64.tools: is missing"
+    );
+    assert_eq!(
+        pins_error(
+            &text
+                .replacen("[linux-x86_64]\n", "[linux-x86_64]\ntools = 1\n", 1)
+                .replacen(&x86_tools, "", 1)
+        ),
+        "pins.toml: linux-x86_64.tools: must be a table"
+    );
+    assert_eq!(
+        pins_error(&with("[linux-x86_64.tools]\n")),
+        "pins.toml: linux-x86_64.tools: must pin one or more packages"
+    );
+    assert_eq!(
+        pins_error(&with("[linux-x86_64.tools]\nqemu = 1\n")),
+        "pins.toml: linux-x86_64.tools.qemu: must be a table"
+    );
+    let tool = |name: &str, url: &str| {
+        format!("{name} = {{ url = \"{url}\", sha256 = \"{}\" }}\n", hex(9))
+    };
+    assert_eq!(
+        pins_error(&with(&format!(
+            "[linux-x86_64.tools]\n{}",
+            tool("qemu", "https://example.org/qemu.tar.gz")
+        ))),
+        "pins.toml: linux-x86_64.tools.qemu.url: must name a .deb file"
+    );
+    assert_eq!(
+        pins_error(&with(&format!(
+            "[linux-x86_64.tools]\n{}{}",
+            tool("a", "https://example.org/one/q.deb"),
+            tool("b", "https://example.org/two/q.deb")
+        ))),
+        "pins.toml: linux-x86_64.tools.b.url: names q.deb, which another tool names too"
     );
 }

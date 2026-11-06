@@ -3,7 +3,9 @@
 # check of any pull request.
 #
 # `cargo xtask image-recipe` writes the recipe of each platform and the cloud-init seed that builds
-# it. The base image is downloaded and checked against the recipe's SHA-256, and booted once in
+# it, and the list of build tools (QEMU, its firmware and the seed tool) pinned by URL and SHA-256,
+# which are downloaded, checked and installed from those files. The base image is downloaded and
+# checked against the recipe's SHA-256, and booted once in
 # QEMU with the build seed: cloud-init downloads and checks the pinned archives, installs them,
 # runs the crun host setup and powers the machine off, and the last build step prints
 # `js-image-build-done` on the console. A copy-on-write layer of the built image is then booted with
@@ -54,12 +56,18 @@ jobs:
       - name: Write the recipes and the build seeds
         run: cargo xtask image-recipe --out target/machine-image
       - run: sudo apt-get update
-      - name: Install QEMU and the seed tool (x86_64)
-        if: ${{ inputs.arch == 'x86_64' }}
-        run: sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
-      - name: Install QEMU, its UEFI firmware and the seed tool (arm64)
-        if: ${{ inputs.arch == 'arm64' }}
-        run: sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-efi-aarch64 qemu-utils cloud-image-utils
+      # QEMU, its firmware and the seed tool, pinned by URL and SHA-256 in the `tools` table of
+      # packaging/machine-image/pins.toml: downloaded into a directory of their own, checked, and
+      # installed from those files; apt takes only the libraries they depend on from the archive.
+      - name: Download the pinned build tools
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: mkdir tools && wget --quiet --https-only --directory-prefix tools --input-file tools.urls
+      - name: Check the build tools' SHA-256
+        working-directory: ${{ env.IMAGE_DIR }}/tools
+        run: sha256sum --check --strict ../tools.sha256
+      - name: Install the build tools from the checked files
+        working-directory: ${{ env.IMAGE_DIR }}/tools
+        run: sudo apt-get install -y --no-install-recommends ./*.deb
       - name: Download the base image the recipe names
         working-directory: ${{ env.IMAGE_DIR }}
         run: curl --fail --silent --show-error --location --proto =https --proto-redir =https --output base.img "$(jq --raw-output .base.url recipe.json)"

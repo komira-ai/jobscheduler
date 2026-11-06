@@ -95,6 +95,7 @@ directory `<dir>/<platform>/` with:
 | `recipe.json` | the build description: the base image and the archives by URL and SHA-256, every file the build installs with its mode and text, the crun host setup (its steps and the script's command), the units enabled, the user-data paths, and the build's commands in order |
 | `user-data`, `meta-data` | the NoCloud seed that builds the image from the base image: the recipe's files as cloud-init `write_files`, its commands as `runcmd` (the first that fails ends the build), then a power-off |
 | `base.sha256` | the base image's SHA-256, for `sha256sum --check` of `base.img` |
+| `tools.urls`, `tools.sha256` | the packages the workflow's runner builds and checks the image with (QEMU, its firmware, `cloud-image-utils`), from the platform's `tools` pins: their URLs, and their SHA-256 by file name for `sha256sum --check`; not part of the image or its recipe |
 
 It makes no network call: the same pins and files give byte-identical output, and the line it
 prints names each recipe's SHA-256.
@@ -105,7 +106,8 @@ The recipe's platform maps to the provider's `images` key: the image built from
 
 To move a pin (a new jobscheduler or hostkeeper release, a new base image), edit
 `packaging/machine-image/pins.toml` with the URL and the SHA-256 from the release's own
-`SHA256SUMS` (for crun, from the archive's `Packages` index), never from a file you downloaded.
+`SHA256SUMS` (for crun and the tools, from the archive's `Packages` index; the tools from the
+release pocket `noble`, whose files stay in the archive), never from a file you downloaded.
 
 ## Building and checking an image
 
@@ -119,7 +121,9 @@ gh workflow run machine-image.yml -f arch=x86_64
 It runs on a GitHub-hosted runner of that architecture, with read access to the repository and
 nothing else, and:
 
-1. runs `cargo xtask image-recipe` and downloads the base image, checked against `base.sha256`;
+1. runs `cargo xtask image-recipe`; downloads the build tools of `tools.urls`, checks them against
+   `tools.sha256` and installs them from those files (apt takes only the libraries they depend on
+   from the runner's archive); and downloads the base image, checked against `base.sha256`;
 2. boots the base image in QEMU with the build seed: cloud-init downloads and checks the archives,
    installs them, runs the crun host setup and the rest of the build, and powers off. The build
    passes when the console shows `js-image-build-done`;

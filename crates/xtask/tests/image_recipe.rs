@@ -130,7 +130,14 @@ fn image_recipe_is_deterministic() {
     run(&repo(), &second).expect("second");
     let mut digests = Vec::new();
     for arch in ARCHES {
-        for name in ["recipe.json", "user-data", "meta-data", "base.sha256"] {
+        for name in [
+            "recipe.json",
+            "user-data",
+            "meta-data",
+            "tools.urls",
+            "tools.sha256",
+            "base.sha256",
+        ] {
             let rel = format!("{}/{name}", arch.platform());
             let (a, b) = (
                 std::fs::read(first.join(&rel)),
@@ -476,6 +483,78 @@ fn image_recipe_seed_runs_the_recipe() {
     }
 }
 
+/// Asserts that each platform's `tools.urls` lists the HTTPS URL of every tool package of the
+/// platform's pins, in name order, that `tools.sha256` gives each its pinned SHA-256 by the file
+/// name the URL downloads to (as `sha256sum --check` reads it), that the packages are the QEMU of
+/// the platform's architecture, its seed tool and (arm64) its UEFI firmware, and that no tool is
+/// in the recipe: the tools build the image and are not part of it.
+#[test]
+fn image_recipe_pins_the_runner_tools() {
+    let (out, recipes) = repo_recipes("tools");
+    let pins = image::parse_pins(Path::new(PINS), &text(&repo(), PINS)).expect("pins");
+    let expected = [
+        vec![
+            "cloud-image-utils",
+            "qemu-system-common",
+            "qemu-system-data",
+            "qemu-system-x86",
+            "qemu-utils",
+        ],
+        vec![
+            "cloud-image-utils",
+            "qemu-efi-aarch64",
+            "qemu-system-arm",
+            "qemu-system-common",
+            "qemu-system-data",
+            "qemu-utils",
+        ],
+    ];
+    for ((arch, recipe), names) in ARCHES.iter().zip(&recipes).zip(expected) {
+        let tools = &pins.of(*arch).tools;
+        assert_eq!(tools.keys().map(String::as_str).collect::<Vec<_>>(), names);
+        let dir = arch.platform();
+        let urls: Vec<String> = text(&out, &format!("{dir}/tools.urls"))
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            urls,
+            tools.values().map(|t| t.url.clone()).collect::<Vec<_>>()
+        );
+        let sums: Vec<String> = text(&out, &format!("{dir}/tools.sha256"))
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let expected_sums: Vec<String> = tools
+            .values()
+            .map(|t| {
+                let file = t.url.rsplit('/').next().expect("file");
+                format!("{}  {file}", t.sha256)
+            })
+            .collect();
+        assert_eq!(sums, expected_sums);
+        for url in &urls {
+            assert!(
+                url.starts_with("https://") && url.ends_with(".deb"),
+                "{url}"
+            );
+            let file = url.rsplit('/').next().expect("file");
+            assert!(
+                file.ends_with("_all.deb")
+                    || file.ends_with(&format!(
+                        "_{}.deb",
+                        ["amd64", "arm64"][(*arch == image::Arch::Arm64) as usize]
+                    )),
+                "{file}"
+            );
+            assert!(
+                !recipe.to_string().contains(url.as_str()),
+                "{url} is not in the recipe"
+            );
+        }
+    }
+}
+
 /// Asserts that the boot check's fake user data writes every required user-data path of the
 /// recipe, and that its agent command line is the baked crun unit's with only the server (a
 /// loopback one) and the pool changed, so the check runs the unit the image carries.
@@ -706,4 +785,27 @@ fn the_machine_image_workflow_is_by_hand_and_publishes_nothing() {
         }
     }
     assert!(runs.iter().all(|r| !r.contains('\n')));
+    let installs: Vec<&&str> = runs
+        .iter()
+        .filter(|r| r.contains("apt-get install"))
+        .collect();
+    assert_eq!(
+        installs,
+        [&"sudo apt-get install -y --no-install-recommends ./*.deb"],
+        "every tool is installed from the checked files"
+    );
+    let at = |needle: &str| {
+        runs.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}"))
+    };
+    let (download, check, install) = (
+        at("wget --quiet --https-only --directory-prefix tools --input-file tools.urls"),
+        at("sha256sum --check --strict ../tools.sha256"),
+        at("apt-get install"),
+    );
+    assert!(
+        download < check && check < install,
+        "download, check, then install"
+    );
 }
