@@ -30,7 +30,8 @@
 //! 120 s in one transaction when the server opens the job store, before its first tick
 //! ([`crate::job_store::open`]): an outage longer than a queue wait, a start timeout or a
 //! retention window fails no queued job, ends no start and deletes no result at the first
-//! tick.
+//! tick. The same transaction replaces by their digests the files' contents that a row of an
+//! ended job still holds.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

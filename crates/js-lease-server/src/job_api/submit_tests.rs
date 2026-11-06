@@ -194,6 +194,83 @@ async fn same_id_different_job_is_a_conflict() {
     assert_eq!(fixed.asked(), 1, "only the first submit is admitted");
 }
 
+/// Asserts that, once the job `x` (with a file) has ended and its file's contents were
+/// replaced by their digest, the very same job submitted again over both transports is
+/// answered from the ended job, writes nothing, asks admission nothing and makes no second
+/// job. It catches a resubmit of an ended job compared byte for byte against the digests the
+/// store now holds, which refuses every retry of a job with files as a conflict.
+#[tokio::test]
+async fn resubmit_same_spec_after_end_returns_existing_job() {
+    let fixed = Fixed::new(true);
+    let (_, writes) = over_fake(Arc::clone(&fixed)).await;
+    writes.submit(Via::Grpc, &conflicted()).await.unwrap();
+    let ended = writes.cancel(Via::Grpc, "x").await.unwrap();
+    assert_eq!(ended.state(), v1::JobState::Cancelled);
+    assert_eq!(
+        ended.spec.as_ref().map(|spec| spec.files.clone()),
+        Some(vec![v1::JobFile {
+            name: "token".to_owned(),
+            contents: String::new(),
+        }]),
+        "the ended job's answer does not list its file by name alone"
+    );
+    let stored = writes.jobs.get_job(&id("x")).unwrap().unwrap();
+    assert_eq!(
+        stored.spec.files,
+        js_jobs::JobFiles::Digests(BTreeMap::from([(
+            "token".to_owned(),
+            js_jobs::FileDigest::of(b"a"),
+        )])),
+        "the ended job kept its file's contents"
+    );
+    for via in Via::BOTH {
+        let answer = writes.submit(via, &conflicted()).await.unwrap();
+        assert_eq!(answer, ended, "{via:?}");
+    }
+    assert_eq!(writes.jobs.get_job(&id("x")).unwrap(), Some(stored));
+    assert_eq!(rows(&writes.jobs), 1);
+    assert_eq!(fixed.asked(), 1, "only the first submit is admitted");
+}
+
+/// Asserts that, once the job `x` (with a file) has ended, a submit under its id with that
+/// file's contents changed, with a file added, or with its file left out, is refused
+/// `job-id-conflict` over both transports, as a live job's differing spec is, and leaves the
+/// stored job as it was. It catches a resubmit of an ended job matched by its file names
+/// alone, or by nothing, once the contents are gone.
+#[tokio::test]
+async fn resubmit_different_contents_after_end_conflicts() {
+    let (_, writes) = over_fake(Fixed::new(true)).await;
+    writes.submit(Via::Grpc, &conflicted()).await.unwrap();
+    writes.cancel(Via::Grpc, "x").await.unwrap();
+    let before = writes.jobs.get_job(&id("x")).unwrap();
+    let changes: Vec<(&str, Change)> = vec![
+        (
+            "contents",
+            Box::new(|spec| spec.files[0].contents = "b".to_owned()),
+        ),
+        (
+            "a file added",
+            Box::new(|spec| {
+                spec.files.push(v1::JobFile {
+                    name: "more".to_owned(),
+                    contents: "a".to_owned(),
+                });
+            }),
+        ),
+        ("a file left out", Box::new(|spec| spec.files.clear())),
+    ];
+    for (what, change) in changes {
+        let mut spec = conflicted();
+        change(&mut spec);
+        let status = writes.submit_grpc(&spec).await.unwrap_err();
+        is_refusal(&status, RefusalCode::JobIdConflict, Code::AlreadyExists);
+        let answer = writes.submit(Via::Json, &spec).await.unwrap_err();
+        assert_eq!(answer, refusal(RefusalCode::JobIdConflict), "{what}");
+    }
+    assert_eq!(writes.jobs.get_job(&id("x")).unwrap(), before);
+    assert_eq!(rows(&writes.jobs), 1);
+}
+
 /// Asserts that the same id and job with another priority is answered from the job already
 /// made, over both transports, with the stored priority, which is not overwritten. It catches
 /// a priority compared or written by a retry.
@@ -303,7 +380,11 @@ fn submit_does_not_wait_for_placement() {
     let request = Request::new(SubmitJobRequest {
         spec: Some(wire("job-w")),
     });
-    let mut call = pin!(submit_job(&api, request));
+    let caller = crate::job_api::roles::Caller {
+        name: js_jobs::ClientName::default_client(),
+        role: crate::config::Role::Operator,
+    };
+    let mut call = pin!(submit_job(&api, &caller, request));
     let polled = call.as_mut().poll(&mut Context::from_waker(Waker::noop()));
     let state = polled.map(|answer| answer.unwrap().into_inner().job.unwrap().state());
     assert_eq!(state, Poll::Ready(v1::JobState::Queued));

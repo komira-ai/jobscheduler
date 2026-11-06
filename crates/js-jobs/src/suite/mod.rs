@@ -38,6 +38,7 @@ mod queue;
 mod races;
 mod retention;
 mod rows;
+mod scrub;
 
 pub use clock::*;
 pub use collect::*;
@@ -54,6 +55,7 @@ pub use queue::*;
 pub use races::*;
 pub use retention::*;
 pub use rows::*;
+pub use scrub::*;
 
 /// Runs every check of the suite against `backend`, one after another.
 pub fn run_job_store_suite<B: Backend>(backend: &B)
@@ -125,6 +127,10 @@ where
     queued_lists_the_queue_in_order(backend);
     live_allocations_lists_every_booked_or_releasing_allocation(backend);
     a_free_with_rows_beside_it_is_one_commit(backend);
+    ended_job_record_holds_no_file_bytes(backend);
+    live_job_keeps_file_bytes(backend);
+    an_ended_job_is_matched_by_the_digests_of_its_files(backend);
+    a_boot_digests_the_files_an_ended_row_still_holds(backend);
     the_log_lengths_are_kept_with_the_result_and_swept_with_it(backend);
     the_tick_deletes_only_freed_allocations_past_their_window(backend);
     a_backlog_of_freed_allocations_clears_over_several_ticks(backend);
@@ -133,6 +139,7 @@ where
     the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing(backend);
     an_indexed_read_judges_the_row_not_the_entry(backend);
     an_indexed_read_reads_every_page_of_entries(backend);
+    an_ended_row_without_a_retention_end_is_due_and_kept(backend);
     a_backfill_that_loses_its_row_is_stale(backend);
 }
 
@@ -217,6 +224,10 @@ macro_rules! job_store_tests {
             queued_lists_the_queue_in_order,
             live_allocations_lists_every_booked_or_releasing_allocation,
             a_free_with_rows_beside_it_is_one_commit,
+            ended_job_record_holds_no_file_bytes,
+            live_job_keeps_file_bytes,
+            an_ended_job_is_matched_by_the_digests_of_its_files,
+            a_boot_digests_the_files_an_ended_row_still_holds,
             the_log_lengths_are_kept_with_the_result_and_swept_with_it,
             the_tick_deletes_only_freed_allocations_past_their_window,
             a_backlog_of_freed_allocations_clears_over_several_ticks,
@@ -225,6 +236,7 @@ macro_rules! job_store_tests {
             the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing,
             an_indexed_read_judges_the_row_not_the_entry,
             an_indexed_read_reads_every_page_of_entries,
+            an_ended_row_without_a_retention_end_is_due_and_kept,
             a_backfill_that_loses_its_row_is_stale,
         );
     };
@@ -399,7 +411,10 @@ pub(crate) fn full_spec() -> JobSpec {
             host: 8080,
             container: 80,
         }],
-        files: BTreeMap::from([("inputs/upload".to_owned(), b"upload-target".to_vec())]),
+        files: crate::JobFiles::Contents(BTreeMap::from([(
+            "inputs/upload".to_owned(),
+            b"upload-target".to_vec(),
+        )])),
         labels: Labels::from_caller(&caller)
             .and_then(|labels| labels.with_reserved(ReservedKey::Run, "run-1"))
             .expect("labels"),

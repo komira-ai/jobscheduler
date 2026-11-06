@@ -27,6 +27,7 @@ use crate::agent_api::job_rig::{
 use crate::config::FeedRetention;
 use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};
+use crate::job_api::roles::as_operator;
 use crate::job_expiry::JobLimits;
 use crate::job_loss::{Observe, Seen};
 use crate::job_store::FeedTrim;
@@ -53,25 +54,25 @@ fn api(rig: &Rig) -> JobApi {
 }
 
 async fn get_job(api: &JobApi, id: &JobId) -> Result<v1::Job, Status> {
-    let asked = Request::new(GetJobRequest {
+    let asked = as_operator(Request::new(GetJobRequest {
         job_id: id.to_string(),
-    });
+    }));
     let answer = api.get_job(asked).await?.into_inner();
     Ok(answer.job.unwrap())
 }
 
 async fn get_result(api: &JobApi, id: &JobId) -> Result<JobResult, Status> {
-    let asked = Request::new(GetResultRequest {
+    let asked = as_operator(Request::new(GetResultRequest {
         job_id: id.to_string(),
-    });
+    }));
     let answer = api.get_result(asked).await?.into_inner();
     Ok(answer.result.unwrap())
 }
 
 async fn get_logs(api: &JobApi, id: &JobId) -> Result<v1::GetLogsResponse, Status> {
-    let asked = Request::new(GetLogsRequest {
+    let asked = as_operator(Request::new(GetLogsRequest {
         job_id: id.to_string(),
-    });
+    }));
     Ok(api.get_logs(asked).await?.into_inner())
 }
 

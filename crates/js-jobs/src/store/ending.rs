@@ -20,8 +20,8 @@ use crate::ids::{IdSource, JobId};
 use crate::keys;
 use crate::record::{AllocationRecord, AllocationStep, JobRecord, may_move};
 use crate::result::{
-    BOOT_GRACE, JobEnd, Retention, SWEEP_BATCH, ended, floored_at_boot, past_retention,
-    raised_at_boot,
+    BOOT_GRACE, JobEnd, Retention, SWEEP_BATCH, digested_at_boot, ended, floored_at_boot,
+    past_retention, raised_at_boot,
 };
 
 /// Whether `allocation` is freed and its free is at least `retention` before `now`, so the
@@ -284,9 +284,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// to start (queued, placed or starting) gets a deadline floor of at least `boot` plus
     /// [`BOOT_GRACE`](crate::BOOT_GRACE), the earliest instant its queue wait or its start
     /// timeout may end it. A floor is raised to that instant, never by it, so boots in a loop
-    /// do not stretch a wait, and a later floor is kept. Only an ended job has a retention end
-    /// and only a waiting one gets a floor, so no row is put twice. A row a later build wrote
-    /// is left as it is. Returns how many rows it wrote; with none it commits nothing.
+    /// do not stretch a wait, and a later floor is kept. An ended job whose row still holds
+    /// its files' contents (one ended by a build that kept them) has them replaced by their
+    /// digests ([`crate::JobFiles`]), in the same put as its raised retention end when it has
+    /// one. Only an ended job has a retention end or contents to replace and only a waiting
+    /// one gets a floor, so no row is put twice. A row a later build wrote is left as it is.
+    /// Returns how many rows it wrote; with none it commits nothing.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Stale`] (naming
@@ -296,18 +299,23 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let mut txn = Txn::new();
         let mut first: Option<JobId> = None;
         let mut written = 0;
-        let ended = Span {
-            prefix: keys::DUE,
-            below: Some(keys::due_below(boot.saturating_add(BOOT_GRACE))),
-        };
-        let spans = [ended, Span::all(keys::ACTIVE), Span::all(keys::UNREAD_JOB)];
+        // Every ended job, not only those whose end is raised: any of them may still hold its
+        // files' contents to replace. Every ended job has a retention end, so a due entry.
+        let spans = [
+            Span::all(keys::DUE),
+            Span::all(keys::ACTIVE),
+            Span::all(keys::UNREAD_JOB),
+        ];
         for (key, row) in self.indexed_rows(&spans)? {
             let job = match job_at(&key, &row.value) {
                 Ok(job) => job,
                 Err(JobStoreError::UnknownRow { .. }) => continue,
                 Err(error) => return Err(error),
             };
-            let raised = raised_at_boot(&job, boot).or_else(|| floored_at_boot(&job, boot));
+            let raised = match raised_at_boot(&job, boot) {
+                Some(raised) => Some(digested_at_boot(&raised).unwrap_or(raised)),
+                None => floored_at_boot(&job, boot).or_else(|| digested_at_boot(&job)),
+            };
             if let Some(raised) = raised {
                 first.get_or_insert_with(|| raised.id.clone());
                 txn = put_job(txn, Some(&job), &raised, Cond::Version(row.version))?;

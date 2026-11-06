@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
-use js_state::{Cond, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
+use js_state::{Cond, ResumeToken, ScanRange, Store, StoreTime, Txn, Version, Versioned};
 
 use super::{JobStore, allocation_at, job_at};
 use crate::codec::{DecodeError, encode_allocation, encode_job};
@@ -33,12 +33,17 @@ pub struct Backfill {
     pub removed: usize,
 }
 
-/// The entries the job `job` calls for: active while it has not ended, and due while it has a
-/// retention end.
+/// The entry the job `job` calls for: active while it has not ended, and due once it has, at
+/// its retention end (only an ended job has one). An ended row with no retention end (one an
+/// earlier build wrote) is due at the origin, so every ended job is under [`keys::DUE`]; the
+/// sweep never deletes such a row, since it has no end to be past.
 pub(crate) fn job_entries(job: &JobRecord) -> BTreeSet<String> {
-    let active = (!job.state.is_ended()).then(|| keys::active(&job.id));
-    let due = job.retention_ends.map(|end| keys::due(end, &job.id));
-    active.into_iter().chain(due).collect()
+    let entry = if job.state.is_ended() {
+        keys::due(job.retention_ends.unwrap_or(StoreTime::ZERO), &job.id)
+    } else {
+        keys::active(&job.id)
+    };
+    BTreeSet::from([entry])
 }
 
 /// The entry the allocation `allocation` calls for: on its host while it is live (booked or

@@ -329,10 +329,16 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
         .store
         .now()
         .saturating_add(Duration::from_secs(10 * 7 * 24 * 3600));
+    // Without file contents, so the boot has nothing of this row's to digest either.
+    let active_was = job(&active);
     let active_now = JobRecord {
         state: JobState::Cancelled,
         retention_ends: Some(far),
-        ..job(&active)
+        spec: crate::JobSpec {
+            files: crate::JobFiles::default(),
+            ..active_was.spec.clone()
+        },
+        ..active_was
     };
     let ended_now = JobRecord {
         retention_ends: Some(far),
@@ -460,6 +466,44 @@ pub fn an_indexed_read_judges_the_row_not_the_entry<B: Backend>(backend: &B) {
         (job(&active), job(&ended)),
         (active_now, ended_now),
         "{name}: the boot raise wrote a job whose row neither waits nor ends early"
+    );
+}
+
+/// An ended row without a retention end (an earlier build's) is indexed as due at the origin:
+/// the tick reads it and keeps it, since it has no end to be past, and the boot raise reads it.
+pub fn an_ended_row_without_a_retention_end_is_due_and_kept<B: Backend>(backend: &B) {
+    let name = "an_ended_row_without_a_retention_end_is_due_and_kept";
+    let rig = rig(backend);
+    let id = rig.running("nr-ended");
+    let ended = rig.jobs.end_job(&id, exited(0)).expect("ends");
+    let legacy = JobRecord {
+        retention_ends: None,
+        ..ended
+    };
+    rig.put_raw(
+        &crate::keys::job(&id),
+        encode_job(&legacy).expect("encodes"),
+    );
+    assert!(
+        rig.raw("idx/job/due/00000000000000000000/nr-ended")
+            .is_some(),
+        "{name}: the row is not due at the origin"
+    );
+    rig.clock.advance(Duration::from_secs(365 * 24 * 3600));
+    assert_eq!(
+        rig.jobs.tick(),
+        Ok(Vec::new()),
+        "{name}: the tick deleted it"
+    );
+    assert_eq!(
+        rig.jobs.get_job(&id).expect("reads"),
+        Some(legacy),
+        "{name}: the tick changed it"
+    );
+    assert_eq!(
+        rig.jobs.index_entries().expect("reads"),
+        rig.jobs.index_by_scan().expect("reads"),
+        "{name}: the indexes differ from the scan"
     );
 }
 

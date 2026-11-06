@@ -38,8 +38,9 @@ pub(crate) const INDEX: &str = "idx/";
 /// `idx/job/active/<id>`: a job that has not ended (queued, placed, starting or running).
 pub(crate) const ACTIVE: &str = "idx/job/active/";
 
-/// `idx/job/due/<end>/<id>`: an ended job with a retention end, `<end>` its nanoseconds on the
-/// store's clock as twenty digits, so the keys sort by retention end and then by job id.
+/// `idx/job/due/<end>/<id>`: an ended job, `<end>` the nanoseconds of its retention end on the
+/// store's clock as twenty digits (zero for an ended row an earlier build wrote without one),
+/// so the keys sort by retention end and then by job id.
 pub(crate) const DUE: &str = "idx/job/due/";
 
 /// `idx/job/unread/<id>`: a job row this build cannot read (a later build's, or one that does
