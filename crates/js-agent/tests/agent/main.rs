@@ -38,6 +38,7 @@ mod helper_modes;
 mod image_budget;
 mod integrity;
 mod jobs;
+mod join_round_trip;
 mod lifecycle;
 mod native;
 mod quota;

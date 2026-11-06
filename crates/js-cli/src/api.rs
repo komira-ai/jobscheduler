@@ -101,6 +101,31 @@ pub(crate) trait Routes {
     /// `POST /v1/leases/{id}/runs`: 202 with the run's id and state, anything else a
     /// failure.
     fn queue_run(&self, id: &str, body: &Value) -> Result<Queued, Failure>;
+
+    /// `POST /v1/agent/join-tokens`: 201 with the token and its expiry. The route exists
+    /// only on a server that admits agents; a 404 says so.
+    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure>;
+
+    /// `DELETE /v1/agent/join-tokens`: 204.
+    fn revoke_join_tokens(&self, body: &Value) -> Result<(), Failure>;
+}
+
+/// A join token the server made. It has no `Debug`: the token is a secret.
+pub(crate) struct Minted {
+    pub(crate) token: String,
+    pub(crate) expires_at_ms: u64,
+}
+
+/// The route of the join tokens.
+const JOIN_TOKENS: &str = "/v1/agent/join-tokens";
+
+/// The failure of a join-token call that did not succeed: a 404 is a server that admits
+/// no agents (so has no such route).
+fn join_tokens_refusal(reply: &Reply) -> Failure {
+    match reply.status {
+        404 => Failure::Refused("join-tokens-unsupported".to_owned()),
+        _ => refusal(reply),
+    }
 }
 
 /// The answer to a queued run.
@@ -175,6 +200,25 @@ impl Routes for Client {
                 state: text(&reply.body, "state")?,
             }),
             _ => Err(refusal(&reply)),
+        }
+    }
+
+    fn mint_join_token(&self, body: &Value) -> Result<Minted, Failure> {
+        let reply = self.post(JOIN_TOKENS, body)?;
+        match reply.status {
+            201 => Ok(Minted {
+                token: text(&reply.body, "token")?,
+                expires_at_ms: number(&reply.body, "expires_at_ms")?,
+            }),
+            _ => Err(join_tokens_refusal(&reply)),
+        }
+    }
+
+    fn revoke_join_tokens(&self, body: &Value) -> Result<(), Failure> {
+        let reply = self.delete_with(JOIN_TOKENS, body)?;
+        match reply.status {
+            204 => Ok(()),
+            _ => Err(join_tokens_refusal(&reply)),
         }
     }
 }

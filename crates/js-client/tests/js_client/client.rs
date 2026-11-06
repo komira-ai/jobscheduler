@@ -72,6 +72,28 @@ fn requests_carry_the_token_and_replies_are_parsed() {
     assert!(seen[2].ends_with(r#"{"ttl_seconds":5}"#), "{}", seen[2]);
 }
 
+/// Asserts that a delete with a body sends the method, the path, the token, the JSON
+/// content type and the body, and returns the status and the parsed body. It catches a
+/// delete that drops its body (a route that names its target there would see none).
+#[test]
+fn a_delete_with_a_body_carries_the_body_and_the_token() {
+    let dir = Scratch::new("client_delete_with");
+    let fake = Fake::plain(vec![json_reply(409, r#"{"error":"not-held"}"#)]);
+    let client = Client::connect(&fake.url("http"), &token_file(&dir), None, LIMIT).unwrap();
+    let got = client.delete_with("/v1/x", &json!({ "id": "a" })).unwrap();
+    assert_eq!(
+        (got.status, got.body),
+        (409, json!({ "error": "not-held" }))
+    );
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1);
+    let head = seen[0].to_ascii_lowercase();
+    assert!(head.starts_with("delete /v1/x http/1.1"), "{head}");
+    assert!(head.contains("authorization: bearer tok-123\r\n"), "{head}");
+    assert!(head.contains("content-type: application/json"), "{head}");
+    assert!(seen[0].ends_with(r#"{"id":"a"}"#), "{}", seen[0]);
+}
+
 /// A reply with one extra header line.
 fn reply_with_header(status: u16, header: &str) -> Vec<u8> {
     let head = format!(

@@ -165,6 +165,17 @@ impl Client {
         self.reply(request.call())
     }
 
+    /// `DELETE path` with a JSON body, for a route that names what to remove in the body.
+    pub fn delete_with(&self, path: &str, body: &Value) -> Result<Reply, ClientError> {
+        let request = self
+            .agent
+            .delete(self.url(path))
+            .force_send_body()
+            .header("authorization", &self.bearer)
+            .content_type("application/json");
+        self.reply(request.send(body.to_string()))
+    }
+
     /// Reads a reply to the end. A transport error and a body that cannot be read are
     /// the same failure: the server could not be reached or went away.
     fn reply(

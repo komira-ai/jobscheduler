@@ -1,9 +1,12 @@
 //! What `js` prints: one line of text, or one JSON object, per fact.
 
+use std::path::Path;
+
 use prost_reflect::DynamicMessage;
 use serde_json::{Value, json};
 
-use crate::api::{Entry, Lease, Queued};
+use crate::api::{Entry, Lease, Minted, Queued};
+use crate::cli::InstanceArgs;
 use crate::failure::Failure;
 
 /// The output style, chosen by `--json`.
@@ -53,6 +56,53 @@ impl Render {
         match self.json {
             true => line(&json!({ "run_id": run.run_id, "state": run.state })),
             false => format!("run {} {}\n", run.run_id, run.state),
+        }
+    }
+
+    /// A minted join token on stdout: the token alone on a line, or `{"token",
+    /// "expires_at_ms"}`.
+    pub(crate) fn token(&self, minted: &Minted) -> String {
+        match self.json {
+            true => line(&json!({
+                "token": minted.token,
+                "expires_at_ms": minted.expires_at_ms,
+            })),
+            false => format!("{}\n", minted.token),
+        }
+    }
+
+    /// A minted join token that went to a file: where, and when it expires; never the token.
+    pub(crate) fn token_written(
+        &self,
+        instance: &InstanceArgs,
+        path: &Path,
+        expires_at_ms: u64,
+    ) -> String {
+        let (provider, id) = (&instance.provider, &instance.instance_id);
+        match self.json {
+            true => line(&json!({
+                "provider": provider,
+                "instance_id": id,
+                "out": path.display().to_string(),
+                "expires_at_ms": expires_at_ms,
+            })),
+            false => format!(
+                "join token for {provider}:{id} written to {} expires {expires_at_ms}\n",
+                path.display()
+            ),
+        }
+    }
+
+    /// The tokens of an instance were revoked.
+    pub(crate) fn revoked(&self, instance: &InstanceArgs) -> String {
+        let (provider, id) = (&instance.provider, &instance.instance_id);
+        match self.json {
+            true => line(&json!({
+                "provider": provider,
+                "instance_id": id,
+                "state": "revoked",
+            })),
+            false => format!("join tokens for {provider}:{id} revoked\n"),
         }
     }
 
