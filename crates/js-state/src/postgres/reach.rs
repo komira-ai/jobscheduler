@@ -4,7 +4,8 @@
 //! the URL, a role or a database name.
 
 use super::PostgresConfig;
-use super::conn::Conn;
+use super::conn::{Conn, DialError};
+use super::tls::TlsError;
 
 /// Why a login to the database failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -23,6 +24,9 @@ pub enum Unreached {
     /// Any other answer, by its SQLSTATE (a code, never a name).
     #[error("the server answered with an error (SQLSTATE {0})")]
     Other(String),
+    /// The TLS the URL asks for could not be had.
+    #[error(transparent)]
+    Tls(TlsError),
 }
 
 /// Logs in to the database `config` names and drops the connection.
@@ -30,9 +34,12 @@ pub enum Unreached {
 /// # Errors
 /// [`Unreached`]: what stopped the login.
 pub fn reach(config: &PostgresConfig) -> Result<(), Unreached> {
-    Conn::connect(&config.pg)
+    Conn::connect(&config.dial())
         .map(drop)
-        .map_err(|e| classify(&e))
+        .map_err(|err| match err {
+            DialError::Pg(err) => classify(&err),
+            DialError::Tls(err) => Unreached::Tls(err),
+        })
 }
 
 fn classify(err: &postgres::Error) -> Unreached {

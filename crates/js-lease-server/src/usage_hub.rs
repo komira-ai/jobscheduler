@@ -42,9 +42,11 @@ use crate::usage::{
 use crate::usage_map::{host_of, lease_of, load_in};
 use crate::util::blocking;
 
-/// The usage side of the server: the hub, and the clock it is run by.
+/// The usage side of the server: the hub, the sink it writes to, and the clock it is run by.
 pub(crate) struct Usage {
     hub: Arc<UsageHub>,
+    /// The sink the hub writes to, which the job service's `GetUsage` reads.
+    sink: Arc<dyn UsageSink>,
     clock: SharedClock,
     /// Whether the last write of the history queue failed: a run of failures is logged
     /// once.
@@ -72,7 +74,8 @@ impl Usage {
     ) -> Self {
         let started = clock.now().millis() / 60_000;
         Self {
-            hub: Arc::new(UsageHub::new(sink, keys, limits, started)),
+            hub: Arc::new(UsageHub::new(Arc::clone(&sink), keys, limits, started)),
+            sink,
             clock,
             history_failing: AtomicBool::new(false),
         }
@@ -84,6 +87,11 @@ impl Usage {
     /// with its lock, alive after the server stops.
     pub(crate) fn log(&self) -> Arc<dyn AllocationLog> {
         Arc::new(HubLog(Arc::downgrade(&self.hub)))
+    }
+
+    /// The sink the hub writes to, for a reader of what it holds.
+    pub(crate) fn sink(&self) -> Arc<dyn UsageSink> {
+        Arc::clone(&self.sink)
     }
 
     /// The server's clock in wall minutes since the epoch.

@@ -30,6 +30,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 heck.workspace = true
+# The request decoder's property tests: requests round-trip, malformed bodies are refused.
+proptest.workspace = true
 prost-types.workspace = true
 protox.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

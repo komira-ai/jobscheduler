@@ -9,7 +9,9 @@
 //! - **C4** time-to-live keys expired by the store's own [`Clock`], observable in the
 //!   feed ([`Event::Expire`]);
 //! - **C5** ordered prefix scans and a change feed a poller resumes from a [`Revision`]
-//!   without skipping a row ([`Store::changes`]);
+//!   without skipping a row ([`Store::changes`]); the feed is trimmed from its old end by
+//!   [`Store::trim_feed`], and a cursor below the trim is refused with
+//!   [`StoreError::StaleCursor`];
 //! - **C6** an acknowledgement is durable across restart;
 //! - **C7** group commit ([`Store::apply_batch`], [`GROUP_COMMIT_WINDOW`]);
 //! - **C8** a bounded, ordered range scan under a prefix, between two bounds, forward or
@@ -22,7 +24,9 @@
 //!
 //! **One writer**: [`WriterLock`] is the lock the active writer of a store holds for its
 //! life, on either backend ([`WriterTarget`]): an advisory lock on Postgres, the state
-//! file's lock on SQLite.
+//! file's lock on SQLite. On Postgres taking it also takes a new [`WriterGeneration`], which
+//! the holder's store checks in every commit, so a writer that lost the lock commits nothing
+//! once another has taken it.
 //!
 //! With the `postgres` feature, [`postgres`] is the Postgres backend.
 //!
@@ -60,7 +64,7 @@ pub use types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,
 };
-pub use writer::{LockRefused, WriterLock, WriterTarget};
+pub use writer::{LockRefused, WriterGeneration, WriterLock, WriterTarget};
 
 /// The longest a write may wait for the group it commits with (target 5 ms).
 pub const GROUP_COMMIT_WINDOW: Duration = Duration::from_millis(5);

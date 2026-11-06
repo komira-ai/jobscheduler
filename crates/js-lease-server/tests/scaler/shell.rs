@@ -12,7 +12,7 @@ use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
 use js_scaler::{Blocked, CooldownReason, Health, LaunchMode, Phase, Records, Settings, State};
 
-use crate::fakes::{Gate, live, logged, only_saves, record, records, request, rig, view};
+use crate::fakes::{Gate, allocation, job, live, logged, only_saves, record, records, rig, view};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -35,7 +35,7 @@ fn first_name(state: &State) -> String {
 #[tokio::test]
 async fn a_waiting_request_is_launched_once_with_its_records_written_first() {
     let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     let name = first_name(&rig.scaler.state());
     let token = format!("token-of-{name}");
@@ -71,7 +71,7 @@ async fn a_waiting_request_is_launched_once_with_its_records_written_first() {
 #[tokio::test]
 async fn records_that_cannot_be_written_stop_the_tick() {
     let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.world().save_ok = false;
     rig.scaler.tick().await;
     assert_eq!(rig.log(), ["save"]);
@@ -92,7 +92,7 @@ async fn records_that_cannot_be_written_stop_the_tick() {
 #[tokio::test]
 async fn a_token_that_cannot_be_minted_defers_the_launch() {
     let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.world().mint_ok = false;
     rig.scaler.tick().await;
     let name = first_name(&rig.scaler.state());
@@ -212,7 +212,7 @@ async fn a_restart_marks_what_was_being_released_before_anything_else() {
 #[tokio::test]
 async fn a_pool_whose_checks_or_list_fail_launches_nothing() {
     let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.world().health = Health::Checking;
     rig.scaler.tick().await;
     assert!(rig.log().is_empty());
@@ -245,7 +245,7 @@ async fn a_plan_pool_launches_nothing() {
         ..live()
     };
     let rig = rig(Records::default(), plan);
-    rig.world().waiting = vec![request("r1"), request("r2")];
+    rig.world().queued = vec![job("r1"), job("r2")];
     for _ in 0..5 {
         rig.scaler.tick().await;
         rig.advance(mins(1));
@@ -269,11 +269,11 @@ async fn a_plan_pool_launches_nothing() {
 #[tokio::test]
 async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
     let rig = rig(Records::default(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     rig.scaler.tick().await;
     let name = first_name(&rig.scaler.state());
-    rig.world().waiting.clear();
+    rig.world().queued.clear();
     rig.world().hosts = vec![view(&name)];
     rig.scaler.tick().await;
     assert_eq!(
@@ -319,29 +319,28 @@ async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
 }
 
 /// Asserts that a host that holds work is not drained and one that a request fits is
-/// taken back: a registered host with a lease is left alone for any time; a drained host
-/// that a request arrives for is undrained and no machine is launched for it. It catches
-/// a drain that ignores the lease the registry shows, and a launch for a request a drained
-/// host could serve.
+/// taken back: a registered host with a live job allocation is left alone for any time; a
+/// drained host that a queued job arrives for is undrained and no machine is launched for
+/// it. It catches a drain that ignores the job allocation on the host, and a launch for a
+/// job a drained host could serve.
 #[tokio::test]
 async fn a_busy_host_is_kept_and_a_drained_host_is_taken_back_for_a_request() {
     let rig = rig(records(vec![record("js-held", Phase::Registered)]), live());
-    let mut held = view("js-held");
-    held.lease = Some(js_types::LeaseId::new(1, 1));
-    rig.world().hosts = vec![held];
+    rig.world().hosts = vec![view("js-held")];
+    rig.world().live = vec![allocation("j-held", "js-held")];
     rig.scaler.tick().await;
     rig.advance(mins(60));
     rig.scaler.tick().await;
     assert!(rig.log().is_empty());
 
-    rig.world().hosts[0].lease = None;
+    rig.world().live.clear();
     rig.scaler.tick().await;
     rig.advance(mins(10));
     rig.scaler.tick().await;
     assert_eq!(rig.log(), ["save", "Drain:js-held"]);
     assert_eq!(rig.world().hosts[0].mark, Some(HostMark::Draining));
 
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     let log = rig.log();
     assert_eq!(log.last().unwrap(), "Undrain:js-held");
@@ -385,13 +384,13 @@ async fn the_providers_list_reaches_the_step() {
 
 /// Asserts that hosts the scaler must leave alone are left alone, whatever the registry
 /// says of them: two machines of the pool whose hosts are silent (lost, and waiting to say
-/// hello again after a restart) and still hold a lease are held and never released on their
-/// silence, however long, and hosts it did not launch (set aside for a request, held by a
+/// hello again after a restart) and still hold a job allocation are held and never released
+/// on their silence, however long (silence frees no allocation), and hosts it did not launch (set aside for a request, held by a
 /// whole-node lease, finishing runs) are not drained or released. It catches a release on
 /// silence alone, which would terminate a machine that may hold work the registry cannot
 /// see.
 #[tokio::test]
-async fn silent_hosts_that_hold_leases_and_hosts_it_did_not_launch_are_left_alone() {
+async fn silent_hosts_that_hold_jobs_and_hosts_it_did_not_launch_are_left_alone() {
     let each = vec![
         record("js-lost", Phase::Registered),
         record("js-waiting", Phase::Registered),
@@ -399,10 +398,12 @@ async fn silent_hosts_that_hold_leases_and_hosts_it_did_not_launch_are_left_alon
     let rig = rig(records(each), live());
     let mut lost = view("js-lost");
     lost.state = HostState::Lost;
-    lost.lease = Some(js_types::LeaseId::new(1, 1));
     let mut awaiting = view("js-waiting");
     awaiting.state = HostState::Awaiting;
-    awaiting.lease = Some(js_types::LeaseId::new(1, 2));
+    rig.world().live = vec![
+        allocation("j-lost", "js-lost"),
+        allocation("j-waiting", "js-waiting"),
+    ];
     let mut reserved = view("other-1");
     reserved.mark = Some(HostMark::Reserved);
     let mut held = view("other-2");
@@ -498,7 +499,7 @@ async fn the_state_is_read_while_a_provider_call_is_blocked() {
 async fn an_unannounced_host_reaches_the_step_with_no_shape() {
     let announced = rig(Records::default(), live());
     announced.world().hosts = vec![view("js-announced")];
-    announced.world().waiting = vec![request("r1")];
+    announced.world().queued = vec![job("r1")];
     announced.scaler.tick().await;
     assert!(announced.log().is_empty(), "{:?}", announced.log());
 
@@ -506,7 +507,7 @@ async fn an_unannounced_host_reaches_the_step_with_no_shape() {
     let mut unannounced = view("js-unannounced");
     unannounced.claim = None;
     silent.world().hosts = vec![unannounced];
-    silent.world().waiting = vec![request("r1")];
+    silent.world().queued = vec![job("r1")];
     silent.scaler.tick().await;
     let log = silent.log();
     assert_eq!(log.len(), 3, "{log:?}");

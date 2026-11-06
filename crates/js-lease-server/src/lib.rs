@@ -63,7 +63,7 @@
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
-//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. A freed allocation's row is not part of it: `--job-allocation-retention <duration>`, `14d`, same forms and rules, is how long that row is kept after its free before the tick deletes it (at most 500 a tick; the allocation's usage history is kept). `--job-feed-retention <count>`, `100000`, is the third window of the job store: how many of the newest changes of its change feed each tick keeps (a whole number of at least 1, never a time); older rows are trimmed, and a reader behind them is told to start again from the tables. Zero or a non-number is refused at start naming the flag |
 //! | `--max-job-wall <duration>` | the most a submitted job's wall limit may be, `30d` (the job service's `DEFAULT_MAX_JOB_WALL`, the longest `server.max_lease_wall` accepts): a whole count of days (`30d`) or a duration (`12h`, `90m`), at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag. A job asking for more is refused `wall-time-above-ceiling`. Read once at start; it does not read `server.max_lease_wall`. Without `--job-listen` it is checked and kept, and nothing reads it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
@@ -110,7 +110,7 @@
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
-//! # job_retention ("7d"): the flag's name, default and rules
+//! # job_retention ("7d"), job_feed_retention (100000), job_allocation_retention ("14d"): rules
 //! # max_job_wall ("30d"): the flag's name, default and rules
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
@@ -332,9 +332,10 @@
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
 //! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
-//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
-//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
+//! held to `--max-job-wall`), `CancelJob`, and the reads; so are the fleet calls
+//! (`ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`), over
+//! the server's hosts, the status of its pools and its usage store. The answers of each call
+//! are in `docs/http-gateway.md`. The port has the connection cap and the
 //! timeouts of the other listeners, and stops with them. The lease routes are not served on
 //! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
 //! routes than the lease server's of those names, so the two cannot share a port while both
@@ -800,6 +801,7 @@ mod checks;
 mod config;
 mod cordon;
 mod error;
+mod fence;
 mod file;
 mod file_checks;
 mod flags;
@@ -882,7 +884,7 @@ pub use platform::DefaultPlatform;
 pub use pool::LaunchInputs;
 pub use reservations::RESERVATION_BOOT_GRACE;
 pub use scaler::{
-    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    Call, Effects, JobTables, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
     RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
@@ -967,16 +969,18 @@ async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), F
     let running = start(config, SharedClock::new(SystemClock), ticker).await?;
     let _ = writeln!(out, "listening on {}", running.addr());
     let _ = out.flush();
-    let mut stopping = std::pin::pin!(termination());
-    loop {
-        tokio::select! {
-            stopped = &mut stopping => {
-                stopped.map_err(Failure::Runtime)?;
-                break;
-            }
-            _ = hangup.recv() => {
-                // The refusal is logged by the reload; the old pair stays.
-                let _ = running.reload_tls();
+    {
+        let mut stopping = std::pin::pin!(server::stop_or_fence(&running, termination()));
+        loop {
+            tokio::select! {
+                stopped = &mut stopping => {
+                    stopped.map_err(Failure::Runtime)?;
+                    break;
+                }
+                _ = hangup.recv() => {
+                    // The refusal is logged by the reload; the old pair stays.
+                    let _ = running.reload_tls();
+                }
             }
         }
     }

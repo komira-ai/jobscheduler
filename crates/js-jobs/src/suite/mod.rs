@@ -24,10 +24,12 @@ use crate::{
 };
 
 mod clock;
+mod collect;
 mod compat;
 mod failures;
 mod hosts;
 mod idempotency;
+mod indexes;
 mod lifecycle;
 mod logs;
 mod paging;
@@ -39,10 +41,12 @@ mod rows;
 mod scrub;
 
 pub use clock::*;
+pub use collect::*;
 pub use compat::*;
 pub use failures::*;
 pub use hosts::*;
 pub use idempotency::*;
+pub use indexes::*;
 pub use lifecycle::*;
 pub use logs::*;
 pub use paging::*;
@@ -128,6 +132,15 @@ where
     an_ended_job_is_matched_by_the_digests_of_its_files(backend);
     a_boot_digests_the_files_an_ended_row_still_holds(backend);
     the_log_lengths_are_kept_with_the_result_and_swept_with_it(backend);
+    the_tick_deletes_only_freed_allocations_past_their_window(backend);
+    a_backlog_of_freed_allocations_clears_over_several_ticks(backend);
+    a_collection_that_loses_to_a_placement_keeps_the_booking(backend);
+    every_write_keeps_the_indexes_equal_to_a_scan(backend);
+    the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing(backend);
+    an_indexed_read_judges_the_row_not_the_entry(backend);
+    an_indexed_read_reads_every_page_of_entries(backend);
+    an_ended_row_without_a_retention_end_is_due_and_kept(backend);
+    a_backfill_that_loses_its_row_is_stale(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -216,6 +229,15 @@ macro_rules! job_store_tests {
             an_ended_job_is_matched_by_the_digests_of_its_files,
             a_boot_digests_the_files_an_ended_row_still_holds,
             the_log_lengths_are_kept_with_the_result_and_swept_with_it,
+            the_tick_deletes_only_freed_allocations_past_their_window,
+            a_backlog_of_freed_allocations_clears_over_several_ticks,
+            a_collection_that_loses_to_a_placement_keeps_the_booking,
+            every_write_keeps_the_indexes_equal_to_a_scan,
+            the_backfill_makes_the_indexes_agree_and_a_second_changes_nothing,
+            an_indexed_read_judges_the_row_not_the_entry,
+            an_indexed_read_reads_every_page_of_entries,
+            an_ended_row_without_a_retention_end_is_due_and_kept,
+            a_backfill_that_loses_its_row_is_stale,
         );
     };
 }
@@ -291,22 +313,33 @@ impl<S: Store> Rig<S> {
         self.store.get(key).expect("the store is reachable")
     }
 
-    /// Writes `value` under `key` as it is, past the job store.
+    /// Writes `value` under `key` as it is, past the job store, and then indexes the tables
+    /// as a job store's open does ([`Rig::reindex`]): the row is what a later build, an earlier
+    /// release or a hand left in the tables, which the backfill indexes at every start.
     pub(crate) fn put_raw(&self, key: &str, value: Vec<u8>) {
         self.store
             .inner()
             .txn(Txn::new().put(key, value, Cond::Any))
             .expect("the store is reachable")
             .expect("an unconditional put commits");
+        self.reindex();
     }
 
-    /// Removes the row `key`, past the job store.
+    /// Removes the row `key`, past the job store, and then indexes the tables as
+    /// [`Rig::put_raw`] does.
     pub(crate) fn delete_raw(&self, key: &str) {
         self.store
             .inner()
             .txn(Txn::new().delete(key, Cond::Any))
             .expect("the store is reachable")
             .expect("an unconditional delete commits");
+        self.reindex();
+    }
+
+    /// Runs the index backfill a job store's open runs, past the interference, over rows
+    /// written past the job store.
+    pub(crate) fn reindex(&self) {
+        JobStore::new(self.store.inner(), RandomIds).expect("the job store opens and backfills");
     }
 
     /// A second writer over the wrapped store: its commits pass the interference by, so a

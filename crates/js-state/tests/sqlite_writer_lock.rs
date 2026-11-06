@@ -37,12 +37,14 @@ fn the_writer_lock_is_released_when_the_holder_ends() {
 }
 
 // Catches a lock that is not taken, and one taken beside the spelling of the path instead
-// of the file's one name (a second writer naming the file another way would get its own).
+// of the file's one name (a second writer naming the file another way would get its own),
+// and a SQLite lock that claims a writer generation (there is no row to hold one).
 #[test]
 fn a_second_acquire_on_the_same_store_is_refused_as_held() {
     let dir = scratch("writer-lock-held");
     let mut held = acquire(&dir.join("state.db")).expect("the first acquire");
     assert_eq!(held.check(), Ok(()), "a SQLite lock cannot be lost");
+    assert_eq!(held.generation(), None, "a SQLite store is not fenced");
     assert_eq!(
         acquire(&dir.join("state.db")).err(),
         Some(LockRefused::Held)

@@ -1,21 +1,33 @@
 //! The job service's port (`--job-listen`) over real sockets on 127.0.0.1, port 0: gRPC and
 //! the HTTP/JSON gateway on the one port, the bearer token in front of both, the lease
-//! routes kept apart from it, TLS, and the stop. Every call of the job service answers
-//! `UNIMPLEMENTED` until it is served; `GetJob` is served from the server's job store, and
-//! these tests ask it for a job that does not exist, which the store answers `unknown-job`.
+//! routes kept apart from it, TLS, and the stop. `GetJob` is served from the server's job
+//! store, and most of these tests ask it for a job that does not exist, which the store
+//! answers `unknown-job`. The fleet calls are served over the server's registry, pool
+//! status and usage sink, and the last test calls each of them over both transports.
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use axum::http::Uri;
 use hyper_util::rt::TokioIo;
 use js_lease::Timestamp;
-use js_proto::v1::GetJobRequest;
+use js_lease_server::{
+    Config, HostLimits, KeyProfile, LoadIn, NoUsage, NodeRow, Observation, OwnerOnlyFiles,
+    ProfileKey, RunEnd, SinkCounters, UsageFault, UsageSink,
+};
 use js_proto::v1::job_service_client::JobServiceClient;
+use js_proto::v1::{
+    CordonHostRequest, GetJobRequest, GetUsageRequest, Host, ListHostsRequest, ListPoolsRequest,
+    ListProvidersRequest, UncordonHostRequest,
+};
+use js_types::HostId;
+use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -23,9 +35,10 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
 
-use crate::agents_support::start_agents;
+use crate::agents_support::{JOIN, hello_body, session, start_agents};
+use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
 use crate::job_listen::job_args;
-use crate::support::{Harness, Scratch, TOKEN, guard, request};
+use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request};
 use crate::tls::{connector, test_identity, tls_request};
 
 /// The gateway's answer to `GetJob` of a job the store does not hold.
@@ -271,4 +284,265 @@ async fn the_job_port_speaks_tls_over_the_reloaded_pair() {
     assert_eq!((reply.status, reply.body.as_str()), (404, UNKNOWN_JOB_BODY));
     let status = get_job(&mut tls_client(job, &renewed).await, Some(TOKEN)).await;
     assert_eq!(status.code(), Code::NotFound);
+}
+
+/// The host the fleet test registers, in the pool `gpu`.
+const FLEET_HOST: &str = "fleet-host";
+
+/// The job of the ended booking the fleet test's usage sink holds.
+const ENDED_JOB: &str = "ended-job";
+
+/// The host of that booking: one the registry does not hold, as a booking outlives its host.
+const ENDED_HOST: &str = "retired-host";
+
+/// A usage sink that records nothing and holds the ended bookings it was made with, which
+/// it answers as one page whatever the query is.
+struct Ended(Vec<EndedRow>);
+
+impl UsageSink for Ended {
+    fn observe(
+        &self,
+        host: &HostId,
+        epoch: u64,
+        load: &LoadIn,
+        limits: HostLimits,
+        now_minute: u64,
+    ) -> Observation {
+        NoUsage.observe(host, epoch, load, limits, now_minute)
+    }
+
+    fn run_ended(&self, end: &RunEnd, now_minute: u64) -> Result<(), UsageFault> {
+        NoUsage.run_ended(end, now_minute)
+    }
+
+    fn flush(&self, now_minute: u64) -> Result<Vec<(HostId, NodeRow)>, UsageFault> {
+        NoUsage.flush(now_minute)
+    }
+
+    fn prune(&self, now_minute: u64) -> Result<(), UsageFault> {
+        NoUsage.prune(now_minute)
+    }
+
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        NoUsage.node_rows(host, from, to, limit)
+    }
+
+    fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        NoUsage.key_profile(key)
+    }
+
+    fn counters(&self) -> SinkCounters {
+        NoUsage.counters()
+    }
+
+    fn ended_rows_after(&self, _query: &EndedQuery) -> Result<EndedPage, UsageFault> {
+        Ok(EndedPage {
+            rows: self.0.clone(),
+            next: None,
+        })
+    }
+}
+
+/// The booking of [`ENDED_JOB`] on [`ENDED_HOST`] that ended at 1,000,000 ms.
+fn ended_row() -> EndedRow {
+    EndedRow {
+        id: AllocationId::parse(ENDED_JOB).unwrap(),
+        profile: None,
+        host: Some(HostId::new(ENDED_HOST).unwrap()),
+        booked: None,
+        queued_ms: Some(40),
+        run_ms: Some(1000),
+        ended_reason: EndedReason::Released,
+        drain_outcome: DrainOutcome::None,
+        give_up_outcome: None,
+        estimated_end: None,
+        actual_end: 1_000_000,
+        error_ms: None,
+        used: None,
+    }
+}
+
+/// A server with the job service on a loopback port, one elastic pool `gpu` (hosts join it
+/// with [`JOIN`]) and `usage` as its usage sink.
+async fn fleet_server(name: &str, usage: Arc<dyn UsageSink>) -> Harness {
+    let scratch = Scratch::new(name);
+    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
+    let pool = PoolText::elastic(&scratch)
+        .set("exec", &quote("none"))
+        .set("join_token_file", &quoted(&joins));
+    let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\
+                     job_listen = \"127.0.0.1:0\"";
+    let text = file(&server(&scratch, listeners), &[&pool]);
+    let path = scratch.write("js.toml", &text, 0o644);
+    let config = Config::from_config_file(&path, &kinds(), &OwnerOnlyFiles, clock()).unwrap();
+    let harness = Harness::over(scratch, config.with_usage_sink(usage)).await;
+    harness.checks.step().await;
+    harness
+}
+
+/// A hello of `host` into the pool `gpu` on the agent port, which must be admitted, and its
+/// first heartbeat.
+async fn join_gpu_host(h: &Harness, host: &str) {
+    let mut hello = hello_body(host);
+    hello["pool"] = json!("gpu");
+    hello["shape"]["gpu_class"] = json!("nvidia-a10");
+    let hello = hello.to_string().into_bytes();
+    let agent = h.running.agent_addr().unwrap();
+    let reply = request(agent, "POST", "/v1/agent/hello", Some(JOIN), Some(&hello)).await;
+    let joined = session(&reply, host);
+    let beat = joined.beat().to_string().into_bytes();
+    let path = "/v1/agent/heartbeat";
+    let reply = request(agent, "POST", path, Some(JOIN), Some(&beat)).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}
+
+/// `message` as a gRPC request carrying the client token.
+fn authed<T>(message: T) -> tonic::Request<T> {
+    let mut call = tonic::Request::new(message);
+    let value: MetadataValue<Ascii> = format!("Bearer {TOKEN}").parse().unwrap();
+    call.metadata_mut().insert("authorization", value);
+    call
+}
+
+/// The host `id` as `ListHosts` over gRPC lists it.
+async fn grpc_host(grpc: &mut JobServiceClient<Channel>, id: &str) -> Host {
+    let listed = grpc.list_hosts(authed(ListHostsRequest::default())).await;
+    let hosts = listed.unwrap().into_inner().hosts;
+    let found = hosts.into_iter().find(|host| host.id == id);
+    found.unwrap_or_else(|| panic!("{id} is not listed over gRPC"))
+}
+
+/// The host `id` as `GET /v1/hosts` on the job port lists it.
+async fn gateway_host(job: SocketAddr, id: &str) -> Value {
+    let reply = request(job, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let listing = reply.json();
+    let hosts = listing["hosts"].as_array().cloned().unwrap_or_default();
+    let found = hosts.into_iter().find(|host| host["id"] == id);
+    found.unwrap_or_else(|| panic!("{id} is not listed by the gateway: {listing}"))
+}
+
+/// Asserts that both transports list `host` as cordoned (it has a cordon expiry) or not.
+async fn assert_cordon(
+    grpc: &mut JobServiceClient<Channel>,
+    job: SocketAddr,
+    host: &str,
+    cordoned: bool,
+) {
+    let over_grpc = grpc_host(grpc, host).await;
+    assert_eq!(over_grpc.cordon_expires_at_ms.is_some(), cordoned, "gRPC");
+    let over_json = gateway_host(job, host).await;
+    let expiry = over_json.get("cordonExpiresAtMs");
+    assert_eq!(expiry.is_some(), cordoned, "gateway: {over_json}");
+}
+
+/// A `POST` of the empty object to the gateway route `path` on the job port.
+async fn gateway_post(job: SocketAddr, path: &str) -> Reply {
+    request(job, "POST", path, Some(TOKEN), Some(b"{}")).await
+}
+
+/// Asserts that the six fleet calls are served on a real server's job port, over gRPC and
+/// over the gateway: with one host registered in one elastic pool and one ended booking in
+/// the usage sink, `ListHosts` lists the host, `CordonHost` and `UncordonHost` change its
+/// cordon (each one made over one transport and read back over both), `ListPools` and
+/// `ListProviders` name the pool `gpu`, `GetUsage` returns the ended booking by job and
+/// host, and a cordon of a host the registry does not hold is `NOT_FOUND` `unknown-host`
+/// over gRPC and 500 `internal` over the gateway, whose error table does not name it yet. It catches a server that builds the job
+/// service without the fleet group's context, whose every fleet call answers `UNIMPLEMENTED`
+/// (`501`).
+#[tokio::test]
+async fn the_fleet_calls_are_served_on_the_job_port() {
+    let h = fleet_server("job_port_fleet", Arc::new(Ended(vec![ended_row()]))).await;
+    join_gpu_host(&h, FLEET_HOST).await;
+    let job = h.running.job_addr().unwrap();
+    let mut grpc = client(job).await;
+
+    let listed = grpc_host(&mut grpc, FLEET_HOST).await;
+    assert_eq!(listed.id, FLEET_HOST);
+    assert_eq!(gateway_host(job, FLEET_HOST).await["id"], FLEET_HOST);
+    assert_cordon(&mut grpc, job, FLEET_HOST, false).await;
+
+    let cordon = CordonHostRequest {
+        host_id: FLEET_HOST.to_owned(),
+        cordon_secs: None,
+    };
+    let placed = grpc.cordon_host(authed(cordon)).await.unwrap().into_inner();
+    assert_eq!(placed.host.unwrap().id, FLEET_HOST);
+    assert!(!placed.already_cordoned);
+    assert_cordon(&mut grpc, job, FLEET_HOST, true).await;
+
+    let lifted = gateway_post(job, &format!("/v1/hosts/{FLEET_HOST}:uncordon")).await;
+    assert_eq!(lifted.status, 200, "{}", lifted.body);
+    assert_eq!(lifted.json()["host"]["id"], FLEET_HOST);
+    assert_eq!(lifted.json()["lifted"], true);
+    assert_cordon(&mut grpc, job, FLEET_HOST, false).await;
+
+    let placed = gateway_post(job, &format!("/v1/hosts/{FLEET_HOST}:cordon")).await;
+    assert_eq!(placed.status, 200, "{}", placed.body);
+    assert_eq!(placed.json()["host"]["id"], FLEET_HOST);
+    assert_eq!(placed.json()["alreadyCordoned"], Value::Null);
+    assert_cordon(&mut grpc, job, FLEET_HOST, true).await;
+
+    let uncordon = UncordonHostRequest {
+        host_id: FLEET_HOST.to_owned(),
+    };
+    let lifted = grpc.uncordon_host(authed(uncordon)).await.unwrap();
+    assert!(lifted.into_inner().lifted);
+    assert_cordon(&mut grpc, job, FLEET_HOST, false).await;
+
+    let unknown = CordonHostRequest {
+        host_id: "no-such-host".to_owned(),
+        cordon_secs: None,
+    };
+    let status = grpc
+        .cordon_host(authed(unknown))
+        .await
+        .expect_err("the registry holds no such host");
+    assert_eq!(
+        (status.code(), status.message()),
+        (Code::NotFound, "unknown-host")
+    );
+    let reply = gateway_post(job, "/v1/hosts/no-such-host:cordon").await;
+    assert_eq!(
+        (reply.status, reply.body.as_str()),
+        (500, r#"{"error":"internal"}"#)
+    );
+
+    let pools = grpc.list_pools(authed(ListPoolsRequest::default())).await;
+    let pools = pools.unwrap().into_inner().pools;
+    let names: Vec<&str> = pools.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["gpu"]);
+    let reply = request(job, "GET", "/v1/pools", Some(TOKEN), None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["pools"].as_array().map(Vec::len), Some(1));
+    assert_eq!(reply.json()["pools"][0]["name"], "gpu");
+
+    let providers = grpc
+        .list_providers(authed(ListProvidersRequest::default()))
+        .await;
+    let providers = providers.unwrap().into_inner().providers;
+    let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["gpu"]);
+    let reply = request(job, "GET", "/v1/providers", Some(TOKEN), None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["providers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(reply.json()["providers"][0]["name"], "gpu");
+
+    let usage = grpc.get_usage(authed(GetUsageRequest::default())).await;
+    let usage = usage.unwrap().into_inner();
+    assert_eq!(usage.records.len(), 1);
+    assert_eq!(usage.records[0].job_id, ENDED_JOB);
+    assert_eq!(usage.records[0].host_id, ENDED_HOST);
+    assert_eq!(usage.next_page_token, "");
+    let reply = request(job, "GET", "/v1/usage", Some(TOKEN), None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["records"].as_array().map(Vec::len), Some(1));
+    assert_eq!(reply.json()["records"][0]["jobId"], ENDED_JOB);
+    assert_eq!(reply.json()["records"][0]["hostId"], ENDED_HOST);
 }

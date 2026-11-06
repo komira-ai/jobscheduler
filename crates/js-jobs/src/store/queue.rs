@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use js_state::Store;
 
+use super::index::Span;
 use super::{JobStore, allocation_at, same_key};
 use crate::codec::{DecodeError, decode_job};
 use crate::error::JobStoreError;
@@ -24,14 +25,16 @@ pub fn queue_order(a: &JobRecord, b: &JobRecord) -> Ordering {
 }
 
 impl<S: Store, I: IdSource> JobStore<S, I> {
-    /// Every queued job, in queue order ([`queue_order`]). It reads every job row. A row a
-    /// later build wrote is left out and logged, as [`JobStore::list_jobs`] leaves it out.
+    /// Every queued job, in queue order ([`queue_order`]). It reads the rows of the jobs that
+    /// have not ended, through their `active` entries, and the rows this build cannot read. A
+    /// row a later build wrote is left out and logged, as [`JobStore::list_jobs`] leaves it out.
     ///
     /// # Errors
     /// [`JobStoreError::Corrupt`] when a row does not parse; [`JobStoreError::Store`].
     pub fn queued(&self) -> Result<Vec<JobRecord>, JobStoreError> {
         let mut queued = Vec::new();
-        for (key, row) in self.store.scan_prefix(keys::JOB)? {
+        let spans = [Span::all(keys::ACTIVE), Span::all(keys::UNREAD_JOB)];
+        for (key, row) in self.indexed_rows(&spans)? {
             match decode_job(&row.value).and_then(|job| same_key(&key, keys::job(&job.id), job)) {
                 Ok(job) => queued.extend((job.state == JobState::Queued).then_some(job)),
                 Err(DecodeError::Newer) => {
@@ -45,7 +48,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// Every live (booked or releasing) allocation, of every host, in job id order. It reads
-    /// every allocation row, freed ones included, as [`JobStore::booked_on`] does.
+    /// the rows of the live allocations, through their on-host entries, and the allocation
+    /// rows this build cannot read; no freed row.
     ///
     /// # Errors
     /// [`JobStoreError::UnknownRow`] or [`JobStoreError::Corrupt`] when an allocation row
@@ -53,7 +57,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::Store`].
     pub fn live_allocations(&self) -> Result<Vec<AllocationRecord>, JobStoreError> {
         let mut live = Vec::new();
-        for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
+        let spans = [Span::all(keys::ON_HOST), Span::all(keys::UNREAD_ALLOCATION)];
+        for (key, row) in self.indexed_rows(&spans)? {
             let allocation = allocation_at(&key, &row.value)?;
             live.extend((allocation.step != AllocationStep::Freed).then_some(allocation));
         }

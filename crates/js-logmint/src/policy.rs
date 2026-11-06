@@ -1,8 +1,10 @@
 //! The session policy of a host credential.
 //!
 //! Exactly one statement: `Effect` `Allow`, `Action` `s3:PutObject` and `s3:DeleteObject`, and
-//! `Resource` `arn:aws:s3:::BUCKET/L*`, where `L` is the configured log prefix with its trailing
-//! `/` (`arn:aws:s3:::BUCKET/*` when the prefix is empty). Because `L` ends in `/`, the pattern
+//! `Resource` `arn:aws:s3:::BUCKET/L*`, where `L` is the prefix given with its trailing `/`
+//! (`arn:aws:s3:::BUCKET/*` for an empty one). The minters give the host's prefix
+//! ([`crate::MintRequest::host_prefix`]: the configured log prefix and `js-<32 hex>/`), so a
+//! host's policy covers its own jobs and no other host's. Because `L` ends in `/`, the pattern
 //! of the prefix `a/b` matches `a/b/...` and never `a/bc/...`. The trailing `*` is the
 //! resource's only wildcard: the bucket and the prefix are checked ([`crate::names`]) so that
 //! they hold no `*`, `?`, `$` or `{`, and no character that JSON would have to escape. There is
@@ -22,7 +24,7 @@ use crate::names::{Bucket, LogPrefix};
 pub const POLICY_VERSION: &str = "2012-10-17";
 
 /// The session policy that allows `s3:PutObject` and `s3:DeleteObject` on the objects of
-/// `bucket` under `prefix`, and nothing else.
+/// `bucket` under `prefix` (a host's prefix, as the minters give it), and nothing else.
 pub fn policy(bucket: &Bucket, prefix: &LogPrefix) -> String {
     document(&format!(
         "arn:aws:s3:::{}/{}*",

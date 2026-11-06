@@ -17,7 +17,7 @@
 //!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
 //!   [`StartSeen`], [`StopSeen`]).
 //! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
-//!   step and once at the end, and the one-line [`Violation`] it reports. Eleven
+//!   step and once at the end, and the one-line [`Violation`] it reports. Sixteen
 //!   properties: no host booked past what it holds, no lease on two hosts and no host
 //!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
 //!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
@@ -32,7 +32,15 @@
 //!   no run on a host drained for a reservation stopped that its client did not ask to
 //!   stop ([`Invariant::DrainKillsNothing`]), and no ordinary start on a host set aside
 //!   for a whole-host request but backfill inside its tail
-//!   ([`Invariant::MarkedHostsServeNoOrdinaryStart`]).
+//!   ([`Invariant::MarkedHostsServeNoOrdinaryStart`]); and the five of a job: at most one
+//!   allocation booked per job, a new id for each placement and no job on two hosts
+//!   ([`Invariant::OneAllocationPerJob`]), a lost job never read in another state and a
+//!   later listing of it answered with a stop ([`Invariant::LostIsTerminal`]), an
+//!   allocation freed only on the host's listing or the provider's absence
+//!   ([`Invariant::FreedOnlyWhenConfirmed`]), every job start naming an allocation
+//!   committed before it ([`Invariant::NoStartWithoutAllocation`]), and every result kept
+//!   by its agent until acknowledged and stored once
+//!   ([`Invariant::ResultKeptUntilAcknowledged`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
 //! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
@@ -41,18 +49,25 @@
 //!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
 //!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
 //!   Either kind has the node's side of the whole-host handshake, which prepares, reports
-//!   ready, refuses or stays silent as its [`Prepare`] switch says.
+//!   ready, refuses or stays silent as its [`Prepare`] switch says. A fake agent of a
+//!   server of [`ServerSpec::jobs`] also speaks the per-job messages.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
-//!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]).
+//!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]);
+//!   with [`ServerSpec::jobs`], its job service too, its job store minting ids from the
+//!   seed.
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
 //! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
 //!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
 //!   it.
 //! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
 //!   server and reports what it hears as [`ClientEvent`]s, and keeps every answer it was
-//!   given raw ([`Answer`]); [`LeaseFront`] does it as `js run` does today. The client is not a bus node: the run loop polls it at exact virtual
-//!   times and its calls are never dropped.
+//!   given raw ([`Answer`]); [`LeaseFront`] does it as `js run` does today, and
+//!   [`JobFront`] submits each unit as a job to the job service. The client is not a bus
+//!   node: the run loop polls it at exact virtual times and its calls are never dropped.
+//! - [`jobs`]: the job front, and what the cell observes of jobs: the server's job and
+//!   allocation tables as it read them ([`JobRead`], [`AllocationRead`]), and what the
+//!   per-job agents sent and read ([`JobBeat`], [`JobReply`], [`ResultMade`]).
 //! - [`cell`]: the run loop ([`Cell`]), which steps the kernel, runs the actions scripted
 //!   at virtual times, polls the client and checks the invariants after every step, with
 //!   the changes a scenario makes (agents added, killed, killed for good and replaced,
@@ -88,8 +103,9 @@
 //! The crate keeps the kernel's rules although its layer does not demand them: no clock,
 //! no random source and no hashed collection, so a run replays from its seed. The server
 //! it runs is production code and keeps them only where the cell gives it the means: it
-//! reads the cell's clock, its lease table times its saves on that clock, and usage
-//! recording, which reads the system's clock, is off. Its session secrets are random;
+//! reads the cell's clock, its lease table times its saves on that clock, its job store
+//! stamps its rows with that clock and mints its ids from a script drawn from the seed,
+//! and usage recording, which reads the system's clock, is off. Its session secrets are random;
 //! the agents echo them, and no trace line holds one.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -102,6 +118,7 @@ pub mod cell;
 mod counters;
 pub mod front;
 pub mod invariant;
+pub mod jobs;
 mod ledger;
 mod node;
 pub mod observe;
@@ -120,17 +137,21 @@ pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
 pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
+pub use jobs::{
+    AllocationRead, AllocationRow, JOB_PREFIX, JobBeat, JobFront, JobRead, JobReply, JobStartSeen,
+    ResultMade,
+};
 pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
     AgentTruth, Ask, Booking, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
-    Observations, ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand,
-    StopSeen, Verdict,
+    Observations, ReadyReport, RunId, Running, RunningJob, ServerHost, ServerView, StartSeen,
+    StopCommand, StopSeen, Verdict,
 };
 pub use replay::{Failure, FailureReport, drive, run};
 pub use scenario::{
     Booked, Call, Expect, HostIs, HostRef, Listed, Passed, RecordFact, Scenario, ScenarioFailure,
     SeedRun,
 };
-pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
+pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
 pub use work::Work;

@@ -1,21 +1,26 @@
-//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in [`runs`]
-//! `watch` and `stop` and the deadline of a `run`, in
-//! [`switch`] the session switch and the boot reset, and in [`leak`] the leak scan's
-//! `scan`, `baseline` and `reboot-dirty`, over a [`Host`] that does what only the OS
-//! can (user records, launchd, processes, the programs the switch and the scan run),
-//! so the rules here are tested on any platform.
+//! The verbs: `user-create`, `run`, `kill-uid` and `user-delete` (S4.2), in [`pool`] the
+//! pool of lease users (`pool-create`, `pool-status`, and what `user-create` and
+//! `user-delete` do with it), in [`runs`] `watch` and `stop` and the deadline of a `run`,
+//! in [`switch`] the session switch and the boot reset, and in [`leak`] the leak scan's
+//! `scan`, `baseline` and `reboot-dirty`, over a [`Host`] that does what only the OS can
+//! (user records, launchd, processes, the programs the switch and the scan run), so the
+//! rules here are tested on any platform.
 //!
 //! Rules every verb keeps:
-//! - A lease id is parsed strictly and names one user, `kbf-lease-<term>-<seq>`.
+//! - A lease id is parsed strictly and is used once.
+//! - A lease's user is a pool user, `kbf-lease-pool-<slot>`, lent for the lease and
+//!   reset (or replaced) when it ends ([`pool`]); or, for a lease a release before the
+//!   pool created, its own `kbf-lease-<term>-<seq>`, deleted when it ends.
 //! - The uid comes from the ledger, never from a lookup, and must be in the lease
 //!   range; a uid outside it is never touched.
-//! - `user-create` is refused for a lease id used before (so names are never reused
-//!   and a grant is single-use) and makes an administrator only with a valid grant.
+//! - `user-create` is refused for a lease id used before (so a grant is single-use),
+//!   takes only a free pool user (never making one: a full pool is
+//!   [`LeaseError::Exhausted`]) and makes an administrator only with a valid grant.
 //! - `run`, `kill-uid`, `stop` and `user-delete` act only on a lease the ledger holds;
-//!   `run`, `kill-uid` and `stop` refuse a deleted one (its uid may belong to a newer
-//!   lease). `stop` kills only as `kill-uid` does, after a `SIGTERM` to the run's own
-//!   process group and its grace; `watch` reads the helper's table of runs and acts on
-//!   nothing.
+//!   `run`, `kill-uid` and `stop` refuse one that is over (its uid may be another
+//!   lease's now). `stop` kills only as `kill-uid` does, after a `SIGTERM` to the run's
+//!   own process group and its grace; `watch` reads the helper's table of runs and acts
+//!   on nothing.
 //! - `run` in the GUI session, and `session-ready`, act only for the lease the session
 //!   switch's intent record names (the one `session-login` logged in); `run` there is
 //!   refused until launchd has the user's `gui/<uid>` domain, which exists once the
@@ -35,20 +40,24 @@
 //!   user's crontab and `at` jobs, and does it all again, so no scheduled job of the
 //!   user starts after it returns. An outcome that does not hold after the last attempt
 //!   fails, naming what remains, and the lease stays live: its uid is quarantined.
-//! - `user-delete` refuses while any process of the uid remains. It first asks for the
+//! - `user-delete` of a pool user's lease records the lease over and resets the user;
+//!   a reset that is not clean replaces it, and a replacement that fails breaks the slot
+//!   ([`pool`]). The deletion of a user (a lease's from before the pool, or a pool user
+//!   being replaced) refuses while any process of the uid remains. It first asks for the
 //!   uid's `DARWIN_USER_DIR` (in a short-lived process of the uid, while its record is
 //!   there) and takes the uid's own entry under the per-user folders from it, refusing
 //!   any answer that is not such an entry; then it looks (and boots out the domains),
-//!   removes what can start a process (crontab, `at` jobs), looks again, sweeps the rest
-//!   and that entry whole, looks a last time (and boots out the domains), deletes the
-//!   record, and records the deletion last. A failure at any step leaves the lease live
+//!   removes what can start a process (crontab, `at` jobs), looks again, removes the
+//!   uid's System V IPC objects, sweeps the rest and that entry whole, looks a last time
+//!   (and boots out the domains), and deletes the record. For a lease from before the
+//!   pool it records the deletion last, and a failure at any step leaves the lease live
 //!   in the ledger, so its uid is held and never handed to another lease, and the
 //!   refusal says why; the delete is simply repeated. At each look it waits, bounded, for
 //!   processes of the uid to exit (a cron job that started after `kill-uid`), and names
-//!   those still alive when it refuses. It is refused for the lease the session
-//!   switch's intent record names (`session-idle` first).
+//!   those still alive when it refuses. `user-delete` is refused for the lease the
+//!   session switch's intent record names (`session-idle` first).
 //! - The first `user-create` closes the baseline window, and makes a dirty scan's
-//!   verdict stale (`reboot-dirty` then needs a new scan).
+//!   verdict stale (`reboot-dirty` then needs a new scan). Making the pool does not.
 //! - The standing VM user ([`role`], `--vm-user`) is the one account besides lease users
 //!   the helper acts on. Its verbs (`role-run`, `role-session-ready`, `role-kill-uid`)
 //!   take no lease: the account is looked up by its configured name, and its uid must be
@@ -79,16 +88,18 @@ use rustix::fs::{CWD, Gid, Mode, OFlags, Uid};
 
 use crate::autologin::{CommandOutput, Intent, SessionPaths, read_intent};
 use crate::grant::{self, Expect, GrantKeys};
-use crate::lease::{Dotted, UidRange, VmUser, parse_lease, user_name};
+use crate::lease::{Dotted, PoolSize, Slot, UidRange, VmUser, parse_lease};
 use crate::ledger::{Entry, Ledger};
-use crate::proto::{Limits, Reply, Request, Session};
+use crate::proto::{Limits, PoolState, Reply, Request, Session};
 use crate::scan::ScanSettings;
 use crate::spawn::{self, Spawn};
 use crate::sweep::SweepPlan;
 
 pub(crate) mod folders;
 mod image;
+mod ipc;
 mod leak;
+mod pool;
 mod reap;
 mod role;
 mod runs;
@@ -97,8 +108,12 @@ mod teardown;
 mod vmrun;
 
 pub use image::{CHFLAGS, ImageSettings};
+pub use ipc::{IPCRM, IPCS};
+pub use pool::{DSEDITGROUP, LeaseError, POOL_EXHAUSTED, PoolExhausted, PoolStatus};
 pub use runs::{Ended, MAX_WAIT, NO_RUN};
 pub use switch::Reset;
+
+use pool::LeaseUser;
 
 /// How many attempts `kill-uid` makes (kill, boot out the uid's launchd domains, look at
 /// the outcome) before it gives up.
@@ -306,6 +321,9 @@ pub struct NewUser {
 pub struct Settings {
     /// The uids lease users may have.
     pub range: UidRange,
+    /// How many users the pool holds (`--pool-size`); slot `n`'s user has the range's
+    /// first uid plus `n`.
+    pub pool: PoolSize,
     /// Every lease user's primary group.
     pub gid: u32,
     /// Where home folders are made (`/Users` on macOS).
@@ -420,7 +438,10 @@ impl Helper {
             _ if !fds.is_empty() => Err("only run and role-run take descriptors".to_owned()),
             Request::UserCreate { lease, grant } => self
                 .user_create(&lease, grant.as_deref())
-                .map(|uid| Reply::Created { uid }),
+                .map(|uid| Reply::Created { uid })
+                .map_err(|why| why.to_string()),
+            Request::PoolCreate => Ok(pool_reply(self.pool_create())),
+            Request::PoolStatus => Ok(pool_reply(self.pool_status())),
             Request::KillUid { lease } => self.kill_uid(&lease).map(|()| Reply::Killed),
             Request::Stop { lease, grace_ms } => self
                 .stop(&lease, Duration::from_millis(grace_ms))
@@ -464,12 +485,14 @@ impl Helper {
         result.map_or_else(refused, Outcome::Reply)
     }
 
-    /// `user-create <lease> [grant]`: a fresh, non-admin user (an administrator with a
-    /// valid grant), with an empty home folder only it can enter. Returns its uid.
+    /// `user-create <lease> [grant]`: the lease takes a free pool user (an administrator,
+    /// replaced for the lease, with a valid grant), whose home folder is empty and only it
+    /// can enter. Returns its uid.
     ///
     /// # Errors
-    /// Why it was refused or failed.
-    pub fn user_create(&self, lease: &str, grant: Option<&str>) -> Result<u32, String> {
+    /// [`LeaseError::Exhausted`] when no pool user is free (retry once a lease ends);
+    /// otherwise why it was refused or failed.
+    pub fn user_create(&self, lease: &str, grant: Option<&str>) -> Result<u32, LeaseError> {
         let lease = parse_lease(lease)?;
         let admin = match grant {
             None => false,
@@ -486,52 +509,15 @@ impl Helper {
                 true
             }
         };
-        let name = user_name(lease);
         let mut ledger = self.lock();
         if ledger.get(lease).is_some() {
             return Err(format!(
-                "lease {} was used before; a lease user's name is never reused",
+                "lease {} was used before; a lease id is used once",
                 Dotted(lease)
-            ));
+            )
+            .into());
         }
-        let uid = self.free_uid(&ledger)?;
-        self.first_lease_user()?;
-        ledger
-            .record_created(lease, uid)
-            .map_err(|why| format!("recording lease {}: {why}", Dotted(lease)))?;
-        let home = self.settings.homes.join(&name);
-        self.host
-            .make_home(&self.settings.homes, &name, uid, self.settings.gid)
-            .map_err(|why| format!("making {}: {why}", home.display()))?;
-        let user = NewUser {
-            name,
-            uid,
-            gid: self.settings.gid,
-            home,
-            admin,
-        };
-        self.host
-            .create_user(&user)
-            .map_err(|why| format!("creating user {}: {why}", user.name))?;
-        tracing::info!(lease = %Dotted(lease), uid, admin, "created lease user {}", user.name);
-        Ok(uid)
-    }
-
-    /// The first uid after the one handed out last that no live lease holds, no user
-    /// record has and no process runs as.
-    fn free_uid(&self, ledger: &Ledger) -> Result<u32, String> {
-        let held = ledger.held_uids();
-        let range = self.settings.range;
-        for uid in range.after(ledger.last_uid()) {
-            if held.contains(&uid) {
-                continue;
-            }
-            let taken = self.host.uid_taken(uid).map_err(|why| why.to_string())?;
-            if !taken && self.live(uid)?.is_empty() {
-                return Ok(uid);
-            }
-        }
-        Err(format!("no free uid in {range}"))
+        self.take_slot(&mut ledger, lease, admin)
     }
 
     fn live(&self, uid: u32) -> Result<Vec<LiveProcess>, String> {
@@ -541,12 +527,13 @@ impl Helper {
     }
 
     /// The uid of a live lease, in range.
-    fn live_uid(&self, ledger: &Ledger, lease: LeaseId) -> Result<u32, String> {
+    pub(super) fn live_uid(&self, ledger: &Ledger, lease: LeaseId) -> Result<u32, String> {
         match ledger.get(lease) {
             None => Err(format!("lease {} has no user", Dotted(lease))),
-            Some(Entry { deleted: true, .. }) => {
-                Err(format!("lease {}'s user was deleted", Dotted(lease)))
-            }
+            Some(Entry { deleted: true, .. }) => Err(format!(
+                "lease {} is over: its user was deleted or returned to the pool",
+                Dotted(lease)
+            )),
             Some(Entry { uid, .. }) if !self.settings.range.contains(uid) => Err(format!(
                 "lease {}'s uid {uid} is outside {}",
                 Dotted(lease),
@@ -613,14 +600,15 @@ impl Helper {
             )
         })?;
         let ledger = self.lock();
-        let uid = self.live_uid(&ledger, lease)?;
+        let LeaseUser {
+            name: user, uid, ..
+        } = self.lease_user(&ledger, lease)?;
         if session == Session::Gui && !self.gui_up(lease, uid)? {
             return Err(format!(
                 "gui/{uid} does not exist: the login of lease {}'s user has not completed",
                 Dotted(lease)
             ));
         }
-        let user = user_name(lease);
         let program = argv[0].clone();
         let child = spawn::spawn(Spawn {
             uid,
@@ -717,6 +705,24 @@ fn launchctl_print_answer(answer: &PrintAnswer) -> io::Result<bool> {
             "launchctl print was ended by a signal: {stderr}"
         ))),
     }
+}
+
+/// The reply to `pool-create` and `pool-status`.
+fn pool_reply(status: PoolStatus) -> Reply {
+    let indexes = |slots: Vec<Slot>| slots.into_iter().map(Slot::index).collect();
+    Reply::Pool(Box::new(PoolState {
+        size: status.size,
+        free: indexes(status.free),
+        leased: status
+            .leased
+            .into_iter()
+            .map(|(slot, lease)| (slot.index(), Dotted(lease).to_string()))
+            .collect(),
+        resetting: indexes(status.resetting),
+        broken: indexes(status.broken),
+        missing: indexes(status.missing),
+        errors: status.errors,
+    }))
 }
 
 /// Makes the home folder `name` in `homes`: new (an existing one is an error), owned
