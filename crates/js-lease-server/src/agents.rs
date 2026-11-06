@@ -146,6 +146,7 @@ pub(crate) fn assemble_placed(
                 max_lease_wall,
                 job_limits,
                 jobs,
+                job_sources,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
@@ -185,7 +186,7 @@ pub(crate) fn assemble_placed(
             let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
             // The one job store of the server, when the job service is on.
             let jobs = match jobs {
-                Some(setup) => Some(job_store::open(state_file, setup)?),
+                Some(setup) => Some(job_store::open(state_file, setup, &job_sources)?),
                 None => None,
             };
             let agents = Agents {

@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationStep, Booked, EndReason, JobEnd, JobId, JobState, JobStore, JobStoreError, NewJob,
-    Output, RandomIds, ResultReason, StartFailure, keys,
+    Output, ResultReason, StartFailure, keys,
 };
 use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Store, Txn};
@@ -180,7 +180,7 @@ fn timed() -> (Arc<ManualClock>, Arc<Interfere<Fake>>, ServerJobs) {
         Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
+    let jobs = JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     (time, store, jobs)
 }
 

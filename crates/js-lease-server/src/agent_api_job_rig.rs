@@ -13,7 +13,7 @@ use js_agent_wire::{
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
-    JobStore, Needs, NetworkPolicy, NewJob, RandomIds, Retention,
+    JobStore, Needs, NetworkPolicy, NewJob, Retention,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
@@ -70,7 +70,7 @@ pub(crate) fn tables_on(
 ) -> (Arc<Interfere<Fake>>, ServerJobs) {
     let store = Arc::new(Interfere::new(Fake::with_flaw(clock, Flaw::None)));
     let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
+    let jobs = JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap();
     (store, jobs.with_retention(retention))
 }
 

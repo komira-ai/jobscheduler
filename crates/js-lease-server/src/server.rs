@@ -217,7 +217,7 @@ pub(crate) struct Listeners {
     agent_listen: Option<SocketAddr>,
     job_listen: Option<JobListen>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
-    max_job_wall: Duration,
+    pub(crate) max_job_wall: Duration,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -235,7 +235,7 @@ pub(crate) struct Prepared {
     boot: Boot,
     settings: Settings,
     tick: Duration,
-    token: Token,
+    pub(crate) token: Token,
     monotonic: Arc<dyn Monotonic>,
     warnings: Vec<String>,
     status: bool,

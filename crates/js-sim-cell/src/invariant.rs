@@ -1,6 +1,7 @@
 //! What must always be true of the cell: the seven properties of "exactly once, nothing
 //! double-booked, nothing lost", the four of a whole host held, drained and served
-//! (`whole.rs`), and the [`Checker`] that tests them.
+//! (`whole.rs`), the five of a job, its allocations and its result (`jobs.rs`), and the
+//! [`Checker`] that tests them.
 //!
 //! The checker runs a step check ([`Checker::step`]) after every kernel step and every
 //! client call, and an end check ([`Checker::end`]) once, after the scenario has been
@@ -41,13 +42,14 @@ use crate::observe::{
 };
 use crate::text;
 
+mod jobs;
 mod results;
 mod whole;
 
 /// One property the cell must keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Invariant {
-    /// Step check. (a) By agent ground truth, the runs one agent runs at one time never
+    /// Step check. (a) By agent ground truth, the runs and jobs one agent runs at one time never
     /// need more than its capacity (cpu, memory, gpus). (b) No run is run by two agents
     /// at the same virtual time. (c) No host runs a run of another lease while a
     /// whole-host item (as the client asked for it, not as the server lists it) holds a
@@ -131,11 +133,40 @@ pub enum Invariant {
     /// start names, ends no later than the tail the host was set aside on. Read over the
     /// starts the agents were sent ([`Observations::starts`]).
     MarkedHostsServeNoOrdinaryStart,
+    /// Step check. (a) By the server's allocation table as the cell read it, a job has at
+    /// most one allocation booked at a time (an allocation the reads never showed freed or
+    /// releasing counts as still booked). (b) An allocation id names one placement: it is
+    /// never read for a second job or a second host, and once read freed it is never read
+    /// booked or releasing again, so a new placement has a new allocation id. (c) By agent
+    /// ground truth, no job runs on two hosts at once.
+    OneAllocationPerJob,
+    /// Step check. (a) A job the server's job table read lost is never read in another
+    /// state after. (b) An answer to a per-job heartbeat that listed a job running (no
+    /// result), sent at or after the first read that showed the job lost, carries a stop of
+    /// it ([`Observations::job_replies`]).
+    LostIsTerminal,
+    /// Step check. An allocation the server's table reads freed was freed on the host's
+    /// word or the provider's: the host's agent sent, after the allocation was committed
+    /// and by the read, a heartbeat whose listing left the job out (or named it retired);
+    /// or the server's listing read with the tables does not name the host (the provider
+    /// reads it absent); or it ended as a failed whole-host prepare before any container of
+    /// the placement was launched. Never on silence, never on an unknown.
+    FreedOnlyWhenConfirmed,
+    /// Step check. Every job start a per-job agent read names an allocation of that job on
+    /// that host that the server had committed by the time the agent read it, as the first
+    /// read of the server's tables after it shows.
+    NoStartWithoutAllocation,
+    /// Step check. (a) A per-job agent sends a result it made in every heartbeat until it
+    /// reads an answer that acknowledges it, unless its process was killed in between: by
+    /// what it sent ([`Observations::job_beats`]), never dropped before. (b) No job's
+    /// result is accepted twice among the verdicts the agents read: the server stores each
+    /// result once.
+    ResultKeptUntilAcknowledged,
 }
 
 impl Invariant {
     /// Every invariant.
-    pub const ALL: [Invariant; 11] = [
+    pub const ALL: [Invariant; 16] = [
         Invariant::NoDoubleBooking,
         Invariant::AtMostOneLaunch,
         Invariant::OneTerminalAnswer,
@@ -147,6 +178,11 @@ impl Invariant {
         Invariant::HeldMeansReady,
         Invariant::DrainKillsNothing,
         Invariant::MarkedHostsServeNoOrdinaryStart,
+        Invariant::OneAllocationPerJob,
+        Invariant::LostIsTerminal,
+        Invariant::FreedOnlyWhenConfirmed,
+        Invariant::NoStartWithoutAllocation,
+        Invariant::ResultKeptUntilAcknowledged,
     ];
 
     /// A stable kebab-case name, as a failure writes it.
@@ -164,6 +200,11 @@ impl Invariant {
             Invariant::HeldMeansReady => "held-means-ready",
             Invariant::DrainKillsNothing => "drain-kills-nothing",
             Invariant::MarkedHostsServeNoOrdinaryStart => "marked-hosts-serve-no-ordinary-start",
+            Invariant::OneAllocationPerJob => "one-allocation-per-job",
+            Invariant::LostIsTerminal => "lost-is-terminal",
+            Invariant::FreedOnlyWhenConfirmed => "freed-only-when-confirmed",
+            Invariant::NoStartWithoutAllocation => "no-start-without-allocation",
+            Invariant::ResultKeptUntilAcknowledged => "result-kept-until-acknowledged",
         }
     }
 
@@ -178,7 +219,12 @@ impl Invariant {
             | Invariant::WholeHostIsExclusive
             | Invariant::HeldMeansReady
             | Invariant::DrainKillsNothing
-            | Invariant::MarkedHostsServeNoOrdinaryStart => Checked::EveryStep,
+            | Invariant::MarkedHostsServeNoOrdinaryStart
+            | Invariant::OneAllocationPerJob
+            | Invariant::LostIsTerminal
+            | Invariant::FreedOnlyWhenConfirmed
+            | Invariant::NoStartWithoutAllocation
+            | Invariant::ResultKeptUntilAcknowledged => Checked::EveryStep,
             Invariant::SettlesWhenQuiet
             | Invariant::BookingsMatchAgents
             | Invariant::NoResultLost => Checked::AtEnd,
@@ -340,6 +386,8 @@ pub struct Checker {
     runs: BTreeMap<RunId, ItemId>,
     /// The leases of items that did not ask for a whole host.
     ordinary: BTreeSet<LeaseId>,
+    /// What the job invariants have read.
+    jobs: jobs::Indices,
 }
 
 impl Checker {
@@ -383,6 +431,7 @@ impl Checker {
         }
         self.read_starts(observations, &mut found);
         self.read_stops(observations, &mut found);
+        self.jobs.step(observations, touched, &mut found);
         found.list
     }
 
@@ -654,7 +703,9 @@ impl Found {
 fn over_capacity(host: &HostId, agent: &AgentTruth, found: &mut Found) {
     // Summed in u128: a run count below 2^64 cannot overflow it, so no total is
     // clipped to a capacity it exceeds.
-    let need = agent.running.values().map(|r| text::axes(&r.resources));
+    let runs = agent.running.values().map(|r| &r.resources);
+    let jobs = agent.jobs.values().map(|j| &j.resources);
+    let need = runs.chain(jobs).map(text::axes);
     let used = need.fold([0; 3], |sum: [u128; 3], add| {
         std::array::from_fn(|i| sum[i] + add[i])
     });
@@ -665,7 +716,8 @@ fn over_capacity(host: &HostId, agent: &AgentTruth, found: &mut Found) {
         .map(|(name, _)| *name)
         .collect();
     if !over.is_empty() {
-        let runs: Vec<String> = agent.running.keys().map(text::run).collect();
+        let mut runs: Vec<String> = agent.running.keys().map(text::run).collect();
+        runs.extend(agent.jobs.keys().map(|job| format!("job {job}")));
         let detail = format!(
             "host {} runs {} needing {} beyond its capacity {} (over on {})",
             text::host(host),

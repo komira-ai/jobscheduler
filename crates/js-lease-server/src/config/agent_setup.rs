@@ -7,7 +7,7 @@ use js_registry::PoolConfig;
 use super::{CpuSlack, Placement};
 use crate::agent_tokens::AgentTokens;
 use crate::job_expiry::JobLimits;
-use crate::job_store::JobStoreSetup;
+use crate::job_store::{JobSources, JobStoreSetup};
 use crate::rate::HelloLimit;
 
 /// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
@@ -34,4 +34,7 @@ pub(crate) struct AgentSetup {
     pub(crate) job_limits: JobLimits,
     /// The job store's setup when the job service is on; the agent side then opens it.
     pub(crate) jobs: Option<JobStoreSetup>,
+    /// The clock and id source the job store is opened on: the system's, unless
+    /// [`crate::Config::with_job_sources`] gave others.
+    pub(crate) job_sources: JobSources,
 }

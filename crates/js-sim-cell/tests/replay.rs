@@ -40,6 +40,13 @@
 //! (`cell/server_restart.rs`, about 3,840 agent requests a seed) over [`FAULTS_SEEDS`]
 //! seeds, so a restart, which drops the server and opens its lease file again, is shown
 //! to replay from its seed.
+//!
+//! And one job smoke scenario, family `jobs`: the lossy agent wire over the job front
+//! (`Scenario::over_jobs`, about 8,400 agent requests a seed) over [`JOBS_SEEDS`] seeds, so
+//! a change to a decision of the job front, the per-job agents or the server's job service
+//! and job pass, or a job or allocation id that does not follow the seed, moves a hash. The
+//! ids themselves are compared between two runs of one seed, and between two seeds, in the
+//! cell's ledger, where each job's launch is named by its job and allocation ids.
 
 #[path = "cell/lossy_wire.rs"]
 mod lossy_wire;
@@ -55,6 +62,7 @@ mod whole_host;
 mod whole_host_cancel;
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -64,8 +72,8 @@ use js_sim::golden::GoldenFile;
 use js_sim::{Chance, Faults, TraceHash};
 use js_sim_cell::replay::REPORT_LINES;
 use js_sim_cell::{
-    Cell, Failure, FailureReport, Invariant, Observations, ServerSpec, Setup, Shape, Side,
-    Violation, run,
+    Cell, Failure, FailureReport, Invariant, JOB_PREFIX, JobFront, Observations, ServerSpec, Setup,
+    Shape, Side, Violation, Work, run,
 };
 
 use crate::support::{lease, ms, scratch, start_run};
@@ -121,6 +129,17 @@ const REAL_FAMILY: &str = "real_agent";
 /// kept under.
 const FAULTS_SEEDS: u64 = 4;
 const FAULTS_FAMILY: &str = "faults";
+
+/// How many seeds of the job smoke scenario the golden file pins, and the family they are
+/// kept under.
+const JOBS_SEEDS: u64 = 2;
+const JOBS_FAMILY: &str = "jobs";
+
+/// The jobs of the cell whose ids are compared: four hosts, eight jobs of [`JOB_RUN`].
+const JOB_HOSTS: usize = 4;
+const JOBS: usize = 8;
+const JOB_RUN: Duration = Duration::from_secs(10);
+const JOB_HORIZON_MS: u64 = 60_000;
 
 /// The server of the scenario.
 fn spec() -> ServerSpec {
@@ -188,7 +207,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// the end), so the hash covers a run that reached the server. The same for a seed of the
 /// scenario with real agents, run twice, whose items all succeed, and for one seed of the
 /// whole-host scenario and one of the cancelled whole-host request, each run twice under
-/// each placement. Catches a handler path that reads a
+/// each placement, and for one seed of the job smoke scenario, run twice, whose items end
+/// alike. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
 /// whose lines depend on whether they are kept. Also that a seed of the fault scenario of
@@ -239,6 +259,70 @@ fn a_seed_replays_to_the_same_trace_hash() {
     let restart = server_restart::a_restart_of_the_server_with_runs_in_flight_double_books_nothing;
     let once = restart().run_seeds(1).runs[0].hash;
     assert_eq!(restart().run_seeds(1).runs[0].hash, once);
+
+    let jobs = || lossy_wire::a_lossy_agent_wire_settles_every_run().over_jobs();
+    let once = jobs().run_seeds(1).runs.remove(0);
+    let again = jobs().run_seeds(1).runs.remove(0);
+    assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes, again.outcomes);
+}
+
+/// The cell whose job and allocation ids are compared, for `setup`: [`JOB_HOSTS`] hosts
+/// and a server with the job service on, and [`JOBS`] jobs submitted at once through the
+/// job front.
+fn job_cell(setup: Setup) -> Result<Cell, StartupError> {
+    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), JOB_HOSTS).jobs();
+    let mut cell = Cell::new(setup, spec, scratch("job-ids"), Faults::default())?;
+    cell.set_front(Box::new(JobFront::new()));
+    for _ in 0..JOB_HOSTS {
+        cell.add_agent().expect("an agent name is a host id");
+    }
+    cell.at(ms(0), |cell| {
+        for _ in 0..JOBS {
+            cell.submit(&Work::run_for(JOB_RUN));
+        }
+    });
+    Ok(cell)
+}
+
+/// Every launch of the job cell's run of `seed`, by name: `<job>/<allocation>`, in the
+/// order of the cell's ledger.
+fn job_launches(seed: u64) -> Vec<String> {
+    let cell = run("job-ids", seed, ms(JOB_HORIZON_MS), &job_cell).expect("the job cell runs");
+    let launches = cell.ledger().launches().into_iter();
+    launches
+        .map(|launch| launch.run.as_str().to_owned())
+        .collect()
+}
+
+/// Asserts that two runs of one seed launch every job under the same job and allocation
+/// ids, in the same order, as the cell's ledger (which no trace line holds) names them; that
+/// each launch names a job of the front's and an allocation of 32 hex digits; and that
+/// another seed launches the same jobs under other allocation ids. Catches allocation ids
+/// minted from the system's random source, and a source that does not follow the seed.
+#[test]
+fn job_and_allocation_ids_are_a_function_of_the_seed() {
+    let once = job_launches(3);
+    assert_eq!(once.len(), JOBS, "{once:?}");
+    let named = |run: &String| {
+        let (job, allocation) = run.split_once('/').expect("a job and an allocation");
+        let hex = allocation
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+        assert!(
+            job.starts_with(JOB_PREFIX) && allocation.len() == 32 && hex,
+            "{run}"
+        );
+        job.to_owned()
+    };
+    let jobs: BTreeSet<String> = once.iter().map(named).collect();
+    assert_eq!(jobs.len(), JOBS);
+    assert_eq!(job_launches(3), once);
+    let other = job_launches(4);
+    let other_jobs: BTreeSet<String> = other.iter().map(named).collect();
+    assert_eq!(other_jobs, jobs);
+    let shared = other.iter().filter(|run| once.contains(run)).count();
+    assert_eq!(shared, 0, "another seed mints other allocation ids");
 }
 
 /// Asserts that two seeds give two hashes. Catches a seed that never reaches the bus or
@@ -277,6 +361,30 @@ fn real_runs() -> Vec<(String, TraceHash)> {
     let passed = real_agents::without_faults(Side::Real).run_seeds(REAL_SEEDS);
     let each = |run: &js_sim_cell::SeedRun| (format!("without_faults/seed-{}", run.seed), run.hash);
     passed.runs.iter().map(each).collect()
+}
+
+/// The hash of each pinned seed of the job smoke scenario, which must pass.
+fn jobs_runs() -> Vec<(String, TraceHash)> {
+    let scenario = lossy_wire::a_lossy_agent_wire_settles_every_run().over_jobs();
+    let passed = scenario.run_seeds(JOBS_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!(
+            "a_lossy_agent_wire_settles_every_run-jobs/seed-{}",
+            run.seed
+        );
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
+/// Asserts that the hashes of the pinned seeds of the job smoke scenario equal the golden
+/// file's (family `jobs`). Catches any change to a decision of the job front, the per-job
+/// agents, the server's job service or job pass, or to the trace text, and a job run that
+/// differs between processes (a job or allocation id, or a stored time, that does not
+/// follow the seed).
+#[test]
+fn the_job_scenario_matches_the_golden_file() {
+    golden_of(JOBS_FAMILY).assert_matches(&jobs_runs());
 }
 
 /// The hash of each pinned seed of the fault scenario, which must pass.
@@ -340,6 +448,7 @@ fn regenerate_golden_hashes() {
         .unwrap();
     golden_of(REAL_FAMILY).regenerate(&real_runs()).unwrap();
     golden_of(FAULTS_FAMILY).regenerate(&faults_runs()).unwrap();
+    golden_of(JOBS_FAMILY).regenerate(&jobs_runs()).unwrap();
 }
 
 /// The hash of each pinned seed of the whole-host scenario under each placement, which

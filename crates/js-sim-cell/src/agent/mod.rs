@@ -118,6 +118,15 @@
 //! report the process sends, every start that reaches it (launched or not) and every
 //! stop or cancel that reaches a run it is running.
 //!
+//! # Jobs
+//!
+//! A fake agent whose hello reports [`js_agent_wire::PER_JOB_CAPABILITY`] (the cell's
+//! agents do for a server of [`crate::ServerSpec::jobs`]) also speaks the per-job messages:
+//! it acts on `JobStart` and `JobStop`, lists its jobs with their state in every heartbeat,
+//! sends each result until an answer acknowledges it, and lists the ids it retired until
+//! an answer acknowledges them, with a second [`FakeAgent`], keyed by job id, as the
+//! engine (module `per_job`). A real agent's node does not.
+//!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
 
@@ -142,6 +151,7 @@ use js_agent_wire::RETRY_AFTER_CAP;
 use js_conformance::agent::{AgentHarness, FakeAgent};
 
 mod exclusive;
+mod per_job;
 mod process;
 mod real;
 

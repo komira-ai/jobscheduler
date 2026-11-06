@@ -23,17 +23,64 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
-use js_jobs::{JobStore, RandomIds, Retention};
+use js_jobs::{IdSource, JobStore, MintError, RandomIds, Retention};
 use js_state::sqlite::{Options, SqliteStore};
-use js_state::{Store, SystemClock};
+use js_state::{Clock, Store, SystemClock};
 use tracing::info;
 
 use crate::agents::state_path;
 use crate::error::StartupError;
 
 /// The job store the server runs on: the tables over whichever state store the service
-/// opened, with allocation ids from the system's random source.
-pub(crate) type ServerJobs = JobStore<Arc<dyn Store>, RandomIds>;
+/// opened, with allocation ids from the source of its [`JobSources`] (the system's random
+/// source, unless the in-process seam gives another).
+pub(crate) type ServerJobs = JobStore<Arc<dyn Store>, ServerIds>;
+
+/// Where the server's job store mints its ids: the system's random source
+/// ([`ServerIds::random`]) in a service, or a source the caller gives
+/// (`Config::with_job_sources`, the in-process seam), so a simulation's ids are a function
+/// of its seed.
+#[derive(Clone)]
+pub struct ServerIds(Arc<dyn IdSource>);
+
+impl ServerIds {
+    /// Ids from `source`.
+    #[must_use]
+    pub fn new(source: Arc<dyn IdSource>) -> ServerIds {
+        ServerIds(source)
+    }
+
+    /// Ids from the system's random source ([`RandomIds`]).
+    #[must_use]
+    pub fn random() -> ServerIds {
+        ServerIds(Arc::new(RandomIds))
+    }
+}
+
+impl IdSource for ServerIds {
+    fn mint(&self) -> Result<[u8; 16], MintError> {
+        self.0.mint()
+    }
+}
+
+/// The clock the job store stamps its rows with and the source it mints ids from: the
+/// system's clock and random source unless the in-process seam gives others.
+#[derive(Clone)]
+pub(crate) struct JobSources {
+    /// The store's clock.
+    pub(crate) clock: Arc<dyn Clock>,
+    /// The store's ids.
+    pub(crate) ids: ServerIds,
+}
+
+impl Default for JobSources {
+    fn default() -> JobSources {
+        JobSources {
+            clock: Arc::new(SystemClock::default()),
+            ids: ServerIds::random(),
+        }
+    }
+}
 
 /// What the job store is opened with: the flag or key of the job service's address (which
 /// turned it on, and names it in a refusal), and how long an ended job is kept
@@ -49,7 +96,8 @@ pub(crate) struct JobStoreSetup {
 /// The suffix of the job store's file, after the lease file's name.
 pub(crate) const SUFFIX: &str = ".jobs";
 
-/// Opens the job store beside the lease file `state_file`, as `setup` says, and raises its
+/// Opens the job store beside the lease file `state_file`, as `setup` says, on the clock and
+/// id source of `sources`, and raises its
 /// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
 /// ticks. A file that
 /// cannot be made owner-only or opened as a state store (a directory in its place, another
@@ -58,19 +106,20 @@ pub(crate) const SUFFIX: &str = ".jobs";
 pub(crate) fn open(
     state_file: &Path,
     setup: JobStoreSetup,
+    sources: &JobSources,
 ) -> Result<Arc<ServerJobs>, StartupError> {
     let path = state_path(state_file, SUFFIX);
     if let Err(err) = owner_only(&path) {
         let reason = format!("{}: {err}", path.display());
         return Err(StartupError::new(setup.flag, reason));
     }
-    let clock = Arc::new(SystemClock::default());
+    let clock = Arc::clone(&sources.clock);
     let store = SqliteStore::open(&path, clock, Options::default())
         .map_err(StartupError::because(setup.flag))?;
     let store: Arc<dyn Store> = Arc::new(store);
     let boot = store.now();
-    let jobs =
-        JobStore::new(Arc::new(store), RandomIds).map_err(StartupError::because(setup.flag))?;
+    let jobs = JobStore::new(Arc::new(store), sources.ids.clone())
+        .map_err(StartupError::because(setup.flag))?;
     // Before the first tick: an outage longer than a queue wait, a start timeout or a
     // retention window fails, ends or deletes nothing at that tick (design 6.7, step 7).
     let raised = jobs
@@ -119,10 +168,12 @@ mod tests {
     fn the_store_is_opened_once_beside_the_lease_file_with_its_retention() {
         let dir = scratch("opened");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(259_200)).unwrap();
+        let jobs = open(&state, setup(259_200), &JobSources::default()).unwrap();
         assert!(dir.path().join("leases.toml.jobs").is_file());
         assert_eq!(jobs.retention(), setup(259_200).retention);
-        let second = open(&state, setup(259_200)).err().unwrap();
+        let second = open(&state, setup(259_200), &JobSources::default())
+            .err()
+            .unwrap();
         assert_eq!(second.flag(), "--job-listen");
         assert!(second.reason().contains("leases.toml.jobs"), "{second}");
     }
@@ -135,7 +186,7 @@ mod tests {
     fn opening_the_store_raises_the_deadlines_for_the_boot() {
         let dir = scratch("boot");
         let state = dir.path().join("leases.toml");
-        let jobs = open(&state, setup(60)).unwrap();
+        let jobs = open(&state, setup(60), &JobSources::default()).unwrap();
         let id = js_jobs::JobId::parse("job-q").unwrap();
         let new = js_jobs::NewJob {
             id: Some(id.clone()),
@@ -146,11 +197,11 @@ mod tests {
         assert_eq!(queued.deadline_floor, None);
         drop(jobs);
         let floor = |jobs: &ServerJobs| jobs.get_job(&id).unwrap().unwrap().deadline_floor;
-        let reopened = open(&state, setup(60)).unwrap();
+        let reopened = open(&state, setup(60), &JobSources::default()).unwrap();
         let first = floor(&reopened).unwrap();
         assert!(first >= queued.submitted_at.saturating_add(js_jobs::BOOT_GRACE));
         drop(reopened);
-        let again = open(&state, setup(60)).unwrap();
+        let again = open(&state, setup(60), &JobSources::default()).unwrap();
         assert!(floor(&again).unwrap() >= first);
     }
 
@@ -161,7 +212,9 @@ mod tests {
         let dir = scratch("directory");
         let state = dir.path().join("leases.toml");
         std::fs::create_dir(dir.path().join("leases.toml.jobs")).unwrap();
-        let refused = open(&state, setup(60)).err().unwrap();
+        let refused = open(&state, setup(60), &JobSources::default())
+            .err()
+            .unwrap();
         assert_eq!(refused.flag(), "--job-listen");
         assert!(refused.reason().contains("leases.toml.jobs"), "{refused}");
     }
@@ -178,7 +231,9 @@ mod tests {
             b"this is not a SQLite database, and it is long enough",
         )
         .unwrap();
-        let refused = open(&state, setup(60)).err().unwrap();
+        let refused = open(&state, setup(60), &JobSources::default())
+            .err()
+            .unwrap();
         assert_eq!(refused.flag(), "--job-listen");
         assert_eq!(
             std::fs::read(&path).unwrap(),
