@@ -12,6 +12,12 @@
 //! a consumer, so there is nothing to count; the lease server or the registry, where the
 //! caller's identity exists, enforces it ([`Scheduler::with_whole_node`]).
 //!
+//! A mark belongs to its request: it stays on the worker it was made on until the request
+//! is placed, is cancelled or gives the hold up at its deadline, and is never traded for a
+//! worker that has become cheaper to drain, nor taken by another request's hold or mark
+//! ([`Scheduler::hold_whole`]). It moves only when its worker can no longer hold the
+//! request (gone, cordoned, barred to it).
+//!
 //! The whole-node state of each operation is kept in memory only: its queue time, its
 //! mark (the worker, when it was made, its deadline and the end of the tail the worker
 //! was chosen on), how many holds it has given up, and the workers barred to it, each
@@ -231,7 +237,8 @@ impl Drain {
     /// The mark `operation` has on `worker` at `now`: the one it kept, when it is on the
     /// same worker, else a new one on `worker` whose deadline follows [`reserve_deadline`],
     /// whose tail end is `tail` (the end of the worker's tail now) and whose time of
-    /// making is the kept mark's: a hold that moves keeps its age.
+    /// making is the kept mark's: a mark moved off a worker that can no longer hold its
+    /// request keeps its age.
     pub(super) fn mark(
         &self,
         operation: OperationId,
@@ -535,11 +542,17 @@ impl Scheduler {
     }
 
     /// The worker whole-machine `id`, at queue `position`, holds this round, its mark and
-    /// the start time of the hold for backfill, when it holds one. `kept` stays on its
-    /// worker without a check (that mark is already counted); a new mark is made only if
-    /// the caps allow it ([`may_reserve`]) and the worker is not the last capable one of an
-    /// older ordinary request, in which case the next worker by drain cost is tried. `Err`
-    /// is the reason it holds none. `Ok(None)` is no worker that could.
+    /// the start time of the hold for backfill, when it holds one. A mark belongs to its
+    /// request until the request is placed, cancelled or gives the hold up at its
+    /// deadline: `kept` stays on its worker, without a check (that mark is already
+    /// counted), for as long as that worker could still hold the request, however cheap
+    /// another worker becomes to drain, and no other request's hold or mark takes the
+    /// worker ([`Scheduler::off_marks`]). Only a worker that can no longer hold it (gone,
+    /// cordoned, barred to it) moves the mark, keeping its age and counting no give-up.
+    /// A new mark is made only if the caps allow it ([`may_reserve`]) and the worker is
+    /// not the last capable one of an older ordinary request, in which case the next
+    /// worker by drain cost is tried. `Err` is the reason it holds none. `Ok(None)` is no
+    /// worker that could.
     ///
     /// The start time is when the request is expected to start there (`None`: not known):
     /// the mark's tail end, or the worker's tail now if that ends sooner
@@ -564,15 +577,19 @@ impl Scheduler {
             .expect("whole-node settings are on");
         let op = &self.ops[&id];
         let mut out: BTreeSet<WorkerId> = reserved.union(&turn.barred).cloned().collect();
+        // Another request's mark is never taken: it stays on its worker.
+        out.extend(self.marked_workers(id).cloned());
         let avoid = Drain::avoiding(&op.avoid, &turn.barred);
         let kept = turn.kept.as_ref().map(|m| &m.worker);
         let drain = self.drain_order(placed);
         let max_wall = self.max_walls.get(&id).copied();
         let mut wait = None;
         loop {
-            // The pick is made again every round, with no stickiness; `kept` is only the
-            // worker the mark was on, whose cap check is already made.
-            let Some(name) = servable.reserve(&self.workers, &op.request, &out, &avoid, &drain)
+            // A mark stays on its worker while that worker could still hold the request:
+            // it is not picked again when another worker becomes cheaper to drain. Its cap
+            // check was made when it was made.
+            let Some(name) =
+                servable.reserve(&self.workers, &op.request, &out, &avoid, kept, &drain)
             else {
                 return wait.map_or(Ok(None), Err);
             };
@@ -616,6 +633,30 @@ impl Scheduler {
                 round.limits,
             )
             .is_ok()
+    }
+
+    /// The workers the marks of requests other than `id` are on, of the marks this round
+    /// has not reached yet: a request's own mark leaves them when the round reaches it
+    /// ([`Drain::turn`]), and is kept, moved or dropped there.
+    fn marked_workers(&self, id: OperationId) -> impl Iterator<Item = &WorkerId> + '_ {
+        let others = self.drain.marks.iter().filter(move |(op, _)| **op != id);
+        others.map(|(_, m)| &m.worker)
+    }
+
+    /// `reserved` with the workers [`Scheduler::marked_workers`] names for `id`, which
+    /// picks a hold or places a whole-machine request: neither takes a worker another
+    /// request's mark is on, so a mark is never pushed off its worker before its own
+    /// request is reached. Ordinary work is placed there as before (work ahead of a
+    /// request in queue order is never held back). `None` when there is no such mark, so
+    /// `reserved` stands.
+    pub(super) fn off_marks(
+        &self,
+        reserved: &BTreeSet<WorkerId>,
+        id: OperationId,
+    ) -> Option<BTreeSet<WorkerId>> {
+        let mut marked = self.marked_workers(id).peekable();
+        marked.peek()?;
+        Some(reserved.iter().chain(marked).cloned().collect())
     }
 
     /// The limits and the counts the caps read between placement rounds: the same

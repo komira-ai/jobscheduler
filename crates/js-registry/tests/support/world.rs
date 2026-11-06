@@ -92,7 +92,7 @@ pub struct World {
 impl World {
     pub fn new(hosts: &[&str], settings: impl FnOnce(WholeNodeConfig) -> WholeNodeConfig) -> Self {
         let name = ProviderId::new("builders").unwrap();
-        let config = PoolConfig::new(name, whole(), pool_shape(), 4);
+        let config = PoolConfig::new(name, whole(), world_shape(), 4);
         let settings = settings(WholeNodeConfig::dedicated(4));
         Self::of(config.with_whole_node(settings).unwrap(), hosts)
     }
@@ -120,8 +120,11 @@ impl World {
         world
     }
 
+    /// Admits `host`, reporting the World's architecture ([`WORLD_ARCH`]).
     pub fn join(&mut self, host: &str) {
-        let epoch = self.fx.join(host, "t");
+        let mut said = hello(host);
+        said.capabilities.insert("arch".into(), WORLD_ARCH.into());
+        let epoch = self.fx.hello(&said, &cred("t")).unwrap().epoch;
         self.epochs.insert(host.to_string(), epoch);
         self.check();
     }

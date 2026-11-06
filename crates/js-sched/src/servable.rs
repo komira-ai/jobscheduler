@@ -743,21 +743,28 @@ impl Servable {
     }
 
     /// The worker to hold for a request that fits nowhere now, with whole-node settings on:
-    /// the first of `drain` (the workers by drain cost, the least tail first) that could
-    /// run it, with no preference for a worker held before. Never one in `reserved`,
-    /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
-    /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
-    /// asks only for one); an action at a worker's whole memory waits until some worker
-    /// has no lease, and nothing reserves one for it.
+    /// `kept` (the worker a whole-machine mark is on) while it still could run it, else the
+    /// first of `drain` (the workers by drain cost, the least tail first) that could. A
+    /// kept worker is never traded for one that has become cheaper to drain: a mark stays
+    /// on its worker until its request is placed, cancelled or gives it up. Never one in
+    /// `reserved`, nor one in `avoid` while [`Servable::fit`] skips it. Only a
+    /// whole-machine lease or an action that owns its worker ([`Request::owns_worker`])
+    /// holds a worker (the caller asks only for one; an action keeps nothing, and passes
+    /// no `kept`); an action at a worker's whole memory waits until some worker has no
+    /// lease, and nothing reserves one for it.
     pub(crate) fn reserve(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
         request: &Request,
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
+        kept: Option<&WorkerId>,
         drain: &[DrainCost],
     ) -> Option<WorkerId> {
         let candidates = self.holdable(workers, request, reserved, avoid);
+        if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
+            return Some(kept.clone());
+        }
         drain
             .iter()
             .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))

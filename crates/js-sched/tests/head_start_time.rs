@@ -12,10 +12,10 @@ mod load_rig;
 use std::time::Duration;
 
 use js_sched::{Event, LoadConfig, Request};
-use js_types::sched::{LeaseKind, OperationId};
+use js_types::sched::{LeaseKind, OperationId, Qos};
 
 use load_curves::Curves;
-use load_rig::{GIB, Rig, w, warm};
+use load_rig::{GIB, Rig, caps, w, warm};
 
 fn node() -> js_types::sched::Resources {
     js_types::sched::Resources::new(8_000, 32 * GIB)
@@ -80,6 +80,53 @@ fn walls(r: &mut Rig, first: u64, secs: [Option<u64>; 4]) {
 
 fn head(r: &mut Rig, cpu: u64) -> OperationId {
     r.action(cpu, 4 * GIB, Some(warm(cpu, 0)))
+}
+
+/// Two 8-core workers that also serve whole-machine leases, each with four leases, with
+/// whole-node settings on: `a`'s leases (operations 0 to 3) end at 200 s, `b`'s (4 to 7)
+/// at 900 s.
+fn two_whole_loaded() -> Rig {
+    let mut r = configured(Rig::on());
+    let whole = caps("container").with_drivers(["native-whole-machine"]);
+    r.up_with("a", node(), whole.clone());
+    r.up_with("b", node(), whole);
+    r.baseline("a");
+    r.baseline("b");
+    place_four(&mut r, "a", &["b"], 1_000, 1_000);
+    place_four(&mut r, "b", &["a"], 1_000, 1_000);
+    walls(&mut r, 0, [Some(200); 4]);
+    walls(&mut r, 4, [Some(900); 4]);
+    r
+}
+
+/// Catches: a blocked head's hold taking the worker a whole-machine request's mark is on.
+/// The whole-machine request marks `a`, which empties first (200 s against 900 s). A more
+/// urgent action of 6 cores that the load refuses on both workers is reached before it in
+/// every later round. By start time the head would hold `a` (its cores free up there at
+/// 200 s), but `a` carries the request's mark, so the head holds `b`, and the request
+/// keeps its mark on `a` exactly as it was made, in this round and the next.
+#[test]
+fn a_blocked_heads_hold_does_not_take_a_whole_machine_requests_mark() {
+    let mut r = two_whole_loaded();
+    let mut asked = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
+    asked.resources = node();
+    let whole = r.submit(asked);
+    r.round(1_000);
+    assert_eq!(r.s.reservation(whole), Some(&w("a")));
+    let made = r.s.whole_mark(whole).cloned().expect("marked");
+    let urgent = Request {
+        qos: Qos::Interactive,
+        ..r.request(LeaseKind::Action, 6_000, 4 * GIB)
+    };
+    let head = r.submit(urgent);
+    r.s.set_cost(head, warm(6_000, 0));
+    for _ in 0..2 {
+        let started = r.round(1_000);
+        assert!(started.iter().all(|s| s.operation != head && s.operation != whole));
+        assert_eq!(r.s.head_hold(head), Some(&w("b")));
+        assert_eq!(r.s.reservation(whole), Some(&w("a")));
+        assert_eq!(r.s.whole_mark(whole), Some(&made));
+    }
 }
 
 /// Catches: the hold chosen by the load ratio, or by when the worker empties, instead of
