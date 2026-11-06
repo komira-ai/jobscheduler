@@ -356,7 +356,9 @@ pub struct Cli {
     /// The bytes of each stream of a `--runtime crun` job with a live-log sink that the
     /// capture keeps in its file in the lease directory, from 1 MiB to 1 GiB: the file is
     /// what the agent uploads while the store is down, and bytes past it are a gap in the
-    /// job's live logs. A job without a sink keeps the capture's 1 MiB.
+    /// job's live logs. A job without a sink keeps the capture's 1 MiB. For a native job with
+    /// a sink it is the most bytes of each of its log files the agent uploads; the rest is a
+    /// gap, and the files themselves are as before.
     #[arg(
         long,
         value_name = "BYTES",

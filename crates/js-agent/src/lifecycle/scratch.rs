@@ -263,6 +263,28 @@ impl ScratchRoot {
         self.sweep_except(&kept).unwrap_or_default()
     }
 
+    /// The directories a sweep that keeps the runs `kept` removes, by run id and path: what
+    /// an earlier agent left for runs that no longer have a container. Only directories (a link
+    /// to one is not) whose names are UTF-8 and do not begin with a dot are listed; a root
+    /// that cannot be listed lists nothing.
+    pub fn left(&self, kept: &[&str]) -> Vec<(String, PathBuf)> {
+        let listed = open_root(&self.path).and_then(|root| {
+            Dir::read_from(&root)
+                .map(|entries| (root, entries))
+                .map_err(io::Error::from)
+        });
+        let Ok((root, entries)) = listed else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| is_dir(&root, entry.file_name()).unwrap_or(false))
+            .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_owned))
+            .filter(|name| !name.starts_with('.') && !kept.contains(&name.as_str()))
+            .map(|name| (name.clone(), self.of(&name)))
+            .collect()
+    }
+
     /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
     fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
         // The lock of the OCI backend on this directory is not a run's, but must stay: it

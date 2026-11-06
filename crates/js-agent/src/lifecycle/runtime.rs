@@ -396,6 +396,16 @@ pub trait Runtime {
         None
     }
 
+    /// Called once as the lifecycle starts ([`Lifecycle::adopt`](super::Lifecycle::adopt)),
+    /// after the runs were adopted and before the scratch root is swept: `left` names, by run
+    /// id and path, each directory of the root that the sweep removes next, what an earlier
+    /// process left for a run this one did not adopt. A runtime whose runs are not adopted
+    /// after a restart and that uploads their live logs (the native runtime, whose runs the
+    /// lease journal ends at [`Runtime::reclaim`]) finishes each upload from the progress
+    /// record in the directory; it never waits for them. The default, a runtime that adopts
+    /// its uploads with its runs (`crun`) or uploads nothing, does nothing.
+    fn finish_left_uploads(&mut self, _left: &[(String, PathBuf)]) {}
+
     /// Whether this runtime runs the native body `native`, asked before a native start
     /// creates anything. The default runs none, which is every runtime but the one a Mac
     /// agent has: a native start on a Linux host is refused `native-unsupported`.

@@ -71,8 +71,11 @@
 //! - **Live logs are outside the job's critical path.** A job start's checked sink goes to
 //!   the runtime ([`RunSpec::log_sink`]; one that fails its check is dropped with a
 //!   `log-sink-ignored` note and the job starts as without one), and a runtime that uploads
-//!   (`crun`, [`crate::logs`]) does so on a thread of its own per job: the result, with its
-//!   tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot never wait for it.
+//!   (`crun` and the native runtime, [`crate::logs`]) does so on a thread of its own per job:
+//!   the result, with its tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot
+//!   never wait for it. At the start, before the scratch root is swept, the runtime is handed
+//!   the directories the sweep removes ([`Runtime::finish_left_uploads`]), so the native one
+//!   finishes the uploads of the runs its journal ended.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each

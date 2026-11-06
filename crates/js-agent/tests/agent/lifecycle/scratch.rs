@@ -273,3 +273,36 @@ fn a_lease_directory_is_made_empty_replaced_when_stale_and_removed() {
     }
     assert!(root.is_dir());
 }
+
+/// Asserts what [`ScratchRoot::left`] lists before a sweep: every directory of the root a
+/// sweep keeping `r1` removes, by run id and path, and nothing else: not the kept run's, not
+/// a file, not a link to a directory, not a name beginning with a dot (the OCI lock, the
+/// quota's own), not a name that is not UTF-8. A root that is gone lists nothing. It catches
+/// a listing that hands a runtime a kept run's directory, a link it would follow, or an entry
+/// that is no run's.
+#[test]
+fn left_lists_the_directories_a_sweep_removes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let h = Harness::new("left");
+    let root = h.config.scratch.path().to_owned();
+    for dir in ["r1", "gone-a", "gone-b", ".js-health"] {
+        fs::create_dir(root.join(dir)).unwrap();
+    }
+    fs::create_dir(root.join(OsStr::from_bytes(b"bad-\xff"))).unwrap();
+    fs::write(root.join("stray-file"), "s").unwrap();
+    fs::write(root.join(ScratchRoot::LOCK_FILE), "").unwrap();
+    symlink(root.join("gone-a"), root.join("link")).unwrap();
+    let mut left = h.config.scratch.left(&["r1"]);
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            ("gone-a".to_owned(), root.join("gone-a")),
+            ("gone-b".to_owned(), root.join("gone-b")),
+        ]
+    );
+    fs::remove_dir_all(&root).unwrap();
+    assert!(h.config.scratch.left(&[]).is_empty());
+}

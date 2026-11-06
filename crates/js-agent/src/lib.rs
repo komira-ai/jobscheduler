@@ -87,7 +87,7 @@
 //! | `--runtime <docker\|crun\|none>` | what runs a job: `crun` (js-contain over the distribution's `crun`, each command run as `--job-user`; Linux only), which is the default Linux runtime: a Linux agent given no `--runtime` and no `--native-*` flag runs `crun`; or `docker` (the engine program of `--container-bin`, Docker or Podman), which needs `--allow-container-engine`; or `none`, an agent that registers and heartbeats and starts no job, which takes neither `--container-bin` nor a `--native-*` flag. A Mac agent given no `--runtime` runs native jobs (`--native-helper-socket`), or none without it. The packaged unit of the Docker cloud hosts names `--runtime docker --allow-container-engine`; the unit for the Linux farm (`packaging/js-agent/js-agent-crun.service`) names `--runtime crun`. With `crun`, named or the default, the agent checks the host before it registers and exits 2 naming every piece that is missing, and never runs the engine instead (a start that named no `--runtime` is also told that crun is the default, of docs/runbooks/crun-host-setup.md, and of the opt-in to the engine): `crun` at `--crun-bin` and its version (1.14 or newer), `newuidmap` and `newgidmap`, the job user and its subuid and subgid ranges (65536 ids or more each), the state root (`0700`, owned by root) and the scratch root (`0711`, owned by root, every directory above it searchable by the job user), `crun`, `newuidmap` and `newgidmap` executable by the job user, the cgroup version 2 controllers `cpu`, `memory` and `pids` in the agent's own cgroup (`Delegate=yes`), and, where `kernel.apparmor_restrict_unprivileged_userns` is 1, a loaded AppArmor profile for `crun`. Then the worker runs jobs through `CrunRuntime`: images are pulled by the agent's registry client from the `--image-allow` entries into a store beside the scratch root (`oci`), and the agent takes no `--mount-root` or `--mount-root-ro` with it, because the runtime does not read a job's binds back yet |
 //! | `--allow-container-engine` | accept `--runtime docker`: the engine at `--container-bin` runs the jobs, a fallback for a host that cannot run `crun` and for GPU jobs; every job it runs gets network none, and the agent prints one warning at start that says so. `--runtime docker` without it exits 2 (`--runtime docker: needs --allow-container-engine`), and it without `--runtime docker` exits 2 (`--allow-container-engine: needs --runtime docker`). When the fallback is dropped is an open question of the design (question 7 of komira-ai/jobscheduler#648) |
 //! | `--crun-bin <path>` | the `crun` of `--runtime crun`; by default `/usr/bin/crun`, the path the distribution's AppArmor profile attaches to; any other path starts the agent with a warning (and is refused by the kernel where user namespaces are restricted) |
-//! | `--log-file-cap <bytes>` | the bytes of each stream of a `--runtime crun` job with a live-log sink that the capture keeps in its file (default 67108864, 64 MiB; from 1 MiB to 1 GiB): the file is the local backlog the agent uploads from while the store is down, and bytes past it are a gap in the job's live logs (`docs/design/live-logs.md`); a job without a sink keeps the capture's 1 MiB. With `--runtime crun` the agent reports the capability `log-upload`, holds the host's upload credential from the heartbeat replies in memory only, and reports what it holds in each heartbeat (`log_grant_state`) |
+//! | `--log-file-cap <bytes>` | the bytes of each stream of a `--runtime crun` job with a live-log sink that the capture keeps in its file (default 67108864, 64 MiB; from 1 MiB to 1 GiB): the file is the local backlog the agent uploads from while the store is down, and bytes past it are a gap in the job's live logs (`docs/design/live-logs.md`); a job without a sink keeps the capture's 1 MiB. For a native job with a sink (`--native-helper-socket`) it is the most bytes of each of the job's log files the agent uploads, the rest a gap, and the files are as before. With `--runtime crun` or `--native-helper-socket` the agent reports the capability `log-upload`, holds the host's upload credential from the heartbeat replies in memory only, and reports what it holds in each heartbeat (`log_grant_state`) |
 //! | `--job-user <name>` | the non-root user every `crun` command runs as, whose subuid and subgid ranges every job's user namespace is mapped onto; required with `--runtime crun`, and needs it |
 //! | `--gpu-device <path>` | a character device below `/dev` a `crun` job that booked a GPU is given; repeatable. With `{index}` (`/dev/nvidia{index}`) it is one GPU's node, given for each index the job booked and no other; without it (`/dev/nvidiactl`, `/dev/nvidia-uvm`) every GPU job gets it. Each node must be a character device at start, for every GPU the host offers, and the host must offer one; the cgroup of a GPU job allows exactly its nodes. With it the crun runtime runs GPU jobs and the hello reports `gpu-passthrough`; without it a start that names a GPU is refused `gpu-unsupported`. Needs `--runtime crun` |
 //! | `--gpu-mount <src>:<dst>` | a host directory a `crun` GPU job is given read-only (`nosuid,nodev`, not recursive), such as the driver's libraries; repeatable; both absolute, the source a directory not below `/proc`, `/sys` or `/dev`, the destination not at or below those, `/scratch` or a place the runtime mounts itself (`/work`, `/root`, `/tmp`, `/var/tmp`, `/run`, the `/etc` name files), nor hold one of them (`/etc`, `/var`), nor at or below another's. A file source is refused: binding a file where the image has none would leave a file in the image's root that every job of that image shares. A GPU job whose image has a link or a file on the way to the destination, or whose driver directory is gone, is refused when it starts, naming the flag. Needs `--gpu-device` |
@@ -698,6 +698,11 @@ fn execute(
         (Some(native), Some(store)) => Some(native.with_bundles(store).map_err(Failure::Usage)?),
         (native, _) => native,
     };
+    let cap = cli.log_file_cap;
+    local.native = local
+        .native
+        .take()
+        .map(|native| native.with_log_file_cap(cap));
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
@@ -789,13 +794,17 @@ fn execute(
         .is_some_and(|plan| plan.gpus.is_some());
     #[cfg(not(target_os = "linux"))]
     let passthrough = false;
-    // A crun agent uploads live logs: it says so, and its session fills the host's credential
-    // from the replies and reports what it holds.
+    // A crun agent uploads live logs, and so does a native one: it says so, and its session
+    // fills the host's credential from the replies and reports what it holds.
     let log_grant = local
         .container
         .as_ref()
         .and_then(Settings::crun)
-        .map(|plan| Arc::clone(&plan.logs.grant));
+        .map(|plan| Arc::clone(&plan.logs.grant))
+        .or_else(|| {
+            let native = local.native.as_ref();
+            native.map(|native| Arc::clone(&native.logs().grant))
+        });
     let reported = match (local.container.is_some(), local.native.as_ref()) {
         (true, _) => Some(contract::report(
             &mut offer.hello,
