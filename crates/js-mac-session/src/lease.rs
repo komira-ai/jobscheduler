@@ -1,4 +1,5 @@
-//! Lease ids as the helper accepts them, the lease user's name, and the uid range.
+//! Lease ids as the helper accepts them, the pool of lease users (its slots, their names
+//! and its size), and the uid range.
 
 use std::fmt;
 
@@ -44,19 +45,124 @@ fn number(digits: &str) -> Option<u64> {
     if canonical { digits.parse().ok() } else { None }
 }
 
-/// The lease user's account name: `kbf-lease-<term>-<seq>`. A hyphen stands for the
-/// lease id's dot, which some macOS tools treat specially in an account name.
+/// The account name a lease user had before the pool: `kbf-lease-<term>-<seq>`, one
+/// user per lease. The helper makes no such user any more; it names one only to end
+/// the user of a lease a release before the pool created (the boot reset after an
+/// update). A hyphen stands for the lease id's dot, which some macOS tools treat
+/// specially in an account name.
 #[must_use]
 pub fn user_name(lease: LeaseId) -> String {
     format!("{USER_PREFIX}{}-{}", lease.term(), lease.sequence())
+}
+
+/// One place in the pool of lease users: `0` to the pool's size less one. A slot keeps
+/// its user's name ([`pool_user_name`]) and uid ([`UidRange::uid`]) for good; a user
+/// that is replaced is replaced under the same slot, with the same name and uid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Slot(u32);
+
+impl Slot {
+    /// The slot with index `index`.
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// The slot's index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for Slot {
+    type Err = String;
+
+    /// The index in decimal, one spelling only (no sign, no leading zero).
+    fn from_str(text: &str) -> Result<Self, String> {
+        number(text)
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Self)
+            .ok_or_else(|| format!("pool slot {text:?} is not a number"))
+    }
+}
+
+/// The account name of the pool user in `slot`: `kbf-lease-pool-<slot>`. It starts with
+/// [`USER_PREFIX`] (so no VM user can have it) and can never be a name [`user_name`]
+/// makes, whose first field is a number.
+#[must_use]
+pub fn pool_user_name(slot: Slot) -> String {
+    format!("{USER_PREFIX}pool-{slot}")
+}
+
+/// How many users the pool holds (`--pool-size`): 1 to [`MAX_LEN`], and no more than
+/// the uid range holds ([`UidRange::fits`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolSize(u32);
+
+/// The pool's size when `--pool-size` is not given.
+pub const DEFAULT_POOL_SIZE: u32 = 100;
+
+impl PoolSize {
+    /// A pool of `size` users.
+    ///
+    /// # Errors
+    /// `size` is 0 or more than [`MAX_LEN`].
+    pub fn new(size: u32) -> Result<Self, String> {
+        match (1..=MAX_LEN).contains(&size) {
+            true => Ok(Self(size)),
+            false => Err(format!("pool size {size} is not 1 to {MAX_LEN}")),
+        }
+    }
+
+    /// How many users the pool holds.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Every slot of the pool, in order.
+    pub fn slots(self) -> impl Iterator<Item = Slot> {
+        (0..self.0).map(Slot)
+    }
+}
+
+impl Default for PoolSize {
+    fn default() -> Self {
+        Self(DEFAULT_POOL_SIZE)
+    }
+}
+
+impl std::str::FromStr for PoolSize {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let size = number(text)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("pool size {text:?} is not a number"))?;
+        Self::new(size)
+    }
+}
+
+impl fmt::Display for PoolSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 /// The standing VM user's account name (`--vm-user`): the one account besides the
 /// lease users that the helper starts processes as, kills the processes of and rests the
 /// Mac at.
 ///
-/// Its name can never be a lease user's: a lease user is `kbf-lease-<term>-<seq>`, and
-/// every user the boot reset and `user-delete` delete is named by a ledger entry, so a
+/// Its name can never be a lease user's: a lease user is `kbf-lease-pool-<slot>` (or,
+/// from before the pool, `kbf-lease-<term>-<seq>`), and every user the boot reset,
+/// `user-delete` and a pool user's replacement delete is named by a ledger entry, so a
 /// name that does not start with [`USER_PREFIX`] is never among them. The name is also
 /// refused when it is the daemon's role account (`_kbf`) or root, and it is limited to
 /// lower-case letters, digits, `-` and `_` (starting with a letter), at most 31 bytes:
@@ -135,7 +241,7 @@ pub const MIN_UID: u32 = 500;
 /// The highest uid a range may end at, below the `nobody`-style uids near `u32::MAX`
 /// and Linux's 65534.
 pub const MAX_UID: u32 = 60_000;
-/// The most uids a range may hold. A uid is reused only once the range wraps.
+/// The most uids a range may hold, and so the largest pool.
 pub const MAX_LEN: u32 = 10_000;
 
 impl UidRange {
@@ -167,16 +273,31 @@ impl UidRange {
         (self.first..=self.last).contains(&uid)
     }
 
-    /// Every uid of the range once, starting after `after` (the uid handed out last)
-    /// and wrapping, so a uid is reused as late as possible. From the first uid when
-    /// `after` is `None` or outside the range.
-    pub fn after(self, after: Option<u32>) -> impl Iterator<Item = u32> {
+    /// Every uid of the range, in order.
+    pub fn uids(self) -> impl Iterator<Item = u32> {
+        self.first..=self.last
+    }
+
+    /// The uid of the pool user in `slot`: the range's first uid plus the slot's index;
+    /// `None` when the range ends before it.
+    #[must_use]
+    pub fn uid(self, slot: Slot) -> Option<u32> {
+        let uid = self.first.checked_add(slot.0)?;
+        self.contains(uid).then_some(uid)
+    }
+
+    /// Whether a pool of `size` users fits the range: one uid for each slot.
+    ///
+    /// # Errors
+    /// The pool is larger than the range.
+    pub fn fits(self, size: PoolSize) -> Result<(), String> {
         let len = self.last - self.first + 1;
-        let start = match after {
-            Some(uid) if self.contains(uid) => uid - self.first + 1,
-            _ => 0,
-        };
-        (0..len).map(move |i| self.first + (start + i) % len)
+        match size.0 <= len {
+            true => Ok(()),
+            false => Err(format!(
+                "a pool of {size} users does not fit the uid range {self}, which holds {len}"
+            )),
+        }
     }
 }
 
@@ -312,15 +433,50 @@ mod tests {
         assert!("500-10499".parse::<UidRange>().is_ok());
     }
 
-    /// Catches: allocation that restarts at the first uid (reusing a uid at once) or
-    /// skips or repeats one when it wraps.
+    /// Catches: a slot whose uid moves (off by one, or past the range's end), or a pool
+    /// accepted that holds more users than the range has uids.
     #[test]
-    fn uids_come_round_after_the_last_one_handed_out() {
+    fn each_slot_has_one_uid_of_the_range() {
         let range = UidRange::new(600, 603).unwrap();
-        let order = |after| range.after(after).collect::<Vec<_>>();
-        assert_eq!(order(None), [600, 601, 602, 603]);
-        assert_eq!(order(Some(601)), [602, 603, 600, 601]);
-        assert_eq!(order(Some(603)), [600, 601, 602, 603]);
-        assert_eq!(order(Some(42)), [600, 601, 602, 603]);
+        assert_eq!(range.uids().collect::<Vec<_>>(), [600, 601, 602, 603]);
+        assert_eq!(range.uid(Slot::new(0)), Some(600));
+        assert_eq!(range.uid(Slot::new(3)), Some(603));
+        assert_eq!(range.uid(Slot::new(4)), None);
+        assert_eq!(range.uid(Slot::new(u32::MAX)), None);
+        assert_eq!(range.fits(PoolSize::new(4).unwrap()), Ok(()));
+        assert_eq!(
+            range.fits(PoolSize::new(5).unwrap()),
+            Err("a pool of 5 users does not fit the uid range 600-603, which holds 4".to_owned())
+        );
+    }
+
+    /// Catches: a pool user's name that a per-lease user or a VM user could have, or a
+    /// slot or a pool size with a second spelling or out of bounds.
+    #[test]
+    fn pool_names_slots_and_sizes_have_one_spelling() {
+        assert_eq!(pool_user_name(Slot::new(7)), "kbf-lease-pool-7");
+        assert!(VmUser::new(&pool_user_name(Slot::new(7))).is_err());
+        assert_eq!("12".parse::<Slot>(), Ok(Slot::new(12)));
+        assert_eq!(Slot::new(12).to_string(), "12");
+        assert_eq!(Slot::new(12).index(), 12);
+        for bad in ["", "012", "+1", "a", "4294967296"] {
+            assert!(bad.parse::<Slot>().is_err(), "{bad:?} was accepted");
+        }
+        assert_eq!(PoolSize::default().get(), DEFAULT_POOL_SIZE);
+        assert_eq!("100".parse::<PoolSize>(), Ok(PoolSize::default()));
+        assert_eq!(PoolSize::new(3).unwrap().to_string(), "3");
+        let slots: Vec<Slot> = PoolSize::new(3).unwrap().slots().collect();
+        assert_eq!(slots, [Slot::new(0), Slot::new(1), Slot::new(2)]);
+        assert!("10000".parse::<PoolSize>().is_ok());
+        assert_eq!(
+            "0".parse::<PoolSize>(),
+            Err("pool size 0 is not 1 to 10000".to_owned())
+        );
+        assert!("10001".parse::<PoolSize>().is_err());
+        assert_eq!(
+            "x".parse::<PoolSize>(),
+            Err("pool size \"x\" is not a number".to_owned())
+        );
+        assert!("4294967296".parse::<PoolSize>().is_err());
     }
 }
