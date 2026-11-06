@@ -12,6 +12,9 @@
 //! its own transaction on the same connection: the update waits for every commit that holds
 //! the row shared (each commit of a fenced store does), so the old holder's last commit is
 //! ordered before the new holder starts, and none after it can succeed.
+//!
+//! [`probe`] says who holds the lock without trying it: it reads `pg_locks`, on a
+//! connection of its own that takes no lock.
 
 use postgres::error::SqlState;
 
@@ -38,6 +41,21 @@ const TRY_LOCK: &str = "SELECT pg_try_advisory_lock($1)";
 /// the server when the drop returns (closing alone lets the backend release it later).
 const UNLOCK: &str = "SELECT pg_advisory_unlock($1)";
 
+/// The backend that holds the writer lock in the connection's database, and when that
+/// backend started, in microseconds since the Unix epoch. A single-`bigint` advisory key
+/// is split into `classid` (its high 32 bits) and `objid` (its low 32 bits), with
+/// `objsubid` 1; the writer holds it exclusive (a shared or transaction-level lock taken
+/// on the key by some other client is not the writer). `backend_start` is NULL when the probing role may not see the holder's
+/// session (another role, without `pg_read_all_stats`).
+const HOLDER: &str = "SELECT l.pid, (extract(epoch FROM a.backend_start) * 1000000)::bigint \
+                      FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid \
+                      WHERE l.locktype = 'advisory' AND l.mode = 'ExclusiveLock' \
+                      AND l.granted AND l.objsubid = 1 \
+                      AND l.database = \
+                      (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                      AND ((l.classid::bigint << 32) | l.objid::bigint) = $1 \
+                      ORDER BY l.pid LIMIT 1";
+
 /// Why an acquire on a schema older than version 2 is refused.
 const NO_TABLE: &str = "the state schema has no writer generation table (it is older than \
                         version 2): run the installer to bring it forward";
@@ -58,10 +76,8 @@ impl LockSession {
     /// writer generation row (a schema older than version 2: the installer brings it
     /// forward). The lock is given back on every error.
     pub(crate) fn take(config: &PostgresConfig) -> Result<LockSession, LockRefused> {
-        let mut conn = Conn::connect(&config.dial()).map_err(|err| match err {
-            DialError::Pg(err) => refused(err),
-            DialError::Tls(err) => LockRefused::Failed(err.to_string()),
-        })?;
+        let mut conn =
+            Conn::connect(&config.dial()).map_err(|err| LockRefused::Failed(dial_failed(err)))?;
         let taken: bool = conn
             .query_one(TRY_LOCK, &[&WRITER_LOCK_KEY])
             .map_err(refused)?
@@ -124,12 +140,49 @@ impl Drop for LockSession {
     }
 }
 
-/// A failed call while taking the lock, as [`LockRefused::Failed`]: the server's answer by
-/// its SQLSTATE alone (the server's text can quote the role or the database), anything
-/// else as the client says it. Neither carries the URL or the password.
+/// The holder of the writer lock of the database `config` names, read from `pg_locks`
+/// without trying the lock: `None` when no session holds it, else `<pid>@<backend start>`
+/// (the start in microseconds since the Unix epoch), or the pid alone when this role may
+/// not see when the holder's backend started.
+///
+/// # Errors
+/// The text of [`dial_failed`] or [`refusal`] when the server cannot be reached or refuses
+/// the login or the query.
+pub(crate) fn probe(config: &PostgresConfig) -> Result<Option<String>, String> {
+    let mut conn = Conn::connect(&config.dial()).map_err(dial_failed)?;
+    let row = conn
+        .query_opt(HOLDER, &[&WRITER_LOCK_KEY])
+        .map_err(refusal)?;
+    Ok(row.map(|row| {
+        let pid: i32 = row.get(0);
+        let started: Option<i64> = row.get(1);
+        match started {
+            Some(started) => format!("{pid}@{started}"),
+            None => pid.to_string(),
+        }
+    }))
+}
+
+/// A connection that could not be opened, in words that carry neither the URL nor the
+/// password.
+fn dial_failed(err: DialError) -> String {
+    match err {
+        DialError::Pg(err) => refusal(err),
+        DialError::Tls(err) => err.to_string(),
+    }
+}
+
+/// A failed call while taking the lock, as [`LockRefused::Failed`].
 fn refused(err: postgres::Error) -> LockRefused {
-    LockRefused::Failed(match err.code() {
+    LockRefused::Failed(refusal(err))
+}
+
+/// A failed call: the server's answer by its SQLSTATE alone (the server's text can quote
+/// the role or the database), anything else as the client says it. Neither carries the
+/// URL or the password.
+fn refusal(err: postgres::Error) -> String {
+    match err.code() {
         Some(code) => format!("the server refused (SQLSTATE {})", code.code()),
         None => describe(&err),
-    })
+    }
 }

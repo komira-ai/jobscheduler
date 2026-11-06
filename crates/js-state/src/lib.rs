@@ -64,7 +64,9 @@ pub use types::{
     Change, Changes, Commit, CommitStats, Cond, Conflict, Direction, Event, Op, ResumeToken,
     Revision, ScanPage, ScanRange, StoreError, Txn, Version, Versioned,
 };
-pub use writer::{LockRefused, WriterGeneration, WriterLock, WriterTarget};
+pub use writer::{
+    LockHolder, LockRefused, LockState, ProbeFailed, WriterGeneration, WriterLock, WriterTarget,
+};
 
 /// The longest a write may wait for the group it commits with (target 5 ms).
 pub const GROUP_COMMIT_WINDOW: Duration = Duration::from_millis(5);
