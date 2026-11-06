@@ -122,7 +122,11 @@ fn a_blocked_heads_hold_does_not_take_a_whole_machine_requests_mark() {
     r.s.set_cost(head, warm(6_000, 0));
     for _ in 0..2 {
         let started = r.round(1_000);
-        assert!(started.iter().all(|s| s.operation != head && s.operation != whole));
+        assert!(
+            started
+                .iter()
+                .all(|s| s.operation != head && s.operation != whole)
+        );
         assert_eq!(r.s.head_hold(head), Some(&w("b")));
         assert_eq!(r.s.reservation(whole), Some(&w("a")));
         assert_eq!(r.s.whole_mark(whole), Some(&made));

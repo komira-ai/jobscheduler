@@ -85,6 +85,7 @@ pub const CRATES: &[&str] = &[
     "js-registry",
     "js-scaler",
     "js-sched",
+    "js-sched-placer",
     "js-sim",
     "js-sim-cell",
     "js-sizing",
