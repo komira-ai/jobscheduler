@@ -199,6 +199,8 @@ mod tests {
             price_unit: crate::offer::PriceUnit::UsCents,
             available: true,
             purchase: None,
+            quota: None,
+            block: None,
         };
         assert_eq!(block_on(handle.catalog()), Ok(Vec::new()));
         assert!(handle.checks().is_empty());

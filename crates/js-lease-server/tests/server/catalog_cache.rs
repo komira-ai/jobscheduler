@@ -71,6 +71,8 @@ fn offer(id: &str, zone: Option<&str>) -> Offer {
         price_unit: PriceUnit::UsCents,
         available: true,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

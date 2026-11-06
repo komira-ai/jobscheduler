@@ -94,6 +94,8 @@ fn ask(acquire: &str) -> AcquireRequest {
             price_unit: PriceUnit::UsCents,
             available: true,
             purchase: None,
+            quota: None,
+            block: None,
         },
         labels: Vec::new(),
         payload: BootPayload::new(format!("#!/bin/sh\nprintf '%s' '{SECRET}' > /etc/token\n")),

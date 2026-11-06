@@ -175,7 +175,9 @@ pub fn candidate(region: &str) -> Offer {
         price_cents_per_hour: Some(75),
         price_unit: PriceUnit::UsCents,
         available: true,
-        purchase: None,
+        purchase: Some(js_elastic::Purchase::OnDemand),
+        quota: None,
+        block: None,
     }
 }
 

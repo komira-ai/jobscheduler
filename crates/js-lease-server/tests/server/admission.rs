@@ -159,6 +159,8 @@ fn a100(available: bool) -> Offer {
         price_unit: PriceUnit::UsCents,
         available,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 
