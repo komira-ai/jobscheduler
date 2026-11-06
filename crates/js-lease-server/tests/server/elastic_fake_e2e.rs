@@ -120,10 +120,12 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
     rig.tick().await;
     assert_eq!((cloud.count(Call::Acquire), cloud.launched()), (1, 0));
     assert_eq!(cloud.bill(), Bill::default());
-    // The request every offer was refused for waits the pool's `acquire_retry` (60 seconds).
-    for _ in 0..3 {
+    // The request every offer was refused for waits the pool's `acquire_retry` (60 seconds),
+    // presented again every ten seconds as a waiting consumer does, so the registry keeps it.
+    for _ in 0..9 {
         if cloud.launched() == 0 {
-            rig.advance(60);
+            rig.advance(10);
+            assert!(matches!(rig.present(), StartAck::Unknown));
             rig.tick().await;
         }
     }

@@ -680,17 +680,17 @@ fn log_refusal(refused: &Refused) {
         Some((over, until)) => info!(
             provider = %refused.provider,
             offer = %refused.offer,
-            zone,
+            zone = %zone,
             code = ?refused.code,
             instance_type = %over.instance_type,
-            region = over.region.as_deref().unwrap_or("-"),
+            region = %over.region.as_deref().unwrap_or("-"),
             until_ms = until.millis(),
             "acquire refused: the instance type is passed over in the region until the time given"
         ),
         None => info!(
             provider = %refused.provider,
             offer = %refused.offer,
-            zone,
+            zone = %zone,
             code = ?refused.code,
             "acquire refused: the next zone, offer or provider is asked"
         ),
