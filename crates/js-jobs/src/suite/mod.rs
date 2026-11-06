@@ -29,6 +29,7 @@ mod failures;
 mod hosts;
 mod idempotency;
 mod lifecycle;
+mod logs;
 mod paging;
 mod placement;
 mod queue;
@@ -42,6 +43,7 @@ pub use failures::*;
 pub use hosts::*;
 pub use idempotency::*;
 pub use lifecycle::*;
+pub use logs::*;
 pub use paging::*;
 pub use placement::*;
 pub use queue::*;
@@ -119,6 +121,7 @@ where
     queued_lists_the_queue_in_order(backend);
     live_allocations_lists_every_booked_or_releasing_allocation(backend);
     a_free_with_rows_beside_it_is_one_commit(backend);
+    the_log_lengths_are_kept_with_the_result_and_swept_with_it(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -202,6 +205,7 @@ macro_rules! job_store_tests {
             queued_lists_the_queue_in_order,
             live_allocations_lists_every_booked_or_releasing_allocation,
             a_free_with_rows_beside_it_is_one_commit,
+            the_log_lengths_are_kept_with_the_result_and_swept_with_it,
         );
     };
 }
@@ -389,6 +393,7 @@ pub(crate) fn output() -> Output {
             cpu_time: Duration::from_millis(2500),
             peak_memory_bytes: 64 << 20,
         }),
+        logs: None,
     }
 }
 
