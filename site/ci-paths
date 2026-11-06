@@ -21,6 +21,7 @@ crates/js-pool-static/src/
 crates/js-provider-lambdalabs/src/
 crates/js-mdm/src/
 crates/js-registry/src/
+crates/js-sched-placer/src/
 crates/js-sched/src/
 crates/js-server-core/src/
 crates/js-sizing/src/
