@@ -22,13 +22,12 @@
 //! its end at its removal, after the kill ([`close`]), when its files are final. The progress record
 //! is kept in the scratch directory, and the runtime stops it before the directory is removed.
 //!
-//! **After a restart** the lease journal ends every run an earlier process left
-//! (`Runtime::reclaim`), so the files hold all their run wrote. Before the scratch root is
-//! swept, each left directory that holds a progress record has its upload finished
-//! ([`finish_left`]): the uploader goes on from the record (a chunk in flight is put again at
-//! the same key, so nothing is skipped or put twice), is told the end at once, and works from
-//! memory with the files held open once the record is removed for the sweep. A directory
-//! without a record, or with one that is not taken, uploads nothing more.
+//! **After a restart** the run is adopted (`native/adopt.rs`) with its scratch directory, and
+//! the helper kept its process and the job kept writing its files. A run whose directory holds
+//! a progress record has its upload go on from it ([`adopted`]): a chunk in flight is put again
+//! at the same key, and what the job wrote while no agent ran goes out as ordinary chunks, so
+//! nothing is skipped or put twice. Its end is told as any run's. A directory without a record,
+//! or with one that is not taken, uploads nothing more.
 
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
@@ -136,20 +135,16 @@ pub(super) fn close(run: &mut RunLogs, dir: &Path) {
     run.leave();
 }
 
-/// Finishes the uploads of the runs an earlier process of the agent left: `left` names each
-/// one's id and scratch directory. One whose directory holds a progress record of the agent's
-/// user is resumed from it and told its end at once (see the module documentation), its
-/// record then removed; the rest are left as they are. Nothing waits for the uploads.
-pub(super) fn finish_left(logs: Option<&LiveLogs>, left: &[(String, PathBuf)]) {
-    let Some(logs) = logs else {
-        return;
-    };
-    let owner = rustix::process::geteuid().as_raw();
-    for (run_id, dir) in left {
+/// The live logs of a run adopted after a restart, whose log files are in `dir` and whose id
+/// is `run_id` (its label): with `logs`, a progress record of the agent's user there gives it
+/// its uploader again, going on from where the record says each stream is (see the module
+/// documentation); otherwise, or with a record that is not taken (logged once), nothing.
+pub(super) fn adopted(logs: Option<&LiveLogs>, dir: &Path, run_id: Option<&str>) -> RunLogs {
+    let mut run = RunLogs::adopted(None);
+    if let Some((logs, run_id)) = logs.zip(run_id) {
+        let owner = rustix::process::geteuid().as_raw();
         let (stdout, stderr) = files(dir);
-        let mut run = RunLogs::adopted(Some(totals(dir)));
         run.resume_capped(logs, (&stdout, &stderr), dir, (run_id, owner));
-        // The sweep removes the directory next; the upload goes on from memory.
-        run.leave();
     }
+    run
 }

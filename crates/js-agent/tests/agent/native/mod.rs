@@ -6,12 +6,16 @@
 //! reads back that what the helper starts answers to the privacy controls for itself
 //! (`disclaim`).
 
+mod adopt;
 mod agent;
+mod bound;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
+mod env;
 mod fake_helper;
 mod files;
+mod inputs;
 mod journal;
 mod lifecycle;
 mod live_logs;
@@ -38,7 +42,7 @@ use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 
-use crate::support::Scratch;
+pub use crate::support::Scratch;
 use fake_helper::FakeHelper;
 
 /// The term of the runtimes made here: their leases are `7.0`, `7.1` and so on.

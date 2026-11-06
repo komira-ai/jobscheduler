@@ -107,9 +107,9 @@ pub struct RunSpec {
     /// What the run executes.
     pub body: Body,
     /// The environment a job start names, by name in order, which the runtime sets in the
-    /// container over the image's own variables (a name in both takes this value). Empty
-    /// for a run start and for a native body, whose environment is its own
-    /// ([`NativeSpec::env`]). A runtime checks it before it creates anything
+    /// container over the image's own variables (a name in both takes this value), and the
+    /// native runtime over the environment it builds from the body's own
+    /// ([`NativeSpec::env`]). Empty for a run start. A runtime checks it before it creates anything
     /// ([`check_run_env`]), and one that cannot carry it refuses a run that has one
     /// ([`Runtime::check_env`]).
     pub env: Vec<(String, String)>,
@@ -121,7 +121,8 @@ pub struct RunSpec {
     pub pids: Option<u64>,
     /// The GPU device indices the job may use.
     pub gpu_indices: Vec<u32>,
-    /// The mounts, already resolved.
+    /// The mounts, already resolved. For a native body, its `mount` inputs, resolved
+    /// read-only below their roots, each with the input's `dest` as its `target`.
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
@@ -396,16 +397,6 @@ pub trait Runtime {
         None
     }
 
-    /// Called once as the lifecycle starts ([`Lifecycle::adopt`](super::Lifecycle::adopt)),
-    /// after the runs were adopted and before the scratch root is swept: `left` names, by run
-    /// id and path, each directory of the root that the sweep removes next, what an earlier
-    /// process left for a run this one did not adopt. A runtime whose runs are not adopted
-    /// after a restart and that uploads their live logs (the native runtime, whose runs the
-    /// lease journal ends at [`Runtime::reclaim`]) finishes each upload from the progress
-    /// record in the directory; it never waits for them. The default, a runtime that adopts
-    /// its uploads with its runs (`crun`) or uploads nothing, does nothing.
-    fn finish_left_uploads(&mut self, _left: &[(String, PathBuf)]) {}
-
     /// Whether this runtime runs the native body `native`, asked before a native start
     /// creates anything. The default runs none, which is every runtime but the one a Mac
     /// agent has: a native start on a Linux host is refused `native-unsupported`.
@@ -423,9 +414,10 @@ pub trait Runtime {
     /// Whether this runtime carries a job start's environment (`env`, by name in order),
     /// asked at admission for every start, before anything is created and before
     /// [`Runtime::check_image`], so a start the runtime cannot give its environment is
-    /// answered for that and not for another reason. The default carries it, which is every
-    /// container runtime; the runtime a Mac agent has refuses a non-empty one
-    /// (`env-unsupported`): a job must never run without the environment it names.
+    /// answered for that and not for another reason. The default carries it, which every
+    /// runtime of this agent does (the container ones and the Mac's native one); a runtime
+    /// that could not refuses a non-empty one (`env-unsupported`): a job must never run
+    /// without the environment it names.
     ///
     /// # Errors
     ///

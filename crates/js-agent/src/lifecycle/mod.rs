@@ -29,9 +29,10 @@
 //!   `JobStop` or `job_acks` entry a run), so a lease server never sees a job id. A start
 //!   whose id names held work of the other keying is not taken (`Skip::Clash`). The job's
 //!   environment is delivered: it goes to the runtime in [`RunSpec::env`], and a container
-//!   runtime sets it over the image's own variables (a name in both takes the job's value);
-//!   a runtime that cannot carry it (the macOS native one) answers the start
-//!   `env-unsupported` and runs nothing. A
+//!   runtime sets it over the image's own variables (a name in both takes the job's value),
+//!   and the macOS native one over the environment it builds for the run; a runtime that
+//!   cannot carry it ([`Runtime::check_env`]) answers the start `env-unsupported` and runs
+//!   nothing. A
 //!   `JobStop` for a held job ends it as a `Stop` does (`killed`, once however often it
 //!   comes); for a job the agent does not hold it retires the id and lists it in
 //!   `retired_jobs` (the newest [`RETIRED_LISTED`]) in every heartbeat until a reply's
@@ -73,9 +74,7 @@
 //!   `log-sink-ignored` note and the job starts as without one), and a runtime that uploads
 //!   (`crun` and the native runtime, [`crate::logs`]) does so on a thread of its own per job:
 //!   the result, with its tail and `logs` ([`Runtime::logs_report`]), the cleanup and the slot
-//!   never wait for it. At the start, before the scratch root is swept, the runtime is handed
-//!   the directories the sweep removes ([`Runtime::finish_left_uploads`]), so the native one
-//!   finishes the uploads of the runs its journal ended.
+//!   never wait for it.
 //! - **A start waits for its image without holding the worker.** When the runtime says
 //!   the image is being fetched ([`Runtime::prepare`]) the run is held as `starting` with
 //!   its booking and slot and nothing else: no scratch directory, files or container. Each

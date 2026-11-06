@@ -12,19 +12,18 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use js_agent::lifecycle::{Exit, Lifecycle, RunHandle, Runtime, Status};
+use js_agent::lifecycle::{Exit, RunHandle, Runtime, Status, label};
 use js_agent::logs::{HostGrant, LOG_FLUSH, Limits, LiveLogs, ManualWake, Settled, Sink, Wake};
-use js_agent::native::{NativeChecks, NativeRuntime};
+use js_agent::native::NativeRuntime;
 use js_agent_wire::limits::MAX_LOG_STREAM_LEN;
 use js_agent_wire::{LogGrant, LogReport, LogTail};
 use js_logstore::fake::{Action, FakeStore, Op, Policy};
 use js_logstore::{Endpoint, JobPrefix, ManualClock, Stream};
+use js_mac_session::helper::RESET_ALREADY;
 use serde_json::{Value, json};
 
 use super::agent::{hello_on, native_flags};
 use super::{Rig, TERM, config, native};
-use crate::lifecycle::config_in;
-use crate::lifecycle::fake::ManualClock as LifeClock;
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Scratch, Script, ScriptConnector, code, flags, mac_host, reply,
     run_on, welcome,
@@ -305,19 +304,19 @@ fn output_past_the_cap_is_uploaded_as_the_crun_capture_uploads_it() {
 
 /// Proves that an agent restart loses and repeats nothing of a native run's upload: the first
 /// runtime puts a chunk, sees more output and is dropped with the job running (its uploader
-/// stops, its record stays); a new runtime over the same helper, journal and scratch root ends
-/// the run from the journal, and the lifecycle it starts hands it the left directory before
-/// the sweep, so it goes on from the record and finishes. Each chunk offset was put once, no gap
-/// marker was put, the finals hold every byte in order, the chunks are deleted, and the sweep
-/// removed the directory. Catches a restart that re-sends from the start, skips what was
-/// written while no agent ran, or leaves the upload of a run it ended undone.
+/// stops, its record stays). The job writes on while no agent runs. The next runtime over the
+/// same helper and journal adopts the run, and its upload goes on from the record: the bytes
+/// seen but not put and those written meanwhile go out as the next chunk, and the exit ends it
+/// with the finals. Each chunk offset was put once and no gap marker was put. Catches an
+/// adoption that re-sends from the start, skips what was written while no agent ran, or
+/// leaves an adopted run's upload undone.
 #[test]
-fn a_restart_finishes_the_upload_from_the_record_without_a_gap_or_a_repeat() {
+fn an_adopted_run_goes_on_from_the_record_without_a_gap_or_a_repeat() {
     let live = Live::new(64 * 1024 * 1024);
     let mut rig = Rig::new("logs-restart").living(live.logs.clone());
-    let life_config = config_in(&rig.dir, false);
     let mut spec = rig.spec("j3", native("/bin/echo", &[]));
     spec.log_sink = Some(sink("j3"));
+    spec.labels = BTreeMap::from([(label::RUN.to_owned(), "j3".to_owned())]);
     rig.rt.create_and_start(&spec).unwrap();
     let dir = spec.scratch;
     let first = live.wake(0);
@@ -332,31 +331,41 @@ fn a_restart_finishes_the_upload_from_the_record_without_a_gap_or_a_repeat() {
     let Rig {
         fake,
         rt,
-        dir: test_dir,
+        dir: _kept,
     } = rig;
     drop(rt);
     run_out(&first);
     assert!(dir.join(RECORD).is_file());
-    // The job wrote on while no agent ran.
+    // The job writes on while no agent runs.
     print(&dir, "stdout", b"FGH");
 
+    fake.refuse("boot-reset", RESET_ALREADY);
     let mut again = NativeRuntime::open(fake.client(), config(&fake), TERM + 1)
         .unwrap()
         .with_live_logs(live.logs.clone());
-    assert_eq!(
-        again.reclaim(),
-        ["ended the lease user 7.0 an earlier process left"]
-    );
-    let (_life, _) = Lifecycle::adopt(
-        life_config,
-        Box::new(again),
-        Box::new(NativeChecks),
-        Box::new(LifeClock::default()),
-    )
-    .unwrap();
-    assert_eq!(live.made(), 2, "the left upload has an uploader again");
-    run_out(&live.wake(1));
-    assert!(!dir.exists(), "the sweep removed the directory");
+    assert!(again.reclaim().is_empty(), "the run is adopted, not ended");
+    assert_eq!(again.list_labelled().unwrap().len(), 1);
+    assert_eq!(live.made(), 2, "the adopted run has an uploader again");
+    let resumed = live.wake(1);
+    assert_eq!(resumed.settled(), Settled::Asleep);
+    flush(&live, &resumed);
+    let id = RunHandle("7.0".to_owned());
+    fake.exit("7.0", 0);
+    for _ in 0..super::POLLS {
+        if again.poll(&id).unwrap() != Status::Running {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let report = LogReport {
+        stdout_bytes: 18,
+        stderr_bytes: 5,
+        stdout_dropped: 0,
+        stderr_dropped: 0,
+    };
+    assert_eq!(again.logs_report(&id), Some(report));
+    run_out(&resumed);
+    again.remove(&id).unwrap();
 
     let p = prefix("j3");
     assert_eq!(
@@ -376,7 +385,6 @@ fn a_restart_finishes_the_upload_from_the_record_without_a_gap_or_a_repeat() {
             (p.final_key(Stream::Stdout), b"0123456789abcdeFGH".to_vec()),
         ])
     );
-    drop(test_dir);
 }
 
 /// Proves that a run without a sink, on a runtime that uploads, is what it was: no uploader

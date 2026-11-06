@@ -913,3 +913,59 @@ fn a_refused_caller_is_told_it_is_not_the_installed_kbf_daemon() {
     );
     assert!(!text.contains("kbf-daemon"), "{text}");
 }
+
+/// Catches: a run that cannot be found again over the socket once its first connection is
+/// gone (an agent that restarted would kill it or lose it), a `watch` that reports another
+/// end than the run's, a `run` with a deadline or a `stop` the server does not carry out,
+/// and a watch of a lease with no run answered as if it had one.
+#[test]
+fn a_run_is_watched_again_and_stopped_over_the_socket() {
+    let served = served("watch", Ok(()));
+    let client = &served.client;
+    client.user_create("1.1", None).unwrap();
+    match client.watch("1.1") {
+        Err(ClientError::Refused(why)) => assert!(why.ends_with(crate::helper::NO_RUN), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let lease_dir = std::fs::File::open(&served.dir).unwrap();
+    let fds = [null.as_fd(), null.as_fd(), null.as_fd(), lease_dir.as_fd()];
+    let argv = act_argv("exit 4");
+    let first = client
+        .run_bounded("1.1", (&argv, &[]), fds, None, Duration::from_secs(3600))
+        .unwrap();
+    let pid = first.pid;
+    let exit = Exit {
+        code: Some(4),
+        signal: None,
+    };
+    assert_eq!(first.wait().unwrap(), exit);
+    let again = client.watch("1.1").unwrap();
+    assert_eq!(again.pid, pid);
+    assert_eq!(again.wait().unwrap(), exit, "an ended run answers at once");
+    // A stop of a lease whose run has ended kills its user at once.
+    served.host.state().log.clear();
+    client.stop("1.1", Duration::from_secs(5)).unwrap();
+    let log = served.host.state().log.clone();
+    assert!(
+        log.iter().any(|line| line.starts_with("kill_all")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_watched_run_that_was_forgotten_is_refused() {
+    assert_eq!(
+        watched(Some((None, Some(9)))),
+        Reply::Exited {
+            code: None,
+            signal: Some(9)
+        }
+    );
+    assert_eq!(
+        watched(None),
+        Reply::Refused {
+            reason: "the run was forgotten: its user was deleted".to_owned()
+        }
+    );
+}

@@ -232,16 +232,14 @@ loop and end), started once the program has started, with two differences:
 - **It reads at most `--log-file-cap` bytes of each file.** What lies past the cap counts as dropped, so the store gets what `crun`'s
   capture would give for the same output: chunks up to the cap and, for a longer stream, the gap marker at the cap and no final. The
   result's tail is the end of each file, the same text as a capture's ring of the last bytes. A run without a sink is as before.
-- **The end** is told at the first poll that finds the run ended, before its result is reported, with each file's length as the
-  stream's total. The result never waits for the upload. The progress record is kept in the scratch directory and is stopped and
+- **The end** is told at the first poll that reads the run's exit, before its result is reported, with each file's length as the
+  stream's total; a run whose exit was never read is told it at its removal, after its processes were killed. The result never waits for the upload. The progress record is kept in the scratch directory and is stopped and
   removed before the directory is.
 
-**A restart.** A native run is not adopted: the lease journal ends it when the next agent starts, so its files then hold all it wrote.
-Before the scratch root is swept, the lifecycle hands the runtime each directory the sweep will remove; one that holds a progress
-record has its upload resumed from it as 3.5 says (a chunk in flight is put again at the same key; the bytes written while no agent
-ran go out as ordinary chunks), is told its end at once with the files' lengths, and then works from memory with the files held open,
-its record removed for the sweep. A second restart before that upload ends finds no record and uploads nothing more. The run's result
-is never reported (the run is lost, as before), so a reader sees the finals, or the chunks and a gap marker, with no reported length.
+**A restart.** The helper keeps a native run's process while no agent runs, and the job keeps writing its files; the next agent
+adopts the run (`js-agent/src/native/adopt.rs`) with its scratch directory. A run whose directory holds a progress record has its
+upload go on from it as 3.5 says: a chunk in flight is put again at the same key, and the bytes written while no agent ran go out as
+ordinary chunks, their first-byte time the resuming poll. Its end is then told as any run's. Without a record it uploads nothing more.
 
 ## 4. The host credential (D1)
 

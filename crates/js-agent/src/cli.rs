@@ -232,10 +232,11 @@ pub struct Cli {
     /// started with its own explicit `--socket`, `--state-dir`, `--uid-range` and `--homes`,
     /// never the defaults of another helper: the agent asks it for its boot reset, which ends
     /// the lease users of whoever used it before and clears the Mac's auto-login. Native runs
-    /// are NOT stopped when the agent stops, restarts or dies: the lease journal in the state
-    /// root ends them when the agent next starts, or when the rescue of an agent whose worker
-    /// died runs; until then they run on, and their wall limit is enforced only while an
-    /// agent runs.
+    /// are NOT stopped when the agent stops, restarts or dies: the agent's next start adopts
+    /// each run the lease journal in the state root recorded and ends the rest, as the rescue
+    /// of an agent whose worker died does; meanwhile the helper ends a run at its own
+    /// deadline, its wall limit plus `--stop-grace` (a helper from before that deadline holds
+    /// none, and its runs are bounded only while an agent runs).
     /// The profile does not deny System V or POSIX shared memory, semaphores or message
     /// queues, and the helper reuses uids, so what a run leaves in them can be read by a later
     /// run that gets the same uid: an open channel between runs on one Mac.

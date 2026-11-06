@@ -321,8 +321,8 @@ impl PartialEq for LogPlan {
 impl Eq for LogPlan {}
 
 /// What a run of the `crun` or the native runtime holds of live logs: its sink while it is
-/// staged, its uploader once it has started (or once it was adopted, or left by an earlier
-/// process, with a progress record), and the report
+/// staged, its uploader once it has started (or once it was adopted with a progress record),
+/// and the report
 /// once it has ended. A run of a runtime without [`LiveLogs`], one whose start carried no sink,
 /// and one adopted without a record, hold nothing and report nothing.
 #[derive(Debug, Default)]
@@ -330,8 +330,7 @@ pub struct RunLogs {
     sink: Option<Sink>,
     uploader: Option<Uploader>,
     report: Option<LogReport>,
-    /// The totals (stdout, stderr) of a run adopted after it ended: from its exit record
-    /// (`crun`), or the lengths of its files (a native run an earlier process left).
+    /// The totals (stdout, stderr) of a run adopted after it ended, from its exit record.
     ended: Option<(u64, u64)>,
 }
 

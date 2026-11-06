@@ -150,15 +150,10 @@ impl Lifecycle {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .collect();
-        let kept: Vec<&str> = owned
+        let kept = owned
             .iter()
             .copied()
-            .chain(leases.iter().map(String::as_str))
-            .collect();
-        // What the sweep removes may hold the live-log uploads of runs no runtime adopted
-        // (a native run the journal ended): the runtime finishes them first.
-        let left = this.config.scratch.left(&kept);
-        this.runtime.finish_left_uploads(&left);
+            .chain(leases.iter().map(String::as_str));
         this.config.scratch.sweep(kept);
         if let Some(files) = &this.config.files {
             // A root that cannot be listed leaves earlier runs' secrets in place; say so.

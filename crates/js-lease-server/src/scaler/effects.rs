@@ -6,7 +6,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
+use js_elastic::{
+    AcquireId, Acquired, EventStream, Held, HostRef, Offer, ProviderError, Released, Secret,
+};
 use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 
@@ -25,6 +27,9 @@ pub enum Call {
     ReleaseHost,
     /// `Registry::mark_ending`.
     MarkEnding,
+    /// `Registry::cordon`, for the server's default cordon length: the host of a machine
+    /// the provider reclaimed takes no new work.
+    Cordon,
 }
 
 /// The shell's whole interface to the registry, the join tokens, the provider, the network
@@ -106,4 +111,10 @@ pub trait Effects: Send + Sync {
 
     /// Makes `call` on the registry for `host`.
     fn call(&self, call: Call, host: &str);
+
+    /// The provider's notices ([`js_elastic::CapacityProvider::events`]): `None` (the
+    /// default) for a provider that sends none.
+    fn events(&self) -> Option<EventStream> {
+        None
+    }
 }

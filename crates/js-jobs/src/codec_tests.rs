@@ -43,7 +43,7 @@ fn full_result() -> JobResult {
 }
 
 /// A job with every optional field set.
-fn full_job() -> JobRecord {
+pub(super) fn full_job() -> JobRecord {
     JobRecord {
         id: JobId::parse("full-1").expect("an id"),
         spec: full_spec(),
@@ -73,7 +73,7 @@ fn bare_job() -> JobRecord {
     spec.constraints = Constraints::default();
     spec.network = NetworkPolicy::None;
     spec.ports.clear();
-    spec.files.clear();
+    spec.files = crate::record::JobFiles::default();
     spec.labels = Labels::default();
     JobRecord {
         id: JobId::parse("bare-1").expect("an id"),
@@ -119,7 +119,7 @@ fn shape() -> Booked {
     }
 }
 
-fn job_row(job: &JobRecord) -> Vec<u8> {
+pub(super) fn job_row(job: &JobRecord) -> Vec<u8> {
     encode_job(job).expect("encodes")
 }
 
@@ -128,7 +128,7 @@ fn allocation_row(allocation: &AllocationRecord) -> Vec<u8> {
 }
 
 /// `row` without its field `tag`.
-fn without(row: &[u8], tag: u16) -> Vec<u8> {
+pub(super) fn without(row: &[u8], tag: u16) -> Vec<u8> {
     let mut fields = Fields::of(row).expect("the row parses");
     fields.0.remove(&tag);
     Writer(fields.0)
@@ -137,7 +137,7 @@ fn without(row: &[u8], tag: u16) -> Vec<u8> {
 }
 
 /// `row` with its field `tag` set to `value`.
-fn with(row: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
+pub(super) fn with(row: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
     set_field(row, tag, value).expect("the row parses")
 }
 
@@ -330,7 +330,7 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
 }
 
 /// A list value framed here, apart from the codec's own `list`.
-fn framed(items: &[&[u8]]) -> Vec<u8> {
+pub(super) fn framed(items: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for item in items {
         out.extend_from_slice(&u32::try_from(item.len()).expect("small").to_be_bytes());
@@ -610,7 +610,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
             job.spec.env.len(),
             job.spec.constraints.capabilities.len(),
             job.spec.ports.len(),
-            job.spec.files.len(),
+            job.spec.files.names().len(),
         ),
         (0, 0, 0, 0, 0, 0)
     );
