@@ -468,6 +468,12 @@ async fn serve_jobs(
             false => Ok(()),
         };
         let served = lost.and_then(|()| per_job::serve(&jobs, &context, &listed, &retired, room));
+        // Whether the listing was clean is noted before the pass, so a host that lists a job
+        // it holds no live allocation for takes no start until it lists only its own (design
+        // section 8, row 37).
+        if let Ok(served) = &served {
+            placing.note_listing(&host, served.clean);
+        }
         // What the listing ended or freed, and the load the beat brought, can make room
         // for a queued job: a pass places it, and its start rides on the host's next reply.
         placing.place_jobs();
@@ -476,7 +482,6 @@ async fn serve_jobs(
     .await;
     match served {
         (host, Ok(served)) => {
-            agents.note_listing(&host, served.clean);
             agents.listed(&host, session);
             Ok(Some(served))
         }

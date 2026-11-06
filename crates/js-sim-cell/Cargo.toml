@@ -34,5 +34,13 @@ tokio = { workspace = true, features = ["rt"] }
 # `oneshot`, to call a router as a service.
 tower = { workspace = true, features = ["util"] }
 
+# The sweep: the smoke family over the seeds its flags name, one shard of a nightly sweep
+# (src/sweep.rs). It reads its own flags, which libtest would refuse, so it has no harness;
+# run with none, as a plain `cargo test` runs it, it sweeps nothing.
+[[test]]
+name = "sweep"
+path = "tests/sweep.rs"
+harness = false
+
 [lints]
 workspace = true

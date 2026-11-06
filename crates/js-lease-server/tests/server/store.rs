@@ -80,6 +80,9 @@ async fn sqlite_is_refused_unless_the_dev_flag_is_set() {
     assert_eq!(health.status, 200);
     assert!(h.running.store().is_some(), "the server holds the store");
     assert!(sqlite_db(&h.scratch).exists());
+    // The status route shows the lock the server holds.
+    let pools = request(h.addr(), "GET", "/v1/pools", None, None).await;
+    assert_eq!(pools.json()["store"]["lock"], "held");
     // A tick asks the lock first; on SQLite the store holds it, and the tick runs.
     h.ticks.step().await;
     assert_eq!(h.running.save_errors(), 0);

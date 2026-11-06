@@ -23,7 +23,8 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--metrics-listen` | `server.metrics_listen`, off unless given: the address the operator's metrics are served on (see "The metrics port" below); a private address only, plain HTTP, no token; an address that is not a private one is refused at start naming the flag or the key; needs no agent registration |
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | `--store`, `--allow-sqlite-store` | `server.store` and `server.allow_sqlite_store` (`false` unless given; `true` is refused without `server.store`, as the flag is without `--store`): the store the server's state is to be kept in, and the gate of its SQLite backend; see "The store" below |
-| none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
+| `--store-unreachable-after` | `server.store_unreachable_after`, `"60s"` unless given: how long the store paths of the tick (the lease file's write, the job pass) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both; zero or an unparsable value is refused at start naming the flag or the key |
+| none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler, and the store's `store:unreachable`, is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
@@ -330,8 +331,8 @@ credential_ttl  = "1h"                                  # 15m to 12h
 max_follow      = 256                                   # most GetLogs calls waiting at once
 ```
 
-The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a job whose
-start carries a log sink.
+The agent's one flag for it is `--log-file-cap` (default 64 MiB, from 1 MiB to 1 GiB): the local file of each stream of a `crun` job
+whose start carries a log sink, and for a native job with a sink the most bytes of each of its log files that are uploaded.
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 

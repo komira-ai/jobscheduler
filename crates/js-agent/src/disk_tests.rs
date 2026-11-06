@@ -76,6 +76,9 @@ fn the_image_store_is_beside_the_scratch_root() {
         image_store(Path::new("/")),
         PathBuf::from("/oci/oci-images")
     );
+    assert_eq!(IMAGES_DIR, "oci-images");
+    // js-contain is a Linux-only dependency of this crate.
+    #[cfg(target_os = "linux")]
     assert_eq!(IMAGES_DIR, js_contain::oci::image::IMAGES_DIR);
 }
 

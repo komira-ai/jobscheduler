@@ -1049,6 +1049,7 @@ dependencies = [
  "js-testkit",
  "js-treestore",
  "js-types",
+ "js-update-hook",
  "libc",
  "rustix",
  "serde",
@@ -1386,6 +1387,7 @@ dependencies = [
  "js-registry",
  "js-scaler",
  "js-sched",
+ "js-sched-placer",
  "js-state",
  "js-testkit",
  "js-types",
@@ -1721,6 +1723,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-sched-placer"
+version = "0.1.0"
+dependencies = [
+ "js-agent-wire",
+ "js-caps",
+ "js-jobs",
+ "js-lease",
+ "js-provider",
+ "js-registry",
+ "js-sched",
+ "js-state",
+ "js-types",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "js-server-core"
 version = "0.1.0"
 dependencies = [
@@ -1852,6 +1871,17 @@ dependencies = [
 name = "js-types"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "js-update-hook"
+version = "0.1.0"
+dependencies = [
+ "js-testkit",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

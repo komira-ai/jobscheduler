@@ -42,6 +42,12 @@
 //!    scratch directory (`native/outputs.rs`); one that cannot be copied does not stop the
 //!    removal, which then fails as [`RuntimeError`] of its outputs only.
 //!
+//! A run whose start carried a sink, on a runtime given [`LiveLogs`]
+//! ([`NativeRuntime::with_live_logs`]), has its two log files uploaded while it runs and
+//! finished after its end ([`Runtime::logs_report`] gives the totals); a run adopted after a
+//! restart goes on with its upload from the progress record in its scratch directory. See
+//! `native/logs.rs`.
+//!
 //! A start that pins a bundle (`RunSpec::bundle`) also has its bundle's trees pinned for
 //! the run before anything is made, the trees the bundle writes to cloned into the run's
 //! own `trees` directory, and `@bundle/<entrypoint>` resolved to the file in the store (or
@@ -146,7 +152,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_agent_wire::{BUNDLE_PROGRAM_PREFIX, InputRef, LogTail, NativeSpec, OutputSpec, refusal};
+use js_agent_wire::{
+    BUNDLE_PROGRAM_PREFIX, InputRef, LogReport, LogTail, NativeSpec, OutputSpec, refusal,
+};
 use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::{Client, ClientError, Exit as HelperExit};
 use js_mac_session::helper::{RESET_ALREADY, RESET_NEEDED};
@@ -160,6 +168,7 @@ use crate::lifecycle::{
     Body, CheckFinding, CheckHook, Exit, Finished, Found, NativeRefusal, RunHandle, RunSpec,
     Runtime, RuntimeError, Status, check_run_env,
 };
+use crate::logs::{LiveLogs, RunLogs};
 
 pub use files::HandOver;
 pub use journal::{Journal, RunRecord};
@@ -222,6 +231,8 @@ struct Run {
     started_ms: u64,
     /// The trees of the run's bundle, pinned until the run is removed.
     _pinned: Option<Pinned>,
+    /// Its live logs: the uploader, then the report.
+    logs: RunLogs,
 }
 
 impl Run {
@@ -264,6 +275,8 @@ pub struct NativeRuntime {
     reset_needed: bool,
     /// Gives a run's files to its user.
     hand_over: HandOver,
+    /// Live logs, when the runtime uploads them ([`NativeRuntime::with_live_logs`]).
+    logs: Option<LiveLogs>,
     /// The wall clock, in milliseconds since the Unix epoch: when a run started, and so how
     /// long an adopted one has run.
     now_ms: Clock,
@@ -337,6 +350,7 @@ impl NativeRuntime {
             journal,
             reset_needed: false,
             hand_over: files::lchown(),
+            logs: None,
             now_ms: system_clock(),
             stop_grace: Duration::ZERO,
             old_helper: AtomicBool::new(false),
@@ -377,6 +391,14 @@ impl NativeRuntime {
             bundles: Some(placer),
             ..self
         }
+    }
+
+    /// The same runtime, uploading with `logs` the output of each run whose start carries a
+    /// sink (`native/logs.rs`).
+    #[must_use]
+    pub fn with_live_logs(self, logs: LiveLogs) -> Self {
+        let logs = Some(logs);
+        Self { logs, ..self }
     }
 
     /// The bundle store, if the runtime has one.
@@ -464,13 +486,7 @@ impl NativeRuntime {
         // The job start's environment last, over the agent's: its values win.
         let env = env::with_job(env, &spec.env);
         let argv = profile::argv_of(&self.config, &native, &home, &read_only)?;
-        let logs = [logs::STDIN, logs::STDOUT, logs::STDERR]
-            .into_iter()
-            .map(|name| {
-                let path = spec.scratch.join(name);
-                open_log(&path).map_err(|why| fail(&path.display(), &why))
-            })
-            .collect::<Result<Vec<File>, RuntimeError>>()?;
+        let logs = logs::open(&spec.scratch).map_err(RuntimeError::new)?;
         let fds = [
             logs[0].as_fd(),
             logs[1].as_fd(),
@@ -509,6 +525,7 @@ impl NativeRuntime {
             labels: record.labels,
             started_ms: record.started_ms,
             _pinned: pinned,
+            logs: logs::start(self.logs.as_ref(), spec.log_sink.as_ref(), &spec.scratch),
         })
     }
 
@@ -687,6 +704,9 @@ impl Runtime for NativeRuntime {
                 Ok(None) | Err(TryRecvError::Disconnected) => Some(Status::Gone),
                 Err(TryRecvError::Empty) => None,
             };
+            if matches!(run.ended, Some(Status::Exited(_))) {
+                logs::end(&mut run.logs, &run.scratch);
+            }
         }
         Ok(run.ended.unwrap_or(Status::Running))
     }
@@ -707,6 +727,7 @@ impl Runtime for NativeRuntime {
         let max_file_bytes = self.config.max_file_bytes;
         if let Some(run) = self.runs.get_mut(&id.0) {
             run.collect(&id.0, max_file_bytes);
+            logs::close(&mut run.logs, &run.scratch);
         }
         let deleted = self.helper.user_delete(&id.0).map(|_| ());
         self.ended(deleted, "user-delete")?;
@@ -776,6 +797,10 @@ impl Runtime for NativeRuntime {
                 .map(Some)
                 .map_err(|why| fail(&"the log", &why)),
         }
+    }
+
+    fn logs_report(&mut self, id: &RunHandle) -> Option<LogReport> {
+        self.runs.get(&id.0).and_then(|run| run.logs.report())
     }
 
     fn supports_gpus(&self) -> bool {
@@ -914,15 +939,4 @@ fn make_dir(path: &Path, uid: u32) -> io::Result<File> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     chown(path, Some(uid), None)?;
     File::open(path)
-}
-
-/// Opens (and empties) the file `path` for reading and writing: the job writes to it, the
-/// runtime reads it back, and a standard input made of one reads as an end of file.
-fn open_log(path: &Path) -> io::Result<File> {
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
 }
