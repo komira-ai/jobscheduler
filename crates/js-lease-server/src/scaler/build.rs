@@ -101,6 +101,8 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
         .allowed_instance_types
         .clone_from(&plan.limits.allowed_instance_types);
     settings.max_price_cents_per_hour = plan.limits.max_price_cents_per_hour;
+    settings.quota_backoff = plan.quota_backoff;
+    settings.acquire_retry = plan.acquire_retry;
     settings
 }
 

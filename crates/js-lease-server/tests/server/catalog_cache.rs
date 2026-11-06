@@ -364,6 +364,46 @@ async fn a_failed_refresh_keeps_the_last_good_catalog() {
     assert_eq!(logs.text().matches(WARNING).count(), 2);
 }
 
+/// Asserts that `Catalogs::fetches` counts the fetches that completed: zero before any, one
+/// after a refresh that fetched, unchanged by a refresh that was not due, unchanged by a
+/// fetch that failed (the provider was called all the same), one more after the fetch an
+/// invalidation by a capacity refusal made due, and zero for a provider the catalogs do
+/// not hold. It catches a count that moves on a failed fetch or on a refresh that fetched
+/// nothing, one that misses a fetch an invalidation caused, and one that reads another
+/// provider's count.
+#[tokio::test]
+async fn a_completed_fetch_is_counted_and_a_failed_one_is_not() {
+    let cloud = Counting::new("counted-cloud");
+    cloud.set(Ok(list_a()));
+    let catalogs = Arc::new(cloud.catalogs(HOUR, HOUR));
+    let id = cloud.id();
+    assert_eq!(catalogs.fetches(&id), 0);
+
+    catalogs.refresh_due(t0()).await;
+    assert_eq!((cloud.calls(), catalogs.fetches(&id)), (1, 1));
+
+    catalogs.refresh_due(after(t0(), 1)).await;
+    assert_eq!((cloud.calls(), catalogs.fetches(&id)), (1, 1));
+
+    cloud.set(Err("the cloud is down"));
+    catalogs.refresh_due(after(t0(), HOUR_MS)).await;
+    assert_eq!((cloud.calls(), catalogs.fetches(&id)), (2, 1));
+
+    cloud.set(Ok(list_b()));
+    catalogs.refresh_due(after(t0(), HOUR_MS + 1)).await;
+    assert_eq!((cloud.calls(), catalogs.fetches(&id)), (3, 2));
+
+    cloud.refuse(RefusalCode::Capacity);
+    let launcher = launcher(&cloud, &catalogs);
+    let answer = launcher.acquire(&plan(), Secret::new("join-token".to_owned()));
+    assert!(matches!(answer, Acquired::Refused(_)));
+    assert_eq!(catalogs.fetches(&id), 2);
+    catalogs.refresh_due(after(t0(), HOUR_MS + 2)).await;
+    assert_eq!((cloud.calls(), catalogs.fetches(&id)), (4, 3));
+
+    assert_eq!(catalogs.fetches(&ProviderId::known("stranger-cloud")), 0);
+}
+
 /// The `cache-cloud` clouds of these tests, by the path of the key file that names them: a
 /// kind is a plain function, so a test leaves its cloud here for the kind to find.
 static CLOUDS: Mutex<BTreeMap<String, Arc<Counting>>> = Mutex::new(BTreeMap::new());

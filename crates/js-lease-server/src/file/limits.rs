@@ -22,9 +22,17 @@ const KEYS: &[&str] = &[
     "max_price_cents_per_hour",
     "max_machines",
     "max_spot_machines",
+    "quota_backoff",
+    "acquire_retry",
     "catalog_refresh",
     "offer_cooldown",
 ];
+
+/// The `quota_backoff` of a provider whose table does not give it.
+const DEFAULT_QUOTA_BACKOFF: Duration = Duration::from_secs(3600);
+
+/// The `acquire_retry` of a provider whose table does not give it.
+const DEFAULT_ACQUIRE_RETRY: Duration = Duration::from_secs(60);
 
 /// The `catalog_refresh` of a provider whose table does not give it.
 const DEFAULT_CATALOG_REFRESH: Duration = Duration::from_secs(3600);
@@ -48,6 +56,14 @@ pub struct ProviderLimits {
     pub max_machines: Option<u64>,
     /// The most of those that may be spot machines; `None`: no bound of its own.
     pub max_spot_machines: Option<u64>,
+    /// How long pass 2 passes over an instance type in a region (a zone, for providers whose
+    /// zones are regions) after the provider refused it for quota (`quota_backoff`); one hour
+    /// when not given. Never zero. The provider as a whole is not braked.
+    pub quota_backoff: Duration,
+    /// How long a request whose every offer was refused or passed over waits before pass 2
+    /// asks again (`acquire_retry`); 60 seconds when not given. Never zero. A completed
+    /// catalog refresh asks again at once.
+    pub acquire_retry: Duration,
     /// How long the provider's cached catalog is used before it is fetched again
     /// (`catalog_refresh`); one hour when not given. Never zero.
     pub catalog_refresh: Duration,
@@ -64,6 +80,8 @@ impl Default for ProviderLimits {
             max_price_cents_per_hour: None,
             max_machines: None,
             max_spot_machines: None,
+            quota_backoff: DEFAULT_QUOTA_BACKOFF,
+            acquire_retry: DEFAULT_ACQUIRE_RETRY,
             catalog_refresh: DEFAULT_CATALOG_REFRESH,
             offer_cooldown: DEFAULT_OFFER_COOLDOWN,
         }
@@ -112,6 +130,8 @@ pub(super) fn read(
             max_price_cents_per_hour: at_least_one(&mut s, "max_price_cents_per_hour")?,
             max_machines: at_least_one(&mut s, "max_machines")?,
             max_spot_machines: s.integer("max_spot_machines")?,
+            quota_backoff: s.duration_or("quota_backoff", DEFAULT_QUOTA_BACKOFF)?,
+            acquire_retry: s.duration_or("acquire_retry", DEFAULT_ACQUIRE_RETRY)?,
             catalog_refresh: s.duration_or("catalog_refresh", DEFAULT_CATALOG_REFRESH)?,
             offer_cooldown: s.duration_or("offer_cooldown", DEFAULT_OFFER_COOLDOWN)?,
         };
