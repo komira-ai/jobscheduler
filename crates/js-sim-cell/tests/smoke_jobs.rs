@@ -1,5 +1,5 @@
-//! The smoke family over both fronts: every smoke scenario of the core (`smoke.rs`), run
-//! once over the lease front and once over the job front ([`Scenario::over_jobs`]: the
+//! The smoke family over the job front: every smoke scenario of the core (`smoke.rs`, which
+//! runs them over the lease front), run over the job front ([`Scenario::over_jobs`]: the
 //! server serves the job service too, its agents speak the per-job messages, and the client
 //! submits each unit of work as a job), under every invariant of `Invariant::ALL`; and the
 //! two negative cases of the per-job agents, each with its correct twin, on the smoke
@@ -11,15 +11,14 @@
 //! smoke shape runs eight jobs at once where it runs one lease.
 //!
 //! Sizes, in agent requests a seed:
-//! - a hundred hosts beating every 30 s for 3,600 s: 12,000, over [`BURST_SEEDS`] seeds
-//!   per front; over the job front its quiet end is [`BURST_JOBS_SETTLE`] rather than an
-//!   hour, which keeps the end check (every run ends long before) and leaves out the hour
-//!   of a hundred hosts beating with nothing to do, each of whose heartbeats the server
-//!   answers with a read of the job tables;
-//! - the lossy wire: about 8,400 (`cell/lossy_wire.rs`), over [`LOSSY_SEEDS`] seeds per
-//!   front;
+//! - a hundred hosts beating every 30 s for the runs and [`BURST_JOBS_SETTLE`], about
+//!   2,000 heartbeats over the first 600 s, over [`BURST_SEEDS`] seeds; its quiet end is
+//!   600 s rather than `smoke.rs`'s hour, which keeps the end check (every run ends long
+//!   before) and leaves out the hour of a hundred hosts beating with nothing to do, each of
+//!   whose heartbeats the server answers with a read of the job tables;
+//! - the lossy wire: about 8,400 (`cell/lossy_wire.rs`), over [`LOSSY_SEEDS`] seeds;
 //! - the partition: twenty hosts beating every 5 s for 1,920 s, about 7,700, over
-//!   [`CUT_SEEDS`] seeds per front;
+//!   [`CUT_SEEDS`] seeds;
 //! - each negative case and its twin: two hosts beating every second for about two
 //!   minutes, about 250, over [`REPEAT_SEEDS`] seeds.
 
@@ -42,7 +41,6 @@ const BURST_RUN: Duration = Duration::from_secs(300);
 const BURST_GIVE_UP: Duration = Duration::from_secs(2_400);
 const BURST_INTERVAL: Duration = Duration::from_secs(30);
 const BURST_GRACE: Duration = Duration::from_secs(90);
-const BURST_SETTLE: Duration = Duration::from_secs(3_600);
 const BURST_JOBS_SETTLE: Duration = Duration::from_secs(600);
 const BURST_SEEDS: u64 = 1;
 
@@ -71,25 +69,8 @@ const REPEAT_GRACE: Duration = Duration::from_secs(3);
 const REPEAT_SETTLE: Duration = Duration::from_secs(120);
 const REPEAT_SEEDS: u64 = 2;
 
-/// Which front a scenario runs over.
-#[derive(Clone, Copy)]
-enum Over {
-    Leases,
-    Jobs,
-}
-
-/// Both fronts.
-const FRONTS: [Over; 2] = [Over::Leases, Over::Jobs];
-
-/// `scenario` over `front`.
-fn over(scenario: Scenario, front: Over) -> Scenario {
-    match front {
-        Over::Leases => scenario,
-        Over::Jobs => scenario.over_jobs(),
-    }
-}
-
-/// `smoke.rs`'s hundred hosts settling four hundred runs.
+/// `smoke.rs`'s hundred hosts settling four hundred runs, with the quiet end
+/// [`BURST_JOBS_SETTLE`].
 fn a_hundred_hosts_settle_four_hundred_runs() -> Scenario {
     Scenario::new("a_hundred_hosts_settle_four_hundred_runs")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
@@ -107,7 +88,7 @@ fn a_hundred_hosts_settle_four_hundred_runs() -> Scenario {
             BURST_RUNS as usize,
             HowEnded::Succeeded,
         ))
-        .settle_within(BURST_SETTLE)
+        .settle_within(BURST_JOBS_SETTLE)
 }
 
 /// `smoke.rs`'s partition of ten agents that heals.
@@ -126,40 +107,34 @@ fn a_partition_of_ten_agents_that_heals_settles_every_run() -> Scenario {
         .settle_within(CUT_SETTLE)
 }
 
-/// Proves that every smoke scenario of the core holds over either front: a hundred hosts
+/// Proves that every smoke scenario of the core holds over the job front: a hundred hosts
 /// settle four hundred runs, all succeeded; a lossy agent wire settles every item, with a
 /// result sent again because its acknowledgement was lost; and a partition of ten agents
 /// that heals settles every item; each under every invariant, the five job invariants too.
-/// Over the job front, red for a server that books a job twice or reuses an allocation id
+/// Red for a server that books a job twice or reuses an allocation id
 /// (`one-allocation-per-job`), frees an allocation on silence (`freed-only-when-confirmed`),
 /// sends a start before it commits the allocation (`no-start-without-allocation`), stores a
 /// resent result twice
 /// (`result-kept-until-acknowledged`), or loses or fails jobs (the expected count of
 /// successes).
 ///
-/// The six runs are independent cells, each built and run on a thread of its own, so they
+/// The three runs are independent cells, each built and run on a thread of its own, so they
 /// overlap in time; a run that fails panics its thread, and the scope fails the test.
 #[test]
 fn smoke_scenarios_run_over_the_job_front() {
     std::thread::scope(|scope| {
-        for front in FRONTS {
-            scope.spawn(move || {
-                let burst = over(a_hundred_hosts_settle_four_hundred_runs(), front);
-                let burst = match front {
-                    Over::Leases => burst,
-                    Over::Jobs => burst.settle_within(BURST_JOBS_SETTLE),
-                };
-                burst.run_seeds(BURST_SEEDS);
-            });
-            scope.spawn(move || {
-                let lossy = lossy_wire::a_lossy_agent_wire_settles_every_run();
-                over(lossy, front).run_seeds(LOSSY_SEEDS);
-            });
-            scope.spawn(move || {
-                let cut = a_partition_of_ten_agents_that_heals_settles_every_run();
-                over(cut, front).run_seeds(CUT_SEEDS);
-            });
-        }
+        scope.spawn(|| {
+            let burst = a_hundred_hosts_settle_four_hundred_runs();
+            burst.over_jobs().run_seeds(BURST_SEEDS);
+        });
+        scope.spawn(|| {
+            let lossy = lossy_wire::a_lossy_agent_wire_settles_every_run();
+            lossy.over_jobs().run_seeds(LOSSY_SEEDS);
+        });
+        scope.spawn(|| {
+            let cut = a_partition_of_ten_agents_that_heals_settles_every_run();
+            cut.over_jobs().run_seeds(CUT_SEEDS);
+        });
     });
 }
 
