@@ -33,7 +33,7 @@ fn hello_with(host: &Host, extra: &[String], machine: FakeMachine) -> (Ran, Valu
 }
 
 /// The VM flags over a driver binary and a store with a base image, both in `dir`.
-fn vm_flags(dir: &Scratch) -> Vec<String> {
+pub(super) fn vm_flags(dir: &Scratch) -> Vec<String> {
     let driver = dir.write("js-vmm", "#!/bin/sh\n", 0o755);
     let store = private(dir, "vm-store");
     fs::create_dir(dir.path("vm-store").join("base")).unwrap();

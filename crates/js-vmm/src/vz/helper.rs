@@ -7,7 +7,7 @@
 //! thread only waits on channels; it is never needed by the framework.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -170,9 +170,16 @@ fn bridge_connection(fd: RawFd, socket: &Path) -> Result<(), String> {
         .map_err(|e| describe_io(&format!("connect {}", socket.display()), e))?;
     let mut host_in = host.try_clone().map_err(|e| describe_io("dup host", e))?;
     // SAFETY: `fd` is open for as long as the caller's connection object lives, which is
-    // until this returns; `ManuallyDrop` stops this `File` closing it (the connection
-    // object owns it). Only duplicates of it are used below.
-    let guest = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    // until this returns, and it is only borrowed here to be duplicated: the duplicate is
+    // the bridge's own, and the connection object still owns and closes `fd`.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    // The vsock connection is a stream socket: read, write, duplicate and `shutdown(2)` are
+    // the calls the bridge makes, and they are the same for it as for a Unix one.
+    let guest = UnixStream::from(
+        borrowed
+            .try_clone_to_owned()
+            .map_err(|e| describe_io("dup guest", e))?,
+    );
     let mut guest_in = guest.try_clone().map_err(|e| describe_io("dup guest", e))?;
     let mut guest_out = guest.try_clone().map_err(|e| describe_io("dup guest", e))?;
     let mut host_out = host;
@@ -181,8 +188,8 @@ fn bridge_connection(fd: RawFd, socket: &Path) -> Result<(), String> {
         let _ = host_out.shutdown(std::net::Shutdown::Both);
     });
     let _ = std::io::copy(&mut host_in, &mut guest_out);
-    // SAFETY: `shutdown` on a descriptor that is open (see above) only ends its traffic.
-    unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+    // Ends the guest's side too, which wakes the copy to the host.
+    let _ = guest.shutdown(std::net::Shutdown::Both);
     let _ = to_host.join();
     Ok(())
 }

@@ -6,6 +6,7 @@
 mod agent;
 mod helper;
 mod lifecycle;
+mod rescue;
 mod runtime;
 mod split;
 
