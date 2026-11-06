@@ -31,6 +31,7 @@ mod e2e;
 mod exclusive;
 mod facts;
 mod flags;
+mod flags_file;
 #[cfg(target_os = "linux")]
 mod helper_modes;
 #[cfg(target_os = "linux")]

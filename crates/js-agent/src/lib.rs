@@ -240,6 +240,14 @@
 //! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
 //! around any [`Quiesce`], for a host driven in-thread.
 //!
+//! # Flags in a file
+//!
+//! `--flags-file <PATH>` (or `--flags-file=<PATH>`) is replaced, before the other flags are
+//! read, by the words of the file, one flag per line; see [`flags_file`] for the rules of the
+//! file (owner, mode, size, form). It is for a package unit that is the same on every host
+//! and takes the host's `--server` and `--pool` from `/etc/js-agent/flags`. The flag may be
+//! given once, and a flags file may not name another.
+//!
 //! # Secrets
 //!
 //! The join token is read from its file by `js-client`, held there, and sent in the
@@ -269,6 +277,7 @@ pub mod disk;
 pub mod egress;
 mod exclusive;
 mod facts;
+pub mod flags_file;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 mod host;
@@ -636,6 +645,9 @@ fn execute(
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> Result<(), Failure> {
+    // `--flags-file PATH` is replaced by the file's words before anything else reads the
+    // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
+    let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
     // A removed flag is refused by name with what replaces it, before clap would call it
     // unknown, and before anything is read or the agent registers.
     if let Some(refusal) = cli::removed_flag(&args) {
