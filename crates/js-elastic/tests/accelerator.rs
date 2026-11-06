@@ -64,8 +64,8 @@ fn asking(name: &str, count: u32) -> Demand {
 }
 
 /// The three A100 offers: 80 GB SXM4 and 40 GB SXM4 by their agent spellings, and a 40 GB
-/// PCIe one as a provider states it (the table has no PCIe spelling read from a source
-/// yet, so the provider's translation names the family and the facts itself).
+/// PCIe one built by hand, as a provider states it when it gives the family and the facts
+/// without a variant spelling.
 fn a100s() -> [Offer; 3] {
     let pcie = Accelerator {
         vendor: Vendor::parse("nvidia").unwrap(),

@@ -61,6 +61,9 @@ fn state(dir: &TestDir, agents: bool, jobs: Option<Arc<crate::job_store::ServerJ
     Shared::new(table, token(), side)
 }
 
+/// The ceiling the service is built with: one hour, so that it differs from the default.
+const WALL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 fn scratch(name: &str) -> TestDir {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/job_wiring");
     TestDir::under(root, name)
@@ -76,7 +79,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
     let dir = scratch("one_handle");
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
-    let api = from_server(&state).expect("the server holds a job store");
+    let api = from_server(&state, WALL).expect("the server holds a job store");
     let held = state.agents().unwrap().jobs.as_ref().unwrap();
     assert!(Arc::ptr_eq(&api.jobs, held));
 
@@ -98,6 +101,12 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
         api.read.silence.is_some(),
         "GetJob would show no host silence"
     );
+    assert_ne!(
+        api.submit,
+        super::submit::Ctx::default(),
+        "SubmitJob is not served"
+    );
+    assert_eq!(api.submit.ceiling(), Some(WALL));
 }
 
 /// Asserts that no job service is built from a server that holds no job store: one whose
@@ -106,9 +115,9 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
 #[test]
 fn without_a_job_store_the_server_builds_no_job_service() {
     let dir = scratch("no_store");
-    assert!(from_server(&state(&dir, true, None)).is_none());
+    assert!(from_server(&state(&dir, true, None), WALL).is_none());
     let other = scratch("no_agents");
-    assert!(from_server(&state(&other, false, None)).is_none());
+    assert!(from_server(&state(&other, false, None), WALL).is_none());
 }
 
 /// The status, the `grpc-status` header (absent for a plain HTTP answer) and the body of
@@ -121,7 +130,7 @@ async fn answer(
     let dir = scratch("port");
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
-    let router = port(from_server(&state).unwrap(), token());
+    let router = port(from_server(&state, WALL).unwrap(), token());
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {
         request = request.header(header::CONTENT_TYPE, content_type);

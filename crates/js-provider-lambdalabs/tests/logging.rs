@@ -99,7 +99,7 @@ fn the_key_is_in_no_log_line() {
         shown.push_str(&format!("{:?}", api.get_instance(&id).map(|i| i.status)));
         let launch = LaunchRequest {
             region: "region-a".to_owned(),
-            instance_type: "gpu_1x_sample".to_owned(),
+            instance_type: "gpu_1x_h100_sxm5".to_owned(),
             ssh_key: "fixture-key".to_owned(),
             name: "js-0123456789ab-000000000001".to_owned(),
             tags: Vec::new(),

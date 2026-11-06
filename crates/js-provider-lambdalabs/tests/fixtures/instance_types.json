@@ -1,21 +1,21 @@
 {
   "data": {
-    "gpu_8x_example": {
+    "gpu_8x_h100_sxm5": {
       "instance_type": {
-        "name": "gpu_8x_example",
-        "description": "8x Example GPU (80 GB)",
-        "gpu_description": "Example GPU (80 GB)",
+        "name": "gpu_8x_h100_sxm5",
+        "description": "8x H100 (80 GB SXM5)",
+        "gpu_description": "H100 (80 GB SXM5)",
         "price_cents_per_hour": 1200,
         "specs": { "vcpus": 128, "memory_gib": 1800, "storage_gib": 6000, "gpus": 8 },
         "architecture": "x86_64"
       },
       "regions_with_capacity_available": []
     },
-    "gpu_1x_sample": {
+    "gpu_1x_h100_sxm5": {
       "instance_type": {
-        "name": "gpu_1x_sample",
-        "description": "1x Sample GPU (24 GB)",
-        "gpu_description": "Sample GPU (24 GB)",
+        "name": "gpu_1x_h100_sxm5",
+        "description": "1x H100 (80 GB SXM5)",
+        "gpu_description": "H100 (80 GB SXM5)",
         "price_cents_per_hour": 75,
         "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 },
         "architecture": "x86_64",

@@ -19,10 +19,7 @@ fn provider() -> LambdaProvider {
         NonZeroUsize::MIN,
     )
     .unwrap();
-    let table = OptionTable::parse(
-        "[[option]]\ninstance_type = \"gpu_1x_a10\"\ngpu_class = \"nvidia-a10\"\ngpus = 1\n",
-    )
-    .unwrap();
+    let table = OptionTable::parse("[[option]]\ninstance_type = \"gpu_1x_a10\"\n").unwrap();
     LambdaProvider::new(
         Arc::new(FakeLambda::new()),
         Arc::new(ManualClock::new()),

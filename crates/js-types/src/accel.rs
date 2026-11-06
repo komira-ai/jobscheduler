@@ -622,6 +622,22 @@ pub struct Family {
 /// The family of Apple silicon's integrated GPU, the class a Mac's agent reports.
 pub const APPLE_M: &str = "apple-m";
 
+/// The family of the NVIDIA A10. A provider crate names it through this constant, so the
+/// table stays the one place the name is spelt.
+pub const NVIDIA_A10: &str = "nvidia-a10";
+
+/// The family of the NVIDIA A100.
+pub const NVIDIA_A100: &str = "nvidia-a100";
+
+/// The family of the NVIDIA B200.
+pub const NVIDIA_B200: &str = "nvidia-b200";
+
+/// The family of the NVIDIA H100.
+pub const NVIDIA_H100: &str = "nvidia-h100";
+
+/// The family of the NVIDIA RTX A6000.
+pub const NVIDIA_RTX_A6000: &str = "nvidia-rtx-a6000";
+
 /// Every canonical family, sorted by name. This and [`ALIASES`] are the only place a
 /// canonical accelerator name is defined; a new accelerator is a new row in a release, and
 /// no flag, configuration key or environment variable adds or overrides one.
@@ -634,17 +650,27 @@ pub const FAMILIES: &[Family] = &[
     },
     // NVIDIA A10: `nvidia-smi` prints `NVIDIA A10`, the family name itself.
     Family {
-        name: "nvidia-a10",
+        name: NVIDIA_A10,
         vendor: Vendor::NVIDIA,
     },
     // NVIDIA A100, in SXM4 and PCIe forms with 40 or 80 GB.
     Family {
-        name: "nvidia-a100",
+        name: NVIDIA_A100,
+        vendor: Vendor::NVIDIA,
+    },
+    // NVIDIA B200: `nvidia-smi` prints `NVIDIA B200`, the family name itself.
+    Family {
+        name: NVIDIA_B200,
         vendor: Vendor::NVIDIA,
     },
     // NVIDIA H100, in SXM5 and PCIe forms.
     Family {
-        name: "nvidia-h100",
+        name: NVIDIA_H100,
+        vendor: Vendor::NVIDIA,
+    },
+    // NVIDIA RTX A6000: `nvidia-smi` prints `NVIDIA RTX A6000`, the family name itself.
+    Family {
+        name: NVIDIA_RTX_A6000,
         vendor: Vendor::NVIDIA,
     },
 ];
@@ -653,11 +679,18 @@ pub const FAMILIES: &[Family] = &[
 /// spellings read from a real source are rows; a spelling the table does not know passes
 /// through as its own model and matches only an identical one.
 pub const ALIASES: &[Alias] = &[
+    // `NVIDIA A100-PCIE-40GB`: A100 PCIe card with 40 GB HBM2 (NVIDIA A100 data sheet).
+    Alias {
+        spelling: "nvidia-a100-pcie-40gb",
+        family: NVIDIA_A100,
+        memory_gib: 40,
+        form_factor: FormFactor::Pcie,
+    },
     // `NVIDIA A100-SXM4-40GB`: A100 SXM4 module with 40 GB HBM2 (NVIDIA A100 data sheet).
     // The spelling is the agent spelling the design's alias table names for this variant.
     Alias {
         spelling: "nvidia-a100-sxm4-40gb",
-        family: "nvidia-a100",
+        family: NVIDIA_A100,
         memory_gib: 40,
         form_factor: FormFactor::Sxm,
     },
@@ -665,7 +698,7 @@ pub const ALIASES: &[Alias] = &[
     // `nvidia-smi` reports 81920 MiB). Read by the agent's fixtures.
     Alias {
         spelling: "nvidia-a100-sxm4-80gb",
-        family: "nvidia-a100",
+        family: NVIDIA_A100,
         memory_gib: 80,
         form_factor: FormFactor::Sxm,
     },
@@ -674,9 +707,16 @@ pub const ALIASES: &[Alias] = &[
     // is compared with). Read by the agent's fixtures.
     Alias {
         spelling: "nvidia-h100-80gb-hbm3",
-        family: "nvidia-h100",
+        family: NVIDIA_H100,
         memory_gib: 80,
         form_factor: FormFactor::Sxm,
+    },
+    // `NVIDIA H100 PCIe`: H100 PCIe card with 80 GB HBM2e (NVIDIA H100 data sheet).
+    Alias {
+        spelling: "nvidia-h100-pcie",
+        family: NVIDIA_H100,
+        memory_gib: 80,
+        form_factor: FormFactor::Pcie,
     },
 ];
 

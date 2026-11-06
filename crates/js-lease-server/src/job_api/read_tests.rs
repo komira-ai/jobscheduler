@@ -276,7 +276,7 @@ pub(super) fn json_of(body: &[u8]) -> Value {
 
 /// `body`, JSON, decoded as the message `name` by the proto3 JSON mapping and converted to
 /// `M`.
-fn from_json<M: Message + Default>(name: &str, body: &[u8]) -> M {
+pub(super) fn from_json<M: Message + Default>(name: &str, body: &[u8]) -> M {
     let pool = DescriptorPool::decode(js_proto::FILE_DESCRIPTOR_SET).expect("the set decodes");
     let descriptor = pool
         .get_message_by_name(name)

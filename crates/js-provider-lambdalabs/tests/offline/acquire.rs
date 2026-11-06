@@ -74,7 +74,7 @@ fn the_same_request_that_dry_run_stops_launches_once_when_live() {
     assert!(extras.is_empty());
     assert_eq!(held.acquire, "a");
     assert_eq!(held.status, HostStatus::Booting);
-    assert_eq!(held.offer, "gpu_1x_sample");
+    assert_eq!(held.offer, "gpu_1x_h100_sxm5");
     assert_eq!(held.zone.as_deref(), Some("region-a"));
     let stored = &rig.fake.instances()[0];
     assert_eq!(stored.id.host_ref(), held.id);
