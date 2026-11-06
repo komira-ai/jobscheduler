@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use js_elastic::{Claim, GpuClass, HostRef, HostStatus, Released};
+use js_elastic::{Claim, HostRef, HostStatus, Released};
 use js_scaler::{Action, Blocked, CooldownReason, Health, HostFacts, Mark, Phase, ReleaseResult};
 
 /// A rig as `registered` leaves it, driven on to the drain: the host has been quiet for
@@ -180,18 +180,18 @@ fn short(change: fn(&mut HostFacts)) -> (Rig, js_scaler::AcquirePlan) {
     (rig, plan)
 }
 
-/// Asserts that a hello below the offer in cpu, memory, gpus or gpu class (or with no
-/// class) condemns the host: it is drained, and marked for release, as soon as it is quiet,
-/// the pool waits out
+/// Asserts that a hello below the offer in cpu, memory, accelerator count or accelerator
+/// model (or with no accelerator) condemns the host: it is drained, and marked for release,
+/// as soon as it is quiet, the pool waits out
 /// `boot_fail_cooldown`, and a hello that meets or exceeds the offer does neither.
 #[test]
 fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
     let below: [fn(&mut HostFacts); 5] = [
         |h| shape(h).cpu_millis = 7999,
         |h| shape(h).memory_bytes = (64 << 30) - 1,
-        |h| shape(h).gpus = 0,
-        |h| shape(h).gpu_class = Some(GpuClass::parse("nvidia-h100").unwrap()),
-        |h| shape(h).gpu_class = None,
+        |h| shape(h).accelerator = accel("nvidia-a10", 0),
+        |h| shape(h).accelerator = accel("nvidia-h100", 1),
+        |h| shape(h).accelerator = None,
     ];
     for change in below {
         let (rig, _) = short(change);

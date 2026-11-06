@@ -4,11 +4,11 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use js_elastic::{CapacityProvider, GpuClass, Offer, PriceUnit, SchedulerId};
+use js_elastic::{CapacityProvider, Offer, PriceUnit, SchedulerId};
 use js_lease_server::bootstrap::{Fill, render};
 use js_lease_server::network::{DefaultMode, NetworkMode};
 use js_provider_lambdalabs::{ElasticConfig, FakeLambda, LambdaProvider, ManualClock, OptionTable};
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 
 use crate::support::{TEN_MINUTES, ctx, host, plan};
 
@@ -19,10 +19,7 @@ fn provider() -> LambdaProvider {
         NonZeroUsize::MIN,
     )
     .unwrap();
-    let table = OptionTable::parse(
-        "[[option]]\ninstance_type = \"gpu_1x_a10\"\ngpu_class = \"nvidia-a10\"\ngpus = 1\n",
-    )
-    .unwrap();
+    let table = OptionTable::parse("[[option]]\ninstance_type = \"gpu_1x_a10\"\n").unwrap();
     LambdaProvider::new(
         Arc::new(FakeLambda::new()),
         Arc::new(ManualClock::new()),
@@ -38,8 +35,11 @@ fn offer(disk_gib: u64) -> Offer {
         cpu_millis: 30_000,
         memory_bytes: 200 << 30,
         disk_bytes: disk_gib << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a10").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -47,6 +47,9 @@ fn offer(disk_gib: u64) -> Offer {
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

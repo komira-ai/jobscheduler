@@ -10,10 +10,11 @@ use js_lease::Settings;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, JOB_RETENTION_MUST, Limits, Placement, TlsFiles, Token,
-    parse_job_retention, parse_token,
+    BootMode, CpuSlack, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST, Placement,
+    TlsFiles, Token, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
+use crate::job_store::JobStoreSetup;
 use crate::rate::HelloLimit;
 use crate::usage_setup::{DEFAULT_HISTORY_RETENTION_DAYS, DEFAULT_PROFILE_STORE_BYTES};
 
@@ -55,6 +56,8 @@ const SERVER_KEYS: &[&str] = &[
     "max_spend_per_month_total",
     "max_spend_since_go_total",
     "job_retention",
+    "job_listen",
+    "max_job_wall",
 ];
 
 /// What the `[server]` table says.
@@ -79,6 +82,8 @@ pub(crate) struct Server {
     pub(crate) alerts: Option<AlertKeys>,
     /// `job_retention`: how long an ended job is kept; seven days unless the file sets it.
     pub(crate) job_retention: Retention,
+    /// `max_job_wall`: the most a submitted job's wall limit may be, when the file sets it.
+    pub(crate) max_job_wall: Option<Duration>,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -101,7 +106,8 @@ pub(crate) struct UsageKeys {
 }
 
 /// The keys of `[server]` that belong to agent registration, as the file gave them. They
-/// mean something only with a pool that registers agents.
+/// mean something only with a pool that registers agents. The job service is one of them:
+/// its store is held by the agent side, and its jobs run on hosts that register.
 pub(crate) struct AgentKeys {
     burst: Option<u32>,
     interval: Option<Duration>,
@@ -109,6 +115,7 @@ pub(crate) struct AgentKeys {
     placement: Option<Placement>,
     estimate_feed: Option<bool>,
     cpu_slack: Option<CpuSlack>,
+    job_listen: Option<SocketAddr>,
 }
 
 impl AgentKeys {
@@ -124,6 +131,7 @@ impl AgentKeys {
             ("placement", self.placement.is_some()),
             ("estimate_feed", self.estimate_feed.is_some()),
             ("cpu_slack", self.cpu_slack.is_some()),
+            ("job_listen", self.job_listen.is_some()),
         ];
         given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
     }
@@ -158,6 +166,19 @@ impl AgentKeys {
     /// absent one means ([`Placement::slack`]).
     pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
         self.cpu_slack
+    }
+
+    /// Where the job service is served, when the file turns it on.
+    pub(crate) fn job_listen(&self) -> Option<JobListen> {
+        let flag = "server.job_listen";
+        self.job_listen.map(|addr| JobListen { addr, flag })
+    }
+
+    /// The job store's setup when the file turns the job service on: named by its key, and
+    /// keeping an ended job for `retention`.
+    pub(crate) fn job_store(&self, retention: Retention) -> Option<JobStoreSetup> {
+        let flag = "server.job_listen";
+        self.job_listen.map(|_| JobStoreSetup { flag, retention })
     }
 }
 
@@ -211,6 +232,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         placement: read_placement(&mut s)?,
         estimate_feed: s.boolean("estimate_feed")?,
         cpu_slack: read_cpu_slack(&mut s)?,
+        job_listen: s.address("job_listen")?,
     };
     let usage = read_usage(&mut s)?;
     // The rule of `--estimate-feed`: with usage off there is nothing to estimate from.
@@ -220,6 +242,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let totals = super::budget::read_totals(&mut s)?;
     let alerts = read_alerts(&mut s)?;
     let job_retention = read_job_retention(&mut s)?;
+    let max_job_wall = read_max_job_wall(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -248,7 +271,18 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         totals,
         alerts,
         job_retention,
+        max_job_wall,
     })
+}
+
+/// The `max_job_wall` key, read as `--max-job-wall` is; `None` when the file does not give
+/// it. A refusal says what the value must be and does not repeat it.
+fn read_max_job_wall(s: &mut Section) -> Result<Option<Duration>, StartupError> {
+    let Some(text) = s.string("max_job_wall")? else {
+        return Ok(None);
+    };
+    let wall = parse_max_job_wall(&text).map_err(|_| s.fail("max_job_wall", MAX_JOB_WALL_MUST))?;
+    Ok(Some(wall))
 }
 
 /// The `job_retention` key, read as `--job-retention` is; [`Retention::DEFAULT`] when the

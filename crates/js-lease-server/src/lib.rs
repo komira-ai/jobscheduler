@@ -31,12 +31,13 @@
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
-//! the bearer token, is read from a file that only its owner can use.
+//! below has a key in the file, and a flag given beside `--config` is refused. The secrets,
+//! the bearer tokens, are read from files that only their owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
+//! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
@@ -47,7 +48,7 @@
 //! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets, and books the host it names among the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable): for a class that books part of a host, the hosts' load readings choose among those that still fit, then the host the lease fits most tightly, so the most booked first, equal hosts by a hash of the lease and the host; a lease that books a whole host is not scored and takes the first free host by id, as under `registry`. A start costs time in the open hosts plus their leases, under the registry's lock; the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings (the two windows its load is read from), and the start is counted. A class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room (CPU up to `--cpu-slack` over a host's cores) and makes the booking. The pool's `memory_schedulable_percent` is the scheduler's rule under this placement: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; a request above the percent still fits no host (`no-fit`), and `GET /v1/hosts` still shows the cut memory as `shape.memory_bytes`, beside the percent. A request the scheduler cannot describe is booked on the first host with room for it within the pool's memory percent (none if no host has, and the start answers `no-capacity`); one the scheduler places nowhere is booked nowhere (`no-capacity`); each is counted and logged. A host a whole-node request has set aside takes, under `js-sched`, a lease of the pool's `share_class` (not a probe) only as backfill: when its max wall time ends, with a minute to spare, by the end of the host's tail as the mark took it, a wall time above `server.max_lease_wall` never does, and a host whose tail is unknown or past takes none; the registry's own placement keeps such a host for its request alone. The flag is refused at start for a pool whose capabilities name no `arch`. Leases restored from the lease file are seated with the resources it records whatever the flag says now. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler of `--placement js-sched` may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. The registry's book lets the leases sharing a host book that much CPU and no more of anything else. Needs `--placement js-sched` (refused naming it otherwise) and `--agent-pool-config` |
 //! | `--estimate-feed` | off by default. When a whole-node request has to pick a host to drain, each lease is costed at its estimated end, cut to its max-wall bound: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. A lease with no such run is costed at its bound, as every lease is without the flag, and a lease with neither (no such run, and a max wall so long that its end saturates) ranks its host after every host whose tail is known. A usage sink that keeps no curves leaves every lease at its bound. A lease restored from the lease file keeps the start and the bound the file records (its acquire, or for a whole-node lease the moment it was ready). Needs `--agent-pool-config`; not with `--usage-off` |
-//! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
+//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of the lease routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`) and the file of its own token, checked as `--token-file`'s is. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
@@ -62,11 +63,12 @@
 //! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
 //! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //! | `--history-retention-days <n>` | how many days the record of each ended allocation (today a lease's booking) is kept in the usage file, `90`; the daily prune removes older ones, and a record that ended exactly that long ago is kept; `0` is refused. Not a cap on tenants or cost (`docs/usage-store.md`) |
-//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--job-retention <duration>` | how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, `7d`: a whole count of days (`7d`) or a duration (`36h`, `90m`), at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag. Read once at start: it is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+//! | `--max-job-wall <duration>` | the most a submitted job's wall limit may be, `30d` (the job service's `DEFAULT_MAX_JOB_WALL`, the longest `server.max_lease_wall` accepts): a whole count of days (`30d`) or a duration (`12h`, `90m`), at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag. A job asking for more is refused `wall-time-above-ceiling`. Read once at start; it does not read `server.max_lease_wall`. Without `--job-listen` it is checked and kept, and nothing reads it |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
-//! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed` and
-//! `--cpu-slack` need `--agent-pool-config`, and are refused without it.
+//! hello limit flags, `--require-host-credential`, `--placement`, `--estimate-feed`,
+//! `--cpu-slack` and `--job-listen` need `--agent-pool-config`, and are refused without it.
 //!
 //! # The configuration file
 //!
@@ -75,7 +77,7 @@
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
 //! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
-//! `join_token_file`, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
+//! `join_token_file`, a `--client-token` a `[[client]]` table, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
 //! value of the file; a syntax error says the line. Nothing is checked over the network
@@ -109,6 +111,9 @@
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
 //! # job_retention ("7d"): the flag's name, default and rules
+//! # max_job_wall ("30d"): the flag's name, default and rules
+//! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
+//! # tls_cert and tls_key); refused unless a pool registers agents
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
 //! # scaler is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every
@@ -270,6 +275,8 @@
 //! max_price_cents_per_hour = 200
 //! max_machines             = 2   # at most the pool's
 //! max_spot_machines        = 1   # at most this table's max_machines
+//! catalog_refresh          = "1h" # default 1h; how long the cached catalog is used
+//! offer_cooldown           = "1h" # default 1h; how long a cooled-down offer is passed over
 //! ```
 //!
 //! A pool with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables:
@@ -282,10 +289,16 @@
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
-//! below), and `path_grace` is how long a whole-node request of the pool waits once no host
-//! could serve it (the registry's `regain_grace` for that pool). Nothing enforces the rest
-//! yet: the job lifecycle ticks (design 6.1) will enforce `max_queue_wait` and
-//! `start_timeout`, and the pick of an offer (design 5.6, pass 2) the limits.
+//! below); `catalog_refresh` (a positive duration, one hour when not given; zero is
+//! refused) is how long the provider's cached catalog is used before the tick fetches it
+//! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
+//! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
+//! whole-node request of the pool waits once no host could serve it (the registry's
+//! `regain_grace` for that pool). The job pass of the tick (design 6.1) ends a queued job of
+//! the job tables past the pool's `max_queue_wait` as `no-capacity`, and a placed or
+//! starting one past its `start_timeout` as `start-timeout` (a joined pool takes the
+//! defaults). The scaler's pick of an offer (design 5.6, pass 2) enforces
+//! `allowed_instance_types`, `max_price_cents_per_hour` and the provider's `max_machines`.
 //! [`Config::resolve_file`] answers the [`Resolved`] machine providers, platforms and pools
 //! of a file, and [`Resolved::describe`] prints them.
 //!
@@ -313,6 +326,32 @@
 //! `{"error": "<code>"}` (a 400 adds `"reason"`, which says what kind of fault it was and
 //! where the parser stopped, and never repeats a value of the request).
 //!
+//! # The job service
+//!
+//! With `--job-listen` (`server.job_listen`) the job service (`jobscheduler.v1.JobService`,
+//! crate `js-proto`) is served on a port of its own, off by default. One listener speaks
+//! HTTP/1.1 and HTTP/2 on it, whichever the client starts with: a request whose content type
+//! is `application/grpc` (with any suffix) goes to the gRPC service, every other request to
+//! its HTTP/JSON gateway (`js-api-gateway`, routes under `/v1/`, listed in
+//! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records; `docs/design/configuration.md`):
+//! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
+//! request 401 with an empty body. A request carries at most 64 KiB over either transport.
+//! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
+//! the registered hosts and the pool's catalog, committed before it answers; its wall limit
+//! held to `--max-job-wall`), `CancelJob`, and the reads. Every other call answers
+//! `UNIMPLEMENTED` (over HTTP, 501 `{"error":"unimplemented"}`) until it is served; the
+//! answers of each call are in `docs/http-gateway.md`. The port has the connection cap and the
+//! timeouts of the other listeners, and stops with them. The lease routes are not served on
+//! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
+//! routes than the lease server's of those names, so the two cannot share a port while both
+//! exist.
+//!
+//! The job store is a SQLite file beside the lease file, `<state file>.jobs`, owner-only: the
+//! single-node development backend. It moves into the shared store with the server's other
+//! state. The server opens it once and holds that one handle: the job service and the
+//! per-job heartbeat both read it. Without `--job-listen` no store is opened and no file is
+//! made.
+//!
 //! # Who may do what
 //!
 //! The server is single-tenant: there is one token, and so one trust domain. Whoever
@@ -327,7 +366,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none). A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` only to a server that has it. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start (a `whole-node` lease is always 202: it is listed `pending` until its host's agent reports it ready, then `held` with its expiry and end counted from that report, and is dropped if that takes longer than the pool's `prepare_timeout`, 600 s unless the pool file sets it: at that deadline the table asks the registry first, which ends a lease whose agent stayed silent as a failed prepare (counted against the request, the host excluded for `reserve_backoff`), and expires it itself only if the registry still has no answer at the tick after; a ready report within one tick of the deadline can lose to it, and the host is then restored); 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; `no-capable-host` is answered first, at admission, when no host and no machine provider's catalog could ever serve the request, and records nothing (see "Admission" below): a busy host or a catalog that cannot be read is not a refusal; 422 for a start-contract refusal (`wall-time-not-positive`, `wall-time-above-ceiling` (the `max_wall_seconds` is above `server.max_lease_wall`, when the file sets one), `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`); the body's `resources` take an optional `disk_bytes`, the scratch disk the lease books (above zero and at most 2^46 - 1, else 400 naming `disk_bytes`; left out or `null` books none); `resources` also take an optional `accelerator` object `{vendor?, model?, count?, memory_per_device_gib?, interconnect?, form_factor?}` (`interconnect` is `kind>=size`, `form_factor` is `sxm` or `pcie`; every field is optional and one left out matches anything; an unknown key in it is a 400 naming it). `gpus` and `gpu_class` work as before and are resolved through the alias table: a full spelling (`nvidia-a100-sxm4-80gb`) pins its variant, and a family name (`nvidia-a100`) matches every variant of the family. A body with only `gpus` and `gpu_class` is stored with no capability added; the need they state (the class as the model, `gpus` as the count) is derived when the lease is matched, never written. The object is stored as `accelerator.*` capabilities of the request (`accelerator.vendor`, `.model`, `.count`, `.memory-gib`, `.interconnect`, `.form-factor`), merged into the body's own `capabilities`; a body capability with another value for a key the object states is a 400 naming that key. `accelerator.*` capabilities the body names itself narrow the need of `gpus` and `gpu_class` and never drop it: a model and a count they leave out are the pair's, so a vendor alone keeps a full spelling's pin. The object alone books `count` devices of `model` (the class is the model as written); beside `gpus` and `gpu_class`, the object and any `accelerator.model` or `accelerator.count` capability must agree with them, the model by family and variant after resolution (a family name does not agree with a full spelling of it, nor one variant with another) and the count exactly, else 400 naming `accelerator`. A `count` above zero (in the object or as `accelerator.count`) without a model is 400 naming `accelerator.model`; a count above the GPUs the resources book is 400 naming `accelerator.count`; any `accelerator.*` capability that is not valid is 400 naming `accelerator`; a vendor alone books no GPU. A body with no `accelerator` and no `accelerator.*` capability is read as before. A 400 that names an unknown field means an older server (there is no capability endpoint), so send `disk_bytes` and `accelerator` only to a server that has them. 409 `no-fit` is terminal (the request can never fit; read the error code), while `no-capacity` is the one to retry. Today only agent pools and static host files can book disk: elastic and joined pools have no `disk_bytes` key, so a request for disk there is refused (`no-capable-host` at admission when no host and no offer has the disk, else `no-fit`) and never waits. An optional `probe_host` (a host id, else 400 naming `probe_host`; left out or `null` is no probe) asks for a probe: the lease is placed on that host alone, past its cordon (`docs/design/placement.md`, 6.7), and only under `--placement js-sched`; 409 `probe-unsupported` when the server cannot place a probe (the default placement, the static pool, a whole-node class, a request or host with no scheduler form), else 409 `probe-host-unknown`, `probe-host-not-serving`, `probe-host-not-cordoned`, `probe-host-draining`, `probe-host-mismatch` or `probe-host-too-small` by the probe rule, at once and for good; a probe its host has no room for is `no-capacity`, never placed elsewhere. Send `probe_host` only to a server that has it, as `disk_bytes`. An optional `request_id` (1 to 63 bytes of `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`, else 400 naming `request_id`; left out or `null` is none, and the acquire is answered as without the field) names the request: see "Request ids" below; 409 `request-id-conflict` when the id names a lease acquired for another request. Send `request_id` only to a server that has it, as `disk_bytes` |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms, host_reserved?}`, where `host_reserved: true` says the host the lease holds is set aside for a waiting whole-node request (the renewal is not refused for it; the field is left out when false); 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -434,8 +473,13 @@
 //! the request
 //! (availability now is not asked) and the pool's `provider_limits` (an allowed instance
 //! type, at most the maximum price, an unpriced offer never under a price limit), with a
-//! share of machines above zero; a catalog that cannot be read may offer. The catalog is
-//! read once per admission, and only when no host is capable, with the table's lock let go.
+//! share of machines above zero; a catalog that has never been read may offer. Admission
+//! reads the catalog from the server's cache ([`Catalogs`]) under the table's lock and never
+//! calls the provider: the scaler's tick fetches a catalog before the first read, once its
+//! `catalog_refresh` has passed since the last one that came, and after the provider
+//! refused a launch for capacity or quota. A fetch that fails keeps the last catalog that
+//! came and is tried again at the next tick; until one has come (and after a restart) the
+//! catalog has never been read. A catalog that was read and is empty refuses.
 //! An admitted request is then started as before, so the start's own answers (`no-fit`,
 //! `no-capacity`, `unsupported-class` and the rest) are unchanged for it. This code was
 //! already in the documented 409 list, so a client needs no change: older servers answer it
@@ -490,9 +534,9 @@
 //! the grace period) and serving. A host that goes silent keeps its lease and reads
 //! `Unknown` until it is heard again or the lease ends by its ttl or a release.
 //!
-//! **Tokens.** The join tokens and the client token are different secrets: each is a 401
-//! with an empty body on the other's routes, and a join-token file that holds the client
-//! token is refused. A file may hold several tokens, so that a new one can be added
+//! **Tokens.** The join tokens and the client tokens are different secrets: each is a 401
+//! with an empty body on the other's routes, and a join-token file that holds the token of
+//! any client is refused. A file may hold several tokens, so that a new one can be added
 //! before an old one is removed; the file is read again at every tick, and a read that
 //! fails (a half-saved edit, a mode that is no longer private) keeps the tokens in force,
 //! is logged and is counted in [`Running::agent_errors`]. A host id is bound to the
@@ -545,7 +589,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image` or `native` (both is 422 `invalid-image`, neither is 400): `native` is `{program, args?, network?}`, a program the agent runs on the host with no container (an absolute path, or `@bundle/<entrypoint>` with `bundle`), `network` one of `off` (the default), `loopback` or `on`, and nothing else is read from it; `bundle?` (`name[:tag]@sha256:<64 lower case hex>`, only beside `native`: the toolchain the job runs from); `args?` (of a container run), `limits {cpu_millis, memory_bytes, disk_bytes?, pids?, wall_ms?}` (`disk_bytes`: the most scratch disk the run may use, above zero and below 2^46), `gpu_indices?`, `mounts?`, `files?` (`[{name, contents}]`: secret text files the agent writes before the container starts and mounts read-only at `/run/js-files/<name>`, mode 0444; at most 8, names `[A-Za-z0-9._-]` and unique, 16 KiB each and 64 KiB in all, no NUL; contained runs only; the list, a run's entry and the logs never show the contents), `isolation?`, `labels?`, `profile?` (a string of 1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a letter: the name of the profile a clean run's cost curve is learned under, the client's own key for the work the run does). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host), `files-unsupported` (the body has `files` and the host's agent did not report the `run-files` capability, so it would ignore them), `disk-unsupported` (the body has `limits.disk_bytes` and the host's agent did not report the `scratch-quota` capability, so it would run the job unbounded), `native-unsupported` (the body has `native` and the host's agent did not report `exec` as `sandbox-exec`), `bundle-unsupported` (the body has `bundle` and the host's agent reported no `bundle-root`, so it holds no bundle store); 422 `invalid-bundle` (a malformed bundle, or one beside no `native`), `bundle-digest-required` (a bundle without a digest), `invalid-program`, `limits-exceed-shape` (the limits are above the host's shape, or, for a lease of a class that shares its host, above what the lease booked; the runs of such a lease are also held to its booking together, in cores, memory, booked disk and the number of GPUs their indices name, so one past what is left of it is 409 `no-capacity`), `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-profile` (a `profile` that is not that grammar), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 `invalid-file` (a file is badly named, repeated, too large or holds a NUL, or there are too many) and 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image` or `native` (both is 422 `invalid-image`, neither is 400): `native` is `{program, args?, network?}`, a program the agent runs on the host with no container (an absolute path, or `@bundle/<entrypoint>` with `bundle`), `network` one of `off` (the default), `loopback`, `on` (the network behind the host's packet filter) or `open` (the network with no filter), and nothing else is read from it (the host's agent refuses a level above its `--native-network`); `bundle?` (`name[:tag]@sha256:<64 lower case hex>`, only beside `native`: the toolchain the job runs from); `args?` (of a container run), `limits {cpu_millis, memory_bytes, disk_bytes?, pids?, wall_ms?}` (`disk_bytes`: the most scratch disk the run may use, above zero and below 2^46), `gpu_indices?`, `mounts?`, `files?` (`[{name, contents}]`: secret text files the agent writes before the container starts and mounts read-only at `/run/js-files/<name>`, mode 0444; at most 8, names `[A-Za-z0-9._-]` and unique, 16 KiB each and 64 KiB in all, no NUL; contained runs only; the list, a run's entry and the logs never show the contents), `isolation?`, `labels?`, `profile?` (a string of 1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a letter: the name of the profile a clean run's cost curve is learned under, the client's own key for the work the run does). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host), `files-unsupported` (the body has `files` and the host's agent did not report the `run-files` capability, so it would ignore them), `disk-unsupported` (the body has `limits.disk_bytes` and the host's agent did not report the `scratch-quota` capability, so it would run the job unbounded), `native-unsupported` (the body has `native` and the host's agent did not report `exec` as `sandbox-exec`), `bundle-unsupported` (the body has `bundle` and the host's agent reported no `bundle-root`, so it holds no bundle store); 422 `invalid-bundle` (a malformed bundle, or one beside no `native`), `bundle-digest-required` (a bundle without a digest), `invalid-program`, `limits-exceed-shape` (the limits are above the host's shape, or, for a lease of a class that shares its host, above what the lease booked; the runs of such a lease are also held to its booking together, in cores, memory, booked disk and the number of GPUs their indices name, so one past what is left of it is 409 `no-capacity`), `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-profile` (a `profile` that is not that grammar), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 `invalid-file` (a file is badly named, repeated, too large or holds a NUL, or there are too many) and 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
 //! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list, with `log_tail {stdout, stderr, truncated}` when the host read the end of the job's output (a contained run that exited; at most 8 KiB of each stream; the list leaves it out); the text is the job's own, returned as written to whoever can read the run, so a task must not print secrets; it is untrusted bytes (it may hold ANSI escapes, U+202E or NUL), so a consumer that prints it to a terminal must strip control characters; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
@@ -757,6 +801,7 @@ mod api;
 pub mod bootstrap;
 mod brake_api;
 mod capacity;
+mod catalogs;
 mod checks;
 mod config;
 mod cordon;
@@ -773,10 +818,13 @@ mod job_alloc;
     not(test),
     expect(
         dead_code,
-        reason = "the job service listener mounts the job service; until it lands only tests do"
+        reason = "the calls read the service's fields and the group builders, once each group is served; until then only tests do"
     )
 )]
 mod job_api;
+mod job_expiry;
+mod job_loss;
+mod job_pass;
 mod job_start;
 mod job_store;
 mod join_api;
@@ -819,6 +867,7 @@ use tokio::sync::mpsc;
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
+pub use catalogs::Catalogs;
 pub use config::{
     BootMode, Cli, Config, CpuSlack, CpuSlackError, Limits, MIN_TOKEN_BYTES, Placement, TlsFiles,
     Token, is_private_address, parse_duration,

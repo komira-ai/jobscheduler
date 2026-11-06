@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_agent_wire::{HeldJob, HeldState, LogGrant, LogReport, NetworkCeiling, Outcome};
 use js_jobs::{JobId, JobState, LogLengths, RandomIds, Retention};
@@ -72,7 +73,7 @@ async fn the_host_credential_is_renewed_before_half_its_life_is_gone_and_deliver
     let first = agent.grant.clone().unwrap();
     assert_eq!(first.expires_at_ms, START_MS + 2 * HALF_LIFE_MS);
 
-    rig.advance(HALF_LIFE_MS);
+    rig.advance(Duration::from_millis(HALF_LIFE_MS));
     tick(&rig).await;
     logs.settle().await;
     assert_eq!(
@@ -80,7 +81,7 @@ async fn the_host_credential_is_renewed_before_half_its_life_is_gone_and_deliver
         1,
         "renewed with half its life left"
     );
-    rig.advance(1);
+    rig.advance(Duration::from_millis(1));
     tick(&rig).await;
     logs.settle().await;
     assert_eq!(
@@ -125,7 +126,7 @@ async fn a_host_without_the_capability_gets_no_grant() {
     rig.join("host-a", false).await;
     rig.join("host-b", true).await;
     logs.settle().await;
-    rig.advance(5_000);
+    rig.advance(Duration::from_millis(5_000));
     tick(&rig).await;
     logs.settle().await;
     let incapable = FakeAgent::uploading("host-a");
@@ -141,13 +142,13 @@ async fn a_host_without_the_capability_gets_no_grant() {
     assert_eq!(logs.minter.calls("host-b"), 2);
     // A hello again (once the host fell silent, as an agent that restarted) with the
     // capability, while the host holds a credential, mints nothing.
-    rig.advance(grace + 1);
+    rig.advance(Duration::from_millis(grace + 1));
     rig.join("host-b", true).await;
     logs.settle().await;
     assert_eq!(logs.minter.calls("host-b"), 2);
     assert!(logs.grants.credential_for("host-b").is_some());
 
-    rig.advance(grace + 1);
+    rig.advance(Duration::from_millis(grace + 1));
     rig.join("host-b", false).await;
     assert_eq!(logs.grants.credential_for("host-b"), None);
     assert_eq!(rig.beat(&capable).await.unwrap().log_grant, None);
@@ -320,7 +321,7 @@ async fn the_credential_is_forgotten_when_the_host_leaves_not_when_a_job_ends() 
     agent.take(&reply);
     rig.beat(&agent).await.unwrap();
     assert!(logs.grants.credential_for("host-a").is_some());
-    rig.advance(HALF_LIFE_MS + 1);
+    rig.advance(Duration::from_millis(HALF_LIFE_MS + 1));
     tick(&rig).await;
     logs.settle().await;
     assert_eq!(logs.minter.calls("host-a"), 2);
@@ -331,7 +332,7 @@ async fn the_credential_is_forgotten_when_the_host_leaves_not_when_a_job_ends() 
     rig.agents.registry.remove(&host).unwrap();
     tick(&rig).await;
     assert_eq!(logs.grants.credential_for("host-a"), None);
-    rig.advance(HALF_LIFE_MS + 1);
+    rig.advance(Duration::from_millis(HALF_LIFE_MS + 1));
     tick(&rig).await;
     logs.settle().await;
     assert_eq!(logs.minter.calls("host-a"), 2);
@@ -340,16 +341,16 @@ async fn the_credential_is_forgotten_when_the_host_leaves_not_when_a_job_ends() 
     let (mut rig, logs) = logging_rig("logs_forgotten_silent", grace);
     rig.join("host-a", true).await;
     logs.settle().await;
-    rig.advance(grace);
+    rig.advance(Duration::from_millis(grace));
     tick(&rig).await;
     assert!(
         logs.grants.credential_for("host-a").is_some(),
         "lost at its grace"
     );
-    rig.advance(1);
+    rig.advance(Duration::from_millis(1));
     tick(&rig).await;
     assert_eq!(logs.grants.credential_for("host-a"), None);
-    rig.advance(HALF_LIFE_MS);
+    rig.advance(Duration::from_millis(HALF_LIFE_MS));
     tick(&rig).await;
     logs.settle().await;
     assert_eq!(logs.minter.calls("host-a"), 1);
@@ -548,5 +549,5 @@ async fn no_secret_reaches_a_log_a_status_page_or_an_error() {
 
 /// The rig's clock, as the status and the grants read it.
 fn status_clock(rig: &Rig) -> SharedClock {
-    SharedClock::new(rig.clock.clone())
+    rig.shared.clone()
 }

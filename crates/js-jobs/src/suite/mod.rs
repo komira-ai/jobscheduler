@@ -32,6 +32,7 @@ mod lifecycle;
 mod logs;
 mod paging;
 mod placement;
+mod queue;
 mod races;
 mod retention;
 mod rows;
@@ -45,6 +46,7 @@ pub use lifecycle::*;
 pub use logs::*;
 pub use paging::*;
 pub use placement::*;
+pub use queue::*;
 pub use races::*;
 pub use retention::*;
 pub use rows::*;
@@ -57,6 +59,7 @@ where
     same_id_same_job_returns_the_existing_row(backend);
     same_id_different_job_is_a_conflict(backend);
     a_priority_only_difference_is_the_same_job(backend);
+    a_retry_by_another_client_keeps_the_first(backend);
     the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
     minted_ids_do_not_repeat_across_instances(backend);
@@ -71,6 +74,7 @@ where
     a_requeued_job_gets_a_new_allocation(backend);
     a_repeated_allocation_id_is_drawn_again(backend);
     booked_on_sums_the_live_allocations_of_a_host(backend);
+    placement_books_the_jobs_host_ports(backend);
     live_on_lists_the_live_allocations_of_one_host(backend);
     end_and_free_is_one_commit(backend);
     requeue_loses_to_a_change_of_either_row(backend);
@@ -104,6 +108,7 @@ where
     restart_keeps_results(backend);
     a_result_survives_the_end_of_its_allocation(backend);
     retention_ends_are_raised_at_boot_after_a_long_outage(backend);
+    a_boot_raises_floors_and_retention_ends_in_one_commit(backend);
     retention_uses_the_injected_clock(backend);
     the_result_and_the_state_change_commit_together(backend);
     an_overlong_tail_is_cut_on_a_character_boundary(backend);
@@ -113,6 +118,9 @@ where
     the_tick_deletes_in_batches_and_leaves_what_it_cannot_read(backend);
     a_failed_sweep_or_raise_changes_nothing(backend);
     a_sweep_that_loses_to_a_raise_is_stale(backend);
+    queued_lists_the_queue_in_order(backend);
+    live_allocations_lists_every_booked_or_releasing_allocation(backend);
+    a_free_with_rows_beside_it_is_one_commit(backend);
     the_log_lengths_are_kept_with_the_result_and_swept_with_it(backend);
 }
 
@@ -135,6 +143,7 @@ macro_rules! job_store_tests {
             same_id_same_job_returns_the_existing_row,
             same_id_different_job_is_a_conflict,
             a_priority_only_difference_is_the_same_job,
+            a_retry_by_another_client_keeps_the_first,
             the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
             minted_ids_do_not_repeat_across_instances,
@@ -149,6 +158,7 @@ macro_rules! job_store_tests {
             a_requeued_job_gets_a_new_allocation,
             a_repeated_allocation_id_is_drawn_again,
             booked_on_sums_the_live_allocations_of_a_host,
+            placement_books_the_jobs_host_ports,
             live_on_lists_the_live_allocations_of_one_host,
             end_and_free_is_one_commit,
             requeue_loses_to_a_change_of_either_row,
@@ -182,6 +192,7 @@ macro_rules! job_store_tests {
             restart_keeps_results,
             a_result_survives_the_end_of_its_allocation,
             retention_ends_are_raised_at_boot_after_a_long_outage,
+            a_boot_raises_floors_and_retention_ends_in_one_commit,
             retention_uses_the_injected_clock,
             the_result_and_the_state_change_commit_together,
             an_overlong_tail_is_cut_on_a_character_boundary,
@@ -191,6 +202,9 @@ macro_rules! job_store_tests {
             the_tick_deletes_in_batches_and_leaves_what_it_cannot_read,
             a_failed_sweep_or_raise_changes_nothing,
             a_sweep_that_loses_to_a_raise_is_stale,
+            queued_lists_the_queue_in_order,
+            live_allocations_lists_every_booked_or_releasing_allocation,
+            a_free_with_rows_beside_it_is_one_commit,
             the_log_lengths_are_kept_with_the_result_and_swept_with_it,
         );
     };
@@ -234,6 +248,7 @@ impl<S: Store> Rig<S> {
                 id: Some(job_id(text)),
                 spec,
                 priority: 0,
+                client: None,
             })
             .expect("a fresh job is recorded");
         assert!(inserted.created, "a fresh job is created");

@@ -7,12 +7,12 @@
 //! move together in [`Rig::advance`]); nothing sleeps, nothing measures elapsed time and
 //! nothing reaches a real cloud.
 
-use js_elastic::{GpuClass, Offer, PriceUnit, RefusalCode};
+use js_elastic::{Offer, PriceUnit, RefusalCode};
 use js_elastic_fake::{Bill, Billing, Call, ElasticFake, FakeClock, Step};
 use js_provider::{Pool, StartAck, StopAck};
 use js_provider_lambdalabs::Call as LambdaCall;
 use js_scaler::{Blocked, Phase};
-use js_types::{ExecMode, LeaseId};
+use js_types::{ExecMode, LeaseId, Model, accelerator_of};
 
 use crate::lambda_e2e_support::Rig;
 use crate::scaler_support::{account, elastic_cloud, spec, start, text_with};
@@ -29,8 +29,11 @@ fn offer() -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a100").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -38,6 +41,9 @@ fn offer() -> Offer {
         price_cents_per_hour: Some(PRICE),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

@@ -85,8 +85,9 @@ Deviations a reviewer should see (each is also under Open questions 20):
 - Requirement 14 says "elastic pools" (plural). The first slice serves one registering pool because
   `Registry::new` takes one `PoolConfig` (`crates/js-registry/src/registry.rs`). `js-scaler`
   takes a list of pools; the registry is the limit (6.5, PR 12).
-- Requirement 13: the gpu class comes from a `types` row the operator writes, not the catalog (3.5),
-  and the "about ten lines" of requirement 10 depend on that row (4.1).
+- Requirement 13: the GPU facts of a Lambda type come from the provider crate's table in code, not
+  from the catalog's free text (3.5); a type the table does not know cannot be used until a
+  release adds it.
 - Requirement 8: "single-use" holds for registration only until the Welcome credential exists (7.2).
   The credential is in the first slice, before any live launch.
 - Requirements 6 and 9: modes are `default` and `tailscale` only; there is no status token, no new
@@ -226,20 +227,29 @@ offers from its catalog (`LambdaApi::instance_types`,
 `crates/js-provider-lambdalabs/src/api.rs`, which returns vcpus, memory, storage, gpus,
 architecture, price and regions with capacity now, `src/model.rs`).
 
-The pool is catalog-derived except for one value. The Lambda crate says the GPU is "free
-text. Do not parse it: the GPU class comes from the agent" (`model.rs`,
-`InstanceTypeOffer::gpu_description`). So the gpu class of a type is a row the operator
-writes (`types = [{ name, gpu, gpus }]`, today `gpu_class` in `options.rs`). This is a
-named narrowing of requirement 13. Two guards keep it honest:
+The pool is catalog-derived, and the GPU facts are the provider's code. The Lambda crate says
+the GPU is "free text. Do not parse it" (`model.rs`, `InstanceTypeOffer::gpu_description`), so
+`js-provider-lambdalabs` keeps a table in code (`src/catalog.rs`) keyed by Lambda's
+instance-type name: for each type, the canonical model (a family of the alias table in
+`js-types`, which `js-caps` re-exports; the crate spells none itself), the GPU count, the memory
+of one GPU, the form factor where Lambda states one, and the NVLink domain of an eight-GPU SXM
+board. The operator's `types` rows only select among those types: `types = [{ name }]` (the
+`[[option]]` rows of `options.rs` likewise hold `instance_type` alone). Guards:
 
-- A row that disagrees with the catalog on gpu count is skipped with a log line, as
-  `select.rs` does.
+- A listed type the API does not offer, one the table does not know, or one whose GPU count in
+  the API's catalog is not the table's is skipped with a log line and named by the `types` check;
+  the rows beside it are still offered.
+- A type the table knows and the rows do not list is never offered.
 - The first hello is compared with the offer (6.2, Booting): a host that reports a
   different class or less than its offer starts the boot-failure cooldown, and is drained
   and then released once it is quiet.
 
-If Lambda's catalog ever gives a machine-readable class, the `gpu` field becomes optional
-and the rest of the design is unchanged.
+A new Lambda type is a new row of the table, in a release; no configuration adds one.
+
+**Upgrading.** A configuration written for an earlier release, whose rows still carry `gpu` and
+`gpus` (`types`) or `gpu_class` and `gpus` (`[[option]]`), keeps working: the two fields are
+accepted, not checked and ignored, and each such row logs one warning naming its instance type.
+Remove them at leisure. Any other unknown field in a row is still refused.
 
 ### 3.6 Host contract (requirements 3, 4)
 
@@ -301,7 +311,7 @@ idle = "10m"                      # required of a pool with accelerators (6.4)
 max_age = "6h"                    # required of a pool with accelerators: a host is retired at this age, busy or not
 min_host_lifetime = "15m"         # required of a pool with accelerators: idle never releases a younger host
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
-             types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
+             types = [{ name = "gpu_1x_a10" }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth",
              tag = "tag:js-agent" }
 agent    = { x86_64 = { url = "https://pkgs.example.org/js-agent-x86_64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
@@ -313,9 +323,9 @@ firewall, the CA file. The service makes them. The agent download is the operato
 entry per CPU architecture the pool's offers have (7.3).
 Two things the ten lines depend on, stated plainly:
 
-- The `types` row names the gpu class by hand. Lambda's catalog gives the GPU as free text (3.5),
-  so requirement 13's "derivable from a catalog" is met for cpu, memory, disk, gpu count and price
-  and not for the class.
+- The `types` row names an instance type only. Lambda's catalog gives the GPU as free text (3.5),
+  so the GPU model, count and memory of each type come from the provider crate's table in code;
+  cpu, memory, disk and price come from the catalog.
 - Lambda's API requires exactly one ssh key name at launch, and the key is unused (requirement 8).
   An account with no key, or with several and no `ssh_key` line, makes the pool unavailable
   until a person acts. That is a hand-made input, against requirement 10. 5.3 and Open questions 3
@@ -365,8 +375,7 @@ boot_timeout = "15m"          # default
 launch = "plan"               # default; "live" spends money
 provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
              regions = ["us-west-1", "us-east-1"], ssh_key = "my-key",   # regions, ssh_key optional
-             types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 },
-                      { name = "gpu_2x_a10", gpu = "nvidia-a10", gpus = 2 }] }
+             types = [{ name = "gpu_1x_h100_sxm5" }, { name = "gpu_8x_h100_sxm5" }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth", tag = "tag:js-agent" }
 agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
              aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
@@ -405,7 +414,7 @@ message naming pool and field:
 | unknown table or field anywhere | `pool "gpu": provider.api_keyfile: unknown field; known: api_key_file, regions, types, ssh_key, api_url` |
 | unknown `provider.kind` or `network.kind` | `pool "gpu": provider.kind: "lambda" is not a kind; known: lambdalabs, static` |
 | credential file missing, not regular, not owned by the service user, or group/other readable | `pool "gpu": provider.api_key_file: mode 0644, must be 0600 or 0400` (the `read_token` rule in `config.rs`) |
-| type name not 1 to 64 lower case letters, digits or `_`; gpu class not in the agent's spelling (`GpuClass::parse`); a type twice; two gpu classes in one pool | `pool "gpu": provider.types[1].name: ...` |
+| type name not 1 to 64 lower case letters, digits or `_`; a type twice; a type the provider crate's table does not know (the pool would have no floor); types of two gpu models in one pool | `pool "gpu": provider.types[1].name: ...` |
 | elastic pool with accelerators (a floor of one GPU or more) without `idle`, `max_age` or `min_host_lifetime`, or under a `[server]` without `max_lease_wall`; `max_age` not longer than `boot_timeout`; `min_host_lifetime` longer than `max_age` | `pool "gpu": max_age: required of a pool with accelerators: ...` |
 | elastic pool without `max_instances`, `max_spend_per_hour` and `max_spend_per_day`; a spend value not a decimal with at most two places, or zero; a day cap below the hour cap | `pool "gpu": max_spend_per_day: required` |
 | `max_instances` of 256 or more (the join-token table holds 256 waiting tokens, `MAX_WAITING` in `join_tokens.rs`) | `pool "gpu": max_instances: 300 exceeds 255` |
@@ -426,8 +435,8 @@ does not, so it is a catalog check (10.1), not a start refusal.
 
 The registry takes one `Shape` per pool and refuses a hello whose shape does not satisfy it
 (`docs/design/registration.md`, Admission). An elastic pool has many sizes. The floor is
-built offline from the config: cpu 1000 millis, memory 1 GiB, `gpus` = the least `gpus` over
-`types`, `gpu_class` = the one class, and the required capabilities of 3.6 (`runtime` equal
+built offline from the config: cpu 1000 millis, memory 1 GiB, `gpus` = the least GPU count the
+provider crate's table gives the `types`, `gpu_class` = the one canonical model they share, and the required capabilities of 3.6 (`runtime` equal
 to `exec`, `gpu-toolkit` if gpus > 0). Real capacity is whatever the agent reports; the
 floor only keeps a wrong machine out. PROPOSAL (requirements do not set the floor).
 
@@ -483,7 +492,7 @@ pub struct Offer {
     pub id: String,                  // the provider's name for it; opaque to the core
     pub zone: Option<String>,        // one Offer per zone with capacity
     pub cpu_millis: u64, pub memory_bytes: u64, pub disk_bytes: u64,
-    pub gpus: u32, pub gpu_class: Option<GpuClass>,
+    pub accelerator: Option<Accelerator>,  // vendor, canonical model, count, memory per device, form factor, interconnect
     pub os: String, pub arch: String, pub exec: ExecMode,   // ExecMode: Container | SandboxExec
     pub price_cents_per_hour: Option<u64>, pub price_unit: PriceUnit,
     pub available: bool,             // capacity now, per the catalog
@@ -513,7 +522,7 @@ pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal
 pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   // unchanged
 
 pub trait CapacityProvider: Send + Sync {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;   // also the credential check
+    fn catalog(&self) -> CatalogFuture<'_>;                   // awaited; also the credential check; the scheduler reads it through a cache
     fn host_prep(&self, offer: &Offer) -> Vec<BootStep>;      // what this image lacks (7.3); data, from the offer only
     fn payload_limit(&self) -> usize;                         // bytes the cloud accepts
     fn acquire(&self, request: &AcquireRequest) -> Acquired;  // idempotent on request.acquire; delivers request.payload as is
@@ -540,8 +549,9 @@ name prefix, both needed to terminate, either counted toward the cap) stay insid
 Lambda crate.
 
 The scaler, not the provider, picks the offer. Today the Lambda crate picks
-(`select.rs::candidates`: cheapest, then fewest gpus, then name, then region). That moves to
-`js-scaler::choose`, so the next kind does not copy it. The Lambda crate keeps the
+(`select.rs::candidates`: cheapest, then fewest gpus, then name, then region). That moves out
+of the provider, so the next kind does not copy it: the pick is pass 2 of placement
+(`js_sched::acquire::pick`), and the scaler stages what it picks. The Lambda crate keeps the
 catalog-to-offer conversion and the `OptionTable` filter.
 
 `ElasticConfig`'s `enabled` and `Mode::DryRun/Live` stay as a second lock under the pool's
@@ -1071,8 +1081,9 @@ released at `boot_timeout` (F22).
 
 1. A consumer's whole-node request finds no free host and waits in the registry; `Launchable` is true,
    so it is not refused `no-capable-host`.
-2. Next tick the scaler sees one uncovered request, takes offers from `catalog()`, picks the
-   cheapest fit, passes the caps and writes the Launching record (6.2).
+2. Next tick the scaler sees one uncovered request, takes offers from the catalog the checks last read, stages
+   the offer pass 2 picks (`js_sched::acquire::pick`: the cheapest fit inside the pool's
+   `provider_limits`), passes the caps and writes the Launching record (6.2).
 3. The shell mints the join token for `(pool, host name)` (7.2), gets the Tailscale key (8),
    renders the bootstrap (7.3), ensures the no-inbound ruleset exists in the region (5.3), and
    `acquire` launches: type, region, one ssh key name, ruleset, `user_data`, name, tags.
@@ -1447,7 +1458,9 @@ field. A launched host must not reach these routes: the ACL gives it the agent p
     "network_check": { "ok": false, "reason": "oauth: invalid_client", "checked_at_ms": 0 },
     "instances": { "n": 1, "max": 4, "spend_cents_per_hour": 129, "max_spend_cents_per_hour": 1200 },
     "blocked": null,       // max_instances | max_spend | max_spend_day | max_spend_total | boot_failed | unavailable
-    "no_offer": null,      // or { "request": "...", "dimension": "gpus" }
+    "no_offer": null,      // or { "request": "...", "dimension": "gpus" }: os, arch, isa_level, exec, cpu_millis,
+                           // memory_bytes, disk_bytes, accelerator_vendor, gpu_class (the model), gpus (the count),
+                           // accelerator_memory, accelerator_interconnect, accelerator_form_factor
     "last_launch": { "at_ms": 0, "outcome": "accepted", "host": "js-ab12-cd34" },
     "machines": [ { "host": "js-ab12-cd34", "state": "registered", "offer": "gpu_1x_a10",
                     "zone": "us-west-1", "price_cents_per_hour": 129, "idle_since_ms": null } ],

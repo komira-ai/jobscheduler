@@ -4,6 +4,8 @@
 //! lengths are in `agent_api_log_life_tests.rs`. The minter is js-logmint's fake over
 //! js-logstore's fake store; time is the rig's manual clock; nothing sleeps.
 
+use std::time::Duration;
+
 use js_agent_wire::{HeartbeatReply, JobStartSpec, LogSink, Outcome};
 use js_jobs::JobState;
 use js_logmint::{MintError, Refusal};
@@ -319,11 +321,11 @@ async fn a_mint_failure_costs_the_host_its_live_upload_until_a_later_mint_succee
                 logs.settle().await;
             }
             assert_eq!(calls(), attempt - 1, "{error:?}: tried before the wait");
-            rig.advance(wait - 1);
+            rig.advance(Duration::from_millis(wait - 1));
             tick(&rig).await;
             logs.settle().await;
             assert_eq!(calls(), attempt - 1, "{error:?}: tried a millisecond early");
-            rig.advance(1);
+            rig.advance(Duration::from_millis(1));
             tick(&rig).await;
             logs.settle().await;
             assert_eq!(calls(), attempt, "{error:?}: not tried at the wait");

@@ -11,13 +11,14 @@ use crate::config::Cli;
 use crate::error::StartupError;
 
 /// The flags that mean something only beside `--agent-pool-config`.
-const NEED_AGENT_POOL: [&str; 6] = [
+const NEED_AGENT_POOL: [&str; 7] = [
     "--agent-hello-burst",
     "--agent-hello-interval",
     "--require-host-credential",
     "--placement",
     "--estimate-feed",
     "--cpu-slack",
+    "--job-listen",
 ];
 
 impl Cli {
@@ -70,6 +71,7 @@ pub(crate) fn beside_config(flag: &str) -> StartupError {
         "--pool-config" => "add a [[pool]] with provider kind static".to_owned(),
         "--agent-pool-config" => "add a [[pool]] with an elastic provider".to_owned(),
         "--agent-token-file" => "set join_token_file of the [[pool]]".to_owned(),
+        "--client-token" => "add a [[client]] table".to_owned(),
         other => format!(
             "set server.{}",
             other.trim_start_matches("--").replace('-', "_")

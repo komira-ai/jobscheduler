@@ -41,10 +41,14 @@ message Needs {
   uint64 memory_bytes = 2;
   // Scratch disk, in bytes. Absent: none is asked for.
   optional uint64 disk_bytes = 3;
-  // The number of GPUs. 0: none.
+  // The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no
+  // Constraints.accelerator, keeps the meaning it has always had: the class is read through
+  // the alias table of design section 3.8, so a full spelling pins its variant and a family
+  // name such as nvidia-a100 matches every variant of it.
   uint32 gpus = 4;
   // The GPU class, in the spelling the agent reports: the lower-case model name with its
-  // words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class.
+  // words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class. It is resolved
+  // through the alias table like Accelerator.model.
   string gpu_class = 5;
   // The job needs the whole host: it is placed only on a host that holds no other job, and
   // a host is drained for it (design section 5.4). The other needs still bound which hosts
@@ -57,12 +61,18 @@ message Needs {
 message Constraints {
   // The operating system: linux or macos. Empty: any.
   string os = 1;
-  // The CPU architecture, as free text matched exactly against the spelling the host or
-  // offer reports, such as x86_64. Today ARM is spelt arm64 by some sources and aarch64 by
-  // others (design section 3.8). Empty: any.
+  // The CPU architecture: x86_64 or arm64. aarch64 is accepted and stored as arm64 (design
+  // section 3.8). Empty: any.
   string arch = 2;
   // The mode the host runs jobs in. Unspecified: either.
   ExecMode exec = 3;
+  // The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A
+  // host is capable when it reports that level or a higher one of the same architecture.
+  // Empty: any.
+  string isa_level = 4;
+  // The accelerator the job needs, beyond what Needs.gpus and Needs.gpu_class say. Absent:
+  // none.
+  Accelerator accelerator = 5;
 }
 
 // One host port forwarded to a port of the job (design section 5.8). New traffic toward a
@@ -205,6 +215,11 @@ message Job {
   // The client asked to cancel the job and it has not yet ended. Also kept on a job that
   // ended lost after the cancel was asked for.
   bool cancel_requested = 31;
+  // The name of the client whose token submitted the job, as the server's configuration
+  // names it (`--client-token NAME=PATH`, a `[[client]]` table, or `default` for
+  // `--token-file`). Set by the server, never by the request: a retry of the same job from
+  // another client keeps the first. Absent on a job recorded before clients were named.
+  optional string client = 32;
 }
 
 // How an ended job ended, as its result says.
@@ -278,4 +293,22 @@ message Refusal {
   RefusalCode code = 1;
   // Text for a person saying more. A program acts on the code only.
   string detail = 2;
+}
+
+// What a job needs of an accelerator, in the vocabulary of design section 3.8 (the
+// accelerator.* capability keys). Each field left out matches any host. A count above zero
+// needs a model, because the GPUs it books need a class. A vendor alone books no GPU.
+message Accelerator {
+  // The vendor, such as nvidia.
+  optional string vendor = 1;
+  // The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.
+  optional string model = 2;
+  // The least number of devices.
+  optional uint32 count = 3;
+  // The least memory of each device, in whole GiB.
+  optional uint32 memory_per_device_gib = 4;
+  // The least interconnect, as kind>=size.
+  optional string interconnect = 5;
+  // The form factor: sxm or pcie.
+  optional string form_factor = 6;
 }

@@ -14,9 +14,8 @@ use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
-use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -27,19 +26,29 @@ use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
+use crate::job_expiry::JobLimits;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::usage::{KeySource, ProfileKey, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
+mod agent_setup;
 mod cpu_slack;
+mod job_wall;
+mod listen;
 mod placement;
 mod resolve;
 mod retention;
+mod tokens;
+pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
+pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
+pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub use tokens::Token;
+pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -65,6 +74,11 @@ pub struct Cli {
     /// --tls-key: a bearer token never crosses a network in clear.
     #[arg(long, default_value = "127.0.0.1:7300")]
     pub listen: SocketAddr,
+    /// Serves the job service (gRPC and its HTTP/JSON gateway, one port, the bearer token)
+    /// here, and opens the job store, which per-job heartbeats then update. Off unless given.
+    /// Off the loopback it needs --tls-cert and --tls-key. Needs --agent-pool-config.
+    #[arg(long)]
+    pub job_listen: Option<SocketAddr>,
     /// The lease file.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
@@ -77,9 +91,15 @@ pub struct Cli {
     /// (`--agent-pool-config`); one of the two sources is required.
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
-    /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
+    /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400). On the
+    /// job service it is the token of the client named `default`.
     #[arg(long, required_unless_present = "config")]
     pub token_file: Option<PathBuf>,
+    /// One more client of the job service, as `NAME=PATH`: its name (1 to 40 letters,
+    /// digits, `.`, `_` and `-`, not `default`) and a file holding its own bearer token,
+    /// checked as `--token-file` is. Repeatable. Needs `--job-listen`.
+    #[arg(long, value_name = "NAME=PATH")]
+    pub client_token: Vec<String>,
     /// The pool's shared join tokens: a file holding the tokens agents present, one per
     /// line (several while one is being replaced), each at least 32 bytes and the file
     /// owner-only like `--token-file`. Read again at every tick. Needs
@@ -217,6 +237,11 @@ pub struct Cli {
     /// window affects only the jobs that end after the restart.
     #[arg(long, default_value = DEFAULT_JOB_RETENTION, value_parser = parse_job_retention)]
     pub job_retention: Retention,
+    /// The most a submitted job's wall limit may be: a whole count of days (`30d`) or a
+    /// duration such as `12h` or `90m`, at least one second; 30 days unless given. A job
+    /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
+    #[arg(long, value_parser = parse_max_job_wall)]
+    pub max_job_wall: Option<Duration>,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -347,36 +372,6 @@ fn status_policy(flag: &str, listen: SocketAddr, warnings: &mut Vec<String>) -> 
     private
 }
 
-/// The bearer token. It is compared in constant time and never printed.
-#[derive(Clone)]
-pub struct Token(Vec<u8>);
-
-impl Token {
-    /// Whether `given` is the token. The comparison takes the same time for any two
-    /// tokens of one length; a token of another length is refused at once (the length
-    /// of a token is not a secret).
-    pub(crate) fn matches(&self, given: &[u8]) -> bool {
-        self.0.ct_eq(given).into()
-    }
-
-    /// Whether `other` is the same token, compared as [`Token::matches`] does.
-    pub(crate) fn same_as(&self, other: &Token) -> bool {
-        self.matches(&other.0)
-    }
-
-    /// The credential a host admitted with this token is bound to. A token is printable
-    /// ASCII, so its text is exact.
-    pub(crate) fn credential(&self) -> Credential {
-        Credential::of_token(&String::from_utf8_lossy(&self.0))
-    }
-}
-
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Token(..)")
-    }
-}
-
 /// The certificate and key files of `--tls-cert` and `--tls-key`.
 #[derive(Debug, Clone)]
 pub struct TlsFiles {
@@ -395,6 +390,8 @@ pub struct Config {
     /// A listener the caller bound, served in place of binding `listen`.
     pub(crate) bound: Option<std::net::TcpListener>,
     pub(crate) agent_listen: Option<SocketAddr>,
+    /// Where the job service is served (`--job-listen`, `server.job_listen`); off when `None`.
+    pub(crate) job_listen: Option<JobListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -406,6 +403,8 @@ pub struct Config {
     pub(crate) settings: Settings,
     pub(crate) tick: Duration,
     pub(crate) token: Token,
+    /// The clients of the job service, the token of `--token-file` among them.
+    pub(crate) clients: Clients,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
@@ -418,6 +417,8 @@ pub struct Config {
     pub(crate) alert_repeat: Duration,
     /// How long an ended job is kept (`--job-retention`, `server.job_retention`).
     pub(crate) job_retention: Retention,
+    /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
+    pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
 }
 
@@ -433,27 +434,6 @@ pub(crate) enum Hosts {
         /// The registering side.
         agents: Box<AgentSetup>,
     },
-}
-
-/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
-/// decided.
-pub(crate) struct AgentSetup {
-    pub(crate) tokens: AgentTokens,
-    pub(crate) pool: PoolConfig,
-    /// The one provider the mint route accepts, when the configuration names it.
-    pub(crate) mint_provider: Option<String>,
-    pub(crate) hello_limit: HelloLimit,
-    /// `--require-host-credential`.
-    pub(crate) require_host_credential: bool,
-    /// `--placement`.
-    pub(crate) placement: Placement,
-    /// `--estimate-feed`.
-    pub(crate) estimate_feed: bool,
-    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
-    pub(crate) cpu_slack: CpuSlack,
-    /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
-    /// and the one up to which `--placement js-sched` trusts it for backfill.
-    pub(crate) max_lease_wall: Option<Duration>,
 }
 
 impl Config {
@@ -472,11 +452,12 @@ impl Config {
         flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
             .map_err(|err| StartupError::new("--default-ttl", err))?;
-        let tls = tls_files(&cli)?;
+        let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
+        let clients = tokens::from_flags(&token, &cli)?;
         let limits = Limits::from(&cli);
-        let hosts = hosts(&cli, &token)?;
+        let hosts = hosts(&cli, &clients)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let keys = UsageKeys {
@@ -493,6 +474,7 @@ impl Config {
             listen_flag: "--listen",
             bound: None,
             agent_listen: None,
+            job_listen: listen::job_listen(&cli),
             advertise_url: None,
             warnings,
             status,
@@ -503,6 +485,7 @@ impl Config {
             settings,
             tick: cli.tick,
             token,
+            clients,
             tls,
             limits,
             hosts,
@@ -511,6 +494,7 @@ impl Config {
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
+            max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
         })
     }
@@ -537,6 +521,7 @@ impl Config {
         let Loaded {
             server,
             client_token,
+            clients,
             hosts,
             mut warnings,
             unrunnable,
@@ -557,6 +542,7 @@ impl Config {
                     pool,
                     tokens,
                     mint_provider,
+                    job_limits,
                 } = *registering;
                 server.agents.placement().check(&pool, "server.placement")?;
                 let given = server.agents.cpu_slack();
@@ -576,6 +562,8 @@ impl Config {
                     estimate_feed: server.agents.estimate_feed(),
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
+                    job_limits,
+                    jobs: server.agents.job_store(server.job_retention),
                 });
                 (
                     Hosts::Layered {
@@ -606,6 +594,7 @@ impl Config {
             listen_flag: "server.listen",
             bound: None,
             agent_listen: server.agent_listen,
+            job_listen: server.agents.job_listen(),
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -616,6 +605,7 @@ impl Config {
             settings,
             tick: server.tick,
             token: client_token,
+            clients,
             tls: server.tls,
             limits: server.limits,
             hosts,
@@ -624,6 +614,7 @@ impl Config {
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
+            max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
         })
     }
@@ -648,6 +639,11 @@ impl Config {
     /// The address the agent routes alone are served on, when the file gives one.
     pub fn agent_listen(&self) -> Option<SocketAddr> {
         self.agent_listen
+    }
+
+    /// The address the job service is served on, when the flag or the file gives one.
+    pub fn job_listen(&self) -> Option<SocketAddr> {
+        self.job_listen.map(|job| job.addr)
     }
 
     /// The URL agents are told to dial, when the file gives one.
@@ -843,7 +839,7 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
 
 /// The sources of hosts the flags name. At least one is required; the shared join token
 /// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
+fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
         .as_ref()
@@ -857,7 +853,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
         }),
         (tokens, Some(pool)) => {
             let tokens = match tokens {
-                Some(path) => AgentTokens::open(path, client)?,
+                Some(path) => AgentTokens::open(path, clients)?,
                 None => AgentTokens::none(),
             };
             let pool = agent_pool::read(pool)?;
@@ -879,6 +875,8 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     estimate_feed: cli.estimate_feed,
                     cpu_slack,
                     max_lease_wall: None,
+                    job_limits: JobLimits::default(),
+                    jobs: listen::job_store(cli),
                 }),
             })
         }
@@ -886,30 +884,6 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
             "--agent-pool-config",
             "required with --agent-token-file",
         )),
-    }
-}
-
-fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {
-    let both = |cert: &Path, key: &Path| TlsFiles {
-        cert: cert.to_path_buf(),
-        key: key.to_path_buf(),
-    };
-    let files = match (&cli.tls_cert, &cli.tls_key) {
-        (Some(cert), Some(key)) => Some(both(cert, key)),
-        (None, None) => None,
-        (Some(_), None) => return Err(StartupError::new("--tls-key", "required with --tls-cert")),
-        (None, Some(_)) => return Err(StartupError::new("--tls-cert", "required with --tls-key")),
-    };
-    let clear = files.is_none() & !cli.listen.ip().is_loopback();
-    match clear {
-        true => Err(StartupError::new(
-            "--listen",
-            format!(
-                "{} is not a loopback address, so --tls-cert and --tls-key are required: a bearer token never crosses a network in clear",
-                cli.listen
-            ),
-        )),
-        false => Ok(files),
     }
 }
 
@@ -923,26 +897,6 @@ fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool
 /// A token that anyone on the network can try to guess is only as strong as it is long;
 /// 32 bytes of a random source is out of reach.
 pub const MIN_TOKEN_BYTES: usize = 32;
-
-/// The token a file's bytes hold: its content without trailing whitespace, which must
-/// be one run of printable ASCII (an HTTP header value cannot carry anything else, so
-/// any other token could never match a request) of at least [`MIN_TOKEN_BYTES`] bytes.
-pub(crate) fn parse_token(bytes: &[u8]) -> Result<Token, String> {
-    let token = bytes.trim_ascii_end();
-    let printable = token.iter().all(u8::is_ascii_graphic);
-    match (token.is_empty(), printable, token.len() < MIN_TOKEN_BYTES) {
-        (true, _, _) => Err("is empty".to_string()),
-        (false, false, _) => Err(
-            "must hold one token of printable ASCII with no space or line break inside it"
-                .to_string(),
-        ),
-        (false, true, true) => Err(format!(
-            "holds a token of {} bytes; a token must have at least {MIN_TOKEN_BYTES} (use a random one)",
-            token.len()
-        )),
-        (false, true, false) => Ok(Token(token.to_vec())),
-    }
-}
 
 /// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
 /// that it is a regular file owned by the server's user that only that user can use.
@@ -995,5 +949,7 @@ fn read_token(path: &Path) -> Result<Token, StartupError> {
         .map_err(|reason| StartupError::new("--token-file", format!("{} {reason}", path.display())))
 }
 
+#[cfg(test)]
+pub(crate) mod clients_rig;
 #[cfg(test)]
 mod tests;

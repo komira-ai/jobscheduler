@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CheckResult, GpuClass, Held,
-    HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
+    AcquireRequest, Acquired, Artifact, BootStep, CapacityProvider, CatalogFuture, CheckResult,
+    Held, HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
@@ -20,7 +20,7 @@ use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, LaunchInputs, OwnerOnlyFiles,
     Running, SharedClock, TickHandle, channel_ticker, start_with_checks,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 use serde_json::Value;
 use tokio_rustls::TlsConnector;
 
@@ -60,8 +60,7 @@ pub fn offer(id: &str, gpus: u32, class: Option<&str>, price: Option<u64>, ok: b
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus,
-        gpu_class: class.map(|class| GpuClass::parse(class).unwrap()),
+        accelerator: class.map(|class| accelerator_of(&Model::parse(class).unwrap(), gpus, None)),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -69,6 +68,9 @@ pub fn offer(id: &str, gpus: u32, class: Option<&str>, price: Option<u64>, ok: b
         price_cents_per_hour: price,
         price_unit: PriceUnit::UsCents,
         available: ok,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 
@@ -146,16 +148,16 @@ impl FakeCloud {
 struct Handle(Arc<FakeCloud>);
 
 impl CapacityProvider for Handle {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.catalogs.fetch_add(1, Ordering::SeqCst);
         if self.0.panics.load(Ordering::SeqCst) {
             panic!("the fake cloud was told to panic");
         }
         if let Some(provider) = self.0.delegate.lock().unwrap().clone() {
-            return provider.catalog();
+            return Box::pin(async move { provider.catalog().await });
         }
         let answer = self.0.catalog.lock().unwrap().clone();
-        answer.map_err(ProviderError::new)
+        Box::pin(std::future::ready(answer.map_err(ProviderError::new)))
     }
 
     fn checks(&self) -> Vec<CheckResult> {
@@ -248,7 +250,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         provider: Box::new(Handle(cloud)),
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a10").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))

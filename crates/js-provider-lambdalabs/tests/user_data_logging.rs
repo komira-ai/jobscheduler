@@ -13,14 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, GpuClass, HostName, Offer,
-    PriceUnit, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, HostName, Offer, PriceUnit,
+    SchedulerId,
 };
 use js_provider_lambdalabs::{
     ApiKey, Architecture, ElasticConfig, FakeLambda, HttpApi, InstanceTypeOffer, LambdaProvider,
     ManualClock, OptionTable, Region,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 use support::{PATIENT, Reply, Scratch, Server, fixture};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -76,13 +76,16 @@ fn ask(acquire: &str) -> AcquireRequest {
         pool: "pool-a".to_owned(),
         lifetime: None,
         offer: Offer {
-            id: "gpu_1x_sample".to_owned(),
+            id: "gpu_1x_h100_sxm5".to_owned(),
             zone: Some("region-a".to_owned()),
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 512 << 30,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            accelerator: Some(accelerator_of(
+                &Model::parse("nvidia-h100-80gb-hbm3").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,
@@ -90,6 +93,9 @@ fn ask(acquire: &str) -> AcquireRequest {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         },
         labels: Vec::new(),
         payload: BootPayload::new(format!("#!/bin/sh\nprintf '%s' '{SECRET}' > /etc/token\n")),
@@ -97,10 +103,7 @@ fn ask(acquire: &str) -> AcquireRequest {
 }
 
 fn table() -> OptionTable {
-    OptionTable::parse(
-        "[[option]]\ninstance_type = \"gpu_1x_sample\"\ngpu_class = \"nvidia-sample\"\ngpus = 1\n",
-    )
-    .unwrap()
+    OptionTable::parse("[[option]]\ninstance_type = \"gpu_1x_h100_sxm5\"\n").unwrap()
 }
 
 fn account_key(scheduler: SchedulerId) -> ElasticConfig {
@@ -168,7 +171,7 @@ fn the_payload_and_a_made_keys_private_half_are_in_no_log_line() {
         // The same payload through the in-memory account: its launch log and call log.
         let fake = Arc::new(FakeLambda::new());
         fake.set_offers(vec![InstanceTypeOffer {
-            name: "gpu_1x_sample".to_owned(),
+            name: "gpu_1x_h100_sxm5".to_owned(),
             description: String::new(),
             gpu_description: String::new(),
             price_cents_per_hour: 75,

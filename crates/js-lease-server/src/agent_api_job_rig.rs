@@ -1,7 +1,8 @@
 //! A server with the job tables over a store that can fail a commit, hosts registered with or
 //! without the `per-job` capability, and a fake of an agent that speaks the per-job messages,
-//! for the tests of the heartbeat's per-job half. Nothing here waits on time: the registry's
-//! clock and the store's clock are manual and move only when a test advances them.
+//! for the tests of the heartbeat's per-job half and of the job pass. Nothing here waits on
+//! time: the registry's clock and the store's clock are manual, and move only in a rig made by
+//! [`clocked_rig`] or [`logging_rig`], where they are one clock a test moves ([`Rig::advance`]).
 //!
 //! A server with a log sink ([`logging_rig`]) mints its host credentials with js-logmint's
 //! fake minter over js-logstore's fake store, both on the server's clock; its hosts say hello
@@ -18,23 +19,24 @@ use js_agent_wire::{
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     AllocationRecord, AllocationStep, Booked, Constraints, JobId, JobRecord, JobSpec, JobState,
-    JobStore, Needs, NetworkPolicy, NewJob, RandomIds,
+    JobStore, Needs, NetworkPolicy, NewJob, RandomIds, Retention,
 };
-use js_lease::{Clock as _, ManualClock, Timestamp};
+use js_lease::{ManualClock, Timestamp};
 use js_logmint::fake::FakeMinter;
 use js_logmint::{Bucket, LogPrefix};
 use js_logstore::fake::FakeStore;
 use js_logstore::{Endpoint, Store as LogStore};
 use js_registry::{PoolConfig, Registry, SequentialSessions};
-use js_state::Store;
 use js_state::fake::{Fake, Flaw};
+use js_state::{ManualClock as StoreClock, Store};
 use js_testkit::dir::TestDir;
 use js_types::{ImageDigestRef, Labels, ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 
 use super::*;
 use crate::adapt::SharedClock;
-use crate::logs::{Scope, SinkTemplate, StoreClock};
+use crate::job_expiry::JobLimits;
+use crate::logs::{Scope, SinkTemplate, StoreClock as LogClock};
 
 /// What [`Rig::place`] books: a share of a host with no GPU.
 pub(crate) const BOOKED: Booked = Booked::Shape {
@@ -69,10 +71,32 @@ pub(crate) fn spec() -> JobSpec {
 /// Job tables of the server's own type over a fresh store that can fail a commit, so a test
 /// without a server runs the same code a heartbeat does.
 pub(crate) fn tables() -> (Arc<Interfere<Fake>>, ServerJobs) {
-    let store = Arc::new(Interfere::new(Fake::with_flaw(Arc::default(), Flaw::None)));
+    tables_on(Arc::default(), Retention::DEFAULT)
+}
+
+/// [`tables`] over a store whose clock is `clock`, keeping each ended job for `retention`.
+pub(crate) fn tables_on(
+    clock: Arc<StoreClock>,
+    retention: Retention,
+) -> (Arc<Interfere<Fake>>, ServerJobs) {
+    let store = Arc::new(Interfere::new(Fake::with_flaw(clock, Flaw::None)));
     let dynamic: Arc<dyn Store> = store.clone();
     let jobs = JobStore::new(Arc::new(dynamic), RandomIds).unwrap();
-    (store, jobs)
+    (store, jobs.with_retention(retention))
+}
+
+/// When a rig's clock starts: the registry's reading, in milliseconds.
+pub(crate) const START_MS: u64 = 5_000_000;
+
+/// The store's manual clock read as the server's clock: both count from the Unix epoch, so a
+/// rig made by [`clocked_rig`] has one time for the registry, the server and the store.
+pub(crate) struct OneClock(pub(crate) Arc<StoreClock>);
+
+impl js_lease::Clock for OneClock {
+    fn now(&self) -> Timestamp {
+        let since = js_state::Clock::now(&*self.0).as_duration();
+        Timestamp::from_millis(u64::try_from(since.as_millis()).unwrap())
+    }
 }
 
 /// Records the job `id` with `spec` and places it on `host` with `booked`; its records.
@@ -88,6 +112,7 @@ pub(crate) fn placed(
         id: Some(id.clone()),
         spec,
         priority: 0,
+        client: None,
     };
     jobs.insert_queued(new).unwrap();
     jobs.place(&id, js_types::HostId::new(host).unwrap(), booked)
@@ -97,19 +122,19 @@ pub(crate) fn placed(
 /// The server under test and the store under it.
 pub(crate) struct Rig {
     pub(crate) agents: Arc<Agents>,
+    /// The store's clock; in a rig made by [`clocked_rig`], also the registry's and the
+    /// server's.
+    pub(crate) clock: Arc<StoreClock>,
+    /// The server's clock.
+    pub(crate) shared: SharedClock,
     /// The job tables the server holds (also when the server is not given them).
     pub(crate) jobs: Arc<ServerJobs>,
     /// The store under the job tables, which fails the commit it is told to.
     pub(crate) store: Arc<Interfere<Fake>>,
-    /// The clock of the registry and of the log credentials.
-    pub(crate) clock: ManualClock,
     who: Credential,
     sessions: BTreeMap<String, (u64, String)>,
     _dir: TestDir,
 }
-
-/// When every test server starts, in milliseconds since the epoch.
-pub(crate) const START_MS: u64 = 5_000_000;
 
 /// The store a log sink names, as the agent and the server see it.
 pub(crate) const LOG_ENDPOINT: &str = "https://objects.example";
@@ -126,11 +151,6 @@ pub(crate) const LOG_PREFIX: &str = "a/b";
 /// How long a host credential is asked to live.
 pub(crate) const LOG_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// A server named `name`, holding the job tables when `with_jobs`.
-pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
-    build(name, with_jobs, None, None, None)
-}
-
 /// A server named `name` that holds the job tables and minting through a fake minter, whose
 /// hosts are lost after `grace_ms` of silence; the fake minter and the server's grants.
 pub(crate) fn logging_rig(name: &str, grace_ms: u64) -> (Rig, Logs) {
@@ -138,27 +158,34 @@ pub(crate) fn logging_rig(name: &str, grace_ms: u64) -> (Rig, Logs) {
 }
 
 /// [`logging_rig`] over the job tables of `tables` (a store a server ran on before) when
-/// given, with its clock at `now_ms`: a server rebuilt on the same store, with a new registry
-/// and nothing of the log credentials held before.
+/// given (and on its clock), with the clock at `now_ms`: a server rebuilt on the same store,
+/// with a new registry and nothing of the log credentials held before. Its registry, server,
+/// store and minter read one manual clock, which [`Rig::advance`] moves.
 pub(crate) fn logging_over(
     name: &str,
     grace_ms: u64,
     tables: Option<&Rig>,
     now_ms: u64,
 ) -> (Rig, Logs) {
-    let clock = ManualClock::new(Timestamp::from_millis(now_ms));
-    let shared = SharedClock::new(clock.clone());
+    let clock = tables.map_or_else(Arc::default, |rig| Arc::clone(&rig.clock));
+    let since = js_state::Clock::now(&*clock).as_duration();
+    clock.advance(std::time::Duration::from_millis(now_ms).saturating_sub(since));
+    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
     let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
-    let store = FakeStore::new(endpoint.clone(), Arc::new(StoreClock(shared.clone())));
+    let store = FakeStore::new(endpoint.clone(), Arc::new(LogClock(shared.clone())));
     let minter = Arc::new(FakeMinter::new(store));
     let grants = grants_over(
         endpoint,
         Arc::clone(&minter) as Arc<dyn js_logmint::Minter>,
         &shared,
     );
-    let tables = tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs)));
-    let timing = Some((clock, grace_ms));
-    let rig = build(name, true, timing, Some(Arc::clone(&grants)), tables);
+    let extra = Extra {
+        grace_ms: Some(grace_ms),
+        logs: Some(Arc::clone(&grants)),
+        tables: tables.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs))),
+    };
+    let kept = (JobLimits::default(), Retention::DEFAULT);
+    let rig = rig_on(name, (true, false), kept, (clock, shared.clone()), extra);
     let logs = Logs {
         minter,
         grants,
@@ -210,7 +237,7 @@ impl Logs {
     }
 
     /// A client of the fake store signing with `grant`, as the agent signs its uploads.
-    pub(crate) fn client(&self, grant: &LogGrant) -> LogStore<FakeStore, StoreClock> {
+    pub(crate) fn client(&self, grant: &LogGrant) -> LogStore<FakeStore, LogClock> {
         let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
         let credential = js_logstore::Credential {
             access_key_id: grant.access_key_id.clone(),
@@ -219,7 +246,7 @@ impl Logs {
             expires_at: std::time::UNIX_EPOCH
                 + std::time::Duration::from_millis(grant.expires_at_ms),
         };
-        let clock = StoreClock(self.clock.clone());
+        let clock = LogClock(self.clock.clone());
         LogStore::new(self.minter.store().clone(), clock, endpoint, credential)
     }
 }
@@ -227,55 +254,128 @@ impl Logs {
 /// The store under a server's job tables, and the tables.
 type Tables = (Arc<Interfere<Fake>>, Arc<ServerJobs>);
 
-/// A server named `name`: with the job tables when `with_jobs` (`tables` when given, fresh
-/// ones otherwise), on `timing`'s clock and grace when given (a fixed clock and the pool's
-/// grace otherwise), and minting with `logs`.
-fn build(
-    name: &str,
-    with_jobs: bool,
-    timing: Option<(ManualClock, u64)>,
+/// What a [`logging_rig`] gives a server beyond [`rig_on`]'s: the grace after which a silent
+/// host is lost (the pool's own when `None`), the grants it mints with, and the job tables of
+/// a server that ran before (fresh ones when `None`).
+#[derive(Default)]
+struct Extra {
+    grace_ms: Option<u64>,
     logs: Option<Arc<LogGrants>>,
     tables: Option<Tables>,
+}
+
+/// A server named `name`, holding the job tables when `with_jobs`, placing with the
+/// registry's own placement (so no queued job is placed).
+pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
+    rig_of(name, with_jobs, false)
+}
+
+/// A server named `name` holding the job tables and placing with `js-sched`
+/// (`--placement js-sched`), so its heartbeats run the pass over the queued jobs. Its hosts
+/// report an `arch`, which the scheduler needs to describe them.
+pub(crate) fn placing_rig(name: &str) -> Rig {
+    rig_of(name, true, true)
+}
+
+/// A server named `name`, holding the job tables when `with_jobs` and placing with
+/// `js-sched` when `placing`.
+fn rig_of(name: &str, with_jobs: bool, placing: bool) -> Rig {
+    let clock = ManualClock::new(Timestamp::from_millis(START_MS));
+    let kept = (JobLimits::default(), Retention::DEFAULT);
+    rig_on(
+        name,
+        (with_jobs, placing),
+        kept,
+        (Arc::default(), SharedClock::new(clock)),
+        Extra::default(),
+    )
+}
+
+/// A server named `name` holding the job tables and its jobs to `limits`, placing with
+/// `js-sched` when `placing`, whose registry, server and store read one manual clock, at
+/// [`START_MS`] until the test moves it ([`Rig::advance`]).
+pub(crate) fn clocked_rig(name: &str, placing: bool, limits: JobLimits) -> Rig {
+    clocked_rig_keeping(name, placing, (limits, Retention::DEFAULT))
+}
+
+/// [`clocked_rig`], its jobs held to `limits` and each ended job kept for `retention`.
+pub(crate) fn clocked_rig_keeping(
+    name: &str,
+    placing: bool,
+    (limits, retention): (JobLimits, Retention),
+) -> Rig {
+    let clock = Arc::new(StoreClock::default());
+    clock.advance(std::time::Duration::from_millis(START_MS));
+    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
+    let kept = (limits, retention);
+    let extra = Extra::default();
+    rig_on(name, (true, placing), kept, (clock, shared), extra)
+}
+
+/// A server named `name` (`(with_jobs, placing)` as [`rig_of`]) holding its jobs to the limits
+/// of `kept` and keeping each ended job for its retention, on the server clock `shared`, its
+/// store on `clock`, with what `extra` adds.
+fn rig_on(
+    name: &str,
+    (with_jobs, placing): (bool, bool),
+    (limits, retention): (JobLimits, Retention),
+    (clock, shared): (Arc<StoreClock>, SharedClock),
+    extra: Extra,
 ) -> Rig {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
-    let shape = Shape::new(resources, BTreeMap::new());
+    let arch = placing.then(|| ("arch".to_owned(), "x86_64".to_owned()));
+    let shape = Shape::new(resources, arch.into_iter().collect());
     let pool = PoolConfig::new(
         ProviderId::new("burst").unwrap(),
         ResourceClass::gpu_host(),
         shape,
         4,
     );
-    let (clock, pool) = match timing {
-        Some((clock, grace_ms)) => {
+    let pool = match extra.grace_ms {
+        Some(grace_ms) => {
             let timed = pool.with_timing(DEFAULT_HEARTBEAT_INTERVAL_MS, grace_ms);
-            (clock, timed.unwrap())
+            timed.unwrap()
         }
-        None => (ManualClock::new(Timestamp::from_millis(START_MS)), pool),
+        None => pool,
     };
-    let shared = SharedClock::new(clock.clone());
-    let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(pool, shared.clone(), SequentialSessions::new());
+    let placer = placing.then(|| {
+        let settings = crate::sched::engine::Settings::default();
+        Arc::new(crate::sched::place::SchedPlacer::new(
+            settings,
+            shared.clone(),
+        ))
+    });
+    placer
+        .iter()
+        .for_each(|placer| registry.set_placer(placer.clone()));
     let fresh = || {
-        let (store, jobs) = self::tables();
+        let (store, jobs) = tables_on(Arc::clone(&clock), retention);
         (store, Arc::new(jobs))
     };
-    let (store, jobs) = tables.unwrap_or_else(fresh);
-    let agents = Agents::over(registry, &shared, dir.path());
+    let (store, jobs) = extra.tables.unwrap_or_else(fresh);
+    let agents = Agents::over(registry, &shared, dir.path()).with_job_limits(limits);
     let agents = match with_jobs {
         true => agents.with_jobs(Arc::clone(&jobs)),
         false => agents,
     };
-    let agents = match logs {
+    let agents = match placer {
+        Some(placer) => agents.with_placer(placer),
+        None => agents,
+    };
+    let agents = match extra.logs {
         Some(logs) => agents.with_logs(logs),
         None => agents,
     };
     let who = agents.tokens.identify(&"j".repeat(40)).unwrap();
     Rig {
         agents: Arc::new(agents),
+        clock,
+        shared,
         jobs,
         store,
-        clock,
         who,
         sessions: BTreeMap::new(),
         _dir: dir,
@@ -314,7 +414,8 @@ impl Rig {
     /// the `per-job` and `log-upload` capabilities: a host whose hello the registry holds and
     /// whose hello the log side never saw.
     pub(crate) fn register_uploading(&mut self, host: &str) {
-        self.register_with(host, json!({ "per-job": "true", "log-upload": "true" }));
+        let capabilities = json!({ "per-job": "true", "log-upload": "true", "arch": "x86_64" });
+        self.register_with(host, capabilities);
     }
 
     /// The directory the server's files are kept in.
@@ -322,17 +423,11 @@ impl Rig {
         self._dir.path()
     }
 
-    /// Moves the clock on by `millis`.
-    pub(crate) fn advance(&self, millis: u64) {
-        let now = self.clock.now().millis();
-        self.clock.set(Timestamp::from_millis(now + millis));
-    }
-
     /// Registers `host`, whose agent reports the `per-job` capability when `per_job`.
     pub(crate) fn register(&mut self, host: &str, per_job: bool) {
         let capabilities = match per_job {
-            true => json!({ "per-job": "true" }),
-            false => json!({}),
+            true => json!({ "per-job": "true", "arch": "x86_64" }),
+            false => json!({ "arch": "x86_64" }),
         };
         self.register_with(host, capabilities);
     }
@@ -406,6 +501,19 @@ impl Rig {
     /// How many transactions the store has committed.
     pub(crate) fn commits(&self) -> u64 {
         self.store.commit_stats().txns
+    }
+
+    /// Moves the rig's clock by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        self.clock.advance(by);
+    }
+
+    /// The job half of one tick of the server, in its order ([`crate::api::Shared::tick`]):
+    /// the job pass, the registry's advance, and the pass over the queued jobs.
+    pub(crate) fn tick(&self) {
+        self.agents.job_pass();
+        self.agents.registry.advance();
+        self.agents.place_jobs();
     }
 }
 

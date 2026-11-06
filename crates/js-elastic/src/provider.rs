@@ -1,5 +1,8 @@
 //! The contract of a provider that launches machines.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::answer::{Acquired, Held, Observed, Released};
 use crate::boot::BootStep;
 use crate::caps::{Capacity, ProviderCaps};
@@ -97,17 +100,27 @@ pub enum ProviderEvent {
     Reclaimed(HostRef),
 }
 
+/// The answer of [`CapacityProvider::catalog`]: a future, boxed so that the trait stays
+/// usable as `dyn CapacityProvider`. Naming or holding it does no I/O; the provider's call
+/// is made when it is awaited.
+pub type CatalogFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<Offer>, ProviderError>> + Send + 'a>>;
+
 /// The notices of one provider, in the order it sent them. `next` waits for the next one
 /// and answers `None` once the provider will send no more.
 pub type EventStream = Box<dyn Iterator<Item = ProviderEvent> + Send>;
 
 /// A scheduler's view of a provider that supplies machines which run the agent.
 ///
-/// The calls block, and each is bound by the time limit of the client under it. The
-/// trait must not be called with a lock held that other work waits on (the lease
-/// table's is one): an acquire takes a request or two, and a slow provider makes every
-/// call slow. [`CapacityProvider::id`], [`CapacityProvider::can_launch`],
-/// [`CapacityProvider::capabilities`], [`CapacityProvider::capacity`] and
+/// The calls other than [`CapacityProvider::catalog`] block, and each is bound by the
+/// time limit of the client under it; `catalog` answers with a future, and a provider whose
+/// catalog call blocks moves it off the caller's executor thread itself. The trait must
+/// not be called (nor a catalog awaited) with a lock held that other work waits on (the
+/// lease table's is one): an acquire takes a request or two, and a slow provider makes
+/// every call slow. A scheduler reads catalogs through a cache that a refresh fills
+/// (`CatalogCache`), not by calling `catalog` for each question. [`CapacityProvider::id`],
+/// [`CapacityProvider::can_launch`], [`CapacityProvider::capabilities`],
+/// [`CapacityProvider::capacity`] and
 /// [`CapacityProvider::verify_instance`] answer from the provider's own code and records
 /// and make no call. It is not the lease-level `Pool` of `js-provider`, the allocation
 /// port that books hosts that already exist.
@@ -128,12 +141,12 @@ pub trait CapacityProvider: Send + Sync {
     fn capabilities(&self) -> ProviderCaps;
 
     /// What the provider could launch now, one offer per zone with capacity. A call that
-    /// works is also a check that the credential does.
+    /// works is also a check that the credential does. The call is made when the future is
+    /// awaited.
     ///
-    /// # Errors
-    ///
-    /// [`ProviderError`] when the catalog cannot be had whole.
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;
+    /// The future's output is [`ProviderError`] when the catalog cannot be had whole. A
+    /// failure is an error, never an empty list.
+    fn catalog(&self) -> CatalogFuture<'_>;
 
     /// How many machines the provider holds for this scheduler and how many more it could
     /// add, from what it last listed, launched or released. It never calls the cloud and
@@ -217,7 +230,8 @@ mod tests {
     use super::*;
     use crate::answer::HostStatus;
     use crate::ids::SchedulerId;
-    use crate::offer::{GpuClass, PriceUnit};
+    use crate::offer::PriceUnit;
+    use crate::wait::block_on;
 
     fn offer() -> Offer {
         Offer {
@@ -226,8 +240,11 @@ mod tests {
             cpu_millis: 1,
             memory_bytes: 1,
             disk_bytes: 1,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("x").unwrap()),
+            accelerator: Some(js_types::accelerator_of(
+                &js_types::Model::parse("x").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,
@@ -235,6 +252,9 @@ mod tests {
             price_cents_per_hour: None,
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         }
     }
 
@@ -286,8 +306,8 @@ mod tests {
             ProviderCaps::default()
         }
 
-        fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-            Ok(Vec::new())
+        fn catalog(&self) -> CatalogFuture<'_> {
+            Box::pin(std::future::ready(Ok(Vec::new())))
         }
 
         fn capacity(&self) -> Capacity {
@@ -349,7 +369,7 @@ mod tests {
         assert!(!Bare.can_launch());
         assert_eq!(Bare.capabilities(), ProviderCaps::default());
         assert_eq!(Bare.capacity().can_add, None);
-        assert_eq!(Bare.catalog(), Ok(Vec::new()));
+        assert_eq!(block_on(Bare.catalog()), Ok(Vec::new()));
         assert!(Bare.host_prep(&offer()).is_empty());
         assert_eq!(Bare.payload_limit(), 0);
         assert_eq!(Bare.list(), Ok(Vec::new()));

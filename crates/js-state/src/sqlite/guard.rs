@@ -66,7 +66,7 @@ pub(super) fn canonical_db(db: &Path) -> io::Result<PathBuf> {
 }
 
 /// The lock file of the state file `db`, by its one name ([`canonical_db`]).
-fn canonical_lock(db: &Path) -> io::Result<PathBuf> {
+pub(super) fn canonical_lock(db: &Path) -> io::Result<PathBuf> {
     canonical_db(db).map(|file| lock_path(&file))
 }
 
@@ -226,6 +226,11 @@ impl StoreLock {
     #[must_use]
     pub fn lock_file(&self) -> &Path {
         &self.lock
+    }
+
+    /// The held lock itself, for a store that adopts it: it stays held.
+    pub(super) fn into_file(self) -> LockFile {
+        self._file
     }
 }
 

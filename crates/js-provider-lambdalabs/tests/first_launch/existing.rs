@@ -13,7 +13,7 @@ fn row(id_text: &str, name: Option<&str>, tags: Vec<Tag>, status: HostStatus) ->
         name: name.map(str::to_owned),
         status,
         region: "region-a".to_owned(),
-        instance_type: "gpu_1x_cheap".to_owned(),
+        instance_type: "gpu_1x_a10".to_owned(),
         ip: None,
         private_ip: None,
         hostname: None,

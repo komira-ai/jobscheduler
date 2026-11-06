@@ -14,6 +14,7 @@ mod lagging;
 mod model;
 mod options;
 mod own;
+mod panicking;
 mod read;
 mod records;
 mod release;

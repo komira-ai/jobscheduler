@@ -11,11 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use js_agent::lifecycle::{Event, Runtime};
 use js_agent::native::{
-    Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
+    Ceiling, Enforcer, NativeFlags, NativeRuntime, NativeSettings, PfFlags, ProvisionError,
 };
 use js_agent::{Backend, Worker};
 use js_agent_wire::{Command, JobSpec, NetworkLevel};
-use js_mac_pool::seatbelt::Net;
 
 use super::fake_helper::FakeHelper;
 use super::lifecycle::{Native, job};
@@ -87,17 +86,17 @@ impl Enforcer for Fake {
     }
 }
 
-/// A native lifecycle with the network cap `net`, checked by `check`.
-fn gated(name: &str, net: Net, check: &Arc<Fake>) -> Native {
+/// A native lifecycle with the network ceiling `net`, checked by `check`.
+pub(super) fn gated(name: &str, net: Ceiling, check: &Arc<Fake>) -> Native {
     let check: Arc<dyn Enforcer> = check.clone();
     Native::built(name, None, move |config| {
-        config.net = net;
+        config.network = net;
         config.egress = Some(check);
     })
 }
 
 /// A start of `run_id` with the network at `level`.
-fn job_at(run_id: &str, level: NetworkLevel) -> JobSpec {
+pub(super) fn job_at(run_id: &str, level: NetworkLevel) -> JobSpec {
     let mut spec = job(run_id, "/bin/echo");
     spec.native.as_mut().unwrap().network = level;
     spec
@@ -126,7 +125,7 @@ fn a_network_job_is_refused_for_each_way_the_anchor_is_not_enforced() {
     ];
     for (n, (verdict, said)) in table.into_iter().enumerate() {
         let check = Fake::new(verdict);
-        let mut h = gated(&format!("pf-refuse{n}"), Net::On, &check);
+        let mut h = gated(&format!("pf-refuse{n}"), Ceiling::On, &check);
         let events = start(&mut h, job_at("r1", NetworkLevel::On));
         let refused: Vec<(&str, &str)> = events
             .iter()
@@ -155,7 +154,7 @@ fn a_network_job_is_refused_for_each_way_the_anchor_is_not_enforced() {
 #[test]
 fn jobs_without_the_network_are_not_checked() {
     let check = Fake::new(Verdict::PfDisabled);
-    let mut h = gated("pf-off", Net::On, &check);
+    let mut h = gated("pf-off", Ceiling::On, &check);
     assert_eq!(h.start(job_at("r1", NetworkLevel::Off)), ["started r1"]);
     assert_eq!(
         h.start(job_at("r2", NetworkLevel::Loopback)),
@@ -172,7 +171,7 @@ fn jobs_without_the_network_are_not_checked() {
 #[test]
 fn the_check_runs_before_every_network_job_and_is_not_kept() {
     let check = Fake::new(Verdict::Enforced);
-    let mut h = gated("pf-every", Net::On, &check);
+    let mut h = gated("pf-every", Ceiling::On, &check);
     assert_eq!(h.start(job_at("r1", NetworkLevel::On)), ["started r1"]);
     assert_eq!(h.start(job_at("r2", NetworkLevel::On)), ["started r2"]);
     assert_eq!(check.calls(), 2);
@@ -193,7 +192,7 @@ fn the_check_runs_before_every_network_job_and_is_not_kept() {
 #[test]
 fn an_agent_whose_cap_is_not_on_never_asks() {
     let check = Fake::new(Verdict::PfDisabled);
-    let mut h = gated("pf-cap", Net::Loopback, &check);
+    let mut h = gated("pf-cap", Ceiling::Loopback, &check);
     assert_eq!(
         h.start(job_at("r1", NetworkLevel::Loopback)),
         ["started r1"]
@@ -209,7 +208,7 @@ fn a_runtime_whose_cap_is_on_does_not_open_without_a_check() {
     let dir = Scratch::new("native-pf-open");
     let fake = FakeHelper::start(&dir);
     let mut cfg = config(&fake);
-    cfg.net = Net::On;
+    cfg.network = Ceiling::On;
     let Err(why) = NativeRuntime::open(fake.client(), cfg.clone(), TERM) else {
         panic!("no check, no runtime");
     };
@@ -292,7 +291,7 @@ fn the_runtime_asks_only_when_its_cap_is_on() {
     assert!(below.check_egress().is_ok());
     assert!(below.check_native_egress(&asks).is_ok());
     assert_eq!(check.calls(), 0);
-    cfg.net = Net::On;
+    cfg.network = Ceiling::On;
     let on = NativeRuntime::open(fake.client(), cfg, TERM).unwrap();
     assert!(on.check_egress().is_err());
     assert!(on.check_native_egress(&asks).is_err());
@@ -318,7 +317,7 @@ fn a_runtime_with_nothing_to_check_refuses_a_network_job() {
 /// because `open` stands in front of it.
 #[test]
 fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
-    let mut h = Native::ungated("pf-nocheck", |config| config.net = Net::On);
+    let mut h = Native::ungated("pf-nocheck", |config| config.network = Ceiling::On);
     assert_eq!(
         h.start(job_at("r1", NetworkLevel::On)),
         ["refused r1 egress-unchecked"]
@@ -332,7 +331,7 @@ fn a_gate_with_no_check_refuses_a_network_job_by_itself() {
     let dir = Scratch::new("native-pf-nocheck-rt");
     let fake = FakeHelper::start(&dir);
     let mut cfg = config(&fake);
-    cfg.net = Net::On;
+    cfg.network = Ceiling::On;
     let runtime = NativeRuntime::open_ungated(fake.client(), cfg, TERM).unwrap();
     assert!(runtime.check_egress().is_err());
 }

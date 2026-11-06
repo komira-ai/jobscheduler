@@ -18,10 +18,12 @@ use crate::admit::{Admit, Launching};
 use crate::agents::{Agents, assemble};
 use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
+use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Config, Limits, TlsFiles, Token};
+use crate::config::{Clients, Config, JobListen, Limits, TlsFiles, Token};
 use crate::error::StartupError;
-use crate::listener::{Slots, serve};
+use crate::job_api;
+use crate::listener::{Slots, serve, serve_both};
 use crate::pool::{Pool, Setup};
 use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
@@ -35,7 +37,8 @@ use crate::util::or_pending;
 /// it the orderly way (requests in flight finish, one last tick).
 pub struct Running {
     addr: SocketAddr,
-    agent: Option<AgentPort>,
+    agent: Option<Port>,
+    job: Option<Port>,
     state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
@@ -47,11 +50,20 @@ pub struct Running {
     tls: Option<tls::Tls>,
 }
 
-/// The listener that serves the agent routes alone (`server.agent_listen`).
-struct AgentPort {
+/// A listener beside the one of `--listen`: the agent routes alone (`server.agent_listen`),
+/// or the job service (`--job-listen`).
+struct Port {
     addr: SocketAddr,
     stop: oneshot::Sender<()>,
     serving: JoinHandle<()>,
+}
+
+impl Port {
+    /// Tells the listener to stop; the task to await for its drain.
+    fn stop(self) -> JoinHandle<()> {
+        let _ = self.stop.send(());
+        self.serving
+    }
 }
 
 /// Binds `addr`, or takes over `bound` (a listener the caller bound) when there is one,
@@ -112,11 +124,18 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         Some(agent) => Some(bind(agent, "server.agent_listen", None).await?),
         None => None,
     };
+    let job_listener = match listeners.job_listen {
+        Some(job) => Some(bind(job.addr, job.flag, None).await?),
+        None => None,
+    };
+    let job_acceptor = tls.as_ref().map(tls::Tls::job_acceptor);
+    let clients = listeners.clients;
     let served_tls = acceptor.is_some();
     let Opened {
         shared,
         scaler,
         checker,
+        cached,
         state_file,
     } = open(prepared, &clock, |table| {
         info!(
@@ -146,21 +165,38 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         let app = agent_router(&shared);
         let serving = serve(listener, acceptor, app, limits, slots, stopped);
         info!(%addr, "listening for agents");
-        AgentPort {
+        Port {
             addr,
             stop,
             serving: tokio::spawn(serving),
         }
     });
+    // The job service, when it is on: the server holds its one job store exactly when
+    // `--job-listen` is given, so the listener and the service are there together.
+    let job = job_listener
+        .zip(job_api::from_server(&shared, listeners.max_job_wall))
+        .map(|((listener, addr), api)| {
+            let (stop, stopped) = oneshot::channel::<()>();
+            let slots = Arc::new(Slots::new(limits.max_connections));
+            let app = job_api::port(api, clients);
+            let serving = serve_both(listener, job_acceptor, app, limits, slots, stopped);
+            info!(%addr, tls = served_tls, "listening for the job service");
+            Port {
+                addr,
+                stop,
+                serving: tokio::spawn(serving),
+            }
+        });
     let ticking = Ticking(tokio::spawn(tick_loop(
         shared.clone(),
         ticker,
-        scaler.clone(),
+        scaler.clone().map(|scaler| (scaler, cached)),
     )));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
         agent,
+        job,
         state_file,
         shared,
         stop,
@@ -179,6 +215,11 @@ pub(crate) struct Listeners {
     listen_flag: &'static str,
     bound: Option<std::net::TcpListener>,
     agent_listen: Option<SocketAddr>,
+    job_listen: Option<JobListen>,
+    /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
+    max_job_wall: Duration,
+    /// The clients the job service's bearer layer admits.
+    clients: Clients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -201,14 +242,17 @@ pub(crate) struct Prepared {
     warnings: Vec<String>,
     status: bool,
     admit: Admit,
+    cached: Cached,
 }
 
 /// What a start has built once the lease table is open: the state the routes and the tick
-/// share, the elastic pool's scaler and its check loop, and the lease file.
+/// share, the elastic pool's scaler and its check loop, the cache of the launching
+/// providers' catalogs, and the lease file.
 pub(crate) struct Opened {
     pub(crate) shared: Arc<Shared>,
     pub(crate) scaler: Option<Scaler>,
     pub(crate) checker: Option<Checker>,
+    pub(crate) cached: Cached,
     pub(crate) state_file: PathBuf,
 }
 
@@ -225,6 +269,7 @@ pub(crate) fn prepare(
         listen_flag,
         bound,
         agent_listen,
+        job_listen,
         advertise_url,
         warnings,
         status,
@@ -235,6 +280,7 @@ pub(crate) fn prepare(
         settings,
         tick,
         token,
+        clients,
         tls,
         limits,
         hosts,
@@ -243,6 +289,7 @@ pub(crate) fn prepare(
         alerts,
         alert_repeat,
         logs,
+        max_job_wall,
         ..
     } = config;
     let bookings =
@@ -254,7 +301,14 @@ pub(crate) fn prepare(
         share: plan.share,
         limits: plan.limits.clone(),
     });
-    let admit = Admit::new(launching.collect());
+    // The scaler's tick fetches the catalogs. An elastic plan comes only with a pool whose
+    // hosts register (agents), so a server with a catalog to fetch always has a scaler.
+    let catalogs = elastic.iter().fold(Catalogs::new(), |catalogs, plan| {
+        let provider = Arc::clone(&plan.provider);
+        catalogs.with(provider, plan.catalog_refresh, plan.offer_cooldown)
+    });
+    let cached = Cached::new(Arc::new(catalogs), clock.clone());
+    let admit = Admit::new(launching.collect(), cached.clone());
     let elastic = elastic.map(|mut plan| {
         let setup = Setup {
             advertise: advertise_url.clone(),
@@ -276,6 +330,7 @@ pub(crate) fn prepare(
                 first_start: boot == Boot::Initialise,
                 health: pool.health.clone(),
                 mode: pool.mode(),
+                catalogs: Arc::clone(cached.catalogs()),
             };
             Some(build(plan, parts)?)
         }
@@ -300,12 +355,16 @@ pub(crate) fn prepare(
         warnings,
         status,
         admit,
+        cached,
     };
     let listeners = Listeners {
         listen,
         listen_flag,
         bound,
         agent_listen,
+        job_listen,
+        max_job_wall,
+        clients,
         tls,
         limits,
     };
@@ -337,6 +396,7 @@ pub(crate) fn open(
         warnings,
         status: serves_status,
         admit,
+        cached,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
     let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
@@ -382,6 +442,7 @@ pub(crate) fn open(
         shared,
         scaler,
         checker,
+        cached,
         state_file,
     })
 }
@@ -416,18 +477,24 @@ impl Drop for Alive {
 }
 
 /// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
-/// elastic pool when the server has one, forever; the caller aborts it. The scaler ticks on
-/// a task of its own (a provider's slow call must not hold back the table's lease expiry),
-/// so a tick is finished when both are done, or at once when the scaler is still busy with
+/// elastic pool when the server has one, with the cache of its provider's catalog, forever;
+/// the caller aborts it. The scaler ticks on a task of its own (a provider's slow call must
+/// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
+/// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
+/// table, the fetch and the scaler are done, or at once when the scaler is still busy with
 /// an earlier tick, which skips this one for it.
 ///
 /// A panic in the scaler ends its task, as one in the table ends this loop: `/healthz` then
 /// answers that the server is not ticking, and the supervisor of the process must restart
 /// it. The records are on disk before any call they describe, so a restart launches nothing
 /// twice.
-async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T, scaler: Option<Scaler>) {
+async fn tick_loop<T: Ticker>(
+    shared: Arc<Shared>,
+    mut ticker: T,
+    scaler: Option<(Scaler, Cached)>,
+) {
     let _alive = Alive(shared.clone());
-    let side = scaler.map(|scaler| ScalerLoop::spawn(shared.clone(), scaler));
+    let side = scaler.map(|(scaler, cached)| ScalerLoop::spawn(shared.clone(), scaler, cached));
     loop {
         let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
@@ -451,12 +518,13 @@ struct ScalerLoop {
 }
 
 impl ScalerLoop {
-    fn spawn(shared: Arc<Shared>, scaler: Scaler) -> Self {
+    fn spawn(shared: Arc<Shared>, scaler: Scaler, cached: Cached) -> Self {
         let (ticks, mut due) = mpsc::channel::<Tick>(1);
         let task = tokio::spawn(async move {
             let _alive = Alive(shared);
             loop {
                 let tick = or_pending(due.recv().await).await;
+                cached.refresh().await;
                 scaler.tick().await;
                 tick.finish();
             }
@@ -514,6 +582,12 @@ impl Running {
     /// for port 0; `None` when the agent routes share the port of [`Running::addr`].
     pub fn agent_addr(&self) -> Option<SocketAddr> {
         self.agent.as_ref().map(|agent| agent.addr)
+    }
+
+    /// The address the job service is served on (`--job-listen`), with the port the system
+    /// chose for port 0; `None` when the job service is off.
+    pub fn job_addr(&self) -> Option<SocketAddr> {
+        self.job.as_ref().map(|job| job.addr)
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use),
@@ -580,16 +654,12 @@ impl Running {
     /// that says nothing would hide it. The cause is in the error and in the log.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
-        let agent = self.agent.take().map(|agent| {
-            let _ = agent.stop.send(());
-            agent.serving
-        });
-        let served = self.serving.await.map_err(io::Error::other);
-        let agent_served = match agent {
-            Some(serving) => serving.await.map_err(io::Error::other),
-            None => Ok(()),
-        };
-        let served = served.and(agent_served);
+        let ports = [self.agent.take(), self.job.take()];
+        let others: Vec<JoinHandle<()>> = ports.into_iter().flatten().map(Port::stop).collect();
+        let mut served = self.serving.await.map_err(io::Error::other);
+        for serving in others {
+            served = served.and(serving.await.map_err(io::Error::other));
+        }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;

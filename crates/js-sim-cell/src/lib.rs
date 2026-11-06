@@ -1,29 +1,79 @@
-//! The whole-cell simulation of this repository, to be built in parts: the real lease
-//! server under the [`js_sim`] kernel, many fake agents and a client driver, with
-//! properties checked after every step.
+//! The whole-cell simulation of this repository, built in parts: the real lease server
+//! under the [`js_sim`] kernel, many fake agents (or a few real ones) and a client driver, with properties
+//! checked after every step, and a builder in which a scenario reads top to bottom.
 //!
-//! It holds no client driver yet. What it holds:
+//! How to run, write and read a scenario, and what the cell does not model, is in
+//! `docs/simulation.md` at the root of the repository.
+//!
+//! What it holds:
 //!
 //! - [`observe`]: the facts. What the client driver heard about each unit of work and
 //!   what it asked for ([`ClientEvent`], [`Ask`]), the ground truth of each agent
-//!   process ([`AgentTruth`]), the cell's own launch ledger ([`Launch`]), which outlives
-//!   any agent process, and the server's list of hosts ([`ServerView`]), gathered at one
-//!   virtual time into [`Observations`].
-//! - [`invariant`]: the oracle. The five properties of "exactly once, nothing
-//!   double-booked" ([`Invariant`]), the [`Checker`] that tests them after each step and
-//!   once at the end, and the one-line [`Violation`] it reports.
+//!   process ([`AgentTruth`]), the cell's own ledger of launches ([`Launch`]),
+//!   completions ([`Completion`]) and verdicts ([`Acked`]), which outlives any agent
+//!   process, the processes it killed ([`Killed`]), and the server's list of hosts
+//!   ([`ServerView`]), with each booking it showed and for how long ([`Booking`]),
+//!   gathered at one virtual time into [`Observations`]. The ledger also keeps what the
+//!   agents sent and were sent for the whole-host handshake ([`ReadyReport`],
+//!   [`StartSeen`], [`StopSeen`]).
+//! - [`invariant`]: the oracle ([`Invariant`]), the [`Checker`] that tests it after each
+//!   step and once at the end, and the one-line [`Violation`] it reports. Eleven
+//!   properties: no host booked past what it holds, no lease on two hosts and no host
+//!   listed twice ([`Invariant::NoDoubleBooking`]); each run launched at most once
+//!   ([`Invariant::AtMostOneLaunch`]); one terminal answer per item
+//!   ([`Invariant::OneTerminalAnswer`]); no new lease on a host the server lists as lost
+//!   ([`Invariant::NoLeaseOnALostHost`]); everything settled once quiet
+//!   ([`Invariant::SettlesWhenQuiet`]); no booking without a run and no run without a
+//!   booking at the end ([`Invariant::BookingsMatchAgents`]); no result lost or
+//!   recorded twice ([`Invariant::NoResultLost`]); and the four of a whole host: no host
+//!   held by two whole-host leases or booked beside one
+//!   ([`Invariant::WholeHostIsExclusive`]), a whole-host lease granted only after its
+//!   host's agent reported ready for exactly that lease ([`Invariant::HeldMeansReady`]),
+//!   no run on a host drained for a reservation stopped that its client did not ask to
+//!   stop ([`Invariant::DrainKillsNothing`]), and no ordinary start on a host set aside
+//!   for a whole-host request but backfill inside its tail
+//!   ([`Invariant::MarkedHostsServeNoOrdinaryStart`]).
 //! - [`bus`]: what an agent and the server send each other, one HTTP call as a request
 //!   and its answer ([`Msg`]), and how a trace writes it.
-//! - [`agent`]: the agent node ([`AgentNode`]), the conformance suite's in-process agent
-//!   behind the real wire, which writes what it launches and completes into the cell's
-//!   [`Ledger`] and counts what happened to it ([`Counters`]).
+//! - [`agent`]: the agent node ([`AgentNode`]), behind the real wire, which writes what it
+//!   launches and completes, and the verdicts it reads, into the cell's [`Ledger`] and counts what happened to it
+//!   ([`Counters`]). Its agent is one of two kinds ([`AgentKind`]): the conformance
+//!   suite's in-process fake, the scale agent a cell runs by the hundred, or the real
+//!   agent lifecycle of `js-agent` over an in-memory runtime, for a handful of hosts.
+//!   Either kind has the node's side of the whole-host handshake, which prepares, reports
+//!   ready, refuses or stays silent as its [`Prepare`] switch says.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
-//!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock.
+//!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
+//!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]).
 //! - [`CellNode`]: the two kinds of node, as the kernel runs them.
+//! - [`work`]: one unit of client work ([`Work`]): a run that lasts a fixed time, what it
+//!   asks for (a whole host too, [`Work::whole_host`]), and when the client gives up on
+//!   it.
+//! - [`front`]: the client driver. A [`Front`] turns units of work into calls to the
+//!   server and reports what it hears as [`ClientEvent`]s, and keeps every answer it was
+//!   given raw ([`Answer`]); [`LeaseFront`] does it as `js run` does today. The client is not a bus node: the run loop polls it at exact virtual
+//!   times and its calls are never dropped.
 //! - [`cell`]: the run loop ([`Cell`]), which steps the kernel, runs the actions scripted
-//!   at virtual times and checks the invariants after every step, with the changes a
-//!   scenario makes (agents added, killed and replaced, partitions, faults on the bus,
-//!   client calls).
+//!   at virtual times, polls the client and checks the invariants after every step, with
+//!   the changes a scenario makes (agents added, killed, killed for good and replaced,
+//!   partitions, faults on the bus, a restart of the server, client calls, items
+//!   submitted and cancelled), and the end of a scenario with its end check
+//!   ([`Cell::settle`]).
+//! - [`actions`]: what a scenario does at a virtual time, one [`Action`] per file.
+//! - [`scenario`]: the builder ([`Scenario`]): the world, the work, the actions, what is
+//!   expected ([`Expect`], at the end or at a virtual time) and the witnesses that show the
+//!   situation happened, run over seeds. An expectation may also name one of the client's
+//!   calls ([`Call`]) and read its raw answer, or read the server when it is judged: the
+//!   lease list ([`Listed`]), where a lease is booked ([`Booked`], [`HostRef`]), a
+//!   whole-node request's record ([`RecordFact`]), the wait list and the reservations. The smoke family (`tests/smoke.rs`) proves the machine works; the fault
+//!   family (`tests/faults.rs`) runs agents that die and return or never return,
+//!   partitions that heal, a lossy wire, a silent host, a stale start after its stop, a
+//!   restart of the server and a forgotten host, each over sixteen seeds; the whole-host
+//!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
+//!   path, and the ways its handshake fails, under every value of `--placement`.
+//! - [`agreement`]: one scenario run with every agent a fake and again with every agent
+//!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
+//!   is held to the real agent.
 //! - [`replay`]: a seed run to its end, run again with its trace kept when it fails, and the
 //!   [`FailureReport`] that names the scenario, the seed, the trace hash, the violation
 //!   and the last trace lines.
@@ -41,28 +91,42 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod actions;
 pub mod agent;
+pub mod agreement;
 pub mod bus;
 pub mod cell;
 mod counters;
+pub mod front;
 pub mod invariant;
 mod ledger;
 mod node;
 pub mod observe;
 pub mod replay;
+pub mod scenario;
 pub mod server;
 mod text;
+pub mod work;
 
-pub use agent::{AgentNode, AgentSpec, SIM_RUN_IMAGE};
+pub use actions::Action;
+pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
+pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
 pub use cell::{Cell, Setup};
 pub use counters::{Counter, Counters};
+pub use front::{Answer, CallKind, ClientPort, Front, FrontFactory, LeaseFront, REQUEST_PREFIX};
 pub use invariant::{Checked, Checker, Invariant, NotSettled, Touched, Violation};
-pub use ledger::{Completion, Ledger};
+pub use ledger::{Acked, Completion, Ledger};
 pub use node::CellNode;
 pub use observe::{
-    AgentTruth, Ask, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Launch, Observations, RunId,
-    Running, ServerHost, ServerView, Verdict,
+    AgentTruth, Ask, Booking, ClientEvent, Heard, HowEnded, ItemId, ItemRecord, Killed, Launch,
+    Observations, ReadyReport, RunId, Running, ServerHost, ServerView, StartSeen, StopCommand,
+    StopSeen, Verdict,
 };
-pub use replay::{Failure, FailureReport, run};
-pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape};
+pub use replay::{Failure, FailureReport, drive, run};
+pub use scenario::{
+    Booked, Call, Expect, HostIs, HostRef, Listed, Passed, RecordFact, Scenario, ScenarioFailure,
+    SeedRun,
+};
+pub use server::{EPOCH_MS, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
+pub use work::Work;

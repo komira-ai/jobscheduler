@@ -1,0 +1,747 @@
+[
+  {
+    "doc": "Submits a job. Idempotent on the job id: the same id with the same job (every field but the priority) answers from the job already made, in whatever state it is now, so a retry after a lost answer never runs the work twice. The job is recorded as queued before the answer; the call never waits for placement. A refusal records nothing.",
+    "flags": [
+      {
+        "doc": "The job's id: 1 to 63 bytes of letters, digits, dot, underscore and dash (design section 5.3; the service checks it). Submitting the same id with the same job (every field but the priority) answers from the job already made; the same id with a different job is refused job-id-conflict. Empty: the service mints one, so a submit without an id that is repeated after a lost answer makes a second job.",
+        "field": [
+          "spec",
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "id",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The image, pinned by digest: NAME@sha256:HEX, with an optional tag after the name. The service rejects an image without a digest.",
+        "field": [
+          "spec",
+          "image"
+        ],
+        "kind": "Text",
+        "name": "spec.image",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The program to run. Empty: the image's default. How it combines with the image's own entrypoint and command is set by the server that implements SubmitJob.",
+        "field": [
+          "spec",
+          "command"
+        ],
+        "kind": "Text",
+        "name": "spec.command",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The arguments the program is started with, in order.",
+        "field": [
+          "spec",
+          "args"
+        ],
+        "kind": "Text",
+        "name": "spec.args",
+        "oneof": null,
+        "repeated": true,
+        "required": false
+      },
+      {
+        "doc": "The environment of the job, by variable name.",
+        "field": [
+          "spec",
+          "env"
+        ],
+        "kind": "Pair(Text, Text)",
+        "name": "spec.env",
+        "oneof": null,
+        "repeated": true,
+        "required": false
+      },
+      {
+        "doc": "CPU, in thousandths of a core.",
+        "field": [
+          "spec",
+          "needs",
+          "cpu_millis"
+        ],
+        "kind": "U64",
+        "name": "spec.needs.cpu-millis",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Memory, in bytes.",
+        "field": [
+          "spec",
+          "needs",
+          "memory_bytes"
+        ],
+        "kind": "U64",
+        "name": "spec.needs.memory-bytes",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Scratch disk, in bytes. Absent: none is asked for.",
+        "field": [
+          "spec",
+          "needs",
+          "disk_bytes"
+        ],
+        "kind": "U64",
+        "name": "spec.needs.disk-bytes",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The number of GPUs. 0: none. A job that sets only gpus and gpu_class, and no Constraints.accelerator, keeps the meaning it has always had: the class is read through the alias table of design section 3.8, so a full spelling pins its variant and a family name such as nvidia-a100 matches every variant of it.",
+        "field": [
+          "spec",
+          "needs",
+          "gpus"
+        ],
+        "kind": "U32",
+        "name": "spec.needs.gpus",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The GPU class, in the spelling the agent reports: the lower-case model name with its words joined by dashes, such as nvidia-a100-sxm4-80gb. Empty: any class. It is resolved through the alias table like Accelerator.model.",
+        "field": [
+          "spec",
+          "needs",
+          "gpu_class"
+        ],
+        "kind": "Text",
+        "name": "spec.needs.gpu-class",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The job needs the whole host: it is placed only on a host that holds no other job, and a host is drained for it (design section 5.4). The other needs still bound which hosts are capable.",
+        "field": [
+          "spec",
+          "needs",
+          "whole_host"
+        ],
+        "kind": "Bool",
+        "name": "spec.needs.whole-host",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The operating system: linux or macos. Empty: any.",
+        "field": [
+          "spec",
+          "constraints",
+          "os"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.os",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The CPU architecture: x86_64 or arm64. aarch64 is accepted and stored as arm64 (design section 3.8). Empty: any.",
+        "field": [
+          "spec",
+          "constraints",
+          "arch"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.arch",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The mode the host runs jobs in. Unspecified: either.",
+        "field": [
+          "spec",
+          "constraints",
+          "exec"
+        ],
+        "kind": "Enum([(\"unspecified\", \"EXEC_MODE_UNSPECIFIED\"), (\"container\", \"EXEC_MODE_CONTAINER\"), (\"sandbox-exec\", \"EXEC_MODE_SANDBOX_EXEC\")])",
+        "name": "spec.constraints.exec",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A host is capable when it reports that level or a higher one of the same architecture. Empty: any.",
+        "field": [
+          "spec",
+          "constraints",
+          "isa_level"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.isa-level",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The vendor, such as nvidia.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "vendor"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.vendor",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The model: a family such as nvidia-a100, or a full spelling such as nvidia-a100-sxm4-80gb.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "model"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.model",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least number of devices.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "count"
+        ],
+        "kind": "U32",
+        "name": "spec.constraints.accelerator.count",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least memory of each device, in whole GiB.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "memory_per_device_gib"
+        ],
+        "kind": "U32",
+        "name": "spec.constraints.accelerator.memory-per-device-gib",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The least interconnect, as kind>=size.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "interconnect"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.interconnect",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The form factor: sxm or pcie.",
+        "field": [
+          "spec",
+          "constraints",
+          "accelerator",
+          "form_factor"
+        ],
+        "kind": "Text",
+        "name": "spec.constraints.accelerator.form-factor",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The most seconds the job may run, counted from running. The service refuses a job without one (absent or 0, wall-time-not-positive) and one above its ceiling (wall-time-above-ceiling).",
+        "field": [
+          "spec",
+          "wall_limit_seconds"
+        ],
+        "kind": "Seconds",
+        "name": "spec.wall-limit-seconds",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "What the job may reach over the network. Unspecified: none.",
+        "field": [
+          "spec",
+          "network"
+        ],
+        "kind": "Enum([(\"unspecified\", \"NETWORK_LEVEL_UNSPECIFIED\"), (\"none\", \"NETWORK_LEVEL_NONE\"), (\"allow-list\", \"NETWORK_LEVEL_ALLOW_LIST\"), (\"open\", \"NETWORK_LEVEL_OPEN\")])",
+        "name": "spec.network",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The host ports forwarded to the job. Empty: none, and no inbound path to the job.",
+        "field": [
+          "spec",
+          "ports"
+        ],
+        "kind": "File",
+        "name": "spec.ports-file",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The files the host writes for the job before it starts.",
+        "field": [
+          "spec",
+          "files"
+        ],
+        "kind": "File",
+        "name": "spec.files-file",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The job's priority among queued jobs. 0 when not given. A resubmit that differs from the job already made only in its priority is the same job (design section 5.3).",
+        "field": [
+          "spec",
+          "priority"
+        ],
+        "kind": "I32",
+        "name": "spec.priority",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The client's labels, by key. A listing can filter by them.",
+        "field": [
+          "spec",
+          "labels"
+        ],
+        "kind": "Pair(Text, Text)",
+        "name": "spec.labels",
+        "oneof": null,
+        "repeated": true,
+        "required": false
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "submit"
+    ],
+    "request": "jobscheduler.v1.SubmitJobRequest",
+    "response": "jobscheduler.v1.SubmitJobResponse",
+    "retry_key": [
+      "spec",
+      "job_id"
+    ],
+    "rpc": "SubmitJob",
+    "streaming": false
+  },
+  {
+    "doc": "Reads a job: its state, its host once placed, its times and its host's silence. Changes nothing.",
+    "flags": [
+      {
+        "doc": "The id of the job to read.",
+        "field": [
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "job-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "get"
+    ],
+    "request": "jobscheduler.v1.GetJobRequest",
+    "response": "jobscheduler.v1.GetJobResponse",
+    "retry_key": null,
+    "rpc": "GetJob",
+    "streaming": false
+  },
+  {
+    "doc": "Lists jobs by state, label, client and the time they were queued, a page at a time. Changes nothing.",
+    "flags": [
+      {
+        "doc": "Only jobs in one of these states. Empty: every state.",
+        "field": [
+          "states"
+        ],
+        "kind": "Enum([(\"unspecified\", \"JOB_STATE_UNSPECIFIED\"), (\"queued\", \"JOB_STATE_QUEUED\"), (\"placed\", \"JOB_STATE_PLACED\"), (\"starting\", \"JOB_STATE_STARTING\"), (\"running\", \"JOB_STATE_RUNNING\"), (\"succeeded\", \"JOB_STATE_SUCCEEDED\"), (\"failed\", \"JOB_STATE_FAILED\"), (\"cancelled\", \"JOB_STATE_CANCELLED\"), (\"lost\", \"JOB_STATE_LOST\"), (\"failed-to-start\", \"JOB_STATE_FAILED_TO_START\")])",
+        "name": "states",
+        "oneof": null,
+        "repeated": true,
+        "required": false
+      },
+      {
+        "doc": "Only jobs that carry every one of these labels with the same value. Empty: any labels.",
+        "field": [
+          "labels"
+        ],
+        "kind": "Pair(Text, Text)",
+        "name": "labels",
+        "oneof": null,
+        "repeated": true,
+        "required": false
+      },
+      {
+        "doc": "Only jobs queued at or after this time, in milliseconds since the Unix epoch.",
+        "field": [
+          "queued_after_ms"
+        ],
+        "kind": "U64",
+        "name": "queued-after-ms",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only jobs queued before this time, in milliseconds since the Unix epoch.",
+        "field": [
+          "queued_before_ms"
+        ],
+        "kind": "U64",
+        "name": "queued-before-ms",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only jobs submitted by the client of this name (Job.client). Absent: every client's.",
+        "field": [
+          "client"
+        ],
+        "kind": "Text",
+        "name": "client",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The most jobs in one answer. 0: the server's own page size. A server may answer fewer.",
+        "field": [
+          "page_size"
+        ],
+        "kind": "U32",
+        "name": "page-size",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Where to continue: the next page token of the previous answer of the same listing. Empty: the first page.",
+        "field": [
+          "page_token"
+        ],
+        "kind": "Text",
+        "name": "page-token",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "list"
+    ],
+    "request": "jobscheduler.v1.ListJobsRequest",
+    "response": "jobscheduler.v1.ListJobsResponse",
+    "retry_key": null,
+    "rpc": "ListJobs",
+    "streaming": false
+  },
+  {
+    "doc": "Cancels a job. Idempotent on the job: cancelling twice is the same as once. A queued job is cancelled at once; a placed, starting or running job is asked to stop and is cancelled when its host reports it stopped; an ended job is unchanged.",
+    "flags": [
+      {
+        "doc": "The id of the job to cancel.",
+        "field": [
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "job-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "cancel"
+    ],
+    "request": "jobscheduler.v1.CancelJobRequest",
+    "response": "jobscheduler.v1.CancelJobResponse",
+    "retry_key": null,
+    "rpc": "CancelJob",
+    "streaming": false
+  },
+  {
+    "doc": "Reads the result of an ended job, for the retention window after it ended. A job that has not ended has no result, and the call is refused. Changes nothing.",
+    "flags": [
+      {
+        "doc": "The id of the ended job whose result to read.",
+        "field": [
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "job-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "result"
+    ],
+    "request": "jobscheduler.v1.GetResultRequest",
+    "response": "jobscheduler.v1.GetResultResponse",
+    "retry_key": null,
+    "rpc": "GetResult",
+    "streaming": false
+  },
+  {
+    "doc": "Reads the log tail held so far, also for a running job, and for the retention window after the job ended. Changes nothing.",
+    "flags": [
+      {
+        "doc": "The id of the job whose log tail to read.",
+        "field": [
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "job-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "job",
+      "logs"
+    ],
+    "request": "jobscheduler.v1.GetLogsRequest",
+    "response": "jobscheduler.v1.GetLogsResponse",
+    "retry_key": null,
+    "rpc": "GetLogs",
+    "streaming": false
+  },
+  {
+    "doc": "Lists the hosts, each with the resources booked on it. Changes nothing.",
+    "flags": [],
+    "idempotency": "Unknown",
+    "path": [
+      "host",
+      "list"
+    ],
+    "request": "jobscheduler.v1.ListHostsRequest",
+    "response": "jobscheduler.v1.ListHostsResponse",
+    "retry_key": null,
+    "rpc": "ListHosts",
+    "streaming": false
+  },
+  {
+    "doc": "Takes a host out of placement for a time, or extends a cordon already there. A cordon lapses unless it is extended. Jobs already on the host go on.",
+    "flags": [
+      {
+        "doc": "The id of the host to cordon.",
+        "field": [
+          "host_id"
+        ],
+        "kind": "Text",
+        "name": "host-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      },
+      {
+        "doc": "How long the cordon holds unless it is extended, in seconds from the call. Absent: 300. The server cuts a longer one to 3600.",
+        "field": [
+          "cordon_secs"
+        ],
+        "kind": "Seconds",
+        "name": "cordon-secs",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "host",
+      "cordon"
+    ],
+    "request": "jobscheduler.v1.CordonHostRequest",
+    "response": "jobscheduler.v1.CordonHostResponse",
+    "retry_key": null,
+    "rpc": "CordonHost",
+    "streaming": false
+  },
+  {
+    "doc": "Lifts a host's cordon. Lifting a host that is not cordoned changes nothing.",
+    "flags": [
+      {
+        "doc": "The id of the host whose cordon to lift.",
+        "field": [
+          "host_id"
+        ],
+        "kind": "Text",
+        "name": "host-id",
+        "oneof": null,
+        "repeated": false,
+        "required": true
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "host",
+      "uncordon"
+    ],
+    "request": "jobscheduler.v1.UncordonHostRequest",
+    "response": "jobscheduler.v1.UncordonHostResponse",
+    "retry_key": null,
+    "rpc": "UncordonHost",
+    "streaming": false
+  },
+  {
+    "doc": "Lists the pools. Changes nothing.",
+    "flags": [],
+    "idempotency": "Unknown",
+    "path": [
+      "pool",
+      "list"
+    ],
+    "request": "jobscheduler.v1.ListPoolsRequest",
+    "response": "jobscheduler.v1.ListPoolsResponse",
+    "retry_key": null,
+    "rpc": "ListPools",
+    "streaming": false
+  },
+  {
+    "doc": "Lists the machine providers. Changes nothing.",
+    "flags": [],
+    "idempotency": "Unknown",
+    "path": [
+      "provider",
+      "list"
+    ],
+    "request": "jobscheduler.v1.ListProvidersRequest",
+    "response": "jobscheduler.v1.ListProvidersResponse",
+    "retry_key": null,
+    "rpc": "ListProviders",
+    "streaming": false
+  },
+  {
+    "doc": "Lists the ended bookings, a page at a time. Changes nothing.",
+    "flags": [
+      {
+        "doc": "Only records of bookings that ended at or after this time, in milliseconds since the Unix epoch.",
+        "field": [
+          "from_ms"
+        ],
+        "kind": "U64",
+        "name": "from-ms",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only records of bookings that ended before this time, in milliseconds since the Unix epoch.",
+        "field": [
+          "to_ms"
+        ],
+        "kind": "U64",
+        "name": "to-ms",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only records of this host. Empty: every host.",
+        "field": [
+          "host_id"
+        ],
+        "kind": "Text",
+        "name": "host-id",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only records of this job. Empty: every job.",
+        "field": [
+          "job_id"
+        ],
+        "kind": "Text",
+        "name": "job-id",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The most records in one answer. 0: the server's own page size. A server may answer fewer.",
+        "field": [
+          "page_size"
+        ],
+        "kind": "U32",
+        "name": "page-size",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Where to continue: the next page token of the previous answer of the same listing. Empty: the first page.",
+        "field": [
+          "page_token"
+        ],
+        "kind": "Text",
+        "name": "page-token",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      }
+    ],
+    "idempotency": "Unknown",
+    "path": [
+      "usage"
+    ],
+    "request": "jobscheduler.v1.GetUsageRequest",
+    "response": "jobscheduler.v1.GetUsageResponse",
+    "retry_key": null,
+    "rpc": "GetUsage",
+    "streaming": false
+  }
+]

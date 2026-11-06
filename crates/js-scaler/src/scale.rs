@@ -5,11 +5,13 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
+use js_sched::acquire::needs_acquire;
 
 use crate::budget;
-use crate::caps::{check, choose, nearest_miss, unpriced};
+use crate::caps::{check, holding, nearest_miss};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
+use crate::pick::decide;
 use crate::record::{CooldownReason, Phase, Record, Records};
 use crate::settings::{Blocked, Health, LaunchMode, Settings};
 use crate::state::{AcquirePlan, Action, PlanLine, State};
@@ -60,16 +62,19 @@ fn launch_actions(
 /// ([`crate::StoredOffer::isa_level`]), so a record read back after a restart has none;
 /// the level is a fact of the offer, which the catalog states again, so a machine still
 /// booting for a request that asked for a level keeps covering it. An offer the catalog no
-/// longer lists states no level, as before.
+/// longer lists states no level, as before. The accelerator is restored the same way
+/// ([`crate::StoredOffer::accelerator_facts`]): a record that holds none takes the
+/// catalog's accelerator for the offer when it spells the stored class and count.
 fn launched_offer(record: &Record, pool: &PoolInput) -> Offer {
+    let listed = pool
+        .offers
+        .iter()
+        .find(|listed| (&listed.id, &listed.zone) == (&record.offer.id, &record.offer.zone));
     let mut offer = record.offer.to_offer(0);
-    if offer.isa_level.is_none() {
-        offer.isa_level = pool
-            .offers
-            .iter()
-            .find(|listed| (&listed.id, &listed.zone) == (&offer.id, &offer.zone))
-            .and_then(|listed| listed.isa_level);
-    }
+    offer.isa_level = offer.isa_level.or_else(|| listed.and_then(|l| l.isa_level));
+    offer.accelerator = record
+        .offer
+        .accelerator_with(listed.and_then(|l| l.accelerator.as_ref()));
     offer
 }
 
@@ -103,7 +108,10 @@ impl Pass<'_> {
     /// Matches requests greedily, in queue order, to a free host that fits and is not set
     /// aside, then to a machine on its way whose offer fits, or to a restored machine
     /// still awaited (its host has not said hello since the restart, `boot_timeout` not yet
-    /// run from it) whose offer fits. A request left over is uncovered.
+    /// run from it) whose offer fits. A request left over is uncovered: it is the one pass 2
+    /// is asked about ([`needs_acquire`]). The hosts are every host of the pool, whichever
+    /// machine provider brought them (a host the scaler did not launch included); a machine
+    /// on its way counts only when the offer it was launched for fits the request.
     pub(crate) fn cover<'w>(
         &self,
         pool: &PoolInput,
@@ -134,10 +142,6 @@ impl Pass<'_> {
                 .into_iter()
                 .all(|ok| ok)
             });
-            if let Some(host) = host {
-                claims.hosts.insert(host.id.as_str().to_owned());
-                continue;
-            }
             let record = self
                 .records
                 .instances
@@ -154,11 +158,18 @@ impl Pass<'_> {
                     .into_iter()
                     .all(|ok| ok)
                 });
-            if let Some(i) = record {
-                claims.records.insert(i);
+            // Pass 2 runs for the request only when neither can serve it (design 5.6,
+            // step 5). The host is taken before the machine on its way.
+            if needs_acquire(usize::from(host.is_some()), usize::from(record.is_some())) {
+                uncovered.push(request);
                 continue;
             }
-            uncovered.push(request);
+            match host {
+                Some(host) => {
+                    claims.hosts.insert(host.id.as_str().to_owned());
+                }
+                None => claims.records.extend(record),
+            }
         }
         uncovered
     }
@@ -540,7 +551,7 @@ impl Pass<'_> {
         let mut served: Vec<&Waiting> = Vec::new();
         let mut left = Vec::new();
         let mut stopped = None;
-        let mut no_price = false;
+        let mut held_back = None;
         // The go begins before anything is staged, so that the budget since the go counts the
         // launches staged in this step (with `max_step` above one, the second is checked
         // against the first); it is taken back if nothing is staged.
@@ -555,15 +566,17 @@ impl Pass<'_> {
             ]
             .into_iter()
             .all(|ok| ok);
-            let chosen = choose(settings, &pool.offers, &request.demand, &self.declined);
-            no_price |= [
-                chosen.is_none(),
-                unpriced(settings, &pool.offers, &request.demand, &self.declined),
-            ]
-            .into_iter()
-            .all(|ok| ok);
-            let offer = chosen.filter(|_| room);
-            match offer.map(|offer| self.stage(settings, offer, &staged)) {
+            let machines = holding(settings, &self.records.instances, &staged, &BTreeSet::new());
+            let decided = decide(
+                settings,
+                &pool.offers,
+                &self.declined,
+                &request.demand,
+                machines.len(),
+            );
+            held_back = held_back.or(decided.as_ref().err().copied().flatten());
+            let offer = decided.ok().filter(|_| room);
+            match offer.map(|offer| self.stage(settings, &offer, &staged)) {
                 Some(Ok(record)) => {
                     staged.push(record);
                     served.push(request);
@@ -575,7 +588,7 @@ impl Pass<'_> {
                 None => left.push(request),
             }
         }
-        let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
+        let stopped = stopped.or(held_back);
         if fresh && staged.is_empty() {
             self.records.go.remove(&settings.pool);
         }

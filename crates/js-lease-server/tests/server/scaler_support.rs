@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostName,
+    AcquireId, AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostName,
     HostRef, Offer, ProviderError, Released,
 };
 use js_elastic_fake::ElasticFake;
@@ -22,7 +22,7 @@ use js_provider_lambdalabs::{
     OptionTable, Region,
 };
 use js_types::{
-    Capabilities, ClassId, ExecMode, LeaseId, Request, RequestId, ResourceClass, Resources,
+    Capabilities, ClassId, ExecMode, LeaseId, Model, Request, RequestId, ResourceClass, Resources,
 };
 use serde_json::{Value, json};
 
@@ -58,7 +58,7 @@ pub fn panic_on_list(scratch: &Scratch) {
 struct PanicOnList(Box<dyn CapacityProvider>);
 
 impl CapacityProvider for PanicOnList {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.catalog()
     }
 
@@ -119,8 +119,6 @@ impl CapacityProvider for PanicOnList {
 const OPTIONS: &str = r#"
 [[option]]
 instance_type = "gpu_1x_a100"
-gpu_class = "nvidia-a100"
-gpus = 1
 "#;
 
 /// The agent the bootstrap downloads.
@@ -142,7 +140,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
             provider: Box::new(cloud),
             floor: Floor {
                 gpus: 1,
-                gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+                gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
             },
             exec: vec![ExecMode::Container],
         }));
@@ -177,7 +175,7 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
         provider,
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))
@@ -327,6 +325,9 @@ pub fn hello_body_of(name: &str) -> Value {
     let mut body = hello_body(name);
     body["instance"] = json!({ "provider": "burst", "instance_id": name });
     body["shape"]["memory_bytes"] = json!(64u64 << 30);
+    // The class the agent of a `gpu_1x_a100` machine reads from `nvidia-smi`: the 40 GB
+    // PCIe variant the provider's catalog table offers for that type.
+    body["shape"]["gpu_class"] = json!("nvidia-a100-pcie-40gb");
     body
 }
 

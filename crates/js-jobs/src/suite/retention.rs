@@ -223,6 +223,88 @@ pub fn a_result_survives_the_end_of_its_allocation<B: Backend>(backend: &B) {
     );
 }
 
+/// At boot one commit raises the retention end of an ended job and gives each queued, placed
+/// and starting job a deadline floor of the boot plus [`BOOT_GRACE`]; a running job and a row a
+/// later build wrote are left as they are; a second raise at the same boot, or at an earlier
+/// instant, writes nothing; and a boot a minute later raises each floor to that boot plus the
+/// grace, never to the first floor plus it (design section 6.7, step 7; section 8, row 36).
+pub fn a_boot_raises_floors_and_retention_ends_in_one_commit<B: Backend>(backend: &B) {
+    let name = "a_boot_raises_floors_and_retention_ends_in_one_commit";
+    let rig = rig(backend);
+    let ended = rig.running("b-ended");
+    rig.jobs.end_job(&ended, exited(0)).expect("ends");
+    let queued = rig.queue("b-queued");
+    let placed = rig.placed("b-placed");
+    let starting = rig.placed("b-starting");
+    rig.jobs
+        .transition(&starting, JobState::Placed, JobState::Starting)
+        .expect("starts");
+    let running = rig.running("b-running");
+    rig.put_raw("job/b-zz-later", vec![FORMAT + 1]);
+    rig.clock.advance(WEEK + Duration::from_secs(3600));
+    let boot = now(&rig);
+    let floor = boot.saturating_add(BOOT_GRACE);
+    let untouched = || (rig.raw("job/b-running"), rig.raw("job/b-zz-later"));
+    let before = untouched();
+    let commits = rig.store.commit_stats().txns;
+
+    assert_eq!(
+        rig.jobs.raise_at_boot(boot),
+        Ok(4),
+        "{name}: not every waiting or ended job was raised"
+    );
+    assert_eq!(
+        rig.store.commit_stats().txns,
+        commits + 1,
+        "{name}: the boot raise was not one commit"
+    );
+    for id in [&queued, &placed, &starting] {
+        assert_eq!(
+            stored(&rig.jobs, id).deadline_floor,
+            Some(floor),
+            "{name}: {id} has no floor of the boot plus the grace"
+        );
+    }
+    let ended_now = stored(&rig.jobs, &ended);
+    assert_eq!(
+        (ended_now.retention_ends, ended_now.deadline_floor),
+        (Some(floor), None),
+        "{name}: the ended job's retention end was not raised, or it was given a floor"
+    );
+    assert_eq!(
+        untouched(),
+        before,
+        "{name}: a running job, or a later build's row, was written"
+    );
+    assert_eq!(
+        stored(&rig.jobs, &running).deadline_floor,
+        None,
+        "{name}: a running job was given a floor"
+    );
+
+    for again in [boot, StoreTime::ZERO] {
+        assert_eq!(
+            rig.jobs.raise_at_boot(again),
+            Ok(0),
+            "{name}: a raise at {again:?} wrote a floor that was already as late"
+        );
+    }
+    assert_eq!(
+        rig.store.commit_stats().txns,
+        commits + 1,
+        "{name}: a raise with nothing to write committed"
+    );
+
+    rig.clock.advance(Duration::from_secs(60));
+    let second = now(&rig);
+    assert_eq!(rig.jobs.raise_at_boot(second), Ok(4));
+    assert_eq!(
+        stored(&rig.jobs, &queued).deadline_floor,
+        Some(second.saturating_add(BOOT_GRACE)),
+        "{name}: a second boot stretched the floor past that boot plus the grace"
+    );
+}
+
 /// An outage outlasts a retention end: at boot the end is raised to the boot plus
 /// [`BOOT_GRACE`], so the result reads at boot, the sweep lists nothing then and lists the
 /// job at the boot plus the grace. An end already later stays; a job with no end (queued)
@@ -684,8 +766,13 @@ pub fn the_tick_deletes_in_batches_and_leaves_what_it_cannot_read<B: Backend>(ba
         rig.jobs
             .raise_deadlines_at_boot(Txn::new(), now(&rig))
             .map(drop),
-        Err(corrupt),
+        Err(corrupt.clone()),
         "{name}: the raise read a corrupt row"
+    );
+    assert_eq!(
+        rig.jobs.raise_at_boot(now(&rig)),
+        Err(corrupt),
+        "{name}: the boot raise read a corrupt row"
     );
 }
 

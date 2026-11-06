@@ -2,14 +2,16 @@
 
 use js_elastic::{
     AcquireId, Acquired, CapacityProvider, Claim, Demand, Held, HostRef, HostStatus, Offer,
-    ProviderError, Released,
+    ProviderError, Purchase, Released,
 };
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, SCHEDULER_TAG, TerminateEffect,
 };
-use js_types::Resources;
+use js_types::{AcceleratorNeed, Model, Resources};
 
-use crate::rig::{INTERVAL, Rig, SCHEDULER, ask, host, id, live, offer, rig, rig_with, row, tag};
+use crate::rig::{
+    H100, INTERVAL, Rig, SCHEDULER, ask, catalog, host, id, live, offer, rig, rig_with, row, tag,
+};
 
 /// A rig with one launched instance, `fake0001`.
 fn launched() -> Rig {
@@ -306,13 +308,25 @@ fn the_sweep_reports_orphans_suspects_and_the_ending_and_terminates_nothing() {
 /// rig's class.
 fn request(gpus: u64) -> Demand {
     Demand {
-        resources: Resources::new(4000, 16 << 30, gpus, Some("nvidia-sample".to_owned())).unwrap(),
+        resources: Resources::new(4000, 16 << 30, gpus, Some(H100.to_owned())).unwrap(),
         disk_bytes: None,
         os: None,
         arch: Some("x86_64".to_owned()),
         isa_level: None,
         exec: None,
+        accelerator: booked(H100, gpus),
+        network: Default::default(),
+        host_ports: Vec::new(),
     }
+}
+
+/// The need a request that books `gpus` GPUs of `class` states.
+fn booked(class: &str, gpus: u64) -> Option<AcceleratorNeed> {
+    Some(AcceleratorNeed {
+        model: Some(Model::parse(class).unwrap()),
+        count: u32::try_from(gpus).unwrap(),
+        ..AcceleratorNeed::default()
+    })
 }
 
 fn names(rig: &Rig, wanted: &Demand) -> Vec<(String, String)> {
@@ -335,69 +349,75 @@ fn candidates_come_cheapest_first_then_fewest_gpus_then_name_then_region() {
     assert_eq!(
         names(&rig, &request(1)),
         pairs(&[
-            ("gpu_1x_sample", "region-a"),
-            ("gpu_1x_sample", "region-b"),
-            ("gpu_8x_example", "region-a")
+            ("gpu_1x_h100_sxm5", "region-a"),
+            ("gpu_1x_h100_sxm5", "region-b"),
+            ("gpu_8x_h100_sxm5", "region-a")
         ])
     );
     // More GPUs than the small type has: only the big one.
     assert_eq!(
         names(&rig, &request(2)),
-        pairs(&[("gpu_8x_example", "region-a")])
+        pairs(&[("gpu_8x_h100_sxm5", "region-a")])
     );
     assert!(names(&rig, &request(9)).is_empty());
     // Equal price: fewer GPUs first; equal GPUs too: name.
     rig.fake.set_offers(vec![
         offer(
-            "gpu_8x_example",
+            "gpu_8x_h100_sxm5",
             100,
             8,
             Architecture::X86_64,
             &["region-a"],
         ),
-        offer("gpu_1x_sample", 100, 1, Architecture::X86_64, &["region-a"]),
+        offer(
+            "gpu_1x_h100_sxm5",
+            100,
+            1,
+            Architecture::X86_64,
+            &["region-a"],
+        ),
     ]);
     let order: Vec<String> = names(&rig, &request(1)).into_iter().map(|c| c.0).collect();
-    assert_eq!(order, ["gpu_1x_sample", "gpu_8x_example"]);
+    assert_eq!(order, ["gpu_1x_h100_sxm5", "gpu_8x_h100_sxm5"]);
 }
 
+/// Four types of the one model of the rig, the H100: two of one GPU, one of two and one
+/// of eight.
 const TIES: &str = r#"
 [[option]]
-instance_type = "gpu_1x_a"
-gpu_class = "nvidia-sample"
-gpus = 1
+instance_type = "gpu_1x_h100_pcie"
 
 [[option]]
-instance_type = "gpu_1x_b"
-gpu_class = "nvidia-sample"
-gpus = 1
+instance_type = "gpu_1x_h100_sxm5"
 
 [[option]]
-instance_type = "gpu_1x_d"
-gpu_class = "nvidia-sample"
-gpus = 1
+instance_type = "gpu_2x_h100_sxm5"
 
 [[option]]
-instance_type = "gpu_8x_c"
-gpu_class = "nvidia-sample"
-gpus = 8
+instance_type = "gpu_8x_h100_sxm5"
 "#;
 
 #[test]
 fn the_choice_is_the_same_whatever_order_the_api_lists_in() {
     let rig = rig_with(live(5), TIES);
     let mut offers = vec![
-        offer("gpu_1x_b", 80, 1, Architecture::X86_64, &["r2", "r1", "r1"]),
-        offer("gpu_8x_c", 80, 8, Architecture::X86_64, &["r1"]),
-        offer("gpu_1x_a", 80, 1, Architecture::X86_64, &["r1"]),
-        offer("gpu_1x_d", 70, 1, Architecture::X86_64, &["r9"]),
+        offer(
+            "gpu_1x_h100_sxm5",
+            80,
+            1,
+            Architecture::X86_64,
+            &["r2", "r1", "r1"],
+        ),
+        offer("gpu_8x_h100_sxm5", 80, 8, Architecture::X86_64, &["r1"]),
+        offer("gpu_1x_h100_pcie", 80, 1, Architecture::X86_64, &["r1"]),
+        offer("gpu_2x_h100_sxm5", 70, 2, Architecture::X86_64, &["r9"]),
     ];
     let want: Vec<(String, String)> = [
-        ("gpu_1x_d", "r9"),
-        ("gpu_1x_a", "r1"),
-        ("gpu_1x_b", "r1"),
-        ("gpu_1x_b", "r2"),
-        ("gpu_8x_c", "r1"),
+        ("gpu_2x_h100_sxm5", "r9"),
+        ("gpu_1x_h100_pcie", "r1"),
+        ("gpu_1x_h100_sxm5", "r1"),
+        ("gpu_1x_h100_sxm5", "r2"),
+        ("gpu_8x_h100_sxm5", "r1"),
     ]
     .iter()
     .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
@@ -415,7 +435,13 @@ fn the_choice_is_the_same_whatever_order_the_api_lists_in() {
 #[test]
 fn a_type_that_does_not_fit_or_has_no_capacity_is_left_out() {
     let rig = rig(live(5));
-    let mut arm = offer("gpu_1x_sample", 10, 1, Architecture::Arm64, &["region-a"]);
+    let mut arm = offer(
+        "gpu_1x_h100_sxm5",
+        10,
+        1,
+        Architecture::Arm64,
+        &["region-a"],
+    );
     // arm64 is not released for.
     rig.fake.set_offers(vec![arm.clone()]);
     assert!(names(&rig, &request(1)).is_empty());
@@ -427,11 +453,17 @@ fn a_type_that_does_not_fit_or_has_no_capacity_is_left_out() {
     arm.regions.clear();
     rig.fake.set_offers(vec![arm.clone()]);
     assert!(names(&rig, &request(1)).is_empty());
-    // The table row disagrees with the API about the GPU count.
-    let mut odd = offer("gpu_1x_sample", 10, 2, Architecture::X86_64, &["region-a"]);
+    // The catalog table disagrees with the API about the GPU count.
+    let mut odd = offer(
+        "gpu_1x_h100_sxm5",
+        10,
+        2,
+        Architecture::X86_64,
+        &["region-a"],
+    );
     rig.fake.set_offers(vec![odd.clone()]);
     assert!(names(&rig, &request(1)).is_empty());
-    // A type not in the table.
+    // A type not on the allow list.
     odd = offer(
         "gpu_9x_unlisted",
         10,
@@ -446,18 +478,26 @@ fn a_type_that_does_not_fit_or_has_no_capacity_is_left_out() {
 #[test]
 fn cpu_memory_and_class_must_fit() {
     let rig = rig(live(5));
-    // gpu_1x_sample in the rig has 8 vcpus and 64 GiB.
+    // gpu_1x_h100_sxm5 in the rig has 8 vcpus and 64 GiB.
     let mut wanted = request(1);
-    let sized =
-        |cpu, memory| Resources::new(cpu, memory, 1, Some("nvidia-sample".to_owned())).unwrap();
+    let sized = |cpu, memory| Resources::new(cpu, memory, 1, Some(H100.to_owned())).unwrap();
     wanted.resources = sized(8000, 64 << 30);
     assert!(!names(&rig, &wanted).is_empty());
     wanted.resources = sized(8001, 64 << 30);
-    assert!(names(&rig, &wanted).iter().all(|c| c.0 != "gpu_1x_sample"));
+    assert!(
+        names(&rig, &wanted)
+            .iter()
+            .all(|c| c.0 != "gpu_1x_h100_sxm5")
+    );
     wanted.resources = sized(8000, (64 << 30) + 1);
-    assert!(names(&rig, &wanted).iter().all(|c| c.0 != "gpu_1x_sample"));
+    assert!(
+        names(&rig, &wanted)
+            .iter()
+            .all(|c| c.0 != "gpu_1x_h100_sxm5")
+    );
     let other_class = Demand {
         resources: Resources::new(4000, 16 << 30, 1, Some("nvidia-other".to_owned())).unwrap(),
+        accelerator: booked("nvidia-other", 1),
         ..request(1)
     };
     assert!(names(&rig, &other_class).is_empty());
@@ -474,7 +514,7 @@ fn a_failed_read_of_the_types_is_an_error_and_not_an_empty_choice() {
 #[test]
 fn the_catalog_has_one_offer_per_region_with_capacity_and_the_facts_of_the_type() {
     let rig = rig(live(5));
-    let offers = rig.provider.catalog().unwrap();
+    let offers = catalog(&rig.provider).unwrap();
     let places: Vec<(&str, &str)> = offers
         .iter()
         .map(|o| (o.id.as_str(), o.zone.as_deref().unwrap()))
@@ -482,15 +522,31 @@ fn the_catalog_has_one_offer_per_region_with_capacity_and_the_facts_of_the_type(
     assert_eq!(
         places,
         [
-            ("gpu_1x_sample", "region-a"),
-            ("gpu_1x_sample", "region-b"),
-            ("gpu_8x_example", "region-a")
+            ("gpu_1x_h100_sxm5", "region-a"),
+            ("gpu_1x_h100_sxm5", "region-b"),
+            ("gpu_8x_h100_sxm5", "region-a")
         ]
     );
     // The rig's 8 vcpus, 64 GiB, 100 GiB of storage, one GPU and 75 cents per hour.
     assert_eq!(offers[0], crate::rig::candidate("region-a"));
-    assert_eq!(offers[2].gpus, 8);
+    // Eight H100 SXM5 on one NVLink fabric, as the catalog table gives the type.
+    assert_eq!(offers[2].accelerator, Some(crate::rig::h100(8)));
     assert_eq!(offers[2].price_cents_per_hour, Some(1200));
+}
+
+/// Asserts that every offer of the Lambda catalog states that it is bought on demand, has
+/// no quota (Lambda reports none) and no reserved block. Catches the new offer fields left
+/// unfilled by the existing provider.
+#[test]
+fn lambda_offers_still_state_on_demand_and_no_quota() {
+    let rig = rig(live(5));
+    let offers = crate::rig::catalog(&rig.provider).unwrap();
+    assert_eq!(offers.len(), 3);
+    for offer in &offers {
+        assert_eq!(offer.purchase, Some(Purchase::OnDemand), "{}", offer.id);
+        assert_eq!(offer.quota, None, "{}", offer.id);
+        assert_eq!(offer.block, None, "{}", offer.id);
+    }
 }
 
 #[test]
@@ -503,13 +559,13 @@ fn the_catalog_carries_every_architecture_and_leaves_the_choice_to_the_demand() 
         (Architecture::Other("riscv".to_owned()), "riscv"),
     ] {
         rig.fake.set_offers(vec![offer(
-            "gpu_1x_sample",
+            "gpu_1x_h100_sxm5",
             10,
             1,
             architecture,
             &["region-a"],
         )]);
-        let offers: Vec<Offer> = rig.provider.catalog().unwrap();
+        let offers: Vec<Offer> = catalog(&rig.provider).unwrap();
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].arch, name);
         assert_eq!(offers[0].os, "linux");
@@ -524,7 +580,7 @@ fn a_catalog_that_cannot_be_read_is_an_error_and_not_an_empty_catalog() {
     let down = ApiError::Transport("down".to_owned());
     rig.fake.fail_next(Call::InstanceTypes, down.clone());
     assert_eq!(
-        rig.provider.catalog(),
+        catalog(&rig.provider),
         Err(ProviderError::new(down.to_string()))
     );
 }

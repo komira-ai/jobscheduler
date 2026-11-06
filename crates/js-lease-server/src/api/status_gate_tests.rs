@@ -139,6 +139,9 @@ async fn a_launch_is_planned_for_the_head_of_the_wait_list_else_the_floor() {
         arch: None,
         isa_level: None,
         exec: None,
+        accelerator: None,
+        network: Default::default(),
+        host_ports: Vec::new(),
     };
     let mut rig = Rig::new("status_wanted").await;
     for registry in [None, Some(&rig.registry)] {

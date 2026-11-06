@@ -70,10 +70,11 @@ pub enum Net {
     Loopback,
     /// The network is open: the profile has no network rule. Seatbelt cannot deny a
     /// literal address (the compiler accepts only `*` and `localhost` as the host of a
-    /// `remote ip` filter), so egress control needs a packet filter keyed on the pool's
-    /// user range. Tracked in komira-ai/jobscheduler#407. Until then a run at this
-    /// level can reach any address the Mac can, the scheduler and the cloud metadata
-    /// address included.
+    /// `remote ip` filter), so egress control is a packet filter keyed on the pool's user
+    /// range (`js-mac-provision`). The agent requires that filter in force for its
+    /// `--native-network on` and not for `--native-network open`, which both give a run this
+    /// profile: without the filter a run at this level can reach any address the Mac can,
+    /// the scheduler and the cloud metadata address included.
     On,
 }
 

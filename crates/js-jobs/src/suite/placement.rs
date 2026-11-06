@@ -11,8 +11,8 @@ use crate::codec::{FORMAT, alloc_tag, set_field};
 use crate::ids::ScriptedIds;
 use crate::interfere::{INJECTED, Interfere};
 use crate::{
-    AllocationId, AllocationStep, Booked, EndReason, HostBooking, JobState, JobStore,
-    JobStoreError, MINT_TRIES, NewJob, RandomIds,
+    AllocationId, AllocationStep, Booked, DeclaredPort, EndReason, HostBooking, JobId, JobSpec,
+    JobState, JobStore, JobStoreError, MINT_TRIES, NewJob, RandomIds,
 };
 
 /// The error an operation answers when its commit fails.
@@ -104,6 +104,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
                     id: Some(job_id("f-new")),
                     spec: super::full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .map(drop)
             }),
@@ -115,6 +116,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
                     id: None,
                     spec: super::full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .map(drop)
             }),
@@ -539,4 +541,86 @@ pub fn booked_on_sums_the_live_allocations_of_a_host<B: Backend>(backend: &B) {
         }),
         "booked_on_sums_the_live_allocations_of_a_host: a row it cannot read was taken as none"
     );
+}
+
+/// Placement books the host ports the job declares, sorted and each once, on the allocation
+/// it returns and the one the store reads back; a job that declares none books none, and a
+/// freed allocation is no longer live. Catches ports that are left off the allocation, kept
+/// in declaration order or with a repeat, or still live after the free.
+pub fn placement_books_the_jobs_host_ports<B: Backend>(backend: &B) {
+    let rig = rig(backend);
+    let declared = |host: u16| DeclaredPort {
+        host,
+        container: 9000,
+    };
+    let ported = rig.queue_spec(
+        "p-a-ported",
+        JobSpec {
+            ports: vec![declared(8080), declared(80), declared(8080)],
+            ..super::full_spec()
+        },
+    );
+    let portless = rig.queue_spec(
+        "p-b-portless",
+        JobSpec {
+            ports: Vec::new(),
+            ..super::full_spec()
+        },
+    );
+    let (_, placed) = rig
+        .jobs
+        .place(&ported, host("host-a"), share())
+        .expect("placed");
+    rig.jobs
+        .place(&portless, host("host-a"), share())
+        .expect("placed");
+    let name = "placement_books_the_jobs_host_ports";
+    assert_eq!(
+        placed.host_ports,
+        vec![80, 8080],
+        "{name}: the returned allocation"
+    );
+    assert_eq!(
+        rig.jobs.get_allocation(&ported).expect("reads"),
+        Some(placed.clone()),
+        "{name}: the stored allocation"
+    );
+    let live: Vec<(JobId, Vec<u16>)> = rig
+        .jobs
+        .live_allocations()
+        .expect("reads")
+        .into_iter()
+        .map(|allocation| (allocation.job, allocation.host_ports))
+        .collect();
+    assert_eq!(
+        live,
+        vec![
+            (ported.clone(), vec![80, 8080]),
+            (portless.clone(), Vec::new())
+        ],
+        "{name}: the live allocations"
+    );
+    let on_host: Vec<Vec<u16>> = rig
+        .jobs
+        .live_on(&host("host-a"))
+        .expect("reads")
+        .into_iter()
+        .map(|(allocation, _)| allocation.host_ports)
+        .collect();
+    assert_eq!(
+        on_host,
+        vec![vec![80, 8080], Vec::new()],
+        "{name}: live on the host"
+    );
+
+    rig.jobs.end_job(&ported, super::cancelled()).expect("ends");
+    rig.jobs.free(&ported, EndReason::Cancelled).expect("frees");
+    let live: Vec<JobId> = rig
+        .jobs
+        .live_allocations()
+        .expect("reads")
+        .into_iter()
+        .map(|allocation| allocation.job)
+        .collect();
+    assert_eq!(live, vec![portless], "{name}: after the free");
 }

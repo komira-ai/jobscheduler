@@ -1,57 +1,62 @@
 //! What one launchable thing would give, and whether it fits a job.
 
-use std::fmt;
-
-use js_types::{ExecMode, IsaLevel, Requirements};
+use js_types::{Accelerator, AcceleratorMiss, ExecMode, IsaLevel, Requirements};
 
 /// What a job needs of a host. The scaler and the matcher read one definition.
 pub type Demand = Requirements;
-
-/// A GPU class spelled as the agent reports it: the model name in lower case, its words
-/// joined by `-`, so `NVIDIA A100-SXM4-80GB` is `nvidia-a100-sxm4-80gb`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GpuClass(String);
-
-impl GpuClass {
-    /// The class `text`, which must already be in the agent's spelling.
-    ///
-    /// # Errors
-    ///
-    /// The reason `text` is not a class.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let words: Vec<&str> = text.split('-').collect();
-        let word = |w: &&str| {
-            !w.is_empty()
-                && w.bytes()
-                    .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
-        };
-        match (text.is_empty(), words.iter().all(word)) {
-            (true, _) => Err("is empty".to_owned()),
-            (false, false) => Err(
-                "must be lower case letters and digits joined by single '-', as the agent reports a GPU model"
-                    .to_owned(),
-            ),
-            (false, true) => Ok(Self(text.to_owned())),
-        }
-    }
-
-    /// The class as text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for GpuClass {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        out.write_str(&self.0)
-    }
-}
 
 /// The unit a price is quoted in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceUnit {
     /// US cents.
     UsCents,
+}
+
+/// How a machine from an offer is bought: the purchase option a catalog states for it.
+/// A provider's configured `purchase` list orders these when offers tie on everything
+/// else (design 5.6, step 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Purchase {
+    /// Bought by the hour at the list price, kept until released.
+    OnDemand,
+    /// Spare capacity at a lower price, which the cloud may take back.
+    Spot,
+    /// Capacity reserved for a fixed block of time.
+    CapacityBlock,
+    /// Capacity held by a reservation the account already has.
+    Reserved,
+    /// A purchase option the catalog names that none of the others is, as the catalog
+    /// spells it.
+    Other(String),
+}
+
+/// A provider account's limit on the vCPUs of running machines, for the group of machine
+/// types and the purchase option an offer belongs to, as the provider reported it. It is
+/// information: nothing removes, delays or marks an offer because of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quota {
+    /// The most vCPUs the account may run.
+    pub vcpus_limit: u32,
+    /// The vCPUs running now, when the provider says; `None`: not reported.
+    pub vcpus_in_use: Option<u32>,
+}
+
+/// The terms of a reserved block of machines that an offer of
+/// [`Purchase::CapacityBlock`] would buy. The price of the offer is the block's upfront
+/// price spread over its machines and hours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockTerms {
+    /// The provider's id of the offering, which a purchase names.
+    pub offering: String,
+    /// When the block starts, in seconds since the Unix epoch (UTC).
+    pub start_unix_seconds: u64,
+    /// How long the block lasts, in minutes.
+    pub duration_minutes: u64,
+    /// The price of the whole block, paid up front, in US cents (rounded up).
+    pub upfront_cents: u64,
+    /// How many machines the block holds.
+    pub instances: u32,
 }
 
 /// The dimension of a [`Demand`] that an [`Offer`] fails.
@@ -72,10 +77,33 @@ pub enum Dimension {
     MemoryBytes,
     /// The offer has less disk.
     DiskBytes,
-    /// The offer has fewer GPUs.
-    Gpus,
-    /// The offer has no GPUs of the class asked for.
-    GpuClass,
+    /// The offer's accelerators are of another vendor, or it has none.
+    AcceleratorVendor,
+    /// The offer's accelerators are of another model (compared by canonical family and,
+    /// for a full spelling, by its variant's facts), or it has none.
+    AcceleratorModel,
+    /// The offer has fewer accelerators.
+    AcceleratorCount,
+    /// The offer's accelerators have less memory per device, or it is not known.
+    AcceleratorMemory,
+    /// The offer's accelerators are linked by another kind or a smaller domain, or how is
+    /// not known.
+    AcceleratorInterconnect,
+    /// The offer's accelerators are of another form factor, or it is not known.
+    AcceleratorFormFactor,
+}
+
+impl From<AcceleratorMiss> for Dimension {
+    fn from(miss: AcceleratorMiss) -> Self {
+        match miss {
+            AcceleratorMiss::Vendor => Self::AcceleratorVendor,
+            AcceleratorMiss::Model => Self::AcceleratorModel,
+            AcceleratorMiss::Count => Self::AcceleratorCount,
+            AcceleratorMiss::Memory => Self::AcceleratorMemory,
+            AcceleratorMiss::Interconnect => Self::AcceleratorInterconnect,
+            AcceleratorMiss::FormFactor => Self::AcceleratorFormFactor,
+        }
+    }
 }
 
 /// What one launchable thing would give: the provider's id for it, where, its size, its
@@ -92,10 +120,9 @@ pub struct Offer {
     pub memory_bytes: u64,
     /// Disk in bytes.
     pub disk_bytes: u64,
-    /// GPUs.
-    pub gpus: u32,
-    /// The class of the GPUs, as the agent reports it. `None` when there are none.
-    pub gpu_class: Option<GpuClass>,
+    /// The accelerators, resolved through the alias table (`js_types::accelerator_of`).
+    /// `None` when there are none.
+    pub accelerator: Option<Accelerator>,
     /// The operating system (`linux`, `macos`).
     pub os: String,
     /// The CPU architecture, canonical: `x86_64` or `arm64` (every constructor of an offer
@@ -113,21 +140,38 @@ pub struct Offer {
     pub price_unit: PriceUnit,
     /// Whether the catalog has capacity for it now.
     pub available: bool,
+    /// How a machine from it is bought. `None`: the catalog does not say. It is not part
+    /// of the [fit](Self::fit).
+    pub purchase: Option<Purchase>,
+    /// The account's vCPU limit for this offer's machine group and purchase option, as
+    /// information only. `None`: not known (the provider has none, the account has no
+    /// entry, or the read failed).
+    pub quota: Option<Quota>,
+    /// The terms of the reserved block an offer of [`Purchase::CapacityBlock`] buys;
+    /// `None` for every other offer.
+    pub block: Option<BlockTerms>,
 }
 
 impl Offer {
     /// Whether a host from this offer would serve `demand`: the same platform where the
     /// demand names one, an ISA level of the same family at least as high where the demand
-    /// asks for one (an offer that states no level serves no such demand), and at least
-    /// the CPU, memory, disk and GPUs asked for (the disk
-    /// both as the `disk-gib` requirement and as the scratch disk the request books), with
-    /// the GPU class when GPUs are asked for. Whether the offer is [available](Self::available)
-    /// is not part of the fit.
+    /// asks for one (an offer that states no level serves no such demand), at least the
+    /// CPU, memory and disk asked for (the disk both as the `disk-gib` requirement and as
+    /// the scratch disk the request books), and the accelerators the demand needs. Whether
+    /// the offer is [available](Self::available) is not part of the fit.
+    ///
+    /// The accelerator need is resolved through the alias table and compared with
+    /// `AcceleratorNeed::met_by`: vendor, canonical model (a family fits every variant; a
+    /// full spelling pins its variant's memory and form factor; an unknown name fits only
+    /// an identical one), count at least, memory per device at least, interconnect at
+    /// least, form factor. The GPUs the demand books must also be at most the offer's
+    /// count, and a demand that books GPUs of a class that is not a model name fits no
+    /// offer. A demand with no accelerator and no GPUs fits any offer, GPU offers included.
     ///
     /// # Errors
     ///
     /// The first [`Dimension`] it fails: platform first (the ISA level after the
-    /// architecture), then size.
+    /// architecture), then size, then the accelerator in the order above.
     pub fn fit(&self, demand: &Demand) -> Result<(), Dimension> {
         let wanted = &demand.resources;
         let checks = [
@@ -163,28 +207,49 @@ impl Offer {
                 .into_iter()
                 .all(|fits| fits),
             ),
-            (Dimension::Gpus, wanted.gpus() <= u64::from(self.gpus)),
-            (
-                Dimension::GpuClass,
-                wanted.gpu_class().is_none_or(|class| {
-                    self.gpu_class
-                        .as_ref()
-                        .is_some_and(|own| own.as_str() == class)
-                }),
-            ),
         ];
         match checks.into_iter().find(|(_, fits)| !fits) {
             Some((dimension, _)) => Err(dimension),
-            None => Ok(()),
+            None => self.accelerator_fit(demand),
+        }
+    }
+
+    /// The accelerator part of [`Self::fit`].
+    fn accelerator_fit(&self, demand: &Demand) -> Result<(), Dimension> {
+        let have = self.accelerator.as_ref();
+        let wanted = &demand.resources;
+        match &demand.accelerator {
+            Some(need) => need.met_by(have)?,
+            None if wanted.gpu_class().is_some() => return Err(Dimension::AcceleratorModel),
+            None => {}
+        }
+        match wanted.gpus() <= u64::from(have.map_or(0, |have| have.count)) {
+            true => Ok(()),
+            false => Err(Dimension::AcceleratorCount),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use js_types::{Arch, Os, Resources};
+    use js_types::{AcceleratorNeed, Arch, Model, Os, Resources, accelerator_of};
 
     use super::*;
+
+    /// `count` accelerators of the model `name`, as an offer states them.
+    fn accelerators(name: &str, count: u32) -> Option<Accelerator> {
+        Some(accelerator_of(&Model::parse(name).unwrap(), count, None))
+    }
+
+    /// A need for `count` accelerators of the model `name`, as a request that books them
+    /// states it.
+    fn need(name: &str, count: u32) -> Option<AcceleratorNeed> {
+        Some(AcceleratorNeed {
+            model: Some(Model::parse(name).unwrap()),
+            count,
+            ..AcceleratorNeed::default()
+        })
+    }
 
     fn offer() -> Offer {
         Offer {
@@ -193,8 +258,7 @@ mod tests {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 512 << 30,
-            gpus: 2,
-            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            accelerator: accelerators("nvidia-sample", 2),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,
@@ -202,6 +266,9 @@ mod tests {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         }
     }
 
@@ -213,6 +280,9 @@ mod tests {
             arch: Some("x86_64".to_owned()),
             isa_level: None,
             exec: Some(ExecMode::Container),
+            accelerator: need("nvidia-sample", 2),
+            network: Default::default(),
+            host_ports: Vec::new(),
         }
     }
 
@@ -228,10 +298,14 @@ mod tests {
             arch: None,
             isa_level: None,
             exec: None,
+            accelerator: None,
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         assert_eq!(offer().fit(&nothing), Ok(()));
         let mut small = demand();
         small.resources = Resources::new(1000, 1 << 30, 1, Some("nvidia-sample".into())).unwrap();
+        small.accelerator = need("nvidia-sample", 1);
         assert_eq!(offer().fit(&small), Ok(()));
         let mut gone = offer();
         gone.available = false;
@@ -260,6 +334,42 @@ mod tests {
         let mut arch_only = demand();
         arch_only.os = None;
         assert_eq!(mac.fit(&arch_only), Ok(()));
+    }
+
+    /// Asserts that an offer built without a purchase option holds `None`; that each
+    /// option set on an offer reads back from it and from its copy as the same option,
+    /// equal to itself and to no other (an `Other` by its spelling); and that the option
+    /// is not part of the fit. Catches a field that a copy drops, options that compare
+    /// equal across kinds, and a fit that refuses an offer for how it is bought.
+    #[test]
+    fn purchase_round_trips_and_defaults_to_none() {
+        assert_eq!(offer().purchase, None);
+        let options = [
+            Purchase::OnDemand,
+            Purchase::Spot,
+            Purchase::CapacityBlock,
+            Purchase::Reserved,
+            Purchase::Other("savings-plan".to_owned()),
+            Purchase::Other("preemptible".to_owned()),
+        ];
+        for (index, option) in options.iter().enumerate() {
+            let bought = Offer {
+                purchase: Some(option.clone()),
+                ..offer()
+            };
+            let copy = bought.clone();
+            assert_eq!(copy.purchase.as_ref(), Some(option));
+            assert_eq!(copy, bought);
+            assert_ne!(copy, offer());
+            assert_eq!(bought.fit(&demand()), Ok(()));
+            for (other, different) in options.iter().enumerate() {
+                assert_eq!(
+                    option == different,
+                    index == other,
+                    "{option:?} {different:?}"
+                );
+            }
+        }
     }
 
     /// Asserts that a job whose image is built for `macos`/`arm64` turns a demand that named
@@ -371,9 +481,10 @@ mod tests {
         either.exec = None;
         assert_eq!(sandbox.fit(&either), Ok(()));
 
-        let ask = |cpu, memory, gpus, class: Option<&str>| {
+        let ask = |cpu, memory, gpus: u64, class: Option<&str>| {
             let mut wanted = demand();
             wanted.resources = Resources::new(cpu, memory, gpus, class.map(str::to_owned)).unwrap();
+            wanted.accelerator = class.and_then(|class| need(class, gpus as u32));
             wanted
         };
         let class = Some("nvidia-sample");
@@ -385,10 +496,13 @@ mod tests {
             offer().fit(&ask(0, (64 << 30) + 1, 0, None)),
             Err(Dimension::MemoryBytes)
         );
-        assert_eq!(offer().fit(&ask(0, 0, 3, class)), Err(Dimension::Gpus));
+        assert_eq!(
+            offer().fit(&ask(0, 0, 3, class)),
+            Err(Dimension::AcceleratorCount)
+        );
         assert_eq!(
             offer().fit(&ask(0, 0, 1, Some("nvidia-other"))),
-            Err(Dimension::GpuClass)
+            Err(Dimension::AcceleratorModel)
         );
 
         let mut disk = demand();
@@ -424,43 +538,15 @@ mod tests {
         assert_eq!(none.fit(&books(1)), Err(Dimension::DiskBytes));
     }
 
-    /// Asserts that an offer with no GPU class fails a demand for GPUs by class, and
+    /// Asserts that an offer with no accelerator fails a demand for GPUs by model, and
     /// that when several dimensions fail the platform is named before the size.
     #[test]
     fn a_classless_offer_fails_a_gpu_demand_and_the_platform_is_named_first() {
         let mut cpu_only = offer();
-        (cpu_only.gpus, cpu_only.gpu_class) = (2, None);
-        assert_eq!(cpu_only.fit(&demand()), Err(Dimension::GpuClass));
+        cpu_only.accelerator = None;
+        assert_eq!(cpu_only.fit(&demand()), Err(Dimension::AcceleratorModel));
         let mut worse = offer();
         (worse.os, worse.cpu_millis) = ("macos".to_owned(), 1);
         assert_eq!(worse.fit(&demand()), Err(Dimension::Os));
-    }
-
-    /// Asserts that a GPU class is accepted only in the agent's spelling.
-    #[test]
-    fn a_gpu_class_must_be_in_the_agents_spelling() {
-        for good in ["nvidia-a10", "x", "nvidia-h100-80gb-hbm3", "a1-2b"] {
-            let class = GpuClass::parse(good).unwrap();
-            assert_eq!((class.as_str(), class.to_string().as_str()), (good, good));
-        }
-        for bad in [
-            "",
-            "NVIDIA-A10",
-            "nvidia a10",
-            "nvidia--a10",
-            "-nvidia",
-            "nvidia-",
-            "nvidia_a10",
-            "nvidia-a10 ",
-            "nvidia-\u{e9}",
-        ] {
-            assert!(GpuClass::parse(bad).is_err(), "{bad:?}");
-        }
-        assert_eq!(GpuClass::parse("").unwrap_err(), "is empty");
-        assert!(
-            GpuClass::parse("NVIDIA A10")
-                .unwrap_err()
-                .starts_with("must be lower case")
-        );
     }
 }

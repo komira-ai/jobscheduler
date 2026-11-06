@@ -7,14 +7,14 @@ use std::thread;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, GpuClass, HostName, Offer,
-    PriceUnit, Reason, Refusal, RefusalCode, Released, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, CapacityProvider, HostName, Offer, PriceUnit,
+    Reason, Refusal, RefusalCode, Released, SchedulerId,
 };
 use js_provider_lambdalabs::{
     ApiError, ApiKey, ElasticConfig, ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider,
     LaunchRequest, ManualClock, OptionTable, Tag,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, Model, accelerator_of};
 use serde_json::{Value, json};
 
 use crate::reads::client;
@@ -32,7 +32,7 @@ const MAKE_KEY: &str = "POST /api/v1/ssh-keys";
 fn request() -> LaunchRequest {
     LaunchRequest {
         region: "region-a".to_owned(),
-        instance_type: "gpu_1x_sample".to_owned(),
+        instance_type: "gpu_1x_h100_sxm5".to_owned(),
         ssh_key: "fixture-key".to_owned(),
         name: "js-0123456789ab-000000000001".to_owned(),
         tags: vec![Tag {
@@ -61,7 +61,7 @@ fn a_launch_posts_the_documented_body_with_one_ssh_key_and_no_quantity() {
         body(&server, 0),
         json!({
             "region_name": "region-a",
-            "instance_type_name": "gpu_1x_sample",
+            "instance_type_name": "gpu_1x_h100_sxm5",
             "ssh_key_names": ["fixture-key"],
             "name": "js-0123456789ab-000000000001",
             "tags": [{"key": "jobscheduler:pool", "value": "fixture"}],
@@ -172,10 +172,7 @@ fn provider_with(
     let key = ApiKey::from_file(&scratch.key_file("key-one")).unwrap();
     let api = HttpApi::connect(&server.url("http"), &key, None, limit).unwrap();
     let clock = Arc::new(ManualClock::new());
-    let table = OptionTable::parse(
-        "[[option]]\ninstance_type = \"gpu_1x_sample\"\ngpu_class = \"nvidia-sample\"\ngpus = 1\n",
-    )
-    .unwrap();
+    let table = OptionTable::parse("[[option]]\ninstance_type = \"gpu_1x_h100_sxm5\"\n").unwrap();
     let config = make(SchedulerId::new("sched-one").unwrap()).enable().live();
     (
         LambdaProvider::new(Arc::new(api), clock.clone(), table, config),
@@ -191,13 +188,16 @@ fn ask() -> AcquireRequest {
         pool: "pool-a".to_owned(),
         lifetime: None,
         offer: Offer {
-            id: "gpu_1x_sample".to_owned(),
+            id: "gpu_1x_h100_sxm5".to_owned(),
             zone: Some("region-a".to_owned()),
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             disk_bytes: 100 << 30,
-            gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            accelerator: Some(accelerator_of(
+                &Model::parse("nvidia-h100-80gb-hbm3").unwrap(),
+                1,
+                None,
+            )),
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,
@@ -205,6 +205,9 @@ fn ask() -> AcquireRequest {
             price_cents_per_hour: Some(75),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         },
         labels: Vec::new(),
         payload: BootPayload::new(String::new()),
@@ -244,7 +247,7 @@ fn the_provider_lists_then_launches_with_the_ownership_tags_and_name() {
         [RULESETS, LIST, LAUNCH].map(str::to_owned).to_vec()
     );
     let sent = body(&server, 2);
-    assert_eq!(sent["instance_type_name"], "gpu_1x_sample");
+    assert_eq!(sent["instance_type_name"], "gpu_1x_h100_sxm5");
     // The ruleset found by its name is the one attached, and an empty payload sends no
     // user data.
     assert_eq!(sent["firewall_rulesets"], json!([{"id": "rs-noinbound-a"}]));

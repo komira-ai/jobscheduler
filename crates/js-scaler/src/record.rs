@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use js_elastic::{AcquireId, GpuClass, Offer, PriceUnit};
-use js_types::{ExecMode, normalise_arch};
+use js_elastic::{AcquireId, Offer, PriceUnit};
+use js_types::{Accelerator, ExecMode, Model, accelerator_of, normalise_arch};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::time::Millis;
@@ -127,30 +127,60 @@ pub struct StoredOffer {
     /// the key reads as stating none.
     #[serde(default, skip_serializing)]
     pub isa_level: Option<String>,
+    /// The accelerator the offer stated, when [`StoredOffer::gpus`] and
+    /// [`StoredOffer::gpu_class`] cannot rebuild all of it: a model the alias table does
+    /// not know keeps the memory per device, the vendor, the interconnect and the form
+    /// factor the offer measured or stated, none of which the class spelling holds. It is
+    /// `None` when the spelling rebuilds the whole accelerator, so a record of an alias
+    /// offer equals the same record read back.
+    ///
+    /// It is never written or read, so the records file is unchanged and the release before
+    /// this one reads what this release writes. A record read back after a restart holds
+    /// none; the scaler then takes the accelerator the catalog states for the same offer
+    /// and zone, when it spells the same class and count, as it judges whether the machine
+    /// covers a request. Equality includes it.
+    #[serde(skip)]
+    pub accelerator_facts: Option<Accelerator>,
     /// The execution mode.
     pub exec: StoredExec,
+}
+
+/// How an agent spells `accelerator`: its variant, else its model.
+fn class_of(accelerator: &Accelerator) -> &str {
+    accelerator
+        .variant
+        .as_ref()
+        .unwrap_or(&accelerator.model)
+        .as_str()
 }
 
 impl StoredOffer {
     /// The shape of `offer`.
     #[must_use]
     pub fn from_offer(offer: &Offer) -> Self {
-        Self {
+        let mut stored = Self {
             id: offer.id.clone(),
             zone: offer.zone.clone(),
             cpu_millis: offer.cpu_millis,
             memory_bytes: offer.memory_bytes,
             disk_bytes: offer.disk_bytes,
-            gpus: offer.gpus,
-            gpu_class: offer.gpu_class.as_ref().map(|c| c.as_str().to_owned()),
+            gpus: offer.accelerator.as_ref().map_or(0, |a| a.count),
+            gpu_class: offer.accelerator.as_ref().map(|a| class_of(a).to_owned()),
             os: offer.os.clone(),
             arch: offer.arch.clone(),
             isa_level: offer.isa_level.map(|level| level.name().to_owned()),
+            accelerator_facts: None,
             exec: match offer.exec {
                 ExecMode::Container => StoredExec::Container,
                 ExecMode::SandboxExec => StoredExec::SandboxExec,
             },
-        }
+        };
+        let rebuilt = stored.accelerator();
+        stored.accelerator_facts = offer
+            .accelerator
+            .clone()
+            .filter(|stated| rebuilt.as_ref() != Some(stated));
+        stored
     }
 
     /// A shape that offers nothing, for a machine found with no offer to read it from.
@@ -167,14 +197,38 @@ impl StoredOffer {
             os: String::new(),
             arch: String::new(),
             isa_level: None,
+            accelerator_facts: None,
             exec: StoredExec::Container,
         }
+    }
+
+    /// The accelerator the stored count and class spell, with the memory the alias table
+    /// states for the variant. A class that is not a model name (a file edited by hand)
+    /// states none.
+    pub(crate) fn accelerator(&self) -> Option<Accelerator> {
+        let model = Model::parse(self.gpu_class.as_deref()?).ok()?;
+        Some(accelerator_of(&model, self.gpus, None))
+    }
+
+    /// The accelerator of the offer this shape was taken from: the one held, else the one
+    /// `listed` (what the catalog states now for the same offer and zone) when it spells
+    /// the stored class and count, else the one the stored count and class rebuild.
+    pub(crate) fn accelerator_with(&self, listed: Option<&Accelerator>) -> Option<Accelerator> {
+        let same = listed.filter(|each| {
+            (each.count, Some(class_of(each))) == (self.gpus, self.gpu_class.as_deref())
+        });
+        self.accelerator_facts
+            .clone()
+            .or_else(|| same.cloned())
+            .or_else(|| self.accelerator())
     }
 
     /// The offer this shape was taken from, priced at `price`, available. The architecture
     /// is read in the one spelling, so a record written when offers spelt Arm `aarch64`
     /// rebuilds an `arm64` offer. The ISA level is the one held; a held name that is not a
-    /// level (a file edited by hand) states none, as an offer that has not said.
+    /// level (a file edited by hand) states none, as an offer that has not said. The
+    /// accelerator is the one held when there is one, else the one the count and class
+    /// spell.
     #[must_use]
     pub fn to_offer(&self, price: u64) -> Offer {
         Offer {
@@ -183,11 +237,7 @@ impl StoredOffer {
             cpu_millis: self.cpu_millis,
             memory_bytes: self.memory_bytes,
             disk_bytes: self.disk_bytes,
-            gpus: self.gpus,
-            gpu_class: self
-                .gpu_class
-                .as_deref()
-                .and_then(|class| GpuClass::parse(class).ok()),
+            accelerator: self.accelerator_with(None),
             os: self.os.clone(),
             arch: normalise_arch(&self.arch).to_owned(),
             isa_level: self.isa_level.as_deref().and_then(|name| name.parse().ok()),
@@ -198,6 +248,9 @@ impl StoredOffer {
             price_cents_per_hour: Some(price),
             price_unit: PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         }
     }
 }

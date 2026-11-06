@@ -101,7 +101,7 @@ fn ours(scratch: &Scratch) -> Vec<String> {
 
 /// The file of the golden `config_two_elastic.txt`: two `lambdalabs` machine providers
 /// with their own key files, two platforms, the elastic pools `gpu` (settings and limits
-/// given) and `cpu`, and an agentless static pool.
+/// given, `catalog_refresh` among them) and `cpu`, and an agentless static pool.
 fn two_elastic(scratch: &Scratch) -> String {
     let tables = [
         rack(),
@@ -116,7 +116,7 @@ fn two_elastic(scratch: &Scratch) -> String {
         .set("path_grace", &quote("250ms"))
         .set(
             "provider_limits",
-            "{ lambda-a = { allowed_instance_types = [\"gpu_1x_a10\", \"gpu_8x_h100\"], max_price_cents_per_hour = 5000, max_machines = 3, max_spot_machines = 2 } }",
+            "{ lambda-a = { allowed_instance_types = [\"gpu_1x_a10\", \"gpu_8x_h100\"], max_price_cents_per_hour = 5000, max_machines = 3, max_spot_machines = 2, catalog_refresh = \"30m\" } }",
         );
     let cpu = on(&["west"], scratch)
         .set("name", &quote("cpu"))
@@ -548,7 +548,7 @@ fn limited_beside(scratch: &Scratch, limits: &str, more: &[String]) -> String {
 /// one the pool's platforms do not reach, and for a `static` one; `max_machines` above the
 /// pool's; `max_spot_machines` above `max_machines`; a repeated, empty, missing or
 /// mistyped instance type; a zero price or share; an entry or a table that is not a table;
-/// and an unknown key (`catalog_refresh`, which belongs to the catalog cache). It catches a
+/// and an unknown key (`catalog_ttl`; the message lists `catalog_refresh` and `offer_cooldown` among the known ones). It catches a
 /// limit that is not checked against the pool, or a key read as nothing.
 #[test]
 fn provider_limits_are_validated() {
@@ -616,8 +616,8 @@ fn provider_limits_are_validated() {
         ),
         ("{ lambda = 3 }", "lambda: must be a table"),
         (
-            "{ lambda = { catalog_refresh = \"1h\" } }",
-            "lambda.catalog_refresh: unknown field; known: allowed_instance_types, max_price_cents_per_hour, max_machines, max_spot_machines",
+            "{ lambda = { catalog_ttl = \"1h\" } }",
+            "lambda.catalog_ttl: unknown field; known: allowed_instance_types, max_price_cents_per_hour, max_machines, max_spot_machines, catalog_refresh, offer_cooldown",
         ),
     ];
     for (limits, message) in cases {

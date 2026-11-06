@@ -47,6 +47,15 @@ pub(crate) enum Unsendable {
     },
 }
 
+/// The network level a job's policy asks for.
+pub(crate) fn job_network(policy: NetworkPolicy) -> Level {
+    match policy {
+        NetworkPolicy::None => Level::None,
+        NetworkPolicy::AllowList => Level::AllowList,
+        NetworkPolicy::Open => Level::Open,
+    }
+}
+
 /// The start of the job `job` for its allocation `allocation`, to the host of `context`
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
 /// image, the command then its arguments, the environment, the files, what the
@@ -84,11 +93,7 @@ pub(crate) fn start_of(
             gpu_indices: Vec::new(),
         },
     };
-    let network = match spec.network {
-        NetworkPolicy::None => Level::None,
-        NetworkPolicy::AllowList => Level::AllowList,
-        NetworkPolicy::Open => Level::Open,
-    };
+    let network = job_network(spec.network);
     let ports: Vec<PortMap> = spec
         .ports
         .iter()

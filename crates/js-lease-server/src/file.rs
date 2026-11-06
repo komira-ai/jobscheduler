@@ -1,5 +1,5 @@
-//! The configuration file of `--config`: a `[server]` table, `[[pool]]` tables and the
-//! `[logs]` table of live logs.
+//! The configuration file of `--config`: a `[server]` table, `[[pool]]` tables, the
+//! `[[client]]` tables of the job service's clients and the `[logs]` table of live logs.
 //!
 //! Every table refuses a field it does not know, and the file holds no secret: a secret is
 //! the path of a file, read owner-only. A refusal names the pool and the field, such as
@@ -30,14 +30,16 @@ use crate::adapt::SharedClock;
 use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::Token;
+use crate::config::{Clients, Token};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
+use crate::job_expiry::JobLimits;
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::OAuthClient;
 
 mod brake;
 mod budget;
+mod clients;
 mod joined;
 mod lifetime;
 mod limits;
@@ -72,6 +74,7 @@ const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
 const ROOT_KEYS: &[&str] = &[
     "server",
+    "client",
     "pool",
     "budget",
     "machine_provider",
@@ -226,6 +229,12 @@ pub struct ElasticPlan {
     pub(crate) share: u32,
     /// The pool's `provider_limits` on the provider, as admission reads them.
     pub(crate) limits: PoolLimits,
+    /// How long the provider's cached catalog is used before it is fetched again: its
+    /// `provider_limits` `catalog_refresh`.
+    pub(crate) catalog_refresh: Duration,
+    /// How long one of the provider's offers cools down: its `provider_limits`
+    /// `offer_cooldown`.
+    pub(crate) offer_cooldown: Duration,
 }
 
 impl ElasticPlan {
@@ -277,12 +286,16 @@ pub(crate) struct Registering {
     /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
     /// elastic pool's launches are minted for under the provider kind's name.
     pub(crate) mint_provider: Option<String>,
+    /// The pool's `max_queue_wait` and `start_timeout`: an elastic pool's settings, and the
+    /// defaults for a joined pool, which has no keys for them.
+    pub(crate) job_limits: JobLimits,
 }
 
 impl Registering {
-    /// Gives the launching side the share and the limits admission reads, from the pool's
-    /// `provider_limits` (`limits`; a pool has one launching provider and a limit is refused
-    /// for any other, so it holds that provider's limits or none) and its `max_machines`.
+    /// Gives the launching side the share and the limits admission reads, and the refresh
+    /// and cool-down of the provider's catalog, from the pool's `provider_limits` (`limits`;
+    /// a pool has one launching provider and a limit is refused for any other, so it holds
+    /// that provider's limits or none) and its `max_machines`.
     fn admit(&mut self, limits: &BTreeMap<String, ProviderLimits>, max_machines: Option<u64>) {
         let limit = limits.values().next().cloned().unwrap_or_default();
         let share = limit.max_machines.or(max_machines).unwrap_or_default();
@@ -292,6 +305,8 @@ impl Registering {
                 allowed_instance_types: limit.allowed_instance_types.clone(),
                 max_price_cents_per_hour: limit.max_price_cents_per_hour,
             };
+            plan.catalog_refresh = limit.catalog_refresh;
+            plan.offer_cooldown = limit.offer_cooldown;
         });
     }
 }
@@ -311,6 +326,7 @@ pub(crate) enum LoadedHosts {
 pub(crate) struct Loaded {
     pub(crate) server: Server,
     pub(crate) client_token: Token,
+    pub(crate) clients: Clients,
     pub(crate) hosts: LoadedHosts,
     pub(crate) warnings: Vec<String>,
     /// Where live logs go: the `[logs]` table, or no sink.
@@ -366,6 +382,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let server = read_server(server)?;
     let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
+    let clients = clients::read(&mut root, &client_token, &server, ld)?;
     let logs = logs::read_logs(logs, ld.files)?;
     let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
     let mut static_pool = None;
@@ -377,7 +394,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             table,
             index + 1,
             ld,
-            (&client_token, &server.scheduler, ceiling, &budgets),
+            (&clients, &server.scheduler, ceiling, &budgets),
             &mut resolved,
         )?;
         let pool = format!("pool {:?}", read.name);
@@ -428,6 +445,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     Ok(Loaded {
         server,
         client_token,
+        clients,
         hosts,
         warnings,
         logs,
@@ -526,7 +544,7 @@ fn read_pool(
     number: usize,
     ld: &Load<'_>,
     (client, scheduler, max_lease_wall, budgets): (
-        &Token,
+        &Clients,
         &SchedulerId,
         Option<Duration>,
         &Budgets,
@@ -673,6 +691,7 @@ fn read_pool(
                 path_grace: settings.path_grace,
             };
             let mut registering = elastic.finish(built, client)?;
+            registering.job_limits = JobLimits::of(&settings);
             let reach = match reach {
                 Some(reach) => reach,
                 None => resolved.shorthand(&name, &kind, &p.map),
@@ -727,7 +746,7 @@ struct Elastic<'a> {
 }
 
 impl Elastic<'_> {
-    fn finish(self, built: ElasticBuilt, client: &Token) -> Result<Registering, StartupError> {
+    fn finish(self, built: ElasticBuilt, client: &Clients) -> Result<Registering, StartupError> {
         let Self {
             s,
             name,
@@ -820,6 +839,9 @@ impl Elastic<'_> {
             arch: None,
             isa_level: None,
             exec,
+            accelerator: built.floor.need(),
+            network: Default::default(),
+            host_ports: Vec::new(),
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
@@ -856,12 +878,15 @@ impl Elastic<'_> {
             provider: Arc::from(built.provider),
             share: u32::try_from(max).unwrap_or(u32::MAX),
             limits: PoolLimits::default(),
+            catalog_refresh: ProviderLimits::default().catalog_refresh,
+            offer_cooldown: ProviderLimits::default().offer_cooldown,
         };
         Ok(Registering {
             plan: Some(plan),
             pool,
             tokens,
             mint_provider: None,
+            job_limits: JobLimits::default(),
         })
     }
 }

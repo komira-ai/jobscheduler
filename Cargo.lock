@@ -1152,27 +1152,38 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "getrandom 0.2.17",
+ "http-body-util",
+ "hyper",
  "js-client",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
+ "js-proto",
  "js-provider",
  "js-provider-fake",
  "js-testkit",
  "js-types",
+ "prost",
+ "prost-reflect",
  "rcgen",
  "rustix",
  "serde_json",
  "thiserror",
  "tokio",
+ "tonic",
 ]
 
 [[package]]
 name = "js-client"
 version = "0.1.0"
 dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "js-agent-wire",
+ "js-proto",
  "js-testkit",
+ "prost",
  "rcgen",
  "rustix",
  "rustls",
@@ -1180,6 +1191,9 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tonic",
  "ureq",
  "webpki-roots",
 ]
@@ -1352,12 +1366,14 @@ dependencies = [
  "js-types",
  "js-usage",
  "log",
+ "prost-reflect",
  "prost-types",
  "rcgen",
  "rustix",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "subtle",
  "thiserror",
  "tokio",
@@ -1545,6 +1561,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "hyper-util",
+ "js-caps",
  "prost",
  "prost-types",
  "protox",
@@ -1560,6 +1577,18 @@ version = "0.1.0"
 dependencies = [
  "js-types",
  "thiserror",
+]
+
+[[package]]
+name = "js-provider-ec2"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-elastic",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1586,6 +1615,7 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror",
  "time",
+ "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -1622,6 +1652,7 @@ version = "0.1.0"
 dependencies = [
  "js-elastic",
  "js-elastic-fake",
+ "js-sched",
  "js-types",
  "serde",
  "serde_json",
@@ -1632,6 +1663,7 @@ dependencies = [
 name = "js-sched"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
  "js-caps",
  "js-elastic",
  "js-sim",
@@ -1673,6 +1705,8 @@ name = "js-sim-cell"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
+ "js-agent",
  "js-agent-wire",
  "js-conformance",
  "js-lease",
@@ -3875,12 +3909,17 @@ dependencies = [
  "flate2",
  "hex",
  "js-agent",
+ "js-cli",
  "js-client",
  "js-elastic",
  "js-mac-provision",
  "js-mac-session",
+ "js-proto",
  "js-testkit",
  "proc-macro2",
+ "prost",
+ "prost-types",
+ "protox",
  "rcgen",
  "rustix",
  "rustls",

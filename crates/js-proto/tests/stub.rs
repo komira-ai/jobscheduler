@@ -234,6 +234,7 @@ mod requests {
             queued_before_ms: Some(T0 + 20),
             page_size: 25,
             page_token: "list-page-2".to_owned(),
+            client: Some("list-client".to_owned()),
         }
     }
 
@@ -288,6 +289,7 @@ mod answers {
     fn with_id(id: &str) -> Job {
         Job {
             id: id.to_owned(),
+            client: Some("stub-client".to_owned()),
             ..job()
         }
     }

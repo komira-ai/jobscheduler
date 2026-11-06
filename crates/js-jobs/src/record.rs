@@ -6,7 +6,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources};
 
 use crate::codec::Carried;
-use crate::ids::{AllocationId, JobId};
+use crate::ids::{AllocationId, ClientName, JobId};
 use crate::result::JobResult;
 
 /// What a job needs of the host it runs on.
@@ -182,6 +182,16 @@ pub struct JobRecord {
     /// retention window, and raised at boot ([`crate::JobStore::raise_deadlines_at_boot`]);
     /// `None` until it ends.
     pub retention_ends: Option<StoreTime>,
+    /// The earliest instant a time limit may end the job while it waits to be placed or to
+    /// start: written at boot to at least the boot plus [`crate::BOOT_GRACE`]
+    /// ([`crate::JobStore::raise_at_boot`]), so an outage fails no job that waited through it;
+    /// `None` on a row no boot raised (and on every row an older build wrote).
+    pub deadline_floor: Option<StoreTime>,
+    /// The client that submitted the job, as the server named it from the token it presented.
+    /// Not part of the idempotency comparison: a retry of the same job by another client
+    /// answers the stored record, which keeps the first. `None` on a row written before
+    /// clients were named, and for a job recorded with no client.
+    pub client: Option<ClientName>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }
@@ -248,6 +258,9 @@ pub struct AllocationRecord {
     pub host: HostId,
     /// What it books.
     pub booked: Booked,
+    /// The host ports the job declared, sorted ascending, each once. They are booked with the
+    /// allocation and held until it is freed; a row written before this field holds none.
+    pub host_ports: Vec<u16>,
     /// Where it is.
     pub step: AllocationStep,
     /// When it was made, by the store's clock.

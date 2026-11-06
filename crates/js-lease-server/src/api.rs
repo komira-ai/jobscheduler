@@ -98,6 +98,12 @@ impl Shared {
         self
     }
 
+    /// The admission of lease requests: the pool's launching providers, which a submitted
+    /// job is admitted over too.
+    pub(crate) fn admit(&self) -> &Admit {
+        &self.admit
+    }
+
     /// The same state serving the brake reset route for `scaler`.
     #[must_use]
     pub(crate) fn with_scaler(mut self, scaler: Option<Scaler>) -> Self {
@@ -180,10 +186,13 @@ impl Shared {
     }
 
     /// Ticks the table, which writes the leases the tick changed and, when it changed, the
-    /// registry's reservation ledger as the tick's stops and presentations left it, in one
-    /// replace; then advances the agent registry (when the server has one) so its
-    /// reservations and prepare deadlines act on this tick, logs what changed and counts a
-    /// failed write. The table's lock is held for the tick alone.
+    /// registry's reservation ledger as the tick's stops and presentations left it, in one replace;
+    /// then runs the job pass, which ends the jobs that ran out of time, deletes those past their
+    /// retention and settles the allocations of hosts read absent ([`Agents::job_pass`]); then
+    /// advances the agent registry (when the server has one) so its reservations and prepare
+    /// deadlines act on this tick, logs what changed and counts a failed write; then runs a pass
+    /// over the queued jobs ([`Agents::place_jobs`]): the order of design section 6.1. The
+    /// table's lock is held for the tick alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = {
             let mut table = self.table.lock().await;
@@ -193,6 +202,12 @@ impl Shared {
             let agents = self.agents.as_ref();
             table.tick_then(|| agents.and_then(|agents| handed.changed(&agents.registry)))
         };
+        if let Some(agents) = &self.agents {
+            // The job pass reads and writes the job tables, so it runs on the pool for
+            // blocking calls; it holds no lock of the table or the registry while it does.
+            let passing = Arc::clone(agents);
+            crate::util::blocking(move || passing.job_pass()).await;
+        }
         let counts = match &self.agents {
             Some(agents) => {
                 // The marks are brought up to this tick, so the counts and the next
@@ -205,6 +220,10 @@ impl Shared {
         self.record(&report, counts);
         if let Some(agents) = &self.agents {
             agents.refresh().await;
+            // The tick is a pass over the queued jobs too, whatever else freed room; it reads
+            // and writes the job tables, so it runs on the pool for blocking calls.
+            let placing = Arc::clone(agents);
+            crate::util::blocking(move || placing.place_jobs()).await;
         }
         report
     }
@@ -386,31 +405,20 @@ async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Respo
     let request_id = body.request_id()?;
     let (request, ttl) = body.into_parts()?;
     let registry = shared.registry();
-    // Admission first, under the table lock; the catalogs, when the hosts alone admit
-    // nothing, are read with the lock let go, and the question is asked again (see
-    // `admit`). The second answer is never `ReadCatalogs`.
-    let mut providers = None;
-    let outcome = loop {
-        let mut table = shared.lock("wait-acquire").await;
-        let decision = shared.admit.decide(
-            &table,
-            registry.as_ref(),
-            request_id.as_ref(),
-            &request,
-            providers.as_deref(),
-        );
-        match decision {
-            Decision::Start => {
-                break match request_id {
-                    Some(id) => table.acquire_with_id(id, request, ttl),
-                    None => table.acquire(request, ttl),
-                };
-            }
-            Decision::Refuse => break Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
-            Decision::ReadCatalogs => drop(table),
-        }
-        providers = Some(shared.admit.read().await);
+    // Admission first, under the table lock: the hosts, and the catalogs as the cache holds
+    // them, which calls no provider (see `admit`).
+    let mut table = shared.lock("wait-acquire").await;
+    let decision = shared
+        .admit
+        .decide(&table, registry.as_ref(), request_id.as_ref(), &request);
+    let outcome = match decision {
+        Decision::Start => match request_id {
+            Some(id) => table.acquire_with_id(id, request, ttl),
+            None => table.acquire(request, ttl),
+        },
+        Decision::Refuse => Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
     };
+    drop(table);
     match outcome {
         Ok(lease) => {
             let granted = Granted {

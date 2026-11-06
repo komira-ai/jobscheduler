@@ -17,9 +17,9 @@ use js_elastic::conformance::{
     registered_verify_instance_matches_only_a_bound_instance, run_all_registered,
 };
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Claim, Held, Hello, HostRef,
-    HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal, RefusalCode,
-    Released,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Claim, Held,
+    Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal,
+    RefusalCode, Released,
 };
 use js_types::ProviderId;
 
@@ -113,11 +113,12 @@ impl CapacityProvider for Registered {
         }
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        match self.has(Flaw::CatalogFails) {
+    fn catalog(&self) -> CatalogFuture<'_> {
+        let answer = match self.has(Flaw::CatalogFails) {
             true => Err(ProviderError::new("no catalog")),
             false => Ok(Vec::new()),
-        }
+        };
+        Box::pin(std::future::ready(answer))
     }
 
     fn capacity(&self) -> Capacity {
@@ -281,8 +282,7 @@ fn offer() -> Offer {
         cpu_millis: 1,
         memory_bytes: 1,
         disk_bytes: 0,
-        gpus: 0,
-        gpu_class: None,
+        accelerator: None,
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -290,6 +290,9 @@ fn offer() -> Offer {
         price_cents_per_hour: None,
         price_unit: js_elastic::PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

@@ -30,6 +30,7 @@ use js_types::{MEMORY_PERCENT_KEY, ProviderId};
 use super::Section;
 use super::limits::{self, ProviderLimits, Reached};
 use crate::error::StartupError;
+use crate::job_expiry::JobLimits;
 use crate::kinds::{Kinds, PlatformKind};
 
 /// The first character of a name the loader makes; the grammar of a name in the file has
@@ -78,11 +79,11 @@ const NAME_RULE: &str = "must be 1 to 63 characters of [a-z0-9._-]";
 
 /// How long a queued job waits for a host before it ends as `no-capacity`, unless the pool
 /// says.
-const MAX_QUEUE_WAIT: Duration = Duration::from_secs(3600);
+const MAX_QUEUE_WAIT: Duration = JobLimits::DEFAULT.max_queue_wait;
 
 /// How long a placed or starting job has to start before it ends as `start-timeout`,
 /// unless the pool says.
-const START_TIMEOUT: Duration = Duration::from_secs(900);
+const START_TIMEOUT: Duration = JobLimits::DEFAULT.start_timeout;
 
 /// How long a queued job whose last capable path went away stays queued before it ends as
 /// `no-capable-host`, unless the pool says.
@@ -126,16 +127,17 @@ pub struct ResolvedPlatform {
     pub machine_providers: Vec<String>,
 }
 
-/// The settings of a pool about how long a job may wait. Read and checked at start; only
-/// `path_grace` is enforced yet.
+/// The settings of a pool about how long a job may wait. Read and checked at start; the job
+/// pass of the tick enforces `max_queue_wait` and `start_timeout` on the jobs of the server's
+/// job tables, and `path_grace` is the registry's `regain_grace`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PoolSettings {
-    /// How long a queued job waits for a host before it ends as `no-capacity` (default 1h).
-    /// Not enforced yet: the job lifecycle ticks of design 6.1 will.
+    /// How long a queued job waits for a host before it ends as `no-capacity` (default 1h),
+    /// counted from when it was queued.
     pub max_queue_wait: Duration,
     /// How long a placed or starting job has to start before it ends as `start-timeout`
-    /// (default 15m). Not enforced yet: the job lifecycle ticks of design 6.1 will.
+    /// (default 15m), counted from its placement.
     pub start_timeout: Duration,
     /// How long a queued job whose last capable path went away stays queued before it ends
     /// as `no-capable-host` (default 15s): the registry's `regain_grace` for the pool's
@@ -225,12 +227,14 @@ impl Resolved {
                 let types = limit.allowed_instance_types.as_deref().unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "pool {}: provider_limits {name}: allowed_instance_types {}; max_price_cents_per_hour {}; max_machines {}; max_spot_machines {}",
+                    "pool {}: provider_limits {name}: allowed_instance_types {}; max_price_cents_per_hour {}; max_machines {}; max_spot_machines {}; catalog_refresh {}; offer_cooldown {}",
                     pool.name,
                     listed(types),
                     shown(limit.max_price_cents_per_hour),
                     shown(limit.max_machines),
-                    shown(limit.max_spot_machines)
+                    shown(limit.max_spot_machines),
+                    span(limit.catalog_refresh),
+                    span(limit.offer_cooldown)
                 );
             }
         }

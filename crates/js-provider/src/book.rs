@@ -70,12 +70,37 @@ impl Host {
         self.leases.iter().any(|booked| booked.lease == *lease)
     }
 
+    /// `wanted` as booked on this host: the same counts, with the GPUs under the host's own
+    /// class. A lease is admitted here only because its accelerator need is met by the host
+    /// (`nvidia-a100` is met by a host of `nvidia-a100-sxm4-80gb`), so the devices it books
+    /// are the host's, whatever spelling the request used. A request with no GPU, or a host
+    /// with no GPU class, books `wanted` as it is.
+    fn on_host(&self, wanted: &Resources) -> Resources {
+        let class = self
+            .shape
+            .resources()
+            .gpu_class()
+            .filter(|_| wanted.gpus() > 0);
+        class
+            .and_then(|class| {
+                let booked = Resources::new(
+                    wanted.cpu_millis(),
+                    wanted.memory_bytes(),
+                    wanted.gpus(),
+                    Some(class.to_string()),
+                );
+                booked.ok()
+            })
+            .map(|booked| booked.with_disk_bytes(wanted.disk_bytes()))
+            .unwrap_or_else(|| wanted.clone())
+    }
+
     /// Books `spec`'s lease here: the whole shape for a lease that books the whole host,
     /// else the resources it asks for.
     fn book(&mut self, spec: &StartSpec, whole: bool) {
         let resources = match whole {
             true => self.shape.resources().clone(),
-            false => spec.request().resources.clone(),
+            false => self.on_host(&spec.request().resources),
         };
         self.leases.push(Held {
             lease: spec.lease(),
@@ -96,9 +121,12 @@ impl Host {
         if self.leases.iter().any(|booked| booked.whole) {
             return false;
         }
-        let sum = self.leases.iter().try_fold(wanted.clone(), |sum, booked| {
-            sum.checked_add(&booked.resources)
-        });
+        let sum = self
+            .leases
+            .iter()
+            .try_fold(self.on_host(wanted), |sum, booked| {
+                sum.checked_add(&booked.resources)
+            });
         let offered = self.shape.resources();
         let cpu = u128::from(offered.cpu_millis()) * (1000 + u128::from(slack)) / 1000;
         let limit = offered
@@ -479,7 +507,10 @@ impl HostBook {
         let listed = self.hosts.get_mut(host);
         let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
         let whole = shares.is_none();
-        let resources = shares.unwrap_or_else(|| listed.shape.resources().clone());
+        let resources = shares.map_or_else(
+            || listed.shape.resources().clone(),
+            |shares| listed.on_host(&shares),
+        );
         if !listed.has_room(&resources, whole, slack) {
             return Err(match listed.leases.first() {
                 Some(holder) => SeatError::Taken {

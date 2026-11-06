@@ -17,7 +17,7 @@ use crate::answer::Held;
 use crate::boot::BootStep;
 use crate::ids::{AcquireId, HostRef};
 use crate::offer::Offer;
-use crate::provider::{CapacityProvider, CheckResult, ProviderError};
+use crate::provider::{CapacityProvider, CatalogFuture, CheckResult, ProviderError};
 
 /// A provider seen through its reads only. Cheap to clone.
 #[derive(Clone)]
@@ -29,12 +29,9 @@ impl ReadHandle {
         Self(provider)
     }
 
-    /// [`CapacityProvider::catalog`].
-    ///
-    /// # Errors
-    ///
-    /// [`ProviderError`] when the catalog cannot be had whole.
-    pub fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    /// [`CapacityProvider::catalog`]: a future whose output is [`ProviderError`] when
+    /// the catalog cannot be had whole.
+    pub fn catalog(&self) -> CatalogFuture<'_> {
         self.0.catalog()
     }
 
@@ -84,6 +81,7 @@ mod tests {
 
     use crate::ids::Hello;
     use crate::provider::AcquireRequest;
+    use crate::wait::block_on;
 
     /// A provider that writes down the name of every call made on it.
     #[derive(Default)]
@@ -111,9 +109,9 @@ mod tests {
             ProviderCaps::default()
         }
 
-        fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+        fn catalog(&self) -> CatalogFuture<'_> {
             self.note("catalog");
-            Ok(Vec::new())
+            Box::pin(std::future::ready(Ok(Vec::new())))
         }
 
         fn capacity(&self) -> Capacity {
@@ -192,8 +190,7 @@ mod tests {
             cpu_millis: 1,
             memory_bytes: 1,
             disk_bytes: 1,
-            gpus: 0,
-            gpu_class: None,
+            accelerator: None,
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             isa_level: None,
@@ -201,8 +198,11 @@ mod tests {
             price_cents_per_hour: None,
             price_unit: crate::offer::PriceUnit::UsCents,
             available: true,
+            purchase: None,
+            quota: None,
+            block: None,
         };
-        assert_eq!(handle.catalog(), Ok(Vec::new()));
+        assert_eq!(block_on(handle.catalog()), Ok(Vec::new()));
         assert!(handle.checks().is_empty());
         assert!(handle.host_prep(&offer).is_empty());
         assert_eq!(copy.payload_limit(), 7);

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, CapacityProvider, GpuClass, Held, HostRef, Offer,
+    AcquireRequest, Acquired, BootStep, CapacityProvider, CatalogFuture, Held, HostRef, Offer,
     ProviderError, Released,
 };
 use js_lease::{ManualClock, Timestamp};
@@ -14,7 +14,7 @@ use js_lease_server::{
     StartupError,
 };
 use js_pool_static::EXAMPLE_CONFIG;
-use js_types::ExecMode;
+use js_types::{ExecMode, Model};
 
 use crate::support::{Scratch, T0, TOKEN};
 
@@ -26,8 +26,8 @@ pub const OAUTH_SECRET: &str = "PLANTED-OAUTH-SECRET-VALUE";
 struct NullElastic;
 
 impl CapacityProvider for NullElastic {
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(Vec::new())
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -92,7 +92,7 @@ fn built(gpus: u64, exec: Vec<ExecMode>) -> Built {
         provider: Box::new(NullElastic),
         floor: Floor {
             gpus,
-            gpu_class: Some(GpuClass::parse("nvidia-a10").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a10").unwrap()),
         },
         exec,
     })

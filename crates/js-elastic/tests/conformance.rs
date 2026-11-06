@@ -10,9 +10,9 @@ use js_elastic::conformance::{
     release_terminates_then_reads_back,
 };
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, BootStep, Capacity, CapacityProvider, Held,
-    Hello, HostName, HostRef, HostStatus, Observed, Offer, PriceUnit, ProviderCaps, ProviderError,
-    RefusalCode, Released, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, BootStep, Capacity, CapacityProvider,
+    CatalogFuture, Held, Hello, HostName, HostRef, HostStatus, Observed, Offer, PriceUnit,
+    ProviderCaps, ProviderError, RefusalCode, Released, SchedulerId,
 };
 use js_types::{ExecMode, ProviderId};
 
@@ -46,8 +46,8 @@ impl CapacityProvider for Broken {
         ProviderCaps::default()
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(vec![offer()])
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(vec![offer()])))
     }
 
     fn capacity(&self) -> Capacity {
@@ -111,8 +111,7 @@ fn offer() -> Offer {
         cpu_millis: 1000,
         memory_bytes: 1 << 30,
         disk_bytes: 1 << 30,
-        gpus: 0,
-        gpu_class: None,
+        accelerator: None,
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -120,6 +119,9 @@ fn offer() -> Offer {
         price_cents_per_hour: Some(1),
         price_unit: PriceUnit::UsCents,
         available: true,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

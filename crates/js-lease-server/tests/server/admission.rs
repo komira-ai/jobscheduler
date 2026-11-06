@@ -10,16 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, GpuClass, Held, HostRef,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Held, HostRef,
     Observed, Offer, PriceUnit, ProviderCaps, ProviderError, Released,
 };
 use js_lease_server::{BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, OwnerOnlyFiles};
-use js_types::{ExecMode, HostId, ProviderId, RequestId};
+use js_types::{ExecMode, HostId, Model, ProviderId, RequestId, accelerator_of};
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hello_body, session, start_agents};
 use crate::config_support::{PoolText, file, kinds, quote, quoted, server};
-use crate::support::{Harness, Reply, Scratch, lease_body, request};
+use crate::support::{Harness, Reply, Scratch, TOKEN, lease_body, request};
 
 /// The clouds of these tests, by the path of the key file that names them: a kind is a
 /// plain function, so a test leaves its cloud here for the kind to find.
@@ -65,20 +65,22 @@ impl CapacityProvider for Handle {
         ProviderCaps {
             os: BTreeSet::from(["linux".to_owned()]),
             arch: BTreeSet::from(["x86_64".to_owned()]),
-            accelerators: BTreeSet::from([GpuClass::parse("nvidia-a100").unwrap()]),
+            accelerators: BTreeSet::from([Model::parse("nvidia-a100").unwrap()]),
             whole_host: true,
             host_ports: false,
         }
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn catalog(&self) -> CatalogFuture<'_> {
         self.0.reads.fetch_add(1, Ordering::SeqCst);
-        self.0
+        let answer = self
+            .0
             .catalog
             .lock()
             .unwrap()
             .clone()
-            .map_err(ProviderError::new)
+            .map_err(ProviderError::new);
+        Box::pin(std::future::ready(answer))
     }
 
     fn capacity(&self) -> Capacity {
@@ -130,7 +132,7 @@ fn admission_cloud(table: &toml::Table, _ctx: &BuildCtx<'_>) -> Result<Built, Ki
         provider: Box::new(Handle(cloud.unwrap())),
         floor: Floor {
             gpus: 1,
-            gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+            gpu_class: Some(Model::parse("nvidia-a100").unwrap()),
         },
         exec: vec![ExecMode::Container],
     }))
@@ -144,8 +146,11 @@ fn a100(available: bool) -> Offer {
         cpu_millis: 8000,
         memory_bytes: 64 << 30,
         disk_bytes: 512 << 30,
-        gpus: 1,
-        gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
+        accelerator: Some(accelerator_of(
+            &Model::parse("nvidia-a100").unwrap(),
+            1,
+            None,
+        )),
         os: "linux".to_owned(),
         arch: "x86_64".to_owned(),
         isa_level: None,
@@ -153,6 +158,9 @@ fn a100(available: bool) -> Offer {
         price_cents_per_hour: Some(129),
         price_unit: PriceUnit::UsCents,
         available,
+        purchase: None,
+        quota: None,
+        block: None,
     }
 }
 
@@ -170,6 +178,17 @@ async fn over(
     class: &str,
     more: &[(&str, &str)],
     allowed: Option<&str>,
+) -> (Harness, Arc<Cloud>) {
+    over_serving(name, class, more, (allowed, "")).await
+}
+
+/// [`over`], with `serving` added to the `[server]` table (such as the job service's
+/// address).
+async fn over_serving(
+    name: &str,
+    class: &str,
+    more: &[(&str, &str)],
+    (allowed, serving): (Option<&str>, &str),
 ) -> (Harness, Arc<Cloud>) {
     let scratch = Scratch::new(name);
     let cloud = Cloud::new();
@@ -207,10 +226,8 @@ async fn over(
         }
         None => String::new(),
     };
-    let head = server(
-        &scratch,
-        "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"",
-    );
+    let listen = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
+    let head = server(&scratch, &format!("{listen}{serving}"));
     let text = format!("{}\n{tables}", file(&head, &[&pool]));
     let path = scratch.write("js.toml", &text, 0o644);
     let kinds = kinds().with("admission-cloud", admission_cloud);
@@ -355,12 +372,16 @@ async fn an_ordinary_request_with_no_request_id_still_gets_the_same_answers_as_b
     refused(&post(&h, &lease_body()).await, "no-capacity");
 }
 
-/// Asserts, through the route, that a pool with no host whose provider's catalog cannot
-/// be read admits the request (the start then answers `no-capacity`, the answer to retry,
-/// not `no-capable-host`), and so does a catalog whose one fitting offer is unavailable
-/// now; that a catalog that was read and is empty refuses `no-capable-host`; and that each
-/// request reads the catalog exactly once. Catches an unreadable catalog read as an empty
-/// one, and admission asking whether an offer is available now.
+/// Asserts, through the route, how admission reads the cached catalog and never the
+/// provider's: before any tick the catalog is unread and a request only a catalog could
+/// serve is admitted (the start answers `no-capacity`); after a tick whose fetch failed it
+/// is still unread, and that fetch is retried at the next tick; a tick that fetches an empty
+/// catalog makes the request `no-capable-host`, leaving the lease file as it was; that
+/// catalog is kept until the clock has moved past `catalog_refresh`, after which a tick
+/// fetches the one fitting offer, unavailable now, and the request is `no-capacity` again;
+/// and the cloud's reads move at ticks only, never across the posts. Catches an unreadable
+/// catalog read as an empty one, admission asking whether an offer is available now, and
+/// admission calling the provider.
 #[tokio::test]
 async fn an_unreadable_catalog_counts_as_may_offer() {
     let (h, cloud) = elastic("admission_unreadable", "gpu-host", &[]).await;
@@ -368,14 +389,86 @@ async fn an_unreadable_catalog_counts_as_may_offer() {
     cloud.set(Err("the cloud's API did not answer"));
     let reads = cloud.reads();
     refused(&post(&h, &request).await, "no-capacity");
+    refused(&post(&h, &request).await, "no-capacity");
+    assert_eq!(cloud.reads(), reads);
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 1);
+    refused(&post(&h, &request).await, "no-capacity");
     assert_eq!(cloud.reads(), reads + 1);
     cloud.set(Ok(Vec::new()));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
     let before = lease_file(&h);
     refused(&post(&h, &request).await, "no-capable-host");
     assert_eq!(cloud.reads(), reads + 2);
     assert_eq!(lease_file(&h), before);
     cloud.set(Ok(vec![a100(false)]));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
+    refused(&post(&h, &request).await, "no-capable-host");
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 3);
     refused(&post(&h, &request).await, "no-capacity");
+    assert_eq!(cloud.reads(), reads + 3);
+}
+
+/// `SubmitJob` of the job `id` through the job service's gateway on `h`'s job port: 1.5 cores
+/// and 1 GiB, no GPU, for ten minutes.
+async fn submit(h: &Harness, id: &str) -> Reply {
+    let body = json!({
+        "spec": {
+            "jobId": id,
+            "image": format!("team/app@sha256:{}", "a".repeat(64)),
+            "command": "run",
+            "needs": { "cpuMillis": "1500", "memoryBytes": "1073741824" },
+            "wallLimitSeconds": "600",
+        }
+    });
+    let job = h.running.job_addr().unwrap();
+    let body = body.to_string().into_bytes();
+    request(job, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await
+}
+
+/// Asserts, through the job service's port of a server whose pool launches on the test's
+/// cloud and has no host, that a submitted job is admitted over the pool's cached catalog as
+/// a lease is: before any fetch, and after a fetch that failed, the catalog is unread and may
+/// offer, so the job is queued (201); once a tick has fetched an empty catalog the job is
+/// refused `no-capable-host` (422) and nothing is recorded, so the job is unknown; once a tick
+/// past `catalog_refresh` has fetched an offer that fits, unavailable now, the same job is
+/// admitted. The cloud is read at ticks only, never by a submit. It catches an unreadable
+/// catalog read as empty, a job service that admits over the hosts alone, and a submit that
+/// calls the provider.
+#[tokio::test]
+async fn a_submitted_job_is_admitted_over_the_catalog() {
+    let jobs = "\njob_listen = \"127.0.0.1:0\"";
+    let (h, cloud) = over_serving("admission_jobs", "gpu-host", &[], (None, jobs)).await;
+    cloud.set(Err("the cloud's API did not answer"));
+    let reads = cloud.reads();
+    let queued = submit(&h, "job-unfetched").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
+    assert_eq!(queued.json()["job"]["state"], "JOB_STATE_QUEUED");
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 1);
+    let queued = submit(&h, "job-unread").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
+    cloud.set(Ok(Vec::new()));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 2);
+    let refused = submit(&h, "job-empty").await;
+    assert_eq!(
+        (refused.status, refused.json()),
+        (422, json!({ "error": "no-capable-host" }))
+    );
+    let job = h.running.job_addr().unwrap();
+    let unknown = request(job, "GET", "/v1/jobs/job-empty", Some(TOKEN), None).await;
+    assert_eq!(unknown.status, 404, "{}", unknown.body);
+    cloud.set(Ok(vec![a100(false)]));
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    h.ticks.step().await;
+    assert_eq!(cloud.reads(), reads + 3);
+    let offered = submit(&h, "job-empty").await;
+    assert_eq!(offered.status, 201, "{}", offered.body);
     assert_eq!(cloud.reads(), reads + 3);
 }
 
@@ -388,10 +481,12 @@ async fn an_offer_outside_the_pool_limits_does_not_count() {
     let other = Some("[\"gpu_8x_a100\"]");
     let (h, cloud) = over("admission_limits_out", "gpu-host", &[], other).await;
     cloud.set(Ok(vec![a100(true)]));
+    h.ticks.step().await;
     refused(&post(&h, &one_gpu("gpu-host")).await, "no-capable-host");
     let allowed = Some("[\"gpu_1x_a100\"]");
     let (h, cloud) = over("admission_limits_in", "gpu-host", &[], allowed).await;
     cloud.set(Ok(vec![a100(true)]));
+    h.ticks.step().await;
     refused(&post(&h, &one_gpu("gpu-host")).await, "no-capacity");
 }
 

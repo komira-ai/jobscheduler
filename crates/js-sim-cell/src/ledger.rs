@@ -1,11 +1,15 @@
 //! The cell's launch and completion ledger: one entry per run an agent process launched,
-//! and one per run that ended on its own.
+//! one per run that ended on its own, one per verdict an agent process read on one of its
+//! results, and, for the whole-host handshake, one per ready report an agent sent, per
+//! start delivered and per stop or cancel that reached a running run.
 //!
 //! The ledger belongs to the cell, not to an agent. Every agent node writes into one
 //! shared [`Ledger`] handle that outlives the node's processes, so an agent that is
 //! killed and replaced cannot reset a count. [`Ledger::launches`] is what the cell puts
 //! in [`crate::Observations::ledger`] for [`crate::Invariant::AtMostOneLaunch`]: a
-//! replacement that launches a run its predecessor launched shows as a second entry.
+//! replacement that launches a run its predecessor launched shows as a second entry. The
+//! completions and the verdicts are what [`crate::Invariant::NoResultLost`] reads: a
+//! process that dies takes its own record of them with it, the ledger keeps them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,7 +17,7 @@ use std::rc::Rc;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
-use crate::observe::{Launch, RunId};
+use crate::observe::{Launch, ReadyReport, RunId, StartSeen, StopSeen, Verdict};
 
 /// One run that ended on its own (its job's time ran out), in the cell's ledger.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +27,21 @@ pub struct Completion {
     /// The host whose agent ran it.
     pub host: HostId,
     /// When it ended.
+    pub at: FarmTime,
+}
+
+/// One verdict an agent process read in an answer to one of its heartbeats, on the
+/// result of one run, in the cell's ledger. Every verdict read is written, whether or not
+/// the process still held the result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acked {
+    /// The run whose result was judged.
+    pub run: RunId,
+    /// The host whose agent read the verdict.
+    pub host: HostId,
+    /// The verdict.
+    pub verdict: Verdict,
+    /// When the agent read it.
     pub at: FarmTime,
 }
 
@@ -37,6 +56,10 @@ pub struct Ledger(Rc<RefCell<Entries>>);
 struct Entries {
     launches: Vec<Launch>,
     completions: Vec<Completion>,
+    verdicts: Vec<Acked>,
+    ready: Vec<ReadyReport>,
+    starts: Vec<StartSeen>,
+    stops: Vec<StopSeen>,
 }
 
 impl Ledger {
@@ -69,6 +92,24 @@ impl Ledger {
         self.0.borrow().completions.clone()
     }
 
+    /// The completions after the first `skip`, oldest first.
+    pub(crate) fn completions_after(&self, skip: usize) -> Vec<Completion> {
+        let entries = self.0.borrow();
+        entries.completions.iter().skip(skip).cloned().collect()
+    }
+
+    /// Every verdict an agent read, oldest first.
+    #[must_use]
+    pub fn verdicts(&self) -> Vec<Acked> {
+        self.0.borrow().verdicts.clone()
+    }
+
+    /// The verdicts after the first `skip`, oldest first.
+    pub(crate) fn verdicts_after(&self, skip: usize) -> Vec<Acked> {
+        let entries = self.0.borrow();
+        entries.verdicts.iter().skip(skip).cloned().collect()
+    }
+
     /// Appends a launch.
     pub(crate) fn launched(&self, launch: Launch) {
         self.0.borrow_mut().launches.push(launch);
@@ -77,5 +118,56 @@ impl Ledger {
     /// Appends a completion.
     pub(crate) fn completed(&self, completion: Completion) {
         self.0.borrow_mut().completions.push(completion);
+    }
+
+    /// Every ready report sent, oldest first.
+    #[must_use]
+    pub fn ready(&self) -> Vec<ReadyReport> {
+        self.0.borrow().ready.clone()
+    }
+
+    /// Every start delivered, oldest first.
+    #[must_use]
+    pub fn starts(&self) -> Vec<StartSeen> {
+        self.0.borrow().starts.clone()
+    }
+
+    /// Every stop or cancel that reached a running run, oldest first.
+    #[must_use]
+    pub fn stops(&self) -> Vec<StopSeen> {
+        self.0.borrow().stops.clone()
+    }
+
+    /// The ready reports, starts and stops after the first `skip` of each, oldest first.
+    pub(crate) fn whole_after(
+        &self,
+        [ready, starts, stops]: [usize; 3],
+    ) -> (Vec<ReadyReport>, Vec<StartSeen>, Vec<StopSeen>) {
+        let entries = self.0.borrow();
+        (
+            entries.ready.iter().skip(ready).cloned().collect(),
+            entries.starts.iter().skip(starts).cloned().collect(),
+            entries.stops.iter().skip(stops).cloned().collect(),
+        )
+    }
+
+    /// Appends a ready report.
+    pub(crate) fn reported_ready(&self, report: ReadyReport) {
+        self.0.borrow_mut().ready.push(report);
+    }
+
+    /// Appends a delivered start.
+    pub(crate) fn start_seen(&self, start: StartSeen) {
+        self.0.borrow_mut().starts.push(start);
+    }
+
+    /// Appends a stop or cancel that reached a running run.
+    pub(crate) fn stop_seen(&self, stop: StopSeen) {
+        self.0.borrow_mut().stops.push(stop);
+    }
+
+    /// Appends a verdict.
+    pub(crate) fn acked(&self, acked: Acked) {
+        self.0.borrow_mut().verdicts.push(acked);
     }
 }

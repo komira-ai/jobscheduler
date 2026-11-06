@@ -16,12 +16,59 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
-| `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The server does not serve jobs yet, so today the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+| `--job-retention` | `server.job_retention`, same default (`"7d"`) and rules: how long an ended job's record and result (exit code, reason, log tails, timing, usage) are kept after the job ends, as a whole count of days or a duration such as `36h` or `90m`, at least one minute; zero, a negative or unparsable value, or less than a minute is refused at start naming the flag or the key. It is read once at start and is the window the job store (`js-jobs`) applies when a job ends, so a changed window affects only the jobs that end after the restart. The job store of `--job-listen` is opened with it; without `--job-listen` the setting is checked and kept, and nothing reads it. Allocation history is not part of it |
+| `--job-listen` | `server.job_listen`, off unless given: the address the job service is served on (see "The job service's port" below); off the loopback it needs `server.tls_cert` and `server.tls_key`, the same pair as `server.listen`; refused unless a pool registers agents |
+| `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
+| `--client-token NAME=PATH` (repeatable) | a `[[client]]` table with `name` and `token_file`: one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
+
+### The job service's port
+
+`--job-listen <addr>` (`server.job_listen`) serves the job service (`jobscheduler.v1.JobService`) on a port of its own. It is off
+by default: without it the server binds no other port, opens no job store and behaves as before. On, one listener speaks HTTP/1.1
+and HTTP/2 on that port: a request whose content type is `application/grpc` goes to the gRPC service, every other request to the
+HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind one check of the bearer token of a client; a request
+without one is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one
+TLS setup and one connection cap for the service, whichever client calls it.
+
+The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME=PATH` or `[[client]]` table:
+
+```toml
+[[client]]
+name       = "ci"                             # 1 to 40 bytes of letters, digits, '.', '_' and '-'; unique; not "default"
+token_file = "/run/credentials/js/ci-token"   # owner-only (0600 or 0400), one token of at least 32 bytes, as client_token_file
+```
+
+A start is refused, naming the entry and never the token, for two clients of one name, a client named `default`, a name that is not
+one, a short token, a token file others can read, the same token in two entries, and a client token that the join token file of the
+pool also holds. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
+client's, records the client's name on each job it submits (`Job.client`, and the `client` filter of `ListJobs`), and logs the
+client and the job on each call's line. Every client may read and cancel every job; job ids are one namespace. To revoke a client,
+remove its entry and restart the server: the set is read at start only, and a restart ends no job.
+
+- **TLS.** The rule of `--listen`: an address off the loopback is refused at start without `--tls-cert` and `--tls-key` (the same two
+  flags, not new ones), with a message naming `--job-listen` and saying that a bearer token never crosses a network in clear. With
+  them the port speaks TLS over the same certificate and key, reloaded with the others on SIGHUP, and offers HTTP/2 (`h2`) and
+  HTTP/1.1.
+- **Limits.** The port has the connection cap and timeouts of the other listeners, and stops with them. An address in use is refused
+  at start naming the flag.
+- **Agents.** The flag needs `--agent-pool-config` (the key, a pool that registers agents): the job store is held by the agent side,
+  and jobs run on hosts that register.
+- **The job store.** Turning the port on opens the job store: today a SQLite file beside the lease file, `<state file>.jobs`, owned
+  by the server's user and owner-only (mode 0600), with SQLite's own files beside it. It is the single-node development backend: the
+  file moves into the shared store when the server's state does. A file that cannot be made owner-only or opened as a state store
+  is refused at start naming `--job-listen`. With the store open, the heartbeat of an agent that reports the `per-job` capability is
+  also served from it: its job listing is committed and it is told the starts and stops of its jobs. Without `--job-listen` such a
+  heartbeat gets the lease and run reply alone, as before.
+- **The job ceiling.** `--max-job-wall` (`server.max_job_wall`, 30 days unless given) is the most a submitted job's wall limit may
+  be; every job must carry a wall limit, and one above the ceiling is refused `wall-time-above-ceiling`.
+- **Not shared with `--listen`.** The lease routes stay on `--listen` and the job routes are not served there: the gateway's
+  `/v1/hosts` and `/v1/pools` are other routes than the lease server's of the same names, so the two cannot share a port while the
+  lease API exists.
 
 A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
 `max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents;
@@ -113,6 +160,8 @@ allowed_instance_types = ["gpu_1x_a10"] # names, none empty, none twice
 max_price_cents_per_hour = 200          # 1 or more
 max_machines = 2                        # 1 or more, at most the pool's
 max_spot_machines = 1                   # at most this table's max_machines
+catalog_refresh = "1h"                  # default 1h; a positive duration, zero is refused
+offer_cooldown = "1h"                   # default 1h; a positive duration, zero is refused
 ```
 
 A pool written with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables: a machine provider made from its provider
@@ -126,8 +175,16 @@ platform that lists a launching machine provider before `static` is refused (`ma
 whose instance type is not allowed, whose price is above the maximum, or that has no price under a maximum does not admit a request, and
 a provider whose `max_machines` (else the pool's) is zero admits none. `path_grace` is how long a waiting whole-node request of the pool
 keeps its place once no host could serve it, after which it is refused `no-capable-host` (it is the registry's `regain_grace` for the
-pool). Nothing acts on the rest yet: the job lifecycle ticks (design 6.1) will end a job that waits past `max_queue_wait` or does not
-start within `start_timeout`, and the pick of an offer when a pool acquires a machine (design 5.6, pass 2) will read the limits. A limit
+pool). The job pass of the tick (design 6.1, step 1) ends a job of the server's job tables that waits past `max_queue_wait` (counted
+from when it was queued) as `no-capacity`, and a placed or starting one that has not started within `start_timeout` (counted from its
+placement) as `start-timeout`; each deadline is held to at least the server's boot plus 120 s, so an outage fails no job at the first
+tick. A joined pool has neither key and takes the defaults. Nothing acts on the limits yet: the pick of an offer when a pool acquires a
+machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the provider's cached catalog is used before the tick fetches
+it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
+next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance
+type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it; it is read and checked,
+and nothing enters a cool-down yet (the check of a host's hello against its offer will). Zero for either is refused, naming the key: a
+zero refresh would ask the cloud at every tick, and a zero cool-down is none. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 

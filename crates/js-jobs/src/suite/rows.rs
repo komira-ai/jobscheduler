@@ -98,8 +98,9 @@ pub fn a_row_without_the_newest_tag_reads_with_defaults<B: Backend>(backend: &B)
             job.spec.ports.clone(),
             job.spec.files.clone(),
             job.retention_ends,
+            job.client.clone(),
         ),
-        (NetworkPolicy::None, Vec::new(), BTreeMap::new(), None),
+        (NetworkPolicy::None, Vec::new(), BTreeMap::new(), None, None),
         "{name}: a field the row lacks did not read as its default"
     );
     let image = ImageDigestRef::parse(&format!("team/app:1@{}", digest('c'))).expect("an image");
@@ -193,6 +194,7 @@ pub fn a_row_with_a_higher_format_byte_is_unknown_not_missing<B: Backend>(backen
                 id: Some(newer_id.clone()),
                 spec: full_spec(),
                 priority: 0,
+                client: None,
             })
             .map(drop),
         unknown("job/m-2"),
@@ -254,6 +256,7 @@ pub fn a_row_that_does_not_parse_is_corrupt<B: Backend>(backend: &B) {
                 id: Some(id),
                 spec: full_spec(),
                 priority: 0,
+                client: None,
             })
             .map(drop),
         corrupt,

@@ -1,0 +1,77 @@
+Acquire a lease, run a command while renewing it, then release it.
+
+The command is a child process with JS_LEASE_ID and JS_LEASE_HOST set in its environment: they are outputs of `js` to the command, not configuration of `js`, which reads no environment variable. js renews the lease at a third of the time the server's last answer left (at most --renew-every apart), forwards SIGINT, SIGTERM and SIGHUP to the command's process group, and when the command ends stops what it left running (SIGTERM, then SIGKILL after --stop-grace), releases the lease and exits with the command's status (128 plus the signal for a command a signal ended). If a renewal finds the lease gone, or none has succeeded before the deadline short of the server's expiry (a failed renewal is tried again after a sixth of the period, at least a second, until then), it stops the command the same way and exits 7; a command that cannot be started exits 127. The held-lease line is printed on stderr, so the command owns stdout.
+
+Usage: js lease run [OPTIONS] --class <CLASS> --max-wall <MAX_WALL> -- <COMMAND>...
+
+Arguments:
+  <COMMAND>...
+          The command and its arguments, after `--`
+
+Options:
+      --class <CLASS>
+          The resource class, such as `gpu-host`
+
+      --server <URL>
+          The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
+
+      --gpus <GPUS>
+          How many GPUs the request needs
+          
+          [default: 0]
+
+      --token-file <PATH>
+          A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
+
+      --ca-cert <PATH>
+          A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
+
+      --gpu-class <GPU_CLASS>
+          The GPU class the request needs, such as `nvidia-a100`
+
+      --cpu-millis <CPU_MILLIS>
+          CPU, in thousandths of a core
+          
+          [default: 0]
+
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --memory-bytes <MEMORY_BYTES>
+          Memory, in bytes
+          
+          [default: 0]
+
+      --max-wall <MAX_WALL>
+          The longest the lease may last in all, such as `2h`
+
+      --ttl <TTL>
+          How long the lease lasts without a renewal (the server's default when absent)
+
+      --label <KEY=VALUE>
+          A label of the lease, `key=value`; repeat for more
+
+      --validation-run <ID>
+          The validation run the lease serves
+
+      --probe-host <HOST>
+          A probe: place the lease on this host alone, past its cordon (the server refuses it by name when the host is unknown, not cordoned, not serving, too small or not one the server can probe)
+
+      --request-id <ID>
+          The request's id, of your choosing (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`): an acquire repeated with the same id and flags answers the lease the first one made instead of taking a second, and a whole-node request waits for a host instead of being refused for lack of one. Every flag that shapes the request counts; `--ttl` and `--wait-pending` do not. The same id with another request is refused `request-id-conflict` while the first lease is on the server, and so is a second `lease run` under it then (each run adds its own random label)
+
+      --wait-pending <WAIT_PENDING>
+          How long to wait for a start the provider has not confirmed (202) to settle
+          
+          [default: 60s]
+
+      --renew-every <RENEW_EVERY>
+          The longest to wait between renewals. Without it, and in any case, a renewal is tried when a third of the time the server's last answer left is gone
+
+      --stop-grace <STOP_GRACE>
+          How long what the command started gets to end after SIGTERM (when the command ends, or its lease is lost), before it is killed (SIGKILL)
+          
+          [default: 30s]
+
+  -h, --help
+          Print help (see a summary with '-h')

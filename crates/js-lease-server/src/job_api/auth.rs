@@ -2,23 +2,26 @@
 //! front of both transports, gRPC (where the header is the metadata `authorization`) and the
 //! HTTP/JSON gateway.
 //!
-//! The header is read with the lease routes' [`bearer`] and the token compared by
-//! [`Token::matches`], as the lease routes' middleware does; the layer holds no comparison
-//! of its own. A request whose header is missing, is not `Bearer <token>`, or names another
-//! token reaches no handler: a gRPC request (`content-type: application/grpc...`) is
-//! answered `UNAUTHENTICATED` with an empty message, any other request 401 with an empty
-//! body.
+//! The header is read with the lease routes' [`bearer`] and the token compared with every
+//! client's by [`Clients::identify`]; the layer holds no comparison of its own. A request
+//! whose token is a client's goes on with that client's name ([`ClientName`]) in its
+//! extensions, where the calls read it (the gateway hands a call the extensions of its HTTP
+//! request), so the name comes from the token and never from the request's body. A request
+//! whose header is missing, is not `Bearer <token>`, or names no client's token reaches no
+//! handler: a gRPC request (`content-type: application/grpc...`) is answered
+//! `UNAUTHENTICATED` with an empty message, any other request 401 with an empty body.
 
 use std::future::{Future, ready};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::http::{HeaderMap, Request, Response, StatusCode, header};
+use js_jobs::ClientName;
 use tonic::Status;
 use tower::{Layer, Service};
 
 use crate::api::bearer;
-use crate::config::Token;
+use crate::config::Clients;
 
 /// The content type every gRPC request carries, alone or with a suffix such as `+proto`.
 const GRPC_CONTENT_TYPE: &[u8] = b"application/grpc";
@@ -26,13 +29,13 @@ const GRPC_CONTENT_TYPE: &[u8] = b"application/grpc";
 /// The layer that puts [`Bearer`] in front of a service.
 #[derive(Clone)]
 pub(crate) struct BearerLayer {
-    token: Token,
+    clients: Clients,
 }
 
 impl BearerLayer {
-    /// The layer that admits requests that present `token`.
-    pub(crate) fn new(token: Token) -> BearerLayer {
-        BearerLayer { token }
+    /// The layer that admits requests that present the token of one of `clients`.
+    pub(crate) fn new(clients: Clients) -> BearerLayer {
+        BearerLayer { clients }
     }
 }
 
@@ -41,21 +44,21 @@ impl<S> Layer<S> for BearerLayer {
 
     fn layer(&self, inner: S) -> Bearer<S> {
         Bearer {
-            token: self.token.clone(),
+            clients: self.clients.clone(),
             inner,
         }
     }
 }
 
-/// A service that passes on a request that presents the token and answers any other
-/// itself.
+/// A service that passes on a request that presents a client's token, with the client's
+/// name, and answers any other itself.
 ///
 /// It is ready when the service behind it is. A refused request is answered without a
 /// call, which leaves that readiness unused; the services it guards (the generated gRPC
 /// server and the gateway's routes) are always ready and keep no state between calls.
 #[derive(Clone)]
 pub(crate) struct Bearer<S> {
-    token: Token,
+    clients: Clients,
     inner: S,
 }
 
@@ -77,22 +80,24 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request<B>) -> Self::Future {
-        if admitted(&self.token, request.headers()) {
-            Box::pin(self.inner.call(request))
-        } else {
-            Box::pin(ready(Ok(refusal(request.headers()))))
+    fn call(&mut self, mut request: Request<B>) -> Self::Future {
+        match client(&self.clients, request.headers()) {
+            Some(name) => {
+                request.extensions_mut().insert(name);
+                Box::pin(self.inner.call(request))
+            }
+            None => Box::pin(ready(Ok(refusal(request.headers())))),
         }
     }
 }
 
-/// Whether `headers` present `token`: an `Authorization` value `Bearer <token>`.
-fn admitted(token: &Token, headers: &HeaderMap) -> bool {
+/// The client whose token `headers` present, as an `Authorization` value `Bearer <token>`.
+fn client(clients: &Clients, headers: &HeaderMap) -> Option<ClientName> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(bearer)
-        .is_some_and(|given| token.matches(given.as_bytes()))
+        .and_then(|given| clients.identify(given.as_bytes()))
 }
 
 /// The answer to a request that does not present the token, with an empty body of the
@@ -117,7 +122,7 @@ fn refusal_head(headers: &HeaderMap) -> Response<()> {
 
 /// Whether `headers` are those of a gRPC request: its content type starts with
 /// `application/grpc`.
-fn is_grpc(headers: &HeaderMap) -> bool {
+pub(super) fn is_grpc(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
         .is_some_and(|value| value.as_bytes().starts_with(GRPC_CONTENT_TYPE))

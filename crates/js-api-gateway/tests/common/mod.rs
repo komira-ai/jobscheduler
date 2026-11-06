@@ -34,14 +34,22 @@ use tower::ServiceExt;
 /// A time in milliseconds since the Unix epoch above 2^53: a JSON number would round it.
 pub const BIG: u64 = (1 << 53) + 1;
 
-/// One call as the stub received it: the method's name and the encoded request.
+/// One call as the stub received it: the method's name, the encoded request, and the
+/// [`Marker`] its extensions carried, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     /// The method's name in the service, such as `GetJob`.
     pub rpc: &'static str,
     /// The request message, encoded.
     pub request: Vec<u8>,
+    /// The marker a layer in front of the router set on the HTTP request.
+    pub marker: Option<Marker>,
 }
+
+/// A value a layer in front of the router sets in the extensions of an HTTP request, as a
+/// server's bearer layer sets who the caller is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker(pub String);
 
 /// A [`JobService`] that records every call and answers each with a fixed sample, or every
 /// call with one status.
@@ -89,6 +97,7 @@ impl Stub {
             .push(Call {
                 rpc,
                 request: request.get_ref().encode_to_vec(),
+                marker: request.extensions().get::<Marker>().cloned(),
             });
         match &self.failure {
             Some(status) => Err(status.clone()),
@@ -359,6 +368,15 @@ pub fn spec() -> JobSpec {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             exec: ExecMode::Container.into(),
+            isa_level: "x86-64-v3".to_owned(),
+            accelerator: Some(js_proto::v1::Accelerator {
+                vendor: Some("nvidia".to_owned()),
+                model: Some("nvidia-a100".to_owned()),
+                count: Some(1),
+                memory_per_device_gib: Some(80),
+                interconnect: Some("nvlink-domain>=8".to_owned()),
+                form_factor: Some("sxm".to_owned()),
+            }),
         }),
         wall_limit_seconds: Some(3600),
         network: NetworkLevel::AllowList.into(),
@@ -397,6 +415,7 @@ pub fn job() -> Job {
         times: Some(times()),
         host_silent_since_ms: Some(BIG + 4000),
         cancel_requested: true,
+        client: Some("client-a".to_owned()),
     }
 }
 

@@ -1,5 +1,6 @@
 //! [`JobStore`]: the job and allocation tables over a state [`Store`].
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use crate::codec::{
     Carried, DecodeError, decode_allocation, decode_job, encode_allocation, encode_job,
 };
 use crate::error::JobStoreError;
-use crate::ids::{AllocationId, IdSource, JobId, RandomIds};
+use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
 use crate::keys;
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
@@ -20,6 +21,9 @@ use crate::result::{JobEnd, Output, Retention};
 
 mod ending;
 mod hosts;
+mod queue;
+
+pub use queue::queue_order;
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -30,7 +34,8 @@ pub const MINT_TRIES: usize = 8;
 /// The most jobs one [`JobStore::list_jobs`] page holds, whatever limit is asked for.
 pub const MAX_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(999);
 
-/// A job to record: its id if the client gave one, the job, and its priority.
+/// A job to record: its id if the client gave one, the job, its priority, and the client
+/// that submits it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
     /// The client's id, or `None` for the store to mint one.
@@ -39,6 +44,9 @@ pub struct NewJob {
     pub spec: JobSpec,
     /// Its priority.
     pub priority: i32,
+    /// The client that submits it, recorded on a new job ([`JobRecord::client`]); not
+    /// compared with a stored job of the same id.
+    pub client: Option<ClientName>,
 }
 
 /// What [`JobStore::insert_queued`] did.
@@ -77,6 +85,19 @@ pub struct JobStore<S, I = RandomIds> {
 /// `Err(error)` unless `ok`.
 fn ensure(ok: bool, error: JobStoreError) -> Result<(), JobStoreError> {
     if ok { Ok(()) } else { Err(error) }
+}
+
+/// One row a caller writes beside a free: its key and its value.
+pub type Row = (String, Vec<u8>);
+
+/// What gives the rows written beside a free ([`JobStore::free_with`],
+/// [`JobStore::end_and_free_with`]), from the allocation as it is freed.
+pub type Beside<'a> = dyn Fn(&AllocationRecord) -> Vec<Row> + 'a;
+
+/// `txn` with a put of each of `rows`, whatever its key holds.
+fn with_rows(txn: Txn, rows: Vec<Row>) -> Txn {
+    rows.into_iter()
+        .fold(txn, |txn, (key, value)| txn.put(key, value, Cond::Any))
 }
 
 /// The schema version a `meta/jobs/schema` row holds.
@@ -174,8 +195,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Records a job as queued (design section 5.3, steps 2 and 4).
     ///
     /// With an id: when a job with that id exists, the same job (every field of the spec;
-    /// the priority is not compared) is answered from the stored record, in whatever state
-    /// it is now, with `created: false`; a different one is [`JobStoreError::JobIdConflict`].
+    /// the priority and the client are not compared) is answered from the stored record, in
+    /// whatever state it is now and with the client that recorded it, with `created: false`;
+    /// a different one is [`JobStoreError::JobIdConflict`].
     /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
     /// times.
     ///
@@ -184,14 +206,25 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::UnknownRow`] when the id's row is one a later build wrote,
     /// [`JobStoreError::Store`] or [`JobStoreError::Mint`].
     pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
-        let NewJob { id, spec, priority } = job;
+        let NewJob {
+            id,
+            spec,
+            priority,
+            client,
+        } = job;
         match id {
-            Some(id) => self.insert_with_id(id, spec, priority),
-            None => self.insert_minted(&spec, priority),
+            Some(id) => self.insert_with_id(id, spec, priority, client),
+            None => self.insert_minted(&spec, priority, client.as_ref()),
         }
     }
 
-    fn queued(&self, id: JobId, spec: JobSpec, priority: i32) -> JobRecord {
+    fn queued_record(
+        &self,
+        id: JobId,
+        spec: JobSpec,
+        priority: i32,
+        client: Option<ClientName>,
+    ) -> JobRecord {
         JobRecord {
             id,
             spec,
@@ -206,6 +239,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             cancel_requested_at: None,
             result: None,
             retention_ends: None,
+            deadline_floor: None,
+            client,
             carried: Carried::default(),
         }
     }
@@ -230,11 +265,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         id: JobId,
         spec: JobSpec,
         priority: i32,
+        client: Option<ClientName>,
     ) -> Result<Inserted, JobStoreError> {
         if let Some(found) = self.same_job(&id, &spec)? {
             return Ok(found);
         }
-        let record = self.queued(id, spec, priority);
+        let record = self.queued_record(id, spec, priority, client);
         let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
         match self.store.txn(txn)? {
             Ok(_) => Ok(Inserted {
@@ -250,9 +286,15 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    fn insert_minted(&self, spec: &JobSpec, priority: i32) -> Result<Inserted, JobStoreError> {
+    fn insert_minted(
+        &self,
+        spec: &JobSpec,
+        priority: i32,
+        client: Option<&ClientName>,
+    ) -> Result<Inserted, JobStoreError> {
         for _ in 0..MINT_TRIES {
-            let record = self.queued(JobId::minted(self.ids.mint()?), spec.clone(), priority);
+            let id = JobId::minted(self.ids.mint()?);
+            let record = self.queued_record(id, spec.clone(), priority, client.cloned());
             let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
             if self.store.txn(txn)?.is_ok() {
                 return Ok(Inserted {
@@ -264,12 +306,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         Err(JobStoreError::IdSpaceExhausted { tries: MINT_TRIES })
     }
 
-    /// Places a queued job (design section 5.3, step 5): in one transaction the job becomes
-    /// placed on `host`, and its allocation is written as booked with a newly minted
-    /// allocation id. The job must still be queued at the version read, and its allocation
-    /// row must still be absent, or freed (a requeued job's earlier allocation, which the new
-    /// one overwrites), at the version read. The new allocation id differs from the freed
-    /// row's: a source that repeats it is drawn again, at most [`MINT_TRIES`] times.
+    /// Places a queued job (design section 5.3, step 5): in one transaction the job becomes placed
+    /// on `host`, and its allocation is written as booked with a newly minted allocation id,
+    /// holding the host ports the job declares (sorted, each once). The job must still be queued at
+    /// the version read, and its allocation row must still be absent, or freed (a requeued job's
+    /// earlier allocation, which the new one overwrites), at the version read. The new allocation
+    /// id differs from the freed row's: a source that repeats it is drawn again, at most
+    /// [`MINT_TRIES`] times.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
@@ -307,11 +350,13 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         };
         let allocation_id = self.fresh_allocation_id(earlier_id)?;
         let now = self.store.now();
+        let host_ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
         let allocation = AllocationRecord {
             job: id.clone(),
             allocation_id,
             host: host.clone(),
             booked,
+            host_ports: host_ports.into_iter().collect(),
             step: AllocationStep::Booked,
             created_at: now,
             freed_at: None,
@@ -534,6 +579,22 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// # Errors
     /// [`JobStoreError::NoAllocation`]; [`JobStoreError::Stale`]; as for any read and write.
     pub fn free(&self, id: &JobId, reason: EndReason) -> Result<AllocationRecord, JobStoreError> {
+        self.free_with(id, reason, &|_| Vec::new())
+    }
+
+    /// [`JobStore::free`], with the rows `beside` gives for the freed allocation written in
+    /// the same transaction, each as `(key, value)` whatever the key holds: the free and those
+    /// rows commit together or not at all. An allocation already freed is returned as it is,
+    /// and `beside` is not called: nothing is written.
+    ///
+    /// # Errors
+    /// As [`JobStore::free`].
+    pub fn free_with(
+        &self,
+        id: &JobId,
+        reason: EndReason,
+        beside: &Beside<'_>,
+    ) -> Result<AllocationRecord, JobStoreError> {
         let (allocation, version) = self.allocation_row(id)?;
         if allocation.step == AllocationStep::Freed {
             return Ok(allocation);
@@ -549,7 +610,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             encode_allocation(&freed)?,
             Cond::Version(version),
         );
-        self.commit(id, txn)?;
+        self.commit(id, with_rows(txn, beside(&freed)))?;
         Ok(freed)
     }
 
@@ -787,6 +848,7 @@ mod tests {
             id,
             spec: crate::suite::full_spec(),
             priority: 0,
+            client: None,
         };
         assert_eq!(jobs.insert_queued(job(None)).map(drop), failed);
         let id = crate::JobId::parse("a").expect("an id");

@@ -176,7 +176,8 @@ pub use heartbeat::{
     RefusalReason, RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
 };
 pub use hello::{
-    GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
+    GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireAccelerator,
+    WireShape,
 };
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
 pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};

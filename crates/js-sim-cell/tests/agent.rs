@@ -14,8 +14,8 @@ use js_conformance::agent::Defect;
 use js_sim::Sim;
 use js_sim_cell::bus::agent_name;
 use js_sim_cell::{
-    AgentSpec, Checker, Counter, Invariant, Ledger, Observations, RunId, SIM_RUN_IMAGE, Touched,
-    Verdict,
+    AgentKind, AgentSpec, Checker, Counter, Invariant, Ledger, Observations, RunId, SIM_RUN_IMAGE,
+    Touched, Verdict,
 };
 use js_types::sched::FarmTime;
 use js_types::{HostId, LeaseId, Resources};
@@ -23,6 +23,9 @@ use serde_json::{Value, json};
 
 #[path = "agent/standin.rs"]
 mod standin;
+// The whole-host handshake, a module of this test binary.
+#[path = "agent/exclusive.rs"]
+mod exclusive;
 
 use standin::{
     BeatAnswer, Cell, HelloAnswer, POOL, SESSION_PREFIX, Script, agent, agent_mut, cell, stand_in,
@@ -64,14 +67,14 @@ fn spec() -> AgentSpec {
         capabilities: BTreeMap::from([("isa".to_owned(), "x86-64-v3".to_owned())]),
         labels: BTreeMap::from([("rack".to_owned(), "r1".to_owned())]),
         hello_interval: INTERVAL,
-        defect: None,
+        kind: AgentKind::Fake(None),
     }
 }
 
 /// The agent of [`spec`], lacking `defect`.
 fn broken(defect: Defect) -> AgentSpec {
     AgentSpec {
-        defect: Some(defect),
+        kind: AgentKind::Fake(Some(defect)),
         ..spec()
     }
 }

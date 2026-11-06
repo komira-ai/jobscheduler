@@ -5,23 +5,32 @@
 //!
 //! ```toml
 //! provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key",
-//!              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
+//!              types = [{ name = "gpu_1x_a10" }] }
 //! ```
 //!
 //! with `regions`, `ssh_key` and `api_url` as optional keys. [`build`] reads the table the
 //! service hands it (everything but `kind`) and the facts the pool decides, checks every
 //! rule that needs no network, and returns the [`LambdaProvider`] with the facts the
 //! service needs of it offline ([`Built`]). It makes no network call: the client is
-//! built, not used; what only the network can say (a real type name, a key that works)
-//! is for the service's checks.
+//! built, not used; what only the network can say (a type Lambda offers today, a key that
+//! works) is for the service's checks.
+//!
+//! `types` is the allow list of instance types the pool may launch. The GPU facts of each
+//! type come from the crate's catalog table (`catalog.rs`), and the pool floor is derived
+//! from them: the fewest GPUs of any listed type, and the one canonical model they share.
+//! A row may still carry `gpu` and `gpus`, as rows did before the facts moved into the
+//! crate: they are accepted, not checked and ignored, and each such row logs one warning
+//! naming the row and its type.
 //!
 //! The rules, each refusal naming the field relative to the provider table:
 //!
 //! - a type's `name` is 1 to 64 lower case letters, digits or `_`, and no two types have
 //!   one name;
-//! - a type's `gpu` is a class in the agent's spelling ([`GpuClass::parse`]), and a pool
-//!   has one class: every type names the class of the first;
-//! - a type's `gpus` is a whole number from 1;
+//! - a type's `name` is a type the catalog table knows. Here, unlike in the catalog the
+//!   provider serves (where a listed type the table does not know is skipped with a
+//!   warning), an unknown type is refused: without its facts the pool has no floor;
+//! - a pool has one GPU model: every type has the canonical model of the first, and a
+//!   refusal names both models;
 //! - `api_key_file` is read through the service's reader of secret files, never directly,
 //!   and holds one key.
 //!
@@ -35,14 +44,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{GpuClass, SchedulerId};
+use js_elastic::SchedulerId;
+use js_types::Model;
 use toml::{Table, Value};
+
+use crate::catalog;
 
 use crate::clock::Clock;
 use crate::config::ElasticConfig;
 use crate::http::HttpApi;
 use crate::key::ApiKey;
-use crate::options::{OptionRow, OptionTable};
+use crate::options::{OptionRow, OptionTable, instance_type_name};
 use crate::provider::LambdaProvider;
 
 /// The address of Lambda's API when the table has no `api_url`. The client appends the
@@ -55,8 +67,12 @@ pub const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// The fields of a `lambdalabs` provider table (`kind` is the service's and is not passed).
 const KNOWN: &[&str] = &["api_key_file", "regions", "types", "ssh_key", "api_url"];
 
-/// The fields of one row of `types`.
+/// The fields of one row of `types`. `gpu` and `gpus` are the GPU facts rows carried
+/// before the facts moved into the crate: accepted and ignored.
 const ROW_KNOWN: &[&str] = &["name", "gpu", "gpus"];
+
+/// The fields of [`ROW_KNOWN`] that are accepted and ignored.
+const ROW_IGNORED: &[&str] = &["gpu", "gpus"];
 
 /// A table that [`build`] refused: the field at fault, relative to the provider table, and
 /// why. The reason holds nothing the table said except what it names, and no secret.
@@ -105,10 +121,10 @@ pub struct Context<'a> {
 pub struct Built {
     /// The provider.
     pub provider: LambdaProvider,
-    /// The fewest GPUs of any type of the pool.
+    /// The fewest GPUs of any type of the pool, from the catalog table.
     pub gpus: u64,
-    /// The class of the pool's GPUs.
-    pub gpu_class: GpuClass,
+    /// The canonical model of the pool's GPUs, from the catalog table.
+    pub gpu_class: Model,
 }
 
 /// A string field, if the table has it.
@@ -130,51 +146,56 @@ fn row_string<'t>(at: &str, row: &'t Table, field: &str) -> Result<&'t str, Refu
     }
 }
 
+/// One row of `types` with what the catalog table says of its type.
+struct TypeRow {
+    row: OptionRow,
+    gpus: u32,
+    model: Model,
+}
+
 /// The row `value` of `types`, named `at`, after the `earlier` ones.
-fn type_row(at: &str, value: &Value, earlier: &[OptionRow]) -> Result<OptionRow, Refused> {
+fn type_row(at: &str, value: &Value, earlier: &[TypeRow]) -> Result<TypeRow, Refused> {
     let Value::Table(row) = value else {
-        return Err(refused(at, "must be a table with name, gpu and gpus"));
+        return Err(refused(at, "must be a table with a name"));
     };
     if let Some(unknown) = row.keys().find(|key| !ROW_KNOWN.contains(&key.as_str())) {
         let reason = format!("unknown field; known: {}", ROW_KNOWN.join(", "));
         return Err(refused(&format!("{at}.{unknown}"), reason));
     }
     let name = row_string(at, row, "name")?;
-    let named = (1..=64).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-    if !named {
+    if !instance_type_name(name) {
         let reason = "must be 1 to 64 lower case letters, digits or '_'";
         return Err(refused(&format!("{at}.name"), reason));
     }
-    if earlier.iter().any(|each| each.instance_type == name) {
+    if earlier.iter().any(|each| each.row.instance_type == name) {
         let reason = format!("{name:?} is listed twice");
         return Err(refused(&format!("{at}.name"), reason));
     }
-    let class = GpuClass::parse(row_string(at, row, "gpu")?)
-        .map_err(|why| refused(&format!("{at}.gpu"), why))?;
-    if let Some(first) = earlier.first().filter(|first| first.gpu_class != class) {
+    let Some((gpus, model)) = catalog::entry(name)
+        .and_then(|entry| entry.accelerator())
+        .map(|accelerator| (accelerator.count, accelerator.model))
+    else {
         let reason = format!(
-            "a pool has one gpu class; {:?} is the class of types[1], not {:?}",
-            first.gpu_class.as_str(),
-            class.as_str()
+            "{name:?} is not an instance type this release knows the GPUs of; \
+             the known types are listed in js-provider-lambdalabs"
         );
-        return Err(refused(&format!("{at}.gpu"), reason));
+        return Err(refused(&format!("{at}.name"), reason));
+    };
+    if let Some(first) = earlier.first().filter(|first| first.model != model) {
+        let reason = format!(
+            "a pool has one gpu model; types[1] ({:?}) has {:?}, {name:?} has {:?}",
+            first.row.instance_type,
+            first.model.as_str(),
+            model.as_str()
+        );
+        return Err(refused(&format!("{at}.name"), reason));
     }
-    let gpus = match row.get("gpus") {
-        None => return Err(refused(&format!("{at}.gpus"), "required")),
-        Some(Value::Integer(count)) => u32::try_from(*count).ok().filter(|count| *count >= 1),
-        Some(_) => None,
-    };
-    let Some(gpus) = gpus else {
-        let reason = "must be a whole number from 1";
-        return Err(refused(&format!("{at}.gpus"), reason));
-    };
-    Ok(OptionRow {
-        instance_type: name.to_owned(),
-        gpu_class: class,
+    Ok(TypeRow {
+        row: OptionRow {
+            instance_type: name.to_owned(),
+        },
         gpus,
+        model,
     })
 }
 
@@ -182,17 +203,19 @@ fn type_row(at: &str, value: &Value, earlier: &[OptionRow]) -> Result<OptionRow,
 struct Types {
     rows: Vec<OptionRow>,
     gpus: u64,
-    gpu_class: GpuClass,
+    gpu_class: Model,
 }
 
-/// The rows of `types`, the fewest GPUs of any of them and their class.
+/// The rows of `types`, the fewest GPUs of any of them and their model, both from the
+/// catalog table. A row that carries `gpu` or `gpus` logs one warning, once every row is
+/// accepted.
 fn types(table: &Table) -> Result<Types, Refused> {
     let items = match table.get("types") {
         None => return Err(refused("types", "required")),
         Some(Value::Array(items)) => items,
         Some(_) => return Err(refused("types", "must be an array of tables")),
     };
-    let mut rows: Vec<OptionRow> = Vec::new();
+    let mut rows: Vec<TypeRow> = Vec::new();
     for (index, value) in items.iter().enumerate() {
         let row = type_row(&format!("types[{}]", index + 1), value, &rows)?;
         rows.push(row);
@@ -200,12 +223,25 @@ fn types(table: &Table) -> Result<Types, Refused> {
     let Some(first) = rows.first() else {
         return Err(refused("types", "must list at least one type"));
     };
-    let gpu_class = first.gpu_class.clone();
+    let gpu_class = first.model.clone();
     let gpus = rows.iter().map(|row| u64::from(row.gpus)).min();
+    for (index, (value, row)) in items.iter().zip(&rows).enumerate() {
+        let carries = value
+            .as_table()
+            .is_some_and(|table| ROW_IGNORED.iter().any(|key| table.contains_key(*key)));
+        let name = &row.row.instance_type;
+        if carries {
+            tracing::warn!(
+                "types[{}] ({name}): gpu and gpus are ignored; the GPU facts of an instance \
+                 type come from js-provider-lambdalabs, so remove them from the row",
+                index + 1
+            );
+        }
+    }
     Ok(Types {
         gpus: gpus.unwrap_or_default(),
         gpu_class,
-        rows,
+        rows: rows.into_iter().map(|row| row.row).collect(),
     })
 }
 

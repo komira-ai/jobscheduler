@@ -19,7 +19,7 @@ use js_provider_lambdalabs::{
     POOL_TAG, SCHEDULER_TAG, SshKey, Tag,
 };
 
-use crate::rig::{Rig, SCHEDULER, TABLE, ask, host, id, live, rig, row, tag};
+use crate::rig::{Rig, SCHEDULER, TABLE, ask, catalog, host, id, live, rig, row, tag};
 
 /// A provider with room for `machines` and no space between launches.
 fn roomy(machines: usize) -> Rig {
@@ -292,19 +292,19 @@ fn the_capabilities_hold_when_nothing_is_available_and_the_catalog_fails() {
     let caps = rig.provider.capabilities();
     let mut types = rig.fake.calls().len();
     let none = crate::rig::offer(
-        "gpu_1x_sample",
+        "gpu_1x_h100_sxm5",
         75,
         1,
         js_provider_lambdalabs::Architecture::X86_64,
         &[],
     );
     rig.fake.set_offers(vec![none]);
-    assert!(rig.provider.catalog().unwrap().is_empty());
+    assert!(catalog(&rig.provider).unwrap().is_empty());
     types += 1;
     assert_eq!(rig.provider.capabilities(), caps);
     rig.fake
         .fail_next(Call::InstanceTypes, ApiError::Transport("down".to_owned()));
-    assert!(rig.provider.catalog().is_err());
+    assert!(catalog(&rig.provider).is_err());
     types += 1;
     assert_eq!(rig.provider.capabilities(), caps);
     assert_eq!(rig.fake.calls().len(), types, "capabilities make no call");

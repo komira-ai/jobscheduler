@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CheckResult, Claim,
-    Demand, Extra, Held, Hello, HostName, HostRef, HostStatus, Observed, Offer, ProviderCaps,
-    ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
+    AcquireId, AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture,
+    CheckResult, Claim, Demand, Extra, Held, Hello, HostName, HostRef, HostStatus, Observed, Offer,
+    ProviderCaps, ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
 };
 use js_types::ProviderId;
 
@@ -29,6 +29,9 @@ use records::Records;
 
 /// The provider's name: the kind a configuration names it by.
 pub const PROVIDER_ID: ProviderId = ProviderId::known("lambdalabs");
+
+/// What a catalog answers when its blocking API call did not come back (it panicked).
+const CATALOG_CALL_LOST: &str = "the catalog call did not finish";
 
 /// The most bytes of boot payload this provider carries: the user data of a launch.
 ///
@@ -698,8 +701,9 @@ impl CapacityProvider for LambdaProvider {
         true
     }
 
-    /// Linux, the architectures of the instance types Lambda documents, and the GPU classes
-    /// of the option table: the table [`CapacityProvider::catalog`] takes each offer's class
+    /// Linux, the architectures of the instance types Lambda documents, and the canonical
+    /// GPU model the crate's catalog table gives each instance type of the option table (the
+    /// allow list): the table [`CapacityProvider::catalog`] takes each offer's accelerator
     /// from.
     ///
     /// An architecture Lambda does not document reaches the catalog as its own text; once a
@@ -711,11 +715,19 @@ impl CapacityProvider for LambdaProvider {
         caps
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        let types = self.api.instance_types().map_err(provider_error)?;
-        let offers = select::offers(&self.options, &types, self.config.regions.as_deref());
-        self.records().offered(&offers);
-        Ok(offers)
+    /// The API call is blocking, so it runs on tokio's blocking pool; awaiting the answer
+    /// needs a tokio runtime context. A call that panics answers an error.
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(async move {
+            let api = Arc::clone(&self.api);
+            let types = tokio::task::spawn_blocking(move || api.instance_types())
+                .await
+                .map_err(|_| ProviderError::new(CATALOG_CALL_LOST))?
+                .map_err(provider_error)?;
+            let offers = select::offers(&self.options, &types, self.config.regions.as_deref());
+            self.records().offered(&offers);
+            Ok(offers)
+        })
     }
 
     /// From what the provider last listed, launched, released and read by id; `can_add`

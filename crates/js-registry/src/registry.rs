@@ -183,12 +183,18 @@ struct State {
 impl State {
     /// Forgets every host that has been lost for longer than the retention and holds no
     /// booking, binding included, and answers which. A booked host stays however long it
-    /// is silent.
-    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> Vec<HostId> {
+    /// is silent, and so does one `held` says holds work the book does not.
+    fn forget_lost(
+        &mut self,
+        (now, grace_ms, retention_ms): (Timestamp, u64, u64),
+        held: &dyn Fn(&HostId) -> bool,
+    ) -> Vec<HostId> {
         let lost = self
             .records
             .iter()
-            .filter(|(_, record)| record.out_of_retention(now, grace_ms, retention_ms))
+            .filter(|(id, record)| {
+                record.out_of_retention(now, grace_ms, retention_ms) && !held(id)
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         let forgotten = lost.into_iter().filter(|id| self.book.remove_free(id));
@@ -226,7 +232,8 @@ struct Shared {
 /// lost-host retention ([`PoolConfig::with_lost_retention`]), also computed when asked:
 /// every call forgets such hosts first, so they stop counting toward the pool's limit
 /// ([`Registry::check_heartbeat`], which changes nothing, answers as if it had).
-/// A host that holds a booking is never forgotten. An awaiting host (seated after a
+/// A host that holds a booking, or that its placer holds work on
+/// ([`crate::Placer::holds_work_on`]), is never forgotten. An awaiting host (seated after a
 /// restart, never heard) is counted from the time it was seated: once its lease has
 /// ended, it is forgotten after the grace period and the retention have passed since
 /// then, so an agent that never returns does not hold a place until the next restart.
@@ -330,7 +337,10 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
-        let forgotten = state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        let placer = self.shared.placer.get();
+        let held = |host: &HostId| placer.is_some_and(|placer| placer.holds_work_on(host));
+        let timing = (now, config.grace_ms(), config.lost_retention_ms());
+        let forgotten = state.forget_lost(timing, &held);
         forgotten.iter().for_each(|host| self.tell_gone(host));
         let horizon = Rules::of(config).idle_horizon_ms();
         state.requests.sweep(now, horizon);
@@ -612,7 +622,7 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        config.list_in(&mut state.book, host.clone());
+        config.list_claimed(&mut state.book, host.clone(), claim.as_ref());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),

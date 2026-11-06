@@ -13,10 +13,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{CapacityProvider, GpuClass, SchedulerId};
+use js_elastic::{CapacityProvider, SchedulerId};
 use js_lease::Clock as LeaseClock;
 use js_provider_lambdalabs as lambda;
-use js_types::{ExecMode, MemoryPercent, ResourceClass};
+use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
 
 use crate::adapt::SharedClock;
 use crate::capacity::{CapacitySource, StaticPoolSource};
@@ -82,7 +82,20 @@ pub struct Floor {
     /// The fewest GPUs of any size.
     pub gpus: u64,
     /// The class of those GPUs; `Some` exactly when `gpus` is above zero.
-    pub gpu_class: Option<GpuClass>,
+    pub gpu_class: Option<Model>,
+}
+
+impl Floor {
+    /// The accelerators a demand at the floor asks for: its GPUs of its class; `None`
+    /// when the floor has no class.
+    #[must_use]
+    pub fn need(&self) -> Option<AcceleratorNeed> {
+        self.gpu_class.clone().map(|model| AcceleratorNeed {
+            model: Some(model),
+            count: u32::try_from(self.gpus).unwrap_or(u32::MAX),
+            ..AcceleratorNeed::default()
+        })
+    }
 }
 
 /// An elastic provider and what the server learns of it offline.

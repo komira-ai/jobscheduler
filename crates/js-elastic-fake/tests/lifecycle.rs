@@ -164,7 +164,7 @@ fn the_bound_saturates_and_counts_an_acquire_that_may_land() {
 #[test]
 fn the_capabilities_count_offers_with_no_capacity_and_no_gpu() {
     let mut cpu = offer(None);
-    (cpu.id, cpu.gpus, cpu.gpu_class, cpu.available) = ("cpu".to_owned(), 0, None, false);
+    (cpu.id, cpu.accelerator, cpu.available) = ("cpu".to_owned(), None, false);
     cpu.arch = "arm64".to_owned();
     let cloud = ElasticFake::new(FakeClock::new(START), Billing::Gce, vec![cpu.clone()]);
     let caps = cloud.capabilities();

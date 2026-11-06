@@ -30,12 +30,16 @@ js-types = { path = "../js-types" }
 js-usage = { path = "../js-usage" }
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
-hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["service", "tokio"] }
+# The lease and agent listeners speak HTTP/1.1; the job service's speaks HTTP/1.1 and HTTP/2
+# on one port (src/listener.rs, `serve_both`).
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["http1", "http2", "server", "server-auto", "service", "tokio"] }
 rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# A client token of the job service is kept as its SHA-256 digest (src/config/tokens.rs).
+sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 toml.workspace = true
@@ -81,6 +85,9 @@ tower = { workspace = true, features = ["util"] }
 # The job service's tests: a tonic client over an in-memory stream, a call of any method by
 # name, and the method names from js-proto's descriptor set (src/job_api/tests.rs).
 prost-types.workspace = true
+# The read calls' tests decode the gateway's JSON by the proto3 JSON mapping, to compare it
+# with the gRPC answer (src/job_api/read_tests.rs).
+prost-reflect = { workspace = true, features = ["serde"] }
 tonic = { workspace = true, features = ["transport"] }
 tonic-prost.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }

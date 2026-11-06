@@ -33,7 +33,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
 
 use crate::error::JobStoreError;
-use crate::ids::{AllocationId, JobId};
+use crate::ids::{AllocationId, ClientName, JobId};
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, JobRecord,
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
@@ -107,7 +107,7 @@ pub(crate) mod job_tag {
     /// When the record may be deleted (time).
     pub const RETENTION_ENDS: u16 = 30;
     /// Why the job ended, when it has a result (u8). A row without it has no result, and
-    /// the tags up to [`RESULT_LOGS`] are read only beside it.
+    /// the tags up to [`RESULT_USAGE`] and [`RESULT_LOGS`] are read only beside it.
     pub const RESULT_REASON: u16 = 31;
     /// The exit code (i32).
     pub const RESULT_EXIT_CODE: u16 = 32;
@@ -127,9 +127,13 @@ pub(crate) mod job_tag {
     pub const RESULT_ENDED_AT: u16 = 39;
     /// What it used: the CPU time (time) and then the peak memory in bytes (u64).
     pub const RESULT_USAGE: u16 = 40;
+    /// The earliest instant a time limit may end the job (time).
+    pub const DEADLINE_FLOOR: u16 = 41;
+    /// The name of the client that submitted the job (text).
+    pub const CLIENT: u16 = 42;
     /// The lengths of its output streams: standard output's bytes, standard error's, then the
     /// bytes each dropped (four u64).
-    pub const RESULT_LOGS: u16 = 41;
+    pub const RESULT_LOGS: u16 = 43;
 }
 
 /// The tags of an allocation row.
@@ -158,6 +162,8 @@ pub(crate) mod alloc_tag {
     pub const FREED_AT: u16 = 11;
     /// Why it was freed (u8).
     pub const END_REASON: u16 = 12;
+    /// The host ports it holds (2 bytes each, ascending, each once); absent when it holds none.
+    pub const HOST_PORTS: u16 = 13;
 }
 
 /// The fields of a row this build does not know, by tag, as the row held them.
@@ -358,6 +364,11 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put_opt(t::CANCEL_REQUESTED_AT, job.cancel_requested_at.map(time));
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
     result_fields::put_result(&mut row, job.result.as_ref());
+    row.put_opt(t::DEADLINE_FLOOR, job.deadline_floor.map(time));
+    row.put_opt(
+        t::CLIENT,
+        job.client.as_ref().map(|name| text(name.as_str())),
+    );
     row.finish(&job.carried)
 }
 
@@ -384,6 +395,16 @@ pub(crate) fn encode_allocation(allocation: &AllocationRecord) -> Result<Vec<u8>
             row.put(t::DISK_BYTES, disk_bytes.to_be_bytes());
             row.put(t::ACCELERATORS, accelerators.to_be_bytes());
         }
+    }
+    if !allocation.host_ports.is_empty() {
+        row.put(
+            t::HOST_PORTS,
+            allocation
+                .host_ports
+                .iter()
+                .flat_map(|port| port.to_be_bytes())
+                .collect::<Vec<u8>>(),
+        );
     }
     row.put(t::STEP, [step_code(allocation.step)]);
     row.put(t::CREATED_AT, time(allocation.created_at));
@@ -610,6 +631,27 @@ fn ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<DeclaredPort>, DecodeError> 
         .collect())
 }
 
+/// The host ports of an allocation row: 2 bytes each, each above the one before it, so none is
+/// zero and none repeats.
+fn host_ports_of(tag: u16, value: Vec<u8>) -> Result<Vec<u16>, DecodeError> {
+    let chunks = value.chunks_exact(2);
+    chunks
+        .remainder()
+        .is_empty()
+        .then_some(())
+        .ok_or(DecodeError::BadLength { tag })?;
+    let ports: Vec<u16> = chunks
+        .map(|port| u16::from_be_bytes([port[0], port[1]]))
+        .collect();
+    let ascending = ports
+        .iter()
+        .zip(std::iter::once(&0).chain(ports.iter()))
+        .all(|(port, before)| port > before);
+    ascending
+        .then_some(ports)
+        .ok_or(DecodeError::BadValue { tag })
+}
+
 /// The reserved label keys a row may hold.
 const RESERVED: [ReservedKey; 5] = [
     ReservedKey::Tenant,
@@ -642,6 +684,10 @@ fn labels_of(tag: u16, value: Vec<u8>) -> Result<Labels, DecodeError> {
 
 fn job_id_of(tag: u16, value: Vec<u8>) -> Result<JobId, DecodeError> {
     JobId::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
+}
+
+fn client_of(tag: u16, value: Vec<u8>) -> Result<ClientName, DecodeError> {
+    ClientName::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
 
 fn host_of(tag: u16, value: Vec<u8>) -> Result<HostId, DecodeError> {
@@ -847,6 +893,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let cancel_requested_at = fields.opt(t::CANCEL_REQUESTED_AT, time_of)?;
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
+    let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
+    let client = fields.opt(t::CLIENT, client_of)?;
     Ok(JobRecord {
         id,
         spec,
@@ -861,6 +909,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         cancel_requested_at,
         result,
         retention_ends,
+        deadline_floor,
+        client,
         carried: fields.carried(),
     })
 }
@@ -885,6 +935,9 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
             accelerators: fields.opt(t::ACCELERATORS, u64_of)?.unwrap_or(0),
         }
     };
+    let host_ports = fields
+        .opt(t::HOST_PORTS, host_ports_of)?
+        .unwrap_or_default();
     let step = fields.need(t::STEP, step_of)?;
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
@@ -894,6 +947,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         allocation_id,
         host,
         booked,
+        host_ports,
         step,
         created_at,
         freed_at,

@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 /// them `none`, `allow-list` and `open`; a text this version does not know is refused, so
 /// a job is never run at a level it did not name.
 ///
-/// It is not the `NetworkLevel` of a native job on the agent wire (`off`, `loopback`, `on`),
-/// which is a macOS sandbox setting.
+/// It is not the `NetworkLevel` of a native job on the agent wire (`off`, `loopback`, `on`,
+/// `open`), which is a macOS sandbox setting; a Mac agent reads its `off`, `on` and `open` as
+/// `none`, `allow-list` and `open`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]

@@ -9,9 +9,9 @@
     "file_system_names": [],
     "region": { "name": "region-a", "description": "Place A" },
     "instance_type": {
-      "name": "gpu_1x_sample",
-      "description": "1x Sample GPU (24 GB)",
-      "gpu_description": "Sample GPU (24 GB)",
+      "name": "gpu_1x_h100_sxm5",
+      "description": "1x H100 (80 GB SXM5)",
+      "gpu_description": "H100 (80 GB SXM5)",
       "price_cents_per_hour": 75,
       "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 },
       "architecture": "x86_64"

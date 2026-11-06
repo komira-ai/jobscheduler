@@ -16,10 +16,30 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
+# The job client (src/jobs), behind the `jobs` feature: the job service's messages and
+# generated gRPC client, the HTTP/2 channel they run on (`channel`, without tonic's own TLS:
+# the job client does TLS itself) and the byte stream under it, and the bundled roots.
+hyper-util = { workspace = true, features = ["tokio"], optional = true }
+js-proto = { path = "../js-proto", optional = true }
+tokio = { workspace = true, features = ["net", "time"], optional = true }
+tokio-rustls = { workspace = true, optional = true }
+tonic = { workspace = true, features = ["channel"], optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[features]
+# The client of the job service, `jobs::JobClient`. Off by default: js-agent and the macOS
+# helper use the lease client only and link none of it; js-cli turns it on.
+jobs = ["dep:hyper-util", "dep:js-proto", "dep:tokio", "dep:tokio-rustls", "dep:tonic", "dep:webpki-roots"]
 
 [dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
 js-testkit = { path = "../js-testkit" }
+prost.workspace = true
 rcgen.workspace = true
+# `test-util`: the job client's deadline tests run on a paused clock.
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
+tonic = { workspace = true, features = ["transport"] }
 webpki-roots.workspace = true
 
 [lints]

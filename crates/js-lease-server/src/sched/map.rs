@@ -8,14 +8,19 @@
 //! | This server | The scheduler |
 //! |---|---|
 //! | `Resources` cpu, memory, gpus | `sched::Resources` (a booking vector) |
-//! | `Resources` gpu class | the `gpu.kind` platform key, on the host's `NodeCaps` and on the request's `needs` |
+//! | `Resources` gpu class | the `gpu.kind` platform key, on the host's `NodeCaps` and on the request's `needs`, as the canonical family of the class through the alias table (a class that is not a model name stays as written) |
+//! | `Shape` accelerator ([`Shape::accelerator`]) | the host's `accelerator.*` report entries ([`Accelerator::to_capabilities`]), and its `gpu.kind` |
+//! | a request's `accelerator.*` capabilities | passed to the scheduler's `needs` as they are; `gpu.kind` is the family of `accelerator.model`, else of the class |
 //! | `Shape` | the host's capacity and the `NodeCaps` its node report would give |
 //! | `HostId` | `WorkerId`, same text |
 //! | `LeaseId` | `sched::LeaseId`, printed `<term>-<seq>` |
 
 use std::collections::BTreeMap;
 
-use js_caps::{NodeCaps, ReportError, RequestError};
+use js_caps::{
+    ACCEL_KEYS, ACCEL_MODEL_KEY, Accelerator, AcceleratorNeed, Model, NodeCaps, ReportError,
+    RequestError,
+};
 use js_sched::Request as SchedRequest;
 use js_types::sched::{LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey, WorkerId};
 use js_types::{HostId, IdError, Request, Resources, Shape};
@@ -26,7 +31,8 @@ const DRIVER: &str = "container";
 /// The platform key that carries a GPU class.
 const GPU_KIND: &str = "gpu.kind";
 
-/// Report keys a shape's resources decide; a capability of the same name is ignored.
+/// Report keys a shape's resources decide; a capability of the same name is ignored. The
+/// `accelerator.*` keys are decided by the shape's accelerator ([`ACCEL_KEYS`]).
 const FROM_RESOURCES: [&str; 4] = ["cpus", "mem_gib", "gpu", GPU_KIND];
 
 /// Why a conversion was refused.
@@ -66,19 +72,25 @@ pub(crate) fn booking(resources: &Resources) -> js_types::sched::Resources {
 /// node report would carry.
 ///
 /// The report is rendered from the shape: `cpus` (whole cores, rounded down), `mem_gib`
-/// (whole GiB, rounded down), `gpu` and `gpu.kind` from its resources, the `container`
-/// driver, and every capability entry the scheduler reads. A capability named like one
-/// of those the resources decide is ignored. A shape must name its `arch`.
+/// (whole GiB, rounded down), `gpu` from its resources, `gpu.kind` and the `accelerator.*`
+/// entries from its accelerator ([`Shape::accelerator`]: the canonical family, the count and
+/// whatever the alias table or the shape's own `accelerator.*` capabilities state of the
+/// variant; a class that is not a model name is reported as `gpu.kind` as written), the
+/// `container` driver, and every capability entry the scheduler reads. A capability named
+/// like one of those the resources or the accelerator decide is ignored. A shape must name
+/// its `arch`.
 ///
 /// # Errors
 /// [`MapError::Report`] when a capability is not a valid report entry (no `arch`, an unknown `arch`,
 /// a countable entry that is not a whole number).
 pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCaps), MapError> {
     let resources = shape.resources();
+    let accelerator: Option<Accelerator> = shape.accelerator();
     let mut entries: Vec<(String, String)> = shape
         .capabilities()
         .iter()
         .filter(|(key, _)| !FROM_RESOURCES.contains(&key.as_str()))
+        .filter(|(key, _)| !ACCEL_KEYS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     entries.push(("drivers".into(), DRIVER.into()));
@@ -88,31 +100,73 @@ pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCap
         (resources.memory_bytes() >> 30).to_string(),
     ));
     entries.push(("gpu".into(), resources.gpus().to_string()));
-    if let Some(class) = resources.gpu_class() {
-        entries.push((GPU_KIND.into(), class.into()));
+    match (&accelerator, resources.gpu_class()) {
+        (Some(accelerator), _) => {
+            entries.extend(
+                accelerator
+                    .to_capabilities()
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned(), value)),
+            );
+            entries.push((GPU_KIND.into(), accelerator.model.to_string()));
+        }
+        (None, Some(class)) => entries.push((GPU_KIND.into(), class.into())),
+        (None, None) => {}
     }
     let caps = NodeCaps::from_report(entries.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
     Ok((booking(resources), caps))
 }
 
-/// What `request` requires of a node: its capabilities as platform requirements, and its
-/// GPU class as `gpu.kind`.
+/// The canonical family of a GPU class or model through the alias table, or the text as
+/// written when it is not a model name.
+fn family_of(text: &str) -> String {
+    match Model::parse(text) {
+        Ok(model) => model.canonical().model.to_string(),
+        Err(_) => text.to_owned(),
+    }
+}
+
+/// What `request` requires of a node: its capabilities as platform requirements, its
+/// accelerator need as the `accelerator.*` keys of [`AcceleratorNeed::requested`] (its own
+/// keys over the need its booked GPUs state, so a booked full spelling pins its variant
+/// here too, without any key being stored with the request), and its GPU class as
+/// `gpu.kind`: the family of its `accelerator.model` when it states one, else of the class.
 ///
 /// # Errors
 /// [`MapError::Needs`] when a capability is not a platform key;
-/// [`MapError::GpuClass`] when a `gpu.kind` capability names another class than the
-/// resources.
+/// [`MapError::GpuClass`] when a `gpu.kind` capability names another family than the
+/// request's model or class.
 pub(crate) fn needs(request: &Request) -> Result<js_caps::Request, MapError> {
-    let mut pairs: BTreeMap<&str, &str> = request
-        .capabilities
+    needs_of(&request.capabilities, &request.resources)
+}
+
+/// What a run asking for `capabilities` and `resources` requires of a node, as [`needs`]
+/// says: a lease's request and a queued job's constraints alike.
+///
+/// # Errors
+/// As [`needs`].
+pub(crate) fn needs_of(
+    capabilities: &js_types::Capabilities,
+    resources: &Resources,
+) -> Result<js_caps::Request, MapError> {
+    let model = capabilities
+        .get(ACCEL_MODEL_KEY)
+        .map(String::as_str)
+        .or_else(|| resources.gpu_class());
+    let kind = model.map(family_of);
+    let need = AcceleratorNeed::requested(capabilities, resources).map_err(RequestError::from)?;
+    let stated: Vec<(&str, String)> = need.map(|need| need.to_capabilities()).unwrap_or_default();
+    let mut pairs: BTreeMap<&str, &str> = capabilities
         .iter()
+        .filter(|(key, _)| !ACCEL_KEYS.contains(&key.as_str()))
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    if let Some(class) = request.resources.gpu_class() {
-        match pairs.insert(GPU_KIND, class) {
-            Some(other) if other != class => {
+    pairs.extend(stated.iter().map(|(key, value)| (*key, value.as_str())));
+    if let Some(kind) = &kind {
+        match pairs.insert(GPU_KIND, kind) {
+            Some(other) if family_of(other) != *kind => {
                 return Err(MapError::GpuClass {
-                    class: class.into(),
+                    class: kind.clone(),
                     capability: other.into(),
                 });
             }
@@ -490,5 +544,119 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// Asserts that a host whose class is a full spelling reports the canonical family as
+    /// `gpu.kind` and states its accelerator (the family, the count, the variant's memory
+    /// and form factor), and that a class that is not a model name stays as written.
+    /// Catches a report that keeps the raw spelling, which a family request would miss.
+    #[test]
+    fn a_hosts_accelerator_is_reported_with_its_family_as_gpu_kind() {
+        let full = resources(8000, 1 << 30, 8, Some("nvidia-a100-sxm4-80gb"));
+        let (_, caps) = host(&shape(full, &[])).unwrap();
+        assert_eq!(caps.exact["gpu.kind"], "nvidia-a100");
+        let accelerator = caps.accelerator.unwrap();
+        assert_eq!(accelerator.model.as_str(), "nvidia-a100");
+        assert_eq!(accelerator.count, 8);
+        assert_eq!(accelerator.memory_per_device, Some(80 << 30));
+        assert_eq!(accelerator.form_factor, Some(js_caps::FormFactor::Sxm));
+        let odd = resources(8000, 1 << 30, 1, Some("Not A Model"));
+        let (_, caps) = host(&shape(odd, &[])).unwrap();
+        assert_eq!(caps.exact["gpu.kind"], "Not A Model");
+        assert_eq!(caps.accelerator, None);
+    }
+
+    /// Asserts that a shape's own `accelerator.*` capabilities do not override what its
+    /// accelerator reports: a shape of eight 80 GiB devices that also writes
+    /// `accelerator.count=1` is reported with eight. Catches a capability that shadows the
+    /// booked count.
+    #[test]
+    fn a_shapes_accelerator_keys_are_decided_by_its_accelerator() {
+        let full = resources(8000, 1 << 30, 8, Some("nvidia-a100-sxm4-80gb"));
+        let (_, caps) = host(&shape(full, &[("accelerator.count", "1")])).unwrap();
+        assert_eq!(caps.accelerator.unwrap().count, 8);
+    }
+
+    /// Asserts that requests for a family and for the host's own full spelling are placed
+    /// on a host of eight `nvidia-a100-sxm4-80gb`, that another family and a variant with
+    /// more memory than the host's (the 80 GiB variant on a host of 40 GiB devices) are not,
+    /// and that a request with no `accelerator.*` keys is held to the need its booked class
+    /// states: the full spelling runs on its variant and not on the 40 GiB one, the family
+    /// on any. Catches a family request that is not placed, and a variant that is placed on
+    /// a smaller one.
+    #[test]
+    fn requests_resolve_family_and_variant_against_the_hosts_class() {
+        let runnable_on = |host_class: &str, class: &str| {
+            let shape = shape(resources(8000, 1 << 30, 8, Some(host_class)), &[]);
+            let (capacity, caps) = host(&shape).unwrap();
+            let keys = [("accelerator.model", class), ("accelerator.count", "4")];
+            let wanted = request(resources(1000, 1, 4, Some(class)), &keys);
+            job(&wanted, "j").unwrap().runnable_on(&caps, &capacity)
+        };
+        let (a80, a40) = ("nvidia-a100-sxm4-80gb", "nvidia-a100-sxm4-40gb");
+        assert!(runnable_on(a80, "nvidia-a100"));
+        assert!(runnable_on(a80, a80));
+        assert!(!runnable_on(a80, "nvidia-h100"));
+        assert!(!runnable_on(a40, a80));
+        let (capacity, caps) = host(&shape(resources(8000, 1 << 30, 8, Some(a80)), &[])).unwrap();
+        let bare = request(resources(1000, 1, 4, Some(a80)), &[]);
+        assert!(job(&bare, "j").unwrap().runnable_on(&caps, &capacity));
+        let bare_family = request(resources(1000, 1, 4, Some("nvidia-a100")), &[]);
+        assert!(
+            job(&bare_family, "j")
+                .unwrap()
+                .runnable_on(&caps, &capacity)
+        );
+        let (capacity, caps) = host(&shape(resources(8000, 1 << 30, 8, Some(a40)), &[])).unwrap();
+        assert!(
+            !job(&bare, "j").unwrap().runnable_on(&caps, &capacity),
+            "a booked full spelling pins its variant without stored keys"
+        );
+        let vendor = request(
+            resources(1000, 1, 4, Some(a80)),
+            &[("accelerator.vendor", "nvidia")],
+        );
+        assert!(
+            !job(&vendor, "j").unwrap().runnable_on(&caps, &capacity),
+            "a vendor key beside a booked full spelling keeps its pin"
+        );
+        let odd = shape(resources(8000, 1 << 30, 8, Some("Not A Model")), &[]);
+        let (capacity, caps) = host(&odd).unwrap();
+        let same = request(resources(1000, 1, 1, Some("Not A Model")), &[]);
+        assert!(job(&same, "j").unwrap().runnable_on(&caps, &capacity));
+        let other = request(resources(1000, 1, 1, Some("Not B Model")), &[]);
+        assert!(
+            !job(&other, "j").unwrap().runnable_on(&caps, &capacity),
+            "a class that is not a model name is matched as written"
+        );
+    }
+
+    /// Asserts that a `gpu.kind` capability that resolves to the family of the request's
+    /// class or of its `accelerator.model` is taken, and one that resolves to another
+    /// family is `MapError::GpuClass` naming the family and the capability. Catches a
+    /// request whose class and capability disagree being placed on either.
+    #[test]
+    fn a_gpu_kind_capability_must_name_the_requests_family() {
+        let full = resources(1000, 1, 1, Some("nvidia-a100-sxm4-80gb"));
+        assert!(needs(&request(full.clone(), &[("gpu.kind", "nvidia-a100")])).is_ok());
+        assert_eq!(
+            needs(&request(full, &[("gpu.kind", "nvidia-h100")])).unwrap_err(),
+            MapError::GpuClass {
+                class: "nvidia-a100".into(),
+                capability: "nvidia-h100".into(),
+            }
+        );
+        let none = resources(1000, 1, 0, None);
+        let by_model = [
+            ("accelerator.model", "nvidia-h100-80gb-hbm3"),
+            ("gpu.kind", "nvidia-a100"),
+        ];
+        assert_eq!(
+            needs(&request(none, &by_model)).unwrap_err(),
+            MapError::GpuClass {
+                class: "nvidia-h100".into(),
+                capability: "nvidia-a100".into(),
+            }
+        );
     }
 }

@@ -5,7 +5,9 @@
 //! worker by measured and predicted load, now, at placement; this one asks only whether
 //! some path could serve the request at all, once it is free or launched, and is asked
 //! once, before anything is recorded. Its answer is [`Admission::Refuse`] only when no
-//! path exists, and that refusal is the plain constant `no-capable-host`.
+//! path exists, and that refusal is the plain constant `no-capable-host`. A host whose
+//! advertised network ceiling is below the request's level, or lacks one of its host ports,
+//! is not capable ([`crate::ceiling`]).
 //!
 //! [`can_ever_serve`] takes everything as values: the pool's hosts ([`HostView`]) and its
 //! machine providers ([`ProviderView`]), each with its catalog as the caller read it
@@ -14,6 +16,8 @@
 
 use js_elastic::{Offer, ProviderCaps};
 use js_types::{Capabilities, DISK_GIB_KEY, EXEC_KEY, HostId, Requirements, Resources, Shape};
+
+use crate::ceiling::{ceiling_of, within_ceiling};
 
 /// One GiB, the unit of the `disk-gib` capability.
 const GIB: u64 = 1 << 30;
@@ -131,9 +135,11 @@ pub struct ProviderView {
 
 impl ProviderView {
     /// Whether it may offer a machine for `req`: it launches, is enabled and has a share,
-    /// `req` is inside its capabilities, and its catalog is unread or has an offer that
-    /// fits `req` ([`Offer::fit`], which does not ask whether the offer is available now)
-    /// and the limits.
+    /// `req` is inside its capabilities, it forwards host ports when `req` declares any
+    /// ([`ProviderCaps::host_ports`]; a platform without it is passed over), and its
+    /// catalog is unread or has an offer that fits `req` ([`Offer::fit`], which does not ask
+    /// whether the offer is available now) and the limits. A provider has no network level
+    /// to compare, so `req`'s level is not checked against it.
     fn may_offer(&self, req: &Requirements) -> bool {
         let launches = !self.kind_is_static & self.enabled & (self.share > 0);
         let offered = match &self.catalog {
@@ -142,7 +148,8 @@ impl ProviderView {
                 .iter()
                 .any(|offer| offer.fit(req).is_ok() & self.limits.allow(offer)),
         };
-        launches & inside(&self.capabilities, req) & offered
+        let ports = req.host_ports.is_empty() | self.capabilities.host_ports;
+        launches & inside(&self.capabilities, req) & ports & offered
     }
 }
 
@@ -150,11 +157,13 @@ impl ProviderView {
 /// host in `hosts` admits it ([`Path::CapableHost`]); otherwise a provider of `providers`
 /// that may offer a machine for it ([`Path::MayOffer`]); otherwise it is refused.
 ///
-/// A host is capable when it is neither tainted nor draining, what the pool books of it
-/// holds `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`,
-/// `disk-gib` and `exec` (as [`Shape::satisfies`] compares them). Whether it is busy,
-/// lost or cordoned does not matter. A pool with no provider that launches admits only
-/// through a capable host.
+/// A host is capable when it is neither tainted nor draining, what the pool books of it holds
+/// `req`'s resources, and its facts satisfy `req`'s `os`, `arch`, `isa_level`, `disk-gib` and
+/// `exec` (as [`Shape::satisfies`] compares them), and the network ceiling its facts advertise
+/// ([`ceiling_of`]) covers `req`'s network level and host ports ([`within_ceiling`]; a host that
+/// advertises none has the level `none` and no port). Whether it is busy, lost or cordoned does not
+/// matter. A provider may offer only if it forwards host ports when `req` declares any; its level
+/// is not checked. A pool with no provider that launches admits only through a capable host.
 pub fn can_ever_serve(
     req: &Requirements,
     hosts: &[HostView],
@@ -163,7 +172,9 @@ pub fn can_ever_serve(
     let required = required(req);
     let capable = hosts.iter().any(|host| {
         let shape = Shape::new(host.total.clone(), host.facts.clone());
-        !host.tainted & !host.draining & shape.satisfies(&req.resources, &required)
+        let ceiling = ceiling_of(&host.facts);
+        let within = within_ceiling(&ceiling, req.network, &req.host_ports).is_ok();
+        !host.tainted & !host.draining & shape.satisfies(&req.resources, &required) & within
     });
     let offered = providers.iter().any(|provider| provider.may_offer(req));
     match (capable, offered) {
@@ -174,17 +185,24 @@ pub fn can_ever_serve(
 }
 
 /// Whether `req` is inside `caps`: its operating system and architecture, when it names
-/// them, are in the sets, and so is its GPU class when it asks for GPUs.
+/// them, are in the sets, and so is the canonical family of the model it needs (its
+/// `accelerator.model`, else its booked GPU class, resolved through the alias table), as
+/// the provider's accelerators are canonical. A booked class that is not a model name is
+/// in no provider's set; a need that names no model is inside.
 fn inside(caps: &ProviderCaps, req: &Requirements) -> bool {
     let os = req.os.as_ref().is_none_or(|os| caps.os.contains(os));
     let arch = req
         .arch
         .as_ref()
         .is_none_or(|arch| caps.arch.contains(arch));
-    let class = req
-        .resources
-        .gpu_class()
-        .is_none_or(|class| caps.accelerators.iter().any(|own| own.as_str() == class));
+    let model = req
+        .accelerator
+        .as_ref()
+        .and_then(|need| need.model.as_ref());
+    let class = match model {
+        Some(model) => caps.accelerators.contains(&model.canonical().model),
+        None => req.resources.gpu_class().is_none(),
+    };
     os & arch & class
 }
 

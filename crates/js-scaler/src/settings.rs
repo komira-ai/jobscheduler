@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use js_types::ProviderId;
+
 use crate::time::Millis;
 
 /// Whether a pool may spend money (`launch` in the pool's table).
@@ -101,7 +103,25 @@ pub struct Settings {
     /// `unknown_hold`, for the scaler's ticks, the drain and release round trips and the
     /// provider's clock.
     pub lifetime_margin: Duration,
+    /// The machine provider the pool launches with, as pass 2 of placement names it
+    /// (`js_sched::acquire`). The server gives the provider's id; [`UNNAMED_PROVIDER`]
+    /// until it does. The scaler launches with the pool's one provider whatever the name.
+    pub provider: ProviderId,
+    /// The provider's share of the pool: the most machines it may hold for the pool at
+    /// once (its `provider_limits` `max_machines`, else the pool's). `None`: no share of
+    /// its own. A launch that would pass it is not made, and the pool shows
+    /// [`Blocked::MaxInstances`], as for `max_instances`.
+    pub provider_share: Option<u32>,
+    /// The instance types (offer ids) the pool may launch, from the provider's
+    /// `provider_limits`. `None`: any.
+    pub allowed_instance_types: Option<Vec<String>>,
+    /// The highest price per hour, in cents, the pool may launch at, from the provider's
+    /// `provider_limits`; an offer at exactly this price is inside. `None`: any price.
+    pub max_price_cents_per_hour: Option<u64>,
 }
+
+/// The default of [`Settings::provider`], for settings no server has named a provider in.
+pub const UNNAMED_PROVIDER: ProviderId = ProviderId::known("unnamed");
 
 /// The default of [`Settings::lifetime_margin`]: 10 minutes.
 const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
@@ -121,7 +141,8 @@ pub const BOOT_FAIL_TRIP_AFTER: u32 = 3;
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
     /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
-    /// minutes, `unknown_hold` 30 minutes and `max_step` 1.
+    /// minutes, `unknown_hold` 30 minutes and `max_step` 1; [`UNNAMED_PROVIDER`], with no
+    /// share and no `provider_limits` on its offers.
     #[must_use]
     pub fn new(
         pool: &str,
@@ -151,6 +172,10 @@ impl Settings {
             max_lease_wall: None,
             prepare_timeout: PREPARE_TIMEOUT,
             lifetime_margin: LIFETIME_MARGIN,
+            provider: UNNAMED_PROVIDER,
+            provider_share: None,
+            allowed_instance_types: None,
+            max_price_cents_per_hour: None,
         }
     }
 }
@@ -254,7 +279,8 @@ pub enum Blocked {
     /// of zero, so it is never launched. The catalog needs fixing; nothing else will unblock
     /// the request.
     Unpriced,
-    /// The pool holds `max_instances`.
+    /// The pool holds `max_instances`, or its provider holds its share
+    /// ([`Settings::provider_share`]).
     MaxInstances,
     /// One more machine would take the hourly spend over `max_spend_per_hour`.
     MaxSpend,

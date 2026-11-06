@@ -18,16 +18,24 @@ pub enum Counter {
     /// An answer the agent ignored, wholly or in part, because it failed to decode or
     /// validate, or named a start the cell cannot account for.
     ReplyInvalid,
+    /// The agent was cut off from the server while it ran a run that no hello or
+    /// heartbeat it had sent listed: the server cannot have seen it listed. Bumped by
+    /// [`crate::actions::partition_agents`] at the cut.
+    CutWithUnlistedRun,
+    /// A heartbeat answered 409 `unknown-host`: the server had forgotten the host.
+    UnknownHost,
 }
 
 impl Counter {
     /// Every counter, in order.
-    pub const ALL: [Counter; 5] = [
+    pub const ALL: [Counter; 7] = [
         Counter::StartRepeated,
         Counter::StartAfterStop,
         Counter::StartDroppedLate,
         Counter::ResultResent,
         Counter::ReplyInvalid,
+        Counter::CutWithUnlistedRun,
+        Counter::UnknownHost,
     ];
 
     /// A stable snake_case name.
@@ -39,6 +47,8 @@ impl Counter {
             Counter::StartDroppedLate => "start_dropped_late",
             Counter::ResultResent => "result_resent",
             Counter::ReplyInvalid => "reply_invalid",
+            Counter::CutWithUnlistedRun => "cut_with_unlisted_run",
+            Counter::UnknownHost => "unknown_host",
         }
     }
 }
@@ -64,6 +74,22 @@ impl Counters {
     pub(crate) fn bump(&mut self, counter: Counter) {
         *self.0.entry(counter).or_insert(0) += 1;
     }
+
+    /// The counts of `all` added together.
+    pub(crate) fn sum<'a>(all: impl IntoIterator<Item = &'a Counters>) -> Counters {
+        let mut total = Counters::default();
+        for counters in all {
+            total.absorb(counters);
+        }
+        total
+    }
+
+    /// Adds every count of `other` to this one's.
+    pub(crate) fn absorb(&mut self, other: &Counters) {
+        for (counter, count) in other.iter() {
+            *self.0.entry(counter).or_insert(0) += count;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +109,8 @@ mod tests {
                 "start_dropped_late",
                 "result_resent",
                 "reply_invalid",
+                "cut_with_unlisted_run",
+                "unknown_host",
             ]
         );
     }

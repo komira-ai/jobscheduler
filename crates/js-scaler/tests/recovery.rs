@@ -467,3 +467,57 @@ fn a_failed_record_restarted_from_records_is_revoked_then_released() {
         assert_eq!(fresh.state.refused, 0);
     }
 }
+
+/// A rig whose catalog holds the one offer `gb` for an unknown model with a measured
+/// memory, with the request `r1` for 80 GiB of nvidia memory waiting, after the step that
+/// launched for it.
+fn launched_for_unknown_model() -> Rig {
+    let mut rig = Rig::new(settings("gpu"));
+    rig.pool().offers = vec![gb300_offer("gb", 60)];
+    rig.input.waiting = vec![gb300_request("r1")];
+    assert_eq!(acquires(&rig.tick(at(0))).len(), 1);
+    rig
+}
+
+/// Asserts that a machine launched from an offer for an unknown model with a measured
+/// memory keeps covering its request over later steps while it boots, so no second machine
+/// is launched. Catches a pending offer rebuilt without its memory, which stops fitting
+/// the request and launches a duplicate.
+#[test]
+fn a_pending_machine_of_an_unknown_model_keeps_covering_its_request() {
+    let mut rig = launched_for_unknown_model();
+    for step_at in [5, 10, 15] {
+        assert!(acquires(&rig.tick(at(step_at * SECOND))).is_empty());
+    }
+    assert_eq!(rig.state.records.instances.len(), 1);
+    assert!(rig.record(0).offer.accelerator_facts.is_some());
+}
+
+/// Asserts that after a restart the record holds no facts, the catalog's offer of the same
+/// id and zone restores them, and three steps with the request waiting make no other
+/// acquire. Catches a restart that forgets the measured memory and launches a second
+/// machine for the one request.
+#[test]
+fn a_restart_restores_the_accelerator_facts_from_the_catalog() {
+    let rig = launched_for_unknown_model();
+    let mut fresh = restarted(&rig);
+    assert_eq!(fresh.record(0).offer.accelerator_facts, None);
+    for step_at in [5, 10, 15] {
+        assert!(acquires(&fresh.tick(at(step_at * SECOND))).is_empty());
+    }
+    assert_eq!(fresh.state.records.instances.len(), 1);
+}
+
+/// Asserts that the facts a restored record takes are those of its own offer: when the
+/// catalog lists only another offer for the same class, the restored machine no longer
+/// covers the request and that offer is launched. Catches facts taken from whatever the
+/// catalog holds.
+#[test]
+fn restored_facts_come_from_the_offer_of_the_same_id_only() {
+    let rig = launched_for_unknown_model();
+    let mut fresh = restarted(&rig);
+    fresh.pool().offers = vec![gb300_offer("other", 60)];
+    let plans = acquires(&fresh.tick(at(5 * SECOND)));
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].offer.id, "other");
+}

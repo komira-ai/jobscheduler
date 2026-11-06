@@ -122,7 +122,8 @@ fn agents_register_through_the_real_hello_and_are_listed_by_the_registry() {
         .sum();
     assert_eq!(refused, 0);
     assert_eq!(cell.observations().server.hosts.len(), REGISTER_HOSTS);
-    assert_eq!(cell.server().expect("a server").server().agent_errors(), 0);
+    let server = cell.server().expect("a server").server();
+    assert_eq!(server.map(|server| server.agent_errors()), Some(0));
 }
 
 /// Asserts that with a burst of one the real limiter refuses one of two hellos with a wait
@@ -389,7 +390,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
         capabilities: Shape::gpu_host().capabilities,
         labels: Default::default(),
         hello_interval: INTERVAL,
-        defect: None,
+        kind: js_sim_cell::AgentKind::Fake(None),
     };
     let mut agent = CellNode::Agent(Box::new(AgentNode::new(agent, Ledger::new())));
     assert!(agent.as_server().is_none() && agent.as_server_mut().is_none());

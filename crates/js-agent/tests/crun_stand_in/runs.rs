@@ -191,6 +191,7 @@ fn native() -> js_agent_wire::NativeSpec {
         inputs: Vec::new(),
         outputs: Vec::new(),
         network: js_agent_wire::NetworkLevel::Off,
+        ports: Vec::new(),
     }
 }
 

@@ -165,7 +165,8 @@ impl Registry {
     /// load, taint and whole-node state, its booking and its binding stay as they were, and
     /// no run is touched. Unlike every other call it does not run the registry's
     /// time-driven housekeeping (forgetting hosts lost for longer than the retention with
-    /// no booking, expiring waits, sweeping idle requests) either: it answers as if that
+    /// no booking and no work their placer holds on them, expiring waits, sweeping idle
+    /// requests) either: it answers as if that
     /// had run, so a host the housekeeping would forget is refused as unknown, as
     /// [`Registry::heartbeat`] refuses it after forgetting it. The rest of the
     /// housekeeping touches no host record, so it changes no answer here.
@@ -188,10 +189,13 @@ impl Registry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
+        // As the housekeeping, a host its placer holds work on is kept however long silent.
+        let placer = self.shared.placer.get();
+        let held = |host: &HostId| placer.is_some_and(|placer| placer.holds_work_on(host));
         let kept = state
             .records
             .get(&host)
-            .filter(|record| !forgotten(&state.book, (&host, *record), now, config));
+            .filter(|record| !forgotten(&state.book, (&host, *record), now, config) || held(&host));
         let record = admitted(kept, heartbeat, credential)?;
         let taint = match record.taint {
             Some(_) => None,
@@ -242,6 +246,7 @@ mod tests {
                 disk_bytes: 0,
                 gpu_class: None,
                 max_leases: None,
+                accelerator: None,
             },
             capabilities: macos(),
             gpu_devices: Vec::new(),

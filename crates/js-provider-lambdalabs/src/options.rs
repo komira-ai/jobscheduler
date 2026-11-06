@@ -1,14 +1,14 @@
-//! The `[[option]]` rows of the configuration: which Lambda instance types the provider
-//! may use, and what GPUs each one brings. Parsing and checking only; nothing chooses
-//! among the rows here.
+//! The `[[option]]` rows of the configuration: the allow list of the Lambda instance types
+//! the provider may use. Parsing and checking only; nothing chooses among the rows here.
 //!
-//! The row fields (`instance_type`, `gpu_class`, `gpus`) are not yet the shape of the
-//! design's `[[provider.option]]` table (`shape`, `id`, `facts`). They are to be aligned
-//! with it before anything reads the table beyond parsing.
+//! A row names an instance type and nothing else. The GPU facts of each type (its model,
+//! count and memory) come from the crate's code (`catalog.rs`), never from configuration.
+//! A row written for an earlier release may still carry `gpu_class` and `gpus`: they are
+//! accepted, not checked and ignored, and each such row logs one warning that names its
+//! instance type. Any other key in a row is refused.
 
 use std::collections::BTreeSet;
 
-use js_elastic::GpuClass;
 use serde::Deserialize;
 
 use crate::error::cut;
@@ -18,10 +18,6 @@ use crate::error::cut;
 pub struct OptionRow {
     /// Lambda's name for the type, such as `gpu_1x_a10`.
     pub instance_type: String,
-    /// The class the agent on this type reports for its GPUs.
-    pub gpu_class: GpuClass,
-    /// How many GPUs the type has (at least 1).
-    pub gpus: u32,
 }
 
 /// The rows, in the order the file lists them.
@@ -59,12 +55,15 @@ struct Document {
     option: Vec<RawRow>,
 }
 
+/// A row as written. `gpu_class` and `gpus` are the GPU facts rows carried before the
+/// facts moved into the crate: read as any value, so an old file still parses, and never
+/// used.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRow {
     instance_type: String,
-    gpu_class: String,
-    gpus: u32,
+    gpu_class: Option<toml::Value>,
+    gpus: Option<toml::Value>,
 }
 
 impl OptionTable {
@@ -74,9 +73,10 @@ impl OptionTable {
     /// ```toml
     /// [[option]]
     /// instance_type = "gpu_1x_a10"
-    /// gpu_class = "nvidia-a10"
-    /// gpus = 1
     /// ```
+    ///
+    /// A row that also carries `gpu_class` or `gpus` parses as the row without them and
+    /// logs one warning naming its instance type, once the whole table is accepted.
     ///
     /// # Errors
     ///
@@ -89,12 +89,22 @@ impl OptionTable {
         }
         let mut seen = BTreeSet::new();
         let mut rows = Vec::new();
+        let mut old_shape = Vec::new();
         for (index, raw) in document.option.into_iter().enumerate() {
-            let row = row(index + 1, raw)?;
+            let carries_gpu_facts = raw.gpu_class.is_some() || raw.gpus.is_some();
+            let row = row(index + 1, raw.instance_type)?;
             if !seen.insert(row.instance_type.clone()) {
                 return Err(OptionsError::Duplicate(row.instance_type));
             }
+            old_shape.extend(carries_gpu_facts.then(|| row.instance_type.clone()));
             rows.push(row);
+        }
+        for name in old_shape {
+            tracing::warn!(
+                instance_type = %name,
+                "option row {name}: gpu_class and gpus are ignored; the GPU facts of an \
+                 instance type come from js-provider-lambdalabs, so remove them from the row"
+            );
         }
         Ok(Self::from_rows(rows))
     }
@@ -123,27 +133,20 @@ impl OptionTable {
     }
 }
 
-fn row(number: usize, raw: RawRow) -> Result<OptionRow, OptionsError> {
-    let refuse = |why: String| OptionsError::Row { row: number, why };
-    let named = !raw.instance_type.is_empty()
-        && raw.instance_type.len() <= 64
-        && raw
-            .instance_type
+/// Whether `name` is an instance-type name: 1 to 64 lower case letters, digits or `_`.
+pub(crate) fn instance_type_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-    if !named {
-        return Err(refuse(
-            "instance_type must be 1 to 64 lower case letters, digits or '_'".to_owned(),
-        ));
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn row(number: usize, instance_type: String) -> Result<OptionRow, OptionsError> {
+    match instance_type_name(&instance_type) {
+        true => Ok(OptionRow { instance_type }),
+        false => Err(OptionsError::Row {
+            row: number,
+            why: "instance_type must be 1 to 64 lower case letters, digits or '_'".to_owned(),
+        }),
     }
-    if raw.gpus == 0 {
-        return Err(refuse("gpus must be at least 1".to_owned()));
-    }
-    let gpu_class =
-        GpuClass::parse(&raw.gpu_class).map_err(|why| refuse(format!("gpu_class {why}")))?;
-    Ok(OptionRow {
-        instance_type: raw.instance_type,
-        gpu_class,
-        gpus: raw.gpus,
-    })
 }

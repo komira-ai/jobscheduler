@@ -4,6 +4,7 @@
 //! the agent routes, the layering of the sources of hosts, the restart, and the container
 //! runs a lease holder queues on a registered host.
 
+mod accelerator_requests;
 mod admission;
 mod agents;
 mod agents_contract;
@@ -18,6 +19,8 @@ mod alerts;
 mod auth;
 mod binary;
 mod brake_reset;
+mod catalog_cache;
+mod catalog_config;
 mod config_brake;
 mod config_budget;
 mod config_file;
@@ -38,7 +41,10 @@ mod elastic_fake_e2e;
 mod estimate_feed;
 mod gpu_path_pin;
 mod guard_names;
+mod job_listen;
+mod job_port;
 mod job_retention;
+mod job_wall;
 mod joins;
 mod joins_credential;
 mod joins_revoke;

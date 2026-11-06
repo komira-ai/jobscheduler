@@ -25,11 +25,11 @@
 use std::collections::BTreeSet;
 
 use js_elastic::{
-    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, Claim, GpuClass, Held, Hello,
-    HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal,
+    AcquireRequest, Acquired, BootStep, Capacity, CapacityProvider, CatalogFuture, Claim, Held,
+    Hello, HostRef, HostStatus, Observed, Offer, ProviderCaps, ProviderError, Reason, Refusal,
     RefusalCode, Released,
 };
-use js_types::{HostId, ProviderId, normalise_arch};
+use js_types::{HostId, Model, ProviderId, normalise_arch};
 
 use crate::registry::{HostMark, HostState, HostView, Registry};
 
@@ -119,7 +119,8 @@ impl CapacityProvider for StaticCapacity {
                 .map(|arch| normalise_arch(arch).to_owned())
                 .collect(),
             accelerators: classes
-                .filter_map(|class| GpuClass::parse(class).ok())
+                .filter_map(|class| Model::parse(class).ok())
+                .map(|model| model.canonical().model)
                 .collect(),
             whole_host: any,
             host_ports: any,
@@ -127,9 +128,9 @@ impl CapacityProvider for StaticCapacity {
     }
 
     /// `Ok` and empty: a static provider has nothing to launch. It is an answer, not an
-    /// error.
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        Ok(Vec::new())
+    /// error. The future is already complete.
+    fn catalog(&self) -> CatalogFuture<'_> {
+        Box::pin(std::future::ready(Ok(Vec::new())))
     }
 
     /// The hosts in the table that are not being given back (live, lost, awaiting or

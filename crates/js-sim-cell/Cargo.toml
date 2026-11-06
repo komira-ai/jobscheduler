@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The real agent lifecycle, which a real agent node runs (src/agent/real.rs).
+js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-conformance = { path = "../js-conformance" }
 js-lease = { path = "../js-lease" }
@@ -19,6 +21,8 @@ js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
 # Requests and bodies for the server's routers (`axum::http`, `axum::body`).
 axum.workspace = true
+# `ValueEnum`, through which the server's `--placement` values are listed and spelled.
+clap.workspace = true
 serde_json.workspace = true
 # The current-thread runtime each request and tick of the server runs on.
 tokio = { workspace = true, features = ["rt"] }

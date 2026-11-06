@@ -15,7 +15,8 @@ pub enum RequestError {
     /// A label was refused.
     #[error(transparent)]
     Label(#[from] LabelError),
-    /// The `disk-gib`, `exec` or `isa_level` capability is not a requirement.
+    /// The `disk-gib`, `exec`, `isa_level` or `accelerator.*` capabilities are not a
+    /// requirement.
     #[error(transparent)]
     Requirements(#[from] RequirementsError),
 }

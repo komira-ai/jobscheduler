@@ -1,21 +1,38 @@
-//! The run loop: the kernel, the real server, the agents, and a check after every step.
+//! The run loop: the kernel, the real server, the agents, the client, and a check after
+//! every step.
 //!
-//! A [`Cell`] owns the [`Sim`] of [`CellNode`]s, the [`Checker`] and the actions scripted
-//! at virtual times ([`Cell::at`]). [`Cell::run_until`] repeats, in this order: it reads
-//! the time of the kernel's next event and of the next scripted action; when the event
-//! comes first, or at the same time, it applies the event with [`Sim::step`]; otherwise it
-//! moves the clock to the action's time with [`Sim::run_until`] and runs the action. After
-//! every step and every action that changed something it builds what changed into the
-//! [`Observations`] (the agent the step fed, the ledger entries appended, the server's
-//! listing once per virtual second and at every client call) and calls
-//! [`Checker::step`]. It stops at the end time or at the first [`Violation`], which every
-//! later call returns again.
+//! A [`Cell`] owns the [`Sim`] of [`CellNode`]s, the [`Checker`], the actions scripted at
+//! virtual times ([`Cell::at`]) and the client driver ([`Front`]). [`Cell::run_until`]
+//! repeats, in this order: it reads the time of the kernel's next event, of the next
+//! scripted action and of the client's next poll ([`Front::next_poll`]); when the event
+//! comes first, or at the same time, it applies the event with [`Sim::step`]; otherwise,
+//! when the action comes first or at the same time as the poll, it moves the clock to the
+//! action's time with [`Sim::run_until`] and runs the action; otherwise it moves the clock
+//! to the poll's time and polls the client, which makes its calls to the server there and
+//! then. The client is polled at most once per virtual millisecond. After every step,
+//! every poll and every action that changed something it builds what changed into the
+//! [`Observations`] (the agent the step fed, the events the client heard, the ledger
+//! entries appended, the whole-host facts the agents wrote, the server's listing once per
+//! virtual second and at every client call or poll) and calls [`Checker::step`]. It stops at the end time or at the first
+//! [`Violation`], which every later call returns again.
+//!
+//! [`Cell::settle`] ends a scenario: it runs every scripted action, the ones actions
+//! script too, then the cell for the time it is given, and makes the end check
+//! ([`Checker::end`]).
+//!
+//! A killed agent process is a fault until it is replaced ([`Cell::kill`]); one killed
+//! for good ([`Cell::kill_for_good`]) is a host gone, not a fault. A restart of the
+//! server ([`Cell::restart_server`]) is a moment, not a fault; a restart the server
+//! refuses leaves it down and is kept for [`Cell::take_refused`], which is how the run of
+//! a seed reports it.
 //!
 //! # The trace
 //!
 //! The cell writes a trace of its own, family `js-sim-cell`, beside the kernel's: what
-//! the kernel does not see (a process killed or replaced, the bus's faults changed, a
-//! client call and its status), what the server's listing says of each host when it
+//! the kernel does not see (a process killed, killed for good or replaced, the server
+//! restarted or its restart refused, the bus's faults changed, a
+//! client call and its status, an item submitted or cancelled and each event the client
+//! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
 //! changes, each launch in the ledger, and the violation that stopped the run. A line
 //! names hosts, statuses and counts; it never holds a token, a bearer, a session secret,
 //! a body or an id the server generated. The hash of a run ([`Cell::trace_hash`]) is the
@@ -24,25 +41,29 @@
 //! one, each line where it happened.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
-use js_sim::{Chance, Faults, NodeId, Partition, Sim, Trace, TraceHash};
+use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
 use js_testkit::dir::TestDir;
 use js_types::sched::FarmTime;
-use js_types::{HostId, IdError, Resources};
+use js_types::{HostId, IdError, LeaseId, Resources};
 
-use crate::agent::{AgentNode, AgentSpec};
+use crate::agent::{AgentKind, AgentNode, AgentSpec, Prepare};
 use crate::bus::{SERVER, agent_name};
-use crate::counters::Counters;
-use crate::invariant::{Checker, Touched, Violation};
+use crate::counters::{Counter, Counters};
+use crate::front::{Answer, ClientPort, Front, LeaseFront};
+use crate::invariant::{Checker, Invariant, Touched, Violation};
 use crate::ledger::Ledger;
 use crate::node::{Applied, CellNode};
-use crate::observe::Observations;
+use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observations};
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
+use crate::text;
+use crate::work::Work;
 
 /// How long an agent waits between two hellos that were not welcomed (design section
 /// 5.1: a one second base).
@@ -50,6 +71,9 @@ pub const HELLO_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often the run loop re-reads the server's listing when no client call does.
 pub const LISTING_EVERY: Duration = Duration::from_secs(1);
+
+/// The least time between two polls of the client.
+const POLL_GAP: Duration = Duration::from_millis(1);
 
 /// A scripted action: a change to the cell at a virtual time.
 type Action = Box<dyn FnOnce(&mut Cell)>;
@@ -100,8 +124,45 @@ impl Faulted {
     }
 }
 
+/// The client driver: the front, the number of the next item, and the earliest time of
+/// the next poll.
+struct Client {
+    front: Box<dyn Front>,
+    next_item: u32,
+    after: FarmTime,
+}
+
+impl Client {
+    /// When the next poll is due: when the front asks, but not before `after`.
+    fn due(&self) -> Option<FarmTime> {
+        let asked = self.front.next_poll();
+        asked.map(|at| at.max(self.after))
+    }
+}
+
+/// The server as a poll of the client calls it: each call through the client router at
+/// the poll's time, written down for the trace.
+struct Recording<'a> {
+    now: FarmTime,
+    server: Option<&'a mut ServerNode>,
+    lines: Vec<String>,
+}
+
+impl ClientPort for Recording<'_> {
+    fn call(&mut self, request: Request<Body>) -> Response<String> {
+        let method = request.method().as_str().to_owned();
+        let now = self.now;
+        let server = self.server.as_deref_mut();
+        let answer = server.map_or_else(Response::default, |s| s.client_call(now, request));
+        let status = answer.status().as_u16();
+        self.lines.push(format!("client {method} {status}"));
+        answer
+    }
+}
+
 /// The real lease server and its agents under the kernel, checked after every step.
 pub struct Cell {
+    seed: u64,
     sim: Sim<CellNode>,
     checker: Checker,
     observations: Observations,
@@ -109,14 +170,21 @@ pub struct Cell {
     applied: Applied,
     capacity: Resources,
     spec: ServerSpec,
+    /// The cell's directory, where each real agent makes its own.
+    dir: PathBuf,
     agents: usize,
     script: BTreeMap<(FarmTime, u64), Action>,
     scripted: u64,
+    client: Client,
     hook: Option<Hook>,
     checks: u64,
     listed_at: Option<FarmTime>,
+    /// The first host each lease was seen booked on, at a read of the listing.
+    first_booked: BTreeMap<LeaseId, HostId>,
     faulted: Faulted,
     violation: Option<Violation>,
+    /// The first restart the server refused, until it is taken.
+    refused: Option<StartupError>,
     trace: Trace,
     /// Both traces as one, when lines are kept, and how many kernel lines it holds.
     merged: Option<Vec<String>>,
@@ -124,8 +192,9 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir`, with
-    /// `faults` on the bus and no agent yet.
+    /// A cell of `setup`'s seed: the server `spec` describes, its files in `dir` (and the
+    /// directories of any real agent), with `faults` on the bus, no agent yet, and a
+    /// [`LeaseFront`] as its client.
     ///
     /// # Errors
     ///
@@ -140,6 +209,7 @@ impl Cell {
             .shape()
             .resources()
             .map_err(StartupError::because("shape"))?;
+        let path = dir.path().to_path_buf();
         let server = ServerNode::start(&spec, dir)?;
         let mut sim = Sim::new(setup.seed, faults.clone());
         let mut trace = Trace::new("js-sim-cell");
@@ -150,7 +220,13 @@ impl Cell {
             merged = Some(Vec::new());
         }
         sim.add_node(SERVER, CellNode::Server(Box::new(server)));
+        let client = Client {
+            front: Box::new(LeaseFront::new(&spec)),
+            next_item: 0,
+            after: FarmTime::default(),
+        };
         let mut cell = Self {
+            seed: setup.seed,
             sim,
             checker: Checker::new(),
             observations: Observations::quiet(),
@@ -158,14 +234,18 @@ impl Cell {
             applied: Applied::default(),
             capacity,
             spec,
+            dir: path,
             agents: 0,
             script: BTreeMap::new(),
             scripted: 0,
+            client,
             hook: None,
             checks: 0,
             listed_at: None,
+            first_booked: BTreeMap::new(),
             faulted: Faulted::default(),
             violation: None,
+            refused: None,
             trace,
             merged,
             kernel_lines: 0,
@@ -180,7 +260,7 @@ impl Cell {
     ///
     /// Never for fewer than a thousand million agents: the name is a host id.
     pub fn add_agent(&mut self) -> Result<HostId, IdError> {
-        self.add(None)
+        self.add(AgentKind::Fake(None))
     }
 
     /// Adds the next agent, whose agent lacks `defect`.
@@ -189,10 +269,20 @@ impl Cell {
     ///
     /// As [`Cell::add_agent`].
     pub fn add_broken_agent(&mut self, defect: Defect) -> Result<HostId, IdError> {
-        self.add(Some(defect))
+        self.add(AgentKind::Fake(Some(defect)))
     }
 
-    fn add(&mut self, defect: Option<Defect>) -> Result<HostId, IdError> {
+    /// Adds the next agent, whose process is the real agent lifecycle over an in-memory
+    /// runtime, with its directories in the cell's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cell::add_agent`].
+    pub fn add_real_agent(&mut self) -> Result<HostId, IdError> {
+        self.add(AgentKind::Real(self.dir.clone()))
+    }
+
+    fn add(&mut self, kind: AgentKind) -> Result<HostId, IdError> {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let spec = AgentSpec {
@@ -203,7 +293,7 @@ impl Cell {
             capabilities: self.spec.shape().capabilities.clone(),
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
-            defect,
+            kind,
         };
         let mut agent = AgentNode::new(spec, self.ledger.clone());
         agent.report_to(self.applied.clone());
@@ -242,7 +332,9 @@ impl Cell {
             }
             let event = self.sim.next_event_time();
             let action = self.script.first_key_value().map(|(&(at, _), _)| at);
-            let next = event.into_iter().chain(action).fold(end, FarmTime::min);
+            let poll = self.client.due();
+            let times = event.into_iter().chain(action).chain(poll);
+            let next = times.fold(end, FarmTime::min);
             if event == Some(next) {
                 self.sim.step();
                 let touched = self.touched_by_step();
@@ -253,11 +345,108 @@ impl Cell {
                 let act = first.remove();
                 self.sim.run_until(next);
                 act(self);
+            } else if poll == Some(next) {
+                self.sim.run_until(next);
+                self.poll();
             } else {
                 self.sim.run_until(end);
                 return Ok(());
             }
         }
+    }
+
+    /// Runs every scripted action, the ones an action scripts too, then the cell for
+    /// `within` more of virtual time, and makes the end check: [`Checker::end`] over what
+    /// the cell observes then, with the server's listing read again. The end of a fault
+    /// (a partition healed, the bus's faults put back) is an action, so `within` is
+    /// virtual time after the last fault ended, and after the last action of any kind.
+    ///
+    /// # Errors
+    ///
+    /// The first violation of a step or end invariant. A fault still active at the end
+    /// is a violation of [`Invariant::SettlesWhenQuiet`]: the scenario never went quiet.
+    pub fn settle(&mut self, within: Duration) -> Result<(), Violation> {
+        while let Some(&(last, _)) = self.script.last_key_value().map(|(key, _)| key) {
+            self.run_until(last)?;
+        }
+        let end = self.sim.now().saturating_add(within);
+        self.run_until(end)?;
+        self.reread();
+        self.observations.at = self.sim.now();
+        let at = self.observations.at;
+        let found = Checker::end(&self.observations, within).unwrap_or_else(|refused| {
+            let invariant = Invariant::SettlesWhenQuiet;
+            let detail = refused.to_string();
+            vec![Violation {
+                invariant,
+                at,
+                detail,
+            }]
+        });
+        self.stop_at(found.into_iter().next());
+        self.violation.clone().map_or(Ok(()), Err)
+    }
+
+    /// Makes `front` the cell's client, in place of the one it has. The old front is
+    /// dropped with every item it held: an item submitted before is never polled again
+    /// and never ends, so a scenario sets its front before it submits anything.
+    pub fn set_front(&mut self, front: Box<dyn Front>) {
+        self.client.front = front;
+    }
+
+    /// Submits one item of `work` now: the cell records what it asks for and that it was
+    /// submitted, hands it to the client, and checks. Items are numbered from zero.
+    pub fn submit(&mut self, work: &Work) -> ItemId {
+        let now = self.sim.now();
+        let item = ItemId(self.client.next_item);
+        self.client.next_item += 1;
+        let heard = vec![Heard {
+            at: now,
+            event: ClientEvent::Submitted,
+        }];
+        let record = ItemRecord {
+            ask: work.ask(now),
+            heard,
+        };
+        self.observations.items.insert(item, record);
+        self.client.front.submit(item, work, now);
+        let submitted = text::event(&ClientEvent::Submitted);
+        self.record(format!("client {} {submitted}", text::item(item)));
+        self.check(Touched::nothing().item(item));
+        item
+    }
+
+    /// Asks the client to cancel `item`, now; the observations keep when the client
+    /// first asked ([`Observations::cancels`]).
+    pub fn cancel_item(&mut self, item: ItemId) {
+        let now = self.sim.now();
+        self.observations.cancels.entry(item).or_insert(now);
+        self.client.front.cancel(item, now);
+        self.record(format!("client {} cancel", text::item(item)));
+    }
+
+    /// The kernel's random source, from the seed: how a scenario draws a choice (which
+    /// agents, when) so that it follows the seed.
+    pub fn rng(&mut self) -> &mut SimRng {
+        self.sim.rng()
+    }
+
+    /// The seed the cell runs.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// How many agents the cell has added.
+    #[must_use]
+    pub fn agent_count(&self) -> usize {
+        self.agents
+    }
+
+    /// Every agent's counts added together.
+    #[must_use]
+    pub fn total_counters(&self) -> Counters {
+        Counters::sum((0..self.agents).filter_map(|index| self.counters(index)))
     }
 
     /// Kills the process of agent `index`: it holds nothing and drops every input until
@@ -270,9 +459,36 @@ impl Cell {
         if let Some(host) = killed {
             self.record(format!("kill {host}"));
             self.observations.agents.remove(&host);
+            let at = self.sim.now();
+            let kill = Killed {
+                host: host.clone(),
+                at,
+            };
+            self.observations.kills.push(kill);
             self.faulted.killed.insert(host.clone());
             self.fault_changed();
             self.check(Touched::nothing().agent(host));
+        }
+    }
+
+    /// Makes agent `index` answer a prepare as `prepare` says, from its next heartbeat on
+    /// ([`AgentNode::set_prepare`]).
+    pub fn set_prepare(&mut self, index: usize, prepare: Prepare) {
+        if let Some(agent) = self.agent_mut(index) {
+            agent.set_prepare(prepare);
+        }
+    }
+
+    /// Kills the process of agent `index` for good, as [`Cell::kill`] does, with its host
+    /// gone rather than faulted: it is never replaced, so the quiet the end check waits
+    /// for starts now, as if the host had been taken out of the cell.
+    pub fn kill_for_good(&mut self, index: usize) {
+        self.kill(index);
+        let host = self.agent(index).map(|agent| agent.host().clone());
+        if let Some(host) = host {
+            self.record(format!("gone {host}"));
+            self.faulted.killed.remove(&host);
+            self.fault_changed();
         }
     }
 
@@ -308,6 +524,48 @@ impl Cell {
     /// Ends the partition in force, now.
     pub fn heal(&mut self) {
         self.partition(&[]);
+    }
+
+    /// Bumps [`Counter::CutWithUnlistedRun`] of agent `index` when its process runs a run
+    /// that no hello or heartbeat it sent listed ([`AgentNode::runs_unlisted`]): what a
+    /// cut of the agent notes as it starts.
+    pub(crate) fn note_cut(&mut self, index: usize) {
+        let agent = self.agent_mut(index).filter(|agent| agent.runs_unlisted());
+        if let Some(agent) = agent {
+            agent.count(Counter::CutWithUnlistedRun);
+        }
+    }
+
+    /// Stops the server and starts it again over the same directory with `--boot
+    /// resume`, on the same clock ([`ServerNode::restart`]), keeping the agents and the
+    /// client; the cell then reads the listing again and checks. A restart the server
+    /// refuses leaves it down and is kept, the first one only, for
+    /// [`Cell::take_refused`].
+    pub fn restart_server(&mut self) {
+        let spec = self.spec.clone();
+        self.restart_server_with(&spec);
+    }
+
+    /// Restarts the server as [`Cell::restart_server`] does, with the flags `spec`
+    /// describes in place of the cell's (an operator who restarts the server with a
+    /// changed configuration). The cell's own spec, which the agents and the client were
+    /// made for, stays as it is.
+    pub fn restart_server_with(&mut self, spec: &ServerSpec) {
+        let server = self.sim.nodes_mut().find_map(|(_, n)| n.as_server_mut());
+        match server.map(|server| server.restart(spec)) {
+            Some(Err(error)) => {
+                self.record(format!("restart refused {}", error.flag()));
+                self.refused = self.refused.take().or(Some(error));
+            }
+            _ => self.record("restart server".to_owned()),
+        }
+        self.reread();
+        self.check(Touched::nothing().server());
+    }
+
+    /// The first restart the server refused, taken, so it is returned once.
+    pub fn take_refused(&mut self) -> Option<StartupError> {
+        self.refused.take()
     }
 
     /// Replaces the faults of the bus: a message sent from now on takes `faults`.
@@ -351,6 +609,20 @@ impl Cell {
         self.reread();
         self.check(Touched::nothing().server());
         answer
+    }
+
+    /// Every answer the client was given, in the order given ([`Front::answers`]).
+    #[must_use]
+    pub fn answers(&self) -> &[Answer] {
+        self.client.front.answers()
+    }
+
+    /// The first host the server's listing showed `lease` booked on, at any read of it
+    /// so far; `None` for a lease never seen booked. The listing is read at every client
+    /// call and poll and at least every [`LISTING_EVERY`].
+    #[must_use]
+    pub fn first_booked(&self, lease: &LeaseId) -> Option<&HostId> {
+        self.first_booked.get(lease)
     }
 
     /// What the cell observes now.
@@ -452,12 +724,12 @@ impl Cell {
             .and_then(CellNode::as_agent)
     }
 
-    /// Reads the server's listing into the observations, writing each host whose entry
-    /// changed into the trace.
+    /// Reads the server's listing into the observations, with the bookings it starts and
+    /// ends, writing each host whose entry changed into the trace.
     fn reread(&mut self) {
         let now = self.sim.now();
         let view = self.server().map(ServerNode::view).unwrap_or_default();
-        let old = std::mem::take(&mut self.observations.server);
+        let old = &self.observations.server;
         let changed = view
             .hosts
             .iter()
@@ -480,8 +752,44 @@ impl Cell {
         for line in lines {
             self.record(line);
         }
-        self.observations.server = view;
+        for (host, listed) in &view.hosts {
+            for lease in &listed.leases {
+                let first = self.first_booked.entry(*lease);
+                first.or_insert_with(|| host.clone());
+            }
+        }
+        self.observations.read_listing(view, now);
         self.listed_at = Some(now);
+    }
+
+    /// Polls the client now: its calls go to the server, each is written into the trace,
+    /// then each event heard; the listing is read again and the cell checks.
+    fn poll(&mut self) {
+        let now = self.sim.now();
+        self.client.after = now.saturating_add(POLL_GAP);
+        let server = self.sim.nodes_mut().find_map(|(_, n)| n.as_server_mut());
+        let mut port = Recording {
+            now,
+            server,
+            lines: Vec::new(),
+        };
+        let heard = self.client.front.poll(now, &mut port);
+        for line in port.lines {
+            self.record(line);
+        }
+        let mut touched = Touched::nothing().server();
+        for (item, event) in heard {
+            self.record(format!(
+                "client {} {}",
+                text::item(item),
+                text::event(&event)
+            ));
+            let record = self.observations.items.entry(item).or_default();
+            record.heard.push(Heard { at: now, event });
+            touched = touched.item(item);
+        }
+        self.reread();
+        self.check(touched);
     }
 
     /// Checks the step invariants over what `touched` names, after reading the ledger.
@@ -492,6 +800,18 @@ impl Cell {
             self.record(format!("launch {}", launch.host));
         }
         self.observations.ledger.extend(launches);
+        let seen = &self.observations;
+        let counts = [seen.ready.len(), seen.starts.len(), seen.stops.len()];
+        let (ready, starts, stops) = self.ledger.whole_after(counts);
+        self.observations.ready.extend(ready);
+        self.observations.starts.extend(starts);
+        self.observations.stops.extend(stops);
+        let ended = self.observations.completions.len();
+        let completions = self.ledger.completions_after(ended);
+        self.observations.completions.extend(completions);
+        let judged = self.observations.verdicts.len();
+        let verdicts = self.ledger.verdicts_after(judged);
+        self.observations.verdicts.extend(verdicts);
         self.checks += 1;
         let found = self
             .checker
@@ -503,7 +823,12 @@ impl Cell {
             .hook
             .as_mut()
             .and_then(|hook| hook(checks, &self.observations));
-        let first = found.or(hooked);
+        self.stop_at(found.or(hooked));
+    }
+
+    /// Keeps `first` as the violation that stops the run, unless one stopped it before,
+    /// and writes it into the trace.
+    fn stop_at(&mut self, first: Option<Violation>) {
         if let Some(violation) = &first {
             self.record(format!("violation {}", violation.invariant.name()));
         }

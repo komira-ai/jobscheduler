@@ -1,8 +1,9 @@
-//! The result fields of a job row, tags 31 (the reason) to 41 (the stream lengths). They are
-//! written only when the job has a result, and the reason is what says it has one: a row
-//! without it, as every row written before results were stored, reads with no result. A result
-//! without tag 41, as every result written before the lengths were stored, reads with none; a
-//! build from before tag 41 keeps it as a field it does not know and writes it back unchanged.
+//! The result fields of a job row, tags 31 (the reason) to 40 (the usage) and 43 (the stream
+//! lengths). They are written only when the job has a result, and the reason is what says it
+//! has one: a row without it, as every row written before results were stored, reads with no
+//! result. A result without tag 43, as every result written before the lengths were stored,
+//! reads with none; a build from before tag 43 keeps it as a field it does not know and writes
+//! it back unchanged.
 
 use js_state::StoreTime;
 

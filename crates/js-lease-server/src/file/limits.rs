@@ -3,11 +3,16 @@
 //!
 //! They are read and checked at start. Admission reads `allowed_instance_types`,
 //! `max_price_cents_per_hour` and `max_machines` (an offer outside them does not admit a
-//! request, design 5.6, step 2); the pick of an offer when a pool acquires a machine
-//! (design 5.6, pass 2) does not read them yet. A static machine provider launches nothing,
-//! so a limit for one is refused.
+//! request, design 5.6, step 2), and so does the pick of an offer when a pool acquires a
+//! machine (design 5.6, pass 2): the scaler launches no offer outside them, and no machine
+//! past the provider's `max_machines`. `catalog_refresh` is how long the cached
+//! catalog of the provider is used before it is fetched again, and `offer_cooldown` how long
+//! one of its offers cools down once one is (nothing enters a cool-down yet); each defaults
+//! to one hour and must not be zero. A static
+//! machine provider launches nothing, so a limit for one is refused.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::Section;
 use crate::error::StartupError;
@@ -17,11 +22,20 @@ const KEYS: &[&str] = &[
     "max_price_cents_per_hour",
     "max_machines",
     "max_spot_machines",
+    "catalog_refresh",
+    "offer_cooldown",
 ];
 
+/// The `catalog_refresh` of a provider whose table does not give it.
+const DEFAULT_CATALOG_REFRESH: Duration = Duration::from_secs(3600);
+
+/// The `offer_cooldown` of a provider whose table does not give it.
+const DEFAULT_OFFER_COOLDOWN: Duration = Duration::from_secs(3600);
+
 /// What a pool lets one machine provider launch. Read and checked at start, and read by
-/// admission; the pick of an offer (design 5.6, pass 2) does not read it yet.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// admission, by the cache of the provider's catalog and by the pick of an offer (design
+/// 5.6, pass 2) in the scaler.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProviderLimits {
     /// The instance types the provider may launch for the pool, in the file's order;
@@ -34,6 +48,26 @@ pub struct ProviderLimits {
     pub max_machines: Option<u64>,
     /// The most of those that may be spot machines; `None`: no bound of its own.
     pub max_spot_machines: Option<u64>,
+    /// How long the provider's cached catalog is used before it is fetched again
+    /// (`catalog_refresh`); one hour when not given. Never zero.
+    pub catalog_refresh: Duration,
+    /// How long one of the provider's offers cools down once it is cooled down
+    /// (`offer_cooldown`); one hour when not given. Never zero.
+    pub offer_cooldown: Duration,
+}
+
+impl Default for ProviderLimits {
+    /// No limit, and the default refresh and cool-down.
+    fn default() -> Self {
+        Self {
+            allowed_instance_types: None,
+            max_price_cents_per_hour: None,
+            max_machines: None,
+            max_spot_machines: None,
+            catalog_refresh: DEFAULT_CATALOG_REFRESH,
+            offer_cooldown: DEFAULT_OFFER_COOLDOWN,
+        }
+    }
 }
 
 /// A machine provider a pool's platforms reach, as the limits read it.
@@ -78,6 +112,8 @@ pub(super) fn read(
             max_price_cents_per_hour: at_least_one(&mut s, "max_price_cents_per_hour")?,
             max_machines: at_least_one(&mut s, "max_machines")?,
             max_spot_machines: s.integer("max_spot_machines")?,
+            catalog_refresh: s.duration_or("catalog_refresh", DEFAULT_CATALOG_REFRESH)?,
+            offer_cooldown: s.duration_or("offer_cooldown", DEFAULT_OFFER_COOLDOWN)?,
         };
         if let (Some(share), Some(cap)) = (read.max_machines, cap)
             && share > cap

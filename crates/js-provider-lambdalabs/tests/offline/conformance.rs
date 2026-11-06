@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use js_elastic::conformance::{FOREIGN_ACQUIRE, OTHER_SCHEDULER, Rig as Conformance, run_all};
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, GpuClass, Hello,
-    HostName, HostRef, HostStatus, Observed, ProviderCaps, RefusalCode, SchedulerId,
+    AcquireId, AcquireRequest, Acquired, BootPayload, Capacity, CapacityProvider, Hello, HostName,
+    HostRef, HostStatus, Observed, ProviderCaps, RefusalCode, SchedulerId,
 };
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, POOL_TAG, PROVIDER_ID, SCHEDULER_TAG,
 };
-use js_types::ProviderId;
+use js_types::{Model, ProviderId};
 
 use crate::rig::{Rig, SCHEDULER, ask, candidate, host, id, live, offer, rig, rig_with, row, tag};
 
@@ -26,9 +26,15 @@ impl LambdaRig {
     fn fresh(machines: usize) -> Rig {
         let fresh = rig(live(machines).launch_interval(Duration::ZERO));
         fresh.fake.set_offers(vec![
-            offer("gpu_1x_sample", 75, 1, Architecture::X86_64, &["region-a"]),
             offer(
-                "gpu_8x_example",
+                "gpu_1x_h100_sxm5",
+                75,
+                1,
+                Architecture::X86_64,
+                &["region-a"],
+            ),
+            offer(
+                "gpu_8x_h100_sxm5",
                 1200,
                 8,
                 Architecture::Arm64,
@@ -162,6 +168,11 @@ fn refusal_500() -> ApiError {
 /// case names the defect it catches in the provider (`js_elastic::conformance`).
 #[test]
 fn the_lambda_provider_passes_the_conformance_suite() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
     run_all(&mut LambdaRig(LambdaRig::fresh(1)));
 }
 
@@ -178,33 +189,41 @@ fn lambda_has_no_event_stream() {
 }
 
 /// Asserts the capabilities: Linux, both documented architectures as the catalog spells
-/// them, every GPU class of the option table and none other, a whole machine and host
-/// ports. They are read from the table, so a table of two classes offers both. It catches
-/// capabilities kept as a second list beside the table the catalog reads.
+/// them, the canonical model the catalog table gives each type of the allow list and none
+/// other, a whole machine and host ports. They are read from the allow list and the table,
+/// so a list of types of two models offers both. It catches capabilities kept as a second
+/// list beside the table the catalog reads.
 #[test]
 fn the_capabilities_are_the_option_tables_classes_on_linux() {
     let table = r#"
 [[option]]
-instance_type = "gpu_1x_sample"
-gpu_class = "nvidia-sample"
-gpus = 1
+instance_type = "gpu_1x_h100_sxm5"
 
 [[option]]
-instance_type = "gpu_8x_example"
-gpu_class = "nvidia-example"
-gpus = 8
+instance_type = "gpu_8x_a100"
 "#;
     let rig = rig_with(live(1), table);
-    let class = |text: &str| GpuClass::parse(text).unwrap();
+    rig.fake.set_offers(vec![
+        offer(
+            "gpu_1x_h100_sxm5",
+            75,
+            1,
+            Architecture::X86_64,
+            &["region-a"],
+        ),
+        offer("gpu_8x_a100", 900, 8, Architecture::X86_64, &["region-a"]),
+    ]);
+    let class = |text: &str| Model::parse(text).unwrap();
     let expected = ProviderCaps {
         os: BTreeSet::from(["linux".to_owned()]),
         arch: BTreeSet::from(["arm64".to_owned(), "x86_64".to_owned()]),
-        accelerators: BTreeSet::from([class("nvidia-example"), class("nvidia-sample")]),
+        accelerators: BTreeSet::from([class("nvidia-a100"), class("nvidia-h100")]),
         whole_host: true,
         host_ports: true,
     };
     assert_eq!(rig.provider.capabilities(), expected);
-    let offers = rig.provider.catalog().unwrap();
+    let offers = crate::rig::catalog(&rig.provider).unwrap();
+    assert_eq!(offers.len(), 2);
     assert!(offers.iter().all(|offer| expected.covers(offer)));
 }
 

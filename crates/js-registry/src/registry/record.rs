@@ -200,6 +200,19 @@ impl Record {
         }
     }
 
+    /// The instant the host's silence passed the grace: when it was last heard or, for a host
+    /// never heard since it was seated (awaiting), when it was seated, plus the grace; `None`
+    /// while that has not passed by `now`, and for a host neither heard nor seated. A host
+    /// heard since it was silent has a new last-heard, so its silence clears.
+    pub(super) fn silent_since(&self, now: Timestamp, grace_ms: u64) -> Option<Timestamp> {
+        let since = self
+            .heard
+            .or(self.seated)
+            .map_or(now.millis(), |at| at.millis());
+        let silent = now.millis().saturating_sub(since) > grace_ms;
+        silent.then(|| Timestamp::from_millis(since.saturating_add(grace_ms)))
+    }
+
     /// Whether a new lease may be placed here: heard from within the grace period,
     /// serving, `quiet` (no run left over from the last lease), not tainted, not cordoned,
     /// clear of a whole-node lease (not held, not restoring) and not being scaled away. Every

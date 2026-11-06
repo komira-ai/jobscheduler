@@ -218,6 +218,8 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--profile-store-bytes", "5"),
         key("--history-retention-days", "5"),
         key("--job-retention", "3d"),
+        key("--job-listen", "127.0.0.1:0"),
+        key("--max-job-wall", "12h"),
     ];
     rows.push((
         vec!["--usage-off"],
@@ -240,6 +242,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
             "add a [[pool]] with an elastic provider",
         ),
         ("--agent-token-file", "set join_token_file of the [[pool]]"),
+        ("--client-token", "add a [[client]] table"),
     ];
     for (flag, instead) in moved {
         let said = format!("{flag}: not allowed with --config; {instead}");

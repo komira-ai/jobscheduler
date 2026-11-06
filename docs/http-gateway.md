@@ -21,7 +21,9 @@ other authentication: `GET /v1/hosts`, `GET` and `POST /v1/hosts/{target}` (whic
 The gateway's router holds `/v1/hosts`, `/v1/pools` and `/v1/usage` and every path below each
 (`/v1/hosts/{*rest}` and so on), so the two routers cannot be merged as they are: axum refuses
 the overlapping routes. The server that mounts the gateway beside the lease routes has to
-decide which one answers those paths; the gateway is not mounted anywhere yet.
+decide which one answers those paths. The lease server therefore does not mount the gateway beside its lease routes: it serves
+the gateway and the gRPC service together on a port of their own, `--job-listen`, behind the bearer tokens of its clients
+([configuration.md](design/configuration.md)).
 
 ## Routes
 
@@ -151,13 +153,23 @@ code this version does not know, is a 500 `internal`. The crate's goldens
 The lease server holds the job service in `crates/js-lease-server/src/job_api/`: one service
 object that both transports call, gRPC (the generated `JobService` server) and this gateway,
 with one bearer layer in front of both. A request that does not present
-`Authorization: Bearer <token>` with the server's token reaches no call: over gRPC it is
-answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The token is the one the
-lease routes take, compared by the same code.
+`Authorization: Bearer <token>` with the token of one of the server's clients reaches no call:
+over gRPC it is answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The
+clients are `default`, whose token is the one the lease routes take (`--token-file`), and each
+`--client-token` of the server; a presented token is compared with every client's. A request
+that passes goes to its call as that client: `SubmitJob` records the client's name on the job,
+and every answer that carries a job shows it as `client` (absent on a job recorded before
+clients were named). The name comes from the token, never from the request. Every client may
+call every method on every job: job ids are one namespace, so the same id with the same job
+from any client answers the existing job with the client that recorded it, and another job
+under the id is `job-id-conflict` whoever sends it.
 
-Nothing mounts the two transports yet, so no port serves them. Every call answers
+Both transports are served on the port of `--job-listen` (off by default). Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
-directory serves it (the fleet calls, until the server gives their group its handles):
+directory serves it (the fleet calls, until the server gives their group its handles); the
+read calls, `SubmitJob` and `CancelJob` are served (below). A request carries at most 64 KiB
+over either transport: a larger gateway body is 413 `request-too-large`, and a larger gRPC
+message is not decoded (`OUT_OF_RANGE`).
 
 | calls | file |
 |---|---|
@@ -165,6 +177,114 @@ directory serves it (the fleet calls, until the server gives their group its han
 | `SubmitJob` | `submit.rs` (its checks in `validate.rs`) |
 | `CancelJob` | `cancel.rs` |
 | `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `fleet.rs` |
+
+### Serving the read calls
+
+`GetJob`, `ListJobs`, `GetResult` and `GetLogs` are served from the job tables (`read.rs`).
+They read the store and nothing else: no call changes any state, none takes a lock of the
+server, and the only time they read is the service's clock, to tell an ended job past its
+retention end.
+
+| case | gRPC | gateway |
+|---|---|---|
+| a `job_id` that is not a job id | `INVALID_ARGUMENT`, `field: jobId` | 400 `invalid-argument`, `field` `jobId` |
+| no job with the id: never submitted, or swept after its retention window | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| `GetResult` or `GetLogs` of a job past its retention end and not yet swept | `NOT_FOUND`, `expired` | 410 `expired` |
+| `GetResult` of a job that has not ended | `FAILED_PRECONDITION`, `not-finished` | 409 `not-finished` |
+| a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
+| a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
+
+**`GetJob`** answers the job: its spec as submitted (a file's contents left empty), its state
+and start failure, its host once placed, whether a cancel was asked for, and its times
+(queued, placed, started, ended). The host silence is not set yet.
+
+**The `expired` window.** An ended job keeps its record and result until its retention end
+(the end plus the server's retention window, seven days by default). From that instant
+`GetResult` and `GetLogs` answer `expired`, until the sweep, which runs on the server's tick,
+deletes the row; then every call answers `unknown-job`, as for a job that never existed (no
+tombstone is kept). `GetJob` and `ListJobs` show the job until it is swept.
+
+**`GetResult`** of an ended job answers its stored result: the state it ended in, the exit
+code, the reason, the last 8 KiB of standard output and of standard error with whether either
+was cut, the times and the resource usage the agent reported. A job that ended without a
+result (lost, or failed to start) answers its state and times alone.
+
+**`GetLogs` without a stream** answers the job's state and the result's tails: for an ended
+job the same tails as `GetResult` (at most 8 KiB a stream, with `truncated`), and for a job
+that has not ended (queued, placed, starting or running) empty tails and `truncated` false,
+never an error. Live output is read with a stream.
+
+**`ListJobs`** keeps the jobs in any of the `states` (a state this server does not know
+matches none), carrying every one of the `labels` with the same value, submitted by the
+`client` of that name when it is given (a job recorded with no client matches none), and
+queued in the half-open window from `queuedAfterMs` (in) to `queuedBeforeMs` (out). Jobs come in the order
+of their ids. A page holds 100 jobs when the request asks for 0, and at most 1000: a larger
+`pageSize` is cut to 1000, not refused. A call reads the table 1000 rows at a time and stops
+when its page is full, at the end of the table, or after 10,000 rows; so a page is short only
+at the end of the table, where it carries no `nextPageToken`, or at that bound, where it
+carries one even if it holds few jobs or none. The page token resumes after the last job or
+row the page read; a job submitted between pages appears on a later page if its id sorts
+after the token, and no job is listed twice.
+
+### Serving the submit and cancel calls
+
+`SubmitJob` (`submit.rs`, its checks in `validate.rs`) and `CancelJob` (`cancel.rs`) write the
+job tables. Each answers only after its one store transaction has committed, and builds its
+answer from what the commit returned; neither holds anything of its own outside the store.
+
+| case | gRPC | gateway |
+|---|---|---|
+| a field of the job that is not valid (the first, in the message's order) | `INVALID_ARGUMENT`, `field: <name>` | 400 `invalid-argument`, `field` `<name>` |
+| a wall limit that is absent or 0 | `INVALID_ARGUMENT` with the refusal | 400 `wall-time-not-positive`, `field` `spec.wallLimitSeconds` |
+| a wall limit above the server's ceiling | `INVALID_ARGUMENT` with the refusal | 400 `wall-time-above-ceiling`, `field` `spec.wallLimitSeconds` |
+| a job id that names a different job | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
+| a job nothing could ever serve | `FAILED_PRECONDITION` with the refusal | 422 `no-capable-host` |
+| `CancelJob` of an id with no job | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| a store that failed (the commit, or the read before it) | `INTERNAL`, `state-write-failed` | 500 `state-write-failed` |
+
+**`SubmitJob`**, in order:
+
+1. **Checks.** The image is pinned by digest (`NAME[:TAG]@sha256:<64 hex>`; a tag alone is
+   refused naming `spec.image`). The needs are a share of a host or the whole host alone; a
+   GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
+   table resolves (an unknown model passes through). The constraints are in the capability
+   vocabulary a lease request speaks: `os` `linux` or `macos`, any `arch` (`aarch64` is
+   recorded as `arm64`), an execution mode, an ISA level, and an accelerator that does not
+   contradict the class; the ISA level and the accelerator are recorded among the job's
+   capabilities, where placement reads them. The wall limit is present, above 0 and at most
+   the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
+   each port is 1 to 65535 and no host port is given twice (refused naming
+   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's run
+   files are; the labels as a lease's are. The job id is empty (the service mints one) or 1
+   to 63 bytes of letters, digits, `.`, `_` and `-`, else refused naming `spec.jobId`. A
+   refusal never repeats a value of the request. Every check runs before the id is looked
+   up, so a retry of a job the ceiling now refuses is refused, not answered.
+2. **Idempotency.** A job id the tables hold, with the same job (every field but the
+   priority, compared on the job as recorded), is answered with that job as it is now, in
+   whatever state, with its own priority, and the same answer as a new job's (OK, 201): a
+   retry cannot tell. A different job is `job-id-conflict`. An id is held for as long as its
+   job's row is: until the sweep on the server's tick deletes it once its retention window has
+   passed (seven days after it ended, by default); after that the id is free. A submit without
+   an id has one minted, so repeating it makes a second job.
+3. **Admission**, only for a job that would be made: a job that no registered host (busy and
+   silent hosts count, tainted and departing hosts do not) and no catalog of the pool's
+   launching provider could ever serve is refused `no-capable-host`, and nothing is
+   recorded. The catalogs are read from the server's catalog cache, as for a lease, so a
+   submit calls no provider; a catalog the cache has not read (never fetched, or its fetch
+   failed) may offer, so the job is admitted.
+4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
+   the job as recorded (201 over the gateway). A failed commit is `state-write-failed` and
+   nothing was recorded. The call does not wait for placement: placement finds the queued job
+   on its own pass.
+
+**`CancelJob`** commits one transaction and answers the job as it then stands. A queued job is
+cancelled at once (it has no allocation), with a result of reason cancelled and its retention
+end. A placed, starting or running job gets the cancel intent (`cancelRequested`) and nothing
+else: from that commit on its host is never sent its start, and its next heartbeat reply
+carries the stop, resent until the host stops listing the job; the job is cancelled when the
+host reports it stopped, or retires an id it never held. An ended job is answered unchanged
+in its state. A second cancel is the first: it commits nothing and answers the same. A failed
+commit is `state-write-failed` and the job is as it was.
 
 ### The fleet calls
 

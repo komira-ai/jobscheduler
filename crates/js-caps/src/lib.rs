@@ -18,6 +18,12 @@
 //!   and kbf's own keys, the names in any case: [`property_name`]) as a request;
 //!   [`NodeCaps::from_report`] reads a daemon's node report as the capabilities
 //!   requests are matched against.
+//! - The accelerator vocabulary ([`accel`]): [`Accelerator`], [`AcceleratorNeed`], their
+//!   comparison, and the alias table that resolves every spelling to its canonical family
+//!   and variant facts ([`ALIASES`], [`FAMILIES`]). The table's data is defined in
+//!   `js-types`, the lowest layer, and re-exported here unchanged; [`request_need`] converts
+//!   a request's accelerator into the booked GPUs and the `accelerator.*` keys a [`Request`]
+//!   and a [`NodeCaps`] match on.
 //! - [`HostContract`] is what a pool requires of the capabilities a host reports about how
 //!   it runs jobs ([`RUNTIME`], [`GPU_TOOLKIT`], [`EXEC`]).
 //!
@@ -29,6 +35,7 @@
 // struct fields and one method are undocumented. Remove this once they are documented.
 #![allow(missing_docs)]
 
+pub mod accel;
 mod cpu;
 mod gpu;
 mod host;
@@ -37,6 +44,14 @@ mod matching;
 mod platform;
 mod report;
 
+pub use accel::{
+    ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
+    ACCEL_MEMORY_GIB_KEY, ACCEL_MODEL_KEY, ACCEL_VENDOR_KEY, ALIASES, APPLE_M, AccelError,
+    Accelerator, AcceleratorMiss, AcceleratorNeed, AcceleratorRequest, Alias, FAMILIES, Family,
+    FormFactor, Interconnect, MAX_MEMORY_GIB, Model, NVIDIA_A10, NVIDIA_A100, NVIDIA_B200,
+    NVIDIA_H100, NVIDIA_RTX_A6000, RequestNeed, RequestNeedError, Resolved, Variant, Vendor,
+    accelerator_of, check_stated, request_need, vendor_of,
+};
 pub use cpu::{CpuCaps, ParseError};
 pub use gpu::{
     GPU_KIND_NATIVE, PciFunction, gpu_cores_from_macos_ioreg, gpus_from_linux_pci,

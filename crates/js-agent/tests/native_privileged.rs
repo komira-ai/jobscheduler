@@ -27,11 +27,11 @@ use std::time::Duration;
 use clap::Parser as _;
 use js_agent::bundle::{Placer, Settings, SystemHost};
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status};
-use js_agent::native::{NativeConfig, NativeRuntime};
+use js_agent::native::{Ceiling, NativeConfig, NativeRuntime};
 use js_agent::{Cli, Platform};
 use js_agent_wire::{Isolation, NativeSpec, NetworkLevel};
 use js_bundle::pack_layer;
-use js_mac_pool::seatbelt::{AbsPath, Net, ReadModel};
+use js_mac_pool::seatbelt::{AbsPath, ReadModel};
 use js_mac_session::client::Client;
 use js_oci::{Allow, Digest};
 use js_testkit::oci_registry::{Artifact, Fixture as Registry};
@@ -166,7 +166,7 @@ fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> Na
     let denied = |path: &Path| AbsPath::new(path).unwrap();
     let mut config = NativeConfig {
         homes: fs::canonicalize(&fixture.homes).unwrap(),
-        net: Net::Off,
+        network: Ceiling::Off,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
         read_denies: vec![
             denied(&fixture.state),
@@ -198,6 +198,7 @@ fn spec(fixture: &Fixture, run_id: &str, program: &str, args: &[&str]) -> RunSpe
             inputs: Vec::new(),
             outputs: Vec::new(),
             network: NetworkLevel::Off,
+            ports: Vec::new(),
         }),
         env: Vec::new(),
         cpu_millis: 1000,

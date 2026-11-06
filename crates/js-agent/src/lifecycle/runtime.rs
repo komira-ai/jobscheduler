@@ -488,8 +488,8 @@ pub trait Runtime {
     /// and creates nothing.
     ///
     /// The default fails closed: a runtime that does not say how it limits the network
-    /// refuses a job that asks for it (`on`) and passes one that does not. A runtime that
-    /// takes native jobs and limits the network overrides it.
+    /// refuses a job that asks for it (`on`, the filtered network, or `open`) and passes one
+    /// that does not. A runtime that takes native jobs and limits the network overrides it.
     ///
     /// The check is made at admission. The window from there to the helper's `run` (the
     /// slot, the user, the launch) is not checked again, and a run that is under way is not
@@ -500,7 +500,7 @@ pub trait Runtime {
     /// What is wrong with the limit; the text stays on the host.
     fn check_native_egress(&self, native: &NativeSpec) -> Result<(), RuntimeError> {
         match native.network {
-            NetworkLevel::On => Err(RuntimeError::new(
+            NetworkLevel::On | NetworkLevel::Open => Err(RuntimeError::new(
                 "this runtime does not say how it limits the network of a native job",
             )),
             NetworkLevel::Off | NetworkLevel::Loopback => Ok(()),

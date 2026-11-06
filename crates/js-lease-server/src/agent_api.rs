@@ -55,6 +55,7 @@
 //! A server with `sink = "none"`, and a host that did not report the capability, sends
 //! neither field, and the reply is byte for byte what it was before them.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +77,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
 use crate::logs::{self, LogGrants};
@@ -385,32 +387,53 @@ async fn serve_jobs(
     let per_job = HostId::new(&heartbeat.host_id)
         .ok()
         .and_then(|host| agents.registry.own_host(&host))
-        .and_then(|own| own.host.claim.map(|claim| (own.host.id, claim)))
-        .filter(|(_, claim)| {
+        .and_then(|own| {
+            let session = (own.host.epoch, own.session_started.map(|at| at.millis()));
+            own.host.claim.map(|claim| (own.host.id, session, claim))
+        })
+        .filter(|(_, _, claim)| {
             let reported = claim.capabilities().get(js_agent_wire::PER_JOB_CAPABILITY);
             reported.map(String::as_str) == Some("true")
         });
-    let Some((host, claim)) = per_job else {
+    let Some((host, session, claim)) = per_job else {
         return Ok(None);
     };
+    let first = agents.first_listing(&host, session);
     let ceiling =
         js_agent_wire::NetworkCeiling::from_capabilities(claim.capabilities()).unwrap_or_default();
     let jobs = Arc::clone(jobs);
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
+    let placing = Arc::clone(agents);
     let served = blocking(move || {
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
             logs: logs.as_deref(),
         };
-        let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+        // The first listing after a hello loses the jobs that ran and are not listed: their
+        // container went with the agent (design section 6.7, step 6). The listing's commit
+        // below then frees their allocations, since the host no longer lists them.
+        let held: BTreeSet<&str> = listed
+            .iter()
+            .map(|job| job.job_id.as_str())
+            .chain(retired.iter().map(String::as_str))
+            .collect();
+        let lost = match first {
+            true => job_loss::lose_unlisted(&jobs, &host, &held).map(drop),
+            false => Ok(()),
+        };
+        let served = lost.and_then(|()| per_job::serve(&jobs, &context, &listed, &retired, room));
+        // What the listing ended or freed, and the load the beat brought, can make room
+        // for a queued job: a pass places it, and its start rides on the host's next reply.
+        placing.place_jobs();
         (host, served)
     })
     .await;
     match served {
         (host, Ok(served)) => {
             agents.note_listing(&host, served.clean);
+            agents.listed(&host, session);
             Ok(Some(served))
         }
         (host, Err(error)) => {

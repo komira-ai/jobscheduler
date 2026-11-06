@@ -213,7 +213,7 @@ impl JobStartSpec {
             ));
         }
         check::range(at.field("wall_ms"), self.wall_ms, 1, limits::MAX_WALL_MS)?;
-        network::check_ports(&self.ports)
+        network::check_ports(&network::JOB_PORTS, &self.ports)
     }
 
     /// The start's [`LogSink`], checked: `Ok(None)` when there is none, and an error with

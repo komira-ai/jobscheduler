@@ -5,7 +5,9 @@ mod common;
 use common::{broken, expect, hello, long, map};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
-use js_agent_wire::{GpuDevice, HeldRun, HeldState, Hello, InstanceIdentity, ProtocolRange, Rule};
+use js_agent_wire::{
+    GpuDevice, HeldRun, HeldState, Hello, InstanceIdentity, ProtocolRange, Rule, WireAccelerator,
+};
 
 fn check(edit: impl FnOnce(&mut Hello)) -> js_agent_wire::ValidationError {
     broken(&hello(), edit, Hello::validate)
@@ -363,4 +365,258 @@ fn protocol_range_is_checked() {
     ok.protocol = ProtocolRange { min: 1, max: 9 };
     assert_eq!(ok.validate(), Ok(()));
     assert_eq!(ok.negotiate(), Ok(1));
+}
+
+/// The accelerator the fixture hello (one GPU of class `nvidia-a100`, 64 GiB) states about
+/// itself, as the agent would send it.
+fn stated() -> WireAccelerator {
+    WireAccelerator {
+        vendor: "nvidia".into(),
+        model: "nvidia-a100".into(),
+        variant_spelling: None,
+        count: 1,
+        memory_per_device_bytes: Some(1 << 36),
+    }
+}
+
+/// Asserts that a `shape.accelerator` that agrees with the class, the count and the
+/// devices is accepted, memory included (the least of the devices, and absent when none is
+/// listed), and that one whose model, variant, count or vendor disagrees, or that has no `gpu_class` to
+/// derive from, is refused naming `shape.accelerator`; and that an over-long or
+/// bad-character string is refused at its own field. It catches a server that believes a
+/// host's claim of another model or more devices than its shape says, and a hostile
+/// string that reaches the registry.
+#[test]
+fn a_hello_whose_accelerator_disagrees_with_its_devices_is_refused() {
+    let mut ok = hello();
+    ok.shape.accelerator = Some(stated());
+    assert_eq!(ok.validate(), Ok(()));
+    ok.gpu_devices.clear();
+    ok.shape.accelerator = Some(WireAccelerator {
+        memory_per_device_bytes: None,
+        ..stated()
+    });
+    assert_eq!(ok.validate(), Ok(()));
+    let mut two = hello();
+    two.gpu_devices[0].memory_bytes = 1 << 37;
+    two.shape.gpus = 2;
+    two.gpu_devices.push(GpuDevice {
+        index: 1,
+        uuid: "GPU-2".into(),
+        model: "A100".into(),
+        memory_bytes: 1 << 36,
+    });
+    two.shape.accelerator = Some(WireAccelerator {
+        count: 2,
+        ..stated()
+    });
+    assert_eq!(two.validate(), Ok(()), "the least of the devices is stated");
+    two.shape.accelerator = Some(WireAccelerator {
+        count: 2,
+        memory_per_device_bytes: Some(1 << 37),
+        ..stated()
+    });
+    assert!(
+        two.validate().is_err(),
+        "the largest device is not the least"
+    );
+
+    let lies = [
+        WireAccelerator {
+            model: "nvidia-h100".into(),
+            ..stated()
+        },
+        WireAccelerator {
+            variant_spelling: Some("nvidia-a100-sxm4-80gb".into()),
+            ..stated()
+        },
+        WireAccelerator {
+            count: 2,
+            ..stated()
+        },
+        WireAccelerator {
+            memory_per_device_bytes: Some(1),
+            ..stated()
+        },
+        WireAccelerator {
+            memory_per_device_bytes: Some(1 << 37),
+            ..stated()
+        },
+        WireAccelerator {
+            memory_per_device_bytes: None,
+            ..stated()
+        },
+        WireAccelerator {
+            vendor: "apple".into(),
+            ..stated()
+        },
+    ];
+    for lie in lies {
+        let err = check(move |h| h.shape.accelerator = Some(lie));
+        expect(
+            err,
+            "shape.accelerator",
+            Rule::Inconsistent,
+            refusal::INVALID_HELLO,
+        );
+    }
+
+    let err = check(|h| {
+        h.gpu_devices.clear();
+        h.shape.accelerator = Some(stated());
+    });
+    expect(
+        err,
+        "shape.accelerator",
+        Rule::Inconsistent,
+        refusal::INVALID_HELLO,
+    );
+
+    let err = check(|h| {
+        h.shape.gpu_class = Some("nvidia-a100-sxm4-80gb".into());
+        h.shape.accelerator = Some(stated());
+    });
+    expect(
+        err,
+        "shape.accelerator",
+        Rule::Inconsistent,
+        refusal::INVALID_HELLO,
+    );
+
+    let err = check(|h| {
+        h.shape.gpus = 0;
+        h.shape.gpu_class = None;
+        h.gpu_devices.clear();
+        h.shape.accelerator = Some(stated());
+    });
+    expect(
+        err,
+        "shape.accelerator",
+        Rule::Inconsistent,
+        refusal::INVALID_HELLO,
+    );
+
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            model: long(MAX_ID_LEN + 1),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.model",
+        Rule::TooLong,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            vendor: "nv idia".into(),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.vendor",
+        Rule::BadChars,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            variant_spelling: Some("a\nb".into()),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.variant_spelling",
+        Rule::BadChars,
+        refusal::INVALID_HELLO,
+    );
+    let err = check(|h| {
+        h.shape.accelerator = Some(WireAccelerator {
+            memory_per_device_bytes: Some(MAX_MEMORY_BYTES + 1),
+            ..stated()
+        });
+    });
+    expect(
+        err,
+        "shape.accelerator.memory_per_device_bytes",
+        Rule::OutOfRange,
+        refusal::INVALID_HELLO,
+    );
+}
+
+/// Asserts that a hello is not refused for the alias table the agent was built with: an
+/// agent of a newer release that names a class this server's table does not know, with
+/// the family its own table gives and the class as the variant spelling, is accepted, and
+/// so is an agent of an older release that passes a class this server knows as a variant
+/// through as its own model; while a vendor or family that contradicts this server's
+/// table for a class it knows is still refused. Catches a cross-check that refuses every
+/// agent whose table differs from the server's, which would refuse new data on an older
+/// server (or old data on a newer one) after a release adds a row.
+#[test]
+fn a_hello_from_an_agent_with_another_alias_table_is_accepted() {
+    let with = |class: &str, model: &str, variant: Option<&str>, vendor: &str| {
+        let mut h = hello();
+        h.shape.gpu_class = Some(class.into());
+        h.shape.accelerator = Some(WireAccelerator {
+            vendor: vendor.into(),
+            model: model.into(),
+            variant_spelling: variant.map(str::to_owned),
+            ..stated()
+        });
+        h.validate()
+    };
+    let newer = "nvidia-b300-sxm6-288gb";
+    assert_eq!(with(newer, "nvidia-b300", Some(newer), "nvidia"), Ok(()));
+    let known = "nvidia-a100-sxm4-80gb";
+    assert_eq!(with(known, known, None, "nvidia"), Ok(()));
+    assert_eq!(with(known, "nvidia-a100", Some(known), "nvidia"), Ok(()));
+    for refused in [
+        with(known, "nvidia-h100", Some(known), "nvidia"),
+        with(known, "nvidia-a100", Some(known), "amd"),
+        with(known, "nvidia-a100", None, "nvidia"),
+        with(newer, "nvidia-b300", Some("nvidia-b300-other"), "nvidia"),
+    ] {
+        expect(
+            refused.unwrap_err(),
+            "shape.accelerator",
+            Rule::Inconsistent,
+            refusal::INVALID_HELLO,
+        );
+    }
+}
+
+/// Asserts that a hello of one A100 of 64 GiB that also reports `accelerator.model`,
+/// `accelerator.count`, `accelerator.memory-gib` and a form factor of its own as plain
+/// capabilities is shaped with the facts its class, count and devices state: the shape's
+/// accelerator is the A100, one device of 64 GiB, no reported form factor, and every
+/// other capability is kept. Catches a host that reports an H100 or more devices through
+/// raw capabilities and is placed as that.
+#[test]
+fn reported_accelerator_capabilities_are_replaced_by_the_validated_facts() {
+    let mut h = hello();
+    for (key, value) in [
+        ("accelerator.vendor", "amd"),
+        ("accelerator.model", "nvidia-h100"),
+        ("accelerator.count", "8"),
+        ("accelerator.memory-gib", "999"),
+        ("accelerator.form-factor", "sxm"),
+        ("accelerator.interconnect", "nvlink>=900"),
+    ] {
+        h.capabilities.insert(key.into(), value.into());
+    }
+    assert_eq!(h.validate(), Ok(()));
+    let shape = h.to_shape().unwrap();
+    let found = shape.accelerator().unwrap();
+    assert_eq!(found.model.as_str(), "nvidia-a100");
+    assert_eq!(found.vendor.as_str(), "nvidia");
+    assert_eq!((found.count, found.memory_per_device), (1, Some(1 << 36)));
+    assert_eq!((found.form_factor, found.interconnect), (None, None));
+    let mut wanted = map(&[("os", "macos")]);
+    wanted.insert("accelerator.vendor".into(), "nvidia".into());
+    wanted.insert("accelerator.model".into(), "nvidia-a100".into());
+    wanted.insert("accelerator.count".into(), "1".into());
+    wanted.insert("accelerator.memory-gib".into(), "64".into());
+    assert_eq!(shape.capabilities(), &wanted);
 }

@@ -196,9 +196,13 @@ fn a_machine_on_its_way_covers_one_request_that_fits() {
     let mut big = request("r3");
     big.demand.resources =
         js_types::Resources::new(4000, 16 << 30, 2, Some("nvidia-a10".to_owned())).unwrap();
+    big.demand.accelerator = js_types::AcceleratorNeed::booked(&big.demand.resources);
     rig.input.waiting = vec![big];
     assert!(acquires(&rig.tick(at(10 * SECOND))).is_empty());
-    assert_eq!(rig.state.no_offer[&id("r3")], js_elastic::Dimension::Gpus);
+    assert_eq!(
+        rig.state.no_offer[&id("r3")],
+        js_elastic::Dimension::AcceleratorCount
+    );
 }
 
 /// Asserts that a machine on its way whose offer is of another operating system or
@@ -233,7 +237,7 @@ fn the_cheapest_fitting_offer_is_chosen_then_gpus_id_and_zone() {
         (
             vec![
                 Offer {
-                    gpus: 2,
+                    accelerator: accel("nvidia-a10", 2),
                     ..offer("a", 75)
                 },
                 offer("z", 75),

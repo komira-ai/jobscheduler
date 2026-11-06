@@ -7,11 +7,12 @@
 //! | lease | `<term>.<sequence>` |
 //! | run | `run "<id>"`, the id quoted and escaped |
 //! | item | `item<n>` |
+//! | client event | `submitted`, `pending`, `queued`, `placed <host>`, `started`, `terminal <how>`, `release-sent`, `released`; never the ids the client learned |
 //! | resources | `res(cpu=<n> mem=<n> gpus=<n>)`, the three axes a host is booked on |
 
 use js_types::{HostId, LeaseId, Resources};
 
-use crate::observe::{ItemId, RunId};
+use crate::observe::{ClientEvent, ItemId, RunId};
 
 /// A host: its id.
 pub(crate) fn host(host: &HostId) -> String {
@@ -31,6 +32,20 @@ pub(crate) fn run(run: &RunId) -> String {
 /// An item: `item<n>`.
 pub(crate) fn item(item: ItemId) -> String {
     format!("item{}", item.0)
+}
+
+/// A client event, without the ids the server gave the item.
+pub(crate) fn event(event: &ClientEvent) -> String {
+    match event {
+        ClientEvent::Submitted => "submitted".to_owned(),
+        ClientEvent::Pending { .. } => "pending".to_owned(),
+        ClientEvent::Queued { .. } => "queued".to_owned(),
+        ClientEvent::Placed { host: on } => format!("placed {}", host(on)),
+        ClientEvent::Started => "started".to_owned(),
+        ClientEvent::Terminal { how } => format!("terminal {}", how.name()),
+        ClientEvent::ReleaseSent => "release-sent".to_owned(),
+        ClientEvent::Released => "released".to_owned(),
+    }
 }
 
 /// Three booked amounts, as [`axes`] reads them from a vector.

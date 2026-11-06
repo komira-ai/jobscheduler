@@ -1,0 +1,26 @@
+[package]
+name = "js-provider-ec2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+js-caps = { path = "../js-caps" }
+js-elastic = { path = "../js-elastic" }
+# `ExecMode`, which an offer states, is defined in js-types and re-exported by neither
+# js-caps nor js-elastic.
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+# The warnings of a type that passes through or has no offer.
+tracing.workspace = true
+
+[dev-dependencies]
+# The tests install a subscriber that takes every event, so the fields of each log line
+# are evaluated under test.
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

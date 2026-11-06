@@ -3,7 +3,8 @@ use js_agent_wire::{
 };
 use js_provider::HostBook;
 use js_types::{
-    Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId, ResourceClass, Shape,
+    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
+    ResourceClass, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -341,6 +342,18 @@ impl PoolConfig {
         book.insert_host_with(host, self.booked.clone(), self.memory_headroom());
     }
 
+    /// Lists `host` in `book` for a hello whose accepted `claim` is known. The host books
+    /// as [`Self::booked`] does (the pool's numbers are the booking limits), but its
+    /// `accelerator.*` capabilities are those of the claim, which a hello validated, and
+    /// not the pool floor's, so placement sees the host's real family, variant facts and
+    /// measured memory. A host already listed and free is listed again with that shape; one
+    /// holding a lease keeps the shape it was booked with.
+    pub(crate) fn list_claimed(&self, book: &mut HostBook, host: HostId, claim: Option<&Shape>) {
+        let shape = placement_shape(&self.booked, claim);
+        book.remove_free(&host);
+        book.insert_host_with(host, shape, self.memory_headroom());
+    }
+
     pub(crate) fn max_machines(&self) -> usize {
         self.max_machines
     }
@@ -356,4 +369,20 @@ impl PoolConfig {
     pub(crate) fn lost_retention_ms(&self) -> u64 {
         self.lost_retention_ms
     }
+}
+/// The shape a registered host is placed on: the resources and capabilities the pool books
+/// (`booked`), with its `accelerator.*` capabilities replaced by those of the host's
+/// validated claim, so its real family, variant facts and measured memory are matched while
+/// the pool's numbers stay the booking limits. A host without a claim keeps the pool's.
+pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>) -> Shape {
+    let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
+    let mut capabilities = booked.capabilities().clone();
+    capabilities.retain(|key, _| !is_accel(key));
+    let stated = claim.into_iter().flat_map(|claim| claim.capabilities());
+    capabilities.extend(
+        stated
+            .filter(|(key, _)| is_accel(key))
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    Shape::new(booked.resources().clone(), capabilities)
 }

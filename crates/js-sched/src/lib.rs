@@ -99,8 +99,15 @@
 //!   give-up past it ends the operation with [`js_types::sched::Failure::Infra`], proposed
 //!   through the log.
 //! - admission of a request to a pool before it is queued ([`admission_ever`]): whether a
-//!   capable host or a machine provider's catalog could ever serve it, else the refusal
-//!   `no-capable-host`.
+//!   capable host (one whose advertised network ceiling covers the job's level and host
+//!   ports, [`ceiling`]) or a machine provider's catalog could ever serve it, else the
+//!   refusal `no-capable-host`.
+//! - the binding order of a queue of jobs ([`walk_in_order`]): an entry that waits closes
+//!   to the entries behind it every host it could use.
+//! - the choice of the machine provider and offer to acquire from when nothing can serve a
+//!   job now ([`acquire::pick`], pass 2 of design 5.6): providers in order, the pool's
+//!   limits and each provider's share, then price, fewest accelerators, least spare,
+//!   purchase order and offer id. Nothing calls it yet.
 //!
 //! Not yet: placement scoring beyond the spread (alignment, best fit), a reservation for
 //! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
@@ -112,9 +119,11 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod acquire;
 mod admission;
 pub mod admission_ever;
 mod backfill;
+pub mod ceiling;
 mod cordon;
 mod devices;
 pub mod fence;
@@ -123,12 +132,14 @@ mod headroom;
 mod input;
 mod load;
 mod probe;
+mod queue;
 pub use load::{
     Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
     LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
     least_loaded,
 };
 pub use probe::{ProbeHost, ProbeRefusal, admit_probe};
+pub use queue::walk_in_order;
 mod requeue;
 mod scheduler;
 mod servable;

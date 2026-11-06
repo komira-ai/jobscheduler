@@ -48,23 +48,37 @@ pub fn offer(
     }
 }
 
-/// The account most tests use: the cheapest type with capacity is `gpu_1x_cheap` in
+/// The account most tests use: the cheapest type with capacity is `gpu_1x_a10` in
 /// `region-a`.
 pub fn offers() -> Vec<InstanceTypeOffer> {
     vec![
         offer(
-            "gpu_1x_cheap",
+            "gpu_1x_a10",
             75,
             1,
             Architecture::X86_64,
             &["region-b", "region-a"],
         ),
-        offer("gpu_8x_big", 1200, 8, Architecture::X86_64, &["region-a"]),
-        offer("gpu_1x_arm", 10, 1, Architecture::Arm64, &["region-a"]),
-        offer("gpu_1x_nocap", 5, 1, Architecture::X86_64, &[]),
+        offer(
+            "gpu_8x_h100_sxm5",
+            1200,
+            8,
+            Architecture::X86_64,
+            &["region-a"],
+        ),
+        offer(
+            "gpu_1x_h100_sxm5",
+            10,
+            1,
+            Architecture::Arm64,
+            &["region-a"],
+        ),
+        offer("gpu_1x_h100_pcie", 5, 1, Architecture::X86_64, &[]),
         offer("cpu_4x", 1, 0, Architecture::X86_64, &["region-a"]),
-        offer("gpu_1x_cheap", 75, 1, Architecture::X86_64, &["region-a"]),
+        offer("gpu_1x_a10", 75, 1, Architecture::X86_64, &["region-a"]),
         offer("Bad-Name", 1, 1, Architecture::X86_64, &["region-a"]),
+        // A GPU type the catalog table does not know: never offered, however cheap.
+        offer("gpu_1x_rtx6000", 2, 1, Architecture::X86_64, &["region-a"]),
     ]
 }
 
