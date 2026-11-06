@@ -7,7 +7,9 @@ use std::fmt;
 use js_elastic::Purchase;
 
 use crate::error::{ApiError, SettingsError};
-use crate::launch::{DescribeFilter, Instance, InstanceId, RunRequest};
+use crate::launch::{
+    BlockPurchase, CapacityReservation, DescribeFilter, Instance, InstanceId, RunRequest, Tag,
+};
 use crate::model::{
     BlockOffering, InstanceTypeInfo, Region, TypePrice, VcpuQuota, ZoneOffering, ZonePrice,
 };
@@ -34,6 +36,10 @@ pub enum Action {
     DescribeInstances,
     /// [`Ec2Api::terminate_instances`]: EC2 `TerminateInstances`.
     TerminateInstances,
+    /// [`Ec2Api::purchase_capacity_block`]: EC2 `PurchaseCapacityBlock`.
+    PurchaseCapacityBlock,
+    /// [`Ec2Api::capacity_reservations`]: EC2 `DescribeCapacityReservations`.
+    DescribeCapacityReservations,
 }
 
 impl Action {
@@ -49,6 +55,8 @@ impl Action {
             Self::RunInstances => "RunInstances",
             Self::DescribeInstances => "DescribeInstances",
             Self::TerminateInstances => "TerminateInstances",
+            Self::PurchaseCapacityBlock => "PurchaseCapacityBlock",
+            Self::DescribeCapacityReservations => "DescribeCapacityReservations",
         }
     }
 }
@@ -110,9 +118,11 @@ impl PurchaseKind {
 /// bound, and makes exactly one request, or one walk over every page of one list that it
 /// hides: a list is never cut short in silence (a walk that ends early is
 /// [`ApiError::Incomplete`]), nothing is retried here, and a failure is never an empty
-/// answer. The catalog's calls only read. The launch side, the last three calls, creates
-/// and terminates instances: [`Ec2Api::run_instances`] and [`Ec2Api::terminate_instances`]
-/// are the only ones that change anything.
+/// answer. The catalog's calls only read. The launch side, the last five calls, buys
+/// blocks, creates and terminates instances and reads them back:
+/// [`Ec2Api::run_instances`], [`Ec2Api::terminate_instances`] and
+/// [`Ec2Api::purchase_capacity_block`] are the only ones that change anything, and the
+/// purchase also spends: it has no client token, so a repeat of it buys a second block.
 pub trait Ec2Api: Send + Sync {
     /// Every instance type of `region` (`DescribeInstanceTypes`).
     ///
@@ -199,4 +209,27 @@ pub trait Ec2Api: Send + Sync {
     ///
     /// [`ApiError`] when the call fails; an unknown id is `InvalidInstanceID.NotFound`.
     fn terminate_instances(&self, ids: &[InstanceId]) -> Result<(), ApiError>;
+
+    /// Buys the Capacity Block `request` names (`PurchaseCapacityBlock`, Linux) and
+    /// answers the reservation it made.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read. A failure that is not
+    /// a cloud answer (a timeout, a transport error) may have bought the block, and the
+    /// call is not idempotent: a repeat of it may buy another.
+    fn purchase_capacity_block(
+        &self,
+        request: &BlockPurchase,
+    ) -> Result<CapacityReservation, ApiError>;
+
+    /// The capacity reservations that carry every one of `tags`
+    /// (`DescribeCapacityReservations` with `tag:<key>=<value>` filters), of every state
+    /// the cloud still shows, in one hidden walk over every page. A page that fails fails
+    /// the call.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when a page fails or the answer cannot be read.
+    fn capacity_reservations(&self, tags: &[Tag]) -> Result<Vec<CapacityReservation>, ApiError>;
 }

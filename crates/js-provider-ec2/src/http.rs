@@ -36,7 +36,9 @@ use serde_json::Value;
 
 use crate::api::{Ec2Api, PurchaseKind};
 use crate::error::ApiError;
-use crate::launch::{DescribeFilter, Instance, InstanceId, RunRequest};
+use crate::launch::{
+    BlockPurchase, CapacityReservation, DescribeFilter, Instance, InstanceId, RunRequest, Tag,
+};
 use crate::model::{
     BlockOffering, InstanceTypeInfo, Region, TypePrice, VcpuQuota, ZoneOffering, ZonePrice,
 };
@@ -332,5 +334,16 @@ impl Ec2Api for HttpEc2 {
 
     fn terminate_instances(&self, ids: &[InstanceId]) -> Result<(), ApiError> {
         self.terminate(ids)
+    }
+
+    fn purchase_capacity_block(
+        &self,
+        request: &BlockPurchase,
+    ) -> Result<CapacityReservation, ApiError> {
+        self.purchase_block(request)
+    }
+
+    fn capacity_reservations(&self, tags: &[Tag]) -> Result<Vec<CapacityReservation>, ApiError> {
+        self.read_reservations(tags)
     }
 }

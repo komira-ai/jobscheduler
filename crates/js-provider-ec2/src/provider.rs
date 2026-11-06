@@ -20,8 +20,9 @@ use crate::error::ApiError;
 use crate::gpu::GPU_ROWS;
 use crate::identity::{AwsIdentityVerifier, IdentityVerifier};
 use crate::launch::{
-    ACQUIRE_TAG, ClientToken, DescribeFilter, ImageId, Instance, InstanceId, LaunchPurchase,
-    NAME_TAG, RunRequest, SCHEDULER_TAG, Tag, UserData,
+    ACQUIRE_TAG, BLOCK_END_TAG, BlockPurchase, CapacityReservation, ClientToken, DescribeFilter,
+    ImageId, Instance, InstanceId, LaunchPurchase, NAME_TAG, ReservationState, RunRequest,
+    SCHEDULER_TAG, Tag, UserData,
 };
 use crate::model::{InstanceType, Zone};
 use crate::own::Owner;
@@ -47,6 +48,44 @@ pub const PAYLOAD_LIMIT: usize = 16_384;
 /// hold runs out. The map sits behind the launch lock: holding the lock across the read
 /// and the launch is what lets one launch run at a time.
 type Unknown = BTreeMap<String, Duration>;
+
+/// How an acquire buys its instance, before anything is bought.
+#[derive(Debug)]
+enum Buy {
+    /// On demand.
+    OnDemand,
+    /// Spot.
+    Spot,
+    /// A Capacity Block of the offering with this id, bought first.
+    Block { offering: String },
+}
+
+/// What a launch needs but its purchase: everything of a [`RunRequest`] that is known
+/// before a Capacity Block is bought, and how the instance is to be bought.
+struct Prepared {
+    image: ImageId,
+    instance_type: InstanceType,
+    zone: Zone,
+    buy: Buy,
+    user_data: UserData,
+    tags: Vec<Tag>,
+    client_token: ClientToken,
+}
+
+impl Prepared {
+    /// The launch of this instance bought as `purchase`.
+    fn run(&self, purchase: LaunchPurchase) -> RunRequest {
+        RunRequest {
+            image: self.image.clone(),
+            instance_type: self.instance_type.clone(),
+            zone: self.zone.clone(),
+            purchase,
+            user_data: self.user_data.clone(),
+            tags: self.tags.clone(),
+            client_token: self.client_token.clone(),
+        }
+    }
+}
 
 /// What a read of one instance by id found.
 enum Found {
@@ -131,14 +170,17 @@ impl Ec2Provider {
 
     /// What an acquire of `offer` would launch: its instance type (the part of the offer id
     /// before the first `/`), its zone and how it is bought. `None` when the offer has no
-    /// zone, is not on demand or spot (this provider buys no Capacity Block), or is of a
-    /// type the allow list leaves out.
-    fn launchable(&self, offer: &Offer) -> Option<(InstanceType, Zone, LaunchPurchase)> {
+    /// zone, is not on demand, spot or a Capacity Block with its terms, or is of a type the
+    /// allow list leaves out.
+    fn launchable(&self, offer: &Offer) -> Option<(InstanceType, Zone, Buy)> {
         let zone = Zone(offer.zone.clone()?);
         let kind = InstanceType(offer.id.split('/').next().unwrap_or_default().to_owned());
-        let purchase = match offer.purchase {
-            Some(Purchase::OnDemand) => LaunchPurchase::OnDemand,
-            Some(Purchase::Spot) => LaunchPurchase::Spot,
+        let purchase = match (&offer.purchase, &offer.block) {
+            (Some(Purchase::OnDemand), _) => Buy::OnDemand,
+            (Some(Purchase::Spot), _) => Buy::Spot,
+            (Some(Purchase::CapacityBlock), Some(terms)) => Buy::Block {
+                offering: terms.offering.clone(),
+            },
             _ => return None,
         };
         let allowed = self
@@ -207,15 +249,78 @@ impl Ec2Provider {
         }
     }
 
-    /// The launch of `run` for `request`, under the launch lock held as `unknown`: it
+    /// The Capacity Block for the acquire `wanted`, under the launch lock held as
+    /// `unknown`: the reservation an earlier attempt of this acquire bought, found by its
+    /// tags, else the one a purchase of `offering` makes. A block bought twice is paid
+    /// twice and the purchase has no client token, so the read comes first, and a read that
+    /// fails buys nothing. The reservation is returned only when it is active; any other
+    /// answer is the acquire's, with the launch not sent.
+    fn reserve(
+        &self,
+        unknown: &mut Unknown,
+        wanted: &str,
+        offering: &str,
+    ) -> Result<CapacityReservation, Box<Acquired>> {
+        let tags = vec![
+            tag(SCHEDULER_TAG, self.config.scheduler.as_str()),
+            tag(ACQUIRE_TAG, wanted),
+        ];
+        let found = match self.api.capacity_reservations(&tags) {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, "no launch: the capacity reservations of this acquire cannot be listed");
+                unknown.remove(wanted);
+                return Err(Box::new(Acquired::Unknown));
+            }
+        };
+        let reservation = match found.into_iter().next() {
+            Some(earlier) => earlier,
+            None => {
+                tracing::info!(offering, "buying a capacity block");
+                let purchase = BlockPurchase {
+                    offering: offering.to_owned(),
+                    tags,
+                };
+                match self.api.purchase_capacity_block(&purchase) {
+                    Ok(bought) => bought,
+                    Err(error) => {
+                        // A purchase that got no answer may have landed; the unknown entry
+                        // stays, so a retry is deferred until the hold passes, and then
+                        // reads the reservations before it buys.
+                        let answer = launch_answer(&error);
+                        if matches!(answer, Acquired::Refused(_)) {
+                            unknown.remove(wanted);
+                        }
+                        tracing::warn!(%error, "the purchase of a capacity block failed");
+                        return Err(Box::new(answer));
+                    }
+                }
+            }
+        };
+        if reservation.state != ReservationState::Active {
+            unknown.remove(wanted);
+            tracing::warn!(
+                id = %reservation.id,
+                state = reservation.state.name(),
+                "no launch: the capacity reservation is not active"
+            );
+            return Err(Box::new(Self::refuse(
+                RefusalCode::Capacity,
+                Reason::Api(reservation.state.name().to_owned()),
+            )));
+        }
+        Ok(reservation)
+    }
+
+    /// The launch of `prepared` for `request`, under the launch lock held as `unknown`: it
     /// answers the machine a read of the acquire shows, defers while an earlier launch of
-    /// it is unresolved, refuses at the cap and half-marked instances, and otherwise sends
-    /// the launch.
+    /// it is unresolved, refuses at the cap and half-marked instances, buys the Capacity
+    /// Block of a block offer, and otherwise sends the launch.
     fn launch_locked(
         &self,
         unknown: &mut Unknown,
         request: &AcquireRequest,
-        run: &RunRequest,
+        prepared: &Prepared,
     ) -> Acquired {
         let wanted = request.acquire.as_str();
         let rows = match self.api.describe_instances(&self.selecting(Some(wanted))) {
@@ -285,6 +390,21 @@ impl Ec2Provider {
             );
         }
         unknown.insert(wanted.to_owned(), now);
+        let (run, ends) = match &prepared.buy {
+            Buy::OnDemand => (prepared.run(LaunchPurchase::OnDemand), None),
+            Buy::Spot => (prepared.run(LaunchPurchase::Spot), None),
+            Buy::Block { offering } => match self.reserve(unknown, wanted, offering) {
+                Ok(reservation) => {
+                    let mut run = prepared.run(LaunchPurchase::CapacityBlock(reservation.id));
+                    run.tags.push(tag(
+                        BLOCK_END_TAG,
+                        &reservation.end_unix_seconds.to_string(),
+                    ));
+                    (run, Some(reservation.end_unix_seconds))
+                }
+                Err(answer) => return *answer,
+            },
+        };
         tracing::info!(
             instance_type = %run.instance_type,
             zone = %run.zone.as_str(),
@@ -292,7 +412,7 @@ impl Ec2Provider {
             purchase = ?run.purchase,
             "launching one instance"
         );
-        let ids = match self.api.run_instances(run) {
+        let ids = match self.api.run_instances(&run) {
             Ok(ids) => ids,
             Err(error) => {
                 let answer = launch_answer(&error);
@@ -315,6 +435,7 @@ impl Ec2Provider {
             offer: request.offer.id.clone(),
             zone: Some(run.zone.as_str().to_owned()),
             status: HostStatus::Booting,
+            ends_unix_seconds: ends,
         };
         // A launch asks for one instance; any other id it returns is an extra, released at
         // once and counted all the same.
@@ -421,12 +542,13 @@ impl CapacityProvider for Ec2Provider {
     }
 
     // `request.lifetime` is not read: `RunInstances` has no run-duration limit, so only
-    // `max_age` with a live scheduler bounds the cost.
+    // `max_age` with a live scheduler bounds the cost. An instance in a Capacity Block ends
+    // with the block, whatever the lifetime.
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);
         }
-        let Some((instance_type, zone, purchase)) = self.launchable(&request.offer) else {
+        let Some((instance_type, zone, buy)) = self.launchable(&request.offer) else {
             return Self::refuse(RefusalCode::Shape, Reason::NotAllowed);
         };
         if !self.owner.owns_name(&request.name) {
@@ -465,17 +587,17 @@ impl CapacityProvider for Ec2Provider {
             }
             return Self::refuse(RefusalCode::Denied, Reason::DryRun);
         }
-        let run = RunRequest {
+        let prepared = Prepared {
             image: image.clone(),
             instance_type,
             zone,
-            purchase,
+            buy,
             user_data: UserData::new(request.payload.expose().as_bytes().to_vec()),
             tags,
             client_token: ClientToken::derive(&request.acquire, &self.config.scheduler),
         };
         let mut unknown = self.unknown();
-        let answer = self.launch_locked(&mut unknown, request, &run);
+        let answer = self.launch_locked(&mut unknown, request, &prepared);
         self.records().unresolved(unknown.keys().cloned().collect());
         answer
     }
@@ -564,7 +686,9 @@ fn provider_error(error: ApiError) -> ProviderError {
 }
 
 /// The scheduler's view of an instance. Its offer is the instance type: a read of an
-/// instance does not say which offer it was launched from.
+/// instance does not say which offer it was launched from. Its block end is the number in
+/// the [`BLOCK_END_TAG`] tag; an instance with no such tag, or one that holds no number,
+/// has none.
 fn held_of(instance: &Instance) -> Held {
     Held {
         id: instance.id.host_ref(),
@@ -573,5 +697,6 @@ fn held_of(instance: &Instance) -> Held {
         offer: instance.instance_type.to_string(),
         zone: Some(instance.zone.as_str().to_owned()),
         status: instance.state.status(),
+        ends_unix_seconds: instance.tag(BLOCK_END_TAG).and_then(|end| end.parse().ok()),
     }
 }

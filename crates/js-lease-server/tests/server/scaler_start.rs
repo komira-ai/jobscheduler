@@ -219,6 +219,7 @@ fn releasing(name: &str) -> Records {
             clean_lists: 0,
             last_clean: None,
             seen_live: false,
+            ends_at: None,
         }],
         cooldowns: BTreeMap::new(),
         ..Default::default()

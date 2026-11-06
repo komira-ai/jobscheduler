@@ -366,6 +366,7 @@ async fn the_providers_list_reaches_the_step() {
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status: HostStatus::Terminated,
+        ends_unix_seconds: None,
     }];
     rig.world().machines.push(js_elastic::Held {
         id: js_elastic::HostRef("i-77".to_owned()),
@@ -374,6 +375,7 @@ async fn the_providers_list_reaches_the_step() {
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
         status: HostStatus::Active,
+        ends_unix_seconds: None,
     });
     rig.scaler.tick().await;
     let state = rig.scaler.state();

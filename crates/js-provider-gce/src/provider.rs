@@ -452,6 +452,7 @@ impl GceProvider {
             offer: request.offer.id.clone(),
             zone: Some(insert.zone.as_str().to_owned()),
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         };
         self.records().launched(held.clone());
         Acquired::Accepted {
@@ -711,5 +712,6 @@ fn held_of(instance: &Instance) -> Held {
         offer: instance.machine_type.to_string(),
         zone: Some(instance.zone.as_str().to_owned()),
         status: instance.status.status(),
+        ends_unix_seconds: None,
     }
 }

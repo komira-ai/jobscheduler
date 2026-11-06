@@ -131,6 +131,7 @@ fn orphan() -> Record {
         clean_lists: 0,
         last_clean: None,
         seen_live: false,
+        ends_at: None,
     }
 }
 

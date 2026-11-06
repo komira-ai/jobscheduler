@@ -157,17 +157,18 @@ fn block_offering(item: &Node) -> Result<BlockOffering, ApiError> {
         instance_type: InstanceType(item.required("instanceType")?.to_owned()),
         zone: Zone(item.required("availabilityZone")?.to_owned()),
         instance_count: item.number("instanceCount")?,
-        start_unix_seconds: unix_seconds(item.required("startDate")?)?,
+        start_unix_seconds: unix_seconds(item.required("startDate")?, "startDate")?,
         duration_minutes: hours * 60 + extra,
         upfront_fee: item.required("upfrontFee")?.to_owned(),
         currency: item.required("currencyCode")?.to_owned(),
     })
 }
 
-/// The seconds since the Unix epoch of the RFC 3339 time `text`.
-fn unix_seconds(text: &str) -> Result<u64, ApiError> {
+/// The seconds since the Unix epoch of the RFC 3339 time `text`, which the element `field`
+/// holds.
+pub(super) fn unix_seconds(text: &str, field: &str) -> Result<u64, ApiError> {
     OffsetDateTime::parse(text, &Rfc3339)
         .ok()
         .and_then(|at| u64::try_from(at.unix_timestamp()).ok())
-        .ok_or_else(|| unreadable("startDate is not a time since the epoch"))
+        .ok_or_else(|| unreadable(format!("{field} is not a time since the epoch")))
 }
