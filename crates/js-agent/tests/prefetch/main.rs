@@ -80,8 +80,8 @@ fn a_pull_under_way_blocks_neither_the_caller_nor_another_image() {
 }
 
 /// A failed pull is reported to every call that names its ticket (every run that waited on
-/// it), not once: two waiters both hear `Failed`, with the reason. A call that names no
-/// ticket starts a new pull, which can succeed.
+/// it), not once: each waiter hears `Failed`, with the reason, every time it asks. A call
+/// that names no ticket starts a new pull, which can succeed.
 #[test]
 fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
     let pulls = Arc::new(AtomicUsize::new(0));
@@ -100,7 +100,10 @@ fn a_failed_pull_is_reported_to_every_waiter_and_a_new_call_pulls_again() {
     let Prepared::Pending(ticket) = prefetcher.prepare(A, None) else {
         panic!("not pending");
     };
-    assert_eq!(prefetcher.wait(A), failed("registry down"));
+    // The failure is offered before anyone asks again. `wait` names no ticket, so asking with
+    // it after the failure would start a new pull: the waiters here name their ticket.
+    prefetcher.wait_offered(1);
+    assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(prefetcher.prepare(A, Some(ticket)), failed("registry down"));
     assert_eq!(pulls.load(Ordering::SeqCst), 1);
