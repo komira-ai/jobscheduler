@@ -7,10 +7,19 @@
 //! row): so a placement freed between two reads is still read freed. Only what differs from
 //! the read before is appended, and written into the trace as one line each (`job <id>
 //! <state>`, `allocation <job> <step> <host>`), never with an id the server generated.
+//!
+//! The cell asks for a read at every listing read: once a virtual second, and at each
+//! client call or poll, restart of the server and end of a scenario. The last four always
+//! read (`force`); the once-a-second ones read every [`READ_EVERY`] while reads find
+//! changes, and back off while they find none, doubling the wait up to [`QUIET_MAX`]: a
+//! scenario's long quiet end, its hosts beating and nothing changing, then costs a read a
+//! minute rather than a read a second. A change made in a quiet stretch is read at the
+//! next read, however that read comes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_jobs::{
     AllocationRecord, AllocationStep, JobId, JobRecord, JobState, JobStore, StartFailure,
@@ -26,22 +35,34 @@ use crate::server::{ServerNode, virtual_time};
 /// The job tables as the server holds them.
 type Tables = JobStore<Arc<dyn Store>, ServerIds>;
 
+/// The wait between two reads that are not forced, while reads find changes.
+pub(crate) const READ_EVERY: Duration = Duration::from_secs(1);
+
+/// The longest wait between two reads that are not forced, while reads find no change.
+pub(crate) const QUIET_MAX: Duration = Duration::from_secs(60);
+
 /// What the cell last read of the server's tables: each job's state and each job's
 /// allocation row.
 #[derive(Debug, Default)]
 pub(crate) struct Reader {
     states: BTreeMap<JobId, JobState>,
     rows: BTreeMap<JobId, AllocationRow>,
+    /// When the next read that is not forced is due; `None` before the first read.
+    next_at: Option<FarmTime>,
+    /// The wait after the last read.
+    wait: Duration,
 }
 
 impl Reader {
     /// Reads the tables of `server` (when it runs with the job service on) at `now` into
-    /// `observations`, and returns a trace line for each change.
+    /// `observations`, when `force` says so or the next read is due (see the module doc),
+    /// and returns a trace line for each change.
     pub(crate) fn read(
         &mut self,
         server: Option<&ServerNode>,
         observations: &mut Observations,
         now: FarmTime,
+        force: bool,
     ) -> Vec<String> {
         let tables = server
             .and_then(ServerNode::server)
@@ -49,6 +70,9 @@ impl Reader {
         let Some(tables) = tables else {
             return Vec::new();
         };
+        if !force & self.next_at.is_some_and(|due| now < due) {
+            return Vec::new();
+        }
         observations.tables_at = Some(now);
         let mut lines = Vec::new();
         let mut look = BTreeSet::new();
@@ -71,7 +95,7 @@ impl Reader {
         let gone = self
             .rows
             .iter()
-            .filter(|(job, row)| row.step != AllocationStep::Freed && !live_jobs.contains(*job));
+            .filter(|(job, row)| (row.step != AllocationStep::Freed) & !live_jobs.contains(*job));
         look.extend(gone.map(|(job, _)| job.clone()));
         let looked = look.iter().filter(|job| !live_jobs.contains(*job));
         let looked = looked.filter_map(|job| tables.get_allocation(job).ok().flatten());
@@ -87,6 +111,12 @@ impl Reader {
                 .allocation_reads
                 .push(AllocationRead { row, at: now });
         }
+        self.wait = if lines.is_empty() {
+            (self.wait * 2).clamp(READ_EVERY, QUIET_MAX)
+        } else {
+            READ_EVERY
+        };
+        self.next_at = Some(now.saturating_add(self.wait));
         lines
     }
 }
@@ -189,7 +219,7 @@ mod tests {
     #[test]
     fn a_server_without_the_job_service_is_not_read() {
         let mut observations = Observations::quiet();
-        let lines = Reader::default().read(None, &mut observations, FarmTime::from_millis(5));
+        let lines = Reader::default().read(None, &mut observations, FarmTime::from_millis(5), true);
         assert!(lines.is_empty());
         assert_eq!(observations.tables_at, None);
     }

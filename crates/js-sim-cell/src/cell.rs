@@ -381,7 +381,7 @@ impl Cell {
         }
         let end = self.sim.now().saturating_add(within);
         self.run_until(end)?;
-        self.reread();
+        self.reread(true);
         self.observations.at = self.sim.now();
         let at = self.observations.at;
         let found = Checker::end(&self.observations, within).unwrap_or_else(|refused| {
@@ -569,7 +569,7 @@ impl Cell {
             }
             _ => self.record("restart server".to_owned()),
         }
-        self.reread();
+        self.reread(true);
         self.check(Touched::nothing().server());
     }
 
@@ -616,7 +616,7 @@ impl Cell {
         let answer = server.map(|server| server.client_call(now, request));
         let status = answer.as_ref().map_or(0, |answer| answer.status().as_u16());
         self.record(format!("client {method} {status}"));
-        self.reread();
+        self.reread(true);
         self.check(Touched::nothing().server());
         answer
     }
@@ -722,7 +722,7 @@ impl Cell {
         }
         let due = self.listed_at.map(|at| at.saturating_add(LISTING_EVERY));
         if due.is_none_or(|due| due <= self.sim.now()) {
-            self.reread();
+            self.reread(false);
             touched = touched.server();
         }
         touched
@@ -735,9 +735,10 @@ impl Cell {
     }
 
     /// Reads the server's listing into the observations, with the bookings it starts and
-    /// ends, and its job tables when the job service is on, writing each host, job and
-    /// allocation whose entry changed into the trace.
-    fn reread(&mut self) {
+    /// ends, and its job tables when the job service is on (always when `force`, else when a
+    /// read of them is due), writing each host, job and allocation whose entry changed into
+    /// the trace.
+    fn reread(&mut self, force: bool) {
         let now = self.sim.now();
         let view = self.server().map(ServerNode::view).unwrap_or_default();
         let old = &self.observations.server;
@@ -773,7 +774,7 @@ impl Cell {
         self.listed_at = Some(now);
         let server = self.sim.node(&NodeId::new(SERVER));
         let server = server.and_then(CellNode::as_server);
-        let lines = self.tables.read(server, &mut self.observations, now);
+        let lines = self.tables.read(server, &mut self.observations, now, force);
         lines.into_iter().for_each(|line| self.record(line));
     }
 
@@ -803,7 +804,7 @@ impl Cell {
             record.heard.push(Heard { at: now, event });
             touched = touched.item(item);
         }
-        self.reread();
+        self.reread(true);
         self.check(touched);
     }
 

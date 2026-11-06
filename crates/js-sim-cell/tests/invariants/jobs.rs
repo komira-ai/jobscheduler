@@ -297,7 +297,7 @@ fn an_allocation_freed_on_silence_is_flagged() {
         "freed-only-when-confirmed at 5000: allocation {} of job sim-job-0 on host host-0 was read freed at 5000 with no listing of the host since 100 that left the job out, while the server lists the host",
         allocation(1)
     );
-    assert_eq!(lines(&step_all(&freed_on_silence())), [line.clone()]);
+    assert_eq!(lines(&step_all(&freed_on_silence())), [line.as_str()]);
     let flagged = |o: &Observations| of(Invariant::FreedOnlyWhenConfirmed, o);
     let confirmed = freed_on_silence().with_job_beat(beat(0, 3_000, &[], &[]));
     clear(flagged(&confirmed));
@@ -310,13 +310,13 @@ fn an_allocation_freed_on_silence_is_flagged() {
     };
     clear(flagged(&absent));
     let still_listed = freed_on_silence().with_job_beat(beat(0, 3_000, &[0], &[]));
-    assert_eq!(flagged(&still_listed), [line.clone()]);
+    assert_eq!(flagged(&still_listed), [line.as_str()]);
     let with_result = freed_on_silence().with_job_beat(beat(0, 3_000, &[], &[0]));
-    assert_eq!(flagged(&with_result), [line.clone()]);
+    assert_eq!(flagged(&with_result), [line.as_str()]);
     let before = freed_on_silence().with_job_beat(beat(0, 50, &[], &[]));
-    assert_eq!(flagged(&before), [line.clone()]);
+    assert_eq!(flagged(&before), [line.as_str()]);
     let other_host = freed_on_silence().with_job_beat(beat(1, 3_000, &[], &[]));
-    assert_eq!(flagged(&other_host), [line.clone()]);
+    assert_eq!(flagged(&other_host), [line.as_str()]);
     let mut prepare = row(0, 1, 0, AllocationStep::Freed);
     prepare.end_reason = Some(EndReason::FailedPrepare);
     let failed = Observations::quiet()
@@ -331,7 +331,7 @@ fn an_allocation_freed_on_silence_is_flagged() {
     });
     let read_start = || freed_on_silence().with_job_reply(started.clone());
     let before_start = read_start().with_job_beat(beat(0, 1_500, &[], &[]));
-    assert_eq!(flagged(&before_start), [line.clone()]);
+    assert_eq!(flagged(&before_start), [line.as_str()]);
     clear(flagged(&read_start().with_job_beat(beat(
         0,
         2_500,
@@ -342,7 +342,7 @@ fn an_allocation_freed_on_silence_is_flagged() {
     acked.acks.push((job(0), Verdict::Accepted));
     let read_ack = || freed_on_silence().with_job_reply(acked.clone());
     let before_ack = read_ack().with_job_beat(beat(0, 2_500, &[], &[]));
-    assert_eq!(flagged(&before_ack), [line.clone()]);
+    assert_eq!(flagged(&before_ack), [line.as_str()]);
     clear(flagged(&read_ack().with_job_beat(beat(0, 3_500, &[], &[]))));
     let launched = format!("sim-job-0/{}", allocation(1));
     let ran = failed.with_launch(RunId::new(launched), host(0), ms(150));
@@ -363,7 +363,7 @@ fn a_start_with_no_committed_allocation_is_flagged() {
     );
     assert_eq!(
         lines(&step_all(&start_with_no_allocation())),
-        [line.clone()]
+        [line.as_str()]
     );
     let flagged = |row: AllocationRow| {
         let read = start_with_no_allocation().with_allocation_read(row, ms(400));
@@ -372,15 +372,15 @@ fn a_start_with_no_committed_allocation_is_flagged() {
     clear(flagged(row(0, 1, 0, AllocationStep::Booked)));
     assert_eq!(
         flagged(row(0, 1, 1, AllocationStep::Booked)),
-        [line.clone()]
+        [line.as_str()]
     );
     assert_eq!(
         flagged(row(1, 1, 0, AllocationStep::Booked)),
-        [line.clone()]
+        [line.as_str()]
     );
     let mut late = row(0, 1, 0, AllocationStep::Booked);
     late.created_at = ms(350);
-    assert_eq!(flagged(late), [line.clone()]);
+    assert_eq!(flagged(late), [line.as_str()]);
     let mut unread = start_with_no_allocation();
     unread.tables_at = Some(ms(300));
     none(&step_all(&unread));
