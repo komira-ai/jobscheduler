@@ -207,4 +207,8 @@ fn errors_say_what_failed() {
         js_state::StoreError::Fenced.to_string(),
         "state store fenced: this handle is no longer the writer"
     );
+    assert_eq!(
+        js_state::StoreError::Disconnected("connection closed".to_owned()).to_string(),
+        "state store connection lost: connection closed"
+    );
 }

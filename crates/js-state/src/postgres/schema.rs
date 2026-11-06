@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use postgres::error::SqlState;
 
-use super::conn::Conn;
+use super::conn::{Conn, Dial, DialError};
 use super::{PostgresConfig, describe};
 
 /// The oldest schema version this build runs against. Raise it in the release that follows
@@ -56,7 +56,14 @@ pub const MIN_SUPPORTED: u32 = 1;
 /// The migrations of this crate: version, name, file. A crate that keeps tables of its own
 /// in the schema ships its migration itself and continues the numbering ([`extend`]); the set
 /// a release runs is this one plus theirs, put together by the binary that depends on them.
-const EMBEDDED: [(u32, &str, &str); 1] = [(1, "state", include_str!("migrations/0001_state.sql"))];
+const EMBEDDED: [(u32, &str, &str); 2] = [
+    (1, "state", include_str!("migrations/0001_state.sql")),
+    (
+        2,
+        "writer_generation",
+        include_str!("migrations/0002_writer_generation.sql"),
+    ),
+];
 
 /// Taken (transaction-scoped) by every schema change: the installer's `apply` and `setup`
 /// serialise on it, so two installers racing apply a migration once. The key is
@@ -336,6 +343,15 @@ pub enum SchemaError {
 impl From<postgres::Error> for SchemaError {
     fn from(err: postgres::Error) -> SchemaError {
         SchemaError::Database(describe_refusal(&err))
+    }
+}
+
+impl From<DialError> for SchemaError {
+    fn from(err: DialError) -> SchemaError {
+        match err {
+            DialError::Pg(err) => err.into(),
+            DialError::Tls(err) => SchemaError::Database(err.to_string()),
+        }
     }
 }
 
@@ -707,7 +723,7 @@ fn judge(rows: &[(u32, String)], supported: Supported) -> Result<u32, SchemaErro
 /// # Errors
 /// [`SchemaError::NotInitialised`] when there is none; the server's refusal otherwise.
 pub fn current(config: &PostgresConfig) -> Result<u32, SchemaError> {
-    let mut conn = Conn::connect(&config.pg)?;
+    let mut conn = Conn::connect(&config.dial())?;
     let rows = rows(&mut conn, &config.schema)?;
     rows.last()
         .map(|(v, _)| *v)
@@ -768,14 +784,14 @@ pub fn apply_within(
 /// The longest [`apply_within`] waits to reach the server.
 pub const CONNECT_LIMIT: Duration = Duration::from_secs(10);
 
-/// How a call connects: a bounded call (`lock_wait` given) gives up reaching the server
-/// after [`CONNECT_LIMIT`], an unbounded one waits as the operating system lets it.
-fn connect_settings(pg: &postgres::Config, lock_wait: Option<Duration>) -> postgres::Config {
-    let mut settings = pg.clone();
+/// How a call connects: as the configuration's migration runner does (its TLS and network
+/// limits, no server limits on its DDL), and a bounded call (`lock_wait` given) gives up
+/// reaching the server after [`CONNECT_LIMIT`] whatever the configuration's connect limit is.
+fn connect_settings(mut dial: Dial, lock_wait: Option<Duration>) -> Dial {
     if lock_wait.is_some() {
-        settings.connect_timeout(CONNECT_LIMIT);
+        dial.pg.connect_timeout(CONNECT_LIMIT);
     }
-    settings
+    dial
 }
 
 fn apply_with(
@@ -793,7 +809,7 @@ fn apply_with(
         });
     }
     let schema = config.schema.as_str();
-    let mut conn = Conn::connect(&connect_settings(&config.pg, lock_wait))?;
+    let mut conn = Conn::connect(&connect_settings(config.dial_ddl(), lock_wait))?;
     require_durable(&mut conn)?;
     let have = rows(&mut conn, schema)?;
     contiguous(&have)?;

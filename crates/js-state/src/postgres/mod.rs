@@ -33,9 +33,25 @@
 //! [`PostgresStore::claim`] is the claim path: read committed, rows locked
 //! `FOR UPDATE SKIP LOCKED`, each claimed through the same version compare-and-set.
 //!
-//! Limits: the feed table grows until a retention pass trims it (not written yet); the
-//! client does not speak TLS, so an `sslmode=require` URL is refused instead of
-//! downgraded; calls block, so an async caller uses a blocking task.
+//! **Connections.** Every connection is made with the configuration's TLS mode
+//! ([`TlsMode`]: `sslmode`, with the root certificate `sslrootcert` names) and its limits
+//! ([`Timeouts`]: connect, keepalive, `TCP_USER_TIMEOUT`, and the server's
+//! `statement_timeout` and `idle_in_transaction_session_timeout`). A call whose connection is
+//! gone (closed, broken under it, or ended by the server) is run once more on a new
+//! connection, and fails as [`StoreError::Disconnected`] when that one is gone too. A
+//! transaction is run again only when its connection was gone before it began: one under way
+//! is rolled back by the server and reported, not run again, since its commit may have
+//! happened.
+//!
+//! **Fencing.** A store opened for the holder of the writer lock ([`PostgresStore::fenced`],
+//! with the [`crate::WriterGeneration`] the lock took) reads the `writer_generation` row
+//! `FOR SHARE` in every transaction before it commits, and commits nothing (it rolls back and
+//! returns [`StoreError::Fenced`]) when the row no longer holds its generation: another
+//! process took the lock since. Taking the lock increments the row and waits for a commit
+//! that holds it shared, so every commit is ordered before or after the new holder's start.
+//!
+//! Limits: the feed table grows until a retention pass trims it (not written yet); calls
+//! block, so an async caller uses a blocking task.
 
 #[cfg(any(test, feature = "test-support"))]
 mod backend;
@@ -48,16 +64,19 @@ mod not_up;
 mod reach;
 pub mod schema;
 mod session;
+mod timeouts;
+mod tls;
 mod tx;
+mod url;
 pub(crate) mod writer;
 
 use std::fmt;
 use std::ops::Bound;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use postgres::config::SslMode;
 use postgres::error::SqlState;
 use postgres::types::ToSql;
 
@@ -69,15 +88,20 @@ pub use database::{TestDatabase, test_database, test_database_with};
 pub use extension::{ExtensionPool, Loan, store_error};
 pub use not_up::OpenError;
 pub use reach::{Unreached, reach};
-use session::{Edge, Pool, RangeShape, Session};
+use session::{Edge, Pool, Pooled, RangeShape, Session};
+pub use timeouts::Timeouts;
+use tls::Tls;
+pub use tls::{TlsError, TlsMode};
 use tx::{Level, Row, Tx, micros};
 pub use writer::WRITER_LOCK_KEY;
+
+use conn::{Dial, DialError, connection_lost};
 
 use crate::clock::{Clock, StoreTime};
 use crate::store::{Span, Store, page_of};
 use crate::{
     Change, Changes, Commit, CommitStats, Conflict, Direction, Event, Revision, ScanPage,
-    ScanRange, StoreError, Txn, Version, Versioned,
+    ScanRange, StoreError, Txn, Version, Versioned, WriterGeneration,
 };
 
 /// The most times a batch is run again after a serialization failure.
@@ -109,9 +133,16 @@ pub enum ConfigError {
     /// The URL names no host.
     #[error("the state store URL names no host")]
     NoHost,
-    /// The URL asks for TLS, which this client does not speak.
-    #[error("the state store URL asks for TLS (sslmode), which this client does not support")]
-    TlsUnsupported,
+    /// A TLS mode that checks the server's certificate (`verify-ca`, `verify-full`) was asked
+    /// for with no root certificate to check it against.
+    #[error(
+        "the state store's sslmode verify-ca and verify-full need a root certificate (sslrootcert)"
+    )]
+    NoRootCert,
+    /// The root certificate file cannot be read or holds no certificate. The text names the
+    /// file, which is a path of the configuration's own and never the URL.
+    #[error("the state store's root certificate is not usable: {0}")]
+    RootCert(String),
     /// The URL does not parse.
     #[error("the state store URL is not valid: {0}")]
     Invalid(String),
@@ -129,6 +160,8 @@ pub struct PostgresConfig {
     schema: String,
     max_connections: usize,
     supported: schema::Supported,
+    tls: Tls,
+    timeouts: Timeouts,
 }
 
 impl fmt::Debug for PostgresConfig {
@@ -137,6 +170,8 @@ impl fmt::Debug for PostgresConfig {
         f.debug_struct("PostgresConfig")
             .field("schema", &self.schema)
             .field("max_connections", &self.max_connections)
+            .field("tls", &self.tls.mode())
+            .field("timeouts", &self.timeouts)
             .finish_non_exhaustive()
     }
 }
@@ -149,11 +184,14 @@ impl PostgresConfig {
     /// commit head, so more would only wait.
     pub const DEFAULT_MAX_CONNECTIONS: usize = 8;
 
-    /// Reads a `postgres://` URL.
+    /// Reads a `postgres://` URL. Its `sslmode` takes every value libpq does but `allow`
+    /// ([`TlsMode`]; none is `disable`), and `sslrootcert` names the PEM file of the root
+    /// certificates a `verify` mode trusts. Its `connect_timeout`, `tcp_user_timeout` and
+    /// `keepalives_*` replace those of [`Timeouts::default`].
     ///
     /// # Errors
-    /// [`ConfigError`] when the URL is missing, is not a Postgres URL, names no host or
-    /// asks for TLS.
+    /// [`ConfigError`] when the URL is missing, is not a Postgres URL, names no host, asks
+    /// for a `verify` mode with no root certificate, or names one that cannot be read.
     pub fn parse(url: &str) -> Result<PostgresConfig, ConfigError> {
         let url = url.trim();
         if url.is_empty() {
@@ -162,24 +200,82 @@ impl PostgresConfig {
         if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
             return Err(ConfigError::NotPostgres);
         }
-        let mut pg: postgres::Config = url
+        let query = url::split(url)?;
+        let mut pg: postgres::Config = query
+            .url
             .parse()
             .map_err(|err: postgres::Error| ConfigError::Invalid(err.to_string()))?;
         if pg.get_hosts().is_empty() {
             return Err(ConfigError::NoHost);
         }
-        if !matches!(pg.get_ssl_mode(), SslMode::Disable | SslMode::Prefer) {
-            return Err(ConfigError::TlsUnsupported);
-        }
         if pg.get_application_name().is_none() {
             pg.application_name("kbf-state");
         }
+        pg.ssl_mode(query.mode.ssl_mode());
         Ok(PostgresConfig {
-            pg,
             schema: Self::DEFAULT_SCHEMA.to_owned(),
             max_connections: Self::DEFAULT_MAX_CONNECTIONS,
             supported: schema::Supported::this_build(),
+            tls: Tls::new(query.mode, query.root.as_deref())?,
+            timeouts: Timeouts::default().with_url(&pg, query.idle_set),
+            pg,
         })
+    }
+
+    /// Connects with TLS as `mode` says, trusting the certificates of the PEM file `root` when
+    /// one is given (a `verify` mode needs one; the others do not read it). It replaces what
+    /// the URL said.
+    ///
+    /// # Errors
+    /// [`ConfigError::NoRootCert`] for a `verify` mode without `root`, [`ConfigError::RootCert`]
+    /// when the file cannot be read or holds no certificate.
+    pub fn with_tls(
+        mut self,
+        mode: TlsMode,
+        root: Option<&Path>,
+    ) -> Result<PostgresConfig, ConfigError> {
+        self.tls = Tls::new(mode, root)?;
+        self.pg.ssl_mode(mode.ssl_mode());
+        Ok(self)
+    }
+
+    /// The TLS mode connections are made with.
+    #[must_use]
+    pub fn tls_mode(&self) -> TlsMode {
+        self.tls.mode()
+    }
+
+    /// Replaces every limit with those of `timeouts`. A limit the URL set stays set where
+    /// `timeouts` has `None` for it: the client cannot unset one.
+    #[must_use]
+    pub fn with_timeouts(mut self, timeouts: Timeouts) -> PostgresConfig {
+        self.timeouts = timeouts;
+        self
+    }
+
+    /// The limits connections are made with.
+    #[must_use]
+    pub fn timeouts(&self) -> Timeouts {
+        self.timeouts
+    }
+
+    /// How the store's own sessions, the writer lock's and the schema checks connect: TLS,
+    /// the network limits, and the server limits set on each new session.
+    fn dial(&self) -> Dial {
+        Dial {
+            session: self.timeouts.session_sql(),
+            ..self.dial_ddl()
+        }
+    }
+
+    /// How the migration runner connects: TLS and the network limits, and no server limits,
+    /// so a migration's DDL is not cut off.
+    fn dial_ddl(&self) -> Dial {
+        Dial {
+            pg: self.timeouts.network(self.pg.clone()),
+            tls: self.tls.clone(),
+            session: String::new(),
+        }
     }
 
     /// Keeps the store's tables in `schema`.
@@ -282,11 +378,23 @@ impl PostgresConfig {
 pub(crate) enum Fail {
     Pg(postgres::Error),
     Refused(String),
+    Tls(TlsError),
+    /// The writer generation row no longer holds the store's generation.
+    Fenced,
 }
 
 impl From<postgres::Error> for Fail {
     fn from(err: postgres::Error) -> Fail {
         Fail::Pg(err)
+    }
+}
+
+impl From<DialError> for Fail {
+    fn from(err: DialError) -> Fail {
+        match err {
+            DialError::Pg(err) => Fail::Pg(err),
+            DialError::Tls(err) => Fail::Tls(err),
+        }
     }
 }
 
@@ -298,15 +406,37 @@ impl Fail {
                 *code == SqlState::T_R_SERIALIZATION_FAILURE
                     || *code == SqlState::T_R_DEADLOCK_DETECTED
             }),
-            Fail::Refused(_) => false,
+            Fail::Refused(_) | Fail::Tls(_) | Fail::Fenced => false,
         }
     }
 
+    /// Whether the connection was gone: the call can be run again on a new one.
+    fn lost(&self) -> bool {
+        matches!(self, Fail::Pg(err) if connection_lost(err))
+    }
+
+    /// The failure of a call on an open store: a connection that was gone is
+    /// [`StoreError::Disconnected`].
     fn into_store(self) -> StoreError {
-        StoreError::Failed(match self {
-            Fail::Pg(err) => describe(&err),
-            Fail::Refused(why) => why,
-        })
+        self.into_error(true)
+    }
+
+    /// The failure to open a store or an extension's pool, or of an extension's call: every
+    /// failure but a fence is [`StoreError::Failed`].
+    fn into_failed(self) -> StoreError {
+        self.into_error(false)
+    }
+
+    fn into_error(self, call: bool) -> StoreError {
+        match self {
+            Fail::Pg(err) if call && connection_lost(&err) => {
+                StoreError::Disconnected(describe(&err))
+            }
+            Fail::Pg(err) => StoreError::Failed(describe(&err)),
+            Fail::Refused(why) => StoreError::Failed(why),
+            Fail::Tls(err) => StoreError::Failed(err.to_string()),
+            Fail::Fenced => StoreError::Fenced,
+        }
     }
 }
 
@@ -321,9 +451,9 @@ pub struct Claimed {
     pub commit: Commit,
 }
 
-/// A failed client call, as the store reports it.
+/// A failed client call, as an extension's call and the writer lock's check report it.
 fn failed(err: postgres::Error) -> StoreError {
-    Fail::Pg(err).into_store()
+    Fail::Pg(err).into_failed()
 }
 
 /// What the server said, which `Display` for the client's error leaves out ("db error").
@@ -358,12 +488,19 @@ fn versioned(row: &Row) -> Versioned {
     }
 }
 
+/// Called when a call is run again on a new connection, after the connection is made and
+/// before the call runs on it. Test support ([`PostgresStore::with_reconnect_hook`]).
+type Hook = Arc<dyn Fn() + Send + Sync>;
+
 /// The state store on Postgres.
 pub struct PostgresStore {
     pool: Pool,
     config: PostgresConfig,
     clock: Option<Arc<dyn Clock>>,
     flaw: Flaw,
+    /// The writer generation every commit checks ([`PostgresStore::fenced`]).
+    fence: Option<i64>,
+    reconnected: Option<Hook>,
     txns: AtomicU64,
     syncs: AtomicU64,
     retries: AtomicU64,
@@ -413,7 +550,7 @@ impl PostgresStore {
     /// [`OpenError`], as for [`PostgresStore::open`].
     pub fn try_open(config: &PostgresConfig) -> Result<PostgresStore, OpenError> {
         let pool = Pool::open(
-            config.pg.clone(),
+            config.dial(),
             config.schema.clone(),
             config.max_connections,
             config.supported,
@@ -424,6 +561,8 @@ impl PostgresStore {
             config: config.clone(),
             clock: None,
             flaw: Flaw::None,
+            fence: None,
+            reconnected: None,
             txns: AtomicU64::new(0),
             syncs: AtomicU64::new(0),
             retries: AtomicU64::new(0),
@@ -444,6 +583,26 @@ impl PostgresStore {
         self
     }
 
+    /// Makes every commit check that the store's writer generation is still `generation`, the
+    /// one [`crate::WriterLock::generation`] says the lock took, and refuse with
+    /// [`StoreError::Fenced`] (committing nothing) once another process took the lock. The
+    /// store of the writer-lock holder is opened so; a store opened without it checks nothing.
+    #[must_use]
+    pub fn fenced(mut self, generation: WriterGeneration) -> PostgresStore {
+        self.fence = Some(generation.get());
+        self
+    }
+
+    /// Calls `hook` each time a call is run again on a new connection, once the connection is
+    /// made and before the call runs. For tests: a hook that ends the new connection shows
+    /// what a second loss does.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_reconnect_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> PostgresStore {
+        self.reconnected = Some(hook);
+        self
+    }
+
     /// How many times a batch has been run again because the server rolled it back for a
     /// serialization failure or a deadlock. A writer that waits its turn for the commit
     /// head costs none.
@@ -458,14 +617,16 @@ impl PostgresStore {
         &self.config
     }
 
-    /// Opens the same database again with the same clock and flaw, dropping this
-    /// store's connections: a crash of the frontend, for a test.
+    /// Opens the same database again with the same clock, flaw, generation and hook,
+    /// dropping this store's connections: a crash of the frontend, for a test.
     ///
     /// # Errors
     /// [`StoreError`] as for [`PostgresStore::open`].
     pub fn reopen(self) -> Result<PostgresStore, StoreError> {
         let mut store = PostgresStore::open(&self.config)?.with_flaw(self.flaw);
         store.clock = self.clock;
+        store.fence = self.fence;
+        store.reconnected = self.reconnected;
         Ok(store)
     }
 
@@ -481,15 +642,41 @@ impl PostgresStore {
         }
     }
 
+    /// Runs `call` on a pooled session, and once more on a new connection when the first
+    /// failed because its connection was gone.
+    fn twice<'s, T>(
+        &'s self,
+        mut call: impl FnMut(Pooled<'s>) -> Result<T, Fail>,
+    ) -> Result<T, Fail> {
+        match self.pool.checkout().and_then(&mut call) {
+            Err(fail) if fail.lost() => self.reconnect().and_then(call),
+            done => done,
+        }
+    }
+
+    /// A session on a new connection, for a call run again: the idle sessions are dropped
+    /// first, since what ended one connection (a server restart, a failover, an
+    /// administrator) most likely ended them all.
+    fn reconnect(&self) -> Result<Pooled<'_>, Fail> {
+        self.pool.discard_idle();
+        let session = self.pool.checkout();
+        if let Some(hook) = &self.reconnected {
+            hook();
+        }
+        session
+    }
+
     fn read<T>(
         &self,
-        f: impl FnOnce(&mut Session) -> Result<T, postgres::Error>,
+        mut f: impl FnMut(&mut Session) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
-        let mut session = self.pool.checkout().map_err(Fail::into_store)?;
-        f(&mut session).map_err(|err| {
-            session.note_failure(&err);
-            failed(err)
+        self.twice(|mut session| {
+            f(&mut session).map_err(|err| {
+                session.note_failure(&err);
+                Fail::Pg(err)
+            })
         })
+        .map_err(Fail::into_store)
     }
 
     /// Runs `attempt` until it is not rolled back for a serialization failure.
@@ -508,9 +695,11 @@ impl PostgresStore {
         )))
     }
 
+    /// Opens a transaction. One whose connection was gone before it began is begun again on
+    /// a new connection; nothing was written on the old one.
     fn start(&self, level: Level) -> Result<Tx<'_>, Fail> {
-        let session = self.pool.checkout()?;
-        Tx::begin(session, level, self.over(), self.flaw)
+        let over = self.over();
+        self.twice(|session| Tx::begin(session, level, over, self.flaw, self.fence))
     }
 
     fn run_batch(&self, batch: &[Txn]) -> Result<(Tx<'_>, Vec<Result<Commit, Conflict>>), Fail> {

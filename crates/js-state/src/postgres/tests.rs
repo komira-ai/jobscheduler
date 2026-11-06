@@ -2,9 +2,10 @@ use postgres::config::Host;
 
 use std::time::Duration;
 
+use super::conn::Conn;
 use super::{
     ConfigError, Fail, MAX_ATTEMPTS, PostgresConfig, PostgresStore, Revision, Store, StoreError,
-    Txn, describe,
+    Timeouts, TlsMode, Txn, describe,
 };
 use crate::Cond;
 
@@ -102,10 +103,14 @@ fn each_way_a_url_is_refused_is_its_own_error() {
         refused("postgres://h/db?sslmode=bogus"),
         ConfigError::Invalid(_)
     ));
+    assert!(matches!(
+        refused("postgres://h/db?no_such_option=1"),
+        ConfigError::Invalid(_)
+    ));
     assert_eq!(refused("postgres:///db"), ConfigError::NoHost);
     assert_eq!(
-        refused("postgres://h/db?sslmode=require"),
-        ConfigError::TlsUnsupported
+        refused("postgres://h/db?sslmode=verify-full"),
+        ConfigError::NoRootCert
     );
     assert!(PostgresConfig::parse("postgresql://h/db?sslmode=prefer").is_ok());
 }
@@ -269,9 +274,11 @@ fn an_error_that_is_not_the_servers_is_described_with_its_cause() {
             client
                 .batch_execute("SELECT 1")
                 .err()
-                .filter(|e| e.as_db_error().is_none())
+                // The first call can meet the reset (an I/O error, with a cause); the calls
+                // after it find the connection closed, with none.
+                .filter(|e| e.as_db_error().is_none() && std::error::Error::source(e).is_none())
         })
-        .expect("the dead connection fails without a database error");
+        .expect("the dead connection fails without a database error or a cause");
     assert!(!describe(&closed).is_empty());
     assert_eq!(
         describe(&closed),
@@ -314,11 +321,11 @@ fn an_empty_batch_answers_nothing_without_a_connection() {
     });
     assert!(gone, "the killed sessions go");
     assert!(store.apply_batch(Vec::new()).expect("answers").is_empty());
-    // The same call with something in it needs a session: the dead one fails the
-    // call, and the next call runs on a new connection. (Both ends of the function
-    // run in this one test binary.)
+    // The same call with something in it needs a session: the dead one fails as the
+    // transaction begins, before anything is written, so the call is begun again on a new
+    // connection and commits. (Both ends of the function run in this one test binary.)
     let put = || vec![Txn::new().put("k", "v", Cond::Any)];
-    assert!(store.apply_batch(put()).is_err());
+    assert_eq!(store.apply_batch(put()).expect("commits").len(), 1);
     assert_eq!(store.apply_batch(put()).expect("commits").len(), 1);
 }
 
@@ -484,4 +491,77 @@ fn a_commit_the_server_ends_the_backend_in_does_not_return_its_session() {
         assert_ne!(after, before, "the dead session was handed out again");
         before = after;
     }
+}
+
+// Catches a server limit not set on the store's sessions (a statement, or a transaction a
+// stalled caller left open, would hold the commit head for as long as the server lets it),
+// limits not taken from the configuration, and limits set on the migration runner's session
+// (a long DDL would be cut off): what the server reports for a fresh session of each.
+#[test]
+fn a_fresh_session_carries_the_server_limits_of_its_configuration() {
+    let config = PostgresConfig::parse(&url())
+        .and_then(|config| config.with_schema("kbf_unit_limits"))
+        .expect("a usable URL and schema");
+    installed(&config);
+    let show = |store: &PostgresStore| -> (String, String) {
+        store
+            .read(|s| {
+                let statement = s.client.query_one("SHOW statement_timeout", &[])?.get(0);
+                let idle = s
+                    .client
+                    .query_one("SHOW idle_in_transaction_session_timeout", &[])?
+                    .get(0);
+                Ok((statement, idle))
+            })
+            .expect("the settings")
+    };
+    let store = PostgresStore::open(&config).expect("opens");
+    assert_eq!(show(&store), ("30s".to_owned(), "1min".to_owned()));
+    let other = config.clone().with_timeouts(Timeouts {
+        statement: Some(Duration::from_millis(1500)),
+        idle_in_transaction: None,
+        ..Timeouts::default()
+    });
+    let store = PostgresStore::open(&other).expect("opens");
+    assert_eq!(show(&store), ("1500ms".to_owned(), "0".to_owned()));
+    let mut runner = Conn::connect(&config.dial_ddl())
+        .map_err(|_| "no connection")
+        .expect("the runner connects");
+    let runners: String = runner
+        .query_one("SHOW statement_timeout", &[])
+        .expect("the setting")
+        .get(0);
+    let server: String = postgres::Client::connect(&url(), postgres::NoTls)
+        .and_then(|mut client| client.query_one("SHOW statement_timeout", &[]))
+        .expect("the server's own")
+        .get(0);
+    assert_eq!(runners, server, "the runner keeps the server's limit");
+}
+
+// Catches a TLS mode or limits set through the builders that are not kept (a configuration
+// file's `sslmode` would be ignored), a `verify` mode accepted with no root certificate, and
+// a URL's limits that are not the defaults when it names none.
+#[test]
+fn the_builders_set_the_tls_mode_and_the_limits() {
+    let config = PostgresConfig::parse("postgres://u@127.0.0.1/db").expect("parses");
+    assert_eq!(config.tls_mode(), TlsMode::Disable);
+    assert_eq!(config.timeouts(), Timeouts::default());
+    let required = config
+        .clone()
+        .with_tls(TlsMode::Require, None)
+        .expect("needs no root");
+    assert_eq!(required.tls_mode(), TlsMode::Require);
+    assert_eq!(
+        required.pg.get_ssl_mode(),
+        postgres::config::SslMode::Require
+    );
+    assert_eq!(
+        config.clone().with_tls(TlsMode::VerifyCa, None).err(),
+        Some(ConfigError::NoRootCert)
+    );
+    let limits = Timeouts {
+        statement: None,
+        ..Timeouts::default()
+    };
+    assert_eq!(config.with_timeouts(limits).timeouts(), limits);
 }
