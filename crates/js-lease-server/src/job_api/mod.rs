@@ -6,9 +6,10 @@
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
 //! file of its group serves it; the read group (`read.rs`) and the cancel group
 //! (`cancel.rs`) are served, and the submit and fleet groups' calls answer it until their
-//! contexts are given the server's handles (`submit::Ctx::served`, `fleet::Ctx::served`).
-//! The server builds the service from its state in one place, [`from_server`], and serves
-//! both transports on the port of `--job-listen` through [`port`] (`wiring.rs`).
+//! contexts are given the server's handles (`submit::Ctx::served`, `fleet::Ctx::served`), as
+//! the server's own service's are: it answers no call `UNIMPLEMENTED`. The server builds the
+//! service from its state in one place, [`from_server`], and serves both transports on the
+//! port of `--job-listen` through [`port`] (`wiring.rs`).
 //!
 //! # One file per call group
 //!
