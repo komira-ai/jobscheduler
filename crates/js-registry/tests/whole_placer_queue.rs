@@ -285,13 +285,15 @@ fn a_restored_mark_is_held_outside_until_its_request_is_presented() {
 /// Catches: a placer that keeps the whole-node queue but not the prepares (one that does not
 /// answer the prepare calls) taking the registry's rules with it: the failed-prepare count,
 /// the bars, the record a ready report clears, the deadline a hello restarts and the record a
-/// cancel forgets must stay the registry's. `r` is refused on `a` and counted here, is placed
-/// on `b` and reported ready, which clears its record; `b`'s agent restarts, and the lease
+/// cancel forgets must stay the registry's. The placer sets a quiet host aside for `r` each
+/// time. `r` is refused on `a` and counted here, is placed on `b` and reported ready, which clears its record; `b`'s agent restarts, and the lease
 /// fails at the registry's own deadline from that hello; the next try waits and is cancelled,
 /// which forgets the record.
 #[test]
 fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
-    let (mut w, _queue) = world(&["a", "b"]);
+    let (mut w, queue) = world(&["a", "b"]);
+    // The placer sets the quiet host aside for the request: its start commits there.
+    queue.answer(mark("r", "a", w.now().millis(), true));
     assert_eq!(w.ask(2, "r"), StartAck::Unknown);
     assert_eq!(w.lease_on("a"), Some(lease(2)));
     let refused = w.now();
@@ -302,6 +304,7 @@ fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
     let backoff = Duration::from_millis(DEFAULT_RESERVE_BACKOFF_MS);
     let until = Exclusion::Until(refused.plus(backoff));
     assert_eq!(kept.exclusions, BTreeMap::from([(host("a"), until)]));
+    queue.answer(mark("r", "b", w.now().millis(), true));
     assert_eq!(w.ask(3, "r"), StartAck::Unknown);
     assert_eq!(w.lease_on("b"), Some(lease(3)));
     w.ready("b", &lease(3));

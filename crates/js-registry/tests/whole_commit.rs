@@ -486,7 +486,9 @@ fn a_host_books_again_only_after_it_is_serving_and_empty_following_the_stop() {
 
 /// Asserts that a host that says hello during the restore starts the wait again (the
 /// new session has not been told: a start waits, booking nothing), and that a tainted host
-/// never books again, however quiet it is (no host could ever hold the request). It catches a restore cleared by a hello and a taint forgotten by it.
+/// never books again, however quiet it is: a new request finds no host that could ever hold
+/// it (`r`, already waiting, keeps its place on the wait list). It catches a restore cleared
+/// by a hello and a taint forgotten by it.
 #[test]
 fn a_hello_restarts_the_restore_and_a_taint_ends_booking() {
     over_both(|engine| {
@@ -507,8 +509,11 @@ fn a_hello_restarts_the_restore_and_a_taint_ends_booking() {
         for _ in 0..2 {
             beat_with(&fx, "a", epoch, |_| {});
             // The only host is tainted, so no host could ever be given whole.
+            let other = StartSpec::new(lease(3), whole_request(), &[whole()]).unwrap();
+            let other = other.with_request_id(RequestId::new("s").unwrap());
             let refused = StartAck::Refused(RefusalCode::NoCapableHost);
-            assert_eq!(provider.start(whole_spec(2)), refused);
+            assert_eq!(provider.start(other), refused);
+            assert!(provider.booked().is_empty());
         }
     });
 }
