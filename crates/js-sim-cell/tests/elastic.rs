@@ -443,7 +443,9 @@ fn a_statement_of_the_scenarios_own_fails_the_seed_with_what_it_found() {
 #[test]
 fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
     // The first item runs past the end, so the second item can only be met by a second
-    // machine.
+    // machine. The horizon leaves the restarted scaler its wait for the hosts it restored
+    // (a machine of before the restart covers demand while it is awaited, up to the
+    // pool's boot timeout of 15 minutes), the boot of the second machine, and its hello.
     let run = Duration::from_secs(3_000);
     let mut cell = cell_running("a_restarted_elastic_server", 1, small_pool(), run);
     cell.run_until(LOOK_AT).expect("no invariant fails");
@@ -455,7 +457,7 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
     let after = cell.cloud().expect("the same pool");
     assert!(after.calls().starts_with(&before), "the record is kept");
     cell.submit(&Work::whole_host(LONG_RUN));
-    cell.run_until(FarmTime::from_millis(1_200_000))
+    cell.run_until(FarmTime::from_millis(2_400_000))
         .expect("no invariant fails");
     let calls = cell.cloud().expect("the same pool").calls();
     let accepted: Vec<String> = calls
@@ -470,7 +472,18 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
         })
         .collect();
     let distinct: std::collections::BTreeSet<&String> = accepted.iter().collect();
-    assert_eq!(distinct.len(), 2, "{accepted:?}");
+    let tail = |cell: &mut Cell| {
+        let lines = cell.trace_lines().expect("lines are kept");
+        let cloud = lines.iter().filter(|line| line.contains(" cell c"));
+        let kept: Vec<String> = cloud.cloned().collect();
+        kept[kept.len().saturating_sub(40)..].join("\n")
+    };
+    if distinct.len() != 2 {
+        panic!(
+            "acquires {accepted:?}; last cloud and client lines:\n{}",
+            tail(&mut cell)
+        );
+    }
     assert_eq!(cloud.fake().launched(), 2);
     assert_eq!(cloud.fake().running().len(), 2);
     assert!(
