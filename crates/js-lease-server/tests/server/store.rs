@@ -271,8 +271,9 @@ async fn a_store_with_an_elastic_pool_refuses_with_the_not_available_message() {
     assert!(free.is_ok(), "the refused start released the lock");
 }
 
-/// Asserts that a SQLite store that cannot be made owner-only and opened (a directory in its
-/// place) is refused at start naming `--store`, after the lock, which the refusal releases.
+/// Asserts that a SQLite store that cannot be made owner-only (a directory in its place), or
+/// that is not a state store (a text file), is refused at start naming `--store`, after the
+/// lock, which the refusal releases.
 #[tokio::test]
 async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
     let scratch = Scratch::new("store_sqlite_dir");
@@ -288,6 +289,24 @@ async fn a_sqlite_store_that_cannot_be_opened_is_refused() {
         refused
             .reason()
             .starts_with(&format!("the store could not be opened: {db}: ")),
+        "{refused}"
+    );
+    let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
+    assert!(free.is_ok(), "the refused start released the lock");
+    drop(free);
+
+    // A file that can be made owner-only but is not a state store: refused by the open.
+    let scratch = Scratch::new("store_sqlite_not_a_store");
+    scratch.write("state.db", "not a state store\n", 0o600);
+    let args = sqlite_args_over(&scratch, &scratch);
+    let (_ticks, ticker) = js_lease_server::channel_ticker();
+    let refused = js_lease_server::start(config(args).unwrap(), clock(), ticker).await;
+    let refused = refused.err().unwrap();
+    assert_eq!(refused.flag(), "--store");
+    assert!(
+        refused
+            .reason()
+            .starts_with("the store could not be opened: "),
         "{refused}"
     );
     let free = WriterLock::acquire(&WriterTarget::Sqlite(sqlite_db(&scratch)));
