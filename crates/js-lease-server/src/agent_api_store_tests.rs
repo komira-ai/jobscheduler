@@ -71,7 +71,20 @@ struct Rig {
     dir: TestDir,
 }
 
+/// A process-wide subscriber that takes every event and writes it nowhere, so the code of
+/// each log line on a failure path runs, on whichever thread reaches it.
+fn quiet_logs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .try_init();
+    });
+}
+
 fn rig(name: &str) -> Rig {
+    quiet_logs();
     let root = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_store");
     let clock = ManualClock::new(Timestamp::from_millis(START_MS));
     over(TestDir::under(root, name), fake(), clock)

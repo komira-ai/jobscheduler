@@ -223,8 +223,7 @@ async fn serve_hello(
     // store does not hold it yet, it is committed before the registry is asked: with the use
     // of the token in one transaction, or alone for a pool token. A known host's binding is
     // held already, and nothing is written for it.
-    let host = HostId::new(&hello.host_id);
-    let host = host.map_err(|err| Refused::of(&Refusal::BadHostId(err)))?;
+    let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;
     let change = agents.hello_change(&host, &hello, &who);
     let writes = change.writes.clone();
     // A one-time token registers the host that names its instance, and only that host
@@ -337,7 +336,7 @@ async fn heartbeat(
         })?;
     let reply = agents.registry.heartbeat(&heartbeat, &who);
     drop(taint);
-    let mut reply = reply.map_err(|refusal| Refused::of(&refusal))?;
+    let mut reply = reply?;
     // A start refused as host-tainted taints the host too, with nothing to acknowledge
     // there: the file is made current and a failure is retried by the next tick.
     let refused = heartbeat
@@ -586,6 +585,12 @@ impl Refused {
             field: refusal.field(),
             ..Self::new(status, code)
         }
+    }
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Self {
+        Self::of(&refusal)
     }
 }
 
