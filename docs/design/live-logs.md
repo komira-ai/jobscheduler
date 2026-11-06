@@ -561,7 +561,8 @@ same host prefix. Checking grants in tierstore, and testing against the real tie
 - **Presigned read URLs.** `GetLogs` returns the bytes through the service. An alternative is to return presigned read URLs of the
   objects, so the bytes go straight from the store to the client; it moves the work off the server and hands a client a URL to the
   store. Not chosen for v1.
-- **The generated CLI's follow loop.** The `js` CLI is generated from the service definition; a `logs --follow` that calls `GetLogs`
-  again with `next_offset` until `eof`, and backs off on `too-many-follows`, is a hand-written loop the generator does not give.
+- **The CLI's follow loop.** The `js` CLI is generated from the service definition, so the loop that calls `GetLogs` again with
+  `next_offset` until `eof`, and backs off on `too-many-follows`, is written by hand: `js job follow` (and `js job run`, which follows
+  both streams), over `js_client::jobs::follow_logs`. `js job logs --follow true` stays the one generated call.
 - **Per-chunk timestamps are lost in the final file.** A final has no first-byte times; a reader of an ended job gets none. Keeping them
   (an index object beside the final) is later work if a client needs times after the end.

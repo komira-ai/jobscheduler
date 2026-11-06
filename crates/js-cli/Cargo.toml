@@ -22,7 +22,8 @@ prost-reflect = { workspace = true, features = ["serde", "text-format"] }
 rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "signal"] }
+# `macros` and `sync`: `job run` waits and follows at once, and reads the signals as it waits.
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync"] }
 tonic.workspace = true
 
 [dev-dependencies]

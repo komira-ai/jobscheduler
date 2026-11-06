@@ -12,6 +12,8 @@ mod fake_jobs;
 mod job_conformance;
 #[cfg(feature = "jobs")]
 mod jobs;
+#[cfg(feature = "jobs")]
+mod loops;
 mod run;
 mod server_url;
 mod support;
