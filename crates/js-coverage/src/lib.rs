@@ -25,6 +25,7 @@
 
 pub mod base;
 pub mod baseline;
+pub mod check;
 pub mod lcov;
 pub mod ratchet;
 pub mod tighten;

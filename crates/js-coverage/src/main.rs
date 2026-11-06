@@ -8,15 +8,16 @@
 //! measurement (`tighten`), 1 when the ratchet fails or `tighten` refuses, 2 when an
 //! input cannot be read or parsed (and for usage errors, as clap reports them).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use js_coverage::baseline::{self, Baseline, Entry};
-use js_coverage::{CrateCoverage, lcov, ratchet, tighten, uncovered};
+use js_coverage::baseline::{self, Baseline};
+use js_coverage::check::{self, Measured};
+use js_coverage::{ratchet, tighten};
 
 /// Per-crate coverage table and ratchet. With no subcommand, the flags are `check`'s.
 #[derive(Debug, Parser)]
@@ -147,23 +148,12 @@ fn workspace(root: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
         .map_err(|e| format!("list crates under {}: {e}", root.display()).into())
 }
 
-/// What the tracefile `lcov` measured: the workspace's crates and each one's coverage,
-/// and the records it was summed from with the root their paths are under.
-struct Measured {
-    crates: BTreeMap<String, CrateCoverage>,
-    files: Vec<lcov::FileRecord>,
-    sources: PathBuf,
-}
-
-fn measure(lcov: &Path, root: &Path) -> Result<Measured, Box<dyn Error>> {
-    let files = lcov::parse(&read(lcov)?).map_err(|e| format!("{}: {e}", lcov.display()))?;
+/// The tracefile `lcov` measured against the workspace at `root`, and the root as the
+/// tracefile spells it.
+fn measure(lcov: &Path, root: &Path) -> Result<(Measured, PathBuf), Box<dyn Error>> {
     let sources = source_root(root)?;
-    let crates = ratchet::by_crate(&sources, &workspace(root)?, &files)?;
-    Ok(Measured {
-        crates,
-        files,
-        sources,
-    })
+    let measured = Measured::from_tracefile(&read(lcov)?, lcov, &sources, &workspace(root)?)?;
+    Ok((measured, sources))
 }
 
 /// `root` as the tracefile spells its source paths. `cargo llvm-cov` writes them
@@ -178,46 +168,23 @@ fn source_root(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
         .map_err(|e| format!("resolve --root {}: {e}", root.display()).into())
 }
 
-fn entries(measured: &BTreeMap<String, CrateCoverage>) -> Baseline {
-    measured
-        .iter()
-        .map(|(k, c)| (k.clone(), Entry::of(*c)))
-        .collect()
-}
-
 /// Prints the table (and appends it to `--summary-file`), and on a failure the lines
 /// and branches of each crate that misses more and what `tighten` would do about it;
 /// returns whether the ratchet passed.
 fn check(args: &CheckArgs) -> Result<bool, Box<dyn Error>> {
-    let Measured {
-        crates: measured,
-        files,
-        sources,
-    } = measure(&args.lcov, &args.root)?;
-    let now = entries(&measured);
+    let (measured, sources) = measure(&args.lcov, &args.root)?;
     // Written before the check, so a failing run still leaves the file to copy.
     if let Some(path) = &args.write_baseline {
-        std::fs::write(path, baseline::render(&now))
+        std::fs::write(path, baseline::render(&measured.entries()))
             .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     let (_, recorded) = read_baseline(&args.baseline)?;
-    let rows = ratchet::rows(&measured, &recorded);
-    let mut report = ratchet::render(&rows);
-    report.push_str(&uncovered::render(&sources, &rows, &files, uncovered::CAP));
-    let pass = !rows.iter().any(|r| r.status().fails());
-    if !pass {
-        report.push('\n');
-        report.push_str(&tighten::check_advice(
-            &recorded,
-            &now,
-            &tighten_command(args),
-        ));
-    }
-    print!("{report}");
+    let report = check::report(&measured, &sources, &recorded, &tighten_command(args));
+    print!("{}", report.text);
     if let Some(path) = &args.summary_file {
-        append(path, &report).map_err(|e| format!("append to {}: {e}", path.display()))?;
+        append(path, &report.text).map_err(|e| format!("append to {}: {e}", path.display()))?;
     }
-    Ok(pass)
+    Ok(report.pass)
 }
 
 /// Quotes `s` for a POSIX shell when it holds anything but plain path characters.
@@ -296,7 +263,7 @@ fn run_tighten(args: &TightenArgs) -> Result<bool, Box<dyn Error>> {
         (None, lcov) => {
             // clap requires one of the two.
             let lcov = lcov.as_deref().unwrap_or(Path::new(""));
-            entries(&measure(lcov, &args.root)?.crates)
+            measure(lcov, &args.root)?.0.entries()
         }
     };
     let workspace = workspace(&args.root)?;
