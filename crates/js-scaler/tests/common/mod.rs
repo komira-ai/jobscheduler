@@ -145,6 +145,7 @@ pub fn pool(settings: Settings) -> PoolInput {
         offers: vec![offer("a10", 60)],
         held: Some(Vec::new()),
         unresolved: Vec::new(),
+        catalog_refreshed: false,
     }
 }
 

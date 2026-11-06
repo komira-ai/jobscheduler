@@ -8,6 +8,7 @@ mod brake;
 mod complete;
 mod disk;
 mod duties;
+mod failover;
 mod fakes;
 mod launcher;
 mod lifetime;

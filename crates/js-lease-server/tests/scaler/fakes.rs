@@ -2,7 +2,7 @@
 //! something, keeps a provider that holds machines, and keeps a registry whose marks move
 //! the way the real one's do. A test changes what the fake answers and reads its log.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -69,6 +69,11 @@ pub struct World {
     pub gate: Option<Arc<Gate>>,
     /// The lifetime each acquire carried, in the order the acquires were made.
     pub lifetimes: Vec<Option<Duration>>,
+    /// The answers the next acquires are given, in order; once they are used up an acquire
+    /// is accepted and the machine is held.
+    pub acquire_answers: VecDeque<Acquired>,
+    /// The count of completed catalog fetches the provider reports.
+    pub catalog_fetches: u64,
     /// The notice streams the provider hands out, one per ask, in order; once none is
     /// left it answers that it sends no notices.
     pub notices: Vec<EventStream>,
@@ -154,6 +159,10 @@ impl Effects for Handle {
         self.world().unresolved.clone()
     }
 
+    fn catalog_fetches(&self) -> u64 {
+        self.world().catalog_fetches
+    }
+
     fn is_gone(&self, id: &HostRef) -> bool {
         let mut world = self.world();
         world.gone_asked.push(id.as_str().to_owned());
@@ -214,6 +223,9 @@ impl Effects for Handle {
         let entry = format!("acquire:{}:{}", plan.name, token.expose());
         world.log.push(entry);
         world.lifetimes.push(plan.lifetime);
+        if let Some(answer) = world.acquire_answers.pop_front() {
+            return answer;
+        }
         let held = Held {
             id: HostRef(format!("i-{}", world.machines.len() + 1)),
             acquire: plan.acquire.as_str().to_owned(),
@@ -389,6 +401,8 @@ pub fn new_world() -> Arc<Mutex<World>> {
         release_answer: None,
         gate: None,
         lifetimes: Vec::new(),
+        acquire_answers: VecDeque::new(),
+        catalog_fetches: 0,
         notices: Vec::new(),
         notices_asked: 0,
     }))

@@ -57,6 +57,14 @@ pub trait Effects: Send + Sync {
     /// The acquire ids the provider holds an unresolved call for.
     fn unresolved(&self) -> Vec<AcquireId>;
 
+    /// How many fetches of the provider's catalog have completed in this process
+    /// ([`crate::Catalogs::fetches`]). A count that moved since the last tick tells the
+    /// scaler a catalog refresh completed, which ends the `acquire_retry` wait of a request
+    /// every offer was refused for. Zero by default: no catalog is fetched.
+    fn catalog_fetches(&self) -> u64 {
+        0
+    }
+
     /// Whether a read of the machine `id` by id says the provider no longer has it.
     fn is_gone(&self, id: &HostRef) -> bool;
 

@@ -87,8 +87,9 @@ use js_scaler::{
     AcquireResult, Action, Budgets, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
     Settings, State, launchable, step,
 };
+use js_sched::failover::Refused;
 use js_types::ExecMode;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::util::blocking;
@@ -130,6 +131,9 @@ struct Memory {
     /// The alerts that hold now, by key, with their text.
     alerts: BTreeMap<String, String>,
     save_errors: u64,
+    /// The count of completed catalog fetches the last tick saw
+    /// ([`Effects::catalog_fetches`]).
+    catalog_fetches: u64,
 }
 
 /// What a tick's calls answered, for the next tick's input.
@@ -230,6 +234,7 @@ impl Scaler {
             unremoved_failed: false,
             alerts: BTreeMap::new(),
             save_errors: 0,
+            catalog_fetches: 0,
         };
         let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
         let core = Core {
@@ -421,7 +426,13 @@ impl Core {
         work.unremoved_failed = false;
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
+        let fetches = self.effects.catalog_fetches();
+        let refreshed = fetches != work.catalog_fetches;
+        work.catalog_fetches = fetches;
         let mut input = self.input(&work, now);
+        for pool in &mut input.pools {
+            pool.catalog_refreshed = refreshed;
+        }
         let asked = std::mem::take(
             &mut *self
                 .brake_resets
@@ -538,6 +549,9 @@ impl Core {
         for name in &next.silent_released {
             warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
+        for refused in &next.refusals {
+            log_refusal(refused);
+        }
         let pending = (&memory.unrevoked, &memory.unremoved);
         let found = alert::alerts((next, input), now, &self.settings, pending);
         for (key, message) in &found {
@@ -601,6 +615,7 @@ impl Core {
                 offers,
                 held,
                 unresolved: self.effects.unresolved(),
+                catalog_refreshed: false,
             }],
             waiting: waiting.into_iter().map(view::waiting).collect(),
             hosts: hosts.collect(),
@@ -698,4 +713,30 @@ fn tail(bytes: &[u8; 32]) -> [u8; 16] {
     let mut out = [0; 16];
     out.copy_from_slice(&bytes[16..]);
     out
+}
+
+/// The log line of one refused acquire: the provider, offer and zone and the code, and for
+/// `quota` the instance type and region passed over and until when (milliseconds since the
+/// epoch, as the scaler's clock reads them).
+fn log_refusal(refused: &Refused) {
+    let zone = refused.zone.as_deref().unwrap_or("-");
+    match &refused.passed_over {
+        Some((over, until)) => info!(
+            provider = %refused.provider,
+            offer = %refused.offer,
+            zone = %zone,
+            code = ?refused.code,
+            instance_type = %over.instance_type,
+            region = %over.region.as_deref().unwrap_or("-"),
+            until_ms = until.millis(),
+            "acquire refused: the instance type is passed over in the region until the time given"
+        ),
+        None => info!(
+            provider = %refused.provider,
+            offer = %refused.offer,
+            zone = %zone,
+            code = ?refused.code,
+            "acquire refused: the next zone, offer or provider is asked"
+        ),
+    }
 }
