@@ -81,10 +81,12 @@ impl Runs {
         self.changed.notify_all();
     }
 
-    /// Records how `pid` ended, if the table holds it.
+    /// Records how `pid` ended, if the table holds it as running. Only a running entry
+    /// matches: the pid of a run that ended may since be another lease's process.
     pub(super) fn ended(&self, pid: u32, how: Ended) {
         let mut table = self.lock();
-        if let Some(entry) = table.values_mut().find(|entry| entry.pid == pid) {
+        let running = table.values_mut().find(|entry| running(entry, pid));
+        if let Some(entry) = running {
             entry.ended = Some(how);
         }
         drop(table);
@@ -95,6 +97,11 @@ impl Runs {
     pub(super) fn forget(&self, lease: LeaseId) {
         self.lock().remove(&lease);
     }
+}
+
+/// Whether `entry` is the run of `pid` and has not ended.
+fn running(entry: &Entry, pid: u32) -> bool {
+    entry.pid == pid && entry.ended.is_none()
 }
 
 /// How `status` ended, as a reply tells it.
@@ -130,11 +137,11 @@ impl Helper {
     pub(super) fn hold_deadline(&self, pid: u32) {
         let mut table = self.runs.lock();
         loop {
-            let Some((lease, entry)) = table.iter().find(|(_, entry)| entry.pid == pid) else {
+            let Some((lease, entry)) = table.iter().find(|(_, entry)| running(entry, pid)) else {
                 return;
             };
             let (lease, entry) = (*lease, *entry);
-            let (None, Some(deadline)) = (entry.ended, entry.deadline) else {
+            let Some(deadline) = entry.deadline else {
                 return;
             };
             let left = deadline
@@ -193,19 +200,15 @@ impl Helper {
     /// has no run of the lease (any more).
     pub fn wait_watched(&self, lease: &str) -> Option<Ended> {
         let lease = parse_lease(lease).ok()?;
-        let mut table = self.runs.lock();
-        loop {
-            match table.get(&lease)?.ended {
-                Some(how) => return Some(how),
-                None => {
-                    table = self
-                        .runs
-                        .changed
-                        .wait(table)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
-            }
-        }
+        let running = |table: &mut BTreeMap<LeaseId, Entry>| {
+            table.get(&lease).is_some_and(|entry| entry.ended.is_none())
+        };
+        let table = self.runs.lock();
+        let waited = self.runs.changed.wait_while(table, running);
+        waited
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&lease)?
+            .ended
     }
 
     /// `stop <lease> <grace>`: see the module documentation.

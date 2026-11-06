@@ -240,3 +240,35 @@ fn a_run_with_a_deadline_is_held_to_it_and_its_end_recorded() {
     assert_eq!(rig.helper.wait_watched("7.1"), Some((Some(0), None)));
     assert!(!kill_all_logged(&rig));
 }
+
+/// Catches: the end of a run recorded on another lease's entry that holds the same pid from
+/// an earlier, ended run (pids are reused), which would leave the new run's `watch` and
+/// `stop` waiting for an end already reported.
+#[test]
+fn an_end_is_recorded_on_the_running_entry_of_its_pid() {
+    let rig = rig("pid-reuse", 3);
+    let (first, second) = (parse_lease("7.1").unwrap(), parse_lease("7.2").unwrap());
+    rig.helper.runs.started(first, PID, None);
+    rig.helper.runs.ended(PID, (Some(0), None));
+    rig.helper.runs.started(second, PID, None);
+    rig.helper.runs.ended(PID, (Some(5), None));
+    assert_eq!(rig.helper.wait_watched("7.2"), Some((Some(5), None)));
+    assert_eq!(rig.helper.wait_watched("7.1"), Some((Some(0), None)));
+}
+
+/// Catches: the end of a process the table does not hold (a `role-run`'s) recorded on some
+/// entry, and a `watch` that answers before the run it watches has ended.
+#[test]
+fn a_watch_waits_for_the_end_and_an_unknown_end_changes_nothing() {
+    let rig = rig("watch-wait", 2);
+    let lease = parse_lease("7.1").unwrap();
+    rig.helper.runs.ended(PID, (Some(1), None));
+    rig.helper.runs.started(lease, PID, None);
+    rig.helper.runs.ended(PID + 1, (Some(1), None));
+    std::thread::scope(|scope| {
+        let watching = scope.spawn(|| rig.helper.wait_watched("7.1"));
+        // The watch may be waiting already or not yet: either way it sees this end.
+        rig.helper.runs.ended(PID, (None, Some(15)));
+        assert_eq!(watching.join().unwrap(), Some((None, Some(15))));
+    });
+}

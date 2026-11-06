@@ -54,23 +54,38 @@ fn id_of(path: &Path) -> Option<(u64, u64)> {
 
 /// Asserts that a start with two inputs (a directory and a single file, one below a `dest`
 /// with a part that is not there) finds both below `exec/` with their contents before the
-/// helper's `run`, each directory `0500` and each file `0400`, and that the profile denies
-/// writes below each `dest`. It catches inputs that are not staged, staged after the program
-/// starts, or left writable to the job.
+/// helper's `run`, each directory `0500` and each file `0400` (`0500` for an executable one),
+/// and that the profile denies writes below each `dest`. It catches inputs that are not
+/// staged, staged after the program starts, left writable to the job, or a tool among them
+/// that can no longer be run.
 #[test]
 fn two_inputs_are_staged_into_exec_read_only() {
     let mut rig = Rig::new("inputs");
     let tree = source(&rig, "src-a", "x", "one");
     let single = source(&rig, "src-b", "data.txt", "two").join("data.txt");
+    let tool = tree.join("tool");
+    fs::write(&tool, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     let mut spec = rig.spec("r1", native("/bin/true", &[]));
-    spec.mounts = vec![input(&tree, "in/a"), input(&single, "two.txt")];
+    let third = source(&rig, "src-c", "y", "three");
+    spec.mounts = vec![
+        input(&tree, "in/a"),
+        input(&single, "two.txt"),
+        input(&third, "in/c"),
+    ];
     rig.rt.create_and_start(&spec).unwrap();
     let exec = rig.fake.home_of("7.0").join("exec");
     assert_eq!(fs::read_to_string(exec.join("in/a/x")).unwrap(), "one");
     assert_eq!(fs::read_to_string(exec.join("two.txt")).unwrap(), "two");
+    assert_eq!(fs::read_to_string(exec.join("in/c/y")).unwrap(), "three");
     assert_eq!(mode(&exec.join("in")), 0o700);
     assert_eq!(mode(&exec.join("in/a")), 0o500);
     assert_eq!(mode(&exec.join("in/a/x")), 0o400);
+    assert_eq!(
+        mode(&exec.join("in/a/tool")),
+        0o500,
+        "an executable stays executable"
+    );
     assert_eq!(mode(&exec.join("two.txt")), 0o400);
     let run = rig.fake.run_of("7.0");
     let parsed = parse(&run.argv);
@@ -206,14 +221,18 @@ fn a_cwd_that_is_not_a_directory_fails_the_start() {
 
 /// Asserts that an input that cannot be staged fails the start before `run`, naming the
 /// input, and the user is removed: a source that is not there, two inputs at one `dest`, and
-/// a source that is neither a file, a directory nor a link (a socket). It catches a run that
+/// a source that is neither a file, a directory nor a link (a FIFO). It catches a run that
 /// starts without an input it named.
 #[test]
 fn an_input_that_cannot_be_staged_fails_the_start() {
     let mut rig = Rig::new("inputs-bad");
     let tree = source(&rig, "src", "x", "one");
-    let socket = rig.dir.path("sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let fifo = rig.dir.path("fifo");
+    let (kind, mode) = (
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    );
+    rustix::fs::mknodat(rustix::fs::CWD, &fifo, kind, mode, 0).unwrap();
     let cases = [
         (
             vec![input(&rig.dir.path("missing"), "in")],
@@ -223,7 +242,7 @@ fn an_input_that_cannot_be_staged_fails_the_start() {
             vec![input(&tree, "twice"), input(&tree, "twice")],
             "an input: twice: ",
         ),
-        (vec![input(&socket, "s")], "an input: s: "),
+        (vec![input(&fifo, "s")], "an input: s: "),
     ];
     for (n, (inputs, said)) in cases.into_iter().enumerate() {
         let mut spec = rig.spec(&format!("r{n}"), native("/bin/true", &[]));
@@ -299,4 +318,23 @@ fn the_lifecycle_resolves_a_mount_input_below_its_root() {
     let verbs = h.fake.verbs();
     assert!(!verbs.contains(&"user-create 7.1".to_owned()), "{verbs:?}");
     unlock(h.fake.homes());
+}
+
+/// Asserts that a `cwd` whose part cannot even be looked up (a name longer than the file
+/// system allows) fails the start before `run`, naming the `cwd`. It catches a lookup error
+/// taken for a part that is not there, which would be made.
+#[test]
+fn a_cwd_that_cannot_be_looked_up_fails_the_start() {
+    let mut rig = Rig::new("cwd-long");
+    let mut body = native("/bin/true", &[]);
+    body.cwd = "a".repeat(300);
+    let error = rig.rt.create_and_start(&rig.spec("r1", body)).unwrap_err();
+    let said = format!("native.cwd {:?}: ", "a".repeat(300));
+    assert!(error.0.starts_with(&said), "{}", error.0);
+    let runs = rig
+        .fake
+        .verbs()
+        .into_iter()
+        .filter(|verb| verb.starts_with("run"));
+    assert_eq!(runs.count(), 0);
 }

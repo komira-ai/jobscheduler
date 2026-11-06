@@ -96,6 +96,9 @@ struct State {
     /// Whether the fake is a helper from before `watch`, `stop` and the deadline: it reads
     /// each request as such a helper does, and refuses one it cannot read.
     old: bool,
+    /// A journal a `run` turns into a directory before it starts, so nothing can be added
+    /// to it any more.
+    break_at_run: Option<PathBuf>,
 }
 
 struct Shared {
@@ -279,6 +282,12 @@ impl FakeHelper {
         self.shared.lock().signals.clone()
     }
 
+    /// From now on a `run` turns the journal at `path` into a directory first: the runtime
+    /// cannot record the run.
+    pub fn break_journal_at_run(&self, path: &Path) {
+        self.shared.lock().break_at_run = Some(path.to_path_buf());
+    }
+
     /// From now on the fake is a helper from before `watch`, `stop` and the deadline.
     pub fn be_old(&self) {
         self.shared.lock().old = true;
@@ -436,6 +445,10 @@ fn run(
     }
     {
         let mut state = shared.lock();
+        if let Some(journal) = state.break_at_run.take() {
+            fs::remove_file(&journal).unwrap();
+            fs::create_dir(&journal).unwrap();
+        }
         let pid = 4242 + u32::try_from(state.pids.len()).unwrap();
         state.pids.insert(lease.clone(), pid);
         if let Some(after) = deadline_ms {

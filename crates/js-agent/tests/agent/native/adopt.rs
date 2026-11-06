@@ -279,3 +279,19 @@ fn a_restarted_lifecycle_adopts_a_native_job_and_reports_its_result() {
         fake.verbs()
     );
 }
+
+/// Asserts that a run whose record cannot be written still runs: the record costs only the
+/// adoption (the lease, written before, is ended by the next process's reclaim). It catches
+/// a started run failed, and its user left behind, because a record could not be written.
+#[test]
+fn a_run_whose_record_cannot_be_written_still_runs() {
+    let mut rig = Rig::new("adopt-norecord");
+    let journal = rig.dir.path("native-leases");
+    rig.fake.break_journal_at_run(&journal);
+    let id = rig.start("r1", "/bin/true", &[]);
+    assert_eq!(rig.rt.poll(&id).unwrap(), Status::Running);
+    assert!(
+        Journal::new(&journal).runs().is_err(),
+        "the journal is a directory now"
+    );
+}

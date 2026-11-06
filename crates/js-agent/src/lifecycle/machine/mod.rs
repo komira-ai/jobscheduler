@@ -20,8 +20,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use js_agent_wire::{
-    Ack, Command, HeartbeatReply, HeldRun, InputRef, Isolation, JobSpec, Mount, NativeSpec,
-    Outcome, ResultAck, RunResult, Taint, limits, refusal,
+    Ack, Command, HeartbeatReply, HeldRun, Isolation, JobSpec, NativeSpec, Outcome, ResultAck,
+    RunResult, Taint, limits, refusal,
 };
 
 pub use self::exclusive::{Quiet, Restored};
@@ -514,32 +514,12 @@ impl Lifecycle {
         // A native body's mount inputs are resolved as mounts are, read-only, each with its
         // `dest` as its target: the native runtime stages them into the run directory.
         let inputs = body.iter().flat_map(|native| &native.inputs);
-        let staged = inputs.filter_map(|input| match input {
-            InputRef::Mount {
-                root_name,
-                rel,
-                dest,
-            } => Some((
-                Mount {
-                    root_name: root_name.clone(),
-                    rel: rel.clone(),
-                    ro: true,
-                },
-                dest,
-            )),
-            InputRef::Stage { .. } => None,
-        });
+        let staged = inputs.filter_map(|input| self.config.mounts.resolve_input(input));
         let mounts = spec
             .mounts
             .iter()
             .map(|mount| self.config.mounts.resolve(mount))
-            .chain(staged.map(|(mount, dest)| {
-                let resolved = self.config.mounts.resolve(&mount)?;
-                Ok(ResolvedMount {
-                    target: dest.clone(),
-                    ..resolved
-                })
-            }))
+            .chain(staged)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
         // A job above the runtime's ceiling is refused, never run with less; it costs no call.

@@ -12,7 +12,8 @@
 //! The inputs of a native run are staged the same way, into `exec/`: each `mount` input,
 //! which the lifecycle resolved below one of the agent's mount roots (`RunSpec::mounts`, its
 //! `target` the input's `dest`), is copied to `exec/<dest>` while no process of the user
-//! exists, every directory `0500` and every file `0400`, given to the user; a link is copied
+//! exists, every directory `0500` and every file `0400` (`0500` when the source is
+//! executable), given to the user; a link is copied
 //! as the link it is. The profile denies writes below each `dest`, as it does below the files
 //! directory, so the job reads its inputs and cannot change them. A part of `dest` above the
 //! input that is not there is made `0700`, the user's, as `exec/` is.
@@ -80,17 +81,16 @@ pub(super) fn stage_inputs(
     for input in inputs {
         let dest = input_dest(exec, input);
         let named = |why: io::Error| io::Error::new(why.kind(), format!("{}: {why}", input.target));
-        if let Some(parent) = dest.parent() {
-            make_parents(exec, parent, make).map_err(named)?;
-        }
+        let above = Path::new(&input.target).parent().unwrap_or(Path::new(""));
+        make_parents(exec, above, make).map_err(named)?;
         copy_tree(&input.host, &dest, (uid, gid), chown).map_err(named)?;
     }
     Ok(())
 }
 
-/// Makes every directory from `exec` (which exists) down to `dir` that is not there.
-fn make_parents(exec: &Path, dir: &Path, make: MakeDir<'_>) -> io::Result<()> {
-    let below = dir.strip_prefix(exec).map_err(io::Error::other)?;
+/// Makes every directory of `below` (a path relative to `exec`, which exists) that is not
+/// there.
+fn make_parents(exec: &Path, below: &Path, make: MakeDir<'_>) -> io::Result<()> {
     let mut at = exec.to_path_buf();
     for part in below.components() {
         at.push(part);
@@ -122,7 +122,12 @@ fn copy_tree(from: &Path, to: &Path, owner: (u32, u32), chown: &HandOver) -> io:
             .create_new(true)
             .open(to)?;
         fs::copy(from, to)?;
-        fs::set_permissions(to, fs::Permissions::from_mode(0o400))?;
+        // Read-only, and executable by its user when the source is by anyone.
+        let mode = match meta.permissions().mode() & 0o111 {
+            0 => 0o400,
+            _ => 0o500,
+        };
+        fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
     } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

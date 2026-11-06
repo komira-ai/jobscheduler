@@ -203,3 +203,22 @@ fn the_agents_wall_limit_holds_on_a_helper_without_deadlines() {
     let verbs = h.fake.verbs();
     assert!(verbs.contains(&"kill-uid 7.0".to_owned()), "{verbs:?}");
 }
+
+/// Asserts that a `run` with a deadline that the helper refuses for another reason than not
+/// knowing the field fails the start, and is not retried without the deadline. It catches a
+/// refusal of any kind taken for an old helper (the run would lose its bound for nothing).
+#[test]
+fn a_bounded_run_refused_for_another_reason_fails_the_start() {
+    let mut rig = Rig::new("bound-refused");
+    rig.fake.refuse("run", "no");
+    let mut spec = rig.spec("r1", native("/bin/true", &[]));
+    spec.labels
+        .insert(label::WALL_MS.to_owned(), "60000".to_owned());
+    let error = rig.rt.create_and_start(&spec).unwrap_err();
+    assert!(error.0.starts_with("run: "), "{}", error.0);
+    let runs = rig.fake.seen().into_iter().filter(|one| one.verb == "run");
+    assert_eq!(
+        runs.map(|one| one.millis).collect::<Vec<_>>(),
+        [Some(60_000)]
+    );
+}

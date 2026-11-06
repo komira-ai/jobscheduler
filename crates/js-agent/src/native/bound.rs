@@ -52,10 +52,7 @@ impl NativeRuntime {
                 .run_bounded(lease, (argv, env), fds, limits, deadline)
             {
                 Err(why) if why.unknown_to_helper() => {
-                    tracing::warn!(
-                        "the helper holds no deadline of a run ({why}); the agent's wall limit \
-                         alone bounds native runs"
-                    );
+                    tracing::warn!(%why, "the helper holds no run deadline: the wall limit alone");
                     self.old_helper.store(true, Ordering::Relaxed);
                 }
                 started => {

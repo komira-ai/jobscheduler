@@ -455,3 +455,40 @@ fn a_job_that_sets_tmpdir_is_refused_before_a_user_is_made() {
     assert_eq!(s.rig.fake.verbs(), ["boot-reset"]);
     assert!(s.unpinned("7.0"));
 }
+
+/// Asserts that a run adopted by the next process has its bundle pinned again for it while
+/// the next runtime holds the store, and that a store that no longer has the bundle leaves
+/// the run adopted, unpinned. It catches an adopted run whose toolchain trees the store may
+/// evict under it, and an adoption that fails because a pin did.
+#[test]
+fn an_adopted_run_has_its_bundle_pinned_again() {
+    use js_agent::native::NativeRuntime;
+    use js_mac_session::helper::RESET_ALREADY;
+
+    let mut s = Stored::new("adopt");
+    let spec = s.spec("r1", "@bundle/tool", &[]);
+    s.rig.rt.create_and_start(&spec).unwrap();
+    let Stored {
+        rig: Rig { fake, rt, dir },
+        store,
+        bundle,
+        _dir,
+    } = s;
+    drop(rt);
+    assert!(
+        store.pin(&bundle.pin(), "7.0").is_ok(),
+        "the pins end with the process"
+    );
+    fake.refuse("boot-reset", RESET_ALREADY);
+    let open = |term| NativeRuntime::open(fake.client(), super::config(&fake), term).unwrap();
+    let mut next = open(super::TERM + 1).with_bundles(Arc::clone(&store));
+    assert_eq!(next.list_labelled().unwrap().len(), 1);
+    assert!(
+        store.pin(&bundle.pin(), "7.0").is_err(),
+        "held for the adopted run"
+    );
+    drop(next);
+    let empty = placer(&dir, no_registry());
+    let mut bare = open(super::TERM + 2).with_bundles(empty);
+    assert_eq!(bare.list_labelled().unwrap().len(), 1);
+}
