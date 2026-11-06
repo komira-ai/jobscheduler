@@ -1,0 +1,33 @@
+Mint a one-time join token for an instance.
+
+The token admits the agent that names this provider and instance in its hello, once, before it expires (the agent's `--instance-file` holds `PROVIDER:INSTANCE_ID` and its `--token-file` the token). Without --out the token alone is printed on stdout; with --out it is written to that file, created new with mode 0600 (a path that exists is refused before anything is asked of the server) and not printed. Minting again for the instance replaces its unused tokens.
+
+Usage: js join-token mint [OPTIONS] --provider <NAME> --instance-id <ID>
+
+Options:
+      --provider <NAME>
+          The provider the instance belongs to; a pool that admits one provider accepts its own name only
+
+      --server <URL>
+          The lease server, such as `https://leases.example:7300`. Plain `http://` is accepted for a loopback host only: the bearer token never crosses a network in clear. Required
+
+      --instance-id <ID>
+          The instance's id, as the agent's `--instance-file` names it
+
+      --token-file <PATH>
+          A file holding the bearer token: a regular file owned by you, mode 0600 or 0400. Required
+
+      --ca-cert <PATH>
+          A PEM file with the certificate to trust for `https://` (the server's, or the authority that issued it); only those certificates are trusted then. Optional: without it an `https://` server is verified against the public roots bundled in the binary, never the platform's store, because the places it is found can be redirected by the environment
+
+      --ttl <TTL>
+          How long the token may be used (the server's default, 30 minutes, when absent; at most 24h)
+
+      --json
+          Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --out <FILE>
+          Write the token to this new file (mode 0600, the token and a newline) instead of printing it
+
+  -h, --help
+          Print help (see a summary with '-h')

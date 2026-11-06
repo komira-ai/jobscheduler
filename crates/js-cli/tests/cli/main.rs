@@ -13,6 +13,7 @@ mod help;
 mod job_conformance;
 mod job_loops;
 mod jobs;
+mod join_token;
 mod lost_reply;
 mod native;
 mod ops;

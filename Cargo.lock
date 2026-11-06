@@ -1101,6 +1101,7 @@ dependencies = [
  "js-agent-wire",
  "js-bundle",
  "js-caps",
+ "js-cli",
  "js-client",
  "js-contain",
  "js-lease",
