@@ -16,7 +16,7 @@ use prost::Message as _;
 use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{DescriptorProto, FileDescriptorSet};
 use syn::{Expr, Item, Lit};
-use xtask::job_surface::{CLI_FILE, CLIENT_FILE, Generated, generate};
+use xtask::job_surface::{Args, CLI_FILE, CLIENT_FILE, DOC_FILE, Generated, generate, run};
 
 /// The repository root.
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -103,7 +103,7 @@ fn generated_files_are_current() {
         (code, out.as_str(), err.as_str()),
         (
             Some(0),
-            format!("{CLIENT_FILE} and {CLI_FILE} are current\n").as_str(),
+            format!("{CLIENT_FILE}, {CLI_FILE} and {DOC_FILE} are current\n").as_str(),
             ""
         ),
         "\n{CLIENT_FILE}: {}\n{CLI_FILE}: {}",
@@ -112,21 +112,58 @@ fn generated_files_are_current() {
     );
 }
 
+/// A copy of the three checked-in files under `dir`, `change` applied to the text of each.
+fn copied(dir: &TestDir, change: impl Fn(&str, &mut String)) {
+    for path in [CLIENT_FILE, CLI_FILE, DOC_FILE] {
+        let mut text =
+            std::fs::read_to_string(Path::new(ROOT).join(path)).expect("the checked-in file");
+        change(path, &mut text);
+        let copy = dir.path().join(path);
+        std::fs::create_dir_all(copy.parent().expect("a parent")).expect("the copy's directory");
+        std::fs::write(copy, text).expect("the copy");
+    }
+}
+
+/// Asserts that `--check` against a copy of the files whose route table has one row edited
+/// by hand exits 1 and names the page and only it, and that the same copy with the generated
+/// table passes.
+#[test]
+fn check_names_a_page_whose_route_table_was_edited() {
+    let dir = scratch("page");
+    copied(&dir, |path, text| {
+        if path == DOC_FILE {
+            *text = text.replace(
+                "| `GET /v1/pools` | `ListPools` | 200 |",
+                "| `GET /v1/pools` | `ListPools` | 201 |",
+            );
+        }
+    });
+    let root = dir.path().to_str().expect("a UTF-8 path");
+    let (code, out, err) = xtask(&["gen-job-surface", "--check", "--out", root]);
+    assert_eq!(
+        (code, out.as_str(), err.as_str()),
+        (
+            Some(1),
+            "",
+            "xtask: not what `cargo xtask gen-job-surface --out .` renders from the job service: docs/http-gateway.md\n"
+        )
+    );
+    let (code, out, _) = xtask(&["gen-job-surface", "--out", root]);
+    assert_eq!(code, Some(0), "{out}");
+    let (code, _, err) = xtask(&["gen-job-surface", "--check", "--out", root]);
+    assert_eq!((code, err.as_str()), (Some(0), ""));
+}
+
 /// Asserts that `--check` against a copy of the files with one byte of the CLI file changed
 /// exits 1 and names that file and only it (T15: the check fails on a stale file).
 #[test]
 fn check_names_the_stale_file() {
     let dir = scratch("stale");
-    for path in [CLIENT_FILE, CLI_FILE] {
-        let mut text =
-            std::fs::read_to_string(Path::new(ROOT).join(path)).expect("the checked-in file");
+    copied(&dir, |path, text| {
         if path == CLI_FILE {
             text.replace_range(0..1, "#");
         }
-        let copy = dir.path().join(path);
-        std::fs::create_dir_all(copy.parent().expect("a parent")).expect("the copy's directory");
-        std::fs::write(copy, text).expect("the copy");
-    }
+    });
     let root = dir.path().to_str().expect("a UTF-8 path");
     let (code, out, err) = xtask(&["gen-job-surface", "--check", "--out", root]);
     assert_eq!(
@@ -196,13 +233,18 @@ fn the_verb_names_a_file_it_cannot_write() {
 }
 
 /// Asserts that the verb, given a descriptor file, writes both files under `--out` (making
-/// their directories) as the generator renders them, and says so.
+/// their directories) as the generator renders them, and the job service's blocks of the
+/// page there, and says so.
 #[test]
 fn the_verb_writes_both_files_from_a_descriptor() {
     let dir = scratch("write");
     let descriptor = dir.path().join("surface.bin");
     std::fs::write(&descriptor, definition(3).encode_to_vec()).expect("the descriptor file");
     let out = dir.path().join("out");
+    let page = out.join(DOC_FILE);
+    std::fs::create_dir_all(page.parent().expect("a parent")).expect("the docs directory");
+    let markers = "<!-- gen-job-surface routes begin -->\n<!-- gen-job-surface routes end -->\n<!-- gen-job-surface served begin -->\n<!-- gen-job-surface served end -->\n";
+    std::fs::write(&page, markers).expect("the page");
     let (code, said, err) = xtask(&[
         "gen-job-surface",
         "--descriptor",
@@ -211,10 +253,22 @@ fn the_verb_writes_both_files_from_a_descriptor() {
         out.to_str().expect("UTF-8"),
     ]);
     assert_eq!((code, err.as_str()), (Some(0), ""));
-    assert_eq!(said, format!("wrote {CLIENT_FILE} and {CLI_FILE}\n"));
+    assert_eq!(
+        said,
+        format!("wrote {CLIENT_FILE} and {CLI_FILE}, and the generated blocks of {DOC_FILE}\n")
+    );
     let want = rendered(3);
     let read = |path: &str| std::fs::read_to_string(out.join(path)).expect("a written file");
     assert_eq!((read(CLIENT_FILE), read(CLI_FILE)), (want.client, want.cli));
+    let page = read(DOC_FILE);
+    assert!(
+        page.contains("| `POST /v1/jobs` | `SubmitJob` | 201 |\n"),
+        "{page}"
+    );
+    assert!(
+        page.contains("The server serves every call of the service"),
+        "{page}"
+    );
 }
 
 /// Asserts that a call added to the definition, and nothing else, becomes a command: the
@@ -657,5 +711,59 @@ fn the_job_service_requires_six_flags_and_keys_submit_on_its_id() {
     assert_eq!(
         keyed,
         [("job submit".to_owned(), vec!["spec", "job_id"], vec!["id"])]
+    );
+}
+
+/// Asserts that writing under a root whose page is missing fails naming the page after the
+/// two generated files are written, and that a page without markers fails naming the page and
+/// the missing marker and is left as it was; `--check` names a page without markers as stale,
+/// and passes, in this process, on the repository's own files.
+#[test]
+fn the_verb_names_a_page_it_cannot_render() {
+    let dir = scratch("unrendered");
+    let args = |check: bool| Args {
+        descriptor: None,
+        out: dir.path().to_path_buf(),
+        check,
+    };
+    let page = dir.path().join(DOC_FILE);
+    let said = run(&args(false))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        said.starts_with(&format!("cannot read {}: ", page.display())),
+        "{said}"
+    );
+    assert!(dir.path().join(CLI_FILE).exists());
+    std::fs::create_dir_all(page.parent().unwrap_or(dir.path())).expect("the docs directory");
+    std::fs::write(&page, "no markers\n").expect("the page");
+    let said = run(&args(false)).err().map(|e| e.to_string());
+    assert_eq!(
+        said.unwrap_or_default(),
+        format!(
+            "{}: has no line <!-- gen-job-surface routes begin -->",
+            page.display()
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(&page).ok().as_deref(),
+        Some("no markers\n")
+    );
+    let said = run(&args(true)).err().map(|e| e.to_string());
+    assert_eq!(
+        said.unwrap_or_default(),
+        "not what `cargo xtask gen-job-surface --out .` renders from the job service: docs/http-gateway.md"
+    );
+    let current = run(&Args {
+        descriptor: None,
+        out: Path::new(ROOT).to_path_buf(),
+        check: true,
+    });
+    assert_eq!(
+        current.ok(),
+        Some(format!(
+            "{CLIENT_FILE}, {CLI_FILE} and {DOC_FILE} are current"
+        ))
     );
 }

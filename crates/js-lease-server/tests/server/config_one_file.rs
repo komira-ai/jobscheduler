@@ -222,6 +222,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--job-allocation-retention", "3d"),
         key("--job-listen", "127.0.0.1:0"),
         key("--max-job-wall", "12h"),
+        key("--metrics-listen", "127.0.0.1:9100"),
     ];
     rows.push((
         vec!["--usage-off"],

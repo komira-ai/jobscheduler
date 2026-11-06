@@ -375,7 +375,7 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
 
 /// The peer of the connection a request came in on, as the listener sets it. Absent when
 /// the listener could not name the peer; a status route then refuses.
-type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+pub(crate) type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 
 /// Whether a peer may read the status pages, which take no token: only a private address
 /// ([`is_private_address`]; an IPv4-mapped IPv6 address counts as its IPv4 form). An
@@ -421,7 +421,7 @@ fn page_response(status: &Arc<Status>) -> Response {
 }
 
 /// The answer of a status route that is not served: that of a route that does not exist.
-fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     ApiError::no_route().into_response()
 }
 

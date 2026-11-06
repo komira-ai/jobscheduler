@@ -10,6 +10,8 @@
 //! cordons, the status of its pools, and the usage sink's ended bookings, none with
 //! `--usage-off`), and the logs group's (the log store of the `[logs]` table, built before
 //! the configuration is consumed). The cancel group needs nothing but the tables.
+//! [`SERVED_CALLS`] names the calls a service so built serves; every other call answers
+//! `UNIMPLEMENTED`, and a group task that adds a `with_<group>` line adds its calls there.
 //!
 //! [`port`] is what the job service's listener serves: one router in front of both
 //! transports, which hands a request whose content type is `application/grpc` (with or
@@ -27,6 +29,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response};
+use js_api_gateway::Rpc;
 use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
@@ -37,6 +40,27 @@ use crate::admit::JobAdmission;
 use crate::api::Shared;
 use crate::config::LiveClients;
 use crate::status::Status;
+
+/// The calls of the job service that [`from_server`] builds and serves, in the order of the
+/// service definition; every other call answers `UNIMPLEMENTED` (over the gateway, 501
+/// `unimplemented`). `docs/http-gateway.md` says which calls are served from this list
+/// (`cargo xtask gen-job-surface` writes that text), and a test of this file sends every call
+/// to the service `from_server` builds and fails when one answers otherwise than this list
+/// says.
+pub const SERVED_CALLS: [Rpc; 12] = [
+    Rpc::SubmitJob,
+    Rpc::GetJob,
+    Rpc::ListJobs,
+    Rpc::CancelJob,
+    Rpc::GetResult,
+    Rpc::GetLogs,
+    Rpc::ListHosts,
+    Rpc::CordonHost,
+    Rpc::UncordonHost,
+    Rpc::ListPools,
+    Rpc::ListProviders,
+    Rpc::GetUsage,
+];
 
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall` and logs read as
