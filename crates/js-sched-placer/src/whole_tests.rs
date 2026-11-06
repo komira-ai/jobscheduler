@@ -284,6 +284,45 @@ fn a_falling_ceiling_puts_back_the_newest_pending_grant_and_never_a_committed_le
     assert_eq!(held(&marks), ["s@b*"]);
 }
 
+/// Request `name`, first presented at `since` ms, holding what `answered` (the engine's
+/// last answer) set aside for it, as the registry hands its marks back in the next round.
+fn waiting_with(name: &str, since: u64, answered: &[Reservation]) -> WaitingWhole {
+    let mark = answered
+        .iter()
+        .find(|mark| mark.request == id(name))
+        .cloned();
+    WaitingWhole {
+        mark,
+        ..waiting(name, since)
+    }
+}
+
+/// Catches: the ceiling's drop ordering a pending grant by the round it is read in rather
+/// than by when it was made (a grant would always look newest, and be put back in place
+/// of a newer mark, the reverse of the registry's pass). `r` is granted the quiet `a` at
+/// one second; `s` marks the busy `b` at eleven. With one of the two hosts kept for
+/// ordinary work the ceiling falls by one: the newer, `s`'s mark, goes, and `r`'s grant
+/// stays, with the time it was made.
+#[test]
+fn a_falling_ceiling_drops_the_newer_mark_before_an_older_pending_grant() {
+    let hosts = live(&["a", "b"]);
+    let mut e = engine(&[("a", &[]), ("b", &[1])]);
+    let first = e.whole_round(round(vec![waiting("r", 0)], &hosts), at(1_000));
+    assert_eq!(held(&first), ["r@a*"]);
+    let both = vec![waiting_with("r", 0, &first), waiting("s", 1_000)];
+    let second = e.whole_round(round(both, &hosts), at(11_000));
+    assert_eq!(held(&second), ["r@a*", "s@b"]);
+    let both = vec![
+        waiting_with("r", 0, &second),
+        waiting_with("s", 1_000, &second),
+    ];
+    let mut low = round(both, &hosts);
+    low.settings.keep_for_ordinary = 1;
+    let third = e.whole_round(low, at(12_000));
+    assert_eq!(held(&third), ["r@a*"]);
+    assert_eq!(third[0].at, Timestamp::from_millis(1_000));
+}
+
 /// Catches: the engine's own queue order used in place of the registry's wait list (the
 /// requests would be served by name). `zeta` was presented before `alpha`: the one quiet
 /// host goes to `zeta`.
