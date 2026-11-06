@@ -2,11 +2,12 @@
 
 `js-sim-cell` tests the scheduler's behaviour without hosts: the real lease server runs
 under a deterministic kernel beside many fake agents and a client driver, and a set of
-invariants is checked after every step. A scenario is a short builder chain that reads
-top to bottom. This page is for someone who has not seen the cell: what it is, how to run
-a scenario, how to write one, what each invariant means, how to read a failure, when a
-golden hash may move, what the cell does not model, and which rows of section 8 of
-`docs/design/jobscheduler-design.md` a scenario covers today.
+invariants is checked after every step. A scenario is a short builder chain that reads top
+to bottom. This page is for someone who has not seen the cell: what it is, how to run a
+scenario, how to sweep it over many seeds, what keeps a seed replayable, how to write one,
+what each invariant means, how to read a failure, when a golden hash may move, what the
+cell does not model, and which rows of section 8 of `docs/design/jobscheduler-design.md` a
+scenario covers today.
 
 `crates/js-sim-cell/tests/docs.rs` holds this page to the crate: it fails when an
 invariant, a test file of the crate, a scenario named in the section 8 table, or the
@@ -93,7 +94,9 @@ cargo test -p js-sim-cell --test smoke -- a_partition_of_ten_agents_that_heals_s
 
 A run is a function of (scenario, seed). A scenario runs seeds `0..n` in order
 (`Scenario::run_seeds`), each in a cell of its own, and stops at the first failure, so the
-same command on the same code fails at the same seed with the same trace hash.
+same command on the same code fails at the same seed with the same trace hash. The pull
+request tests run a few seeds of each scenario; [Sweep many seeds](#sweep-many-seeds) runs
+the smoke family over thousands more.
 
 Each file directly under `crates/js-sim-cell/tests/` is one test binary. Files in the
 subdirectories (`cell/`, `agent/`, `invariants/`) are shared code that a binary includes
@@ -101,7 +104,9 @@ with `#[path = ...]`; they are not binaries of their own.
 
 | binary | file | what it holds |
 |---|---|---|
-| `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals. |
+| `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals. The scenarios are in `tests/cell/burst.rs`, `tests/cell/lossy_wire.rs` and `tests/cell/partition.rs`. |
+| `sweep` | `tests/sweep.rs` | The smoke family over the seeds its flags name, one shard of a sweep; it has no harness, and a plain `cargo test` runs it with no flag, so it runs no seed ([Sweep many seeds](#sweep-many-seeds)). |
+| `seed_range` | `tests/seed_range.rs` | `Scenario::run_seed_range` and the sweep, each shown to fail when it should: the seeds a range runs, a failing seed and its report in the panic, the shards of a sweep, flags that do not fit together, a run that is not a sweep, and each kind of failure printed with the command that replays it. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
 | `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a run it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
 | `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
@@ -117,6 +122,79 @@ with `#[path = ...]`; they are not binaries of their own.
 | `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts under every placement over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
+
+## Sweep many seeds
+
+A few fixed seeds find only the races those seeds hit. The test binary `sweep`
+(`tests/sweep.rs`, over `js_sim_cell::sweep`) runs the smoke family over a range of seeds
+split into shards, one shard a run:
+
+```sh
+cargo test --release --locked -p js-sim-cell --test sweep -- --start 0 --count 400 --shards 4 --shard 1
+```
+
+The flags, all the binary's own (it has no harness, so libtest never reads them):
+
+- `--count <n>`: how many seeds the sweep runs over all its shards (required);
+- `--start <seed>`: the first of them (default 0);
+- `--shards <n>` and `--shard <i>`: split the seeds into `n` contiguous shards, whose sizes
+  differ by at most one, and run shard `i`, from 0 (default: one shard, all the seeds);
+- `--scenario <name>`: run only that scenario of the family;
+- `--help`: print the flags.
+
+This is the one way to run a scenario over seeds other than the first few; there is no
+environment variable. A run with none of these flags runs no seed and passes, saying so
+on stderr: that is how `cargo test --workspace` runs the binary on every pull request, so
+the pull request tests keep their few seeds. Flags that do not fit together (no shard, a
+shard past the last, fewer seeds than shards, a range past the last seed, a scenario the
+family does not have) are refused with exit status 2.
+
+Each scenario runs over the shard's seeds with `Scenario::try_run_seed_range` and prints
+`scenario <name>: <n> seeds passed`, or its failure as text (for a violation the whole
+report of [Read a failure](#read-a-failure)) and under it the command that replays it:
+
+```text
+replay: cargo test --release --locked -p js-sim-cell --test sweep -- --scenario <name> --start <seed> --count 1
+```
+
+That is the failing seed alone; for a witness no seed of the shard satisfied, it is the
+shard's whole range. A witness is judged over one shard's seeds, so a witness of a swept
+family must hold in nearly every shard-sized range, not only somewhere in the sweep. The
+binary goes on to the next scenario after a failure and exits 1 if any failed.
+
+The workflow `.github/workflows/sim-sweep.yml` runs the sweep every night, and by hand
+from the Actions tab (`workflow_dispatch`, with the first seed, the seed count and the
+shard count as inputs). Each shard is a job of its own on a GitHub-hosted runner, and a
+red job's log holds each failure and its `replay:` line. A nightly run starts at the run's
+id (`github.run_id`), so each night sweeps seeds no night swept before; the binary's first
+line of output (`sweep: seeds <a>..<b>, shard <i> of <n> of seeds ...`) names them. It is not a check of pull requests.
+
+## The determinism lint
+
+A sweep's failure is worth having only if its seed replays, and a seed replays only while
+nothing outside it decides anything. `cargo xtask determinism`
+(`crates/xtask/src/determinism.rs`) reads the source of `js-sim-cell` and of every
+workspace crate it links, listed by hand in that file's `CRATES`, and fails on each of
+these that its allow-list does not name: `SystemTime::now`, `Instant::now`, `getrandom`,
+`thread_rng` and `Uuid::new_v4`. It reads code, not text: a path (qualified ones too, such
+as `<Instant>::now`), a type, an import or a macro call's tokens, but not a comment or a
+string; and it leaves out what only a test
+build compiles (`#[cfg(test)]` items and test module files). The test
+`cargo test -p xtask --test determinism` runs it on the tree on every pull request, beside
+the layering test, and fails when `CRATES` is not exactly the crates the cell links.
+
+Each entry of the allow-list, `ALLOWED` in the same file, names a file, the item the site
+is inside (`SystemClock::now`: an `impl` block's type, then the function), the token and
+how many sites (lines) of that item it allows, with a reason: the production clock or random source behind a port the cell fills with
+its own, or code a cell run never reaches. A failure names each site no entry allows, as
+`file:line: token in item`, each entry that matches no site (remove it: the call moved
+or went), each entry whose count is not its number of sites (so a second read added to an
+allowed function needs its own reason), and each entry with no reason. A new site gets an entry only when the cell
+cannot reach it or reaching it decides nothing; otherwise the code takes its clock or its
+random source from the cell, as the server's clock does. The lint looks for a name as it
+is written: `use std::time::Instant as Clock;` then `Clock::now()` is not found, nor is a
+clock or random source other than the five (`rand::random`, `Utc::now`), nor the code of a
+crate outside the workspace.
 
 ## Write one
 
@@ -256,13 +334,16 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   because nothing happened fails instead;
 - `.settle_within(d)`: the virtual time the cell runs after the last action before the
   end check (600 s unless the scenario says otherwise);
-- `.run_seeds(n)`: run seeds `0..n`, and fail the test with the failure as text.
+- `.run_seeds(n)`: run seeds `0..n`, and fail the test with the failure as text;
+  `.run_seed_range(a..b)` does the same for the seeds of any range (`run_seeds(n)` is
+  `run_seed_range(0..n)`), and `.try_run_seeds(n)` and `.try_run_seed_range(a..b)` return
+  the failure instead.
 
 The rules:
 
 - Expect only what the server as built and the design both promise. Where they differ,
   the scenario states what both promise and leaves the rest to the invariants (the
-  partition scenario of `tests/smoke.rs` does this for rows 4 and 35 of section 8).
+  partition scenario of `tests/cell/partition.rs` does this for rows 4 and 35 of section 8).
 - Never pin a behaviour that a row of section 8 marks Open.
 - Time is virtual. Every duration in a scenario is virtual time; nothing in a scenario
   measures or waits for real time.
@@ -336,8 +417,10 @@ The other ways a scenario fails are one line each:
 - `scenario <name>: witness <witness> held in none of <n> seeds; counted over them [...]`,
   with every counter added over all the seeds.
 
-To replay a seed, run the same test again: seeds run from 0 in order, so it fails at the
-same seed with the same hash. There is no flag that starts at a later seed.
+To replay a seed a test reported, run the same test again: seeds run from 0 in order, so it
+fails at the same seed with the same hash. A seed a sweep reported is replayed by the
+`replay:` line printed under its failure, which runs that scenario at that seed alone
+([Sweep many seeds](#sweep-many-seeds)).
 
 ### Trace lines
 
@@ -476,7 +559,7 @@ and how much of each. A row not listed has no scenario.
 | 39 | `a_cancelled_whole_host_request_drops_its_mark_and_the_host_serves_again` | `tests/cell/whole_host_cancel.rs` | Queued and marked: one whole-host request cancelled while queued behind a held host, and one cancelled at the first read of the listing that shows the host set aside for it; both end cancelled, no mark is left, and a later whole-host request is held on the host and launches its run, under every placement. In a whole-node pool there is no ordinary start, so a whole-host lease shows the host serving again. A cancel while preparing is not run. |
 | 41 | `agents_killed_for_good_leave_no_booking_once_clients_release` | `tests/faults.rs` | Five of fifty agents die for good; their hosts read lost and take no new lease, and once the clients give up and release, nothing stays booked on them. |
 
-The partition scenario of `tests/smoke.rs` cuts agents off while they run, but asserts only
+The partition scenario of `tests/cell/partition.rs` cuts agents off while they run, but asserts only
 what the server as built and the design both promise (the invariants and every item
 terminal). `a_thirty_second_partition_of_twenty_agents_loses_no_result` and
 `a_forgotten_host_that_comes_back_is_seated_once` in `tests/faults.rs` cover section 7's

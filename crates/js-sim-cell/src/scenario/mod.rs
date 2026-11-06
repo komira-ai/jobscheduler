@@ -20,8 +20,9 @@
 //! every scenario: the step invariants after every step, the end invariants once
 //! [`Scenario::settle_within`] after the last action ([`Cell::settle`]).
 //!
-//! [`Scenario::run_seeds`] runs seeds `0..n` in order, each in a cell of its own built
-//! from the same data, and stops at the first failure: a violation, reported by
+//! [`Scenario::run_seeds`] runs seeds `0..n` in order, and [`Scenario::run_seed_range`]
+//! the seeds of any range, each in a cell of its own built from the same data; both stop
+//! at the first failure: a violation, reported by
 //! [`crate::FailureReport`] (the scenario, the seed, the trace hash, the invariant and the
 //! last forty trace lines); an [`Expect`] a seed does not meet (the first one judged at a
 //! virtual time that was not met, else the first judged at the end); or, once every seed
@@ -350,14 +351,27 @@ impl Scenario {
         self
     }
 
-    /// Runs seeds `0..seeds` in order.
+    /// Runs seeds `0..seeds` in order: [`Scenario::run_seed_range`] from seed 0.
     ///
     /// # Panics
     ///
-    /// With the [`ScenarioFailure`] as text, at the first failure: how a scenario fails
-    /// its test.
+    /// As [`Scenario::run_seed_range`].
     pub fn run_seeds(&self, seeds: u64) -> Passed {
-        self.try_run_seeds(seeds)
+        self.run_seed_range(0..seeds)
+    }
+
+    /// Runs the seeds of `seeds` in order, stopping at the first that fails, then judges
+    /// the witnesses over every seed of the range: [`Scenario::try_run_seed_range`], for a
+    /// test that fails at the first failure. (The sweep, [`crate::sweep`], runs the
+    /// `try_` form, so that it goes on to the next scenario.)
+    ///
+    /// # Panics
+    ///
+    /// With the [`ScenarioFailure`] as text, at the first failure: the seed that failed
+    /// and, for a violation, its whole [`FailureReport`]. This is how a scenario fails its
+    /// test.
+    pub fn run_seed_range(&self, seeds: Range<u64>) -> Passed {
+        self.try_run_seed_range(seeds)
             .unwrap_or_else(|failure| panic!("{failure}"))
     }
 

@@ -40,6 +40,10 @@
 //!   commands of `js` and the methods of `js_client::jobs::JobClient`, rendered from the job
 //!   service's descriptor set into the two checked-in files; `--check` fails naming a file that
 //!   is not current (docs/job-surface.md).
+//! - `determinism [--root <dir>]` ([`determinism`]): no clock or random source is read in the
+//!   crates a `js-sim-cell` run links, but at the sites its allow-list names, each with a
+//!   reason (docs/simulation.md). The test `cargo test -p xtask --test determinism` runs it on
+//!   this tree.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //! - [`spawn_sites`]: every program the crates `js-agent` and `js-mac-session` are built
@@ -59,6 +63,7 @@ use clap::{Parser, Subcommand};
 pub mod count_run;
 pub mod crun_tests;
 pub mod deploy;
+pub mod determinism;
 pub mod fetch;
 pub mod job_surface;
 pub mod layering;
@@ -79,6 +84,9 @@ pub enum Error {
     /// The deploy verb failed.
     #[error(transparent)]
     Deploy(#[from] deploy::Error),
+    /// The determinism lint failed, or could not read the tree.
+    #[error(transparent)]
+    Determinism(#[from] determinism::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -139,6 +147,13 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// Fail unless every clock and random-source site in the crates the simulation cell
+    /// links is on the lint's allow-list, and every entry of the list matches a site.
+    Determinism {
+        /// The repository root.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// Run the real-crun tests of js-contain, each test target in its own `Delegate=yes`
     /// system unit as this user (a Linux host with crun, uidmap and passwordless sudo).
     CrunTests {
@@ -259,6 +274,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::Determinism { root } => Ok(determinism::run(&root)?),
         Verb::CrunTests {
             sudo,
             root,
