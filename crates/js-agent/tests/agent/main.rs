@@ -49,3 +49,4 @@ mod support;
 #[cfg(target_os = "linux")]
 mod update_hook;
 mod usage;
+mod vm;

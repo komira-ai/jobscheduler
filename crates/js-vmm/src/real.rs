@@ -16,12 +16,24 @@ use crate::spec::{Event, SHUTDOWN_COMMAND, VmSpec};
 use crate::system::{Clock, OfflineFile, Poll, RealClock, Signature, System, VmProcess};
 use crate::{offline, signature, vz};
 
-pub struct RealSystem;
+pub struct RealSystem {
+    /// The program a VM helper is started from; this binary when `None`.
+    helper: Option<PathBuf>,
+}
 
 impl RealSystem {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self { helper: None }
+    }
+
+    /// A system that starts VM helpers from the signed `js-vmm` binary at `helper`
+    /// instead of from the running binary (the host agent is not entitled to run VMs).
+    #[must_use]
+    pub fn with_helper(helper: PathBuf) -> Self {
+        Self {
+            helper: Some(helper),
+        }
     }
 }
 
@@ -183,7 +195,10 @@ impl System for RealSystem {
                 chown_tree(&p, uid, uid)?;
             }
         }
-        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let exe = match &self.helper {
+            Some(helper) => helper.clone(),
+            None => std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?,
+        };
         let mut cmd = Command::new(exe);
         cmd.arg("vm-run")
             .arg("--spec")

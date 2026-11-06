@@ -6,11 +6,11 @@
 //! reads back that what the helper starts answers to the privacy controls for itself
 //! (`disclaim`).
 
-mod agent;
+pub(crate) mod agent;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
-mod fake_helper;
+pub(crate) mod fake_helper;
 mod files;
 mod journal;
 mod lifecycle;

@@ -58,6 +58,10 @@ pub const ENV_UNSUPPORTED: &str = "env-unsupported";
 /// A start with a `native` body sent to an agent that cannot run native jobs. An agent
 /// that predates the field reads such a start as `invalid-image` instead.
 pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
+/// A VM start ([`crate::StartKind::Vm`]) sent to an agent that runs no VMs: it was started
+/// without the VM backend (`--vm-driver`). The agent answers it `failed_to_start` and
+/// creates nothing.
+pub const VM_UNAVAILABLE: &str = "vm-unavailable";
 /// A start whose `os` or `arch` is not the platform its image's config says it is built
 /// for, or whose image names a platform outside the set a start can name (`linux`,
 /// `darwin`; `amd64`, `arm64`). The refusal's `field` is `os` or `arch`, or `image.os` or

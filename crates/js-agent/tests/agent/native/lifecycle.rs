@@ -306,6 +306,7 @@ fn job_start_spec(job_id: &str, env: &[(&str, &str)]) -> JobStartSpec {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     }
 }
 

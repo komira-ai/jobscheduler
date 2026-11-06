@@ -508,6 +508,9 @@ pub struct Local {
     /// `--silence-stop`, or [`DEFAULT_SILENCE_STOP`]: how long the server may be silent
     /// before every job is stopped; above the server's default grace plus the stop grace.
     pub silence_stop: Duration,
+    /// The VM backend, when `--vm-driver` turned it on; the agent sets it after the checks
+    /// here ([`crate::vm::VmSettings::from_cli`]).
+    pub vm: Option<crate::vm::VmSettings>,
 }
 
 /// The file in the state root that holds the native agent's lease journal.
@@ -782,6 +785,7 @@ impl Local {
             image_allow: image_allow(&cli.image_allow)?,
             egress,
             silence_stop,
+            vm: None,
         })
     }
 }

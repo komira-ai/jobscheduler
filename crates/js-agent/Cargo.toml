@@ -40,6 +40,8 @@ js-mac-session = { path = "../js-mac-session" }
 js-oci = { path = "../js-oci" }
 js-treestore = { path = "../js-treestore" }
 js-types = { path = "../js-types" }
+# The lifecycle of a VM lease's VM (src/vm): the driver trait and, on macOS, the real driver.
+js-vmm = { path = "../js-vmm" }
 async-trait.workspace = true
 clap.workspace = true
 getrandom.workspace = true
@@ -72,6 +74,8 @@ js-logstore = { path = "../js-logstore", features = ["fake"] }
 js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
+# The recording VM driver the VM runtime's tests drive (tests/agent/vm).
+js-vmm = { path = "../js-vmm", features = ["fake"] }
 clap.workspace = true
 # `net`: a socket bound and never listening, for a server that is down (update_hook/lease_port).
 rustix = { workspace = true, features = ["net", "process", "thread"] }

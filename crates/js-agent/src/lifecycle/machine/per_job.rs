@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{
     HeldJob, Isolation, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, LogReport,
-    RunResult, limits,
+    RunResult, StartKind, limits,
 };
 
 use super::Lifecycle;
@@ -103,6 +103,7 @@ impl Lifecycle {
             let given = Given {
                 env: spec.env.clone().into_iter().collect(),
                 log_sink: sink.clone().ok().flatten(),
+                vm: spec.kind == StartKind::Vm,
             };
             self.admit_and_start((&run, Keyed::Job), &given, received, events);
             // The start always leaves its job last, running or refused.

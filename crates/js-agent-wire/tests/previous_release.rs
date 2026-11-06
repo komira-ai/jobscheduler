@@ -12,7 +12,7 @@ use common::{heartbeat, job};
 use js_agent_wire::{
     Ack, BookedResources, Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, Hello, JobResult,
     JobResultAck, JobStartSpec, LogGrant, LogGrantState, LogReport, LogSink, Outcome,
-    PER_JOB_CAPABILITY, ResultAck,
+    PER_JOB_CAPABILITY, ResultAck, StartKind,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -238,6 +238,7 @@ fn job_start(id: &str) -> Command {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     }))
 }
 
@@ -454,4 +455,38 @@ fn an_old_agent_ignores_log_sink() {
     );
     let v0: previous::Heartbeat = serde_json::from_value(wire).unwrap();
     assert_eq!(v0.held.len(), 1);
+}
+
+/// Asserts that an agent from before the `kind` of a job start reads a VM start with the
+/// start and the stop beside it intact: the field is skipped, never a decode error. (Such an
+/// agent would run it as an action, which is why a server sends `kind: vm` only to a host
+/// whose hello reports `vm.slots`.) Catches a VM start that costs an old agent the reply.
+#[test]
+fn an_old_agent_skips_the_kind_of_a_vm_start() {
+    let Command::JobStart(mut spec) = job_start("vm-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.kind = StartKind::Vm;
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "vm-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["commands"][0]["kind"], "vm");
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("vm-42", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "vm-41")
+    );
 }

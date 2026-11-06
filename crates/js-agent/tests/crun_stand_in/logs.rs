@@ -306,6 +306,7 @@ fn job_start(node: &Node, job_id: &str) -> JobStartSpec {
             prefix: format!("js/{job_id}/"),
             path_style: true,
         }),
+        kind: Default::default(),
     }
 }
 

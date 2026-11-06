@@ -7,13 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The VM helper for macOS VM leases. Today it holds the feasibility probes (`probe`,
-# `probe-bench`) and the base-image builder (`image base`). It is the one binary that
+# The VM helper for macOS VM leases. It holds the feasibility probes (`probe`,
+# `probe-bench`), the base-image builder (`image base`) and the lifecycle of a lease's VM
+# (`src/lease.rs`), which js-agent links. It is the one binary that
 # needs the virtualization entitlement; every Virtualization.framework call lives in
 # `src/vz/`, macOS only. Its signing test stays in kbf until the signing tooling moves.
 [[bin]]
 name = "js-vmm"
 path = "src/main.rs"
+
+# `fake`: the recording VM driver (src/lease_fake.rs), for the tests of what drives one.
+[features]
+fake = []
 
 [dependencies]
 clap.workspace = true
@@ -35,6 +40,8 @@ objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError
 objc2-virtualization.workspace = true
 
 [dev-dependencies]
+# Its own fake driver, for the tests here.
+js-vmm = { path = ".", features = ["fake"] }
 js-testkit = { path = "../js-testkit" }
 serde_json.workspace = true
 

@@ -44,6 +44,9 @@ pub(super) struct Given {
     pub(super) env: Vec<(String, String)>,
     /// The checked live-log sink ([`RunSpec::log_sink`]).
     pub(super) log_sink: Option<Sink>,
+    /// The start runs in a fresh VM ([`js_agent_wire::StartKind::Vm`]): it is admitted by the
+    /// VM rules and its run carries [`label::KIND`].
+    pub(super) vm: bool,
 }
 
 /// What a start that waits for its image keeps to finish starting.
@@ -648,6 +651,9 @@ pub(super) fn run_spec(
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
     if keyed == Keyed::Job {
         labels.insert(label::KEYING.to_owned(), JOB_KEYED_LABEL.to_owned());
+    }
+    if given.vm {
+        labels.insert(label::KIND.to_owned(), label::VM_KIND.to_owned());
     }
     RunSpec {
         run_id: spec.run_id.clone(),

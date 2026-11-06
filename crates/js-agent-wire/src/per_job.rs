@@ -24,6 +24,7 @@ use crate::error::{Rule, ValidationError};
 use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
 use crate::image;
+use crate::kind::StartKind;
 use crate::limits;
 use crate::log_sink::{self, LogReport, LogSink};
 use crate::network;
@@ -179,6 +180,11 @@ pub struct JobStartSpec {
         deserialize_with = "log_sink::lenient"
     )]
     pub log_sink: Option<LogSink>,
+    /// What the start runs in ([`StartKind`]): absent for the agent's own runtime, `vm` for a
+    /// fresh VM; an unknown value fails to decode. An agent that predates the field ignores
+    /// it, so a server sends `vm` only to a host whose hello reports `vm.slots`.
+    #[serde(default, skip_serializing_if = "StartKind::is_action")]
+    pub kind: StartKind,
 }
 
 impl JobStartSpec {

@@ -10,7 +10,7 @@ use js_agent_wire::{
 };
 
 use js_agent_wire::{PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
-use js_caps::{DETECTED_KEYS, DISK_GIB};
+use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS};
 use js_types::normalise_arch;
 
 use crate::bundle::{BundleHost, Settings, hello_capabilities, report, reserve_bytes};
@@ -70,6 +70,7 @@ fn capabilities(
                 | EGRESS_CAPABILITY
                 | EGRESS_PORTS_CAPABILITY
         ) || DETECTED_KEYS.contains(key)
+            || REPORT_ONLY_KEYS.contains(key)
     });
     match clash {
         Some(key) => Err(format!("--capability: {key} is detected and cannot be set")),

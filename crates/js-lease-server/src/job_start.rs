@@ -133,6 +133,7 @@ pub(crate) fn start_of(
         network,
         ports,
         log_sink: None,
+        kind: Default::default(),
     };
     start
         .validate()

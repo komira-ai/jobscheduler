@@ -345,6 +345,17 @@ pub struct Cli {
     /// the flag `--runtime docker` exits 2; the flag without `--runtime docker` exits 2.
     #[arg(long)]
     pub allow_container_engine: bool,
+    /// Turns the VM backend on (macOS, beside `--native-helper-socket`): the absolute path of
+    /// the signed `js-vmm` binary each VM runs in. A VM start then runs in a fresh VM cloned
+    /// from the base image and destroyed when it ends, at most two at once, and the hello
+    /// reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`. Without it a VM start is
+    /// refused `vm-unavailable`. Needs `--vm-store`.
+    #[arg(long, value_name = "PATH")]
+    pub vm_driver: Option<PathBuf>,
+    /// The directory of the VM backend: the base image in `base` and each run's clone under
+    /// `runs/`, on one APFS volume so a clone is a copy-on-write copy. Needs `--vm-driver`.
+    #[arg(long, value_name = "DIR")]
+    pub vm_store: Option<PathBuf>,
     /// The `crun` program of `--runtime crun`, by absolute path; by default
     /// `/usr/bin/crun`. It must be the distribution's own file at that path: the
     /// distribution's AppArmor profile for `crun` (the one that allows it a user
