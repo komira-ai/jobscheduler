@@ -40,6 +40,11 @@ use serde_json::json;
 
 /// The variable naming the directory the tests work in.
 const ROOT: &str = "JS_NATIVE_PRIV_ROOT";
+
+/// The VM runtime for real; macOS only, as it boots a VM.
+#[cfg(target_os = "macos")]
+#[path = "native_privileged/vm.rs"]
+mod vm;
 /// The uids the helper gives its users: free on the machine (the helper checks).
 #[cfg(target_os = "macos")]
 const UIDS: &str = "680-689";

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use js_mac_session::client::Client;
+use js_vm_lease::VmDriver;
 
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};
@@ -21,6 +22,7 @@ use crate::lifecycle::{Clock, Runtime};
 use crate::native::{self, NativeRuntime, NativeSettings};
 use crate::quota::{self, ScratchQuota};
 use crate::usage::UsageClock;
+use crate::vm::VmSettings;
 
 /// The bits of a native runtime's term that are random. A lease user is named
 /// `kbf-lease-<term>-<sequence>` and a user name is at most 31 bytes, so the term has at
@@ -126,6 +128,16 @@ pub trait Machine: Send + Sync {
     /// default the machine's own.
     fn cgroup_files(&self) -> Box<dyn FileReader> {
         Box::new(SystemFiles)
+    }
+
+    /// The driver of the VMs of the VM backend (`settings`). Called on the worker thread, and
+    /// by the rescue. By default the machine's own ([`crate::vm::system_driver`]).
+    ///
+    /// # Errors
+    ///
+    /// The machine cannot run VMs; the text says why.
+    fn vm_driver(&self, settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
+        crate::vm::system_driver(settings)
     }
 }
 

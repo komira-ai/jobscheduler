@@ -35,6 +35,20 @@ pub fn pool_shape() -> Shape {
     Shape::new(resources, map(&[("os", "macos")]))
 }
 
+/// The architecture the hosts of [`world::World`] report, which its pool's shape
+/// ([`world_shape`]) names.
+pub const WORLD_ARCH: &str = "arm64";
+
+/// The shape of the whole-node pool of [`world::World`]: [`pool_shape`] with an `arch`
+/// as well, so an engine that describes a host by its architecture (js-sched's does) can
+/// describe the World's hosts.
+pub fn world_shape() -> Shape {
+    let shape = pool_shape();
+    let mut capabilities = shape.capabilities().clone();
+    capabilities.insert("arch".into(), WORLD_ARCH.into());
+    Shape::new(shape.resources().clone(), capabilities)
+}
+
 pub fn config(max_machines: usize) -> PoolConfig {
     let name = ProviderId::new("builders").unwrap();
     PoolConfig::new(name, class(), pool_shape(), max_machines)

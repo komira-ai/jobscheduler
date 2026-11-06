@@ -7,13 +7,13 @@
 //! (`disclaim`).
 
 mod adopt;
-mod agent;
+pub(crate) mod agent;
 mod bound;
 mod bundle;
 #[cfg(target_os = "macos")]
 mod disclaim;
 mod env;
-mod fake_helper;
+pub(crate) mod fake_helper;
 mod files;
 mod inputs;
 mod journal;
