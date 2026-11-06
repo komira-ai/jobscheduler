@@ -61,6 +61,8 @@ const SERVER_KEYS: &[&str] = &[
     "job_allocation_retention",
     "job_listen",
     "max_job_wall",
+    "store",
+    "allow_sqlite_store",
     "metrics_listen",
 ];
 
@@ -96,6 +98,10 @@ pub(crate) struct Server {
     pub(crate) job_allocation_retention: Retention,
     /// `max_job_wall`: the most a submitted job's wall limit may be, when the file sets it.
     pub(crate) max_job_wall: Option<Duration>,
+    /// `store`: the file that holds the store's connection, when the file sets one.
+    pub(crate) store: Option<PathBuf>,
+    /// `allow_sqlite_store`: whether a `sqlite:` store is accepted; false unless set.
+    pub(crate) allow_sqlite_store: bool,
 }
 
 /// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
@@ -264,6 +270,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let job_feed_retention = read_job_feed_retention(&mut s)?;
     let job_allocation_retention = read_job_allocation_retention(&mut s)?;
     let max_job_wall = read_max_job_wall(&mut s)?;
+    let (store, allow_sqlite_store) = read_store(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -296,7 +303,20 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         job_feed_retention,
         job_allocation_retention,
         max_job_wall,
+        store,
+        allow_sqlite_store,
     })
+}
+
+/// The `store` key and the SQLite gate, `allow_sqlite_store`, which is refused as `true`
+/// without the store it would apply to, as `--allow-sqlite-store` is without `--store`.
+fn read_store(s: &mut Section) -> Result<(Option<PathBuf>, bool), StartupError> {
+    let store = s.path("store")?;
+    let allow = s.boolean("allow_sqlite_store")?.unwrap_or(false);
+    match (&store, allow) {
+        (None, true) => Err(s.fail("allow_sqlite_store", "needs server.store")),
+        _ => Ok((store, allow)),
+    }
 }
 
 /// The `metrics_listen` key, refused when it is not a private address as `--metrics-listen`

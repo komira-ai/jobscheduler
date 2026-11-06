@@ -1,9 +1,6 @@
 //! The flags, and the checks that decide whether the server may start.
 
-use std::fs::OpenOptions;
-use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +9,6 @@ use clap::{Parser, ValueEnum};
 use js_alert::AlertSink;
 use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
-use rustix::fs::OFlags;
-use rustix::process::geteuid;
 
 use js_registry::{OsSessions, SessionSource};
 use js_types::sched::WorkKey;
@@ -40,8 +35,10 @@ mod feed_retention;
 mod job_wall;
 mod listen;
 mod placement;
+mod private;
 mod resolve;
 mod retention;
+mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 use agent_setup::with_pool_settings;
@@ -53,10 +50,12 @@ pub(crate) use feed_retention::{
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
 pub use placement::Placement;
+pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
     parse_job_retention,
 };
+pub(crate) use store::{StoreNames, StoreSetting};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Entry, LiveClients, Role, Taken, parse_token, token_at};
 
@@ -269,6 +268,15 @@ pub struct Cli {
     /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
     #[arg(long, value_parser = parse_max_job_wall)]
     pub max_job_wall: Option<Duration>,
+    /// A file holding the store's connection, one line: `postgres://...`,
+    /// `postgresql://...`, or `sqlite:<path>` (needs --allow-sqlite-store). Owner-only, as
+    /// --token-file is. The server takes the store's writer lock before anything else.
+    #[arg(long)]
+    pub store: Option<PathBuf>,
+    /// Accepts a `sqlite:` store: SQLite is for tests and single-node development. With a
+    /// Postgres store it has no effect. Needs --store.
+    #[arg(long)]
+    pub allow_sqlite_store: bool,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -460,6 +468,8 @@ pub struct Config {
     /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
+    /// The store the server's state is kept in (`--store`, `server.store`); none unless set.
+    pub(crate) store: Option<StoreSetting>,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -507,6 +517,7 @@ impl Config {
             history_retention_days: cli.history_retention_days,
         };
         let usage = usage_setup(keys, &state_file);
+        let store = store::from_flags(&cli)?;
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
@@ -540,6 +551,7 @@ impl Config {
             job_allocation_retention: cli.job_allocation_retention,
             max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
+            store,
         })
     }
 
@@ -620,6 +632,7 @@ impl Config {
             }
         };
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
+        let store = store::from_file(server.store.as_deref(), server.allow_sqlite_store, files)?;
         let alert_repeat = server
             .alerts
             .as_ref()
@@ -665,6 +678,7 @@ impl Config {
             job_allocation_retention: server.job_allocation_retention,
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
+            store,
         })
     }
 
@@ -939,60 +953,10 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
     }
 }
 
-/// Whether a secret file may be trusted: a regular file, owned by the user running the
-/// server (`euid`), that nobody else can read or write (mode 0600 or 0400).
-fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
-    is_file & matches!(mode, 0o600 | 0o400) & (owner == euid)
-}
-
 /// The fewest bytes a bearer token may have after its trailing whitespace is dropped.
 /// A token that anyone on the network can try to guess is only as strong as it is long;
 /// 32 bytes of a random source is out of reach.
 pub const MIN_TOKEN_BYTES: usize = 32;
-
-/// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
-/// that it is a regular file owned by the server's user that only that user can use.
-/// See [`read_private_reason`].
-pub(crate) fn read_private(path: &Path, flag: &'static str) -> Result<Vec<u8>, StartupError> {
-    read_private_reason(path).map_err(StartupError::because(flag))
-}
-
-/// Reads the secret file at `path` after checking, on the open file, that it is a regular
-/// file owned by the server's user that only that user can use, and says why it was not
-/// read otherwise. The file is opened without blocking, so a named pipe at the path is
-/// refused instead of waited on; a symbolic link is followed (secret mounts are links)
-/// and the checks are on what it leads to. The reason names the path and never the
-/// content.
-pub(crate) fn read_private_reason(path: &Path) -> Result<Vec<u8>, String> {
-    match open_private(path) {
-        Ok(read) => read,
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
-}
-
-/// [`read_private_reason`] with the system's failures on the outside: a file that could
-/// not be opened, inspected or read, and inside it the refusal a file earns by what it
-/// is.
-fn open_private(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
-    let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nonblocking)
-        .open(path)?;
-    let meta = file.metadata()?;
-    let mode = meta.permissions().mode() & 0o777;
-    let euid = geteuid().as_raw();
-    if !trusted_private_file(meta.is_file(), mode, meta.uid(), euid) {
-        return Ok(Err(format!(
-            "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
-            path.display(),
-            meta.uid()
-        )));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Ok(bytes))
-}
 
 /// Reads the token from the file `--token-file` names, see [`read_private`].
 fn read_token(path: &Path) -> Result<Token, StartupError> {
