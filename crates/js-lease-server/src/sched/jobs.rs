@@ -65,6 +65,7 @@ use super::super::map::{self, MapError};
 use super::super::place::SchedPlacer;
 use super::{Engine, Placed, recovered_as};
 use crate::agents::Agents;
+use crate::fence::is_fenced;
 use crate::job_start::job_network;
 use crate::job_store::ServerJobs;
 use crate::metrics::MetricsSink;
@@ -414,7 +415,9 @@ impl SchedPlacer {
     /// not commit, are told to `metrics`.
     ///
     /// # Errors
-    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed.
+    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A commit the
+    /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
+    /// there: a store with a newer writer commits nothing more.
     pub(crate) fn place_jobs(
         &self,
         jobs: &ServerJobs,
@@ -443,6 +446,11 @@ impl SchedPlacer {
                     metrics.store_write_failed();
                     self.engine().job_failed(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
+                    // A store with a newer writer commits nothing more: the pass ends here
+                    // and answers the error, for the caller to trip the fence on.
+                    if is_fenced(&error) {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -470,7 +478,8 @@ impl Agents {
     /// would let take a job now, when this server holds the job tables and places with
     /// `js-sched` (`--placement js-sched`); otherwise nothing, so no job is placed under the
     /// registry's placement. A failed read of the tables is logged; the next pass reads them
-    /// again.
+    /// again, unless the store said it has a newer writer, which trips the fence
+    /// ([`crate::fence`]).
     pub(crate) fn place_jobs(&self) {
         let (Some(jobs), Some(placer)) = (&self.jobs, &self.placer) else {
             return;
@@ -487,6 +496,7 @@ impl Agents {
         if let Err(error) =
             placer.place_jobs(jobs, &open.collect(), (&NoStarts, self.meter().sink()))
         {
+            self.fence.note(&error);
             warn!(%error, "the queued jobs could not be read; the next pass places them");
         }
     }

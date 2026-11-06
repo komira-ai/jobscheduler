@@ -124,9 +124,10 @@ impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
     /// server's clock, under the pool's limits, with the hosts the registry removed read absent;
     /// then those removals are settled. A failed pass is logged and changes no removal; the
-    /// next tick passes again. The pass's duration, the start failures and losses it made,
-    /// and a failure of it, are counted on the agent side's meter ([`Agents::meter`]). Without
-    /// the job tables, nothing.
+    /// next tick passes again, unless the store said it has a newer writer, which trips the
+    /// fence ([`crate::fence`]) and ends the server. The pass's duration, the start failures
+    /// and losses it made, and a failure of it, are counted on the agent side's meter
+    /// ([`Agents::meter`]). Without the job tables, nothing.
     pub(crate) fn job_pass(&self) {
         let Some(jobs) = &self.jobs else {
             return;
@@ -158,6 +159,7 @@ impl Agents {
             }
             Err(error) => {
                 sink.store_write_failed();
+                self.fence.note(&error);
                 warn!(%error, "the job pass failed; the next tick passes again");
             }
         }

@@ -20,6 +20,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::fence::Fence;
 use crate::job_expiry::JobLimits;
 use crate::job_store::{self, FeedTrim, ServerJobs};
 use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
@@ -100,6 +101,9 @@ pub(crate) struct Agents {
     /// Where the job side's events are counted ([`crate::metrics`]); set once, at start, when
     /// the server serves its metrics, and counting nothing until then.
     meter: OnceLock<Meter>,
+    /// Trips when the state store says this process is no longer its writer
+    /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
+    pub(crate) fence: Fence,
 }
 
 /// A host's session as the job side tells one from another: the epoch of its hello and when
@@ -226,6 +230,7 @@ pub(crate) fn assemble_placed(
                 job_limits,
                 listed_sessions: Mutex::default(),
                 meter: OnceLock::new(),
+                fence: Fence::new(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), placer))
         }
@@ -274,6 +279,7 @@ impl Agents {
             job_limits: JobLimits::default(),
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
+            fence: Fence::new(),
         }
     }
 
