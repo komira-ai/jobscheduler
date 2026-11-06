@@ -1039,6 +1039,7 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-logmint",
  "js-logstore",
  "js-mac-pool",
  "js-mac-provision",
@@ -1433,7 +1434,9 @@ name = "js-logstore"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "js-logmint",
  "js-logstore",
+ "js-testkit",
  "rustls",
  "serde_json",
  "sha2 0.11.1",

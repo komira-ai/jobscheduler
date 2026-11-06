@@ -12,6 +12,9 @@
 //! Nothing waits for a clock. A script that must be up before the test signals it opens a
 //! named pipe the test reads (an `open` of a pipe blocks until the other end is opened);
 //! the grace and the waits after a kill are given as zero when a test needs them spent.
+//!
+//! `s3_compat` uploads to the S3-compatible test store with STS (`js_testkit::s3`): it is
+//! `#[ignore]`d, and CI's `test` job, which runs the store, runs it with `--ignored`.
 #![cfg(target_os = "linux")]
 
 mod adopt;
@@ -27,5 +30,6 @@ mod open;
 mod pins;
 mod resume;
 mod runs;
+mod s3_compat;
 mod stop;
 mod sweep;

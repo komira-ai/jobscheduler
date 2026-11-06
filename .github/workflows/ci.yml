@@ -111,6 +111,18 @@ jobs:
   # js-state's Postgres tests run here too (a test that needs the server fails, and does
   # not skip, when KBF_TEST_POSTGRES_URL is unset), against a service container pinned by
   # digest.
+  #
+  # So do the live-log tests against an S3-compatible store with STS (js_testkit::s3): the
+  # store client and the STS minter (js-logstore's s3_compat), the agent's uploader
+  # (js-agent's live_logs::s3_compat and crun_stand_in's s3_compat) and GetLogs over what the
+  # uploader put (js-lease-server's logs_round_trip). They are #[ignore]d, so the workspace
+  # run skips them; the step after it runs them, and only them, with --ignored. The store is
+  # MinIO as Bitnami packages it: it starts from its environment alone (a service container
+  # takes no command), creates the bucket, and checks the region of every signature against
+  # its own. Its root password is a throwaway for this container, which lives only for this
+  # job; its port on the runner is whichever Docker gave, read from the job's context. GitHub
+  # waits for the health check (the store's own liveness endpoint) before the first step, and
+  # fails the job when it has not passed after 30 tries.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -125,6 +137,16 @@ jobs:
         ports:
           - 5432:5432
         options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+      s3:
+        image: docker.io/bitnamilegacy/minio@sha256:a340369228a43597f0540c3f5f7b76ed3324bb38c1d0ecf272f96fc7bf193753
+        env:
+          MINIO_ROOT_USER: jsciroot
+          MINIO_ROOT_PASSWORD: js-ci-throwaway
+          MINIO_SITE_REGION: js-test-1
+          MINIO_DEFAULT_BUCKETS: js-live-logs
+        ports:
+          - 9000
+        options: --health-cmd "curl -fsS http://127.0.0.1:9000/minio/health/live" --health-interval 2s --health-timeout 5s --health-retries 30
     env:
       KBF_TEST_POSTGRES_URL: postgres://postgres:js-ci-throwaway@127.0.0.1:5432/postgres
     steps:
@@ -145,6 +167,14 @@ jobs:
       # the first test binary that fails, so the tests commit of a pull request shows each
       # of its reds.
       - run: cargo test --workspace --locked --no-fail-fast
+      # `--tests` builds what the run above built, so nothing is compiled again; the filters
+      # pick the live-log tests against the store out of every test binary.
+      - name: Live logs against the S3-compatible store
+        if: ${{ !cancelled() }}
+        env:
+          JS_TEST_S3_URL: http://jsciroot:js-ci-throwaway@127.0.0.1:${{ job.services.s3.ports['9000'] }}/js-live-logs
+          JS_TEST_S3_REGION: js-test-1
+        run: 'cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::'
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

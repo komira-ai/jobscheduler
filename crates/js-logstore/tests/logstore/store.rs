@@ -149,8 +149,10 @@ fn a_credential_for_one_job_cannot_touch_another() {
 
 /// Asserts that a request signed with a wrong secret, one whose body, key, metadata or range
 /// was changed after signing, one whose session token was removed, one with no signature at
-/// all, and one from a key the fake never issued are each refused with 403 and store nothing.
-/// Catches a fake that accepts an unsigned or altered request.
+/// all, and one from a key the fake never issued are each refused with 403 and store nothing;
+/// the client reads the last as an expired credential (`InvalidAccessKeyId`: the store does not
+/// know the key, as it forgets a temporary key past its expiry). Catches a fake that accepts an
+/// unsigned or altered request.
 #[test]
 fn a_bad_signature_is_refused_and_changes_nothing() {
     let rig = Rig::new();
@@ -230,8 +232,7 @@ fn a_bad_signature_is_refused_and_changes_nothing() {
     assert_eq!(
         rig.client(stranger)
             .put(key, b"other".to_vec(), &Metadata::new()),
-        Err(StoreError::Denied {
-            status: 403,
+        Err(StoreError::Expired {
             code: "InvalidAccessKeyId".to_owned()
         })
     );

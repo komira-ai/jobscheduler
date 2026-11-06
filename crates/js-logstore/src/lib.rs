@@ -25,8 +25,8 @@
 //! **Errors** ([`StoreError`]) are told apart by transport kind, HTTP status and S3 error code,
 //! never by message text: `Unavailable` (transport failure, timeout, 5xx, 429, `SlowDown`),
 //! `Denied` (403 other than an expiry), `Expired` (`ExpiredToken`, `RequestExpired`,
-//! `InvalidToken`, or the credential's own expiry), `NotFound`, `TooLarge`, `Invalid`,
-//! `OutOfRange` and `Malformed`.
+//! `InvalidToken`, MinIO's `InvalidAccessKeyId` and `InvalidTokenId`, or the credential's own
+//! expiry), `NotFound`, `TooLarge`, `Invalid`, `OutOfRange` and `Malformed`.
 //!
 //! **Secrets.** No error, `Debug` output or log line of this crate holds a secret access key,
 //! a session token, a signature or a URL's query.
