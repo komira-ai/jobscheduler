@@ -578,6 +578,7 @@ fn no_pools() -> PoolsView {
         pools: Vec::new(),
         warnings: Vec::new(),
         logs: None,
+        store: None,
     }
 }
 

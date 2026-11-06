@@ -33,6 +33,7 @@ use js_agent_wire::Taint;
 use js_client::ClientError;
 use js_mac_provision::daemon::AGENT_EXIT_TIMEOUT_SECS;
 use js_types::HostId;
+use js_update_hook::peek;
 
 use crate::CredentialFile;
 use crate::facts::{
@@ -45,7 +46,6 @@ use crate::own_host::{
 
 use super::declaration::{DECLARATION_PATH, Declaration};
 use super::ports::{NoGate, Ports, StateView, SystemClock, SystemLink};
-use super::record::peek;
 use super::step::{self, Env};
 use super::{
     CA_CERT_KEY, ConnectParams, DirStat, Done, HOST_ID_KEY, Invocation, Outcome, Params,

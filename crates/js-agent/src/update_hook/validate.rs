@@ -10,9 +10,14 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+pub use js_update_hook::{
+    CUTOVER_MARGIN_SECS, PREPARE_MARGIN_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS,
+    VERIFY_MARGIN_SECS,
+};
+use js_update_hook::{POLL_SECS, is_plain};
+
 use super::declaration::Declaration;
-use super::params::{POLL_SECS, Params};
-use super::plain::is_plain;
+use super::params::Params;
 use super::record::{Record, SCHEMA};
 
 /// The longest version string a record may hold.
@@ -24,27 +29,9 @@ pub const MAX_VERSION_LEN: usize = 128;
 /// one second.
 pub const EXPIRY_SLACK_MS: u64 = 1_000;
 
-/// How much longer than the drain wait the declared `prepare` timeout must be, in seconds: the
-/// version check, the cordon calls and the record writes happen around the wait.
-pub const PREPARE_MARGIN_SECS: u64 = 60;
-
-/// How long a started unit has to become active, in seconds.
-pub const START_WAIT_SECS: u64 = 120;
-
-/// The margin `cutover` keeps between the end of its wait for the stop and the declared
-/// timeout, besides the start wait, in seconds.
-pub const CUTOVER_MARGIN_SECS: u64 = 60;
-
-/// The margin `verify` keeps between the end of its wait and the declared timeout, in seconds.
-pub const VERIFY_MARGIN_SECS: u64 = 15;
-
 /// How long `rollback` waits for the previous agent's hello once the unit is active, in
 /// seconds.
 pub const ROLLBACK_HELLO_SECS: u64 = 300;
-
-/// The margin `rollback` keeps between the end of its waits and the declared timeout, in
-/// seconds.
-pub const ROLLBACK_MARGIN_SECS: u64 = 60;
 
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -1,5 +1,5 @@
 //! The server's pass over the queued jobs ([`Agents::place_jobs`]): it reads the hosts the
-//! registry would let take a job now, each with the network ceiling its hello advertises,
+//! registry would let take a job now and whose last job listing was clean, each with the network ceiling its hello advertises,
 //! and hands them to the placer's pass
 //! ([`SchedPlacer::place_jobs`](super::place::SchedPlacer::place_jobs), whose module,
 //! [`js_sched_placer::engine::jobs`], says what a pass does).
@@ -15,7 +15,8 @@ use crate::metrics::PassSink;
 impl Agents {
     /// One pass over the queued jobs
     /// ([`SchedPlacer::place_jobs`](super::place::SchedPlacer::place_jobs)) on the hosts the
-    /// registry would let take a job now, when this server holds the job tables and places with
+    /// registry would let take a job now and whose last job listing was clean
+    /// ([`Agents::listing_clean`]), when this server holds the job tables and places with
     /// `js-sched` (`--placement js-sched`); otherwise nothing, so no job is placed under the
     /// registry's placement. A failed read of the tables is logged; the next pass reads them
     /// again, unless the store said it has a newer writer, which trips the fence
@@ -26,7 +27,10 @@ impl Agents {
         };
         let now = self.clock.now();
         let hosts = self.registry.hosts().into_iter();
-        let open = hosts.filter(|view| open_to_jobs(view, now)).map(|view| {
+        // A host whose last job listing named a job it holds no live allocation for is
+        // still running that job: its capacity is not counted until a listing is clean.
+        let open = hosts.filter(|view| open_to_jobs(view, now) && self.listing_clean(&view.id));
+        let open = open.map(|view| {
             // The ceiling is read again on every pass, from the hello the host last said; a
             // host whose hello is not held (after a restart) advertises none.
             let claim = view.claim.as_ref();
