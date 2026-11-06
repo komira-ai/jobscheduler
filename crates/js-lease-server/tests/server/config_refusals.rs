@@ -71,7 +71,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          history_retention_days, alert_webhook_url, alert_webhook_token_file, alert_repeat_after, \
          max_spend_per_day_total, max_spend_per_month_total, max_spend_since_go_total, \
          job_retention, job_feed_retention, job_allocation_retention, job_listen, max_job_wall, \
-         metrics_listen"
+         store, allow_sqlite_store, store_unreachable_after, metrics_listen"
     );
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(

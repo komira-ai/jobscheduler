@@ -64,6 +64,11 @@
 #                         (--release-link) and this unit. The tmpfiles file makes the link, once,
 #                         pointing at /usr/bin, so until an update moves it the program is the
 #                         package's /usr/bin/js-agent; it never replaces a link that is there
+#   Wants=/After=js-agent-crun-gpu.service
+#                         a oneshot that writes, before each start, the drop-in with the --gpu-*
+#                         flags for the host's NVIDIA nodes, and reloads systemd (see that unit).
+#                         On a host without a GPU node it writes none; when it fails the agent
+#                         starts without GPUs. Flags listed here by hand take its place
 # No container engine is in After= and none is pulled in.
 #
 # Like js-agent.service, the unit runs as root with no sandboxing (the agent reads /proc/1/ns and
@@ -73,8 +78,8 @@
 [Unit]
 Description=jobscheduler agent (crun runtime)
 Documentation=https://github.com/komira-ai/jobscheduler
-After=network-online.target
-Wants=network-online.target
+After=network-online.target js-agent-crun-gpu.service
+Wants=network-online.target js-agent-crun-gpu.service
 Conflicts=js-agent.service
 RequiresMountsFor=/var/lib/js-agent/scratch
 ConditionPathIsMountPoint=/var/lib/js-agent/scratch

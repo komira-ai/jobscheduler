@@ -22,9 +22,9 @@ use js_proto::v1::{
     ExecMode, GetJobRequest, GetJobResponse, GetLogsRequest, GetLogsResponse, GetResultRequest,
     GetResultResponse, GetUsageRequest, GetUsageResponse, Job, JobFile, JobResult, JobSpec,
     JobState, JobTimes, ListHostsRequest, ListHostsResponse, ListJobsRequest, ListJobsResponse,
-    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, Needs,
-    NetworkLevel, PortForward, ResourceUsage, ResultReason, StartFailureCode, SubmitJobRequest,
-    SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
+    ListPoolsRequest, ListPoolsResponse, ListProvidersRequest, ListProvidersResponse, LogGap,
+    LogStream, Needs, NetworkLevel, PortForward, ResourceUsage, ResultReason, StartFailureCode,
+    SubmitJobRequest, SubmitJobResponse, UncordonHostRequest, UncordonHostResponse,
 };
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -161,11 +161,28 @@ impl JobService for Stub {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
-        let response = GetLogsResponse {
-            state: JobState::Running.into(),
-            stdout_tail: b"out\n".to_vec(),
-            stderr_tail: b"err\n".to_vec(),
-            truncated: true,
+        let response = if request.get_ref().stream == LogStream::Stderr as i32 {
+            GetLogsResponse {
+                state: JobState::Running.into(),
+                data: b"\xff\x00a\x80".to_vec(),
+                offset: BIG + 2,
+                next_offset: BIG + 6,
+                gaps: vec![LogGap {
+                    offset: BIG,
+                    length: 2,
+                }],
+                eof: true,
+                first_byte_at_ms: Some(BIG + 10),
+                ..GetLogsResponse::default()
+            }
+        } else {
+            GetLogsResponse {
+                state: JobState::Running.into(),
+                stdout_tail: b"out\n".to_vec(),
+                stderr_tail: b"err\n".to_vec(),
+                truncated: true,
+                ..GetLogsResponse::default()
+            }
         };
         self.answer("GetLogs", request, response)
     }

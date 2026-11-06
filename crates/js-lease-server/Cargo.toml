@@ -27,7 +27,10 @@ js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-registry = { path = "../js-registry" }
 js-scaler = { path = "../js-scaler" }
 js-sched = { path = "../js-sched" }
-js-state = { path = "../js-state" }
+js-sched-placer = { path = "../js-sched-placer" }
+# The store the server's state is kept in (`--store`): the Postgres backend, and SQLite for
+# tests and single-node development (src/store.rs).
+js-state = { path = "../js-state", features = ["postgres"] }
 js-types = { path = "../js-types" }
 js-usage = { path = "../js-usage" }
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
@@ -72,18 +75,24 @@ js-lease-server = { path = ".", features = ["in-process"] }
 # The elastic fake cloud with its own bill (tests/server/elastic_fake_e2e.rs).
 js-elastic-fake = { path = "../js-elastic-fake" }
 js-provider-fake = { path = "../js-provider-fake" }
+# What the server's tests read of the placer: its fallback counters, the engines it built and
+# its scheduler (src/sched/*_tests.rs).
+js-sched-placer = { path = "../js-sched-placer", features = ["test-support"] }
 # The store wrapper that fails a commit (`interfere`), for the heartbeat's failed-commit tests.
 js-jobs = { path = "../js-jobs", features = ["test-support"] }
 # The fake minter and the fake object store the host credentials of live logs are minted
 # from and tried against (src/agent_api_log_tests.rs, src/logs/tests.rs).
 js-logmint = { path = "../js-logmint", features = ["fake"] }
 js-logstore = { path = "../js-logstore", features = ["fake"] }
-js-state = { path = "../js-state", features = ["test-support"] }
+# `test-database`: a Postgres database of its own for each store test (tests/server/store.rs).
+js-state = { path = "../js-state", features = ["test-database", "test-support"] }
 js-testkit = { path = "../js-testkit" }
 # The test that keeps the secrets out of every log line reads the HTTP client's own
 # `log` output.
 log.workspace = true
 rcgen.workspace = true
+# The store tests end the session that holds the writer lock (tests/server/store_support.rs).
+postgres.workspace = true
 # `oneshot` on the router, for the tests that set the peer of a request.
 tower = { workspace = true, features = ["util"] }
 # The job service's tests: a tonic client over an in-memory stream, a call of any method by

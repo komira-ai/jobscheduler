@@ -38,6 +38,9 @@
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
 //! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the lease file |
+//! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
+//! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
+//! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the lease file's write, the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
@@ -93,6 +96,9 @@
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
 //! tls_cert          = "/run/credentials/js/tls-cert"
 //! tls_key           = "/run/credentials/js/tls-key"
+//! # store: the path of an owner-only file holding the store's connection (never the
+//! # connection itself); allow_sqlite_store (false): refused as true without store
+//! # store_unreachable_after ("60s"): the flag's name, default and rules
 //! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
@@ -114,7 +120,7 @@
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
-//! # scaler is also POSTed as {source, key, text} JSON
+//! # scaler, and the store's store:unreachable, is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every
 //! # alert_repeat_after while it holds, and again if it clears and returns; delivery is off the
 //! # tick path. The token file (owner-only) holds the bearer token the receiver wants. The token
@@ -346,6 +352,35 @@
 //! per-job heartbeat both read it. Without `--job-listen` no store is opened and no file is
 //! made.
 //!
+//! # The store
+//!
+//! `--store <path>` (`server.store`) is the design's `store` setting
+//! (`docs/design/jobscheduler-design.md`, section 4.1: "The Postgres connection, as a path to
+//! a file that holds it. SQLite is accepted only for tests and single-node development.").
+//! The file holds one line: `postgres://...` or `postgresql://...`, or `sqlite:<absolute
+//! path>` with `--allow-sqlite-store` (`server.allow_sqlite_store = true`). The URL is never
+//! printed in a log line or an error; a Postgres server's refusal is said by its SQLSTATE.
+//! The URL's `sslmode` (`disable` to `verify-full`) and `sslrootcert` choose its TLS. A
+//! Postgres store must hold the state schema already: the server creates none.
+//!
+//! The server takes the store's writer lock first, before it reads or locks the lease file
+//! and before it binds a listener, and holds it for its life: on Postgres a session-level
+//! advisory lock (`js_state::postgres::WRITER_LOCK_KEY`) on a connection of its own, on
+//! SQLite the lock file beside the store's file. A second server on the same store does not
+//! wait: it exits 2 with one line, `--store: another process holds the store's writer lock`,
+//! having opened nothing else. Every tick asks the lock's session first; a tick that finds
+//! it gone does nothing more, and the server stops serving and ticking, writes nothing more
+//! (there is no final tick), logs the loss and exits 1 ([`LockLost`]). The lock takes the
+//! store's next writer generation and every commit checks it, so once another process takes
+//! the lock no commit of this one succeeds, between ticks too.
+//!
+//! Nothing of the server's state is kept in the store yet: the lease file, the files beside
+//! it and the usage file are kept as without the setting. Until they move, a server that
+//! registers agents (`--agent-pool-config`, or an elastic pool) is refused at start with a
+//! store setting, after the lock is taken and before any listener is bound, with
+//! `--store: store-backed server state is not available yet ...`. Without the setting
+//! nothing is opened and the server is as it was.
+//!
 //! # Who may do what
 //!
 //! The server is single-tenant: there is one token, and so one trust domain. Whoever
@@ -365,8 +400,8 @@
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, leases?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `leases` lists every lease on the host in booking order and is left out when the host has at most one (`lease` is the first); `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
-//! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`, `lease_file`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
@@ -773,7 +808,8 @@
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
 //! ticks the table (then advances the agent registry, when agent registration is on) at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
-//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped. On
+//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped, or while the
+//! store paths have failed for `--store-unreachable-after`. On
 //! SIGTERM or ctrl-c the server stops accepting, gives the requests
 //! in flight `--drain-timeout` to finish (a connection still open then is cut), ticks
 //! once more and exits 0. If that last tick cannot write the lease file the file is
@@ -833,6 +869,7 @@ pub mod network;
 mod per_job;
 mod platform;
 mod pool;
+mod program;
 mod rate;
 mod reservations;
 mod run_api;
@@ -840,6 +877,8 @@ mod scaler;
 mod sched;
 mod server;
 mod status;
+mod store;
+mod store_health;
 mod ticker;
 mod tls;
 mod usage;
@@ -854,11 +893,6 @@ mod wire;
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
-
-use js_lease::SystemClock;
-use tokio::runtime::Builder;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
 
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
@@ -889,6 +923,7 @@ pub use scaler::{
     RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
+pub use store::LockLost;
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
     BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
@@ -926,7 +961,7 @@ pub fn run(
     };
     let result = Config::from_cli(cli)
         .map_err(Failure::from)
-        .and_then(|config| serve(config, out));
+        .and_then(|config| program::serve(config, out));
     exit_code(result, err)
 }
 
@@ -948,57 +983,4 @@ fn exit_code(result: Result<(), Failure>, err: &mut dyn Write) -> ExitCode {
             failure.code()
         }
     }
-}
-
-/// Serves `config` on a runtime of its own until a termination signal.
-fn serve(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
-    Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Failure::Runtime)
-        .and_then(|runtime| runtime.block_on(serve_until_signal(config, out)))
-}
-
-async fn serve_until_signal(config: Config, out: &mut dyn Write) -> Result<(), Failure> {
-    // The subscriber is global; a second server in one process keeps the first's.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .try_init();
-    let ticker = IntervalTicker::new(config.tick_period());
-    // Before the address is printed, so a SIGHUP sent once it is known is not lost.
-    let mut hangup = signal(SignalKind::hangup()).map_err(Failure::Runtime)?;
-    let running = start(config, SharedClock::new(SystemClock), ticker).await?;
-    let _ = writeln!(out, "listening on {}", running.addr());
-    let _ = out.flush();
-    {
-        let mut stopping = std::pin::pin!(server::stop_or_fence(&running, termination()));
-        loop {
-            tokio::select! {
-                stopped = &mut stopping => {
-                    stopped.map_err(Failure::Runtime)?;
-                    break;
-                }
-                _ = hangup.recv() => {
-                    // The refusal is logged by the reload; the old pair stays.
-                    let _ = running.reload_tls();
-                }
-            }
-        }
-    }
-    running.shutdown().await.map_err(Failure::Runtime)
-}
-
-/// Completes at SIGTERM or SIGINT.
-async fn termination() -> std::io::Result<()> {
-    let (sender, mut received) = mpsc::channel(2);
-    for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
-        let mut stream = signal(kind)?;
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            stream.recv().await;
-            let _ = sender.send(()).await;
-        });
-    }
-    received.recv().await;
-    Ok(())
 }

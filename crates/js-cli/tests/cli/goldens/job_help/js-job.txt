@@ -8,7 +8,7 @@ Commands:
   list    Lists jobs by state, label, client and the time they were queued, a page at a time.
   cancel  Cancels a job.
   result  Reads the result of an ended job, for the retention window after it ended.
-  logs    Reads the log tail held so far, also for a running job, and for the retention window after the job ended.
+  logs    Reads a job's output.
   help    Print this message or the help of the given subcommand(s)
 
 Options:

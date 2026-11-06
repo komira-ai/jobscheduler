@@ -18,6 +18,11 @@
 //! ([`Flags`]), which a declaration whose hook runs as root uses; the declaration is read from
 //! [`DECLARATION_PATH`].
 //!
+//! What every service's hook shares (the exit status, the last line's shape, the step names,
+//! the locked state directory, the unit managers, the release link, time and the kill points)
+//! is js-update-hook's; this module re-exports it under the names the agent's steps use, with
+//! the agent's [`Reason`]s and [`Record`].
+//!
 //! The hook builds on Linux and macOS and differs between them in two places only: the unit
 //! manager ([`PlatformUnits`]: `systemctl` on Linux, `launchctl` on a Mac) and the runtime the
 //! staged agent must list on `--version` ([`Declaration::runtime`], which the declaration names
@@ -29,7 +34,6 @@ mod flags;
 mod launch_units;
 mod machine;
 mod params;
-mod plain;
 mod ports;
 mod record;
 mod report;
@@ -40,6 +44,8 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+pub use js_update_hook::Outcome;
 
 pub use args::{ArgsError, Invocation, Step};
 pub use declaration::{DECLARATION_PATH, DEFAULT_RUNTIME, Declaration, DeclarationError, Timeouts};
@@ -82,42 +88,10 @@ pub type PlatformUnits<'a> = SystemUnits<'a>;
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";
 
-// The updater's exit codes of a step. They are NOT `readiness.rs`'s `EXIT_NOISE_OVER_BOUND`
-// (75) and `EXIT_NOT_QUIET` (76), which are the statuses of a consumer's readiness hook run
-// by the agent; here 75 and 76 are the updater's "deferred" and "halt". The two sets share
-// numbers and nothing else: do not import one for the other.
-
-/// How a step ended, as the updater reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// Exit 0.
-    Success,
-    /// Exit 1.
-    Failure,
-    /// Exit 75: the host is busy or not ready, nothing irreversible happened, try later.
-    Deferred,
-    /// Exit 76: no version can repair this; acting further would make it worse.
-    Halt,
-}
-
-impl Outcome {
-    /// The status a step exits with.
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Outcome::Success => 0,
-            Outcome::Failure => 1,
-            Outcome::Deferred => 75,
-            Outcome::Halt => 76,
-        }
-    }
-}
-
-impl From<Outcome> for ExitCode {
-    fn from(outcome: Outcome) -> ExitCode {
-        ExitCode::from(outcome.code())
-    }
-}
+// The updater's exit codes of a step ([`Outcome`]) are NOT `readiness.rs`'s
+// `EXIT_NOISE_OVER_BOUND` (75) and `EXIT_NOT_QUIET` (76), which are the statuses of a consumer's
+// readiness hook run by the agent; there 75 and 76 are the updater's "deferred" and "halt". The
+// two sets share numbers and nothing else: do not import one for the other.
 
 /// How a step ended and what it tells the updater.
 #[derive(Clone, Debug, PartialEq, Eq)]

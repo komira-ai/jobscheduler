@@ -125,6 +125,7 @@ impl Pools for NoPools {
             pools: Vec::new(),
             warnings: Vec::new(),
             logs: None,
+            store: None,
         }
     }
 }
@@ -197,7 +198,10 @@ async fn answer(rig: &Writes, token: &str, call: Call) -> (Code, String) {
             )
         }
         Call::Logs(id) => {
-            let request = GetLogsRequest { job_id: job(id) };
+            let request = GetLogsRequest {
+                job_id: job(id),
+                ..GetLogsRequest::default()
+            };
             status(
                 rig.grpc_as::<_, GetLogsResponse>(token, "GetLogs", request)
                     .await,
@@ -759,8 +763,11 @@ async fn a_call_with_no_caller_is_unauthenticated() {
                 .await,
         ),
         status(
-            api.get_logs(Request::new(GetLogsRequest { job_id: job() }))
-                .await,
+            api.get_logs(Request::new(GetLogsRequest {
+                job_id: job(),
+                ..GetLogsRequest::default()
+            }))
+            .await,
         ),
         status(api.list_hosts(Request::new(ListHostsRequest {})).await),
         status(
