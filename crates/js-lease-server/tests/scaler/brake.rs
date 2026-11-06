@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_scaler::{Blocked, Brake, Millis, Records};
 
-use crate::fakes::{START, live, request, rig};
+use crate::fakes::{START, job, live, rig};
 
 fn tripped() -> Records {
     let mut records = Records::default();
@@ -25,7 +25,7 @@ fn tripped() -> Records {
 #[tokio::test]
 async fn a_tripped_pool_launches_nothing_and_raises_one_alert() {
     let rig = rig(tripped(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     for _ in 0..3 {
         rig.scaler.tick().await;
         rig.advance(Duration::from_secs(60));
@@ -48,7 +48,7 @@ async fn a_tripped_pool_launches_nothing_and_raises_one_alert() {
 #[tokio::test]
 async fn a_reset_is_applied_at_the_next_tick_and_written_first() {
     let rig = rig(tripped(), live());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.scaler.tick().await;
     assert_eq!(rig.scaler.alerts().len(), 1);
 

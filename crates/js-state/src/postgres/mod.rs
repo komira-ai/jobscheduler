@@ -33,7 +33,15 @@
 //! [`PostgresStore::claim`] is the claim path: read committed, rows locked
 //! `FOR UPDATE SKIP LOCKED`, each claimed through the same version compare-and-set.
 //!
-//! Limits: the feed table grows until a retention pass trims it (not written yet); the
+//! The feed table grows until [`Store::trim_feed`] trims it (the server's job pass calls
+//! it); a trim deletes in a `SERIALIZABLE` transaction that holds the head lock, so it
+//! never removes a row that can still commit behind it. A read below the feed's floor is
+//! refused with [`StoreError::StaleCursor`]; the floor is derived, not stored (one below
+//! the oldest feed row, or the head when the feed is empty), which holds because every
+//! revision takes exactly one feed row. [`Flaw::SequenceRevisions`] revisions are not
+//! contiguous, so it neither trims nor checks.
+//!
+//! Limits: the
 //! client does not speak TLS, so an `sslmode=require` URL is refused instead of
 //! downgraded; calls block, so an async caller uses a blocking task.
 
@@ -668,9 +676,22 @@ impl Store for PostgresStore {
                 s.client.query_one(&s.st.head_read, &[])?.get(0)
             };
             let rows = s.client.query(&s.st.changes, &[&after_i, &head, &take])?;
-            Ok((head, rows))
+            // The floor after the rows: a trim that commits between the two can only
+            // make this read stale, never let it return a feed with a hole.
+            let floor: i64 = if sequence {
+                0
+            } else {
+                s.client.query_one(&s.st.floor, &[])?.get(0)
+            };
+            Ok((head, rows, floor))
         });
-        let (head, rows) = read?;
+        let (head, rows, floor) = read?;
+        if after_i < floor {
+            return Err(StoreError::StaleCursor {
+                after,
+                floor: Revision(u64::try_from(floor).unwrap_or(0)),
+            });
+        }
         let mut out = Vec::with_capacity(rows.len());
         let mut last = after;
         for row in &rows {
@@ -703,6 +724,20 @@ impl Store for PostgresStore {
             last
         };
         Ok(Changes { rows: out, cursor })
+    }
+
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        let before = i64::try_from(before.0).unwrap_or(i64::MAX);
+        self.retrying(|| {
+            let mut tx = self.start(Level::Serializable)?;
+            let removed = tx.trim(before)?;
+            let wrote = tx.dirty();
+            tx.commit()?;
+            if wrote {
+                self.syncs.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(removed)
+        })
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {

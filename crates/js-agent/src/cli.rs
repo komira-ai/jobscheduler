@@ -224,7 +224,7 @@ pub struct Cli {
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
     /// The Unix socket of the root helper `js-mac-session` (its `--socket`): with it this
-    /// agent runs native jobs, programs started as a user the helper makes for each run, under
+    /// agent runs native jobs, programs started as a user the helper lends from its pool for each run, under
     /// a Seatbelt profile, and reports `exec = sandbox-exec`. macOS only. Needs `--scratch-root`
     /// and `--state-root`, the agent must run as root, and it cannot be combined with
     /// `--container-bin`. The agent checks at start that `sandbox-exec` applies a profile.

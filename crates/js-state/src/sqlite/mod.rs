@@ -248,11 +248,12 @@ impl SqliteStore {
     }
 
     /// Queues a request for the writer and waits for its group to be on disk.
-    fn call(&self, txns: Vec<Txn>, reap: bool) -> Result<Reply, StoreError> {
+    fn call(&self, txns: Vec<Txn>, reap: bool, trim: Option<u64>) -> Result<Reply, StoreError> {
         let (reply, answer) = mpsc::sync_channel(1);
         let request = Request {
             txns,
             reap,
+            trim,
             queued: Instant::now(),
             reply,
         };
@@ -314,7 +315,7 @@ impl Drop for SqliteStore {
 
 impl Store for SqliteStore {
     fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
-        Ok(self.call(batch, false)?.commits)
+        Ok(self.call(batch, false, None)?.commits)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
@@ -333,8 +334,12 @@ impl Store for SqliteStore {
         read::changes(&mut self.reader(), after, limit)
     }
 
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        Ok(self.call(Vec::new(), false, Some(before.0))?.trimmed)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
-        Ok(self.call(Vec::new(), true)?.reaped)
+        Ok(self.call(Vec::new(), true, None)?.reaped)
     }
 
     fn commit_stats(&self) -> CommitStats {
