@@ -245,6 +245,7 @@ impl RuntimeHost {
             files: None,
             egress: port,
             gpus: None,
+            image_budget: None,
         };
         let runtime = CrunRuntime::open(settings, Arc::new(NoImages))
             .map_err(|why| format!("open the crun runtime: {why}"))?;

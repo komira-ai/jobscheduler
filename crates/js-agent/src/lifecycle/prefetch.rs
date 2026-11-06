@@ -16,7 +16,9 @@
 //! Single flight: while an image is being fetched, [`Prefetcher::prepare`] for it starts
 //! nothing, so two runs that name one digest pull once; each is given the ticket of that
 //! pull. A pull that succeeded is remembered until [`Prefetcher::forget`] (the owner of an
-//! image store that evicts images must call it, or the image is still answered `Ready`).
+//! image store that evicts images must call it, or the image is still answered `Ready`; an
+//! owner that evicts from inside a pull, as the image budget of the crun runtime does,
+//! holds a [`Forgetter`] made by [`Prefetcher::forgetter`] instead).
 //! A pull that failed is kept, with its ticket: every call that names that ticket is
 //! answered `Failed` (every run that waited on the pull ends), and a call that names no
 //! ticket, or another one, starts a new pull.
@@ -95,6 +97,26 @@ impl Shared {
         }
         drop(state);
         self.changed.notify_all();
+    }
+}
+
+/// What an image store that evicts images keeps of a [`Prefetcher`]: it forgets the images
+/// of a digest, from anywhere, a pull of the prefetcher included (the prefetcher's lock is
+/// not held while a pull's future runs). Made by [`Prefetcher::forgetter`].
+#[derive(Clone)]
+pub struct Forgetter {
+    shared: Arc<Shared>,
+}
+
+impl Forgetter {
+    /// [`Prefetcher::forget_digest`].
+    pub fn forget_digest(&self, digest: &str) {
+        let suffix = format!("@{digest}");
+        self.shared
+            .lock()
+            .images
+            .retain(|image, _| !image.ends_with(&suffix));
+        self.shared.changed.notify_all();
     }
 }
 
@@ -216,12 +238,16 @@ impl Prefetcher {
     /// [`Prefetcher::forget`] for every image named by `digest` (`sha256:<hex>`): those
     /// whose name ends `@<digest>`, whatever repository or tag they carry.
     pub fn forget_digest(&self, digest: &str) {
-        let suffix = format!("@{digest}");
-        self.shared
-            .lock()
-            .images
-            .retain(|image, _| !image.ends_with(&suffix));
-        self.shared.changed.notify_all();
+        self.forgetter().forget_digest(digest);
+    }
+
+    /// A [`Forgetter`] of this prefetcher, for the image store whose pulls it runs: an
+    /// image the store evicts is forgotten through it, so the next call pulls it again.
+    #[must_use]
+    pub fn forgetter(&self) -> Forgetter {
+        Forgetter {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// [`Prefetcher::prepare`], then, while the image is being fetched, waits for the

@@ -255,7 +255,7 @@ pub use machine::{
     Lifecycle, Quiet, RETIRED_CAP, RETIRED_LISTED, Restored, RunningLease, SLOTS, Slots,
 };
 pub use mounts::{MountError, MountRoots};
-pub use prefetch::{Prefetcher, PullFuture};
+pub use prefetch::{Forgetter, Prefetcher, PullFuture};
 pub use quota::RunQuota;
 use quota_flags::scratch_quota_limits;
 pub use quota_flags::{

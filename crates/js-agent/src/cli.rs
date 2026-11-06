@@ -353,6 +353,14 @@ pub struct Cli {
     /// agent with a loud warning. Needs `--runtime crun`.
     #[arg(long, value_name = "PATH")]
     pub crun_bin: Option<PathBuf>,
+    /// The most GiB the unpacked images of `--runtime crun` (the store beside the scratch
+    /// root) may take together. A pull that would take the store over it first evicts the
+    /// images used least recently, never one a run holds; one that cannot fit even so fails
+    /// as `no-capacity`, and the store keeps what it held. The disk the agent offers
+    /// (`disk-gib`) is reduced by the part of the budget the store does not hold yet. Above
+    /// 0; by default there is no budget and no image is evicted. Needs `--runtime crun`.
+    #[arg(long, value_name = "GIB")]
+    pub image_budget_gib: Option<u64>,
     /// The bytes of each stream of a `--runtime crun` job with a live-log sink that the
     /// capture keeps in its file in the lease directory, from 1 MiB to 1 GiB: the file is
     /// what the agent uploads while the store is down, and bytes past it are a gap in the
