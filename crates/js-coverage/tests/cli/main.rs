@@ -16,6 +16,7 @@ use std::process::{Command, Output};
 
 mod against_base;
 mod relative_root;
+mod uncovered;
 mod unmeasured;
 
 /// A fixture workspace, removed when dropped.

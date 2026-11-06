@@ -1,17 +1,26 @@
 //! Reads an lcov tracefile into one record per source file.
 //!
-//! Only the per-file summary lines are read: `SF:<path>` opens a record, `LF`/`LH` give
-//! the lines found and hit, `BRF`/`BRH` the branches found and hit, and
-//! `end_of_record` closes it. A summary line a record lacks counts as zero (llvm-cov
-//! leaves the branch lines out when branch coverage is off). Every other line (`TN`,
-//! `FN`, `FNDA`, `DA`, `BRDA`, ...) carries detail the summaries already total, and
-//! is skipped.
+//! `SF:<path>` opens a record, `LF`/`LH` give the lines found and hit, `BRF`/`BRH` the
+//! branches found and hit, and `end_of_record` closes it. A summary line a record
+//! lacks counts as zero (llvm-cov leaves the branch lines out when branch coverage is
+//! off). The counts come from these summaries only.
 //!
-//! Refused, so that a damaged or merged file cannot report a wrong total: a summary
-//! line outside a record, a summary line twice in one record, a count that is not a
-//! decimal number, more hits than items, a record left open at the end, the same
-//! source in two records, and a file with no records at all (an empty report would
-//! otherwise pass every check).
+//! The detail lines name what did not run, for the report of a failing crate
+//! ([`crate::uncovered`]): `DA:<line>,<count>[,<checksum>]` with count 0 is an
+//! uncovered line, and `BRDA:<line>,<block>,<branch>,<taken>` with taken `0` or `-`
+//! an uncovered branch. They need not add up to the summaries: llvm-cov sums a file's
+//! summary over its functions and keeps, for a generic function, its best
+//! instantiation's count, while it writes one detail line per source line from the
+//! counts of every function merged. A line one closure or instantiation leaves unrun
+//! while other code on it runs is in the summary and in no detail line. Every other
+//! line (`TN`, `FN`, `FNDA`, ...) is skipped.
+//!
+//! Refused, so that a damaged or merged file cannot report a wrong total or a wrong
+//! place: a summary or detail line outside a record, a summary line twice in one
+//! record, a count that is not a decimal number, a detail line that is not in the
+//! shape above, more hits than items, a record left open at the end, the same source
+//! in two records, and a file with no records at all (an empty report would otherwise
+//! pass every check).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -25,6 +34,31 @@ pub struct FileRecord {
     pub path: PathBuf,
     /// Its line and branch counts.
     pub coverage: CrateCoverage,
+    /// What its detail lines name as not run.
+    pub uncovered: Uncovered,
+}
+
+/// The lines and branches a record's detail lines name as not run, each once, in
+/// source order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Uncovered {
+    /// Line numbers with a `DA` count of 0.
+    pub lines: BTreeSet<u64>,
+    /// Branches with a `BRDA` taken count of `0` or `-`.
+    pub branches: BTreeSet<Branch>,
+}
+
+/// One branch as `BRDA` names it: the line, the block on that line, and the branch
+/// within it (llvm-cov numbers a line's conditions as blocks from 0, and their arms
+/// as branches 2 x block for true and 2 x block + 1 for false).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Branch {
+    /// The source line.
+    pub line: u64,
+    /// The block on that line.
+    pub block: u64,
+    /// The branch in that block.
+    pub branch: u64,
 }
 
 /// Why a tracefile was refused. `line` is 1-based.
@@ -64,6 +98,18 @@ pub enum LcovError {
         /// The text that is not a count.
         value: String,
     },
+    /// A `DA` or `BRDA` line not in its shape.
+    #[error("line {line}: {field} is not in the form {form}: {value:?}")]
+    BadDetail {
+        /// The 1-based line.
+        line: usize,
+        /// `DA` or `BRDA`.
+        field: String,
+        /// The form it must have.
+        form: &'static str,
+        /// The text after the colon.
+        value: String,
+    },
     /// A record that hits more items than it found.
     #[error("line {line}: record for {path} hits {hit} of {found} {what}")]
     HitAboveFound {
@@ -95,11 +141,13 @@ pub enum LcovError {
     Empty,
 }
 
-/// A record being read: the source path and each summary field seen so far.
+/// A record being read: the source path, each summary field seen so far, and what
+/// its detail lines named.
 struct Open {
     path: String,
     /// LF, LH, BRF, BRH in that order.
     fields: [Option<u64>; 4],
+    uncovered: Uncovered,
 }
 
 const FIELDS: [&str; 4] = ["LF", "LH", "BRF", "BRH"];
@@ -123,8 +171,49 @@ impl Open {
         Ok(FileRecord {
             path: PathBuf::from(&self.path),
             coverage,
+            uncovered: self.uncovered,
         })
     }
+}
+
+const DA_FORM: &str = "<line>,<count>[,<checksum>]";
+const BRDA_FORM: &str = "<line>,<block>,<branch>,<taken>";
+
+/// A source line number: decimal, from 1.
+fn line_number(s: &str) -> Option<u64> {
+    s.parse::<u64>().ok().filter(|n| *n > 0)
+}
+
+/// Adds what one `DA` value names; `None` when it is not in [`DA_FORM`].
+fn read_da(value: &str, into: &mut Uncovered) -> Option<()> {
+    let mut parts = value.splitn(3, ',');
+    let line = line_number(parts.next()?)?;
+    let count = parts.next()?.parse::<u64>().ok()?;
+    if count == 0 {
+        into.lines.insert(line);
+    }
+    Some(())
+}
+
+/// Adds what one `BRDA` value names; `None` when it is not in [`BRDA_FORM`].
+fn read_brda(value: &str, into: &mut Uncovered) -> Option<()> {
+    let parts: Vec<&str> = value.split(',').collect();
+    let [line, block, branch, taken] = parts.as_slice() else {
+        return None;
+    };
+    let at = Branch {
+        line: line_number(line)?,
+        block: block.parse().ok()?,
+        branch: branch.parse().ok()?,
+    };
+    let taken = match *taken {
+        "-" => 0,
+        t => t.parse::<u64>().ok()?,
+    };
+    if taken == 0 {
+        into.branches.insert(at);
+    }
+    Some(())
 }
 
 /// Parses a tracefile; see the module docs for what it refuses.
@@ -161,7 +250,27 @@ pub fn parse(text: &str) -> Result<Vec<FileRecord>, LcovError> {
             open = Some(Open {
                 path: value.to_owned(),
                 fields: [None; 4],
+                uncovered: Uncovered::default(),
             });
+            continue;
+        }
+        if field == "DA" || field == "BRDA" {
+            let record = open.as_mut().ok_or_else(|| LcovError::OutsideRecord {
+                line,
+                field: field.to_owned(),
+            })?;
+            let into = &mut record.uncovered;
+            let (read, form) = if field == "DA" {
+                (read_da(value, into), DA_FORM)
+            } else {
+                (read_brda(value, into), BRDA_FORM)
+            };
+            read.ok_or_else(|| LcovError::BadDetail {
+                line,
+                field: field.to_owned(),
+                form,
+                value: value.to_owned(),
+            })?;
             continue;
         }
         let Some(slot) = FIELDS.iter().position(|f| *f == field) else {
@@ -203,8 +312,17 @@ mod tests {
         }
     }
 
+    fn br(line: u64, block: u64, branch: u64) -> Branch {
+        Branch {
+            line,
+            block,
+            branch,
+        }
+    }
+
     /// Asserts that none of these defects is present: summary fields read into the wrong slot, a detail line (`DA`, `BRDA`)
-    /// counted as a summary, or a second record merged into the first.
+    /// counted as a summary, a second record merged into the first, or a run line or
+    /// taken branch named as uncovered.
     #[test]
     fn reads_each_record_summary() {
         let text = "TN:\nSF:/w/crates/a/src/lib.rs\nFN:1,f\nDA:1,3\nDA:2,0\nBRDA:1,0,0,1\n\
@@ -217,14 +335,96 @@ mod tests {
                 FileRecord {
                     path: "/w/crates/a/src/lib.rs".into(),
                     coverage: cov(2, 1, 2, 1),
+                    uncovered: Uncovered {
+                        lines: [2].into(),
+                        branches: [br(1, 0, 1)].into(),
+                    },
                 },
                 // No BRF/BRH: branch coverage was off for this file; zero, not an error.
                 FileRecord {
                     path: "/w/crates/b/src/lib.rs".into(),
                     coverage: cov(5, 4, 0, 0),
+                    uncovered: Uncovered::default(),
                 },
             ]
         );
+    }
+
+    /// Asserts that the detail lines name every line with count 0 and every branch taken
+    /// `0` or `-`, each once and in source order, whatever order the file gives them in;
+    /// that a `DA` checksum is accepted; and that a run line or a taken branch (count 1
+    /// and above, up to `u64::MAX`) is not named.
+    #[test]
+    fn names_each_uncovered_line_and_branch_once_in_order() {
+        let text = "SF:/w/crates/a/src/lib.rs\nDA:9,0\nDA:3,0,abc==\nDA:4,1\nDA:9,0\n\
+                    DA:5,18446744073709551615\nBRDA:7,1,3,0\nBRDA:7,0,0,-\nBRDA:7,0,1,2\n\
+                    BRDA:2,0,1,0\nBRDA:7,1,3,0\nend_of_record\n";
+        let got = parse(text).expect("valid");
+        assert_eq!(
+            got[0].uncovered,
+            Uncovered {
+                lines: [3, 9].into(),
+                branches: [br(2, 0, 1), br(7, 0, 0), br(7, 1, 3)].into(),
+            }
+        );
+        let lines: Vec<u64> = got[0].uncovered.lines.iter().copied().collect();
+        assert_eq!(lines, [3, 9]);
+        let branches: Vec<Branch> = got[0].uncovered.branches.iter().copied().collect();
+        assert_eq!(branches, [br(2, 0, 1), br(7, 0, 0), br(7, 1, 3)]);
+        // Counts still come from the summaries alone: no LF/LH here, so zero.
+        assert_eq!(got[0].coverage, cov(0, 0, 0, 0));
+    }
+
+    /// Asserts that each malformed `DA` or `BRDA` shape is refused with its line, field,
+    /// form and text, rather than skipped (which would name the wrong place or none), and
+    /// that a detail line outside a record is refused like a summary line.
+    #[test]
+    fn refuses_malformed_detail_lines() {
+        for (value, field, form) in [
+            ("DA:", "DA", DA_FORM),
+            ("DA:7", "DA", DA_FORM),
+            ("DA:0,0", "DA", DA_FORM),
+            ("DA:x,0", "DA", DA_FORM),
+            ("DA:7,-1", "DA", DA_FORM),
+            ("DA:7,", "DA", DA_FORM),
+            ("BRDA:7,0,0", "BRDA", BRDA_FORM),
+            ("BRDA:7,0,0,0,9", "BRDA", BRDA_FORM),
+            ("BRDA:0,0,0,0", "BRDA", BRDA_FORM),
+            ("BRDA:7,x,0,0", "BRDA", BRDA_FORM),
+            ("BRDA:7,0,x,0", "BRDA", BRDA_FORM),
+            ("BRDA:7,0,0,x", "BRDA", BRDA_FORM),
+        ] {
+            let text = format!("SF:a\n{value}\nend_of_record\n");
+            let (_, rest) = value.split_once(':').expect("field");
+            assert_eq!(
+                err(&text),
+                LcovError::BadDetail {
+                    line: 2,
+                    field: field.to_owned(),
+                    form,
+                    value: rest.to_owned(),
+                },
+                "{value}"
+            );
+        }
+        assert_eq!(
+            err("SF:a\nDA:x\n").to_string(),
+            "line 2: DA is not in the form <line>,<count>[,<checksum>]: \"x\""
+        );
+        assert_eq!(
+            err("SF:a\nBRDA:1\n").to_string(),
+            "line 2: BRDA is not in the form <line>,<block>,<branch>,<taken>: \"1\""
+        );
+        for outside in ["DA:1,0\n", "BRDA:1,0,0,0\n"] {
+            let field = outside.split_once(':').expect("field").0;
+            assert_eq!(
+                err(outside),
+                LcovError::OutsideRecord {
+                    line: 1,
+                    field: field.to_owned()
+                }
+            );
+        }
     }
 
     /// Asserts that none of these defects is present: trailing whitespace or CRLF line ends breaking `end_of_record`.

@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use js_coverage::baseline::{self, Baseline, Entry};
-use js_coverage::{CrateCoverage, lcov, ratchet, tighten};
+use js_coverage::{CrateCoverage, lcov, ratchet, tighten, uncovered};
 
 /// Per-crate coverage table and ratchet. With no subcommand, the flags are `check`'s.
 #[derive(Debug, Parser)]
@@ -147,11 +147,23 @@ fn workspace(root: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
         .map_err(|e| format!("list crates under {}: {e}", root.display()).into())
 }
 
-/// The workspace's crates and each one's coverage in the tracefile `lcov`.
-fn measure(lcov: &Path, root: &Path) -> Result<BTreeMap<String, CrateCoverage>, Box<dyn Error>> {
+/// What the tracefile `lcov` measured: the workspace's crates and each one's coverage,
+/// and the records it was summed from with the root their paths are under.
+struct Measured {
+    crates: BTreeMap<String, CrateCoverage>,
+    files: Vec<lcov::FileRecord>,
+    sources: PathBuf,
+}
+
+fn measure(lcov: &Path, root: &Path) -> Result<Measured, Box<dyn Error>> {
     let files = lcov::parse(&read(lcov)?).map_err(|e| format!("{}: {e}", lcov.display()))?;
     let sources = source_root(root)?;
-    Ok(ratchet::by_crate(&sources, &workspace(root)?, &files)?)
+    let crates = ratchet::by_crate(&sources, &workspace(root)?, &files)?;
+    Ok(Measured {
+        crates,
+        files,
+        sources,
+    })
 }
 
 /// `root` as the tracefile spells its source paths. `cargo llvm-cov` writes them
@@ -173,10 +185,15 @@ fn entries(measured: &BTreeMap<String, CrateCoverage>) -> Baseline {
         .collect()
 }
 
-/// Prints the table (and appends it to `--summary-file`), and on a failure what
-/// `tighten` would do about it; returns whether the ratchet passed.
+/// Prints the table (and appends it to `--summary-file`), and on a failure the lines
+/// and branches of each crate that misses more and what `tighten` would do about it;
+/// returns whether the ratchet passed.
 fn check(args: &CheckArgs) -> Result<bool, Box<dyn Error>> {
-    let measured = measure(&args.lcov, &args.root)?;
+    let Measured {
+        crates: measured,
+        files,
+        sources,
+    } = measure(&args.lcov, &args.root)?;
     let now = entries(&measured);
     // Written before the check, so a failing run still leaves the file to copy.
     if let Some(path) = &args.write_baseline {
@@ -186,6 +203,7 @@ fn check(args: &CheckArgs) -> Result<bool, Box<dyn Error>> {
     let (_, recorded) = read_baseline(&args.baseline)?;
     let rows = ratchet::rows(&measured, &recorded);
     let mut report = ratchet::render(&rows);
+    report.push_str(&uncovered::render(&sources, &rows, &files, uncovered::CAP));
     let pass = !rows.iter().any(|r| r.status().fails());
     if !pass {
         report.push('\n');
@@ -278,7 +296,7 @@ fn run_tighten(args: &TightenArgs) -> Result<bool, Box<dyn Error>> {
         (None, lcov) => {
             // clap requires one of the two.
             let lcov = lcov.as_deref().unwrap_or(Path::new(""));
-            entries(&measure(lcov, &args.root)?)
+            entries(&measure(lcov, &args.root)?.crates)
         }
     };
     let workspace = workspace(&args.root)?;

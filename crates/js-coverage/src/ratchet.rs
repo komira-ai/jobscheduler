@@ -86,19 +86,23 @@ pub fn by_crate(
         .map(|c| (c.clone(), CrateCoverage::default()))
         .collect();
     for f in files {
-        let total = f
-            .path
-            .strip_prefix(&base)
-            .ok()
-            .filter(|rest| rest.components().count() > 1)
-            .and_then(|rest| rest.iter().next())
-            .and_then(|name| out.get_mut(name.to_str()?));
+        let total = crate_of(&base, &f.path).and_then(|name| out.get_mut(name));
         let Some(total) = total else {
             return Err(Unattributed(f.path.clone()));
         };
         *total = total.plus(f.coverage);
     }
     Ok(out)
+}
+
+/// The directory name under `base` (`<root>/crates`) that `path`, a file below it,
+/// is in; `None` for a path elsewhere, or for that directory itself.
+pub(crate) fn crate_of<'p>(base: &Path, path: &'p Path) -> Option<&'p str> {
+    path.strip_prefix(base)
+        .ok()
+        .filter(|rest| rest.components().count() > 1)
+        .and_then(|rest| rest.iter().next())
+        .and_then(|name| name.to_str())
 }
 
 /// Lines or branches.
@@ -353,6 +357,7 @@ mod tests {
         FileRecord {
             path: path.into(),
             coverage: c,
+            uncovered: Default::default(),
         }
     }
 
