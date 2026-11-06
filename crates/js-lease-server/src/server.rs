@@ -4,13 +4,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_lease::{Booking, Boot, LeaseTable, Monotonic, Settings, read_bookings};
 use js_provider::Pool as _;
 use tokio::net::TcpListener;
-use tokio::signal::unix::Signal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -189,11 +189,12 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
                 serving: tokio::spawn(serving),
             }
         });
-    let ticking = Ticking(tokio::spawn(tick_loop(
+    let ticking = Box::pin(tick_loop(
         shared.clone(),
         ticker,
         scaler.clone().map(|scaler| (scaler, cached)),
-    )));
+    ));
+    let ticking = Ticking(tokio::spawn(until_fenced(shared.clone(), ticking)));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
@@ -475,10 +476,9 @@ impl Drop for Alive {
 }
 
 /// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
-/// elastic pool when the server has one, with the cache of its provider's catalog, until the
-/// caller aborts it or the state store says this process is no longer its writer
-/// ([`crate::fence`]): the loop then ends at once, ticking nothing more, and `/healthz` answers
-/// that the server is not ticking. The scaler ticks on a task of its own (a provider's slow call must
+/// elastic pool when the server has one, with the cache of its provider's catalog, forever;
+/// the caller aborts it, or drops it once the state store says this process is no longer its
+/// writer ([`until_fenced`]). The scaler ticks on a task of its own (a provider's slow call must
 /// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
 /// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
 /// table, the fetch and the scaler are done, or at once when the scaler is still busy with
@@ -496,13 +496,7 @@ async fn tick_loop<T: Ticker>(
     let _alive = Alive(shared.clone());
     let side = scaler.map(|(scaler, cached)| ScalerLoop::spawn(shared.clone(), scaler, cached));
     loop {
-        // The fence is looked at first, so a tick that was ready at the same moment is not
-        // taken: a store with a newer writer is written to no more.
-        let tick = tokio::select! {
-            biased;
-            () = shared.fenced() => return,
-            tick = ticker.next() => tick,
-        };
+        let tick = ticker.next().await;
         tick_once(&shared, side.as_ref(), tick).await;
     }
 }
@@ -558,35 +552,29 @@ impl Drop for ScalerLoop {
 pub(crate) const FENCED: &str =
     "the state store has a newer writer, so this server may no longer write to it";
 
-/// Runs `running` until `stopping` completes (a termination signal) or the state store says
-/// this process is no longer its writer, reloading the TLS pair at each `hangup`; then stops
-/// it. A fenced store is an error, the one line in the log being what the supervisor reads:
-/// the server cannot write again, so it exits (status 1) for a restart to open a new handle.
-pub(crate) async fn watch(
-    running: Running,
-    stopping: &mut (impl Future<Output = io::Result<()>> + Unpin),
-    hangup: &mut Signal,
-) -> Result<(), crate::error::Failure> {
-    loop {
-        tokio::select! {
-            stopped = &mut *stopping => {
-                stopped.map_err(crate::error::Failure::Runtime)?;
-                break;
-            }
-            () = running.fenced() => {
-                error!("the state store has a newer writer: this server can write no more and is stopping");
-                break;
-            }
-            _ = hangup.recv() => {
-                // The refusal is logged by the reload; the old pair stays.
-                let _ = running.reload_tls();
-            }
+/// Completes when `signalled` does (a termination signal), or, logging one error line, when
+/// the state store says this process is no longer its writer: the server cannot write again,
+/// so the caller stops it ([`Running::shutdown`], which then answers an error) and the process
+/// exits with a failure for a restart to open a new handle.
+pub(crate) async fn stop_or_fence(
+    running: &Running,
+    signalled: impl Future<Output = io::Result<()>>,
+) -> io::Result<()> {
+    tokio::select! {
+        biased;
+        () = running.fenced() => {
+            error!("the state store has a newer writer: this server can write no more and is stopping");
+            Ok(())
         }
+        stopped = signalled => stopped,
     }
-    running
-        .shutdown()
-        .await
-        .map_err(crate::error::Failure::Runtime)
+}
+
+/// Runs `ticking` (the tick loop) until the state store says this process is no longer its
+/// writer, when it is dropped: a tick under way is cut at its next wait, nothing is begun
+/// after it, and the loop's guards run ([`Alive`] marks `/healthz`, the scaler's task ends).
+async fn until_fenced(shared: Arc<Shared>, ticking: Pin<Box<dyn Future<Output = ()> + Send>>) {
+    tokio::select! { biased; () = shared.fenced() => {}, () = ticking => {} }
 }
 
 /// The tick that ends a shutdown, and the usage side's last flush; an error when the tick

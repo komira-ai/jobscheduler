@@ -54,6 +54,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::fence::STATE_FENCED;
 use crate::job_loss;
 use crate::job_store::ServerJobs;
 use crate::join_tokens::{Admission, JoinRefusal};
@@ -63,11 +64,6 @@ use crate::util::blocking;
 /// The code of the 500 a heartbeat is answered when a job or allocation change it reported
 /// could not be committed.
 const STATE_WRITE_FAILED: &str = "state-write-failed";
-
-/// The code of the 503 a heartbeat is answered once the state store has a newer writer
-/// ([`crate::fence`]): the server writes nothing more and is about to exit, so the agent
-/// retries against whatever replaces it.
-const STATE_FENCED: &str = "state-fenced";
 
 mod own_host;
 
@@ -249,9 +245,7 @@ async fn heartbeat(
 ) -> Result<Json<HeartbeatReply>, Refused> {
     // Before anything is read or recorded: a server whose store has a newer writer writes
     // nothing at all.
-    if agents.fence.is_tripped() {
-        return Err(fenced());
-    }
+    refuse_when_fenced(&agents)?;
     let heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
@@ -402,8 +396,18 @@ async fn serve_jobs(
 }
 
 /// The answer to a heartbeat once the state store has a newer writer: 503 `state-fenced`.
+/// The server writes nothing more and is about to exit, so the agent retries against whatever
+/// replaces it.
 fn fenced() -> Refused {
     Refused::new(StatusCode::SERVICE_UNAVAILABLE, STATE_FENCED)
+}
+
+/// [`fenced`] when the fence has tripped, else nothing.
+fn refuse_when_fenced(agents: &Agents) -> Result<(), Refused> {
+    match agents.fence.is_tripped() {
+        true => Err(fenced()),
+        false => Ok(()),
+    }
 }
 
 /// The body of a request, or the refusal for a body that is over the cap (413) or could

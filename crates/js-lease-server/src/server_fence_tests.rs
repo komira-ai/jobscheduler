@@ -11,16 +11,17 @@ use js_jobs::{JobId, JobState, JobStoreError, NewJob, StartFailure};
 use js_lease::{Boot, LeaseTable, ManualClock, Settings};
 use js_state::{Store, StoreError};
 use js_testkit::dir::TestDir;
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
 
-use super::{FENCED, Running, start, tick_loop, watch};
+use super::{FENCED, Running, start, stop_or_fence, tick_loop, until_fenced};
 use crate::adapt::{BoxedPool, SharedClock};
 use crate::agent_api::job_rig::{Rig, clocked_rig, spec};
+use crate::agents::Agents;
 use crate::api::Shared;
 use crate::config::{Cli, Config, parse_token};
 use crate::error::Failure;
 use crate::job_expiry::JobLimits;
-use crate::ticker::channel_ticker;
+use crate::ticker::{ChannelTicker, channel_ticker};
 
 /// A century, which carries a manual clock past any wait a queued job is held to.
 const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
@@ -35,6 +36,11 @@ fn scratch(name: &str) -> TestDir {
 /// A server state over the rig's agent side (its job tables, store and clock) and a lease
 /// table of its own in `dir`.
 fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
+    shared_with(rig, dir, Some(Arc::clone(&rig.agents)))
+}
+
+/// [`shared_over`] holding `agents`, which may be none.
+fn shared_with(rig: &Rig, dir: &TestDir, agents: Option<Arc<Agents>>) -> Arc<Shared> {
     let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
     let table = LeaseTable::open(
         BoxedPool(Box::new(rig.agents.registry.provider())),
@@ -45,7 +51,13 @@ fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
     )
     .unwrap();
     let token = parse_token(&[b'c'; 40]).unwrap();
-    Arc::new(Shared::new(table, token, Some(Arc::clone(&rig.agents))))
+    Arc::new(Shared::new(table, token, agents))
+}
+
+/// The tick loop of `shared` as the server runs it, on a task.
+fn spawn_ticking(shared: &Arc<Shared>, ticker: ChannelTicker) -> JoinHandle<()> {
+    let ticking = Box::pin(tick_loop(Arc::clone(shared), ticker, None));
+    tokio::spawn(until_fenced(Arc::clone(shared), ticking))
 }
 
 /// Records the job `id` as queued.
@@ -73,7 +85,7 @@ async fn a_tick_that_meets_a_fenced_store_ends_the_loop_and_writes_nothing_after
     let shared = shared_over(&rig, &dir);
     let id = queue(&rig, "job-q");
     let (handle, ticker) = channel_ticker();
-    let task = tokio::spawn(tick_loop(Arc::clone(&shared), ticker, None));
+    let task = spawn_ticking(&shared, ticker);
 
     handle.step().await;
     assert!(shared.ticking());
@@ -102,8 +114,10 @@ async fn a_loop_waiting_for_a_tick_ends_when_the_fence_trips() {
     let rig = clocked_rig("fence_waiting", false, JobLimits::DEFAULT);
     let dir = scratch("fence_waiting_table");
     let shared = shared_over(&rig, &dir);
-    let (_handle, ticker) = channel_ticker();
-    let task = tokio::spawn(tick_loop(Arc::clone(&shared), ticker, None));
+    let (handle, ticker) = channel_ticker();
+    let task = spawn_ticking(&shared, ticker);
+    handle.step().await;
+    assert!(shared.ticking());
     let fenced = JobStoreError::Store(StoreError::Fenced);
     assert!(rig.agents.fence.note(&fenced));
     task.await.unwrap();
@@ -191,19 +205,25 @@ async fn a_fenced_shutdown_runs_no_final_tick_and_is_an_error() {
     assert_eq!(jobs.get_job(&id).unwrap().unwrap().state, JobState::Queued);
 }
 
-/// Asserts that the loop that waits for a signal returns when the fence trips, with a runtime
-/// failure that has the fenced message and exit status 1, and that the process prints that
-/// message as its one error line. It catches a server that, once fenced, keeps running until
-/// a signal and exits 0.
+/// Asserts that the wait for a stop returns what the signal gave while the store is the
+/// server's, and returns at once, with the one error line logged, when the fence trips; that
+/// the stop that follows is a runtime failure with the fenced message and exit status 1; and
+/// that the process prints that message as its one error line. It catches a server that, once
+/// fenced, keeps running until a signal and exits 0.
 #[tokio::test]
 async fn a_fenced_server_stops_with_a_failure_exit_status() {
     let (running, _jobs, _id, _dir) = started("fence_exit").await;
+    let signalled = std::future::ready(Ok(()));
+    assert!(stop_or_fence(&running, signalled).await.is_ok());
+    let broken = std::future::ready(Err(std::io::Error::other("signal")));
+    let failed = stop_or_fence(&running, broken).await.unwrap_err();
+    assert_eq!(failed.to_string(), "signal");
+
     let fenced = JobStoreError::Store(StoreError::Fenced);
     assert!(running.shared.agents().unwrap().fence.note(&fenced));
-    let mut hangup = signal(SignalKind::hangup()).unwrap();
-    let mut never = std::future::pending::<std::io::Result<()>>();
-    let failure = watch(running, &mut never, &mut hangup).await.unwrap_err();
-    assert!(matches!(failure, Failure::Runtime(_)));
+    let never = std::future::pending::<std::io::Result<()>>();
+    stop_or_fence(&running, never).await.unwrap();
+    let failure = Failure::Runtime(running.shutdown().await.unwrap_err());
     assert_eq!(failure.to_string(), FENCED);
     assert!(failure.code() == std::process::ExitCode::FAILURE);
     let mut printed = Vec::new();
@@ -213,4 +233,21 @@ async fn a_fenced_server_stops_with_a_failure_exit_status() {
         String::from_utf8(printed).unwrap(),
         format!("js-lease-server: {FENCED}\n")
     );
+}
+
+/// Asserts that a server without the agent side (which holds the only state store) is never
+/// fenced: the wait for the fence is not ready, and it is not marked fenced. It catches a
+/// server with no store that stops as if it had lost one.
+#[tokio::test]
+async fn a_server_without_a_state_store_is_never_fenced() {
+    let rig = clocked_rig("fence_none", false, JobLimits::DEFAULT);
+    let dir = scratch("fence_none_table");
+    let shared = shared_with(&rig, &dir, None);
+    let waited = tokio::select! {
+        biased;
+        () = shared.fenced() => false,
+        () = std::future::ready(()) => true,
+    };
+    assert!(waited);
+    assert!(!shared.is_fenced());
 }

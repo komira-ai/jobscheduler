@@ -8,9 +8,15 @@
 //! shutdown writes nothing, and the process exits with an error so its supervisor starts it
 //! afresh, which opens a new handle.
 
+use std::sync::Arc;
+
 use js_jobs::JobStoreError;
 use js_state::StoreError;
 use tokio::sync::watch;
+
+/// The message of the answer the server gives once the state store has a newer writer: the
+/// 503 code of a heartbeat and the `UNAVAILABLE` message of the job service.
+pub(crate) const STATE_FENCED: &str = "state-fenced";
 
 /// Whether `error` says this process is no longer the store's writer.
 pub(crate) fn is_fenced(error: &JobStoreError) -> bool {
@@ -18,16 +24,17 @@ pub(crate) fn is_fenced(error: &JobStoreError) -> bool {
 }
 
 /// Whether the state store has told the server it is no longer the writer. Once tripped it
-/// stays tripped: nothing resets it.
+/// stays tripped: nothing resets it. A clone is the same fence.
+#[derive(Clone)]
 pub(crate) struct Fence {
-    tripped: watch::Sender<bool>,
+    tripped: Arc<watch::Sender<bool>>,
 }
 
 impl Fence {
     /// A fence that has not tripped.
     pub(crate) fn new() -> Self {
         Self {
-            tripped: watch::Sender::new(false),
+            tripped: Arc::new(watch::Sender::new(false)),
         }
     }
 

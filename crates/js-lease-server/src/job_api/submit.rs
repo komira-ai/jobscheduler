@@ -55,6 +55,7 @@ use super::JobApi;
 use super::fleet::Handle;
 use super::read::view;
 use super::validate::{self, Fault};
+use crate::fence::STATE_FENCED;
 
 /// The ceiling on a job's wall limit when `--max-job-wall` (or `server.max_job_wall`) is not
 /// given: 30 days, the longest `server.max_lease_wall` accepts (it has no default of its own).
@@ -155,17 +156,33 @@ fn no_capable_host() -> Status {
 }
 
 /// The answer to a store operation that did not happen: `job-id-conflict` for an id that
-/// names another job, else `state-write-failed`, the cause logged and never answered.
-pub(super) fn not_written(error: JobStoreError) -> Status {
-    match error {
+/// names another job, `UNAVAILABLE` `state-fenced` when the store says this process is no
+/// longer its writer (which also trips `api`'s fence, so the server stops), else
+/// `state-write-failed`, the cause logged and never answered.
+pub(super) fn not_written(api: &JobApi) -> impl Fn(JobStoreError) -> Status + '_ {
+    move |error| match error {
         JobStoreError::JobIdConflict { .. } => refusal_status(
             RefusalCode::JobIdConflict,
             "the job id names a different job",
         ),
         error => {
             tracing::warn!(%error, "a write of the job tables did not happen");
-            Status::internal(STATE_WRITE_FAILED)
+            unavailable_if_fenced(api, &error, Status::internal(STATE_WRITE_FAILED))
         }
+    }
+}
+
+/// `UNAVAILABLE` `state-fenced` when `error` is the store saying this process is no longer its
+/// writer (which trips `api`'s fence), else `otherwise`. The agents' heartbeats answer the same
+/// as a 503.
+pub(super) fn unavailable_if_fenced(
+    api: &JobApi,
+    error: &JobStoreError,
+    otherwise: Status,
+) -> Status {
+    match api.fence.note(error) {
+        true => Status::unavailable(STATE_FENCED),
+        false => otherwise,
     }
 }
 
@@ -181,7 +198,7 @@ pub(super) async fn submit_job(
     let request = request.into_inner();
     let valid = validate::job(request.spec.as_ref(), served.ceiling).map_err(refused)?;
     let held = match &valid.id {
-        Some(id) => api.jobs.get_job(id).map_err(not_written)?.is_some(),
+        Some(id) => api.jobs.get_job(id).map_err(not_written(api))?.is_some(),
         None => false,
     };
     if !held && !served.admission.0.can_ever_serve(&valid.wanted).await {
@@ -193,7 +210,7 @@ pub(super) async fn submit_job(
         priority: valid.priority,
         client,
     };
-    let inserted = api.jobs.insert_queued(new).map_err(not_written)?;
+    let inserted = api.jobs.insert_queued(new).map_err(not_written(api))?;
     Ok(Response::new(SubmitJobResponse {
         job: Some(view::job(&inserted.record)),
     }))

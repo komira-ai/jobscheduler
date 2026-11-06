@@ -53,7 +53,7 @@ pub(super) async fn cancel_job(
         .map_err(|_| Status::invalid_argument("field: jobId"))?;
     let job = api.jobs.request_cancel(&id).map_err(|error| match error {
         JobStoreError::NotFound { .. } => Status::not_found("unknown-job"),
-        error => not_written(error),
+        error => not_written(api)(error),
     })?;
     Ok(Response::new(CancelJobResponse {
         job: Some(view::job(&job)),

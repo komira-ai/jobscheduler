@@ -43,6 +43,7 @@ use crate::adapt::SharedClock;
 use crate::admit::{Admit, JobAdmission};
 use crate::agent_api::job_rig::{OneClock, Rig, START_MS, tables_on};
 use crate::config::Clients;
+use crate::fence::Fence;
 use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 
@@ -102,6 +103,8 @@ impl Admission for Fixed {
 pub(super) struct Writes {
     /// The tables the service writes.
     pub(super) jobs: Arc<ServerJobs>,
+    /// The service's fence, which a fenced store trips.
+    pub(super) fence: Fence,
     channel: Channel,
     router: Router,
 }
@@ -125,11 +128,16 @@ impl Writes {
         clients: Clients,
     ) -> Writes {
         let submit = submit::Ctx::served(CEILING, admission);
-        let api = Arc::new(JobApi::new(Arc::clone(&jobs), clock).with_submit(submit));
+        let fence = Fence::new();
+        let api = JobApi::new(Arc::clone(&jobs), clock)
+            .with_submit(submit)
+            .with_fence(fence.clone());
+        let api = Arc::new(api);
         let channel = connect(grpc(Arc::clone(&api), clients.clone())).await;
         let router = gateway(api, clients);
         Writes {
             jobs,
+            fence,
             channel,
             router,
         }

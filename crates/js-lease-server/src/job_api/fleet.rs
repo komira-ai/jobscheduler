@@ -49,6 +49,7 @@ use js_usage::{
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
+use super::submit::unavailable_if_fenced;
 use crate::agents::Agents;
 use crate::api::Shared;
 use crate::checks::State;
@@ -364,7 +365,9 @@ async fn described(
     let jobs = Arc::clone(&api.jobs);
     let read = move || ids.iter().map(|id| jobs.live_on(id)).collect();
     let live: Result<Vec<Live>, _> = blocking(read).await;
-    let live = live.map_err(|_| Status::unavailable(STORE_UNAVAILABLE))?;
+    let live = live.map_err(|error| {
+        unavailable_if_fenced(api, &error, Status::unavailable(STORE_UNAVAILABLE))
+    })?;
     let hosts = entries.into_iter().zip(live);
     Ok(hosts
         .map(|(entry, live)| host(entry, live, leases))
