@@ -254,8 +254,10 @@ fn tail_of(mut text: String) -> (String, bool) {
 }
 
 /// `job` ended as `end` says at `now`: its state, its end time, its result (none for a job
-/// that was lost or failed to start, with the tails cut to the cap) and its retention end,
-/// `now` plus `retention`. This is the one place a job record is made ended.
+/// that was lost or failed to start, with the tails cut to the cap), its retention end,
+/// `now` plus `retention`, and its files' contents replaced by their digests
+/// ([`crate::JobFiles`]). This is the one place a job record is made ended, so every write
+/// that ends a job drops the contents in the same write.
 pub(crate) fn ended(
     job: JobRecord,
     end: JobEnd,
@@ -284,6 +286,7 @@ pub(crate) fn ended(
         }
     });
     JobRecord {
+        spec: job.spec.digested(),
         state,
         ended_at: Some(now),
         result,
@@ -321,6 +324,22 @@ pub(crate) fn floored_at_boot(job: &JobRecord, boot: StoreTime) -> Option<JobRec
     let lower = job.deadline_floor.is_none_or(|stored| stored < floor);
     (waits & lower).then(|| JobRecord {
         deadline_floor: Some(floor),
+        ..job.clone()
+    })
+}
+
+/// `job` with its files' contents replaced by their digests when it has ended and still holds
+/// some (a row written by a build that kept them after the end); `None` for a job that has
+/// not ended, for one whose files are already digests, and for one with no files, which has
+/// nothing to drop. Nothing else changes.
+pub(crate) fn digested_at_boot(job: &JobRecord) -> Option<JobRecord> {
+    let holds_contents = job
+        .spec
+        .files
+        .contents()
+        .is_some_and(|files| !files.is_empty());
+    (job.state.is_ended() & holds_contents).then(|| JobRecord {
+        spec: job.spec.clone().digested(),
         ..job.clone()
     })
 }

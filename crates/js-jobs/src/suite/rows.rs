@@ -100,7 +100,13 @@ pub fn a_row_without_the_newest_tag_reads_with_defaults<B: Backend>(backend: &B)
             job.retention_ends,
             job.client.clone(),
         ),
-        (NetworkPolicy::None, Vec::new(), BTreeMap::new(), None, None),
+        (
+            NetworkPolicy::None,
+            Vec::new(),
+            crate::JobFiles::Contents(BTreeMap::new()),
+            None,
+            None
+        ),
         "{name}: a field the row lacks did not read as its default"
     );
     let image = ImageDigestRef::parse(&format!("team/app:1@{}", digest('c'))).expect("an image");
