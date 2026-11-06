@@ -221,18 +221,14 @@ fn a_cwd_that_is_not_a_directory_fails_the_start() {
 
 /// Asserts that an input that cannot be staged fails the start before `run`, naming the
 /// input, and the user is removed: a source that is not there, two inputs at one `dest`, and
-/// a source that is neither a file, a directory nor a link (a FIFO). It catches a run that
+/// a source that is neither a file, a directory nor a link (a device). It catches a run that
 /// starts without an input it named.
 #[test]
 fn an_input_that_cannot_be_staged_fails_the_start() {
     let mut rig = Rig::new("inputs-bad");
     let tree = source(&rig, "src", "x", "one");
-    let fifo = rig.dir.path("fifo");
-    let (kind, mode) = (
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from_raw_mode(0o600),
-    );
-    rustix::fs::mknodat(rustix::fs::CWD, &fifo, kind, mode, 0).unwrap();
+    // A character device: neither a file, a directory nor a link, on Linux and macOS.
+    let device = std::path::Path::new("/dev/null");
     let cases = [
         (
             vec![input(&rig.dir.path("missing"), "in")],
@@ -242,7 +238,7 @@ fn an_input_that_cannot_be_staged_fails_the_start() {
             vec![input(&tree, "twice"), input(&tree, "twice")],
             "an input: twice: ",
         ),
-        (vec![input(&fifo, "s")], "an input: s: "),
+        (vec![input(device, "s")], "an input: s: "),
     ];
     for (n, (inputs, said)) in cases.into_iter().enumerate() {
         let mut spec = rig.spec(&format!("r{n}"), native("/bin/true", &[]));
