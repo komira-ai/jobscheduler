@@ -184,14 +184,80 @@ fn a_key_with_carriage_returns_and_no_key_id_is_good() {
     assert!(key_with(&body).is_ok());
 }
 
-/// Asserts that the standard credential and the file reader behind it work on the process
-/// as it is: the standard credential is a credential or an error about the key file (the
-/// result is not compared, because a test does not set the process environment), the
-/// reader gives a file's bytes, and gives the reason in text for a file that is not there.
-/// It catches a reader that panics on a missing file.
+/// The variable that tells a child of this test binary which case of
+/// [`the_standard_credential_is_the_key_file_the_variable_names`] it runs.
+const CHILD_CASE: &str = "JS_GCE_STANDARD_CREDENTIAL_CASE";
+
+/// The cases of the standard credential: a name, and how the child's
+/// `GOOGLE_APPLICATION_CREDENTIALS` is set (`None`: not set at all).
+fn standard_cases() -> [(&'static str, Option<PathBuf>); 4] {
+    [
+        ("absent", None),
+        ("empty", Some(PathBuf::new())),
+        ("key", Some(fixture_path())),
+        (
+            "missing",
+            Some(fixture_path().with_file_name("absent.json")),
+        ),
+    ]
+}
+
+/// What the child of `case` checks of `Credentials::standard()`, which reads its own
+/// process: no variable and an empty one are the metadata server; the fixture's path is the
+/// service account of that key; a path to no file is the read error, named by the variable.
+fn check_standard(case: &str) {
+    let standard = Credentials::standard();
+    let shown = format!("{standard:?}");
+    let expected = match case {
+        "key" => standard.is_ok_and(|credential| {
+            matches!(credential, Credentials::ServiceAccount(_))
+                & shown.contains("tester@sample-project.iam.gserviceaccount.com")
+        }),
+        "missing" => standard.is_err_and(|error| {
+            matches!(error, CredentialError::Read(_))
+                & error.to_string().starts_with(KEY_FILE_VARIABLE)
+        }),
+        _ => matches!(standard, Ok(Credentials::MetadataServer)),
+    };
+    assert!(expected, "case {case}: {shown}");
+}
+
+/// Asserts that `Credentials::standard()` reads `GOOGLE_APPLICATION_CREDENTIALS` and the
+/// file it names: with the variable not set, and set to nothing, the credential is the
+/// metadata server; set to the fixture's path it is that key's service account; set to a
+/// path to no file it is the read error, named by the variable. Each case runs in a child
+/// of this test binary, started with that variable set (or removed) and the case named in
+/// [`CHILD_CASE`], so the result is compared whatever the environment of the test run, and
+/// the test's own process is never changed. It catches a standard credential that reads
+/// another variable, ignores the file, or turns a missing file into the metadata server.
 #[test]
-fn the_standard_credential_reads_the_environment_and_the_file_system() {
-    let _standard = Credentials::standard();
+fn the_standard_credential_is_the_key_file_the_variable_names() {
+    if let Some(case) = std::env::var_os(CHILD_CASE) {
+        check_standard(&case.to_string_lossy());
+        return;
+    }
+    let name = "credential::the_standard_credential_is_the_key_file_the_variable_names";
+    for (case, value) in standard_cases() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([name, "--exact", "--test-threads=1"])
+            .env(CHILD_CASE, case);
+        match value {
+            Some(path) => child.env(KEY_FILE_VARIABLE, path),
+            None => child.env_remove(KEY_FILE_VARIABLE),
+        };
+        let out = child.output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "case {case}: {said}");
+        assert!(said.contains("1 passed"), "case {case} ran no test: {said}");
+    }
+}
+
+/// Asserts that the file reader behind the standard credential gives a file's bytes, and
+/// gives the reason in text for a file that is not there. It catches a reader that panics
+/// on a missing file.
+#[test]
+fn the_key_file_reader_gives_the_bytes_or_the_reason() {
     assert_eq!(
         Credentials::read_key_file(&fixture_path()).unwrap(),
         fixture()
