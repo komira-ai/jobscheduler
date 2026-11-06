@@ -14,6 +14,12 @@ use js_agent::{Cli, RuntimeKind};
 
 const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
+/// The oneshot that writes the crun unit's GPU drop-in before each start.
+const GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
+/// Its name, as the setup script installs it.
+const GPU_UNIT_NAME: &str = "js-agent-crun-gpu.service";
+/// Where the setup script installs the crun unit, which the GPU oneshot extends.
+const INSTALLED_UNIT: &str = "/etc/systemd/system/js-agent-crun.service";
 /// Where the setup script installs the tmpfiles file, which the unit's `ExecStartPre` reads.
 const INSTALLED_TMPFILES: &str = "/etc/tmpfiles.d/js-agent-crun.conf";
 
@@ -33,9 +39,14 @@ fn code(text: &str) -> Vec<String> {
 
 /// The settings of the unit: section, key and value.
 fn settings() -> Vec<(String, String, String)> {
+    settings_of(UNIT)
+}
+
+/// The settings of the unit file `path`: section, key and value.
+fn settings_of(path: &str) -> Vec<(String, String, String)> {
     let mut section = String::new();
     let mut found = Vec::new();
-    for line in code(&read(UNIT)) {
+    for line in code(&read(path)) {
         if let Some(name) = line.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
             section = name.to_owned();
         } else {
@@ -162,11 +173,12 @@ fn the_unit_delegates_the_cgroup_and_leaves_the_stop_to_the_agent() {
 }
 
 /// No container engine is waited for or pulled in: the runtime is crun and the agent starts
-/// without Docker or Podman.
+/// without Docker or Podman. The unit waits for the network and for the GPU flags' oneshot.
 #[test]
 fn the_unit_names_no_container_engine() {
     let after = value("After");
-    assert_eq!(after, "network-online.target");
+    assert_eq!(after, format!("network-online.target {GPU_UNIT_NAME}"));
+    assert_eq!(value("Wants"), after);
     for (_, key, value) in settings() {
         if key == "ExecStart" {
             continue;
@@ -319,4 +331,75 @@ fn the_unit_holds_each_placeholder_the_setup_script_replaces_once() {
     ] {
         assert_eq!(text.matches(placeholder).count(), 1, "{placeholder}");
     }
+}
+
+/// The GPU oneshot runs before the crun unit (which pulls it in), once per start, and reloads
+/// systemd after the generator whatever it did, so the start that follows reads the drop-in as
+/// it is now. Its generator runs the same program as the crun unit, reads the crun unit where the
+/// setup script installs it, and writes a drop-in of that unit in /run (gone at a reboot) whose
+/// name sorts after `override.conf`, the drop-in `systemctl edit` writes, so an edit of the
+/// server or pool does not drop the GPU flags. Catches a drop-in written where systemd does not
+/// read it for the crun unit, or under a name that an edit's `ExecStart=` reset overrides.
+#[test]
+fn the_gpu_oneshot_writes_a_dropin_the_crun_unit_reads_before_it_starts() {
+    let mut found: Vec<(String, String, String)> = settings_of(GPU_UNIT);
+    found.sort();
+    let exec = found
+        .iter()
+        .find(|(_, k, _)| k == "ExecStart")
+        .map(|(_, _, v)| v.clone())
+        .expect("ExecStart");
+    let keys: Vec<(&str, &str)> = found
+        .iter()
+        .map(|(s, k, _)| (s.as_str(), k.as_str()))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("Service", "ExecStart"),
+            ("Service", "ExecStopPost"),
+            ("Service", "Type"),
+            ("Unit", "After"),
+            ("Unit", "Before"),
+            ("Unit", "Description"),
+            ("Unit", "Documentation"),
+        ]
+    );
+    let of = |key: &str| {
+        found
+            .iter()
+            .find(|(_, k, _)| k == key)
+            .map(|(_, _, v)| v.as_str())
+    };
+    assert_eq!(of("Type"), Some("oneshot"));
+    assert_eq!(of("Before"), Some("js-agent-crun.service"));
+    // The driver's modules are loaded and its nodes made before /dev is listed.
+    assert_eq!(
+        of("After"),
+        Some(
+            "systemd-modules-load.service systemd-udev-settle.service nvidia-persistenced.service"
+        )
+    );
+    assert_eq!(of("ExecStopPost"), Some("/usr/bin/systemctl daemon-reload"));
+
+    let words: Vec<&str> = exec.split_whitespace().collect();
+    let program = value("ExecStart");
+    assert_eq!(Some(words[0]), program.split_whitespace().next());
+    assert_eq!(words[1], "crun-gpu-dropin");
+    let flag = |name: &str| {
+        let at = words.iter().position(|w| *w == name).expect(name);
+        words[at + 1]
+    };
+    assert_eq!(flag("--unit"), INSTALLED_UNIT);
+    assert_eq!(flag("--dev-root"), "/dev");
+    assert_eq!(flag("--driver-root"), "/opt/nvidia-driver");
+    assert_eq!(flag("--nvidia-smi"), "/usr/bin/nvidia-smi");
+    let out = Path::new(flag("--out"));
+    assert_eq!(
+        out.parent(),
+        Some(Path::new("/run/systemd/system/js-agent-crun.service.d"))
+    );
+    let name = out.file_name().unwrap().to_str().unwrap();
+    assert!(name.ends_with(".conf"), "{name}");
+    assert!(name > "override.conf", "{name} sorts before override.conf");
 }

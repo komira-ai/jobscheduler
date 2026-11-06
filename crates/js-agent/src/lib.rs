@@ -30,6 +30,12 @@
 //! kill -TERM %1; wait %1                                             # prints `lifted`
 //! ```
 //!
+//! `js-agent crun-gpu-dropin --out <file>` (Linux, run as root by `js-agent-crun-gpu.service`
+//! before each start of `js-agent-crun.service`) writes the systemd drop-in that adds the
+//! `--gpu-device`, `--gpu-mount` and `--gpu-env` flags for the host's NVIDIA nodes to the crun
+//! unit's `ExecStart`, after checking them as the agent's start does; it writes none on a host
+//! without a GPU node; see `gpu_dropin` and docs/runbooks/crun-host-setup.md.
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -260,6 +266,8 @@ pub mod disk;
 pub mod egress;
 mod exclusive;
 mod facts;
+#[cfg(target_os = "linux")]
+mod gpu_dropin;
 mod host;
 #[cfg(target_os = "linux")]
 pub mod image;
@@ -523,6 +531,19 @@ pub fn main_with(
         .is_some_and(|verb| verb.to_str() == Some(image::pull::VERB))
     {
         return image::pull::run(&args, out, err, &image::pull::Host::system());
+    }
+    // The GPU drop-in is a short-lived step of systemd's, before the crun unit starts.
+    #[cfg(target_os = "linux")]
+    if args
+        .get(1)
+        .is_some_and(|verb| verb.to_str() == Some(gpu_dropin::VERB))
+    {
+        let smi = |program: &str| SystemCommands::default().run(program, &["-L"]);
+        let host = gpu_dropin::Host {
+            smi: &smi,
+            read: crun::read_node,
+        };
+        return gpu_dropin::run(&args, out, err, &host);
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
     // step of another program, and installs no signal handler.

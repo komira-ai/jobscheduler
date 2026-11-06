@@ -134,6 +134,11 @@ fn an_apply_on_a_fresh_root_sets_the_host_up() {
         read(TMPFILES)
     );
     assert_eq!(
+        rig.text("etc/systemd/system/js-agent-crun-gpu.service"),
+        read(GPU_UNIT),
+        "the GPU oneshot is installed as it is in the release"
+    );
+    assert_eq!(
         rig.text(&format!("etc/systemd/system/{MOUNT}")),
         mount_unit("loop,prjquota"),
         "the existing option is kept and prjquota added"
@@ -171,6 +176,17 @@ fn an_apply_on_a_fresh_root_sets_the_host_up() {
         .position(|c| c.starts_with("systemd-analyze verify "))
         .expect("the unit was verified");
     assert!(reload < tmpfiles && tmpfiles < verify, "{calls:?}");
+    // Both units are verified, so a GPU unit systemd cannot load fails the apply.
+    assert_eq!(
+        calls[verify],
+        format!(
+            "systemd-analyze verify {} {}",
+            rig.path("etc/systemd/system/js-agent-crun.service")
+                .display(),
+            rig.path("etc/systemd/system/js-agent-crun-gpu.service")
+                .display()
+        )
+    );
     assert!(
         index(
             &calls,
@@ -187,6 +203,12 @@ fn an_apply_on_a_fresh_root_sets_the_host_up() {
     ] {
         assert!(manifest.contains(line), "{line}: {manifest}");
     }
+    assert!(
+        manifest
+            .lines()
+            .any(|l| l.starts_with("file\t") && l.contains("/js-agent-crun-gpu.service\t")),
+        "{manifest}"
+    );
     assert!(out.text.contains("runtimes: docker crun"), "{}", out.text);
 }
 
@@ -412,6 +434,34 @@ fn an_apply_without_what_it_needs_is_refused_before_any_change() {
     assert_eq!(out.code, 2, "{}", out.text);
     assert!(out.text.contains("sha256"), "{}", out.text);
     assert_untouched(&rig, &before);
+    // A GPU unit that is not the pinned file, and an apply without the GPU unit.
+    let mut args = rig.apply_args();
+    let at = args
+        .iter()
+        .position(|a| a == "--gpu-unit-sha256")
+        .expect("flag")
+        + 1;
+    args[at] = "0".repeat(64);
+    let out = rig.run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(out.code, 2, "{}", out.text);
+    assert!(
+        out.text.contains("gpu-unit: ") && out.text.contains("does not have sha256"),
+        "{}",
+        out.text
+    );
+    assert_untouched(&rig, &before);
+    let mut args = rig.apply_args();
+    let at = args.iter().position(|a| a == "--gpu-unit").expect("flag");
+    args.drain(at..at + 4);
+    let out = rig.run(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(out.code, 2, "{}", out.text);
+    assert!(
+        out.text
+            .contains("gpu-unit: --gpu-unit FILE and --gpu-unit-sha256 are needed"),
+        "{}",
+        out.text
+    );
+    assert_untouched(&rig, &before);
     // A flag the script does not know.
     let out = rig.run(&["--bogus"]);
     assert_eq!(out.code, 2, "{}", out.text);
@@ -433,6 +483,8 @@ fn help_lists_the_flags() {
         "--subid-start",
         "--unit",
         "--unit-sha256",
+        "--gpu-unit",
+        "--gpu-unit-sha256",
         "--tmpfiles",
         "--tmpfiles-sha256",
         "--server",

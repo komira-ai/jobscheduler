@@ -17,9 +17,12 @@
 #                  mode is recorded); one not root's, or a link, is refused
 #   6. apparmor    where kernel.apparmor_restrict_unprivileged_userns is 1, the distribution's profile for
 #                  /usr/bin/crun is loaded (loaded here when it is installed and not loaded; refused when absent)
-#   7. unit        /etc/systemd/system/js-agent-crun.service and /etc/tmpfiles.d/js-agent-crun.conf, from the files
-#                  packaging/js-agent/js-agent-crun.service and tmpfiles-crun.conf of the jobscheduler release, pinned
-#                  by sha256; the unit is NOT enabled or started
+#   7. unit        /etc/systemd/system/js-agent-crun.service, /etc/systemd/system/js-agent-crun-gpu.service and
+#                  /etc/tmpfiles.d/js-agent-crun.conf, from the files packaging/js-agent/js-agent-crun.service,
+#                  js-agent-crun-gpu.service and tmpfiles-crun.conf of the jobscheduler release, pinned by sha256; the
+#                  units are NOT enabled or started. The GPU unit is a oneshot the crun unit pulls in before each
+#                  start: it runs `js-agent crun-gpu-dropin`, which writes the --gpu-* flags for the host's NVIDIA
+#                  nodes as a drop-in in /run, then reloads systemd (on a host with no GPU node it writes nothing)
 #
 # Usage:
 #   crun_host_setup.sh [setup flags]                  dry run (the default): read-only, prints each step and what it
@@ -34,6 +37,7 @@
 #   --job-user NAME           default jsjob (the unit names it: --job-user in its ExecStart)
 #   --subid-start N           first id of the block (default: the first free block from 200000)
 #   --unit FILE --unit-sha256 HEX            js-agent-crun.service (apply needs both)
+#   --gpu-unit FILE --gpu-unit-sha256 HEX    js-agent-crun-gpu.service (apply needs both)
 #   --tmpfiles FILE --tmpfiles-sha256 HEX    tmpfiles-crun.conf (apply needs both)
 #   --server URL --pool NAME  written into the unit in place of the placeholders (apply needs both)
 #   --scratch-mount-unit NAME the systemd mount unit of /var/lib/js-agent/scratch, a file in /etc/systemd/system
@@ -77,7 +81,7 @@ WIRED_LINE="runtimes: docker crun"
 ROOT=""             # "" = the host itself; --root DIR = a tree (the tests' fake root)
 EXPECT_UID=0        # the owner of what the script makes and checks
 APPLY=0
-UNIT_FILE="" UNIT_SHA="" TMPF_FILE="" TMPF_SHA="" SERVER="" POOL=""
+UNIT_FILE="" UNIT_SHA="" GPU_FILE="" GPU_SHA="" TMPF_FILE="" TMPF_SHA="" SERVER="" POOL=""
 RUN_MODE=plan       # plan: print what would be done; apply: do it
 PLANNED=0
 REFUSALS=0
@@ -299,6 +303,7 @@ set_paths() {
   STATE_DIR=$ROOT/var/lib/js-crun-host-setup
   MANIFEST=$STATE_DIR/manifest
   UNIT_DST=$ROOT/etc/systemd/system/js-agent-crun.service
+  GPU_DST=$ROOT/etc/systemd/system/js-agent-crun-gpu.service
   TMPF_DST=$ROOT/etc/tmpfiles.d/js-agent-crun.conf
   MOUNT_UNIT_FILE=$ROOT/etc/systemd/system/$MOUNT_UNIT
   PROFILES=$ROOT/sys/kernel/security/apparmor/profiles
@@ -827,18 +832,20 @@ install_one() {
 
 step_files() {
   say "unit and tmpfiles"
-  local unit="" tmpf="" unit_raw=""
+  local unit="" tmpf="" unit_raw="" gpu=""
   if [ -n "$UNIT_FILE" ] && [ -f "$UNIT_FILE" ]; then
     slurp unit_raw "$UNIT_FILE"
     unit=$unit_raw
     render_unit unit "$unit_raw" "$SERVER" "$POOL" "$JOB_USER" \
       || { refuse "unit: $UNIT_FILE is not the unit this script renders (a placeholder is missing, or the server, pool or user is not valid)"; return 0; }
   fi
+  if [ -n "$GPU_FILE" ] && [ -f "$GPU_FILE" ]; then slurp gpu "$GPU_FILE"; fi
   if [ -n "$TMPF_FILE" ] && [ -f "$TMPF_FILE" ]; then slurp tmpf "$TMPF_FILE"; fi
   if [ "$APPLY" = 1 ] && { [ -z "$SERVER" ] || [ -z "$POOL" ]; }; then
     refuse "unit: --server and --pool are needed to write the unit"
   fi
   install_one unit "$UNIT_FILE" "$UNIT_SHA" "$UNIT_DST" "$unit_raw" "$unit"
+  install_one gpu-unit "$GPU_FILE" "$GPU_SHA" "$GPU_DST" "$gpu" "$gpu"
   install_one tmpfiles "$TMPF_FILE" "$TMPF_SHA" "$TMPF_DST" "$tmpf" "$tmpf"
 }
 
@@ -850,7 +857,9 @@ step_reload() {
     # The unit runs its program through the release link (/opt/js-agent/link/current), which the tmpfiles file
     # makes; the verify below needs the program to be there.
     if [ -f "$TMPF_DST" ]; then act "systemd-tmpfiles --create $TMPF_DST" systemd-tmpfiles --create "$TMPF_DST" || return 0; fi
-    if systemd-analyze verify "$UNIT_DST" >/dev/null 2>&1; then say "  systemd-analyze verify $UNIT_DST: ok"; else say "  FAILED: systemd-analyze verify $UNIT_DST"; mark_failed; fi
+    local units=("$UNIT_DST")
+    if [ -f "$GPU_DST" ]; then units+=("$GPU_DST"); fi
+    if systemd-analyze verify "${units[@]}" >/dev/null 2>&1; then say "  systemd-analyze verify ${units[*]}: ok"; else say "  FAILED: systemd-analyze verify ${units[*]}"; mark_failed; fi
   fi
 }
 
@@ -891,13 +900,15 @@ main() {
       --apply) APPLY=1 ;;
       --skip-scratch-quota) SKIP_QUOTA=1 ;;
       --help | -h) usage; exit 0 ;;
-      --job-user | --subid-start | --unit | --unit-sha256 | --tmpfiles | --tmpfiles-sha256 | --server | --pool | --scratch-mount-unit | --root | --dependents-limit)
+      --job-user | --subid-start | --unit | --unit-sha256 | --gpu-unit | --gpu-unit-sha256 | --tmpfiles | --tmpfiles-sha256 | --server | --pool | --scratch-mount-unit | --root | --dependents-limit)
         [ "$#" -ge 2 ] || die "$1 needs a value"
         case $1 in
           --job-user) JOB_USER=$2 ;;
           --subid-start) SUBID_START=$2 ;;
           --unit) UNIT_FILE=$2 ;;
           --unit-sha256) UNIT_SHA=$2 ;;
+          --gpu-unit) GPU_FILE=$2 ;;
+          --gpu-unit-sha256) GPU_SHA=$2 ;;
           --tmpfiles) TMPF_FILE=$2 ;;
           --tmpfiles-sha256) TMPF_SHA=$2 ;;
           --server) SERVER=$2 ;;

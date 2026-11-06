@@ -13,6 +13,7 @@ pub const SHIM: &str = env!("CARGO_BIN_EXE_host-shim");
 pub const SCRIPT: &str = "packaging/js-agent/crun_host_setup.sh";
 pub const UNIT: &str = "packaging/js-agent/js-agent-crun.service";
 pub const TMPFILES: &str = "packaging/js-agent/tmpfiles-crun.conf";
+pub const GPU_UNIT: &str = "packaging/js-agent/js-agent-crun-gpu.service";
 
 /// The programs the script runs that read or change the host. Each has a stand-in.
 pub const GUARDED: [&str; 16] = [
@@ -399,7 +400,7 @@ impl Rig {
         }
     }
 
-    /// The flags of an apply with the unit and tmpfiles file of this repository.
+    /// The flags of an apply with the units and tmpfiles file of this repository.
     pub fn apply_args(&self) -> Vec<String> {
         let mut args: Vec<String> = ["--apply", "--server", SERVER, "--pool", "farm"]
             .map(str::to_owned)
@@ -414,6 +415,10 @@ impl Rig {
             repo(UNIT).display().to_string(),
             "--unit-sha256".into(),
             sha(&read(UNIT)),
+            "--gpu-unit".into(),
+            repo(GPU_UNIT).display().to_string(),
+            "--gpu-unit-sha256".into(),
+            sha(&read(GPU_UNIT)),
             "--tmpfiles".into(),
             repo(TMPFILES).display().to_string(),
             "--tmpfiles-sha256".into(),
