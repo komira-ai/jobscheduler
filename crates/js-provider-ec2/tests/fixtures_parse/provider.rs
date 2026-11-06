@@ -70,6 +70,7 @@ fn the_provider_acquires_over_the_documented_answers() {
                 offer: "m7i.large/on-demand".to_owned(),
                 zone: Some("us-east-1a".to_owned()),
                 status: HostStatus::Booting,
+                ends_unix_seconds: None,
             },
             extras: Vec::new(),
         }
@@ -123,6 +124,7 @@ fn the_provider_lists_the_machines_of_both_pages() {
         offer: offer.to_owned(),
         zone: Some(at.to_owned()),
         status,
+        ends_unix_seconds: None,
     };
     assert_eq!(
         provider.list().unwrap(),

@@ -142,6 +142,7 @@ mod tests {
             offer: "sim_1x_a100".to_owned(),
             zone: Some("zone-a".to_owned()),
             status: HostStatus::Booting,
+            ends_unix_seconds: None,
         };
         let accepted = Acquired::Accepted {
             held,

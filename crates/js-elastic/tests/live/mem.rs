@@ -142,6 +142,7 @@ impl Mem {
             offer: machine.offer.clone(),
             zone: machine.zone.clone(),
             status: machine.status.clone(),
+            ends_unix_seconds: None,
         }
     }
 }

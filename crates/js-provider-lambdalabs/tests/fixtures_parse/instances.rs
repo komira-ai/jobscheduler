@@ -130,6 +130,7 @@ fn held(id_text: &str, acquire_id: &str, name: &str, status: HostStatus) -> Held
         offer: "gpu_1x_h100_sxm5".to_owned(),
         zone: Some("region-a".to_owned()),
         status,
+        ends_unix_seconds: None,
     }
 }
 
