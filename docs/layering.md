@@ -43,8 +43,8 @@ the manifests, so the manifest rules need no network (the transitive walk below 
   `crates/xtask/src/layering.rs`). `update-hook` is kbf's hook-contract crate: js-agent's tests
   run its conformance harness against the hook (`crates/js-agent/tests/agent/update_hook/
   conformance.rs`). `update-rights` holds the host updater's rules for a declaration: xtask's
-  tests load the js-agent declaration the release ships with it
-  (`crates/xtask/tests/js_agent_declaration.rs`). Neither depends on another crate of kbf but
+  tests load the js-agent and js-lease-server declarations the release ships with it
+  (`crates/xtask/tests/js_agent_declaration.rs`, `crates/xtask/tests/js_lease_server_declaration.rs`). Neither depends on another crate of kbf but
   `update-hook`. Both are pinned by one revision in the root `[workspace.dependencies]`, and
   `deny.toml` allows kbf's repository as a git source for them alone. They are the one exception
   to this repository depending on nothing of kbf, and they reach no shipped binary.

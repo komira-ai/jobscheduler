@@ -120,6 +120,13 @@ fn parse(
     Ok(StoreSetting { target, names })
 }
 
+/// The store the content `bytes` of the store file `path` names, read for the update hook:
+/// as `--store` reads it, a `sqlite:` store accepted (the hook only probes a store, and the
+/// server's own start holds it to the gate).
+pub(crate) fn hook_store_target(bytes: &[u8], path: &Path) -> Result<WriterTarget, StartupError> {
+    parse(bytes, path, true, StoreNames::Flags).map(|setting| setting.target)
+}
+
 /// The SQLite store at `file`, which the store file `path` names: refused without the gate,
 /// and refused when it is not an absolute path (the server's working directory is not
 /// configuration).

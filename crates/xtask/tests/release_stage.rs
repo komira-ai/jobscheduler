@@ -11,7 +11,8 @@ use std::process::Command;
 use js_testkit::dir::TestDir;
 use xtask::release::Error;
 use xtask::release::stage::{
-    DECLARATION_MEMBER, DECLARATION_SOURCE, Member, StageArgs, members, run, run_with,
+    DECLARATION_MEMBER, DECLARATION_SOURCE, Member, SERVER_DECLARATION_SOURCE, StageArgs,
+    declaration_member, members, run, run_with,
 };
 
 const LINUX: &str = "x86_64-unknown-linux-musl";
@@ -23,7 +24,7 @@ const LINUX_BINS: [&str; 5] = ["js-lease-server", "js", "js-agent", "js-bundle",
 
 /// A checkout of its own, unique to the test, with the built binaries of the targets (the agent
 /// and the client for x86_64 Linux and the Mac, all five Linux binaries for arm64 Linux), the
-/// license and the declaration. The x86_64 checkout lacks `js-lease-server` on purpose: a test
+/// license and the declarations of the agent and the lease server. The x86_64 checkout lacks `js-lease-server` on purpose: a test
 /// below stages it to see the copy fail.
 fn checkout(name: &str) -> TestDir {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
@@ -45,6 +46,9 @@ fn checkout(name: &str) -> TestDir {
     let declaration = dir.join(DECLARATION_SOURCE);
     std::fs::create_dir_all(declaration.parent().expect("a parent")).expect("packaging");
     std::fs::write(&declaration, "name = \"js-agent\"\n").expect("declaration");
+    let server = dir.join(SERVER_DECLARATION_SOURCE);
+    std::fs::create_dir_all(server.parent().expect("a parent")).expect("packaging");
+    std::fs::write(&server, "name = \"js-lease-server\"\n").expect("server declaration");
     tmp
 }
 
@@ -230,12 +234,15 @@ fn the_arm64_linux_agent_archive_holds_the_binary_the_license_and_the_declaratio
     );
 }
 
-/// Every other arm64 Linux archive (the lease server's, the client's, the bundle tool's and
-/// js-mdm's) holds the binary and the license only, as its x86_64 twin does. Catches a
-/// declaration added to an archive that is not the agent's.
+/// Every other arm64 Linux archive (the client's, the bundle tool's and js-mdm's) holds the
+/// binary and the license only, as its x86_64 twin does. Catches a declaration added to an
+/// archive that has none.
 #[test]
 fn every_other_arm64_linux_archive_holds_the_binary_and_the_license_only() {
-    for bin in LINUX_BINS.into_iter().filter(|&bin| bin != "js-agent") {
+    for bin in LINUX_BINS
+        .into_iter()
+        .filter(|&bin| bin != "js-agent" && bin != "js-lease-server")
+    {
         let tmp = checkout(&format!("stage-arm64-other-{bin}"));
         let repo = tmp.path();
         let line = run(&args(repo, bin, ARM_LINUX)).expect("staged");
@@ -267,6 +274,105 @@ fn every_other_arm64_linux_archive_holds_the_binary_and_the_license_only() {
                 },
             ]
         );
+    }
+}
+
+/// The Linux js-lease-server archives, of both architectures, hold the binary (still
+/// executable), the license and `updater.d/js-lease-server.toml` with the bytes of the checkout's
+/// server declaration (not the agent's), and `members` lists that member for both Linux targets
+/// and for no Mac target; the agent's archive does not carry the server's file and the server's
+/// does not carry the agent's. Catches a server archive the updater cannot read the rights of a
+/// release from, or one that carries the agent's declaration.
+#[test]
+fn the_server_archive_carries_the_declaration() {
+    assert_eq!(
+        declaration_member("js-lease-server"),
+        "updater.d/js-lease-server.toml"
+    );
+    for target in [LINUX, ARM_LINUX] {
+        let tmp = checkout(&format!("stage-server-{target}"));
+        let repo = tmp.path();
+        // The x86_64 checkout has no server binary: this test puts one in.
+        let built = repo.join(format!("target/{target}/release/js-lease-server"));
+        std::fs::write(&built, format!("js-lease-server for {target}")).expect("binary");
+        std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let line = run(&args(repo, "js-lease-server", target)).expect("staged");
+        let name = format!("js-lease-server-1.2.3-{target}");
+        assert_eq!(
+            line,
+            format!(
+                "staged {}: js-lease-server, LICENSE, updater.d/js-lease-server.toml",
+                repo.join("stage").join(&name).display()
+            )
+        );
+        assert_eq!(
+            tree(&repo.join("stage")),
+            [
+                format!("{name}/"),
+                format!("{name}/LICENSE"),
+                format!("{name}/js-lease-server"),
+                format!("{name}/updater.d/"),
+                format!("{name}/updater.d/js-lease-server.toml"),
+            ]
+        );
+        let top = repo.join("stage").join(&name);
+        for (member, source) in [
+            (
+                "js-lease-server",
+                format!("target/{target}/release/js-lease-server"),
+            ),
+            ("LICENSE", "LICENSE".to_owned()),
+            (
+                "updater.d/js-lease-server.toml",
+                SERVER_DECLARATION_SOURCE.to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                std::fs::read(top.join(member)).expect("staged file"),
+                std::fs::read(repo.join(source)).expect("source"),
+                "{member}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(top.join("updater.d/js-lease-server.toml")).expect("declaration"),
+            b"name = \"js-lease-server\"\n"
+        );
+        let mode = std::fs::metadata(top.join("js-lease-server"))
+            .expect("binary")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        assert_eq!(
+            members("js-lease-server", target),
+            [
+                Member {
+                    source: format!("target/{target}/release/js-lease-server"),
+                    path: "js-lease-server".to_owned(),
+                },
+                Member {
+                    source: "LICENSE".to_owned(),
+                    path: "LICENSE".to_owned(),
+                },
+                Member {
+                    source: SERVER_DECLARATION_SOURCE.to_owned(),
+                    path: "updater.d/js-lease-server.toml".to_owned(),
+                },
+            ]
+        );
+    }
+    // The agent's archive carries the agent's declaration only.
+    assert!(
+        !members("js-agent", LINUX)
+            .iter()
+            .any(|member| member.source == SERVER_DECLARATION_SOURCE)
+    );
+    // No Mac archive carries a declaration, and no other binary carries the server's.
+    for (bin, target) in [
+        ("js-lease-server", MAC),
+        ("js", LINUX),
+        ("js-mdm", ARM_LINUX),
+    ] {
+        assert_eq!(members(bin, target).len(), 2, "{bin} {target}");
     }
 }
 

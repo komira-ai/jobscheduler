@@ -32,6 +32,9 @@ js-sched-placer = { path = "../js-sched-placer" }
 # tests and single-node development (src/store.rs).
 js-state = { path = "../js-state", features = ["postgres"] }
 js-types = { path = "../js-types" }
+# The host updater's hook contract (`js-lease-server update-hook`, src/update_hook): the exit
+# status and last line, the state directory and its record, the unit manager, the release link.
+js-update-hook = { path = "../js-update-hook" }
 js-usage = { path = "../js-usage" }
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true

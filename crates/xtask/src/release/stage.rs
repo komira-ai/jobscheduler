@@ -3,12 +3,12 @@
 //! exactly the files [`members`] lists, copied from the checkout. The workflow then archives it
 //! (`.github/workflows/release.yml`, docs/release.md).
 //!
-//! Every archive holds its binary and the repository's `LICENSE`. The Linux archive of `js-agent`,
-//! of either architecture (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), also
-//! holds the host updater's declaration as `updater.d/js-agent.toml` ([`DECLARATION_MEMBER`]),
-//! the name kbf's release unpacker takes it by, so the updater reads the rights of a release
-//! from the release itself. The Mac archive does not: a Mac runs no generic updater, and its
-//! package carries its own declaration.
+//! Every archive holds its binary and the repository's `LICENSE`. The Linux archive, of either
+//! architecture (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), of a binary that has
+//! a host updater's declaration ([`DECLARATIONS`]: `js-agent` and `js-lease-server`) also holds it
+//! as `updater.d/<binary>.toml` ([`declaration_member`]), the name kbf's release unpacker takes it
+//! by, so the updater reads the rights of a release from the release itself. The Mac archives do
+//! not: a Mac runs no generic updater, and the agent's package carries its own declaration.
 
 use std::path::{Path, PathBuf};
 
@@ -17,13 +17,30 @@ use super::{Error, Version, io_error};
 /// The host updater's declaration of js-agent in the repository: the file the deb carries too.
 pub const DECLARATION_SOURCE: &str = "packaging/js-agent/updater.d/js-agent.toml";
 
-/// The declaration's path inside the archive's directory.
+/// js-agent's declaration's path inside the archive's directory.
 pub const DECLARATION_MEMBER: &str = "updater.d/js-agent.toml";
+
+/// The host updater's declaration of js-lease-server in the repository.
+pub const SERVER_DECLARATION_SOURCE: &str =
+    "packaging/js-lease-server/updater.d/js-lease-server.toml";
+
+/// The binaries whose Linux archives carry a host updater's declaration, each with its file in
+/// the repository.
+pub const DECLARATIONS: [(&str, &str); 2] = [
+    ("js-agent", DECLARATION_SOURCE),
+    ("js-lease-server", SERVER_DECLARATION_SOURCE),
+];
+
+/// The path of `bin`'s declaration inside its archive's directory: `updater.d/<bin>.toml`.
+#[must_use]
+pub fn declaration_member(bin: &str) -> String {
+    format!("updater.d/{bin}.toml")
+}
 
 /// The arguments of `release stage`.
 #[derive(clap::Args)]
 pub struct StageArgs {
-    /// The binary the archive is of (`js-agent`).
+    /// The binary the archive is of (`js-agent`, `js-lease-server`).
     #[arg(long)]
     pub bin: String,
     /// The target it was built for (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
@@ -67,8 +84,12 @@ pub fn members(bin: &str, target: &str) -> Vec<Member> {
         Member::new(format!("target/{target}/release/{bin}"), bin),
         Member::new("LICENSE", "LICENSE"),
     ];
-    if bin == "js-agent" && target.contains("-linux-") {
-        list.push(Member::new(DECLARATION_SOURCE, DECLARATION_MEMBER));
+    let declaration = DECLARATIONS
+        .iter()
+        .find(|(name, _)| *name == bin)
+        .filter(|_| target.contains("-linux-"));
+    if let Some((_, source)) = declaration {
+        list.push(Member::new(*source, declaration_member(bin)));
     }
     list
 }
