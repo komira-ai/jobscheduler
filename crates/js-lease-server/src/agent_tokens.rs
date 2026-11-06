@@ -1,12 +1,14 @@
 //! The join tokens of `--agent-token-file`: several at once, so that one can be replaced
-//! while hosts still use the other, and read again at every tick.
+//! while hosts still use the other, and read again at every tick. The clients' tokens they
+//! must differ from are the set in force ([`LiveClients`]), which the same tick reads again
+//! ([`AgentTokens::reload_clients`]), each side checked against the other.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use js_registry::Credential;
 
-use crate::config::{Clients, Token, parse_token, read_private};
+use crate::config::{LiveClients, Token, parse_token, read_private, read_private_reason};
 use crate::error::StartupError;
 
 /// The most tokens the file may hold. A request is compared against each of them, so the
@@ -30,9 +32,10 @@ struct Accepted {
 /// no shared token file ([`AgentTokens::none`]) accepts no shared token, so only the
 /// one-time tokens of launched hosts can register one.
 pub(crate) struct AgentTokens {
-    /// The file the set comes from and the clients whose tokens it is checked against;
-    /// `None` for a pool with no shared token.
-    file: Option<(PathBuf, Clients)>,
+    /// The file the set comes from; `None` for a pool with no shared token.
+    file: Option<PathBuf>,
+    /// The clients in force, whose tokens no join token may be.
+    clients: LiveClients,
     accepted: RwLock<Arc<Vec<Accepted>>>,
 }
 
@@ -40,19 +43,21 @@ impl AgentTokens {
     /// Reads the file at `path`. `clients` are the clients of the server, the token of the
     /// lease routes (`default`) among them: a join token must be none of theirs, or it
     /// would open the clients' side of the server's trust and the other way round.
-    pub(crate) fn open(path: &Path, clients: &Clients) -> Result<Self, StartupError> {
+    pub(crate) fn open(path: &Path, clients: &LiveClients) -> Result<Self, StartupError> {
         let accepted = read(path, clients)?;
         Ok(Self {
-            file: Some((path.to_path_buf(), clients.clone())),
+            file: Some(path.to_path_buf()),
+            clients: clients.clone(),
             accepted: RwLock::new(Arc::new(accepted)),
         })
     }
 
     /// No shared token: nothing is accepted from this set, and there is no file to read
-    /// again.
-    pub(crate) fn none() -> Self {
+    /// again. `clients` are the server's, which [`AgentTokens::reload_clients`] reads again.
+    pub(crate) fn none(clients: &LiveClients) -> Self {
         Self {
             file: None,
+            clients: clients.clone(),
             accepted: RwLock::new(Arc::new(Vec::new())),
         }
     }
@@ -60,15 +65,37 @@ impl AgentTokens {
     /// Reads the file again and, when it is valid, replaces the set. The file's text is
     /// never in the error. With no file there is nothing to read and the call is `Ok`.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
-        let Some((path, clients)) = &self.file else {
+        let Some(path) = &self.file else {
             return Ok(());
         };
-        let accepted = read(path, clients)?;
+        let accepted = read(path, &self.clients)?;
         *self
             .accepted
             .write()
             .unwrap_or_else(PoisonError::into_inner) = Arc::new(accepted);
         Ok(())
+    }
+
+    /// Reads the token file of every named client again ([`LiveClients::reload`]), each
+    /// token checked to be none of the join tokens in force; whether the clients' tokens
+    /// changed. A refusal keeps the clients in force and names the entry, never a token.
+    pub(crate) fn reload_clients(&self) -> Result<bool, String> {
+        self.reload_clients_with(&read_private_reason)
+    }
+
+    /// [`AgentTokens::reload_clients`] reading each file with `read`.
+    pub(crate) fn reload_clients_with(
+        &self,
+        read: &dyn Fn(&Path) -> Result<Vec<u8>, String>,
+    ) -> Result<bool, String> {
+        let taken = |token: &Token| {
+            let accepted = self.accepted.read().unwrap_or_else(PoisonError::into_inner);
+            accepted
+                .iter()
+                .any(|each| each.token.same_as(token))
+                .then(|| format!("holds a join token of {FLAG}: the two must differ"))
+        };
+        self.clients.reload(read, &taken)
     }
 
     /// The credentials of the tokens in force.
@@ -120,10 +147,11 @@ fn parse(bytes: &[u8]) -> Result<Vec<Token>, String> {
 /// Reads and checks the file: owner-only like the client token file, every line a token
 /// of at least [`crate::MIN_TOKEN_BYTES`], none the token of a client. A refusal names the
 /// client's entry and never the token.
-fn read(path: &Path, clients: &Clients) -> Result<Vec<Accepted>, StartupError> {
+fn read(path: &Path, clients: &LiveClients) -> Result<Vec<Accepted>, StartupError> {
     let bytes = read_private(path, FLAG)?;
     let named = |reason: String| StartupError::new(FLAG, format!("{} {reason}", path.display()));
     let tokens = parse(&bytes).map_err(named)?;
+    let clients = clients.now();
     if let Some(client) = tokens.iter().find_map(|token| clients.holder_of(token)) {
         return Err(named(format!(
             "holds the client token of {client}: the two must differ"
@@ -173,7 +201,9 @@ mod tests {
     /// reload that errors every tick.
     #[test]
     fn a_set_with_no_shared_token_accepts_nothing() {
-        let none = AgentTokens::none();
+        let token = parse_token(&[b'c'; 40]).unwrap();
+        let clients = LiveClients::new(crate::config::Clients::only(&token, "--token-file"));
+        let none = AgentTokens::none(&clients);
         assert!(none.identify(A).is_none());
         assert!(none.identify("").is_none());
         assert!(none.credentials().is_empty());

@@ -14,7 +14,17 @@
 //! its next input, so that thread's timing cannot reach a decision.
 //!
 //! [`ServerNode::client_call`] is how a client reaches the server: a call at an exact
-//! virtual time, through the client router, which the bus never drops.
+//! virtual time, through the client router, which the bus never drops. A server of
+//! [`ServerSpec::jobs`] also serves the job service, in process ([`JOBS_PATH`]): a client
+//! call whose path is under it goes to the job service's router (its HTTP/JSON gateway),
+//! and every other to the client router.
+//!
+//! # Ids and the job store's clock
+//!
+//! The server's job store mints its allocation ids from js-jobs's scripted source over ids
+//! drawn from the cell's seed, and stamps its rows with the cell's clock, both given
+//! through the seam (`Config::with_job_sources`); the node keeps the one source across a
+//! restart. So a seed replays with the job service on too (module `ids`).
 //!
 //! The lease file, the pool file and the token files live in a [`TestDir`] the node owns.
 //!
@@ -32,10 +42,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
+use js_jobs::ScriptedIds;
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
@@ -50,8 +63,10 @@ use tower::ServiceExt;
 use crate::bus::{Msg, Route};
 use crate::observe::{ServerHost, ServerView};
 
+mod ids;
 mod spec;
 
+pub use ids::{SCRIPT_LEN, StoreClock, seeded};
 pub use spec::{
     ARCH, ARCH_KEY, CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS,
 };
@@ -73,6 +88,10 @@ pub fn virtual_time(millis: u64) -> FarmTime {
     FarmTime::from_millis(millis.saturating_sub(EPOCH_MS))
 }
 
+/// The path the job service's routes are under: a client call to it goes to the job
+/// service's router.
+pub const JOBS_PATH: &str = "/v1/jobs";
+
 /// A kind of call the server answered: who called, on which route, and the status.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CallKey {
@@ -81,16 +100,26 @@ struct CallKey {
     status: u16,
 }
 
-/// The server while it runs: its two routers and the in-process server they serve.
+/// The server while it runs: its routers (the job service's, while it is on) and the
+/// in-process server they serve.
 struct Up {
     agent: Router,
     client: Router,
+    job: Option<Router>,
     server: InProcess,
 }
 
 impl Up {
-    /// Starts the server `config` describes on `clock`, inside `runtime`.
-    fn start(config: Config, clock: &ManualClock, runtime: &Runtime) -> Result<Self, StartupError> {
+    /// Starts the server `config` describes on `clock`, inside `runtime`, its job store
+    /// minting from `ids` and stamping with `clock`.
+    fn start(
+        config: Config,
+        clock: &ManualClock,
+        ids: &Arc<ScriptedIds>,
+        runtime: &Runtime,
+    ) -> Result<Self, StartupError> {
+        let store_clock = Arc::new(StoreClock(clock.clone()));
+        let config = config.with_job_sources(store_clock, ids.clone());
         let server = {
             let _entered = runtime.enter();
             InProcess::start(config, SharedClock::new(clock.clone()))?
@@ -98,19 +127,29 @@ impl Up {
         Ok(Self {
             agent: server.agent_router(),
             client: server.client_router(),
+            job: server.job_router(),
             server,
         })
     }
 
-    /// Drops the routers, then the server: the lease file is unlocked once this returns.
+    /// Drops the routers, then the server: the lease file and the job store are unlocked
+    /// once this returns.
     fn shutdown(self) {
         let Self {
             agent,
             client,
+            job,
             server,
         } = self;
-        drop((agent, client));
+        drop((agent, client, job));
         server.shutdown();
+    }
+
+    /// The router a client call to `path` goes to: the job service's for a path under
+    /// [`JOBS_PATH`] while it is on, else the client router.
+    fn router_for(&self, path: &str) -> Router {
+        let job = self.job.as_ref().filter(|_| path.starts_with(JOBS_PATH));
+        job.unwrap_or(&self.client).clone()
     }
 }
 
@@ -123,24 +162,37 @@ pub struct ServerNode {
     tick: Duration,
     out: Vec<Output<Msg>>,
     calls: BTreeMap<CallKey, u64>,
+    /// The ids the job store mints, kept across a restart.
+    ids: Arc<ScriptedIds>,
     /// Dropped last: the server's files, which a restart starts over.
     dir: TestDir,
 }
 
 impl ServerNode {
-    /// Starts the server `spec` describes, its files in `dir`, at virtual time zero.
+    /// Starts the server `spec` describes, its files in `dir`, at virtual time zero, its
+    /// job store minting the ids of seed 0.
     ///
     /// # Errors
     ///
     /// When a file cannot be written, the runtime cannot be built, or the server refuses
     /// its configuration, naming the flag at fault.
     pub fn start(spec: &ServerSpec, dir: TestDir) -> Result<Self, StartupError> {
+        Self::start_seeded(spec, dir, 0)
+    }
+
+    /// [`ServerNode::start`], its job store minting the ids of `seed` ([`seeded`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`ServerNode::start`].
+    pub fn start_seeded(spec: &ServerSpec, dir: TestDir, seed: u64) -> Result<Self, StartupError> {
         let clock = ManualClock::new(wall_time(FarmTime::default()));
         let config = spec.config(dir.path(), &clock)?;
         let tick = config.tick_period();
         let mut build = tokio::runtime::Builder::new_current_thread();
         let runtime = build.build().map_err(StartupError::because("runtime"))?;
-        let up = Up::start(config, &clock, &runtime)?;
+        let ids = Arc::new(seeded(seed));
+        let up = Up::start(config, &clock, &ids, &runtime)?;
         Ok(Self {
             up: Some(up),
             runtime,
@@ -148,6 +200,7 @@ impl ServerNode {
             tick,
             out: Vec::new(),
             calls: BTreeMap::new(),
+            ids,
             dir,
         })
     }
@@ -168,7 +221,7 @@ impl ServerNode {
             .clone()
             .resuming()
             .config(self.dir.path(), &self.clock)?;
-        self.up = Some(Up::start(config, &self.clock, &self.runtime)?);
+        self.up = Some(Up::start(config, &self.clock, &self.ids, &self.runtime)?);
         Ok(())
     }
 
@@ -178,14 +231,17 @@ impl ServerNode {
         self.up.is_some()
     }
 
-    /// One call through the client router at virtual time `now`, run to its end. The
-    /// answer's body is read as text. A server that is down answers 503 with no body.
+    /// One call through the client router at virtual time `now`, run to its end, or
+    /// through the job service's router for a path under [`JOBS_PATH`] while the job
+    /// service is on. The answer's body is read as text. A server that is down answers 503
+    /// with no body.
     pub fn client_call(&mut self, now: FarmTime, request: Request<Body>) -> Response<String> {
         self.clock.set(wall_time(now));
         let Some(up) = &self.up else {
             return down();
         };
-        self.runtime.block_on(call(up.client.clone(), request))
+        let router = up.router_for(request.uri().path());
+        self.runtime.block_on(call(router, request))
     }
 
     /// The server: its registry, scaler and counts; `None` while it is down.

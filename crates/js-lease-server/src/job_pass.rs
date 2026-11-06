@@ -14,6 +14,10 @@
 //!    allocation is read once; a host the provider reads absent has its allocations freed and
 //!    its jobs lost.
 //!
+//! After the passes, whether they succeeded or not, the tick trims the job store's change feed to its newest
+//! `--job-feed-retention` changes ([`crate::job_store::FeedTrim`]); a failed trim is logged
+//! and never fails the pass.
+//!
 //! Presence and marks (`registry.advance()`) and placement follow in the tick
 //! ([`crate::api::Shared::tick`]). Every state change is one store transaction carrying the
 //! allocation change that goes with it (section 8, row 25). The pass reads no clock of its
@@ -26,7 +30,8 @@
 //! 120 s in one transaction when the server opens the job store, before its first tick
 //! ([`crate::job_store::open`]): an outage longer than a queue wait, a start timeout or a
 //! retention window fails no queued job, ends no start and deletes no result at the first
-//! tick.
+//! tick. The same transaction replaces by their digests the files' contents that a row of an
+//! ended job still holds.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -117,7 +122,8 @@ impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
     /// server's clock, under the pool's limits, with the hosts the registry removed read absent;
     /// then those removals are settled. A failed pass is logged and changes no removal; the
-    /// next tick passes again. Without the job tables, nothing.
+    /// next tick passes again, unless the store said it has a newer writer, which trips the
+    /// fence ([`crate::fence`]) and ends the server. Without the job tables, nothing.
     pub(crate) fn job_pass(&self) {
         let Some(jobs) = &self.jobs else {
             return;
@@ -143,8 +149,23 @@ impl Agents {
                 self.placer.iter().for_each(settle);
             }
             Err(error) => {
+                self.fence.note(&error);
                 warn!(%error, "the job pass failed; the next tick passes again");
             }
+        }
+        self.trim_feed();
+    }
+
+    /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
+    /// logs how many rows went. A store that fails is logged; the next tick trims again.
+    fn trim_feed(&self) {
+        let Some(feed) = &self.job_feed else {
+            return;
+        };
+        match feed.pass() {
+            Ok(0) => {}
+            Ok(trimmed) => info!(trimmed, "the job store's change feed was trimmed"),
+            Err(error) => warn!(%error, "trimming the job store's change feed failed"),
         }
     }
 }

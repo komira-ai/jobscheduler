@@ -1,5 +1,7 @@
 //! The fleet calls: `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`
-//! and `GetUsage` (design section 3.6). An operator reads the hosts with the resources
+//! and `GetUsage` (design section 3.6). Only a caller of the role `operator` reaches them: the
+//! service's dispatch (`mod.rs`) answers any other `PERMISSION_DENIED` `operator-only` before
+//! a function here runs. An operator reads the hosts with the resources
 //! booked on each, the pools, the machine providers and the ended bookings; the one change
 //! is a host's cordon. A client never sees an allocation as a job concept: what is booked on
 //! a host is a read-only [`wire::HostBooking`] in its listing.
@@ -49,6 +51,7 @@ use js_usage::{
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
+use super::submit::unavailable_if_fenced;
 use crate::agents::Agents;
 use crate::api::Shared;
 use crate::checks::State;
@@ -364,7 +367,9 @@ async fn described(
     let jobs = Arc::clone(&api.jobs);
     let read = move || ids.iter().map(|id| jobs.live_on(id)).collect();
     let live: Result<Vec<Live>, _> = blocking(read).await;
-    let live = live.map_err(|_| Status::unavailable(STORE_UNAVAILABLE))?;
+    let live = live.map_err(|error| {
+        unavailable_if_fenced(api, &error, Status::unavailable(STORE_UNAVAILABLE))
+    })?;
     let hosts = entries.into_iter().zip(live);
     Ok(hosts
         .map(|(entry, live)| host(entry, live, leases))

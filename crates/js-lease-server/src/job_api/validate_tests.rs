@@ -112,7 +112,10 @@ fn a_valid_job_becomes_the_recorded_job_and_what_admission_asks() {
             host: 8080,
             container: 80,
         }],
-        files: BTreeMap::from([("upload-url".to_owned(), b"secret".to_vec())]),
+        files: js_jobs::JobFiles::Contents(BTreeMap::from([(
+            "upload-url".to_owned(),
+            b"secret".to_vec(),
+        )])),
         labels: Labels::from_caller(&labels).unwrap(),
     };
     let accelerator = AcceleratorNeed::requested(&capabilities, &resources).unwrap();

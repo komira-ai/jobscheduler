@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use js_agent_wire::Mount;
+use js_agent_wire::{InputRef, Mount};
 
 use super::runtime::ResolvedMount;
 
@@ -162,6 +162,33 @@ impl MountRoots {
             target: format!("/mnt/{}/{}", mount.root_name, mount.rel),
             ro: mount.ro,
         })
+    }
+
+    /// Resolves the native input `input` below its root, read-only, with the input's `dest`
+    /// as its target; `None` for a `stage` input, which names no root.
+    ///
+    /// # Errors
+    ///
+    /// See [`MountError`].
+    pub fn resolve_input(&self, input: &InputRef) -> Option<Result<ResolvedMount, MountError>> {
+        let InputRef::Mount {
+            root_name,
+            rel,
+            dest,
+        } = input
+        else {
+            return None;
+        };
+        let mount = Mount {
+            root_name: root_name.clone(),
+            rel: rel.clone(),
+            ro: true,
+        };
+        let resolved = self.resolve(&mount).map(|resolved| ResolvedMount {
+            target: dest.clone(),
+            ..resolved
+        });
+        Some(resolved)
     }
 }
 

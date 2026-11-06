@@ -38,7 +38,10 @@ fn full() -> JobSpec {
             host: 8080,
             container: 80,
         }],
-        files: BTreeMap::from([("upload-url".to_owned(), b"secret".to_vec())]),
+        files: js_jobs::JobFiles::Contents(BTreeMap::from([(
+            "upload-url".to_owned(),
+            b"secret".to_vec(),
+        )])),
         ..spec(&[("team", "ml")])
     }
 }

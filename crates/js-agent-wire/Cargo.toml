@@ -13,6 +13,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# The bodies' property tests: generated bodies round-trip, malformed bytes are typed errors.
+proptest.workspace = true
+# `decode_memory` caps the allocator to bound what a decode holds.
+cap.workspace = true
 
 [lints]
 workspace = true

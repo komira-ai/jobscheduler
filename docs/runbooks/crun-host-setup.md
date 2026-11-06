@@ -30,6 +30,10 @@ list: `journalctl -u js-agent-crun` for the packaged crun unit). An agent that w
 
 ## What it sets up
 
+The steps, in order. The `step` and `what` columns are also `packaging/js-agent/crun_host_steps.toml`,
+the list the machine image build follows (`docs/runbooks/machine-images.md`); a test fails when
+this table, the script's order or that file differ.
+
 | step | what | when it is already so |
 |---|---|---|
 | packages | `crun` (1.14 or newer, owned by the distribution's package at `/usr/bin/crun`) and `uidmap` from apt | installed: left |

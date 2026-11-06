@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::autologin::SessionPaths;
 use crate::client::{Client, ClientError, Exit};
+use crate::helper::POOL_EXHAUSTED;
 use crate::helper::Settings;
 use crate::lease::UidRange;
 use crate::ledger::Ledger;
-use crate::proto::Request;
+use crate::proto::{PoolState, Request};
 use crate::sweep::SweepPlan;
-use crate::testing::{FakeHost, act_argv, scratch, trace};
+use crate::testing::{FakeHost, act_argv, pool_of, scratch, trace};
 
 fn me() -> u32 {
     rustix::process::getuid().as_raw()
@@ -120,6 +121,7 @@ fn served_in(
     }
     let settings = Settings {
         range,
+        pool: pool_of(range),
         gid: my_gid(),
         homes: dir.join("Users"),
         schedules: SweepPlan {
@@ -477,7 +479,10 @@ fn a_refused_caller_gets_nothing_done() {
         other => panic!("{other:?}"),
     }
     assert!(served.host.state().log.is_empty());
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: the caller checked only after its request was read (S4.3, the
@@ -527,7 +532,10 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Err(ClientError::Refused(why)) => assert_eq!(why, "caller refused: gone"),
         other => panic!("{other:?}"),
     }
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
     // The same pid with another version is another process.
     let check = Scripted::new(
         vec![
@@ -544,7 +552,10 @@ fn a_request_from_another_process_than_the_checked_one_is_refused() {
         Err(ClientError::Refused(why)) => assert!(why.contains("now pid 7 version 2"), "{why}"),
         other => panic!("{other:?}"),
     }
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: the nonce not checked, so a request written before the helper's check (by
@@ -574,7 +585,10 @@ fn a_request_written_before_the_hello_is_refused() {
             reason: "caller refused: the request does not carry this connection's nonce".to_owned()
         }
     );
-    assert!(served.host.state().users.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(served.dir.join("ledger")).unwrap(),
+        ""
+    );
 }
 
 /// Catches: a nonce that repeats, which a request written early could then carry.
@@ -741,6 +755,18 @@ fn the_client_reports_unexpected_replies_and_hangups() {
             code: Some(3),
             signal: None,
         }),
+        // The pool: an exhausted pool, a state, and a reply of the wrong kind.
+        Some(Reply::Refused {
+            reason: format!("{POOL_EXHAUSTED}: of 1 slots"),
+        }),
+        Some(Reply::Refused {
+            reason: "the pool has no free userX".replace('X', ""),
+        }),
+        Some(Reply::Pool(Box::new(PoolState {
+            size: 1,
+            ..PoolState::default()
+        }))),
+        Some(Reply::Killed),
     ];
     std::thread::spawn(move || {
         // First a helper that answers the connection with something other than Hello.
@@ -794,6 +820,20 @@ fn the_client_reports_unexpected_replies_and_hangups() {
     let running = client.role_run(&[], &[], fds).unwrap();
     assert_eq!(running.pid, 9);
     assert_eq!(running.wait().unwrap().code, Some(3));
+    match client.user_create("1.1", None) {
+        Err(error @ ClientError::Exhausted(_)) => assert_eq!(
+            error.to_string(),
+            format!("kbf-mac-session refused: {POOL_EXHAUSTED}: of 1 slots")
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Exactly the words, with nothing after them, are the exhausted pool too.
+    assert!(matches!(
+        client.user_create("1.1", None),
+        Err(ClientError::Exhausted(_))
+    ));
+    assert_eq!(client.pool_status().unwrap().size, 1);
+    assert!(unexpected(client.pool_create().map(drop)).contains("Killed"));
     let refused = ClientError::Refused("why".to_owned());
     assert_eq!(refused.to_string(), "kbf-mac-session refused: why");
     let gone = Client::new(dir.join("no-socket"));
@@ -811,6 +851,7 @@ fn serve_returns_when_accept_fails() {
         let ledger = Ledger::open(&dir.join("ledger")).unwrap();
         let settings = Settings {
             range: UidRange::new(600, 601).unwrap(),
+            pool: crate::lease::PoolSize::new(2).unwrap(),
             gid: 20,
             homes: dir.to_path_buf(),
             schedules: SweepPlan {
@@ -868,6 +909,7 @@ fn quiet_helper(dir: &Path) -> Helper {
     let ledger = Ledger::open(&dir.join("ledger")).unwrap();
     let settings = Settings {
         range: UidRange::new(600, 601).unwrap(),
+        pool: crate::lease::PoolSize::new(2).unwrap(),
         gid: 20,
         homes: dir.to_path_buf(),
         schedules: SweepPlan {
@@ -912,4 +954,60 @@ fn a_refused_caller_is_told_it_is_not_the_installed_kbf_daemon() {
         "pid 7 version 1 is not the installed `kbf` daemon: code failed the requirement"
     );
     assert!(!text.contains("kbf-daemon"), "{text}");
+}
+
+/// Catches: a run that cannot be found again over the socket once its first connection is
+/// gone (an agent that restarted would kill it or lose it), a `watch` that reports another
+/// end than the run's, a `run` with a deadline or a `stop` the server does not carry out,
+/// and a watch of a lease with no run answered as if it had one.
+#[test]
+fn a_run_is_watched_again_and_stopped_over_the_socket() {
+    let served = served("watch", Ok(()));
+    let client = &served.client;
+    client.user_create("1.1", None).unwrap();
+    match client.watch("1.1") {
+        Err(ClientError::Refused(why)) => assert!(why.ends_with(crate::helper::NO_RUN), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let lease_dir = std::fs::File::open(&served.dir).unwrap();
+    let fds = [null.as_fd(), null.as_fd(), null.as_fd(), lease_dir.as_fd()];
+    let argv = act_argv("exit 4");
+    let first = client
+        .run_bounded("1.1", (&argv, &[]), fds, None, Duration::from_secs(3600))
+        .unwrap();
+    let pid = first.pid;
+    let exit = Exit {
+        code: Some(4),
+        signal: None,
+    };
+    assert_eq!(first.wait().unwrap(), exit);
+    let again = client.watch("1.1").unwrap();
+    assert_eq!(again.pid, pid);
+    assert_eq!(again.wait().unwrap(), exit, "an ended run answers at once");
+    // A stop of a lease whose run has ended kills its user at once.
+    served.host.state().log.clear();
+    client.stop("1.1", Duration::from_secs(5)).unwrap();
+    let log = served.host.state().log.clone();
+    assert!(
+        log.iter().any(|line| line.starts_with("kill_all")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_watched_run_that_was_forgotten_is_refused() {
+    assert_eq!(
+        watched(Some((None, Some(9)))),
+        Reply::Exited {
+            code: None,
+            signal: Some(9)
+        }
+    );
+    assert_eq!(
+        watched(None),
+        Reply::Refused {
+            reason: "the run was forgotten: its user was deleted".to_owned()
+        }
+    );
 }

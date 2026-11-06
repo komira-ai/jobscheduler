@@ -1,7 +1,8 @@
 //! What the scaler does with a cloud that says no or takes a machine back, against the
-//! elastic fake: a refusal for quota, denial or a request that fits nothing starts the pool's
-//! cooldown and costs nothing; a refusal for capacity is retried at once; a preempted machine
-//! stops billing when it is taken and is replaced.
+//! elastic fake: a refusal for denial or a request that fits nothing starts the pool's
+//! cooldown and costs nothing; a refusal for capacity or quota starts none (pass 2 fails over,
+//! see `failover.rs`) and the request is asked again after `acquire_retry`; a preempted
+//! machine stops billing when it is taken and is replaced.
 
 mod cloud_rig;
 mod common;
@@ -19,17 +20,17 @@ fn pool() -> Settings {
     }
 }
 
-/// Asserts the three refusals that start the pool's cooldown (10 minutes by default), one
-/// after another: the pool says why on the tick it learns of the refusal (`Quota`,
-/// `Denied`, `Shape`), the refused launch leaves no record and no machine and the cloud's bill
+/// Asserts the two refusals that start the pool's cooldown (10 minutes by default), one
+/// after another: the pool says why on the tick it learns of the refusal (`Denied`,
+/// `Shape`; a `Quota` refusal no longer starts a cooldown, it passes the instance type over),
+/// the refused launch leaves no record and no machine and the cloud's bill
 /// is nothing, the cloud is not asked again for the whole cooldown, and on its last tick it is
 /// asked once more and the machine is launched. It catches a refusal that does not hold the
-/// pool back (a loop of launches against a quota that will not move), one that holds it
+/// pool back (a loop of launches against a denial that will not move), one that holds it
 /// forever, and one that bills.
 #[test]
-fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown_and_bills_nothing() {
+fn a_denial_or_shape_refusal_holds_the_pool_for_the_cooldown_and_bills_nothing() {
     let cases = [
-        (RefusalCode::Quota, Blocked::Quota),
         (RefusalCode::Denied, Blocked::Denied),
         (RefusalCode::Shape, Blocked::Shape),
     ];
@@ -55,18 +56,23 @@ fn a_quota_denial_or_shape_refusal_holds_the_pool_for_the_cooldown_and_bills_not
     }
 }
 
-/// Asserts that a refusal for capacity is not a failure of the pool: no cooldown, the same
-/// offer is not tried again in the step that learned of the refusal, and the next tick
-/// launches. The cloud sees two acquires and makes one machine. It catches a capacity
-/// refusal that is treated like a quota (a ten minute stall for a cloud that will have room
-/// a minute later).
+/// Asserts that a refusal for capacity is not a failure of the pool: no cooldown, the
+/// refused offer is not asked again in the attempt, and the request is asked again once
+/// `acquire_retry` (one tick here) has passed, not before. After two ticks the cloud has been
+/// asked once and the refusal is read; after four it has been asked twice and makes one
+/// machine. It catches a capacity refusal that is treated like a denial (a ten minute stall
+/// for a cloud that will have room a minute later), and one retried in the very tick that
+/// read it.
 #[test]
-fn a_capacity_refusal_is_retried_on_the_next_tick() {
+fn a_capacity_refusal_is_retried_after_the_acquire_retry_interval() {
     let mut sim = Sim::new(pool(), Billing::Lambda);
     sim.fake
         .script(Call::Acquire, &[Step::Refuse(RefusalCode::Capacity)]);
     sim.waiting = 1;
-    sim.run(4);
+    sim.run(2);
+    assert_eq!(sim.acquires(), 1);
+    assert_eq!(sim.blocked(), None);
+    sim.run(2);
     assert_eq!(sim.acquires(), 2);
     assert_eq!(sim.fake.launched(), 1);
     assert_eq!(sim.phases(), [Phase::Booting]);

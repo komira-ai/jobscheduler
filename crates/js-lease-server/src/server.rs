@@ -1,8 +1,10 @@
 //! Starting the server, running it, and stopping it.
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +22,7 @@ use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Clients, Config, JobListen, Limits, TlsFiles, Token};
+use crate::config::{Config, JobListen, Limits, LiveClients, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
@@ -187,11 +189,12 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
                 serving: tokio::spawn(serving),
             }
         });
-    let ticking = Ticking(tokio::spawn(tick_loop(
+    let ticking = Box::pin(tick_loop(
         shared.clone(),
         ticker,
         scaler.clone().map(|scaler| (scaler, cached)),
-    )));
+    ));
+    let ticking = Ticking(tokio::spawn(until_fenced(shared.clone(), ticking)));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
@@ -217,9 +220,9 @@ pub(crate) struct Listeners {
     agent_listen: Option<SocketAddr>,
     job_listen: Option<JobListen>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
-    max_job_wall: Duration,
-    /// The clients the job service's bearer layer admits.
-    clients: Clients,
+    pub(crate) max_job_wall: Duration,
+    /// The clients the job service's bearer layer admits, as the tick reloads them.
+    pub(crate) clients: LiveClients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -288,12 +291,14 @@ pub(crate) fn prepare(
         monotonic,
         alerts,
         alert_repeat,
+        logs,
         max_job_wall,
         ..
     } = config;
     let bookings =
         read_bookings(&state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(hosts, usage, clock, &state_file)?;
+    let logs = crate::logs::from_config(&logs, clock);
+    let (source, agents) = assemble(hosts, usage, clock, &state_file, logs)?;
     let launching = elastic.iter().map(|plan| Launching {
         provider: Arc::clone(&plan.provider),
         share: plan.share,
@@ -397,6 +402,7 @@ pub(crate) fn open(
         cached,
     } = prepared;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
     }
@@ -426,12 +432,14 @@ pub(crate) fn open(
         warn!("{warning}");
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
-    let status = serves_status.then(|| Arc::new(status));
+    let pools = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let pools = Arc::new(pools.with_logs(logs));
+    let status = serves_status.then(|| Arc::clone(&pools));
     let shared = Arc::new(
         Shared::new(table, token, agents)
             .with_admit(admit)
             .with_status(status)
+            .with_pools(pools)
             .with_scaler(scaler.clone()),
     );
     Ok(Opened {
@@ -474,7 +482,8 @@ impl Drop for Alive {
 
 /// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
 /// elastic pool when the server has one, with the cache of its provider's catalog, forever;
-/// the caller aborts it. The scaler ticks on a task of its own (a provider's slow call must
+/// the caller aborts it, or drops it once the state store says this process is no longer its
+/// writer ([`until_fenced`]). The scaler ticks on a task of its own (a provider's slow call must
 /// not hold back the table's lease expiry): at each tick it first fetches the catalogs that
 /// are due ([`Cached::refresh`]) and then runs its own tick, so a tick is finished when the
 /// table, the fetch and the scaler are done, or at once when the scaler is still busy with
@@ -542,6 +551,49 @@ impl Drop for ScalerLoop {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Why a server whose state store has a newer writer stops with an error.
+pub(crate) const FENCED: &str =
+    "the state store has a newer writer, so this server may no longer write to it";
+
+/// Completes when `signalled` does (a termination signal), or, logging one error line, when
+/// the state store says this process is no longer its writer: the server cannot write again,
+/// so the caller stops it ([`Running::shutdown`], which then answers an error) and the process
+/// exits with a failure for a restart to open a new handle.
+pub(crate) async fn stop_or_fence(
+    running: &Running,
+    signalled: impl Future<Output = io::Result<()>>,
+) -> io::Result<()> {
+    tokio::select! {
+        biased;
+        () = running.fenced() => {
+            error!("the state store has a newer writer: this server can write no more and is stopping");
+            Ok(())
+        }
+        stopped = signalled => stopped,
+    }
+}
+
+/// Runs `ticking` (the tick loop) until the state store says this process is no longer its
+/// writer, when it is dropped: a tick under way is cut at its next wait, nothing is begun
+/// after it, and the loop's guards run ([`Alive`] marks `/healthz`, the scaler's task ends).
+async fn until_fenced(shared: Arc<Shared>, ticking: Pin<Box<dyn Future<Output = ()> + Send>>) {
+    tokio::select! { biased; () = shared.fenced() => {}, () = ticking => {} }
+}
+
+/// The tick that ends a shutdown, and the usage side's last flush; an error when the tick
+/// could not write the lease file.
+async fn final_tick(shared: &Shared, state_file: &Path) -> io::Result<()> {
+    let report = shared.tick().await;
+    if let Some(usage) = shared.usage() {
+        usage.finish().await;
+    }
+    report.save_error.map_or(Ok(()), |err| {
+        let file = state_file.display();
+        let reason = format!("the final tick could not write the lease file {file}: {err}");
+        Err(io::Error::other(reason))
+    })
 }
 
 impl Running {
@@ -641,6 +693,14 @@ impl Running {
         self.slots.waits()
     }
 
+    /// Completes when the state store has said this process is no longer its writer, which
+    /// the server cannot go on from: the caller stops it ([`Running::shutdown`], which then
+    /// answers an error) and exits with a failure. Never completes for a server without
+    /// agents or without the job service, which have no state store.
+    pub async fn fenced(&self) {
+        self.shared.fenced().await;
+    }
+
     /// Stops the server: no new connections, the requests in flight finish (those still
     /// open after `--drain-timeout` are cut), the table is ticked once more (so an expiry
     /// that fell due is stopped before the process ends) and the lease table is released.
@@ -648,6 +708,10 @@ impl Running {
     /// It is an error when the serving task failed, or when that last tick could not
     /// write the lease file: the file is then behind the table, and an orderly stop
     /// that says nothing would hide it. The cause is in the error and in the log.
+    ///
+    /// When the state store has said this process is no longer its writer, the last tick is
+    /// not run (it would write the job tables and the lease file of a server that no longer
+    /// owns them) and the stop is an error that says so.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
         let ports = [self.agent.take(), self.job.take()];
@@ -658,15 +722,14 @@ impl Running {
         }
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
-        let report = self.shared.tick().await;
-        if let Some(usage) = self.shared.usage() {
-            usage.finish().await;
-        }
-        let saved = report.save_error.map_or(Ok(()), |err| {
-            let file = self.state_file.display();
-            let reason = format!("the final tick could not write the lease file {file}: {err}");
-            Err(io::Error::other(reason))
-        });
+        let saved = match self.shared.is_fenced() {
+            true => Err(io::Error::other(FENCED)),
+            false => final_tick(&self.shared, &self.state_file).await,
+        };
         served.and(saved)
     }
 }
+
+#[cfg(test)]
+#[path = "server_fence_tests.rs"]
+mod fence_tests;

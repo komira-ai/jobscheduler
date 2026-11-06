@@ -1,0 +1,32 @@
+# Coverage-guided fuzz targets for the job store's row decode (`cargo fuzz run decode_job`).
+# A package of its own, outside the workspace: CI build-checks it with `cargo check` and runs
+# no fuzzing, and `src/codec_props.rs` in the crate runs a seeded form of the same checks.
+[package]
+name = "js-jobs-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cap = "0.1.2"
+js-jobs = { path = "..", features = ["test-support"] }
+
+[[bin]]
+name = "decode_job"
+path = "fuzz_targets/decode_job.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_allocation"
+path = "fuzz_targets/decode_allocation.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

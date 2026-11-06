@@ -19,7 +19,7 @@ use js_api_gateway::Answer;
 use js_jobs::interfere::Interfere;
 use js_jobs::{
     Booked, Constraints, EndReason, JobEnd, JobId, JobSpec, JobState, JobStore, Needs,
-    NetworkPolicy, NewJob, Output, RandomIds, ResourceUsage,
+    NetworkPolicy, NewJob, Output, ResourceUsage,
 };
 use js_lease::Timestamp;
 use js_proto::v1::{
@@ -73,7 +73,10 @@ pub(super) fn clock() -> Arc<ManualClock> {
 
 /// Job tables over `store`, as the server holds them.
 pub(super) fn tables(store: Arc<dyn Store>) -> Arc<ServerJobs> {
-    Arc::new(JobStore::new(Arc::new(store), RandomIds).expect("the job tables open"))
+    Arc::new(
+        JobStore::new(Arc::new(store), crate::job_store::ServerIds::random())
+            .expect("the job tables open"),
+    )
 }
 
 /// Job tables over the in-memory fake store on `clock`.
@@ -314,7 +317,7 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         wall_limit_secs: 600,
         network: NetworkPolicy::None,
         ports: Vec::new(),
-        files: BTreeMap::new(),
+        files: js_jobs::JobFiles::default(),
         labels: Labels::from_caller(&labels).expect("labels"),
     }
 }
@@ -397,6 +400,7 @@ fn exit_3() -> JobEnd {
             stderr: stderr(),
             truncated: false,
             usage: Some(used()),
+            logs: None,
         },
     }
 }

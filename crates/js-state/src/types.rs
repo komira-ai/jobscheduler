@@ -211,10 +211,31 @@ pub enum StoreError {
     #[error("state store failure: {0}")]
     Failed(String),
     /// This handle is no longer the store's writer. Nothing was written; no retry on this
-    /// handle can succeed. No store in this crate returns it any more; the readers of
-    /// [`StoreError`] still map it.
+    /// handle can succeed. A Postgres store opened for the writer lock's holder
+    /// (`postgres::PostgresStore::fenced`) returns it from a commit once another process has
+    /// taken the lock.
     #[error("state store fenced: this handle is no longer the writer")]
     Fenced,
+    /// The connection to the store was gone, and so was the one new connection the call was
+    /// run again on (or the call was a transaction already under way, which is not run
+    /// again). A later call can succeed once the store is back. A read wrote nothing. A write
+    /// wrote nothing unless the connection was lost at its commit, when whether the commit
+    /// happened is not known: a caller that writes again guards the write with its
+    /// preconditions. The text says what the client met.
+    #[error("state store connection lost: {0}")]
+    Disconnected(String),
+    /// A feed read began at a revision the feed has been trimmed past, so rows between
+    /// `after` and `floor` are gone and a poller resuming there would miss them. Only
+    /// [`crate::Store::changes`] returns it, and only to a cursor below the floor; the
+    /// poller starts again from `floor` (having rebuilt what it needs from a scan).
+    #[error("the change feed was trimmed through revision {}: a read after {} would miss rows", floor.0, after.0)]
+    StaleCursor {
+        /// The revision the read asked to resume after.
+        after: Revision,
+        /// The highest revision a trim has removed through: the lowest cursor the feed
+        /// can still serve.
+        floor: Revision,
+    },
 }
 
 /// What happened to a key.

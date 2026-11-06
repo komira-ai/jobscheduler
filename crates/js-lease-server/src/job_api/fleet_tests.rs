@@ -15,7 +15,7 @@ use axum::http::Uri;
 use hyper_util::rt::TokioIo;
 use js_agent_wire::{Hello, Phase as AgentPhase, Taint};
 use js_jobs::interfere::Interfere;
-use js_jobs::{DeclaredPort, EndReason, JobSpec, JobStore, Needs, RandomIds};
+use js_jobs::{DeclaredPort, EndReason, JobSpec, JobStore, Needs};
 use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_provider::{HostCapacity, Pool as _, RefusalCode, StartAck, StartSpec};
@@ -105,7 +105,8 @@ fn server(name: &str, agents: bool) -> Server {
         Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = Arc::new(JobStore::new(Arc::new(dynamic), RandomIds).unwrap());
+    let jobs =
+        Arc::new(JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap());
     let side = Agents::over(registry.clone(), &shared_clock, dir.path()).with_jobs(jobs.clone());
     let token = parse_token(&[b'c'; 40]).unwrap();
     let shared = Arc::new(Shared::new(table, token, agents.then(|| Arc::new(side))));
@@ -517,7 +518,8 @@ fn api_over(
     history: Option<Arc<dyn History>>,
 ) -> JobApi {
     let store: Arc<dyn Store> = Arc::new(Fake::with_flaw(Arc::default(), Flaw::None));
-    let jobs = Arc::new(JobStore::new(Arc::new(store), RandomIds).unwrap());
+    let jobs =
+        Arc::new(JobStore::new(Arc::new(store), crate::job_store::ServerIds::random()).unwrap());
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     JobApi::new(jobs, clock).with_fleet(Ctx::served(hosts, pools, history))
 }
@@ -575,6 +577,7 @@ fn no_pools() -> PoolsView {
     PoolsView {
         pools: Vec::new(),
         warnings: Vec::new(),
+        logs: None,
     }
 }
 
@@ -623,6 +626,7 @@ async fn fleet_calls_need_the_service_token() {
     s.register("h1");
     let token = parse_token(&[b'f'; 40]).unwrap();
     let token = crate::config::Clients::only(&token, "--token-file");
+    let token = crate::config::LiveClients::new(token);
     let api = Arc::new(s.api);
     let (client_end, server_end) = tokio::io::duplex(64 * 1024);
     let service = super::super::grpc(api, token);
@@ -671,4 +675,22 @@ async fn fleet_calls_need_the_service_token() {
         .insert("authorization", bearer.parse().unwrap());
     let hosts = client.list_hosts(request).await.unwrap().into_inner().hosts;
     assert_eq!(hosts.len(), 1);
+}
+
+/// Asserts that a host listing whose read of the job tables meets `Fenced` is `UNAVAILABLE`
+/// `state-fenced` (not `store-unavailable`) and trips the service's fence. It catches a fenced
+/// store taken for one that may answer again, so a server with no heartbeats and nothing
+/// queued keeps running without a store.
+#[tokio::test]
+async fn a_listing_that_meets_a_fenced_store_is_unavailable_and_trips_the_fence() {
+    let s = server("store-fenced", true);
+    s.register("h1");
+    s.store.fail_with(js_state::StoreError::Fenced);
+    s.store.fail_read_after(0);
+    let answer = list_hosts(&s.api, Request::new(ListHostsRequest {})).await;
+    assert_eq!(
+        refused(answer),
+        (Code::Unavailable, "state-fenced".to_owned())
+    );
+    assert!(s.api.fence.is_tripped());
 }
