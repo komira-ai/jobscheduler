@@ -201,6 +201,13 @@ pub struct Input {
     /// for changes nothing, so asking twice is the same as asking once, and the caller may
     /// keep sending a name until a step that carried it has been saved.
     pub brake_resets: Vec<String>,
+    /// Provider ids of machines the provider said it reclaimed, by a notice of its own
+    /// rather than in a list. Each takes the route of a machine a list shows preempted: one
+    /// of this pool's records in `Booting`, `Registered` or `Draining` whose provider id it
+    /// is goes to `Releasing`, a booted one strikes the brake and a booting one starts the
+    /// cooldown. Any other id changes nothing, so sending an id twice is the same as once,
+    /// and the caller may keep sending one until a step that carried it has been saved.
+    pub reclaimed: Vec<String>,
 }
 
 impl Input {

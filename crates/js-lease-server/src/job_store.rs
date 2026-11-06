@@ -51,7 +51,8 @@ pub(crate) const SUFFIX: &str = ".jobs";
 
 /// Opens the job store beside the lease file `state_file`, as `setup` says, and raises its
 /// deadlines for this boot in one transaction ([`JobStore::raise_at_boot`]) before the server
-/// ticks. A file that
+/// ticks or serves; the same transaction replaces the file contents a row of an ended job
+/// still holds (one an earlier build ended) by their digests. A file that
 /// cannot be made owner-only or opened as a state store (a directory in its place, another
 /// process holding it, a file that is not a state store) is a refused start naming the flag
 /// of the job service's address.
@@ -72,7 +73,8 @@ pub(crate) fn open(
     let jobs =
         JobStore::new(Arc::new(store), RandomIds).map_err(StartupError::because(setup.flag))?;
     // Before the first tick: an outage longer than a queue wait, a start timeout or a
-    // retention window fails, ends or deletes nothing at that tick (design 6.7, step 7).
+    // retention window fails, ends or deletes nothing at that tick (design 6.7, step 7). An
+    // ended job's row that still holds its files' contents is digested in the same commit.
     let raised = jobs
         .raise_at_boot(boot)
         .map_err(StartupError::because(setup.flag))?;
