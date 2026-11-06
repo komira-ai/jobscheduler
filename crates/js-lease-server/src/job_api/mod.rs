@@ -28,14 +28,22 @@
 //!
 //! # Clients
 //!
-//! The bearer layer ([`auth`]) admits the token of any client of the server's configuration
-//! and puts that client's name in the request's extensions ([`client_of`] reads it). Every
-//! client may call every method on every job: there is one trust domain. `SubmitJob` records
-//! the name on a new job; a retry of the same job from another client answers the stored
-//! job, which keeps the first client. Each call writes one log line, `job service call`, with
-//! the method (`call`), the client (`client`), the job the request names or `SubmitJob`
-//! answered (`job`, empty when there is none) and the gRPC code of the answer (`code`); no
-//! line holds a token.
+//! The bearer layer ([`auth`]) admits the token of any client in force (the set the tick
+//! reloads, [`LiveClients`]) and puts that client's name and role in the request's extensions
+//! ([`roles::caller_of`] reads them). A call is made as that caller, by the rules of
+//! [`roles`]: a `client` submits, and reads, lists and cancels only its own jobs (another
+//! client's job is answered `unknown-job`); only an `operator` makes the fleet calls (a client
+//! is answered `PERMISSION_DENIED` `operator-only`); a call no bearer layer admitted is
+//! `UNAUTHENTICATED`. The fleet gate is here, before the group's function; the ownership
+//! checks are in the read, cancel and submit groups, which are handed the caller.
+//! `SubmitJob` records the caller's name on a new job.
+//!
+//! Each call writes one log line ([`logged`]), `job service call`, at info: the method
+//! (`call`), the client (`client`) and its role (`role`), the job or host the request names
+//! (`target`; `job` holds the job alone), the outcome (`outcome`: `ok`, `denied`, `not-found`,
+//! `refused` or `failed`, [`roles::outcome`]) and the gRPC code (`code`). It is the audit line
+//! of the calls that change state, `SubmitJob`, `CancelJob`, `CordonHost` and `UncordonHost`,
+//! denied ones among them. No line holds a token or its digest.
 //!
 //! # One context per group
 //!
@@ -62,7 +70,6 @@
 use std::sync::Arc;
 
 use axum::Router;
-use js_jobs::ClientName;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
 use js_proto::v1::{
     CancelJobRequest, CancelJobResponse, CordonHostRequest, CordonHostResponse, GetJobRequest,
@@ -76,14 +83,16 @@ use tonic::{Code, Request, Response, Status};
 use tower::Layer;
 
 use crate::adapt::SharedClock;
-use crate::config::Clients;
+use crate::config::LiveClients;
 use crate::fence::Fence;
 use crate::job_store::ServerJobs;
+use roles::{Caller, admitted, caller_of};
 
 mod auth;
 pub(crate) mod cancel;
 pub(crate) mod fleet;
 pub(crate) mod read;
+pub(crate) mod roles;
 pub(crate) mod submit;
 pub(crate) mod validate;
 mod wiring;
@@ -91,6 +100,8 @@ mod wiring;
 pub(crate) use auth::{Bearer, BearerLayer};
 pub(crate) use wiring::{from_server, port};
 
+#[cfg(test)]
+mod access_tests;
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]
@@ -102,6 +113,8 @@ mod read_list_tests;
 mod read_tests;
 #[cfg(test)]
 mod read_view_tests;
+#[cfg(test)]
+mod reload_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]
@@ -156,13 +169,13 @@ impl JobApi {
 
 /// The gRPC service of `api`: the generated tonic server behind the bearer layer of
 /// `clients`.
-pub(crate) fn grpc(api: Arc<JobApi>, clients: Clients) -> Bearer<JobServiceServer<JobApi>> {
+pub(crate) fn grpc(api: Arc<JobApi>, clients: LiveClients) -> Bearer<JobServiceServer<JobApi>> {
     grpc_over(api, clients)
 }
 
 /// The gRPC service of any implementation of the job service, behind the bearer layer of
 /// `clients`.
-fn grpc_over<T: JobService>(service: Arc<T>, clients: Clients) -> Bearer<JobServiceServer<T>> {
+fn grpc_over<T: JobService>(service: Arc<T>, clients: LiveClients) -> Bearer<JobServiceServer<T>> {
     let server =
         JobServiceServer::from_arc(service).max_decoding_message_size(js_api_gateway::BODY_LIMIT);
     BearerLayer::new(clients).layer(server)
@@ -170,34 +183,53 @@ fn grpc_over<T: JobService>(service: Arc<T>, clients: Clients) -> Bearer<JobServ
 
 /// The HTTP/JSON gateway of `api` (`js_api_gateway::router`) behind the bearer layer of
 /// `clients`.
-pub(crate) fn gateway(api: Arc<JobApi>, clients: Clients) -> Router {
+pub(crate) fn gateway(api: Arc<JobApi>, clients: LiveClients) -> Router {
     gateway_over(api, clients)
 }
 
 /// The gateway over any implementation of the job service, behind the bearer layer of
 /// `clients`.
-fn gateway_over<T: JobService>(service: Arc<T>, clients: Clients) -> Router {
+fn gateway_over<T: JobService>(service: Arc<T>, clients: LiveClients) -> Router {
     js_api_gateway::router(service).layer(BearerLayer::new(clients))
 }
 
-/// The client the bearer layer named for `request`; `None` for a request that did not pass
-/// it (a test that calls the service directly).
-pub(crate) fn client_of<T>(request: &Request<T>) -> Option<ClientName> {
-    request.extensions().get::<ClientName>().cloned()
+/// What a call names: a job (by the request's text), a host, or nothing.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    /// The job the request names, or `SubmitJob` answered; empty when there is none.
+    Job(&'a str),
+    /// The host a cordon or an uncordon names.
+    Host(&'a str),
+    /// Nothing: a listing, or a fleet read.
+    None,
 }
 
-/// Writes the log line of one call: the method `call`, the `client` the bearer layer named
-/// (empty when none did), the `job` the call names (empty when it names none) and the code of
-/// `answer`.
+/// Writes the one log line of a call, `job service call`: the method `call`; the `client`
+/// and the `role` the bearer layer named (empty when none did); the `target`, the job or the
+/// host the call names (empty when it names none), with `job` the job alone; the `outcome`
+/// ([`roles::outcome`]); and the gRPC `code` of `answer`. No line holds a token or a digest.
 fn logged<T>(
     call: &'static str,
-    client: Option<&ClientName>,
-    job: &str,
+    caller: Option<&Caller>,
+    target: Target<'_>,
     answer: &Result<Response<T>, Status>,
 ) {
-    let code = answer.as_ref().err().map_or(Code::Ok, Status::code);
-    let client = client.map_or("", ClientName::as_str);
-    tracing::info!(call, client, job, code = ?code, "job service call");
+    line(call, caller, target, answer.as_ref().err());
+}
+
+/// The line of [`logged`], for the status a call failed with (`None`: it answered). Not
+/// generic, so every call writes its line through the same code.
+fn line(call: &'static str, caller: Option<&Caller>, target: Target<'_>, failed: Option<&Status>) {
+    let code = failed.map_or(Code::Ok, Status::code);
+    let client = caller.map_or("", |caller| caller.name.as_str());
+    let role = caller.map_or("", |caller| caller.role.as_str());
+    let (job, target) = match target {
+        Target::Job(job) => (job, job),
+        Target::Host(host) => ("", host),
+        Target::None => ("", ""),
+    };
+    let outcome = roles::outcome(failed);
+    tracing::info!(call, client, role, job, target, outcome, code = ?code, "job service call");
 }
 
 #[tonic::async_trait]
@@ -206,19 +238,22 @@ impl JobService for JobApi {
         &self,
         request: Request<SubmitJobRequest>,
     ) -> Result<Response<SubmitJobResponse>, Status> {
-        let client = client_of(&request);
+        let caller = caller_of(&request);
         let asked = request
             .get_ref()
             .spec
             .as_ref()
             .map(|spec| spec.job_id.clone());
-        let answer = submit::submit_job(self, request).await;
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => submit::submit_job(self, caller, request).await,
+            Err(status) => Err(status),
+        };
         let answered = answer
             .as_ref()
             .ok()
             .and_then(|response| response.get_ref().job.as_ref());
         let job = answered.map_or(asked.unwrap_or_default(), |job| job.id.clone());
-        logged("SubmitJob", client.as_ref(), &job, &answer);
+        logged("SubmitJob", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 
@@ -226,10 +261,13 @@ impl JobService for JobApi {
         &self,
         request: Request<GetJobRequest>,
     ) -> Result<Response<GetJobResponse>, Status> {
-        let client = client_of(&request);
+        let caller = caller_of(&request);
         let job = request.get_ref().job_id.clone();
-        let answer = read::get_job(self, request).await;
-        logged("GetJob", client.as_ref(), &job, &answer);
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => read::get_job(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("GetJob", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 
@@ -237,9 +275,12 @@ impl JobService for JobApi {
         &self,
         request: Request<ListJobsRequest>,
     ) -> Result<Response<ListJobsResponse>, Status> {
-        let client = client_of(&request);
-        let answer = read::list_jobs(self, request).await;
-        logged("ListJobs", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => read::list_jobs(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("ListJobs", caller.as_ref(), Target::None, &answer);
         answer
     }
 
@@ -247,10 +288,13 @@ impl JobService for JobApi {
         &self,
         request: Request<CancelJobRequest>,
     ) -> Result<Response<CancelJobResponse>, Status> {
-        let client = client_of(&request);
+        let caller = caller_of(&request);
         let job = request.get_ref().job_id.clone();
-        let answer = cancel::cancel_job(self, request).await;
-        logged("CancelJob", client.as_ref(), &job, &answer);
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => cancel::cancel_job(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("CancelJob", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 
@@ -258,10 +302,13 @@ impl JobService for JobApi {
         &self,
         request: Request<GetResultRequest>,
     ) -> Result<Response<GetResultResponse>, Status> {
-        let client = client_of(&request);
+        let caller = caller_of(&request);
         let job = request.get_ref().job_id.clone();
-        let answer = read::get_result(self, request).await;
-        logged("GetResult", client.as_ref(), &job, &answer);
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => read::get_result(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("GetResult", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 
@@ -269,10 +316,13 @@ impl JobService for JobApi {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
-        let client = client_of(&request);
+        let caller = caller_of(&request);
         let job = request.get_ref().job_id.clone();
-        let answer = read::get_logs(self, request).await;
-        logged("GetLogs", client.as_ref(), &job, &answer);
+        let answer = match admitted(caller.as_ref()) {
+            Ok(caller) => read::get_logs(self, caller, request).await,
+            Err(status) => Err(status),
+        };
+        logged("GetLogs", caller.as_ref(), Target::Job(&job), &answer);
         answer
     }
 
@@ -280,9 +330,12 @@ impl JobService for JobApi {
         &self,
         request: Request<ListHostsRequest>,
     ) -> Result<Response<ListHostsResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::list_hosts(self, request).await;
-        logged("ListHosts", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::list_hosts(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("ListHosts", caller.as_ref(), Target::None, &answer);
         answer
     }
 
@@ -290,9 +343,13 @@ impl JobService for JobApi {
         &self,
         request: Request<CordonHostRequest>,
     ) -> Result<Response<CordonHostResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::cordon_host(self, request).await;
-        logged("CordonHost", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let host = request.get_ref().host_id.clone();
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::cordon_host(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("CordonHost", caller.as_ref(), Target::Host(&host), &answer);
         answer
     }
 
@@ -300,9 +357,18 @@ impl JobService for JobApi {
         &self,
         request: Request<UncordonHostRequest>,
     ) -> Result<Response<UncordonHostResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::uncordon_host(self, request).await;
-        logged("UncordonHost", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let host = request.get_ref().host_id.clone();
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::uncordon_host(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged(
+            "UncordonHost",
+            caller.as_ref(),
+            Target::Host(&host),
+            &answer,
+        );
         answer
     }
 
@@ -310,9 +376,12 @@ impl JobService for JobApi {
         &self,
         request: Request<ListPoolsRequest>,
     ) -> Result<Response<ListPoolsResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::list_pools(self, request).await;
-        logged("ListPools", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::list_pools(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("ListPools", caller.as_ref(), Target::None, &answer);
         answer
     }
 
@@ -320,9 +389,12 @@ impl JobService for JobApi {
         &self,
         request: Request<ListProvidersRequest>,
     ) -> Result<Response<ListProvidersResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::list_providers(self, request).await;
-        logged("ListProviders", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::list_providers(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("ListProviders", caller.as_ref(), Target::None, &answer);
         answer
     }
 
@@ -330,9 +402,18 @@ impl JobService for JobApi {
         &self,
         request: Request<GetUsageRequest>,
     ) -> Result<Response<GetUsageResponse>, Status> {
-        let client = client_of(&request);
-        let answer = fleet::get_usage(self, request).await;
-        logged("GetUsage", client.as_ref(), "", &answer);
+        let caller = caller_of(&request);
+        let answer = match operator(caller.as_ref()) {
+            Ok(()) => fleet::get_usage(self, request).await,
+            Err(status) => Err(status),
+        };
+        logged("GetUsage", caller.as_ref(), Target::None, &answer);
         answer
     }
+}
+
+/// `Ok` for a fleet call of an operator; else the refusal: `UNAUTHENTICATED` for a request
+/// no bearer layer admitted, `PERMISSION_DENIED` `operator-only` for a client.
+fn operator(caller: Option<&Caller>) -> Result<(), Status> {
+    admitted(caller)?.operator()
 }

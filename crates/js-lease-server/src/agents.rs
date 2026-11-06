@@ -12,7 +12,7 @@ use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, ProfileLives, Registry};
 use js_types::{HostId, ProviderId};
 use js_usage::{ProfileCurves, ProfileKey};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore};
@@ -230,9 +230,10 @@ impl Agents {
     /// the routes without a socket.
     #[cfg(test)]
     pub(crate) fn over(registry: Registry, clock: &SharedClock, dir: &Path) -> Self {
-        use crate::config::{Clients, parse_token};
+        use crate::config::{Clients, LiveClients, parse_token};
         use crate::rate::HelloLimit;
         let client = Clients::only(&parse_token(&[b'c'; 40]).unwrap(), "--token-file");
+        let client = LiveClients::new(client);
         let tokens = dir.join("agent-tokens");
         std::fs::write(&tokens, [b'j'; 40]).unwrap();
         std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o600))
@@ -462,12 +463,15 @@ impl Agents {
     }
 
     /// What every tick does for the agent side: read the join tokens again and drop the
-    /// hello limits of those that left the file, and make the file of bindings current
+    /// hello limits of those that left the file, then read the job service's client token
+    /// files again ([`AgentTokens::reload_clients`]), and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits. The usage side, when there is one, is ticked next, and the
-    /// host credentials of live logs last ([`LogGrants::tick`]: the departed hosts' are
-    /// forgotten, the renewals and the retries queued and started, off this task).
+    /// force, and their limits; a client token file that cannot be read, or holds no valid
+    /// token, keeps every client's token in force, with one warning line per tick. The usage
+    /// side, when there is one, is ticked next, and the host credentials of live logs last
+    /// ([`LogGrants::tick`]: the departed hosts' are forgotten, the renewals and the retries
+    /// queued and started, off this task).
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
         match blocking(move || this.tokens.reload()).await {
@@ -475,6 +479,14 @@ impl Agents {
             Err(err) => {
                 self.errors.fetch_add(1, Ordering::SeqCst);
                 warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
+            }
+        }
+        let this = Arc::clone(self);
+        match blocking(move || this.tokens.reload_clients()).await {
+            Ok(true) => info!("the client tokens changed: the new tokens are in force"),
+            Ok(false) => {}
+            Err(error) => {
+                warn!(%error, "cannot read the client token files again; the client tokens in force stay");
             }
         }
         self.save_bindings().await;

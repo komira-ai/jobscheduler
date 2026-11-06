@@ -97,7 +97,7 @@ jobscheduler is the service that answers these. It is one scheduler service (`js
 
 ### 2.2 Non-goals
 
-- Multi-tenant isolation. There is one client token and one trust domain (section 11).
+- Multi-tenant isolation beyond job ownership. The job service names its clients, each with its own token and a role: a `client` sees and cancels only its own jobs, an `operator` everything (`docs/http-gateway.md`, "Clients, roles and token reload"). The lease routes keep one token and one trust domain (section 11).
 - High availability of the service in the first target. It is one active writer over Postgres; whether to add a standby is open (section 13, question 1).
 - Hosting a public listener. The service is meant to sit on a private network.
 - Being a workflow engine. It places and contains jobs; retry policy and result interpretation belong to the client.
@@ -904,7 +904,7 @@ Rows 2, 7, 8, 27 and 29 are properties of the file store; step 2 of section 12.1
 | 16 | Scaler tick skipped when busy | Documented | Demand handled a tick later. | Slow provider; assert demand covered next tick. |
 | 17 | Large non-whole job starvation | Documented | No mark for share jobs by design. | Large share job vs steady small stream. |
 | 18 | Join-token sharing | Open | A holder can say hello for made-up ids to fill the pool or exhaust the shared rate bucket. Closed per host once the host holds a credential; an agent that asks for one gets it. `require_host_credential`, off by default, refuses a first hello that does not ask. | Hello with made-up ids; assert pool-full only for the token holder's share. |
-| 19 | Single trust domain | Accepted | One token; any holder can read any job's result and cancel any job. | Documented, not tested. |
+| 19 | Single trust domain | Accepted for the lease routes | The lease routes take one token: any holder can list and release any lease. On the job service a `client` reads and cancels only its own jobs and makes no fleet call; an `operator` (and `default`, the lease routes' token) may call everything. | Role matrix over both transports (`job_api/access_tests.rs`). |
 | 20 | ETXTBSY on installed helper | Open (fix in review) | Writing an executable in a process that also forks can give a child the write descriptor; the exec fails with text busy. Rare. | Fork-while-writing stress test. |
 | 21 | Scheduler rebuilt per start, under two locks | Open | Unmeasured beyond tens of hosts. | Benchmark at 1000 jobs. |
 | 22 | TCC grant inherited by jobs | Partly proven | Every job process is started through the disclaiming spawner and a source scan test (`spawn_sites`) rejects other spawn sites. The hosted-runner readback of the responsible pid is still to be run. | Hosted-runner readback of responsible pid. |

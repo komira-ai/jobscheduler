@@ -42,7 +42,7 @@ use super::{JobApi, gateway, grpc};
 use crate::adapt::SharedClock;
 use crate::admit::{Admit, JobAdmission};
 use crate::agent_api::job_rig::{OneClock, Rig, START_MS, tables_on};
-use crate::config::Clients;
+use crate::config::LiveClients;
 use crate::fence::Fence;
 use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
@@ -125,13 +125,17 @@ impl Writes {
         jobs: Arc<ServerJobs>,
         clock: SharedClock,
         admission: Arc<dyn Admission>,
-        clients: Clients,
+        clients: LiveClients,
     ) -> Writes {
         let submit = submit::Ctx::served(CEILING, admission);
-        let fence = Fence::new();
-        let api = JobApi::new(Arc::clone(&jobs), clock)
-            .with_submit(submit)
-            .with_fence(fence.clone());
+        Writes::over(JobApi::new(jobs, clock).with_submit(submit), clients).await
+    }
+
+    /// The service `api`, whatever its groups' contexts, behind the bearer layer of
+    /// `clients`. The rig's fence is `api`'s.
+    pub(super) async fn over(api: JobApi, clients: LiveClients) -> Writes {
+        let jobs = Arc::clone(&api.jobs);
+        let fence = api.fence.clone();
         let api = Arc::new(api);
         let channel = connect(grpc(Arc::clone(&api), clients.clone())).await;
         let router = gateway(api, clients);

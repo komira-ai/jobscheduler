@@ -17,6 +17,10 @@
 //! | a `page_token` no listing gave | `INVALID_ARGUMENT`, `field: pageToken` | 400 `invalid-argument`, `field` `pageToken` |
 //! | a read of the store that failed | `INTERNAL`, `internal` | 500 `internal` |
 //!
+//! A job of another client, asked for by a caller of the role `client`, is answered as one
+//! with no row (`unknown-job`, before any other check of the job), and a listing of such a
+//! caller keeps its own jobs only ([`super::roles`]).
+//!
 //! A swept job has no tombstone: it is the same unknown job as one that never existed.
 //! `GetJob` and `ListJobs` show a job until it is swept, its retention end passed or not.
 //!
@@ -54,7 +58,11 @@
 //! none. When only one state is asked for, the table's scan filters by it.
 //!
 //! The page token is a key of the job table (`job/<id>`): the page's last job when the page
-//! filled inside a read, else the last row the call read. The next page starts after it; a
+//! filled inside a read, else the last row the call read. For a caller of the role `client`
+//! the token is always the page's last job, which is its own: the last row read may be
+//! another client's, and its key would name that job. A client's page cut at the bound
+//! with none of its jobs in it reads on past the bound until it holds one of its jobs or the
+//! table ends, so such a listing may read the whole table. The next page starts after it; a
 //! token that is not such a key is refused. A job submitted or swept
 //! between pages is listed by a later page if its id sorts after the token, and no job is
 //! listed twice.
@@ -74,6 +82,7 @@ use tonic::{Request, Response, Status};
 
 use super::JobApi;
 use super::fleet::Handle;
+use super::roles::{Caller, hidden};
 use super::submit::unavailable_if_fenced;
 
 pub(crate) mod view;
@@ -196,16 +205,21 @@ fn read_failed(api: &JobApi, error: &js_jobs::JobStoreError) -> Status {
 struct Reads<'a>(&'a JobApi);
 
 impl Reads<'_> {
-    /// The job `text` names: refused when `text` is not a job id, `unknown-job` when there
-    /// is no row for it.
-    fn job(&self, text: &str) -> Result<JobRecord, Status> {
+    /// The job `text` names, as `caller` may read it: refused when `text` is not a job id,
+    /// `unknown-job` when there is no row for it, and the same answer, marked hidden, when
+    /// the job is not the caller's to read.
+    fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
         let id = JobId::parse(text).map_err(|_| invalid(JOB_ID_FIELD))?;
         let found = self
             .0
             .jobs
             .get_job(&id)
             .map_err(|error| read_failed(self.0, &error))?;
-        found.ok_or_else(unknown_job)
+        let job = found.ok_or_else(unknown_job)?;
+        match caller.owns(&job) {
+            true => Ok(job),
+            false => Err(hidden()),
+        }
     }
 
     /// One window of the table: at most `window` rows after `resume`, keeping the jobs in
@@ -240,9 +254,10 @@ fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
 /// `GetJob`: the job's record, as long as its row exists.
 pub(super) async fn get_job(
     api: &JobApi,
+    caller: &Caller,
     request: Request<GetJobRequest>,
 ) -> Result<Response<GetJobResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
     Ok(Response::new(GetJobResponse {
         job: Some(shown(&api.read, &job)),
     }))
@@ -251,9 +266,10 @@ pub(super) async fn get_job(
 /// `GetResult`: the stored result of an ended job, until its retention end.
 pub(super) async fn get_result(
     api: &JobApi,
+    caller: &Caller,
     request: Request<GetResultRequest>,
 ) -> Result<Response<GetResultResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
     let job = unexpired(api, job)?;
     match job.state.is_ended() {
         true => Ok(Response::new(GetResultResponse {
@@ -267,9 +283,10 @@ pub(super) async fn get_result(
 /// end; empty tails while it has no result.
 pub(super) async fn get_logs(
     api: &JobApi,
+    caller: &Caller,
     request: Request<GetLogsRequest>,
 ) -> Result<Response<GetLogsResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id)?;
+    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
     let job = unexpired(api, job)?;
     Ok(Response::new(tails(&job)))
 }
@@ -303,6 +320,9 @@ struct Filter {
     before: Option<u64>,
     /// Kept: submitted by the client of this name.
     client: Option<String>,
+    /// Kept: submitted by this client, whatever the request asked: the caller's own name
+    /// when it is a client, none for an operator.
+    owner: Option<ClientName>,
 }
 
 impl Filter {
@@ -322,7 +342,11 @@ impl Filter {
             .client
             .as_deref()
             .is_none_or(|client| by == Some(client));
-        [in_state, labelled, after, before, client]
+        let owned = self
+            .owner
+            .as_ref()
+            .is_none_or(|owner| job.client.as_ref() == Some(owner));
+        [in_state, labelled, after, before, client, owned]
             .into_iter()
             .all(|kept| kept)
     }
@@ -376,6 +400,7 @@ fn token_after(last: Option<&JobRecord>) -> Option<ResumeToken> {
 /// `ListJobs`: a page of the jobs that pass the filters, in id order.
 pub(super) async fn list_jobs(
     api: &JobApi,
+    caller: &Caller,
     request: Request<ListJobsRequest>,
 ) -> Result<Response<ListJobsResponse>, Status> {
     let request = request.into_inner();
@@ -387,6 +412,7 @@ pub(super) async fn list_jobs(
         after: request.queued_after_ms,
         before: request.queued_before_ms,
         client: request.client,
+        owner: caller.only_jobs_of().cloned(),
     };
     let (jobs, next) = list(&api.read, Reads(api), &filter, resume, size)?;
     Ok(Response::new(ListJobsResponse {
@@ -410,8 +436,10 @@ fn list(
     let mut read = 0;
     let mut jobs = Vec::new();
     loop {
-        let rest = NonZeroUsize::new(bound - read).unwrap_or(NonZeroUsize::MIN);
-        let window = ctx.scan_window.min(rest);
+        let window = match NonZeroUsize::new(bound.saturating_sub(read)) {
+            Some(rest) => ctx.scan_window.min(rest),
+            None => ctx.scan_window,
+        };
         let page = reads.window(scan_state, resume.as_ref(), window)?;
         for job in page.jobs.into_iter().filter(|job| filter.keeps(job)) {
             if jobs.len() == size {
@@ -424,8 +452,17 @@ fn list(
             return Ok((jobs, None));
         };
         read += window.get();
-        if jobs.len() == size || read >= bound {
-            return Ok((jobs, Some(next)));
+        let cut = jobs.len() == size || read >= bound;
+        match (cut, filter.owner.is_some(), jobs.last()) {
+            (false, _, _) => {}
+            (true, false, _) => return Ok((jobs, Some(next))),
+            (true, true, Some(last)) => {
+                let after = token_after(Some(last));
+                return Ok((jobs, after));
+            }
+            // Nothing of the caller's yet: the token would name a row of another client's,
+            // so the scan reads on past the bound.
+            (true, true, None) => {}
         }
         resume = Some(next);
     }

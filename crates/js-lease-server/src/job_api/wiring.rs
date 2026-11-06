@@ -31,7 +31,7 @@ use super::auth::is_grpc;
 use super::{Bearer, JobApi, gateway, grpc, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
-use crate::config::Clients;
+use crate::config::LiveClients;
 
 /// The job service over the server's state: its job store and its clock, with each served
 /// group's context, a submitted job's wall limit held to `max_job_wall`. `None` when the
@@ -53,7 +53,7 @@ pub(crate) fn from_server(state: &Shared, max_job_wall: Duration) -> Option<JobA
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the
 /// bearer layer of `clients`, chosen by the request's content type.
-pub(crate) fn port(api: JobApi, clients: Clients) -> Router {
+pub(crate) fn port(api: JobApi, clients: LiveClients) -> Router {
     let api = Arc::new(api);
     let both = Both {
         grpc: grpc(Arc::clone(&api), clients.clone()),
