@@ -1,0 +1,29 @@
+# What a jobscheduler machine image is built from, for each Linux platform: the base image and
+# the three release archives baked into it, each pinned by its HTTPS URL and its SHA-256
+# (docs/runbooks/machine-images.md). `cargo xtask image-recipe` reads this file and makes no
+# network call; the image build downloads each file and refuses it unless its SHA-256 matches.
+#
+# - base: the Ubuntu 24.04 server cloud image, from the SHA256SUMS of its release directory.
+# - crun: Ubuntu 24.04's own crun package (the distribution's `/usr/bin/crun`, which its AppArmor
+#   profile attaches to), from the `Packages` index of the archive.
+# - hostkeeper: the deb of a hostkeeper release, from the release's SHA256SUMS.
+# - js-agent: the Linux archive of a jobscheduler release, from the release's SHA256SUMS.
+#
+# Every key is one of these. A key that looks like a secret (a token, a password, a key) is
+# refused by name, and so is a URL that carries a user, a query or a fragment: the image holds no
+# credential, and its configuration comes from the provider's user data at boot.
+#
+# To move a pin, take the URL and the SHA-256 from the release's own SHA256SUMS (or, for crun, the
+# archive's `Packages` index), never from a file you downloaded yourself.
+
+[linux-x86_64]
+base = { url = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img", sha256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94" }
+crun = { url = "https://archive.ubuntu.com/ubuntu/pool/universe/c/crun/crun_1.14.1-1_amd64.deb", sha256 = "2263368dabe3d126189dffd9da7cc31159d8766c9a9a2e3ca8231ad3fcc11109" }
+hostkeeper = { url = "https://github.com/komira-ai/hostkeeper/releases/download/v0.1.35/hostkeeper_0.1.35_amd64.deb", sha256 = "e80ceaaa99420bd513851f563bf186be8e283a71edd40ed1df08b5e3ef24e1d7" }
+js-agent = { url = "https://github.com/komira-ai/jobscheduler/releases/download/v0.1.169/js-agent-0.1.169-x86_64-unknown-linux-musl.tar.gz", sha256 = "6bf3b59221d6b6f83d74e28ba5dcbc56db293cfd99bac4634f060aa4ea8da084" }
+
+[linux-arm64]
+base = { url = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img", sha256 = "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e" }
+crun = { url = "https://ports.ubuntu.com/ubuntu-ports/pool/universe/c/crun/crun_1.14.1-1_arm64.deb", sha256 = "16b5215f56ff1e8143b1af8d6ad390ba7ba61824532078a90679c3c6db78bc8d" }
+hostkeeper = { url = "https://github.com/komira-ai/hostkeeper/releases/download/v0.1.35/hostkeeper_0.1.35_arm64.deb", sha256 = "ba2d8abb4cf39ae2a85f1ae590614e3f39370fca29f4b354afb7808a5187ddf0" }
+js-agent = { url = "https://github.com/komira-ai/jobscheduler/releases/download/v0.1.169/js-agent-0.1.169-aarch64-unknown-linux-musl.tar.gz", sha256 = "aec8dd4a9af7bec84afecebfa11c591c136871020468781302ca07edee13723f" }
