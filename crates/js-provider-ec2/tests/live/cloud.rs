@@ -8,12 +8,13 @@
 //! and the tests give the recording transport a canned one in place of the real client.
 
 use std::fs;
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use js_elastic::conformance::live::{LiveArgs, LiveCloud};
+use js_elastic::conformance::live::{LiveArgs, LiveCloud, run};
 use js_elastic::{CapacityProvider, Offer, SchedulerId};
 use js_logstore::{
     HttpRequest, HttpResponse, SystemClock as WallClock, Transport, TransportError, UreqTransport,
@@ -213,4 +214,47 @@ pub fn offer_id(shape: &str) -> String {
 /// The instance type an offer id names: the part before the first '/'.
 pub fn type_of(offer: &str) -> &str {
     offer.split(['/']).next().unwrap_or(offer)
+}
+
+/// The usage line.
+pub const USAGE: &str = "usage: live --run-id ID --region REGION --image AMI --shape TYPE \
+                     [--arch x86_64|arm64] [--capture-dir DIR] [--spend --plan-hash HASH]\n\
+                     --shape is required: with no type allowed the catalog holds only the types \
+                     with a GPU";
+
+/// Runs the suite for `raw` (the arguments without the program name), writing the run to
+/// `out` and a usage error to `err`: the exit status (0 passed or dry run done, 1 failed,
+/// 2 usage error). `main` only forwards to it.
+pub fn main_with(raw: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut usage_error = |message: &str| {
+        let _ = writeln!(err, "{message}\n{USAGE}");
+        2
+    };
+    let mut args = match LiveArgs::parse(raw, EXTRA) {
+        Ok(args) => args,
+        Err(message) => return usage_error(&message),
+    };
+    args.shape = offer_id(&args.shape);
+    let cloud = match Ec2Cloud::from_args(&args, raw) {
+        Ok(cloud) => cloud,
+        Err(message) => return usage_error(&message),
+    };
+    // The catalog runs its blocking calls on tokio's blocking pool, and the driver waits for
+    // it without a runtime of its own.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(why) => {
+            let _ = writeln!(err, "cannot start the runtime: {why}");
+            return 1;
+        }
+    };
+    let entered = runtime.enter();
+    let status = run(&args, &cloud, out);
+    let _ = out.flush();
+    drop(entered);
+    drop(runtime);
+    status
 }

@@ -19,6 +19,8 @@ use toml::Table;
 #[path = "live/cloud.rs"]
 mod cloud;
 
+use cloud::{USAGE, main_with};
+
 use cloud::{EXTRA, KeyFiles, LambdaCloud};
 
 /// A directory for one test, removed when dropped.
@@ -219,4 +221,74 @@ fn an_empty_key_file_and_a_missing_one_are_refused_when_the_provider_is_built() 
         .err()
         .unwrap();
     assert_eq!(refused.field, "api_key_file");
+}
+
+/// The flags every entry-point case starts from: a run id, a location and a shape.
+const BASE: &[&str] = &[
+    "--run-id",
+    "r1",
+    "--region",
+    "us-east-1",
+    "--shape",
+    "gpu_1x_a10",
+];
+
+/// The entry point run on `raw`: its exit status, what it printed for the run, and what it
+/// printed as a usage error.
+fn entry(raw: &[&str]) -> (i32, String, String) {
+    let raw: Vec<String> = raw.iter().map(|arg| (*arg).to_owned()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = main_with(&raw, &mut out, &mut err);
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+    (status, text(out), text(err))
+}
+
+/// The entry point `main` forwards to refuses missing and misplaced flags with exit status 2,
+/// the message naming the flag, then the usage, and prints nothing for the run: no flag at all,
+/// no shape, the provider's own required flag missing, and the other kind of location.
+#[test]
+fn the_entry_point_refuses_missing_flags_with_exit_2_and_the_usage() {
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec![], "--run-id is required"),
+        (without_shape(BASE), "--shape is required"),
+        (BASE.to_vec(), "--key-file is required"),
+        (
+            vec![
+                "--run-id",
+                "r1",
+                "--zone",
+                "us-east-1a",
+                "--shape",
+                "gpu_1x_a10",
+                "--key-file",
+                "key",
+            ],
+            "--zone is for Compute Engine; Lambda takes --region",
+        ),
+    ];
+    for (raw, message) in cases {
+        assert_eq!(
+            entry(&raw),
+            (2, String::new(), format!("{message}\n{USAGE}\n")),
+            "{raw:?}"
+        );
+    }
+}
+
+/// `BASE` without `--shape` and its value.
+fn without_shape(base: &[&'static str]) -> Vec<&'static str> {
+    let at = base.iter().position(|arg| *arg == "--shape").unwrap();
+    [&base[..at], &base[at + 2..]].concat()
+}
+
+/// Flags the parser accepts but the kind refuses (a key file that does not exist) reach the provider's
+/// construction and end with exit status 1 and the cause, before any call to the cloud: the
+/// entry point runs the driver, not only the parser.
+#[test]
+fn the_entry_point_runs_the_driver_and_exits_1_when_the_provider_cannot_be_built() {
+    let missing = env!("CARGO_TARGET_TMPDIR").to_owned() + "/live-cloud-no-such-key-file";
+    let raw = [BASE, &["--key-file", missing.as_str()][..]].concat();
+    let (status, out, err) = entry(&raw);
+    assert_eq!((status, err.as_str()), (1, ""), "{out}");
+    assert!(out.starts_with("cannot build the provider: "), "{out}");
 }

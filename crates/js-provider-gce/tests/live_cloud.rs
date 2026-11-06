@@ -20,6 +20,8 @@ use toml::Table;
 #[path = "live/cloud.rs"]
 mod cloud;
 
+use cloud::{USAGE, main_with};
+
 use cloud::{EXTRA, GceCloud, Recording, offer_id, type_of, what_of};
 
 const IMAGE: &str = "projects/debian-cloud/global/images/family/debian-12";
@@ -500,4 +502,77 @@ fn a_failed_exchange_writes_nothing_and_a_file_that_cannot_be_written_does_not_s
     let answer = recording.send(call()).unwrap();
     assert_eq!((answer.status, answer.body.as_slice()), (500, &b"boom"[..]));
     assert!(!gone.exists());
+}
+
+/// The flags every entry-point case starts from: a run id, a location and a shape.
+const BASE: &[&str] = &[
+    "--run-id",
+    "r1",
+    "--zone",
+    "us-central1-a",
+    "--shape",
+    "n1-standard-1",
+    "--image",
+    "projects/example-project/global/images/family/example",
+];
+
+/// The entry point run on `raw`: its exit status, what it printed for the run, and what it
+/// printed as a usage error.
+fn entry(raw: &[&str]) -> (i32, String, String) {
+    let raw: Vec<String> = raw.iter().map(|arg| (*arg).to_owned()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let status = main_with(&raw, &mut out, &mut err);
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
+    (status, text(out), text(err))
+}
+
+/// The entry point `main` forwards to refuses missing and misplaced flags with exit status 2,
+/// the message naming the flag, then the usage, and prints nothing for the run: no flag at all,
+/// no shape, the provider's own required flag missing, and the other kind of location.
+#[test]
+fn the_entry_point_refuses_missing_flags_with_exit_2_and_the_usage() {
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec![], "--run-id is required"),
+        (without_shape(BASE), "--shape is required"),
+        (BASE.to_vec(), "--project is required"),
+        (
+            vec![
+                "--run-id",
+                "r1",
+                "--region",
+                "us-central1",
+                "--shape",
+                "n1-standard-1",
+                "--project",
+                "example-project",
+                "--image",
+                "projects/example-project/global/images/family/example",
+            ],
+            "--region is for EC2 and Lambda; Compute Engine takes --zone",
+        ),
+    ];
+    for (raw, message) in cases {
+        assert_eq!(
+            entry(&raw),
+            (2, String::new(), format!("{message}\n{USAGE}\n")),
+            "{raw:?}"
+        );
+    }
+}
+
+/// `BASE` without `--shape` and its value.
+fn without_shape(base: &[&'static str]) -> Vec<&'static str> {
+    let at = base.iter().position(|arg| *arg == "--shape").unwrap();
+    [&base[..at], &base[at + 2..]].concat()
+}
+
+/// Flags the parser accepts but the kind refuses (a project name that is not a project id) reach the provider's
+/// construction and end with exit status 1 and the cause, before any call to the cloud: the
+/// entry point runs the driver, not only the parser.
+#[test]
+fn the_entry_point_runs_the_driver_and_exits_1_when_the_provider_cannot_be_built() {
+    let raw = [BASE, &["--project", "Not_A_Project"][..]].concat();
+    let (status, out, err) = entry(&raw);
+    assert_eq!((status, err.as_str()), (1, ""), "{out}");
+    assert!(out.starts_with("cannot build the provider: "), "{out}");
 }

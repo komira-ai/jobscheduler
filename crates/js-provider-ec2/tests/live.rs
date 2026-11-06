@@ -40,56 +40,13 @@
 
 use std::io::Write;
 
-use js_elastic::conformance::live::{LiveArgs, run};
-
 #[path = "live/cloud.rs"]
 mod cloud;
 
-use cloud::{EXTRA, Ec2Cloud, offer_id};
-
-/// The usage line.
-const USAGE: &str = "usage: live --run-id ID --region REGION --image AMI --shape TYPE \
-                     [--arch x86_64|arm64] [--capture-dir DIR] [--spend --plan-hash HASH]\n\
-                     --shape is required: with no type allowed the catalog holds only the types \
-                     with a GPU";
-
-/// Runs the suite for `raw` (the arguments without the program name): the exit status.
-fn main_with(raw: &[String]) -> i32 {
-    let usage_error = |message: &str| {
-        eprintln!("{message}\n{USAGE}");
-        2
-    };
-    let mut args = match LiveArgs::parse(raw, EXTRA) {
-        Ok(args) => args,
-        Err(message) => return usage_error(&message),
-    };
-    args.shape = offer_id(&args.shape);
-    let cloud = match Ec2Cloud::from_args(&args, raw) {
-        Ok(cloud) => cloud,
-        Err(message) => return usage_error(&message),
-    };
-    // The catalog runs its blocking calls on tokio's blocking pool, and the driver waits for
-    // it without a runtime of its own.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(why) => {
-            eprintln!("cannot start the runtime: {why}");
-            return 1;
-        }
-    };
-    let entered = runtime.enter();
-    let mut out = std::io::stdout();
-    let status = run(&args, &cloud, &mut out);
-    let _ = out.flush();
-    drop(entered);
-    drop(runtime);
-    status
-}
-
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    std::process::exit(main_with(&raw));
+    let mut out = std::io::stdout();
+    let status = cloud::main_with(&raw, &mut out, &mut std::io::stderr());
+    let _ = out.flush();
+    std::process::exit(status);
 }

@@ -6,11 +6,12 @@
 //! exercises everything here without a network: building a provider reads the key file and
 //! sends nothing.
 
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-use js_elastic::conformance::live::{LiveArgs, LiveCloud};
+use js_elastic::conformance::live::{LiveArgs, LiveCloud, run};
 use js_elastic::{CapacityProvider, SchedulerId};
 use js_provider_lambdalabs::kind::{self, Context, SecretFiles};
 use js_provider_lambdalabs::{ApiKey, SystemClock};
@@ -83,4 +84,46 @@ impl LiveCloud for LambdaCloud {
             .map_err(|refused| format!("{}: {}", refused.field, refused.reason))?;
         Ok(Box::new(built.provider))
     }
+}
+
+/// The usage line.
+pub const USAGE: &str = "usage: live --run-id ID --region REGION --shape TYPE --key-file PATH \
+                     [--spend --plan-hash HASH]\n\
+                     --shape is required: the provider's table names the instance types it may \
+                     launch before it is built";
+
+/// Runs the suite for `raw` (the arguments without the program name), writing the run to
+/// `out` and a usage error to `err`: the exit status (0 passed or dry run done, 1 failed,
+/// 2 usage error). `main` only forwards to it.
+pub fn main_with(raw: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let mut usage_error = |message: &str| {
+        let _ = writeln!(err, "{message}\n{USAGE}");
+        2
+    };
+    let args = match LiveArgs::parse(raw, EXTRA) {
+        Ok(args) => args,
+        Err(message) => return usage_error(&message),
+    };
+    let cloud = match LambdaCloud::from_args(&args, raw) {
+        Ok(cloud) => cloud,
+        Err(message) => return usage_error(&message),
+    };
+    // The catalog runs its blocking call on tokio's blocking pool, and the driver waits for
+    // it without a runtime of its own.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(why) => {
+            let _ = writeln!(err, "cannot start the runtime: {why}");
+            return 1;
+        }
+    };
+    let entered = runtime.enter();
+    let status = run(&args, &cloud, out);
+    let _ = out.flush();
+    drop(entered);
+    drop(runtime);
+    status
 }
