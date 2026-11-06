@@ -1,0 +1,68 @@
+{
+  "kind": "compute#machineTypeAggregatedList",
+  "id": "projects/example-project/aggregated/machineTypes",
+  "items": {
+    "zones/us-central1-a": {
+      "machineTypes": [
+        {
+          "kind": "compute#machineType",
+          "id": "4004",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "n1-standard-4",
+          "description": "4 vCPUs, 15 GB RAM",
+          "guestCpus": 4,
+          "memoryMb": 15360,
+          "imageSpaceGb": 0,
+          "maximumPersistentDisks": 128,
+          "maximumPersistentDisksSizeGb": "263168",
+          "zone": "us-central1-a",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/machineTypes/n1-standard-4",
+          "isSharedCpu": false
+        },
+        {
+          "kind": "compute#machineType",
+          "id": "100001",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "a2-highgpu-1g",
+          "description": "Accelerator Optimized: 1 NVIDIA Tesla A100 GPU, 12 vCPUs, 85GB RAM",
+          "guestCpus": 12,
+          "memoryMb": 87040,
+          "imageSpaceGb": 0,
+          "maximumPersistentDisks": 128,
+          "maximumPersistentDisksSizeGb": "263168",
+          "zone": "us-central1-a",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/machineTypes/a2-highgpu-1g",
+          "isSharedCpu": false,
+          "accelerators": [
+            {
+              "guestAcceleratorType": "nvidia-tesla-a100",
+              "guestAcceleratorCount": 1
+            }
+          ],
+          "architecture": "X86_64"
+        }
+      ]
+    },
+    "zones/us-central1-c": {
+      "machineTypes": [
+        {
+          "kind": "compute#machineType",
+          "id": "4004",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "n1-standard-4",
+          "description": "4 vCPUs, 15 GB RAM",
+          "guestCpus": 4,
+          "memoryMb": 15360,
+          "imageSpaceGb": 0,
+          "maximumPersistentDisks": 128,
+          "maximumPersistentDisksSizeGb": "263168",
+          "zone": "us-central1-c",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-c/machineTypes/n1-standard-4",
+          "isSharedCpu": false
+        }
+      ]
+    }
+  },
+  "nextPageToken": "EXAMPLE-PAGE-TOKEN-1",
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/aggregated/machineTypes?returnPartialSuccess=true&maxResults=500"
+}

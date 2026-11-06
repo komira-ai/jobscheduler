@@ -53,10 +53,20 @@ const EC2_CRATE: &str = "crates/js-provider-ec2/";
 
 /// The EC2 provider's live-port files, by path prefix (`src/http.rs`, `src/http/`): the only
 /// places in that crate that name the regional and pricing hosts. Its `tests/http/` files
-/// build the hosts the wire layer must sign for.
-const EC2_HOST_FILES: [&str; 2] = [
+/// build the hosts the wire layer must sign for, its `tests/fixtures_parse.rs` and
+/// `tests/fixtures_parse/` check the host each fixture's call is sent to, its `tests/fixtures/api/` answers carry the API's
+/// XML namespace, and its `tests/live.rs` is the live conformance suite, which reaches the
+/// real API only behind the `live` feature and `--spend` with a plan hash. The account of that
+/// suite is in `tests/live/`, which `tests/live_cloud.rs` tests without a network.
+const EC2_HOST_FILES: [&str; 8] = [
     "crates/js-provider-ec2/src/http",
     "crates/js-provider-ec2/tests/http/",
+    "crates/js-provider-ec2/tests/fixtures_parse.rs",
+    "crates/js-provider-ec2/tests/fixtures_parse/",
+    "crates/js-provider-ec2/tests/fixtures/api/",
+    "crates/js-provider-ec2/tests/live.rs",
+    "crates/js-provider-ec2/tests/live/",
+    "crates/js-provider-ec2/tests/live_cloud.rs",
 ];
 
 /// The Compute Engine provider crate: its insert call sits behind the same guarded launch
@@ -65,12 +75,23 @@ const GCE_CRATE: &str = "crates/js-provider-gce/";
 
 /// The Compute Engine provider's live-port files, by path prefix (`src/http.rs`,
 /// `src/http/`), the files of its `tests/http/` that build the addresses the client must
-/// send to, and its service-account key fixture, whose token address the key file names:
-/// the only places in that crate that name the API hosts.
-const GCE_HOST_FILES: [&str; 3] = [
+/// send to, its service-account key fixture, whose token address the key file names, its
+/// `tests/fixtures_parse.rs` and `tests/fixtures_parse/`, which check the address each
+/// fixture's call is sent to, its `tests/fixtures/api/` answers, whose resource links name the
+/// API host, and its `tests/live.rs`, the live conformance suite, which reaches the real API
+/// only behind the `live` feature and `--spend` with a plan hash (its account is in
+/// `tests/live/`, which `tests/live_cloud.rs` tests without a network): the only places in that
+/// crate that name the API hosts.
+const GCE_HOST_FILES: [&str; 9] = [
     "crates/js-provider-gce/src/http",
     "crates/js-provider-gce/tests/http/",
     "crates/js-provider-gce/tests/fixtures/credential/",
+    "crates/js-provider-gce/tests/fixtures_parse.rs",
+    "crates/js-provider-gce/tests/fixtures_parse/",
+    "crates/js-provider-gce/tests/fixtures/api/",
+    "crates/js-provider-gce/tests/live.rs",
+    "crates/js-provider-gce/tests/live/",
+    "crates/js-provider-gce/tests/live_cloud.rs",
 ];
 
 /// The one file that may name the production host: the default address of the
@@ -122,14 +143,11 @@ fn rules() -> Vec<Rule> {
                 joined(&["windows", ".net"]),
                 joined(&["oracle", "cloud.com"]),
             ],
-            allowed: vec![
-                LAMBDA_DEFAULT_ADDRESS,
-                EC2_HOST_FILES[0],
-                EC2_HOST_FILES[1],
-                GCE_HOST_FILES[0],
-                GCE_HOST_FILES[1],
-                GCE_HOST_FILES[2],
-            ],
+            allowed: [LAMBDA_DEFAULT_ADDRESS]
+                .into_iter()
+                .chain(EC2_HOST_FILES)
+                .chain(GCE_HOST_FILES)
+                .collect(),
         },
         Rule {
             what: "a purchase API",

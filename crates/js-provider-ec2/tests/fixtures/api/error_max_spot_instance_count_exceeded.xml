@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>MaxSpotInstanceCountExceeded</Code>
+            <Message>Max spot instance count exceeded</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000024</RequestID>
+</Response>

@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": 400,
+    "message": "Invalid JSON payload received.",
+    "errors": [
+      {
+        "message": "Invalid JSON payload received.",
+        "domain": "global",
+        "reason": "badRequest"
+      }
+    ]
+  }
+}

@@ -1,0 +1,121 @@
+# Runs the live conformance suite of one machine provider (EC2, Compute Engine or Lambda) against
+# the real cloud, by hand only (docs/runbooks/live-conformance.md). No pull request, push or
+# schedule starts it, and it is not a check of any pull request.
+#
+# It runs tools/held/provider-live/provider_live.sh, which is a dry run unless it is given
+# `--spend --plan-hash H`. The default here is a dry run (`dry_run` true): the suite reads the
+# provider's catalog, prints the plan and its plan hash, lists what an earlier run with the same
+# run id left, and launches nothing. A spending run needs `dry_run` false and the `plan_hash` a dry
+# run printed for the same inputs; the suite refuses when the plan it computes now hashes to
+# something else. The suite ends every spending run with its own cleanup pass that terminates what
+# the run launched, so this workflow has no cleanup step of its own, and a cancelled run is
+# avoided (`cancel-in-progress` is false) because it would skip that pass.
+#
+# The job runs in the `provider-live` environment. That environment holds the provider secrets
+# and must require a reviewer, so a run waits for the owner's approval before it can read them.
+# The secrets it reads:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  EC2 (the provider's standard credentials)
+#   GCE_SERVICE_ACCOUNT_KEY                   Compute Engine (the service account key, JSON)
+#   LAMBDALABS_API_KEY                        Lambda (the API key)
+# The key of Compute Engine and of Lambda is written to a file in the runner's temporary
+# directory, which the suite reads; the runner is discarded after the job.
+#
+# Every input reaches the script through an environment variable, never through the text of a
+# `run` line.
+name: provider-live
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: The provider to run the suite against
+        type: choice
+        options: [ec2, gce, lambdalabs]
+        required: true
+      location:
+        description: The region (EC2, Lambda) or the zone (Compute Engine)
+        type: string
+        required: true
+      run_id:
+        description: The run id, 1 to 40 characters of a-z, 0-9 and -
+        type: string
+        required: true
+      shape:
+        description: The machine shape, such as t3.micro or n1-standard-1
+        required: true
+        type: string
+      image:
+        description: The image to launch (EC2 and Compute Engine need one; empty for Lambda)
+        type: string
+        default: ''
+      project:
+        description: The Google Cloud project (Compute Engine only)
+        type: string
+        default: ''
+      plan_hash:
+        description: The plan hash a dry run printed (used only when dry_run is false)
+        type: string
+        default: ''
+      dry_run:
+        description: Dry run, which launches nothing (false spends money)
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: provider-live-${{ inputs.provider }}-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # The environment holds the provider secrets and must require a reviewer, so a run waits for
+    # the owner's approval.
+    environment: provider-live
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Write the credential file
+        if: ${{ inputs.provider != 'ec2' }}
+        env:
+          CREDENTIAL: ${{ (inputs.provider == 'gce' && secrets.GCE_SERVICE_ACCOUNT_KEY) || (inputs.provider == 'lambdalabs' && secrets.LAMBDALABS_API_KEY) || '' }}
+        # One command: `install` creates the file owner-only (mode 0600) with the secret as its
+        # content, so it is never readable by another user.
+        run: install -m 600 /dev/stdin "$RUNNER_TEMP/provider-credential" <<< "$CREDENTIAL"
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          LOCATION: ${{ inputs.location }}
+          RUN_ID: ${{ inputs.run_id }}
+          SHAPE: ${{ inputs.shape }}
+          IMAGE: ${{ inputs.image }}
+          PROJECT: ${{ inputs.project }}
+          CREDENTIAL_FILE: ${{ inputs.provider != 'ec2' && format('{0}/provider-credential', runner.temp) || '' }}
+          AWS_ACCESS_KEY_ID: ${{ inputs.provider == 'ec2' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ inputs.provider == 'ec2' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+        run: tools/held/provider-live/provider_live.sh --provider "$PROVIDER" --run-id "$RUN_ID" --location "$LOCATION" --shape "$SHAPE" --image "$IMAGE" --project "$PROJECT" --credential-file "$CREDENTIAL_FILE"
+      - name: Spend
+        if: ${{ !inputs.dry_run }}
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          LOCATION: ${{ inputs.location }}
+          RUN_ID: ${{ inputs.run_id }}
+          SHAPE: ${{ inputs.shape }}
+          IMAGE: ${{ inputs.image }}
+          PROJECT: ${{ inputs.project }}
+          PLAN_HASH: ${{ inputs.plan_hash }}
+          CREDENTIAL_FILE: ${{ inputs.provider != 'ec2' && format('{0}/provider-credential', runner.temp) || '' }}
+          AWS_ACCESS_KEY_ID: ${{ inputs.provider == 'ec2' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ inputs.provider == 'ec2' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+        run: tools/held/provider-live/provider_live.sh --provider "$PROVIDER" --run-id "$RUN_ID" --location "$LOCATION" --shape "$SHAPE" --image "$IMAGE" --project "$PROJECT" --credential-file "$CREDENTIAL_FILE" --spend --plan-hash "$PLAN_HASH"

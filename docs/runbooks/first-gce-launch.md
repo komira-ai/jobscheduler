@@ -86,6 +86,8 @@ the image too.
 
 ### 1.4 Pre-checks
 
+**LIVE**, the provider alone: `docs/runbooks/live-conformance.md` runs the provider's live conformance suite (a dry run by default; it spends only with `--spend --plan-hash <hash>`, which needs the same go as the launch below) and refreshes the provider's response fixtures from what the cloud answered. Run its dry run before the pre-checks below.
+
 | # | item | pass criterion | mark |
 |---|---|---|---|
 | 1.4.1 | The APIs are enabled in the project: Compute Engine and Cloud Billing. | The console's API list shows both enabled. | LIVE |

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>RequestLimitExceeded</Code>
+            <Message>Request limit exceeded.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000026</RequestID>
+</Response>

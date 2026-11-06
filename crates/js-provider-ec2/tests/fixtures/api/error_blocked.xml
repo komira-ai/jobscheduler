@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>Blocked</Code>
+            <Message>Your account is currently blocked. Contact AWS Support if you have questions.</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000030</RequestID>
+</Response>

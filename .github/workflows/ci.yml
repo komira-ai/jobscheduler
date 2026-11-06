@@ -68,6 +68,9 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # This builds the live conformance targets of the three machine providers, which no other
+      # job builds and nothing in CI runs; they spend money only when a person runs them.
+      - run: cargo clippy --locked -p js-provider-ec2 -p js-provider-gce -p js-provider-lambdalabs --features js-provider-ec2/live,js-provider-gce/live,js-provider-lambdalabs/live --all-targets -- -D warnings
       # The decoders' cargo-fuzz packages are packages of their own, outside the workspace,
       # so the steps above do not build them: these check that each still compiles against
       # its crate. No fuzzing runs here; a campaign is `cargo +nightly fuzz run <target>`.

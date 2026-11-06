@@ -40,5 +40,17 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 # The test that pins what `RootCerts::WebPki` stands for.
 webpki-roots.workspace = true
 
+[features]
+# Only builds the live conformance target (`tests/live.rs`). It enables no code in the
+# library: the target is run by hand against the real cloud (docs/runbooks/live-conformance.md)
+# and is never part of a default build or test run.
+live = []
+
+[[test]]
+name = "live"
+path = "tests/live.rs"
+harness = false
+required-features = ["live"]
+
 [lints]
 workspace = true

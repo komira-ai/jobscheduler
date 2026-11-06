@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Errors>
+        <Error>
+            <Code>UnauthorizedOperation</Code>
+            <Message>You are not authorized to perform this operation. User: arn:aws:iam::123456789012:user/example-user is not authorized to perform: ec2:RunInstances. Encoded authorization failure message: EXAMPLE-ENCODED-AUTHORIZATION-MESSAGE</Message>
+        </Error>
+    </Errors>
+    <RequestID>00000000-0000-0000-0000-000000000028</RequestID>
+</Response>

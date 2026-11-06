@@ -1,0 +1,4 @@
+{
+  "__type": "TooManyRequestsException",
+  "Message": "Rate exceeded"
+}

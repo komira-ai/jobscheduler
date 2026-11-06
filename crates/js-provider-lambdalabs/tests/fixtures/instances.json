@@ -4,7 +4,7 @@
       "id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
       "name": "js-0123abcd-000000000001",
       "ip": "198.51.100.7",
-      "private_ip": "10.0.0.7",
+      "private_ip": "192.0.2.7",
       "status": "active",
       "ssh_key_names": ["fixture-key"],
       "file_system_names": [],

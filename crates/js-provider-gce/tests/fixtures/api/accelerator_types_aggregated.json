@@ -1,0 +1,57 @@
+{
+  "kind": "compute#acceleratorTypeAggregatedList",
+  "id": "projects/example-project/aggregated/acceleratorTypes",
+  "items": {
+    "zones/us-central1-a": {
+      "acceleratorTypes": [
+        {
+          "kind": "compute#acceleratorType",
+          "id": "10001",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "nvidia-tesla-a100",
+          "description": "NVIDIA A100 40GB",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/acceleratorTypes/nvidia-tesla-a100",
+          "maximumCardsPerInstance": 16
+        },
+        {
+          "kind": "compute#acceleratorType",
+          "id": "10002",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "nvidia-tesla-t4",
+          "description": "NVIDIA T4",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-a/acceleratorTypes/nvidia-tesla-t4",
+          "maximumCardsPerInstance": 4
+        }
+      ]
+    },
+    "zones/us-central1-b": {
+      "acceleratorTypes": [
+        {
+          "kind": "compute#acceleratorType",
+          "id": "10003",
+          "creationTimestamp": "2026-11-05T00:00:00.000-08:00",
+          "name": "nvidia-tesla-t4",
+          "description": "NVIDIA T4",
+          "zone": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-b",
+          "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/zones/us-central1-b/acceleratorTypes/nvidia-tesla-t4",
+          "maximumCardsPerInstance": 4
+        }
+      ]
+    },
+    "zones/us-central1-f": {
+      "warning": {
+        "code": "NO_RESULTS_ON_PAGE",
+        "message": "There are no results for scope 'zones/us-central1-f' on this page.",
+        "data": [
+          {
+            "key": "scope",
+            "value": "zones/us-central1-f"
+          }
+        ]
+      }
+    }
+  },
+  "selfLink": "https://www.googleapis.com/compute/v1/projects/example-project/aggregated/acceleratorTypes?returnPartialSuccess=true&maxResults=500"
+}

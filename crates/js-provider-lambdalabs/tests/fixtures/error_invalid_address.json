@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/invalid-address",
+    "message": "The address is not valid. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-invalid_address"
+  }
+}

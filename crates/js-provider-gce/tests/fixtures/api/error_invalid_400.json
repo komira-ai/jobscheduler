@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": 400,
+    "message": "Invalid value for field 'resource.name': 'Not_A_Name'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'",
+    "errors": [
+      {
+        "message": "Invalid value for field 'resource.name': 'Not_A_Name'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'",
+        "domain": "global",
+        "reason": "invalid"
+      }
+    ]
+  }
+}
