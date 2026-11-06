@@ -65,7 +65,7 @@ pub use boot::{
 };
 pub use cache::{Catalog, CatalogCache, Cooldowns, Instant, OfferKey, Recorded};
 pub use caps::{Capacity, ProviderCaps};
-pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId};
+pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId, SignedIdentity};
 pub use offer::{BlockTerms, Demand, Dimension, Offer, PriceUnit, Purchase, Quota, QuotaLimit};
 pub use provider::{
     AcquireRequest, CapacityProvider, CatalogFuture, CheckResult, EventStream, ProviderError,

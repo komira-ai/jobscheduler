@@ -73,7 +73,7 @@ fn a_pool_needs_a_name_a_class_and_a_provider() {
 
 /// Asserts that a kind the server does not have is refused with the kinds it has, for the
 /// provider and for the network mode (`none` and `script` are not modes), and that the
-/// server as shipped has `lambdalabs` and `static`. It catches a kind name read as a default.
+/// server as shipped has `ec2`, `lambdalabs` and `static`. It catches a kind name read as a default.
 #[test]
 fn an_unknown_kind_is_refused_with_the_known_ones() {
     let scratch = Scratch::new("pool_kinds");
@@ -84,7 +84,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     assert_eq!(
         elastic(&scratch, &lambda),
-        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, lambdalabs, static"
+        "pool \"gpu\": provider.kind: \"lambda\" is not a kind; known: any-mode, broken-floor, ec2, lambdalabs, static"
     );
     for mode in ["none", "script"] {
         let pool = PoolText::elastic(&scratch).set("network", &format!("{{ kind = {mode:?} }}"));
@@ -115,7 +115,7 @@ fn an_unknown_kind_is_refused_with_the_known_ones() {
     );
     let mut names = Kinds::standard().names();
     names.sort_unstable();
-    assert_eq!(names, ["lambdalabs", "static"]);
+    assert_eq!(names, ["ec2", "lambdalabs", "static"]);
 }
 
 /// Asserts the unknown fields of a provider table and of a network table, each naming

@@ -78,6 +78,9 @@ pub const SETUP_SCRIPT: &str = "/usr/share/js-agent/crun_host_setup.sh";
 /// The crun unit the setup script installs, in the image.
 pub const CRUN_UNIT: &str = "/usr/share/js-agent/js-agent-crun.service";
 
+/// The crun unit's GPU oneshot the setup script installs, in the image.
+pub const CRUN_GPU_UNIT: &str = "/usr/share/js-agent/js-agent-crun-gpu.service";
+
 /// The tmpfiles file the setup script installs, in the image.
 pub const CRUN_TMPFILES: &str = "/usr/share/js-agent/tmpfiles-crun.conf";
 
@@ -166,7 +169,7 @@ pub struct Baked {
 }
 
 /// Every file the build installs from the repository, in the order the recipe lists them.
-pub const BAKED: [Baked; 6] = [
+pub const BAKED: [Baked; 8] = [
     Baked {
         source: "packaging/js-agent/crun_host_setup.sh",
         path: SETUP_SCRIPT,
@@ -176,6 +179,12 @@ pub const BAKED: [Baked; 6] = [
     Baked {
         source: "packaging/js-agent/js-agent-crun.service",
         path: CRUN_UNIT,
+        mode: "0644",
+        config: true,
+    },
+    Baked {
+        source: "packaging/js-agent/js-agent-crun-gpu.service",
+        path: CRUN_GPU_UNIT,
         mode: "0644",
         config: true,
     },
@@ -194,6 +203,12 @@ pub const BAKED: [Baked; 6] = [
     Baked {
         source: "packaging/machine-image/js-agent-crun-image.conf",
         path: "/etc/systemd/system/js-agent-crun.service.d/10-image.conf",
+        mode: "0644",
+        config: true,
+    },
+    Baked {
+        source: "packaging/machine-image/js-agent-crun-gpu-image.conf",
+        path: "/etc/systemd/system/js-agent-crun-gpu.service.d/10-image.conf",
         mode: "0644",
         config: true,
     },
@@ -519,8 +534,8 @@ fn staged(file: &str) -> String {
     format!("{STAGE}/{file}")
 }
 
-/// The command of `crun_host_setup.sh` that makes the steps: an apply, with the unit and the
-/// tmpfiles file by path and SHA-256, and the placeholders in place of the server and the pool.
+/// The command of `crun_host_setup.sh` that makes the steps: an apply, with the unit, the GPU
+/// oneshot and the tmpfiles file by path and SHA-256, and the placeholders in place of the server and the pool.
 #[must_use]
 pub fn setup_command(inputs: &Inputs) -> Vec<String> {
     [
@@ -534,6 +549,10 @@ pub fn setup_command(inputs: &Inputs) -> Vec<String> {
         CRUN_UNIT,
         "--unit-sha256",
         &inputs.sha256_of(CRUN_UNIT),
+        "--gpu-unit",
+        CRUN_GPU_UNIT,
+        "--gpu-unit-sha256",
+        &inputs.sha256_of(CRUN_GPU_UNIT),
         "--tmpfiles",
         CRUN_TMPFILES,
         "--tmpfiles-sha256",

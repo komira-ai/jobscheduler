@@ -56,8 +56,10 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
-    /// Reads the log tail held so far, also for a running job, and for the retention window
-    /// after the job ended. Changes nothing.
+    /// Reads a job's output. Without a stream: the job's state and its result's tails. With a
+    /// stream: one page of that stream's bytes from an offset, read from the log store, while
+    /// the job runs and for the retention window after it ended, optionally waiting a bounded
+    /// time for new bytes. Changes nothing.
     pub async fn get_logs(&mut self, request: v1::GetLogsRequest) -> Result<v1::GetLogsResponse, JobError> {
         let (attempt, request) = self.begin(request);
         let answer = tokio::time::timeout(self.limit, self.service.get_logs(request)).await;

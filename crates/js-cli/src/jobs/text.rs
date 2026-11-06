@@ -1,11 +1,13 @@
 //! An answer as text: one `path: value` line per field that is set, in the order the
 //! definition names the fields, a nested message's fields under its name with a dot (`job.spec.image`),
 //! a list's elements by index (`jobs[0].id`) and a map's entries by key, in key order
-//! (`job.spec.labels.team`). An enum value is its short name (`queued`); a `bytes` field
-//! (a log tail) is its label on a line of its own and then its text, even when it is empty
-//! (bytes that are not UTF-8 print with the replacement character), so `GetLogs` prints the
-//! standard output tail and then the standard error tail, each under its label, and a
-//! `truncated: true` line when a stream was cut. Control characters are left out of what
+//! (`job.spec.labels.team`). An enum value is its short name (`queued`); a `bytes` field is
+//! its label on a line of its own and then its text (bytes that are not UTF-8 print with the
+//! replacement character). A log tail (a `bytes` field whose name ends in `_tail`) keeps its
+//! label even when it is empty, so `GetLogs` prints the standard output tail and then the
+//! standard error tail, each under its label, and a `truncated: true` line when a stream was
+//! cut; any other `bytes` field (the `data` of a page of a stream) is printed only when set,
+//! so a `GetLogs` without a stream prints as it did before streams were added. Control characters are left out of what
 //! the server sent, except the line breaks and tabs of a log tail.
 
 use prost_reflect::{DynamicMessage, Kind, MapKey, ReflectMessage, Value};
@@ -21,7 +23,9 @@ pub(crate) fn lines(message: &DynamicMessage) -> String {
 fn fields(message: &DynamicMessage, prefix: &str, out: &mut String) {
     for field in message.descriptor().fields() {
         let path = format!("{prefix}{}", field.name());
-        let tail = matches!(field.kind(), Kind::Bytes) & !field.is_list();
+        let tail = matches!(field.kind(), Kind::Bytes)
+            & !field.is_list()
+            & field.name().ends_with("_tail");
         match (message.has_field(&field), tail) {
             (true, _) => put(&path, &field.kind(), &message.get_field(&field), out),
             // A log tail keeps its label when it is empty, so both tails are always shown.

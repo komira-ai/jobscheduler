@@ -171,6 +171,7 @@ fn hello(name: &str) -> Hello {
     Hello {
         name: name.to_owned(),
         instance_id: None,
+        identity: None,
     }
 }
 

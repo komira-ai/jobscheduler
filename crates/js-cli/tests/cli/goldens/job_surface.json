@@ -534,10 +534,10 @@
     "streaming": false
   },
   {
-    "doc": "Reads the log tail held so far, also for a running job, and for the retention window after the job ended. Changes nothing.",
+    "doc": "Reads a job's output. Without a stream: the job's state and its result's tails. With a stream: one page of that stream's bytes from an offset, read from the log store, while the job runs and for the retention window after it ended, optionally waiting a bounded time for new bytes. Changes nothing.",
     "flags": [
       {
-        "doc": "The id of the job whose log tail to read.",
+        "doc": "The id of the job whose output to read.",
         "field": [
           "job_id"
         ],
@@ -546,6 +546,50 @@
         "oneof": null,
         "repeated": false,
         "required": true
+      },
+      {
+        "doc": "The stream to read. Unspecified: the result's tails, and the other fields below are not read.",
+        "field": [
+          "stream"
+        ],
+        "kind": "Enum([(\"unspecified\", \"LOG_STREAM_UNSPECIFIED\"), (\"stdout\", \"LOG_STREAM_STDOUT\"), (\"stderr\", \"LOG_STREAM_STDERR\")])",
+        "name": "stream",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The offset of the first byte wanted, counted from the stream's first byte. Absent: 0. Past the length of an ended job's stream: refused, OUT_OF_RANGE.",
+        "field": [
+          "from_offset"
+        ],
+        "kind": "U64",
+        "name": "from-offset",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "The most bytes of data in the answer. Absent: 262144 (256 KiB). A larger value than 1048576 (1 MiB) is cut to it; 0 is refused.",
+        "field": [
+          "max_bytes"
+        ],
+        "kind": "U32",
+        "name": "max-bytes",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Whether to wait, up to 20 seconds, for new bytes when none are there yet, then answer; an answer at the cap has no data. Absent: false. A job that has ended answers at once.",
+        "field": [
+          "follow"
+        ],
+        "kind": "Bool",
+        "name": "follow",
+        "oneof": null,
+        "repeated": false,
+        "required": false
       }
     ],
     "idempotency": "Unknown",

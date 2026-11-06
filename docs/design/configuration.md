@@ -22,6 +22,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--job-listen` | `server.job_listen`, off unless given: the address the job service is served on (see "The job service's port" below); off the loopback it needs `server.tls_cert` and `server.tls_key`, the same pair as `server.listen`; refused unless a pool registers agents |
 | `--metrics-listen` | `server.metrics_listen`, off unless given: the address the operator's metrics are served on (see "The metrics port" below); a private address only, plain HTTP, no token; an address that is not a private one is refused at start naming the flag or the key; needs no agent registration |
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
+| `--store`, `--allow-sqlite-store` | `server.store` and `server.allow_sqlite_store` (`false` unless given; `true` is refused without `server.store`, as the flag is without `--store`): the store the server's state is to be kept in, and the gate of its SQLite backend; see "The store" below |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
 | `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
@@ -127,6 +128,44 @@ Under `--placement js-sched` the percent of an agent pool (the agent pool file, 
 engine's rule instead: the registry's book takes each host's whole `[shape]` memory, and the engine books no more than
 `floor(memory x percent / 100)` of it. What fits the pool is still judged at the cut, so a request above it is refused `no-fit`, and
 `GET /v1/hosts` shows the same as under `registry`: `shape.memory_bytes` is the cut, beside `memory`. A static pool is not affected.
+
+### The store
+
+`--store <path>` (`server.store`) is the `store` setting of the design ([jobscheduler-design.md](jobscheduler-design.md), section 4.1:
+"The Postgres connection, as a path to a file that holds it. SQLite is accepted only for tests and single-node development."). It is
+optional for now, and nothing of the server's state is kept in the store yet: the lease file, the files beside it and the usage file
+are kept as without it.
+
+- **The file.** One line: `postgres://...` or `postgresql://...` for Postgres, or `sqlite:<absolute path>` for SQLite. Blank lines and
+  the whitespace around the line are ignored; anything else (two lines, another scheme, a relative path) is refused. The file must be
+  owner-only, as `--token-file`'s is, and its content is never printed: a refusal names the file and says what is wrong, a URL that
+  does not parse is refused as one, and a Postgres server's refusal is reported by its SQLSTATE alone. The URL's `sslmode` (`disable`
+  to `verify-full`) and `sslrootcert` choose its TLS. A Postgres store must hold the state schema already; the server creates none, and
+  a database without it is refused when the lock is taken.
+- **The dev flag.** `--allow-sqlite-store` (`server.allow_sqlite_store = true`) accepts a `sqlite:` store. Without it such a store is
+  refused at start with exit status 2: `--store: <file> names a sqlite: store, which is accepted only with --allow-sqlite-store: SQLite
+  is for tests and single-node development`. With a Postgres store the flag is accepted and does nothing, so one file serves both kinds
+  of environment. Like every flag, it is refused beside `--config`.
+- **The lock.** The server takes the store's writer lock before anything else (before it reads or locks the lease file and before it
+  binds a listener) and holds it for its life: a session-level advisory lock on a connection of its own on Postgres, the lock file
+  beside the store's file on SQLite. It tries once and does not wait.
+- **A refused start.** A second server on the same store exits 2 with one line, `--store: another process holds the store's writer
+  lock`, having bound nothing and opened neither the store nor the lease file. A lock that cannot be tried (the server is down, the
+  login is refused) is `--store: the store's writer lock could not be taken: ...`, also exit 2.
+- **A lost lock.** Every tick asks the lock's session first. When the session is gone (the database restarted, an administrator ended
+  it, the connection broke), the lock is gone with it: the tick does nothing more, the server stops serving and ticking, writes
+  nothing more (there is no final tick), logs `the store's writer lock was lost, so the server stopped: ...` and exits 1. Taking the
+  lock also takes the store's next writer generation, and every commit checks it: once another process takes the lock, no commit of
+  this one succeeds, between ticks too.
+- **Not yet.** Until the server's state moves into the store, a server that registers agents (an elastic pool, a `joined` pool or
+  `--agent-pool-config`) is refused at start with a store setting, after the lock is taken and before any listener is bound:
+  `--store: store-backed server state is not available yet for a server that registers agents ...`.
+
+```toml
+[server]
+store              = "/run/credentials/js/store"   # owner-only; one line: postgres://... (or sqlite:/var/lib/js/state.db)
+allow_sqlite_store = false                         # true only for tests and single-node development
+```
 
 ### The metrics port
 
@@ -249,7 +288,9 @@ file is owner-only like every other key file (mode 0600 or 0400, owned by the se
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
 repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
 server mints each uploading host's credential with the mint key (or derives it from the signing key), delivers and renews it in heartbeat replies, and puts each job's sink
-in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
+in its start (live-logs.md, sections 3.1 and 4). The read key serves `GetLogs` with a stream (live-logs.md, section 8; `docs/http-gateway.md`,
+"Reading logs"): the server lists and reads the job's objects with it, under the prefix of the host the job ran on, and passes the bytes
+through, and `max_follow` bounds how many of those calls with `follow` wait at once (one more is refused `too-many-follows`).
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
 section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 476 bytes, so that a host's
