@@ -1387,11 +1387,13 @@ dependencies = [
  "js-registry",
  "js-scaler",
  "js-sched",
+ "js-sched-placer",
  "js-state",
  "js-testkit",
  "js-types",
  "js-usage",
  "log",
+ "postgres",
  "prost-reflect",
  "prost-types",
  "rcgen",
@@ -1720,6 +1722,23 @@ dependencies = [
  "js-types",
  "js-whole",
  "thiserror",
+]
+
+[[package]]
+name = "js-sched-placer"
+version = "0.1.0"
+dependencies = [
+ "js-agent-wire",
+ "js-caps",
+ "js-jobs",
+ "js-lease",
+ "js-provider",
+ "js-registry",
+ "js-sched",
+ "js-state",
+ "js-types",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

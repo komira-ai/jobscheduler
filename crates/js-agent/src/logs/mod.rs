@@ -1,5 +1,8 @@
-//! Live logs: the agent uploads the output of a `crun` job that has a sink to an S3-compatible
-//! store while it runs, and writes the final files when it ends (`docs/design/live-logs.md`).
+//! Live logs: the agent uploads the output of a `crun` or a native job that has a sink to an
+//! S3-compatible store while it runs, and writes the final files when it ends
+//! (`docs/design/live-logs.md`). A native job writes its log files itself, whole: its
+//! uploader reads at most the file cap of each ([`RunLogs::start_capped`], see
+//! `native/logs.rs`), so it puts what a capture that stops at that cap would give.
 //!
 //! # The layout
 //!
@@ -103,13 +106,13 @@
 //! directory was removed (and before the finals were written) finds no record: the chunks stay
 //! and the reader reads those.
 
-// The upload's progress record and its resume after a restart are used by the `crun`
-// runtime, which is built on Linux only; a macOS build has the rest of the module.
+// The resume of an adopted run is used by the `crun` runtime, which is built on Linux only; a
+// macOS build has the rest of the module.
 #![cfg_attr(
     not(target_os = "linux"),
     allow(
         dead_code,
-        reason = "the crun runtime that records and resumes an upload is Linux only"
+        reason = "the crun runtime that resumes an adopted upload is Linux only"
     )
 )]
 
@@ -280,8 +283,8 @@ impl LiveLogs {
     }
 }
 
-/// What the crun agent's flags say of live logs: the capture file cap of a run with a sink
-/// (`--log-file-cap`) and the cell of the host's credential, which the session fills from the
+/// What the flags of a crun or a native agent say of live logs: the file cap of a run with a
+/// sink (`--log-file-cap`) and the cell of the host's credential, which the session fills from the
 /// heartbeat replies and the runtime's uploaders read.
 #[derive(Debug, Clone)]
 pub struct LogPlan {
@@ -317,8 +320,9 @@ impl PartialEq for LogPlan {
 
 impl Eq for LogPlan {}
 
-/// What a run of the `crun` runtime holds of live logs: its sink while it is staged, its
-/// uploader once it has started (or once it was adopted with a progress record), and the report
+/// What a run of the `crun` or the native runtime holds of live logs: its sink while it is
+/// staged, its uploader once it has started (or once it was adopted with a progress record),
+/// and the report
 /// once it has ended. A run of a runtime without [`LiveLogs`], one whose start carried no sink,
 /// and one adopted without a record, hold nothing and report nothing.
 #[derive(Debug, Default)]
@@ -363,6 +367,31 @@ impl RunLogs {
         lease: &Path,
         (run_id, owner): (&str, u32),
     ) {
+        self.resume_reading(logs, (stdout, stderr), (lease, None), (run_id, owner));
+    }
+
+    /// [`RunLogs::resume`] for a run whose files the job wrote itself (the native runtime's),
+    /// its record in the directory `dir`: as [`RunLogs::start_capped`], the uploader reads at
+    /// most [`LiveLogs::file_cap`] bytes of each file.
+    pub(crate) fn resume_capped(
+        &mut self,
+        logs: &LiveLogs,
+        (stdout, stderr): (&Path, &Path),
+        dir: &Path,
+        (run_id, owner): (&str, u32),
+    ) {
+        let cap = Some(logs.file_cap);
+        self.resume_reading(logs, (stdout, stderr), (dir, cap), (run_id, owner));
+    }
+
+    /// [`RunLogs::resume`], the uploader reading at most `cap` bytes of each file.
+    fn resume_reading(
+        &mut self,
+        logs: &LiveLogs,
+        (stdout, stderr): (&Path, &Path),
+        (lease, cap): (&Path, Option<u64>),
+        (run_id, owner): (&str, u32),
+    ) {
         let (sink, streams) = match record::read(lease, run_id, owner) {
             Ok(Some(found)) => found,
             Ok(None) => return,
@@ -378,6 +407,7 @@ impl RunLogs {
         let origin = Origin {
             record: Some(lease.to_owned()),
             streams,
+            cap,
         };
         self.uploader = Uploader::open_or_warn(&sink, (stdout, stderr), logs, origin);
         if let Some(totals) = self.ended {
@@ -403,9 +433,35 @@ impl RunLogs {
         (stdout, stderr): (&Path, &Path),
         lease: &Path,
     ) {
+        self.start_reading(logs, (stdout, stderr), (lease, None));
+    }
+
+    /// [`RunLogs::start`] for a run whose files hold the whole of each stream because the job
+    /// writes them itself (the native runtime's), its record in the directory `dir`. The
+    /// uploader reads at most [`LiveLogs::file_cap`] bytes of each file and the end counts the
+    /// rest as dropped, so the upload is what it would be from a capture that stops at that
+    /// cap: chunks up to it, then a gap marker and no final.
+    pub fn start_capped(
+        &mut self,
+        logs: Option<&LiveLogs>,
+        (stdout, stderr): (&Path, &Path),
+        dir: &Path,
+    ) {
+        let cap = logs.map(|logs| logs.file_cap);
+        self.start_reading(logs, (stdout, stderr), (dir, cap));
+    }
+
+    /// [`RunLogs::start`], the uploader reading at most `cap` bytes of each file.
+    fn start_reading(
+        &mut self,
+        logs: Option<&LiveLogs>,
+        (stdout, stderr): (&Path, &Path),
+        (lease, cap): (&Path, Option<u64>),
+    ) {
         self.uploader = logs.zip(self.sink.take()).and_then(|(logs, sink)| {
             let origin = Origin {
                 record: Some(lease.to_owned()),
+                cap,
                 ..Origin::default()
             };
             Uploader::open_or_warn(&sink, (stdout, stderr), logs, origin)
