@@ -89,9 +89,10 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
 
 ## The state store
 
-Today the whole state of the service is two files on local disk, beside each other: the **lease file** (`--state-file`, one TOML document
-holding the term, the next sequence and every lease) and the **binding file** (`<state file>.agents`, which credential and instance each
-registered host id was admitted with, and the taint and the cordon it holds), plus a lock file. The crash-safety rules of `js-lease` are merged and must hold unchanged:
+Today the state of the service is files on local disk, beside each other: the **lease file** (`--state-file`, one TOML document
+holding the term, the next sequence and every lease), the **binding file** (`<state file>.agents`, which credential and instance each
+registered host id was admitted with, and the taint and the cordon it holds), the **job store** (`<state file>.jobs`, a SQLite file
+holding every job and allocation, opened when the job service is on), and their lock files. The crash-safety rules of `js-lease` are merged and must hold unchanged:
 
 1. **Atomic replace.** A change is written to a temporary file next to the target, fsynced, renamed over it, and the directory is
    fsynced, so a reader sees the old file or the new one and a crash loses neither.
@@ -125,18 +126,25 @@ lease table and the bindings in a database, with conditional writes (the `js-sta
   stay in one directory of one volume, so that the rename is atomic and the two files age together.
 - **Restart.** A restart reads both files and takes a new term; nothing is rebuilt from elsewhere. Soft state is rebuilt by the agents:
   the facts of each host (5.13) come back at the next hello.
-- **Loss of the volume** is a loss of the leases. With `--boot resume` the pod refuses to start; an operator then restores a snapshot, or
-  deliberately runs `--boot initialise`. After either, an agent that announces a lease the table does not hold is answered `Cancel` (the
-  per-session rule of 5.4) and a client's renew of an unknown lease fails, so the client leases again and the work reruns under the
-  platform-fault budget (8.1). Snapshots of the volume are taken on a schedule; a snapshot holds the old file or the new one for each
-  file, and `--verify-state` (step 50) checks the pair against each other before a restore is trusted.
-- **A restore must not lower the term.** A snapshot holds a term below the ones the lost boots took, so booting it plainly would reissue
-  `(term, sequence)` pairs that stale holders still carry, and a renew of an old id could match a different lease. After a snapshot restore
-  the operator starts with `--term-floor N` (step 50), `N` strictly above the highest term the service logged at any boot (the pod's
-  logs and the agents' last-seen terms give it; a large margin costs nothing). After `--boot initialise` the same applies: the floor is
-  set above every term ever issued, so ids of the lost table are never valid again.
-- **The binding file is part of the state.** Without it the first hello for a host id after a restart would take the host's lease from
-  anyone holding a join token (K10). The two files are always copied, restored and verified together.
+- **The state database.** The Postgres store a server is given (`--store`, `server.store`: a file holding the connection URL)
+  holds, as built, only the writer lock and the writer generation. The server takes the lock before it reads anything else and holds
+  it for its life, and a server that registers agents refuses the setting, since none of its state is kept there yet. The role, the
+  URL file, backups, restores and the checks after a restore are in the
+  [state-database runbook](../runbooks/state-database.md).
+- **Loss of the volume** is a loss of the leases and the jobs. With `--boot resume` the pod refuses to start; an operator restores the
+  files from a backup (the runbook, steps 5 and 6), or deliberately runs `--boot initialise`. After either, a client's renew of a lease
+  the table does not hold fails 404 `unknown-lease`, so the client leases again and the work reruns under the platform-fault budget
+  (8.1), and a run a host lists that the server has no record of is answered `Cancel`. A host that lists a job the restored job store
+  does not know is told to stop it and takes no new start until its listing is clean; minted job and allocation ids are random, so a
+  restore issues none of them again.
+- **A restore must not lower the term.** A backup holds a term below the ones the lost boots took, so booting it plainly would reissue
+  `(term, sequence)` pairs that stale holders still carry, and a renew of an old id could match a different lease. No flag raises it
+  (the `--term-floor` and `--verify-state` this section once prescribed were not built): before the first boot the operator sets `term`
+  in the restored lease file to at least the highest term any lease id carried, and the boot takes the next one. After `--boot
+  initialise` the same applies, so ids of the lost table are never valid again.
+- **The binding file and the job store are part of the state.** Without the binding file the first hello for a host id after a restart
+  would take the host's lease from anyone holding a join token (K10). The lease file, the binding file and the job store are always
+  copied and restored together, with the server stopped.
 
 **(b) later.** An external store is the answer when one of these is true: the service must survive the loss of a node or a zone without a
 minutes-long outage; the table is large enough that the rewrite shows (K29); or a second replica is wanted. It needs the `js-state` trait
@@ -202,18 +210,19 @@ and the agents' fence (above). Each step is reversible until the last.
    before the move, with the agents' pins overlapping (old and new accepted), and is not part of it.
 2. Stop the old server with `SIGTERM` and **disable** it, so no unit can restart it: two servers over two copies of the state are two
    tables.
-3. Copy the lease file and the binding file to the new volume (a one-off pod that mounts the claim), then run `--verify-state` on the copy.
+3. Copy the lease file, the binding file and the job store to the new volume (a one-off pod that mounts the claim). No check of the copied
+   files exists yet; the pod's `--boot resume` refuses a lease file whose `lease_count` disagrees with its tables.
 4. Start the pod with `--boot resume`. It takes the next term and observes each held lease once.
 5. Move the name: the address agents and clients use now points at the service's external entry. Agents re-hello on their own; a client
    retries.
-6. Check that every agent is registered, that the leases held before are held, and that no `Cancel` was sent for a lease the old table
-   held. Only then remove the old files from the old host. Until then the way back is: stop the pod, copy the lease file and the binding
+6. Check that every agent is registered and that the leases held before are held. Only then remove the old files from the old host. Until then the way back is: stop the pod, copy the lease file and the binding
    file **back from the pod's volume** over the old host's files (never revive the old files as they were: the old host would boot with the
-   term the pod's first boot already took, and ids issued since would be reissued), run `--verify-state`, point the name back and start the
-   old unit. If only the old files remain, start it with `--term-floor` above the pod's last logged term.
+   term the pod's first boot already took, and ids issued since would be reissued), point the name back and start the old unit. If only the
+   old files remain, first set `term` in the old lease file to at least the highest term the pod's leases carried (no flag does it; see
+   the runbook, step 6).
 
 ## Tests (13.1, 13.3)
 
 The state rules are the existing `js-lease` tests, unchanged. New: the readiness and lock cases of step 48; the boot grace of step 49 on
-the injected clock; the verify mode of step 50; the manifest test of step 51; the client cases of step 52; and the exercise of step 53,
+the injected clock; the verify mode of step 50 (not built); the manifest test of step 51; the client cases of step 52; and the exercise of step 53,
 which is not run on shared CI. No test asserts elapsed time (R2): outages and graces are counted on the injected clock.
