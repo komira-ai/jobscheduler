@@ -1,4 +1,4 @@
-//! The bytes of the job and allocation rows.
+//! The bytes of the job, allocation and mark rows (the mark row's tags are in `mark_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -40,7 +40,10 @@ use crate::record::{
 };
 
 mod file_fields;
+mod mark_fields;
 mod result_fields;
+
+pub(crate) use mark_fields::{decode_mark, encode_mark};
 
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;

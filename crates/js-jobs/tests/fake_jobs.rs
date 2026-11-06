@@ -68,3 +68,13 @@ fn a_scan_that_resumes_at_its_token_repeats_a_job() {
 fn a_partial_transaction_breaks_an_atomic_requeue() {
     suite::requeue_loses_to_a_change_of_either_row(&FakeBackend::new(Flaw::PartialTxn));
 }
+
+// Catches an end and its mark's delete written in separate steps: the job is cancelled while
+// the mark it held stays.
+#[test]
+#[should_panic(
+    expected = "end_and_unmark_deletes_both_or_neither: the job ended without its mark's delete"
+)]
+fn a_partial_transaction_breaks_an_atomic_end_and_unmark() {
+    suite::end_and_unmark_deletes_both_or_neither(&FakeBackend::new(Flaw::PartialTxn));
+}

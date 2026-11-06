@@ -32,6 +32,7 @@ mod idempotency;
 mod indexes;
 mod lifecycle;
 mod logs;
+mod marks;
 mod paging;
 mod placement;
 mod queue;
@@ -49,6 +50,7 @@ pub use idempotency::*;
 pub use indexes::*;
 pub use lifecycle::*;
 pub use logs::*;
+pub use marks::*;
 pub use paging::*;
 pub use placement::*;
 pub use queue::*;
@@ -141,6 +143,15 @@ where
     an_indexed_read_reads_every_page_of_entries(backend);
     an_ended_row_without_a_retention_end_is_due_and_kept(backend);
     a_backfill_that_loses_its_row_is_stale(backend);
+    marks_are_additive_to_an_existing_store(backend);
+    a_mark_round_trips_with_its_exclusions_and_made(backend);
+    a_mark_keeps_a_later_builds_field_only_on_its_host(backend);
+    only_a_queued_whole_host_job_takes_a_mark(backend);
+    a_mark_row_this_build_cannot_read_is_refused_or_left(backend);
+    marks_are_raised_at_boot(backend);
+    end_and_unmark_deletes_both_or_neither(backend);
+    delete_mark_removes_the_mark_it_read(backend);
+    a_mark_that_loses_to_an_end_or_another_mark_is_stale(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -238,6 +249,15 @@ macro_rules! job_store_tests {
             an_indexed_read_reads_every_page_of_entries,
             an_ended_row_without_a_retention_end_is_due_and_kept,
             a_backfill_that_loses_its_row_is_stale,
+            marks_are_additive_to_an_existing_store,
+            a_mark_round_trips_with_its_exclusions_and_made,
+            a_mark_keeps_a_later_builds_field_only_on_its_host,
+            only_a_queued_whole_host_job_takes_a_mark,
+            a_mark_row_this_build_cannot_read_is_refused_or_left,
+            marks_are_raised_at_boot,
+            end_and_unmark_deletes_both_or_neither,
+            delete_mark_removes_the_mark_it_read,
+            a_mark_that_loses_to_an_end_or_another_mark_is_stale,
         );
     };
 }

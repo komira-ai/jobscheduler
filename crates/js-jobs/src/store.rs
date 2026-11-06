@@ -1,4 +1,4 @@
-//! [`JobStore`]: the job and allocation tables over a state [`Store`].
+//! [`JobStore`]: the job, allocation and mark tables over a state [`Store`].
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -20,6 +20,7 @@ use crate::result::{JobEnd, Output, Retention};
 mod ending;
 mod hosts;
 mod index;
+mod marks;
 mod queue;
 
 pub use index::Backfill;
@@ -70,7 +71,7 @@ pub struct JobPage {
     pub resume: Option<ResumeToken>,
 }
 
-/// The job and allocation tables over a state store. Every operation that writes is one
+/// The job, allocation and mark tables over a state store. Every operation that writes is one
 /// [`Store::txn`]: it commits fully or returns an error having written nothing, and the
 /// record it returns is what it committed. Nothing is cached: each operation reads the rows
 /// it needs, decides, and commits with the versions it read as preconditions, so a row that

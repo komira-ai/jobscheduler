@@ -85,6 +85,12 @@ pub enum JobStoreError {
         /// Where its allocation is.
         step: AllocationStep,
     },
+    /// The job does not need the whole host, so it holds no mark.
+    #[error("job {id} does not need the whole host")]
+    NotWholeHost {
+        /// The job.
+        id: JobId,
+    },
     /// The job neither ended nor was asked to cancel, so its allocation stays booked.
     #[error("job {id} has not ended and no cancel was asked for")]
     NotReleasable {
@@ -210,6 +216,10 @@ mod tests {
                     step: AllocationStep::Freed,
                 },
                 "job a has an allocation that is Freed, not booked",
+            ),
+            (
+                JobStoreError::NotWholeHost { id: id.clone() },
+                "job a does not need the whole host",
             ),
             (
                 JobStoreError::NotReleasable { id: id.clone() },
