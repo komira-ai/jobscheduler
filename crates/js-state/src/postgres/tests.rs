@@ -333,7 +333,8 @@ fn an_empty_batch_answers_nothing_without_a_connection() {
 /// last row and a short one at the head, a store with sequence revisions reads to the
 /// end of the table, and a row of a kind this code does not know is left out of the
 /// page rather than failing it: a full page of only such rows is empty and its cursor
-/// still passes them, and the known rows after it are read.
+/// still passes them, and the known rows after it are read; after a trim, a read from below
+/// the oldest row left is stale and one from just below it reads the rest.
 #[test]
 fn the_feed_maps_each_kind_pages_and_skips_a_kind_it_does_not_know() {
     use super::{Change, Event, Flaw};
@@ -401,8 +402,19 @@ fn the_feed_maps_each_kind_pages_and_skips_a_kind_it_does_not_know() {
     let skipped = store.changes(Revision(3), 1).expect("reads");
     assert_eq!((skipped.rows.len(), skipped.cursor), (0, Revision(6)));
     let resumed = store.changes(skipped.cursor, 1).expect("reads");
-    assert_eq!(resumed.rows, [after]);
+    assert_eq!(resumed.rows, std::slice::from_ref(&after));
     assert_eq!(resumed.cursor, Revision(7));
+    // Trimmed through 3, the oldest row left is 6: the floor is the revision before it, so a
+    // read from below it is refused and one from it reads the rest.
+    assert_eq!(store.trim_feed(Revision(3)), Ok(3));
+    assert_eq!(
+        store.changes(Revision(1), 10),
+        Err(crate::StoreError::StaleCursor {
+            after: Revision(1),
+            floor: Revision(5),
+        })
+    );
+    assert_eq!(store.changes(Revision(5), 10).expect("reads").rows, [after]);
 }
 
 /// The backend of the session a read of `store` runs on.

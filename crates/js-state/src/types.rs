@@ -224,6 +224,18 @@ pub enum StoreError {
     /// preconditions. The text says what the client met.
     #[error("state store connection lost: {0}")]
     Disconnected(String),
+    /// A feed read began at a revision the feed has been trimmed past, so rows between
+    /// `after` and `floor` are gone and a poller resuming there would miss them. Only
+    /// [`crate::Store::changes`] returns it, and only to a cursor below the floor; the
+    /// poller starts again from `floor` (having rebuilt what it needs from a scan).
+    #[error("the change feed was trimmed through revision {}: a read after {} would miss rows", floor.0, after.0)]
+    StaleCursor {
+        /// The revision the read asked to resume after.
+        after: Revision,
+        /// The highest revision a trim has removed through: the lowest cursor the feed
+        /// can still serve.
+        floor: Revision,
+    },
 }
 
 /// What happened to a key.

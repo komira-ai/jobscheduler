@@ -9,7 +9,9 @@
 //! - **C4** time-to-live keys expired by the store's own [`Clock`], observable in the
 //!   feed ([`Event::Expire`]);
 //! - **C5** ordered prefix scans and a change feed a poller resumes from a [`Revision`]
-//!   without skipping a row ([`Store::changes`]);
+//!   without skipping a row ([`Store::changes`]); the feed is trimmed from its old end by
+//!   [`Store::trim_feed`], and a cursor below the trim is refused with
+//!   [`StoreError::StaleCursor`];
 //! - **C6** an acknowledgement is durable across restart;
 //! - **C7** group commit ([`Store::apply_batch`], [`GROUP_COMMIT_WINDOW`]);
 //! - **C8** a bounded, ordered range scan under a prefix, between two bounds, forward or

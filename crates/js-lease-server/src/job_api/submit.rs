@@ -16,8 +16,9 @@
 //!    retry of a job the ceiling now refuses is refused, not answered from the job.
 //! 2. **Idempotency.** For a job with an id, the tables are read first. An existing job with
 //!    the same id and the same job (every field but the priority, compared on the decoded
-//!    job [`js_jobs::JobSpec`]) is the answer, as it is now, in whatever state, with its own
-//!    priority and the client that recorded it: the same shape as a new job's (gRPC `OK`, 201
+//!    job [`js_jobs::JobSpec`]; for an ended job, whose files hold only their SHA-256, each
+//!    submitted file by its digest, with the same names) is the answer, as it is now, in
+//!    whatever state, with its own priority and the client that recorded it: the same shape as a new job's (gRPC `OK`, 201
 //!    over the gateway), so a retry cannot tell. A different job is the refusal
 //!    `job-id-conflict` (`ALREADY_EXISTS`, 409). Job ids are one namespace: an operator's
 //!    retry of any client's job is answered with that job, while a caller of the role

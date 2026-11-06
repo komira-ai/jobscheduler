@@ -43,6 +43,10 @@ impl Store for Refusing {
         Err(StoreError::Fenced)
     }
 
+    fn trim_feed(&self, _before: Revision) -> Result<u64, StoreError> {
+        Err(StoreError::Fenced)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         Err(StoreError::Fenced)
     }
@@ -180,5 +184,14 @@ fn everything_else_is_forwarded_and_not_recorded() {
     );
     assert_eq!(recording.commit_stats(), inner.commit_stats());
     assert_eq!(recording.now(), inner.now());
+    // A trim is forwarded, deletes through the store underneath, and is not a write.
+    assert_eq!(recording.trim_feed(Revision(1)), Ok(1));
+    assert_eq!(
+        inner.changes(Revision::ZERO, 10),
+        Err(StoreError::StaleCursor {
+            after: Revision::ZERO,
+            floor: Revision(1)
+        })
+    );
     assert_eq!(recording.writes(), Vec::new());
 }

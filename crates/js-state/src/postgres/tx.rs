@@ -266,6 +266,19 @@ impl<'p> Tx<'p> {
         Ok(keys.len())
     }
 
+    /// Deletes the feed rows at or below `before` or the head this transaction holds
+    /// locked, whichever is lower; how many. No revision can still commit at or below
+    /// the head, and none above it is touched. (Under the sequence flaw nothing locks
+    /// the head and nothing moves it, so a trim deletes nothing.)
+    pub(super) fn trim(&mut self, before: i64) -> Result<u64, Error> {
+        let s: &mut Session = &mut self.session;
+        let removed = s.client.execute(&s.st.trim, &[&before])?;
+        if removed > 0 {
+            self.dirty = true;
+        }
+        Ok(removed)
+    }
+
     /// Locks up to `limit` live rows under `prefix`, in key order. With `skip_locked`
     /// a row another transaction holds is passed over; without it the call waits.
     pub(super) fn claim_rows(

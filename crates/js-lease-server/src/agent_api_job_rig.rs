@@ -64,7 +64,7 @@ pub(crate) fn spec() -> JobSpec {
         wall_limit_secs: 600,
         network: NetworkPolicy::None,
         ports: Vec::new(),
-        files: BTreeMap::new(),
+        files: js_jobs::JobFiles::default(),
         labels: Labels::default(),
     }
 }
@@ -391,6 +391,13 @@ fn rig_on(
 }
 
 impl Rig {
+    /// This rig's server trimming the job store's change feed through `feed` on each tick.
+    pub(crate) fn with_feed(mut self, feed: crate::job_store::FeedTrim) -> Rig {
+        let agents = Arc::try_unwrap(self.agents).ok().unwrap();
+        self.agents = Arc::new(agents.with_job_feed(feed));
+        self
+    }
+
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {

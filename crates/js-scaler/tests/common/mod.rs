@@ -187,6 +187,7 @@ pub fn input(pool: PoolInput) -> Input {
         entropy: Vec::new(),
         budgets: Budgets::default(),
         brake_resets: Vec::new(),
+        reclaimed: Vec::new(),
     }
 }
 
@@ -230,6 +231,7 @@ impl Rig {
         self.input.acquired.clear();
         self.input.released.clear();
         self.input.not_found.clear();
+        self.input.reclaimed.clear();
         self.input.entropy.clear();
         actions
     }

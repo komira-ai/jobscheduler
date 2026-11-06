@@ -96,6 +96,13 @@ pub enum Flaw {
     /// Only under [`C8_SNAPSHOT_PREFIX`], where it also waits for a commit between rows
     /// so the defect shows on every page of more than one row.
     ScanReadsPerRow,
+    /// C5 trim: `changes` never reports a stale cursor, so a read below the floor
+    /// returns the rows that remain as if they were the whole feed.
+    TrimKeepsNoFloor,
+    /// C5 trim: a trim deletes the row one revision past its bound.
+    TrimPastCursor,
+    /// C5 trim: a trim returns one more than the rows it deleted.
+    TrimMiscounts,
 }
 
 #[derive(Clone)]
@@ -126,6 +133,10 @@ struct Data {
     feed: BTreeMap<u64, Change>,
     /// The highest revision handed out.
     head: u64,
+    /// The highest revision a trim has removed the feed through. It is kept apart from
+    /// the feed because the fake's revisions have gaps (a delete of an absent key takes
+    /// one and writes no row), so the oldest row does not say where the floor is.
+    trimmed: u64,
 }
 
 impl Data {
@@ -173,6 +184,14 @@ impl Data {
                 *self.counters.entry(counter.clone()).or_insert(0) += 1;
             }
         }
+    }
+
+    /// Deletes the feed rows at or below `bound` and raises the floor to it; how many.
+    fn trim(&mut self, bound: u64) -> u64 {
+        let keep = self.feed.split_off(&bound.saturating_add(1));
+        let removed = std::mem::replace(&mut self.feed, keep).len() as u64;
+        self.trimmed = self.trimmed.max(bound);
+        removed
     }
 
     fn emit(&mut self, revision: u64, key: &str, event: Event) {
@@ -642,6 +661,12 @@ impl Store for Fake {
                 .first()
                 .map_or(inner.live.head, |first| first - 1)
         };
+        if inner.live.trimmed > after.0 && self.flaw != Flaw::TrimKeepsNoFloor {
+            return Err(StoreError::StaleCursor {
+                after,
+                floor: Revision(inner.live.trimmed),
+            });
+        }
         let rows: Vec<Change> = inner
             .live
             .feed
@@ -656,6 +681,31 @@ impl Store for Fake {
             Revision(horizon.max(after.0))
         };
         Ok(Changes { rows, cursor })
+    }
+
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        let mut inner = lock(&self.inner);
+        let horizon = inner
+            .pending
+            .first()
+            .map_or(inner.live.head, |first| first - 1);
+        let bound = before.0.min(horizon);
+        let floor = inner.live.trimmed;
+        let removed = inner.live.trim(bound);
+        if self.flaw == Flaw::TrimPastCursor {
+            // The row past the bound goes too, uncounted and with the floor left behind.
+            inner.live.feed.remove(&(bound + 1));
+        }
+        let changed = removed > 0 || inner.live.trimmed != floor;
+        drop(inner);
+        if changed {
+            self.sync();
+        }
+        Ok(if self.flaw == Flaw::TrimMiscounts {
+            removed + 1
+        } else {
+            removed
+        })
     }
 
     fn reap_expired(&self) -> Result<usize, StoreError> {

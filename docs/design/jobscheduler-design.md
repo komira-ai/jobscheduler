@@ -73,7 +73,7 @@ A build farm, a benchmark rig and a CI system all need the same thing: run a pie
 2. **Whole-host jobs starve behind small ones.** A benchmark that needs a quiet machine never gets one if small work keeps arriving. Draining a host costs the remaining time of the work on it; that cost must be chosen, not accidental.
 3. **A host is an unreliable thing.** It can go silent, reboot, be reimaged, or be compromised by the job it ran. The scheduler must say "unknown" when it does not know, and never free a host it cannot see.
 4. **Jobs must start fast and be contained.** A job is an image; launching it must not wait on a container daemon. It must be able to write exactly one thing, to exactly one place, once, and reach only the network it declares.
-5. **Macs are different.** A Mac host has no container runtime that gives the isolation Linux has. Isolation is a throwaway user, a sandbox profile and a firewall rule, and tearing it down must be proven, not assumed.
+5. **Macs are different.** A Mac host has no container runtime that gives the isolation Linux has. Isolation is a user of the job's own (lent from a pool and reset between jobs), a sandbox profile and a firewall rule, and tearing it down must be proven, not assumed.
 6. **Capacity comes from several places.** Machines you own, machines you rent by the hour, and machines a cloud's VM API starts for you are all capacity. A job must be placed on the first source that can serve it, and a machine that costs money needs hard caps and a brake, because the cost of a bug is measured in currency.
 
 jobscheduler is the service that answers these. It is one scheduler service (`js-sched`) that accepts jobs, records which resources on which host are booked for each (allocations), decides which host (placement), and gets machines from machine providers; with an agent on each machine that runs the job, contains it and reports; and the release machinery that keeps all of it updated. Section 3.2 defines job and allocation.
@@ -87,7 +87,7 @@ jobscheduler is the service that answers these. It is one scheduler service (`js
 - **G3. Whole-host jobs finish.** A whole-host job marks the host with the least estimated remaining time, drains it, and commits it when quiet. Smaller jobs may use the host meanwhile only if they will end inside the estimated tail (section 5.5).
 - **G4. Contained jobs.** Digest-pinned images, empty capability sets, a dedicated unprivileged identity, scratch quotas, no network unless the job declares it and the agent allows it (sections 5.7, 5.8).
 - **G5. Taint instead of trust.** A host whose post-job checks fail is marked tainted, permanently, and takes no further work.
-- **G6. Macs run natively under a proven teardown.** A throwaway user per job, a generated sandbox profile, a network rule, and a kill-and-delete that judges outcomes rather than exit codes (section 5.9).
+- **G6. Macs run natively under a proven teardown.** A pool user lent to one job at a time, a generated sandbox profile, a network rule, and a kill-and-reset (a replacement when the reset is not clean) that judges outcomes rather than exit codes (section 5.9).
 - **G7. Bounded spend.** Every elastic pool has instance, hourly, daily and total caps, and a brake that trips to plan-only after repeated launch failures (section 6.5).
 - **G8. Updatable without ceremony.** Every push to shipped code is released, attested and byte-identical on rebuild; agents update themselves through a hook that drains first (section 6.6).
 - **G9. One job, two platforms.** The job is an OCI image on Linux and on macOS; the host's operating system decides how it runs (section 5.7).
@@ -144,7 +144,7 @@ This table is where built and planned status is recorded; the picture above show
 | Agent | Registers, heartbeats, runs jobs, contains them, reports. Today it takes a start and a stop per run; per job is step 28 | Built | `js-agent` |
 | Linux runtime | `crun` run directly by the agent as a non-root job user | Built | `js-agent/src/crun/`, `js-contain`, `js-oci` |
 | Container-engine runtime | Docker or Podman; a fallback | Built | `js-agent/src/cli_runtime/` |
-| macOS runtime | Native run from an OCI bundle under a throwaway user and sandbox | Partly built | `js-agent/src/native/`, `js-mac-session`, `js-mac-pool`, `js-mac-provision`, `js-bundle` |
+| macOS runtime | Native run from an OCI bundle under a pool user and sandbox | Partly built | `js-agent/src/native/`, `js-mac-session`, `js-mac-pool`, `js-mac-provision`, `js-bundle` |
 | Job network policy | Per-job none, allow-list, open, and declared ports | Partly built: crun mechanism built, not wired; no job field | `js-agent/src/egress/`, `js-agent-wire` |
 | Object store | Not part of jobscheduler. Jobs write their output there through the client's grant; with a log sink, agents upload live logs there and `GetLogs` reads them (`live-logs.md`) | outside; live logs Planned (step 31) | |
 | Release machinery | Build, attest, publish, host-driven agent update | Built | `xtask`, `.github/workflows/release.yml`, `packaging/` |
@@ -260,7 +260,7 @@ trait CapacityProvider {
     async fn list(&self, scope: Scope) -> Vec<Instance>;      // for reaping and re-adoption                            (Built)
     async fn observe(&self, i: &InstanceId) -> Observed;      // Present | Absent | Unknown                             (Planned for elastic)
     fn verify_instance(&self, hello: &Hello) -> Option<InstanceId>; // match a first hello to an acquire            (Planned)
-    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices                              (Planned)
+    fn events(&self) -> Option<EventStream>;                  // optional: reclaim notices        (Built: Reclaimed; Interruption planned)
 }
 ```
 
@@ -549,7 +549,7 @@ The steps below are the job table's contract. Where they say "commit", today's s
 **Submit** (`SubmitJob`; Planned, step 27):
 
 1. Parse and validate the job: image by digest, resource needs, constraints, a wall limit, network policy, ports, files, and a job id of 1 to 63 bytes (letters, digits, dot, underscore, dash) or none, in which case the service mints one. A wall limit that is missing, not positive or above the server's ceiling is refused (`wall-time-not-positive`, `wall-time-above-ceiling`).
-2. **Idempotency.** The same id with the same job (every field except the priority) is answered from the job it made, in whatever state it is now: this is what makes a retry after a lost answer safe. The same id with a different job is 409 `job-id-conflict`. An id is reusable once the retention window of the job that held it has passed.
+2. **Idempotency.** The same id with the same job (every field except the priority; for an ended job, whose record keeps only the SHA-256 of each file, each submitted file by its digest) is answered from the job it made, in whatever state it is now: this is what makes a retry after a lost answer safe. The same id with a different job is 409 `job-id-conflict`. An id is reusable once the retention window of the job that held it has passed.
 3. **Admission** (section 5.6, step 2). A job that nothing could ever serve is refused with `no-capable-host` and nothing is recorded.
 4. **Commit before anything else.** Insert the job as queued and commit. Only then answer 201 `{id, state: queued}`. A failed commit answers 500 `state-write-failed` and nothing was done. Submit never waits for placement.
 5. **Place.** `js-sched` takes the queued job (section 5.6) and, in one transaction, marks it placed and inserts its allocation: the host and the resources booked. **Commit before start**: the host is not asked until the commit is done, so a crash leaves a placement the next boot can resolve by observation, never a booking nobody knows about.
@@ -667,7 +667,7 @@ Purpose: start a job fast. The agent pulls the image with its own image-registry
 
 #### macOS: the bundle
 
-Purpose: run the same job where there is no container runtime (`crun` is Linux-only). A `js-bundle` is an OCI image manifest of one platform (`darwin/arm64`) whose layers are sibling directory trees; its config says which tree is which, the entrypoints, the environment and what the tools need from the host. The agent pins the bundle's trees for the job, clones the writable ones into the job's own directory and runs the entrypoint as a throwaway user under a generated sandbox profile (section 5.9). Status is in the table of 3.1.
+Purpose: run the same job where there is no container runtime (`crun` is Linux-only). A `js-bundle` is an OCI image manifest of one platform (`darwin/arm64`) whose layers are sibling directory trees; its config says which tree is which, the entrypoints, the environment and what the tools need from the host. The agent pins the bundle's trees for the job, clones the writable ones into the job's own directory and runs the entrypoint as a pool user lent to the job under a generated sandbox profile (section 5.9). Status is in the table of 3.1.
 
 #### The fallback: Docker and Podman
 
@@ -686,7 +686,7 @@ Purpose: a job must not be able to harm the host, another job or the object stor
 
 #### Write fencing
 
-Purpose: let a job write its output, once, without jobscheduler ever handling the credentials a client gives a job. The fence is a capability the client builds (step 1) and the agent carries. The server sends `files` only to a host that advertised the `run-files` capability. The agent keeps them in a memory-backed directory and mounts it read-only into the job; their contents are secret.
+Purpose: let a job write its output, once, without jobscheduler ever handling the credentials a client gives a job. The fence is a capability the client builds (step 1) and the agent carries. The server sends `files` only to a host that advertised the `run-files` capability. The agent keeps them in a memory-backed directory and mounts it read-only into the job; their contents are secret. The job's record keeps the contents only while the job is live: the write that ends the job replaces each with its SHA-256, so an ended job's record, kept for the retention window, holds the file names and no contents, and a resubmit of it is compared by those digests.
 
 What this guarantees, provided the client builds the grant as described and the object store enforces it (jobscheduler checks neither): a job can write one object, once, and cannot delete or overwrite. jobscheduler never holds the credentials a client gives a job: the create-only write grant of step 1 is still the client's. For logs alone it holds two operator-provided keys (the `AssumeRole` key and a read-only key) and hands each host's agent a temporary credential that can only put and delete under the configured log prefix (`live-logs.md`, section 4).
 
@@ -751,22 +751,22 @@ The existing `loopback` value has no job level and stays an agent ceiling. The s
 
 ### 5.9 Mac execution path
 
-![Mac native run: journal write, throwaway user creation, run directory, sandbox profile, network rule, process under the user, then kill, user deletion, journal done.](diagrams/mac-execution.svg)
+![Mac native run: journal write, a pool user leased, run directory, sandbox profile, network rule, process under the user, then kill, the pool user reset (or replaced), journal done.](diagrams/mac-execution.svg)
 
 A Mac agent uses `NativeRuntime` (`js-agent/src/native/`) with a root helper, `js-mac-session`.
 
 1. Write the journal entry for the booking (synced) **before** creating anything. As built the booking is the lease; in the design it is the job's allocation.
-2. Helper `user-create`: a throwaway user named from the booking, with a uid from a configured range; names are never reused (a ledger).
+2. Helper `user-create`: the booking takes a free user of the helper's pool (`--pool-size`, 100 by default): slot `n` is the user `kbf-lease-pool-<n>` with the range's first uid plus `n`, made once by the helper's boot reset (`pool-create` repeats it; a user the ledger holds is adopted, never made again). No user is made or deleted per booking. A full pool is a typed refusal the caller can retry, never a new user. The ledger records each slot as free, leased (to which booking), resetting or broken, and each booking id is used once.
 3. The agent creates the run directory (exec and tmp) as root and chowns it.
 4. Helper `run`: executes the job (a program from the OCI bundle, section 5.7) under a generated `sandbox-exec` profile as that user, with file-size and process-count limits set in the child. The profile is generated from a typed policy: default allow, deny writes and network, grant back narrowly, private floor emitted last. The only supported read model is `open`.
 5. Network: the job's level is mapped onto the agent's `--native-network` value, which is also its ceiling (the table in section 5.8: `none` to `off`, `allow-list` to `on`, `open` to a new `open` value). `on` requires a packet-filter anchor keyed on the pool's uid range (`js-mac-provision`), checked at start and before each job that asks for network (refusal code `egress-unchecked`); `open` needs none. The sandbox cannot deny hosts when network is on, which is why the filter exists. Declared ports are refused.
 6. Every process the helper or agent starts for a job goes through one spawner that disclaims the parent's privacy-grant responsibility, so a permission granted to the daemon is not inherited by jobs. A source scan test (`spawn_sites`) rejects other spawn sites.
-7. Teardown: `kill-uid` repeats up to 10 rounds, killing every process of the uid and booting out its launchd domains; the verdict is the outcome (no process, no domain printing), never an exit code. Then `user-delete` removes the user, its home and its per-user temp entry. Then the journal entry is marked done.
-8. If a step fails, the uid stays quarantined in the helper's ledger and the booking stays in the journal; the next worker start reclaims.
+7. Teardown: `kill-uid` repeats up to 10 rounds, killing every process of the uid and booting out its launchd domains; the verdict is the outcome (no process, no domain printing), never an exit code. Then `user-delete` resets the pool user for the next booking: the same kill, its crontab and `at` jobs, its System V IPC objects, its files in the swept folders, its home (removed whole and made again empty) and its per-user temp entry (emptied). Each step is judged by its outcome; only a reset with every step clean returns the slot to free. A reset that is not clean deletes the user (as the old per-booking delete did) and makes a new one in the slot with the same name and uid; the slot is free once the new user exists. If that fails too, the slot is broken: lent to no one, shown by `pool-status` and in the pool-full refusal, and replaced again by the next `pool-create` or boot reset. The user of an administrator's booking is always replaced. Then the journal entry is marked done.
+8. If a step fails, the slot is not lent again until a reset or a replacement succeeds, and the booking stays in the journal; the next worker start reclaims. A slot found leased to a booking that is not live, or resetting, after a restart is reset by the boot reset before it is free. POSIX shared memory and semaphores have no listing on macOS, so the reset cannot find them; the isolation test measures what a reused uid finds.
 
 Evidence: an isolation test (`js-agent/tests/native_isolation/`) plants one item of each kind of leftover (files, processes, keychain, defaults, launchd agents, shared memory and semaphores), removes the run, starts a second run on the same uid and looks for the items. It prints one of four verdicts. It runs on a Mac only, on manual dispatch.
 
-A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. Not done: staging inputs and collecting outputs for a native run (a start with `files` is refused `native-unsupported`, `native/mod.rs`), adopting a job after an agent restart, soft stop (the helper only kills), and the reuse pool of fixed users. Native runs are not stopped when the agent stops; the wall limit runs only while an agent runs.
+A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. A native run carries a job start's environment, stages its mount inputs into `exec/` and runs in its `cwd` below it, is adopted by the agent's next process (the lease journal's run record and the helper's `watch`), is stopped softly (the helper's `stop`: `SIGTERM`, `kill-uid` after the grace), and is bounded by a deadline of its wall limit and the stop grace that the helper holds itself, so it ends while no agent runs (`native/mod.rs`). Not done: `stage` inputs (no store of stage trees; refused `native-unsupported`).
 
 ## 6. Background work
 
@@ -813,7 +813,7 @@ On the agent, the whole-host prepare is: the reply names an `exclusive` allocati
 
 ### 6.5 The scaler
 
-`js-scaler` is a pure function `step(state, input, now) -> (state, actions)`. The shell in the server snapshots the registry and the provider's list, calls it, and performs actions in order. `Save` comes first whenever the step changed the records or the hold-save timer is due (`js-scaler/src/scale.rs`): all records are written whole to the `.scaler` file before any provider call.
+`js-scaler` is a pure function `step(state, input, now) -> (state, actions)`. The shell in the server reads the job tables (queued jobs, then live allocations), snapshots the registry and the provider's list, calls it, and performs actions in order. Demand is the registry's waiting whole-node requests and the queued jobs without an allocation (a whole-host job asks for the pool's floor), a host is busy while a live allocation or a lease is on it (the lease side goes with the lease API), and a job the step launched a machine for is held to that machine until it is placed or the machine cannot take it. `Save` comes first whenever the step changed the records or the hold-save timer is due (`js-scaler/src/scale.rs`): all records are written whole to the `.scaler` file before any provider call.
 
 A step: reset brakes, end go if the pool is plan-only, reconcile, cover waiting demand (a mark, a free host, or a booting machine), undrain, drop unwanted, then launch up to a per-step limit to the cheapest priced offer that fits, if `launch = live` and every cap holds (instances, hourly, daily and total spend, boot-failure cooldown). Idle hosts drain and then release.
 
@@ -890,7 +890,7 @@ Rows 2, 7, 8, 27 and 29 are properties of the file store; step 2 of section 12.1
 | 2 | Ignored second save on a booking | Open | As built, the `acquire-settled` and `release-settled` saves are ignored. A failed `release-settled` save converges (the lease is stopped again); a failed `acquire-settled` save leaves a pending lease with no host that the tick drops as `Absent`, so a client told 201 gets 404 on renew. Untested. | Fail the second save of each, restart, assert dropped (acquire) and stopped again (release). |
 | 3 | Runs are not persisted | Open | As built a server restart cancels every run on every host and the work is lost; the client sees 410. Jobs are durable by design. | Restart with a job in flight: the host keeps it and lists it; the client reads the job. |
 | 4 | Agent restart loses crun jobs | Open | Containers are in the runtime's memory. The new process removes what its predecessor left and lists none. The job becomes lost with no result (section 6.7); as built the lease stays held and renewable and the run is `Ended` with no result (section 5.7, item 7). The Docker and Podman path adopts by label. | Kill agent mid-job; assert cleanup and what the client reads. |
-| 5 | No agent self-fence | Open | Documented in older designs; absent in code. A partitioned agent keeps running until the job's wall limit; a cancel or a given-up job is not stopped by any token. Native Mac jobs are unbounded while the agent is down. | Partition an agent after a cancel; assert the job stops within a bound. |
+| 5 | No agent self-fence | Open | Documented in older designs; absent in code. A partitioned agent keeps running until the job's wall limit; a cancel or a given-up job is not stopped by any token. Native Mac jobs are bounded while the agent is down only by the deadline the helper holds (the wall limit plus the stop grace). | Partition an agent after a cancel; assert the job stops within a bound. |
 | 6 | No fencing token on a start | Open | The wire's `fence` field is not built. A cancelled job's container can overlap the host's next job until its wall limit (as built, an expired lease's run). | Cancel a running job; assign the host; assert the old job cannot write. |
 | 7 | Single writer is flock only | Open | Local `flock` stops a second process on one filesystem. On a network filesystem it may not hold and two tables could issue the same ids. | Not testable in CI; document. |
 | 8 | Restoring an older store | Open | As built, restoring an older lease file can reissue `(term, sequence)`; the fix is hand-editing `term` and `next_sequence`. Target: no id repeats, but a restored backup forgets the jobs accepted since; the hosts still list them and are told to stop them (section 6.7). | A restore verb; restore, then assert hosts' jobs are stopped and clients can resubmit. |
@@ -1059,7 +1059,7 @@ Order that follows from the dependencies: 1, 2, 5, 12 and 25 can start now. 3 an
 
 **Whole-host jobs.** Built: the tail rule; registry marks, drain, give-up, caps; wait list; persisted ledger; estimate feed; tail counters; backfill gate. In review: `request_id` on a whole-node lease acquire, which makes the whole path reachable from HTTP today; the job API makes it reachable as a job (steps 8, 27). Remaining: a proof that queue order is respected (step 8); the restart test of section 8 row 10; rows 25 and 28 of section 8 close by design in steps 8, 27 and 28; rows 39 and 40 in step 8.
 
-**Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process. Remaining: staging inputs and collecting outputs (step 17); the pool of reused users; adoption after restart; soft stop; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
+**Macs.** Built: native runtime; the pool of reused users (reset between bookings, replaced when a reset is not clean); Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process; a job start's environment; mount inputs and `cwd`; adoption after restart; soft stop; a deadline the helper holds. Remaining: `stage` inputs (step 17); a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
 
 **Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a safe restore verb; reservations of capacity (question 24).
 

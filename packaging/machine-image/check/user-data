@@ -1,0 +1,44 @@
+#cloud-config
+# Fake user data for the boot check of .github/workflows/machine-image.yml: what a launcher puts
+# in a machine's user data (docs/runbooks/machine-images.md), with a server on loopback that
+# nothing answers, a pool of its own and a made-up join token. The agent passes its start checks
+# of the host, finds no server and keeps retrying, printing `js-agent: <why>; next in <n>ms` for
+# each retry (crates/js-agent/src/run.rs); the check waits for the first such line, reads the
+# agent's unit, then powers the machine off. Never used to launch anything.
+write_files:
+  - path: /etc/js-agent/token
+    owner: root:root
+    permissions: '0600'
+    content: boot-check-not-a-real-join-token
+  - path: /etc/systemd/system/js-agent-crun.service.d/50-user-data.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/opt/js-agent/link/current/js-agent --server http://127.0.0.1:7300 --token-file /etc/js-agent/token --pool image-check --drain-wait 3600 --stop-grace 120 --runtime crun --crun-bin /usr/bin/crun --job-user jsjob --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch/runs
+# Each line runs in order and the first that fails ends the list (`set -eu`), so the line the
+# workflow looks for on the console is printed only when every check before it passed. The
+# status and journal lines come first and never fail, so a failed check leaves them on the
+# console to read. Each unit is checked on a line of its own: `systemctl is-enabled` and
+# `is-active` given several units pass when any one of them is. The `timeout` bounds the wait
+# for the agent's first retry line; it is not what passes the check: the line itself is. After
+# the match the pipe ends at the agent's next retry line, at most a minute later.
+runcmd:
+  - set -eu
+  - systemctl --no-pager --full status js-agent-user-data.service js-agent-crun.service hostkeeper.service || true
+  - journalctl --no-pager --unit js-agent-crun.service --lines 40 || true
+  - sha256sum /usr/share/js-machine-image/recipe.json
+  - systemctl is-enabled --quiet js-agent-user-data.service
+  - systemctl is-enabled --quiet js-agent-crun.service
+  - systemctl is-enabled --quiet hostkeeper.service
+  - systemctl start js-agent-crun.service
+  - |-
+    timeout 600 journalctl --follow --lines 1000 --unit js-agent-crun.service --output cat | grep --max-count 1 --extended-regexp '^js-agent: .*; next in [0-9]+ms$'
+  - systemctl is-active --quiet js-agent-user-data.service
+  - systemctl is-active --quiet js-agent-crun.service
+  - systemctl show --property ExecStart js-agent-crun.service | grep --quiet --fixed-strings -- '--pool image-check'
+  - printf 'js-image-check-%s\n' passed
+power_state:
+  mode: poweroff
+  condition: true

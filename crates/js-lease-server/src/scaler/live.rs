@@ -1,22 +1,24 @@
-//! The real [`Effects`]: the server's registry and join tokens, the pool's provider and
-//! network mode, and the records file.
+//! The real [`Effects`]: the server's registry, job tables and join tokens, the pool's
+//! provider and network mode, and the records file.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, CapacityProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
-    SchedulerId, Secret,
+    AcquireId, Acquired, CapacityProvider, Demand, EventStream, Held, HostName, HostRef, Offer,
+    ProviderError, Released, SchedulerId, Secret,
 };
+use js_jobs::JobStoreError;
 use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
 
-use super::{Call, Effects, Launcher, RecordsFile, UnremovedFile};
+use super::{Call, Effects, JobTables, Launcher, RecordsFile, UnremovedFile};
 use crate::agents::Agents;
 use crate::checks::Health as Checks;
+use crate::cordon::DEFAULT_CORDON;
 
 /// The pool's side of the server, as the shell uses it.
 pub(crate) struct Live {
@@ -28,18 +30,22 @@ pub(crate) struct Live {
     file: RecordsFile,
     unremoved: UnremovedFile,
     checks: Arc<Mutex<Checks>>,
+    /// What a job that books the whole host asks a machine to bring: the pool's floor.
+    whole_host: Demand,
 }
 
 impl Live {
     /// The effects for the pool `pool` of `scheduler`: its machines are launched and
-    /// released through `provider` and `launcher`, its tokens and hosts are `agents`', its
-    /// records are kept in `file`, the hosts the registry would not remove in `unremoved`,
-    /// and its health and offers are what its `checks` found.
+    /// released through `provider` and `launcher`, its tokens, hosts and job tables are
+    /// `agents`', its records are kept in `file`, the hosts the registry would not remove in
+    /// `unremoved`, its health and offers are what its `checks` found, and a job that books
+    /// the whole host asks for `whole_host`, the pool's floor.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
         provider: Arc<dyn CapacityProvider>,
         launcher: Launcher,
         (file, unremoved, checks): (RecordsFile, UnremovedFile, Arc<Mutex<Checks>>),
+        whole_host: Demand,
     ) -> Self {
         Self {
             agents,
@@ -50,6 +56,7 @@ impl Live {
             file,
             unremoved,
             checks,
+            whole_host,
         }
     }
 
@@ -64,12 +71,34 @@ impl Effects for Live {
         self.agents.registry.snapshot()
     }
 
-    fn leased(&self, host: &str) -> bool {
-        let (hosts, _) = self.agents.registry.snapshot();
+    /// The queued jobs first and the live allocations after, so that a job placed between
+    /// the two reads is read in both, never in neither.
+    fn jobs(&self) -> Result<JobTables, JobStoreError> {
+        let Some(jobs) = &self.agents.jobs else {
+            return Ok(JobTables::default());
+        };
+        let queued = jobs.queued()?;
+        let live = jobs.live_allocations()?;
+        Ok(JobTables { queued, live })
+    }
+
+    fn whole_host(&self) -> Demand {
+        self.whole_host.clone()
+    }
+
+    fn holds_work(&self, host: &str) -> bool {
+        let hosts = self.agents.registry.hosts();
         let booked = |view: &HostView| [view.id.as_str() == host, view.lease.is_some()];
-        hosts
+        let leased = hosts
             .iter()
-            .any(|view| booked(view).into_iter().all(|holds| holds))
+            .any(|view| booked(view).into_iter().all(|holds| holds));
+        let allocated = match (&self.agents.jobs, HostId::new(host)) {
+            (Some(jobs), Ok(id)) => jobs
+                .booked_on(&id)
+                .map_or(true, |booking| booking.allocations > 0),
+            _ => false,
+        };
+        leased | allocated
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {
@@ -159,10 +188,19 @@ impl Effects for Live {
                 registry.mark_ending(&id);
                 Ok(())
             }
+            // The registry holds no host by that id: the same answer as a mark's.
+            Call::Cordon => registry
+                .cordon(&id, DEFAULT_CORDON)
+                .map(drop)
+                .map_err(|_| Busy::UnknownHost),
         };
         if let Err(busy) = done {
             warn!(%host, %busy, ?call, "the registry did not do it");
         }
+    }
+
+    fn events(&self) -> Option<EventStream> {
+        self.provider.events()
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {
@@ -184,12 +222,17 @@ mod tests {
     use js_elastic::{
         AcquireId, AcquireRequest, Artifact, BootStep, CatalogFuture, HostStatus, PriceUnit,
     };
+    use js_jobs::Booked;
+    use js_jobs::interfere::Interfere;
     use js_lease::{ManualClock, Timestamp};
     use js_registry::{PoolConfig, Registry, SequentialSessions};
+    use js_state::fake::Fake;
     use js_types::{ExecMode, Model, ResourceClass, Resources, Shape, accelerator_of};
 
     use super::*;
     use crate::adapt::SharedClock;
+    use crate::agent_api::job_rig::{placed, spec, tables};
+    use crate::job_store::ServerJobs;
     use crate::network::DefaultMode;
 
     /// A provider that answers each call with a fixed word and launches nothing.
@@ -286,6 +329,22 @@ mod tests {
         dir
     }
 
+    /// What a whole-host job asks for in these tests.
+    fn floor() -> Demand {
+        let resources = Resources::new(8000, 16 << 30, 1, Some("nvidia-a10".to_owned())).unwrap();
+        Demand {
+            accelerator: js_types::AcceleratorNeed::booked(&resources),
+            resources,
+            disk_bytes: None,
+            os: None,
+            arch: None,
+            isa_level: None,
+            exec: None,
+            network: js_types::JobNetwork::None,
+            host_ports: Vec::new(),
+        }
+    }
+
     fn live(name: &str) -> (Live, PathBuf) {
         quiet_logs();
         let dir = dir(name);
@@ -321,8 +380,20 @@ mod tests {
             Arc::new(Stub),
             launcher,
             (file, unremoved, checks),
+            floor(),
         );
         (live, dir)
+    }
+
+    /// [`live`] over job tables: those of a fresh store that can fail a read, with a server
+    /// holding them.
+    fn live_with_jobs(name: &str) -> (Live, Arc<Interfere<Fake>>, Arc<ServerJobs>) {
+        let (mut live, _dir) = live(name);
+        let (store, jobs) = tables();
+        let jobs = Arc::new(jobs);
+        let agents = Arc::try_unwrap(live.agents).ok().unwrap();
+        live.agents = Arc::new(agents.with_jobs(Arc::clone(&jobs)));
+        (live, store, jobs)
     }
 
     fn offer() -> Offer {
@@ -352,8 +423,8 @@ mod tests {
 
     /// Asserts that the reads and the provider's calls pass through: no waiting request and
     /// no host in a new registry, a pool not yet checked with no offers, the provider's
-    /// list, release, acquire, unresolved acquire ids and by-id read as the provider answers
-    /// them. It catches a method wired to the wrong call.
+    /// list, release, acquire, unresolved acquire ids, by-id read and notices as the provider
+    /// answers them. It catches a method wired to the wrong call.
     #[tokio::test]
     async fn the_reads_and_the_providers_calls_pass_through() {
         let (live, _dir) = live("pass");
@@ -371,7 +442,9 @@ mod tests {
         let (hosts, waiting) = live.registry();
         assert!(hosts.is_empty());
         assert!(waiting.is_empty());
-        assert!(!live.leased("js-nobody"));
+        assert_eq!(live.jobs(), Ok(JobTables::default()));
+        assert_eq!(live.whole_host(), floor());
+        assert!(!live.holds_work("js-nobody"));
         assert_eq!(live.checks(), (Health::Checking, Vec::new()));
         assert!(
             live.provider.catalog().await.is_err(),
@@ -386,6 +459,7 @@ mod tests {
         assert_eq!(live.unresolved(), [AcquireId::new("u1").unwrap()]);
         assert!(live.is_gone(&HostRef("i-gone".to_owned())));
         assert!(!live.is_gone(&id));
+        assert!(live.events().is_none(), "the stand-in sends no notices");
         // The stand-in's calls the shell does not make, so that it is whole.
         assert_eq!(live.provider.id().as_str(), "stub");
         assert!(!live.provider.can_launch());
@@ -399,6 +473,48 @@ mod tests {
             instance_id: None,
         };
         assert_eq!(live.provider.verify_instance(&hello), None);
+    }
+
+    /// Asserts that the job tables are read whole, the queued jobs and the live allocations,
+    /// and that a read that fails is the store's error, never empty tables. It catches a
+    /// scaler that reads a failed read as no demand and no host in use, which would drain
+    /// hosts under running jobs.
+    #[test]
+    fn the_job_tables_are_read_and_a_failed_read_is_an_error() {
+        let (live, store, jobs) = live_with_jobs("jobs");
+        let (_, running) = placed(&jobs, "running", "js-h1", spec(), Booked::WholeHost);
+        let queued = jobs
+            .insert_queued(js_jobs::NewJob {
+                id: Some(js_jobs::JobId::parse("waits").unwrap()),
+                spec: spec(),
+                priority: 0,
+                client: None,
+            })
+            .unwrap()
+            .record;
+        let read = live.jobs().unwrap();
+        assert_eq!(read.queued, [queued]);
+        assert_eq!(read.live, [running]);
+        store.fail_read_after(0);
+        assert!(live.jobs().is_err());
+        store.fail_read_after(1);
+        assert!(live.jobs().is_err());
+    }
+
+    /// Asserts that a host holds work while a live job allocation is on it, whatever the
+    /// registry books, and that one whose bookings cannot be read holds work too, while a
+    /// host with none, and text that is no host id, hold none. It catches a release that
+    /// asks the registry's leases only, whose marks do not see jobs, and so terminates a
+    /// machine under a job placed after the tick read the tables.
+    #[test]
+    fn a_host_with_a_job_allocation_holds_work() {
+        let (live, store, jobs) = live_with_jobs("holds");
+        placed(&jobs, "running", "js-h1", spec(), Booked::WholeHost);
+        assert!(live.holds_work("js-h1"));
+        assert!(!live.holds_work("js-h2"));
+        assert!(!live.holds_work("Not A Host Id"));
+        store.fail_read_after(0);
+        assert!(live.holds_work("js-h2"));
     }
 
     /// Asserts that the records are written whole to their file and that a file that
@@ -476,7 +592,8 @@ mod tests {
 
     /// Asserts each call on the registry for a host it does not hold: the busy answers
     /// are logged and nothing fails, a remove of a host it never held is fine (and so is text that is no host id), a mark of
-    /// ending is kept for the host's first hello, and text that is no host id is ignored.
+    /// ending is kept for the host's first hello, a cordon of a host it does not hold is logged,
+    /// and text that is no host id is ignored.
     #[test]
     fn registry_calls_for_an_unknown_host_are_harmless() {
         let (live, _dir) = live("calls");
@@ -487,6 +604,7 @@ mod tests {
             Call::Undrain,
             Call::ReleaseHost,
             Call::MarkEnding,
+            Call::Cordon,
         ] {
             live.call(call, &host);
             live.call(call, "Not A Host Id");

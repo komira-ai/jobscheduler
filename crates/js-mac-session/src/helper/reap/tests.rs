@@ -221,7 +221,7 @@ fn the_verb_is_served_through_handle() {
     };
     let reply = |rig: &Rig, request: &Request, fds| match rig.helper.handle(request.clone(), fds) {
         Outcome::Reply(reply) => reply,
-        Outcome::Running(child) => panic!("a process started: {child:?}"),
+        other => panic!("not a reply: {other:?}"),
     };
     assert_eq!(
         reply(&rig, &request, crate::helper::tests::fds(&rig.dir)),

@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use js_state::conformance::{
-    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry,
+    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry, c5_feed_trim,
     c5_ordered_feed, c6_durable_ack, c7_group_commit, c8_bounded_range_scan,
 };
 use js_state::postgres::{
@@ -61,6 +61,11 @@ fn c4_expiry_follows_the_store_clock() {
 #[test]
 fn c5_the_feed_skips_no_row() {
     c5_ordered_feed(&backend(Flaw::None));
+}
+
+#[test]
+fn c5_the_feed_trims_and_refuses_a_stale_cursor() {
+    c5_feed_trim(&backend(Flaw::None));
 }
 
 #[test]
