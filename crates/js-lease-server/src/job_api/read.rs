@@ -35,11 +35,14 @@
 //!
 //! # `GetLogs` without a stream
 //!
-//! The request names the job only. The answer is the job's state and the tails of its
+//! A request that names no stream (or a stream this version does not know) is the call as
+//! it was before streams were added. The answer is the job's state and the tails of its
 //! result: for an ended job, the last 8 KiB of each stream it stored and whether either was
 //! cut; for a job that has not ended, and for one that ended without a result (lost, or
-//! failed to start), empty tails and `truncated` false, never an error. Live output is read
-//! with a stream.
+//! failed to start), empty tails and `truncated` false, never an error, and the fields of a
+//! stream's page empty. Live output, of a running job too, is read with a stream: the row is
+//! read here, by the rules above, and the page by the logs group (`logs.rs`), with its own
+//! answers.
 //!
 //! # `ListJobs`
 //!
@@ -80,10 +83,10 @@ use js_state::{ResumeToken, StoreTime};
 use js_types::HostId;
 use tonic::{Request, Response, Status};
 
-use super::JobApi;
 use super::fleet::Handle;
 use super::roles::{Caller, hidden};
 use super::submit::unavailable_if_fenced;
+use super::{JobApi, logs};
 
 pub(crate) mod view;
 
@@ -201,14 +204,15 @@ fn read_failed(api: &JobApi, error: &js_jobs::JobStoreError) -> Status {
     unavailable_if_fenced(api, error, Status::internal("internal"))
 }
 
-/// The reads the read calls make of the job tables, and nothing else.
-struct Reads<'a>(&'a JobApi);
+/// The reads the read calls (and the logs group's follows) make of the job tables, and
+/// nothing else.
+pub(super) struct Reads<'a>(pub(super) &'a JobApi);
 
 impl Reads<'_> {
     /// The job `text` names, as `caller` may read it: refused when `text` is not a job id,
     /// `unknown-job` when there is no row for it, and the same answer, marked hidden, when
     /// the job is not the caller's to read.
-    fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
+    pub(super) fn job(&self, text: &str, caller: &Caller) -> Result<JobRecord, Status> {
         let id = JobId::parse(text).map_err(|_| invalid(JOB_ID_FIELD))?;
         let found = self
             .0
@@ -244,7 +248,7 @@ fn now(api: &JobApi) -> StoreTime {
 
 /// `job`, unless it has ended and its retention end has passed at the service's clock: the
 /// same instant the sweep deletes it from.
-fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
+pub(super) fn unexpired(api: &JobApi, job: JobRecord) -> Result<JobRecord, Status> {
     match js_jobs::sweep([&job], now(api)).is_empty() {
         true => Ok(job),
         false => Err(expired()),
@@ -279,16 +283,22 @@ pub(super) async fn get_result(
     }
 }
 
-/// `GetLogs` without a stream: the job's state and its result's tails, until its retention
-/// end; empty tails while it has no result.
+/// `GetLogs`: until the job's retention end, without a stream the job's state and its
+/// result's tails (empty while it has no result), and with one a page of that stream
+/// (`logs.rs`).
 pub(super) async fn get_logs(
     api: &JobApi,
     caller: &Caller,
     request: Request<GetLogsRequest>,
 ) -> Result<Response<GetLogsResponse>, Status> {
-    let job = Reads(api).job(&request.into_inner().job_id, caller)?;
+    let request = request.into_inner();
+    let job = Reads(api).job(&request.job_id, caller)?;
     let job = unexpired(api, job)?;
-    Ok(Response::new(tails(&job)))
+    let answer = match logs::stream_of(&request) {
+        None => tails(&job),
+        Some(stream) => logs::get_logs(api, caller, job, &request, stream).await?,
+    };
+    Ok(Response::new(answer))
 }
 
 /// The tails `GetLogs` answers for `job`: its result's, or none.
@@ -300,6 +310,7 @@ fn tails(job: &JobRecord) -> GetLogsResponse {
             stdout_tail: result.stdout_tail.as_bytes().to_vec(),
             stderr_tail: result.stderr_tail.as_bytes().to_vec(),
             truncated: result.truncated,
+            ..GetLogsResponse::default()
         },
         None => GetLogsResponse {
             state,
