@@ -1,5 +1,7 @@
 //! `js-update-hook-fake`: `js-agent update-hook` over the fake ports, the program the
-//! conformance harness of the hook contract runs (tests only; not shipped).
+//! conformance harness of the hook contract runs (tests only; not shipped). The harness starts it
+//! in both forms the updater uses: behind the verb (`update-hook <step>`) and with the bare
+//! step.
 //!
 //! `js-update-hook-fake [--world <dir>] [--control <dir>] [--state-dir <dir>] update-hook <step>
 //! ...`. The three directories are the fakes' world, the fakes' own files and the hook's state
@@ -7,8 +9,10 @@
 //! `update_hook_fakes::harness` name them. Only this test binary reads the environment; the
 //! agent reads none.
 //!
-//! The steps are the hook's own (`update_hook::step`), over the declaration and params of
-//! `update_hook_fakes::harness`, the world's ports seen through the fault the test arranged for
+//! The steps are the hook's own (`update_hook::step`), over the params the harness writes
+//! (the record's directory is the one this binary is given), with the updater's part played
+//! before a step: the release link is moved to the staged release before `cutover` and to the
+//! previous release before `rollback`, behind no kill point, the world's ports seen through the fault the test arranged for
 //! the step, kill points in the harness's protocol, the hang guard on the clock, and a watchdog
 //! thread that ends a step which stops making progress (`update_hook_fakes::watchdog`).
 
@@ -24,11 +28,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use js_agent::update_hook::step::{self, Env};
+use js_agent::update_hook::step::{self, Env, TokenFacts};
 #[cfg(target_os = "linux")]
 use js_agent::update_hook::{
-    Clock, DirStat, Done, Host, Invocation, Lease, NoGate, Outcome, Params, Ports, Reason, Report,
-    Step, run,
+    Clock, DirStat, Done, Host, Invocation, Lease, Manager, NoGate, Outcome, Params, Ports, Step,
+    run,
 };
 
 #[cfg(target_os = "linux")]
@@ -40,7 +44,7 @@ use fakes::World;
 #[cfg(target_os = "linux")]
 use fakes::harness::{
     CONTROL_VAR, DEFECT_VAR, Defect, Fault, Faulted, FaultedState, Frozen, Guard, HarnessGate,
-    MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, declaration, mirror_ownership,
+    MirroringGate, STATE_DIR_VAR, StagedAgent, WORLD_VAR, arranged, mirror_ownership,
 };
 #[cfg(target_os = "linux")]
 use fakes::watchdog::{self, WINDOW_VAR};
@@ -69,6 +73,19 @@ fn as_root(_: &Path, _: std::os::fd::BorrowedFd<'_>) -> std::io::Result<DirStat>
         gid: 0,
         mode: 0o700,
     })
+}
+
+/// The join token file as the agent needs it, or (the first-install `prepare` fault,
+/// `Fault::Defer`) readable by everyone.
+#[cfg(target_os = "linux")]
+fn token(wrong: bool) -> impl Fn(&Path) -> std::io::Result<TokenFacts> {
+    move |_| {
+        Ok(TokenFacts {
+            regular: true,
+            mode: if wrong { 0o644 } else { 0o600 },
+            uid: rustix::process::geteuid().as_raw(),
+        })
+    }
 }
 
 /// The state directory cannot be looked at: the first-install `cleanup` fault (`Fault::Fail`).
@@ -114,19 +131,20 @@ fn gate(setup: &Setup) -> MirroringGate {
 /// Runs the step over the fakes.
 #[cfg(target_os = "linux")]
 fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
-    let declaration = match declaration(&setup.state_dir) {
-        Ok(declaration) => declaration,
-        Err(why) => {
-            return Done {
-                outcome: Outcome::Failure,
-                report: Report::failure(Reason::StateInvalid, why),
-            };
-        }
-    };
+    // The record's directory is the harness's, which the params file cannot name.
+    let mut params = params.clone();
+    params.settings.state_dir.clone_from(&setup.state_dir);
+    let params = &params;
     let world = World::new(&setup.world, &setup.control, Box::new(gate(setup)));
     world.set_releases(params);
     let quiet = World::new(&setup.world, &setup.control, Box::new(NoGate));
     let step_now = invocation.step;
+    // The updater moves the release link before it runs the step, whatever the step did before.
+    match (step_now, &params.previous_release) {
+        (Step::Cutover, _) => quiet.set_link(&params.release_link, &params.staged_release),
+        (Step::Rollback, Some(previous)) => quiet.set_link(&params.release_link, previous),
+        _ => {}
+    }
     let fault = arranged(&setup.control, step_now);
     let hang = setup.defect == Some(Defect::Hang);
     let ports = Faulted {
@@ -166,7 +184,13 @@ fn fake_step(setup: &Setup, invocation: &Invocation, params: &Params) -> Done {
             gate: &gate(setup),
         },
         runner: &staged,
-        declaration: &declaration,
+        manager: Manager::Systemd,
+        euid: rustix::process::geteuid().as_raw(),
+        token: &token(
+            step_now == Step::Prepare
+                && fault == Some(Fault::Defer)
+                && params.previous_version.is_none(),
+        ),
         stat: if step_now == Step::Cleanup
             && fault == Some(Fault::Fail)
             && params.previous_version.is_none()

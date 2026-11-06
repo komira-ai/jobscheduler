@@ -1129,7 +1129,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "update-hook",
 ]
 
 [[package]]

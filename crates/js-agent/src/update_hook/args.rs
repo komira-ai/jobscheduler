@@ -1,19 +1,44 @@
-//! The command line of the hook:
-//! `js-agent update-hook [--name=value ...] <step> [<artifact>] --params <file>`.
+//! The command line of the hook, in the two forms the updater uses:
 //!
-//! The updater runs `<executable> <hook_args> <step> [args]` (host-updates design, 3.2). This
-//! module parses what follows the verb: the flags the declaration's `hook_args` put before the
-//! step ([`Flags`]), the step, the staged release directory (`prepare` only) and the file of
-//! the `[hook.params]` table, which this hook always needs (the cordon's lease and cap are in
-//! it). Flags only: no value comes from the environment.
+//! ```text
+//! js-agent update-hook <step> [<artifact>] --params <file>
+//! js-agent <step> [<artifact>] --params <file>
+//! ```
+//!
+//! hostkeeper runs the update steps (`prepare`, `cutover`, `verify`, `rollback`, `cleanup`) as
+//! `<executable> <step> ...` and gives the leading arguments of the manifest's `command` only
+//! to the steps it adds (`boot`, `uninstall`), so the hook takes the step with or without the
+//! verb before it. This module parses what follows the verb: the step, the staged release
+//! directory (`prepare` only) and the file of the `[params]` table, which this hook always
+//! needs (the cordon's lease and cap are in it). Flags only: no value comes from the
+//! environment, and no flag precedes the step.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 pub use js_update_hook::Step;
 use js_update_hook::UnknownStep;
 
-use super::flags::Flags;
+/// The first argument that selects the hook, with the step after it.
+pub const VERB: &str = "update-hook";
+
+/// The step words the updater passes without the verb. `uninstall` is the updater's step for
+/// a service that has a hook to remove it with: this hook has none, and refuses it.
+const BARE_WORDS: [&str; 6] = [
+    "prepare",
+    "cutover",
+    "verify",
+    "rollback",
+    "cleanup",
+    "uninstall",
+];
+
+/// Whether `word`, the first argument after the program name, selects the hook: the verb, or
+/// a step word given bare.
+#[must_use]
+pub fn is_hook_word(word: &OsStr) -> bool {
+    word == VERB || BARE_WORDS.iter().any(|step| word == *step)
+}
 
 /// Why a command line was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -40,39 +65,25 @@ pub enum ArgsError {
     /// No `--params`: the hook cannot know the cordon's lease and cap without the table.
     #[error("--params <file> is required")]
     MissingParams,
-    /// A word before the step that is not one of the [`Flags`].
-    #[error("unknown flag {0:?} before the step")]
-    UnknownFlag(String),
-    /// A flag before the step without `=value`, or with an empty value.
-    #[error("{0} needs a value, written {0}=<value>")]
-    FlagValue(String),
-    /// A flag before the step given twice.
-    #[error("{0} given twice")]
-    DuplicateFlag(String),
-    /// A flag that names a path was given one that is not absolute.
-    #[error("{0} must be an absolute path")]
-    RelativeFlag(String),
 }
 
 /// The step a hook was asked to run, with its arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invocation {
-    /// The flags before the step.
-    pub flags: Flags,
     /// The step.
     pub step: Step,
     /// The staged release directory: given to `prepare` and to no other step.
     pub artifact: Option<PathBuf>,
-    /// The file of the `[hook.params]` table.
+    /// The file of the `[params]` table.
     pub params: PathBuf,
 }
 
 impl Invocation {
-    /// Parses the arguments that follow the verb: the flags, then the step.
+    /// Parses the arguments after the program name: the verb if it is there, then the step.
     ///
     /// # Errors
-    /// [`ArgsError`] for a flag that is unknown, repeated or without a value, an unknown step,
-    /// a missing or extra argument, or a missing `--params`.
+    /// [`ArgsError`] for an unknown step (`uninstall` among them), a missing or extra
+    /// argument, or a missing `--params`.
     pub fn parse<I>(args: I) -> Result<Invocation, ArgsError>
     where
         I: IntoIterator<Item = OsString>,
@@ -83,20 +94,12 @@ impl Invocation {
     /// [`Invocation::parse`] on the words, one body for every caller's iterator.
     fn parse_words(words: Vec<OsString>) -> Result<Invocation, ArgsError> {
         let mut args = words.into_iter();
-        let mut flags = Flags::default();
-        let first = loop {
-            let word = args.next().ok_or(ArgsError::MissingStep)?;
-            let text = word.to_string_lossy();
-            if !text.starts_with("--") {
-                break text.into_owned();
-            }
-            // A value is taken as the bytes given or not at all, never changed to fit text.
-            if word.to_str().is_none() {
-                return Err(ArgsError::UnknownFlag(text.into_owned()));
-            }
-            flags.take(&text)?;
-        };
+        let mut first = args.next().ok_or(ArgsError::MissingStep)?;
+        if first == VERB {
+            first = args.next().ok_or(ArgsError::MissingStep)?;
+        }
         let step: Step = first
+            .to_string_lossy()
             .parse()
             .map_err(|UnknownStep(word)| ArgsError::UnknownStep(word))?;
         let (mut artifact, mut params) = (None, None);
@@ -117,7 +120,6 @@ impl Invocation {
         }
         let params = params.ok_or(ArgsError::MissingParams)?;
         Ok(Invocation {
-            flags,
             step,
             artifact,
             params,

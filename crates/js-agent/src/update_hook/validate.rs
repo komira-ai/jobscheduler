@@ -1,5 +1,5 @@
 //! The rules every value read from the record is held to before it is used (host-updates
-//! design, 4.2, "Every value read from the record is validated against the declaration").
+//! design, 4.2, "Every value read from the record is validated against the settings").
 //!
 //! The record is the hook's own memory, kept where only root writes; the rules are for the
 //! day that stops being true (a corrupt file, a record of another version, a directory that
@@ -16,7 +16,6 @@ pub use js_update_hook::{
 };
 use js_update_hook::{POLL_SECS, is_plain};
 
-use super::declaration::Declaration;
 use super::params::Params;
 use super::record::{Record, SCHEMA};
 
@@ -29,6 +28,12 @@ pub const MAX_VERSION_LEN: usize = 128;
 /// one second.
 pub const EXPIRY_SLACK_MS: u64 = 1_000;
 
+/// The most changes a unit restart plan may name.
+pub const MAX_CHANGES: usize = 64;
+
+/// The longest name of a change in a unit restart plan, in bytes.
+pub const MAX_CHANGE_LEN: usize = 256;
+
 /// How long `rollback` waits for the previous agent's hello once the unit is active, in
 /// seconds.
 pub const ROLLBACK_HELLO_SECS: u64 = 300;
@@ -36,38 +41,38 @@ pub const ROLLBACK_HELLO_SECS: u64 = 300;
 /// The rule a record broke.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Invalid {
-    /// The declared `prepare` timeout would end the step in the middle of the drain wait.
+    /// The `prepare` timeout would end the step in the middle of the drain wait.
     #[error(
-        "the declared prepare timeout {prepare} s is shorter than drain_wait_secs {wait} s plus {PREPARE_MARGIN_SECS} s"
+        "the prepare timeout {prepare} s is shorter than drain_wait_secs {wait} s plus {PREPARE_MARGIN_SECS} s"
     )]
     PrepareTimeout {
-        /// `[hook.timeout_secs] prepare`.
+        /// `prepare_timeout_secs`.
         prepare: u64,
         /// `drain_wait_secs`.
         wait: u64,
     },
-    /// The declared `cutover` timeout leaves no time to wait for the stop.
+    /// The `cutover` timeout leaves no time to wait for the stop.
     #[error(
-        "the declared cutover timeout {cutover} s leaves no time to stop: it must exceed {START_WAIT_SECS} s plus {CUTOVER_MARGIN_SECS} s"
+        "the cutover timeout {cutover} s leaves no time to stop: it must exceed {START_WAIT_SECS} s plus {CUTOVER_MARGIN_SECS} s"
     )]
     CutoverTimeout {
-        /// `[hook.timeout_secs] cutover`.
+        /// `cutover_timeout_secs`.
         cutover: u64,
     },
-    /// The declared `verify` timeout leaves no time for a look and a poll.
+    /// The `verify` timeout leaves no time for a look and a poll.
     #[error(
-        "the declared verify timeout {verify} s is too short: it must exceed {VERIFY_MARGIN_SECS} s plus {POLL_SECS} s"
+        "the verify timeout {verify} s is too short: it must exceed {VERIFY_MARGIN_SECS} s plus {POLL_SECS} s"
     )]
     VerifyTimeout {
-        /// `[hook.timeout_secs] verify`.
+        /// `verify_timeout_secs`.
         verify: u64,
     },
-    /// The declared `rollback` timeout would end the step in the middle of its waits.
+    /// The `rollback` timeout would end the step in the middle of its waits.
     #[error(
-        "the declared rollback timeout {rollback} s is too short: it must exceed drain_wait_secs {wait} s plus {START_WAIT_SECS} s, {ROLLBACK_HELLO_SECS} s and {ROLLBACK_MARGIN_SECS} s"
+        "the rollback timeout {rollback} s is too short: it must exceed drain_wait_secs {wait} s plus {START_WAIT_SECS} s, {ROLLBACK_HELLO_SECS} s and {ROLLBACK_MARGIN_SECS} s"
     )]
     RollbackTimeout {
-        /// `[hook.timeout_secs] rollback`.
+        /// `rollback_timeout_secs`.
         rollback: u64,
         /// `drain_wait_secs`.
         wait: u64,
@@ -85,8 +90,8 @@ pub enum Invalid {
         /// The record field.
         field: &'static str,
     },
-    /// The record's unit is not one the declaration names.
-    #[error("unit {found:?} is not a declared unit")]
+    /// The record's unit is not the one the settings name.
+    #[error("unit {found:?} is not the hook's unit")]
     Unit {
         /// The record's.
         found: String,
@@ -133,6 +138,10 @@ pub enum Invalid {
         /// The latest the cap allows.
         limit_ms: u64,
     },
+    /// The record's unit restart plan names no change, or a change that is not a plain name
+    /// (empty, longer than [`MAX_CHANGE_LEN`] bytes or with a control character), or too many.
+    #[error("the unit restart plan is not a list of up to {MAX_CHANGES} plain names")]
+    UnitRestart,
     /// A mark is set without the one it follows from.
     #[error("{mark} is set but {needs} is not")]
     Marks {
@@ -184,30 +193,27 @@ pub(super) fn is_digest(text: &str) -> bool {
 ///
 /// # Errors
 /// The first [`Invalid`] rule the record breaks.
-pub fn validate(
-    record: &Record,
-    declaration: &Declaration,
-    params: &Params,
-) -> Result<(), Invalid> {
+pub fn validate(record: &Record, params: &Params) -> Result<(), Invalid> {
+    let settings = &params.settings;
     let update = &record.update;
     // The updater kills a step at its declared bound: `prepare` must outlast the wait.
     let needed = params.drain_wait_secs.saturating_add(PREPARE_MARGIN_SECS);
-    if declaration.timeouts.prepare < needed {
+    if settings.timeouts.prepare < needed {
         return Err(Invalid::PrepareTimeout {
-            prepare: declaration.timeouts.prepare,
+            prepare: settings.timeouts.prepare,
             wait: params.drain_wait_secs,
         });
     }
     // The wait for the stop ends before the declared bound by the start wait and a margin.
-    if declaration.timeouts.cutover <= START_WAIT_SECS + CUTOVER_MARGIN_SECS {
+    if settings.timeouts.cutover <= START_WAIT_SECS + CUTOVER_MARGIN_SECS {
         return Err(Invalid::CutoverTimeout {
-            cutover: declaration.timeouts.cutover,
+            cutover: settings.timeouts.cutover,
         });
     }
     // Less and the wait would be a single look, with no poll after it.
-    if declaration.timeouts.verify <= VERIFY_MARGIN_SECS + POLL_SECS {
+    if settings.timeouts.verify <= VERIFY_MARGIN_SECS + POLL_SECS {
         return Err(Invalid::VerifyTimeout {
-            verify: declaration.timeouts.verify,
+            verify: settings.timeouts.verify,
         });
     }
     // The waits of `rollback`: the drain, the stop, the start and the hello, and a margin.
@@ -216,9 +222,9 @@ pub fn validate(
         .saturating_add(START_WAIT_SECS)
         .saturating_add(ROLLBACK_HELLO_SECS)
         .saturating_add(ROLLBACK_MARGIN_SECS);
-    if declaration.timeouts.rollback <= rollback_needed {
+    if settings.timeouts.rollback <= rollback_needed {
         return Err(Invalid::RollbackTimeout {
-            rollback: declaration.timeouts.rollback,
+            rollback: settings.timeouts.rollback,
             wait: params.drain_wait_secs,
         });
     }
@@ -227,7 +233,7 @@ pub fn validate(
             found: record.schema,
         });
     }
-    if !declaration.units.contains(&update.unit) {
+    if update.unit != settings.unit {
         return Err(Invalid::Unit {
             found: update.unit.clone(),
         });
@@ -247,7 +253,7 @@ pub fn validate(
     if !is_digest(&update.artifact_digest) {
         return Err(Invalid::Digest);
     }
-    let state_dir = &declaration.state_dir;
+    let state_dir = &settings.state_dir;
     release_path("staged", &update.staged, state_dir)?;
     if let Some(previous) = &update.previous_target {
         release_path("previous_target", previous, state_dir)?;
@@ -288,7 +294,24 @@ pub fn validate(
         params.previous_release.as_deref().map(Path::as_os_str),
     )?;
     cordon(record, params)?;
+    unit_restart(record)?;
     marks(record)
+}
+
+/// A restart plan names at least one change, and every name is printable text of a sensible
+/// size: it goes into the report's detail.
+fn unit_restart(record: &Record) -> Result<(), Invalid> {
+    let Some(plan) = &record.unit_restart else {
+        return Ok(());
+    };
+    let plain = |name: &String| {
+        (1..=MAX_CHANGE_LEN).contains(&name.len()) && !name.chars().any(char::is_control)
+    };
+    if (1..=MAX_CHANGES).contains(&plan.changed.len()) && plan.changed.iter().all(plain) {
+        Ok(())
+    } else {
+        Err(Invalid::UnitRestart)
+    }
 }
 
 /// The cordon's stamps against its mark and the declared cap: the expiry is whole seconds, so

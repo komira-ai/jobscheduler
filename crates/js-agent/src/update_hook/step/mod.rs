@@ -20,7 +20,7 @@ use std::path::Path;
 use crate::facts::CommandRunner;
 
 use super::{
-    Class, Declaration, DirStat, Done, Held, LeaseError, Outcome, Params, Ports, Reason, Record,
+    Class, DirStat, Done, Held, LeaseError, Manager, Outcome, Params, Ports, Reason, Record,
     Report, StateError, Step, validate,
 };
 
@@ -30,15 +30,33 @@ pub use prepare::prepare;
 pub use rollback::rollback;
 pub use verify::verify;
 
+/// What the hook finds when it looks at the join token file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenFacts {
+    /// Whether it is a regular file after following links.
+    pub regular: bool,
+    /// Its permission bits.
+    pub mode: u32,
+    /// Its owner.
+    pub uid: u32,
+}
+
+/// How the token file is looked at (see [`TokenFacts`]).
+pub type TokenFn = dyn Fn(&Path) -> io::Result<TokenFacts>;
+
 /// Everything a step touches.
 pub struct Env<'a> {
     /// The unit manager, the release link, the lease server, the agent's state root, time and
     /// the kill points.
     pub ports: Ports<'a>,
-    /// Runs the staged agent's `--version`.
+    /// Runs the staged agent's `--version`, and `systemctl` where the unit manager is systemd.
     pub runner: &'a dyn CommandRunner,
-    /// The hook's declaration.
-    pub declaration: &'a Declaration,
+    /// Which unit manager runs the agent, and so which unit file a release carries.
+    pub manager: Manager,
+    /// The user the hook runs as: the owner the join token file must have.
+    pub euid: u32,
+    /// How the join token file is looked at.
+    pub token: &'a TokenFn,
     /// How a directory of the state directory's path is looked at (see
     /// [`fd_stat`](super::fd_stat)).
     pub stat: &'a dyn Fn(&Path, BorrowedFd<'_>) -> io::Result<DirStat>,
@@ -81,17 +99,17 @@ fn lease_failure(error: LeaseError) -> Done {
 
 /// Takes the lock, loads the record and holds it to the rules; `None` if there is none.
 fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), Done> {
-    let held = Held::open(&env.declaration.state_dir, env.stat).map_err(state_failure)?;
+    let held = Held::open(&params.settings.state_dir, env.stat).map_err(state_failure)?;
     let record = held.load().map_err(state_failure)?;
     if let Some(record) = &record {
-        check(env, params, record)?;
+        check(params, record)?;
     }
     Ok((held, record))
 }
 
-/// Holds `record` to the rules of the declaration and the params table.
-fn check(env: &Env<'_>, params: &Params, record: &Record) -> Result<(), Done> {
-    validate(record, env.declaration, params)
+/// Holds `record` to the rules of the params table.
+fn check(params: &Params, record: &Record) -> Result<(), Done> {
+    validate(record, params)
         .map_err(StateError::Invalid)
         .map_err(state_failure)
 }

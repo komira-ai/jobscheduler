@@ -1,11 +1,12 @@
 //! `cutover` (host-updates design, 4.2): look once more at the cordon and the leases, then stop
-//! the unit, move the release link from the previous release to the staged one, and start the
-//! unit. The stop is the commit: once it is begun every ending says `reversible: false`.
+//! the unit and start it again on the staged release. The updater has moved the release link
+//! (hostkeeper's `current`) to the staged release before it runs this step; the hook reads the
+//! link and never writes it. The stop is the commit: once it is begun every ending says
+//! `reversible: false`.
 //!
 //! In this order:
 //! 1. the lock, the record and the params agree; there must be a record, and the release link
-//!    the declaration names (`release_link`) must lie inside a declared directory, never be one,
-//!    and be in neither release (`bad_params` otherwise, nothing done);
+//!    must point at the staged release (`link_failed` otherwise, nothing done);
 //! 2. unless the stop is begun already: a taint or an `owed-*` record halts (76), and the host
 //!    must be cordoned and hold no lease. `prepare` can end with no cordon held (it was killed
 //!    between the placing and the confirming), so a cordon of ours that is gone is put back
@@ -15,34 +16,40 @@
 //!    rollback to lift). A cordon that is not ours (an operator's) is neither renewed nor
 //!    lifted. A cordon in force under a mark that was never confirmed may be ours or not, and
 //!    nothing would renew it through the stop: that defers too, the mark left as it is;
-//! 3. the unit and the link are read, so that a read that fails leaves nothing begun; then the
-//!    record gets `stop_begun` together with `pre_stop_session_ms`, the session the lease server
-//!    showed for the host in the reading of step 2 (one save, so that the stop is never marked
-//!    without it and it is never written without the stop; a rerun that finds the stop begun
-//!    reads no host and keeps it), and the unit is stopped and waited for (renewing the cordon if
-//!    it is ours), for at most the declared bound less the start wait and a margin;
-//! 4. the record gets `link_moved`, then the link is moved;
-//! 5. the record gets `start_issued`, then the unit is started and waited for. A start that
-//!    fails is the release's fault only if the unit ran and died (`failed`, or `auto-restart`
-//!    after a crash, at any look); a unit still waiting in `start` is not.
+//! 3. the unit is read, so that a read that fails leaves nothing begun; then the record gets
+//!    `stop_begun` together with `pre_stop_session_ms`, the session the lease server showed for
+//!    the host in the reading of step 2 (one save, so that the stop is never marked without it
+//!    and it is never written without the stop; a rerun that finds the stop begun reads no host
+//!    and keeps it), and the unit is stopped and waited for (renewing the cordon if it is
+//!    ours), for at most the declared bound less the start wait and a margin;
+//! 4. if the record holds a restart plan (the unit changed, see `prepare`) on systemd, the wait
+//!    for the unit's cgroup to hold no process, so that the new `Slice`, `Delegate` and
+//!    `DelegateSubgroup` layout starts from an empty cgroup (`KillMode=process` leaves strays
+//!    behind); a cgroup still busy at the same bound ends `unit_not_empty`, class environment.
+//!    launchd's `bootout` already empties the job;
+//! 5. the record gets `link_moved` (kept under its name: the link was moved by the updater and
+//!    this is the mark that the start is next, and for a first install the commit), then
+//!    `start_issued`, then the unit is started and waited for. A start that fails is the
+//!    release's fault only if the unit ran and died (`failed`, or `auto-restart` after a crash,
+//!    at any look); a unit still waiting in `start` is not.
 //!
 //! Each mark is written before its act, so a run that is killed leaves the marks of every act
-//! it may have made. A rerun does not rely on them: it asks the unit manager and the link, and
-//! does what is not yet done, so every act is a no-op when its effect is already there. The
-//! state of the unit is read with `show` and not `is-active`, which cannot tell a failed run of
-//! `systemctl` from an inactive unit.
+//! it may have made. A rerun does not rely on them: it asks the unit manager, and does what is
+//! not yet done, so every act is a no-op when its effect is already there. The state of the unit
+//! is read with `show` and not `is-active`, which cannot tell a failed run of `systemctl` from an
+//! inactive unit. A unit that is up after the stop was begun is the new agent only if the
+//! record says the start was issued: the link is on the staged release in every case, so it
+//! cannot say which agent runs.
 //!
 //! A first install has no agent to drain, no host the lease server knows and no unit to stop:
-//! it skips steps 2 and 3, writes no `stop_begun`, and is irreversible from `link_moved` on.
+//! it skips steps 2 to 4, writes no `stop_begun`, and is irreversible from `link_moved` on.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use js_update_hook::is_plain;
-
 use crate::update_hook::{
-    CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Outcome, POLL_SECS, Params,
-    Reason, Record, Report, START_WAIT_SECS, UnitState,
+    CUTOVER_MARGIN_SECS, Class, Cordon, Done, Held, HostReading, Manager, Outcome, POLL_SECS,
+    Params, Reason, Record, Report, START_WAIT_SECS, SYSTEMCTL, UnitState,
 };
 
 use super::prepare::{ask_secs, place, refuse_host, renew};
@@ -87,7 +94,16 @@ pub(super) fn irreversible(mut done: Done) -> Done {
 }
 
 fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Result<Done, Done> {
-    let link = release_link(env, params)?;
+    if !linked(env, &params.release_link, &record.update.staged)? {
+        return Err(environment(
+            Reason::LinkFailed,
+            format!(
+                "the release link {} is not on the staged release {}: the updater moves it before cutover",
+                params.release_link.display(),
+                record.update.staged.display()
+            ),
+        ));
+    }
     let entered_begun = begun(record);
     // The session the server showed in the last reading before the stop (see `hold`). A rerun
     // that finds the stop begun reads nothing and keeps what the record holds.
@@ -102,16 +118,20 @@ fn go(env: &Env<'_>, params: &Params, held: &Held, record: &mut Record) -> Resul
         // leaves nothing begun.
         let unit = record.update.unit.clone();
         let state = show(env, &unit, Reason::StopFailed)?;
-        let on_staged = linked(env, &link, &record.update.staged)?;
         if !entered_begun {
             // One save: the stop is never marked without the session it is to be judged against
             // (`mark` saves a copy of the record as it stands, with the session in it).
             record.pre_stop_session_ms = session;
             mark(env, held, record, |record| record.stop_begun = true)?;
         }
-        stop(env, held, record, params, (state, on_staged), entered_begun)?;
+        let since = env.ports.clock.now_ms();
+        stop(env, held, record, params, state, entered_begun)?;
+        // A unit started by an earlier run holds the new agent: nothing to wait for.
+        if !record.start_issued {
+            wait_empty(env, held, record, params, since)?;
+        }
     }
-    move_link(env, held, record, &link)?;
+    mark_link_moved(env, held, record)?;
     start(env, held, record, params)?;
     Ok(success())
 }
@@ -134,40 +154,6 @@ fn deferred(params: &Params, reason: Reason, detail: impl Into<String>) -> Done 
             detail: Some(detail.into()),
             ..Report::default()
         },
-    }
-}
-
-/// The release link the declaration names, held to the rules the record's paths are held to:
-/// plain, inside a declared directory other than the state directory (never one of them
-/// itself: the swap writes the link's parent), and in neither release.
-pub(super) fn release_link(env: &Env<'_>, params: &Params) -> Result<std::path::PathBuf, Done> {
-    let declaration = env.declaration;
-    let link = params.release_link.clone().ok_or_else(|| {
-        failure(
-            Reason::BadParams,
-            "the hook params name no release link (release_link)",
-        )
-    })?;
-    let declared = declaration
-        .write_paths
-        .iter()
-        .any(|dir| *dir != declaration.state_dir && link != *dir && link.starts_with(dir));
-    // A link inside a release would be replaced with the release, or hide in it.
-    let inside_a_release = link.starts_with(&params.staged_release)
-        || params
-            .previous_release
-            .as_ref()
-            .is_some_and(|previous| link.starts_with(previous));
-    if is_plain(&link) && declared && !inside_a_release {
-        Ok(link)
-    } else {
-        Err(failure(
-            Reason::BadParams,
-            format!(
-                "the release link {} is not inside a declared directory",
-                link.display()
-            ),
-        ))
     }
 }
 
@@ -315,7 +301,25 @@ pub(super) fn show(env: &Env<'_>, unit: &str, reason: Reason) -> Result<UnitStat
         .map_err(|why| environment(reason, format!("cannot read the state of {unit}: {why}")))
 }
 
-/// Whether the link points at the staged release.
+/// Where a link at `link` that holds `target` points: an absolute target as it is, a relative
+/// one from the link's directory, with `.` and `..` resolved by name (nothing is looked up).
+pub(super) fn resolved(link: &Path, target: &Path) -> PathBuf {
+    let mut path = link.parent().unwrap_or(link).to_path_buf();
+    for part in target.components() {
+        match part {
+            Component::RootDir => path = PathBuf::from("/"),
+            Component::ParentDir => {
+                path.pop();
+            }
+            Component::CurDir | Component::Prefix(_) => {}
+            Component::Normal(name) => path.push(name),
+        }
+    }
+    path
+}
+
+/// Whether the link points at the staged release. A target the updater wrote relative to the
+/// link's directory (`current -> 1.4.0`) is read from there.
 pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, Done> {
     let target = env.ports.link.target(link).map_err(|why| {
         environment(
@@ -323,7 +327,7 @@ pub(super) fn linked(env: &Env<'_>, link: &Path, staged: &Path) -> Result<bool, 
             format!("cannot read {}: {why}", link.display()),
         )
     })?;
-    Ok(target.as_deref() == Some(staged))
+    Ok(target.is_some_and(|target| resolved(link, &target) == staged))
 }
 
 /// Waits one poll and renews the cordon if it is ours.
@@ -340,14 +344,14 @@ pub(super) fn pause(
     Ok(())
 }
 
-/// Stops the unit and waits for it to be down. A unit that is up on the staged release after
-/// the stop was begun is the new agent, started by an earlier run: it is left alone.
+/// Stops the unit and waits for it to be down. A unit that is up after the stop was begun and
+/// the start was issued is the new agent, started by an earlier run: it is left alone.
 fn stop(
     env: &Env<'_>,
     held: &Held,
     record: &mut Record,
     params: &Params,
-    (state, on_staged): (UnitState, bool),
+    state: UnitState,
     entered_begun: bool,
 ) -> Result<(), Done> {
     let unit = record.update.unit.clone();
@@ -355,7 +359,7 @@ fn stop(
         Life::Down => return Ok(()),
         Life::Stopping => {}
         Life::Up | Life::Starting => {
-            if entered_begun && on_staged {
+            if entered_begun && record.start_issued {
                 return Ok(());
             }
             env.ports.point();
@@ -365,12 +369,7 @@ fn stop(
         }
     }
     // The step is killed at the declared bound; ending a little before it says why.
-    let bound_ms = env
-        .declaration
-        .timeouts
-        .cutover
-        .saturating_sub(START_WAIT_SECS + CUTOVER_MARGIN_SECS)
-        .saturating_mul(1000);
+    let bound_ms = stop_bound_ms(params);
     let began = env.ports.clock.now_ms();
     loop {
         let state = show(env, &unit, Reason::StopFailed)?;
@@ -391,28 +390,87 @@ fn stop(
     }
 }
 
-/// Points the link at the staged release.
-fn move_link(env: &Env<'_>, held: &Held, record: &mut Record, link: &Path) -> Result<(), Done> {
-    let staged = record.update.staged.clone();
-    // Read before the mark: on a first install the mark is the commit.
-    let on_staged = linked(env, link, &staged)?;
-    if !record.link_moved {
-        mark(env, held, record, |record| record.link_moved = true)?;
+/// The longest the stop and the wait for the cgroup may take: the step is killed at the
+/// declared bound, and ending a little before it says why.
+fn stop_bound_ms(params: &Params) -> u64 {
+    params
+        .settings
+        .timeouts
+        .cutover
+        .saturating_sub(START_WAIT_SECS + CUTOVER_MARGIN_SECS)
+        .saturating_mul(1000)
+}
+
+/// The processes the unit's cgroup holds: `0` for a unit that accounts for none
+/// (`TasksCurrent` is `[not set]` then).
+fn tasks_current(env: &Env<'_>, unit: &str) -> Result<u64, Done> {
+    let printed = env
+        .runner
+        .run(
+            SYSTEMCTL,
+            &["show", "--property=TasksCurrent", "--value", unit],
+        )
+        .map_err(|why| {
+            environment(
+                Reason::StopFailed,
+                format!("cannot read the tasks of {unit}: {why}"),
+            )
+        })?;
+    match printed.trim() {
+        "[not set]" => Ok(0),
+        text => text.parse().map_err(|_| {
+            environment(
+                Reason::StopFailed,
+                format!("cannot read the tasks of {unit}: systemctl printed {text:?}"),
+            )
+        }),
     }
-    if on_staged {
+}
+
+/// With a restart plan on systemd, waits until the stopped unit's cgroup holds no process, for
+/// at most the stop's bound counted from `since_ms`, so that the unit starts on its new layout
+/// from an empty cgroup.
+fn wait_empty(
+    env: &Env<'_>,
+    held: &Held,
+    record: &mut Record,
+    params: &Params,
+    since_ms: u64,
+) -> Result<(), Done> {
+    let Some(restart) = record.unit_restart.clone() else {
+        return Ok(());
+    };
+    if env.manager != Manager::Systemd {
         return Ok(());
     }
-    env.ports.point();
-    env.ports.link.relink(link, &staged).map_err(|why| {
-        environment(
-            Reason::LinkFailed,
-            format!(
-                "cannot move {} to {}: {why}",
-                link.display(),
-                staged.display()
-            ),
-        )
-    })
+    let unit = record.update.unit.clone();
+    let bound_ms = stop_bound_ms(params);
+    loop {
+        let tasks = tasks_current(env, &unit)?;
+        if tasks == 0 {
+            return Ok(());
+        }
+        if env.ports.clock.now_ms().saturating_sub(since_ms) >= bound_ms {
+            return Err(environment(
+                Reason::UnitNotEmpty,
+                format!(
+                    "{unit} is stopped and its cgroup still holds {tasks} process(es) after {} s; the unit changes ({}), and starts only from an empty cgroup",
+                    bound_ms / 1000,
+                    restart.changed.join(", ")
+                ),
+            ));
+        }
+        pause(env, held, record, params)?;
+    }
+}
+
+/// Marks that the link is on the staged release and the start is next, before the start. On a
+/// first install this mark is the commit.
+fn mark_link_moved(env: &Env<'_>, held: &Held, record: &mut Record) -> Result<(), Done> {
+    if record.link_moved {
+        return Ok(());
+    }
+    mark(env, held, record, |record| record.link_moved = true)
 }
 
 /// A start that failed: the release's fault only if the unit ran and died, now or at an earlier

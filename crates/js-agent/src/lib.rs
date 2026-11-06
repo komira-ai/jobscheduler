@@ -36,6 +36,13 @@
 //! unit's `ExecStart`, after checking them as the agent's start does; it writes none on a host
 //! without a GPU node; see `gpu_dropin` and docs/runbooks/crun-host-setup.md.
 //!
+//! `js-agent prepare|cutover|verify|rollback|cleanup [<artifact>] --params <file>` (Linux and
+//! macOS, run as root by hostkeeper), also written `js-agent update-hook <step> ...`, is the
+//! agent's side of hostkeeper's hook contract: it cordons the host, stops the agent and starts
+//! the staged release, and says how it ended in one JSON line. It reads the package manifest's
+//! `[params]` table from the file and the host's `--flags-file` for the lease server; see
+//! [`update_hook`].
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -563,10 +570,11 @@ pub fn main_with(
         return gpu_dropin::run(&args, out, err, &host);
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
-    // step of another program, and installs no signal handler.
+    // step of another program, and installs no signal handler. hostkeeper runs an update step as
+    // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
     if args
         .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(update_hook::VERB))
+        .is_some_and(|word| update_hook::is_hook_word(word))
     {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
     }

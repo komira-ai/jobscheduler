@@ -118,7 +118,7 @@ fn relink_is_a_rename_over_the_old_link_and_idempotent() {
     assert_eq!(rig.points(), 2);
     assert_eq!(rig.again().target(link), Ok(Some("releases/1.1".into())));
     // Nothing is left beside the link in the world.
-    let names: Vec<_> = fs::read_dir(rig.tmp.path().join("world/link"))
+    let names: Vec<_> = fs::read_dir(rig.tmp.path().join("control/link"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
@@ -427,10 +427,9 @@ fn params(previous: bool) -> Params {
         false => "",
     };
     Params::parse(&format!(
-        "{}{previous}",
+        "{}{}{previous}",
+        super::fakes::harness::params_text(),
         concat!(
-            "cordon_lease_secs = 300\ncordon_max_secs = 17355\n",
-    "drain_wait_secs = 3600\ndefer_retry_secs = 300\n",
     "\"updater.artifact_digest\" = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
             "\"updater.staged_release\" = \"/opt/js-agent/releases/1.4.0\"\n",
             "\"updater.target_version\" = \"1.4.0\"\n",
@@ -562,7 +561,7 @@ fn a_relative_link_resolves_from_its_directory_and_a_relink_to_where_it_points_i
     let release = rig.tmp.path().join("releases/1.1");
     rig.world.relink_relative(link, &release).unwrap();
     assert_eq!(rig.points(), 1);
-    let file = rig.tmp.path().join("world/link/current");
+    let file = rig.tmp.path().join("control/link/current");
     assert_eq!(
         fs::read_link(&file).unwrap(),
         Path::new("../../releases/1.1")
@@ -572,7 +571,7 @@ fn a_relative_link_resolves_from_its_directory_and_a_relink_to_where_it_points_i
     assert_eq!(rig.points(), 1, "a link already there is not a change");
     assert_eq!(
         super::fakes::resolve(&file, Path::new("./a/../b")),
-        rig.tmp.path().join("world/link/b")
+        rig.tmp.path().join("control/link/b")
     );
     assert_eq!(
         super::fakes::resolve(&file, Path::new("/abs")),

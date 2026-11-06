@@ -1,6 +1,6 @@
 //! The fake host as the conformance harness of the hook contract runs it (`update_hook::
 //! conformance`, a dev-dependency): what `js-update-hook-fake` reads from its environment, the
-//! declaration and params it runs the steps under, the kill points spoken in the harness's
+//! params it runs the steps under, the kill points spoken in the harness's
 //! protocol, the faults a test arranges for a step, and the hang guard.
 //!
 //! The binary cannot use a dev-dependency, so it speaks the harness's kill-point protocol
@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use js_agent::CommandRunner;
 use js_agent::update_hook::{
-    Clock, Cordoned, Declaration, Gate, HostReading, Lease, LeaseError, Link, PortError,
-    RECORD_FILE, Record, StateView, Step, Uncordoned, UnitState, Units,
+    Clock, Cordoned, Gate, HostReading, Lease, LeaseError, Link, PortError, RECORD_FILE, Record,
+    StateView, Step, Uncordoned, UnitState, Units,
 };
 use js_agent_wire::Taint;
 
@@ -50,10 +50,10 @@ pub const PARKED: &str = "update-hook-gate: parked at the kill point";
 /// See [`GATE_DIR_VAR`].
 pub const COUNT_FILE: &str = "gate-count";
 
-/// The unit the declaration names.
+/// The unit the params name.
 pub const UNIT: &str = "js-agent-crun.service";
 /// The release link the params name. The fake keeps it in the world (`link/current`); nothing
-/// at this path is touched.
+/// at this path is touched. The updater's part (moving it) is the binary's, before a step.
 pub const RELEASE_LINK: &str = "/opt/js-agent/current";
 /// The host the lease server knows.
 pub const HOST: &str = "burst-1";
@@ -71,53 +71,40 @@ pub const fn timeout_secs(step: Step) -> u64 {
     }
 }
 
-/// `text` as a TOML basic string, quotes included: a quotation mark, a backslash and every
-/// control character escaped, so the string parses back to `text`.
-#[must_use]
-pub fn toml_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The declaration the hook runs under, with its record in `state_dir`.
-#[must_use]
-pub fn declaration_text(state_dir: &Path) -> String {
-    let bound = timeout_secs;
-    format!(
-        concat!(
-            "state_dir = {state}\n[hook]\nunits = [\"{unit}\"]\n",
-            "write_paths = [\"/opt/js-agent\", {state}]\n",
-            "[hook.timeout_secs]\nprepare = {prepare}\ncutover = {cutover}\nverify = {verify}\n",
-            "rollback = {rollback}\ncleanup = {cleanup}\n"
-        ),
-        state = toml_string(&state_dir.to_string_lossy()),
-        unit = UNIT,
-        prepare = bound(Step::Prepare),
-        cutover = bound(Step::Cutover),
-        verify = bound(Step::Verify),
-        rollback = bound(Step::Rollback),
-        cleanup = bound(Step::Cleanup),
-    )
-}
-
-/// The declaration's own `[hook.params]` (the harness adds the `updater.*` keys).
-pub const PARAMS: [(&str, ParamValue); 5] = [
+/// The manifest's own `[params]` (the harness adds the `updater.*` keys). The state directory
+/// is a placeholder: the binary runs the steps over the harness's record directory, which only
+/// the binary's flag or variable names.
+pub const PARAMS: [(&str, ParamValue); 17] = [
+    ("unit", ParamValue::Text(UNIT)),
+    ("state_dir", ParamValue::Text("/var/lib/js-agent-update")),
+    ("release_link", ParamValue::Text(RELEASE_LINK)),
+    ("flags_file", ParamValue::Text("/etc/js-agent/flags")),
+    ("token_file", ParamValue::Text("/etc/js-agent/token")),
+    ("state_root", ParamValue::Text("/var/lib/js-agent/state")),
+    ("runtime", ParamValue::Text("crun")),
     ("cordon_lease_secs", ParamValue::Integer(300)),
     ("cordon_max_secs", ParamValue::Integer(17_355)),
     ("drain_wait_secs", ParamValue::Integer(3600)),
     ("defer_retry_secs", ParamValue::Integer(300)),
-    ("release_link", ParamValue::Text(RELEASE_LINK)),
+    ("prepare_timeout_secs", ParamValue::Integer(3900)),
+    ("cutover_timeout_secs", ParamValue::Integer(4320)),
+    ("verify_timeout_secs", ParamValue::Integer(615)),
+    ("rollback_timeout_secs", ParamValue::Integer(8220)),
+    ("cleanup_timeout_secs", ParamValue::Integer(120)),
+    ("verify_deadline_secs", ParamValue::Integer(9000)),
 ];
+
+/// [`PARAMS`] as the text of a params file.
+#[must_use]
+pub fn params_text() -> String {
+    PARAMS
+        .iter()
+        .map(|(key, value)| match value {
+            ParamValue::Integer(n) => format!("{key} = {n}\n"),
+            ParamValue::Text(text) => format!("{key} = \"{text}\"\n"),
+        })
+        .collect()
+}
 
 /// A value of [`PARAMS`].
 #[derive(Clone, Copy, Debug)]
@@ -269,7 +256,8 @@ pub enum Fault {
     /// (`cleanup` of an update, `rollback`), the state directory cannot be looked at (`cleanup`
     /// of a first install, which asks the lease server nothing).
     Fail,
-    /// The host is busy (75): it holds a lease that never goes (`prepare`, `cutover`).
+    /// The host is busy (75): it holds a lease that never goes (`prepare`, `cutover`), or, on a
+    /// first install, the join token file is not as the agent needs it (`prepare`).
     Defer,
     /// No version can repair the host (76): the agent's state root holds a taint (`prepare`,
     /// `cutover`, `verify`, `rollback`).
@@ -305,12 +293,12 @@ impl Fault {
         }
     }
 
-    /// [`Fault::reachable`] on a first install: nothing defers, since there is no host to drain
-    /// and no lease to wait out.
+    /// [`Fault::reachable`] on a first install: only `prepare` defers (the join token file is
+    /// not right), since there is no host to drain and no lease to wait out.
     #[must_use]
     pub const fn reachable_on_first_install(self, step: Step) -> bool {
         match self {
-            Fault::Defer => false,
+            Fault::Defer => matches!(step, Step::Prepare),
             _ => self.reachable(step),
         }
     }
@@ -472,18 +460,20 @@ impl Clock for Frozen<'_> {
 }
 
 /// The staged agent's `--version`: the version the updater installs, on the crun runtime, or
-/// (a `prepare` fault) another version.
+/// (a `prepare` fault) another version; and the unit manager's `systemctl show`, which reports
+/// a stopped unit whose cgroup is empty.
 pub struct StagedAgent {
     /// What the first line names.
     pub version: String,
 }
 
 impl CommandRunner for StagedAgent {
-    fn run(&self, _program: &str, args: &[&str]) -> Result<String, String> {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         match args {
             ["--version"] => Ok(format!("js-agent {}\nruntimes: crun\n", self.version)),
+            ["show", "--property=TasksCurrent", "--value", _] => Ok("0\n".to_owned()),
             _ => Err(format!(
-                "the staged agent takes --version only, not {args:?}"
+                "{program}: the fake runs --version and systemctl show only, not {args:?}"
             )),
         }
     }
@@ -638,8 +628,13 @@ impl Link for Faulted<'_> {
         self.world.resolved_target(link)
     }
 
+    /// The updater moves the release link; the hook never does.
     fn relink(&self, link: &Path, target: &Path) -> Result<(), PortError> {
-        self.world.relink_relative(link, target)
+        panic!(
+            "the hook moved the release link {} to {}",
+            link.display(),
+            target.display()
+        );
     }
 }
 
@@ -693,12 +688,8 @@ impl StateView for FaultedState<'_> {
     fn owed(&self) -> Result<Vec<String>, PortError> {
         self.root.owed()
     }
-}
 
-/// Declaration of the hook over the state directory `state_dir`.
-///
-/// # Errors
-/// The text does not parse (a path the declaration refuses).
-pub fn declaration(state_dir: &Path) -> Result<Declaration, String> {
-    Declaration::parse(&declaration_text(state_dir)).map_err(|why| why.to_string())
+    fn has_credential(&self) -> bool {
+        self.root.has_credential()
+    }
 }

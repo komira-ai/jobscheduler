@@ -4,14 +4,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent::update_hook::{Clock, Link, Outcome, Reason, Units};
+use js_agent::update_hook::{Clock, Outcome, Reason, Units};
 
 use super::step_rig::{Rig, Spy, UNIT, killable, running};
 
 /// Time passes between one step and the next: the sessions of two agents differ.
 pub const WAIT: Duration = Duration::from_secs(5);
-
-pub const RELINK: &str = "link.relink";
 
 pub fn stop() -> String {
     format!("units.stop({UNIT})")
@@ -35,7 +33,7 @@ pub fn unit_state(rig: &Rig) -> String {
 }
 
 pub fn link_target(rig: &Rig) -> Option<PathBuf> {
-    rig.world.target(&rig.link).unwrap()
+    rig.world.resolved_target(&rig.link).unwrap()
 }
 
 /// `rb.drained`, `rb.stop_begun`, `rb.link_restored`, `rb.start_issued`, `rb.hello_ok` on disk.
@@ -62,7 +60,7 @@ fn cut_off(name: &str, pick: impl Fn(&[(String, u32)]) -> u32) -> Rig {
         .iter()
         .map(|act| (act.call.clone(), act.points))
         .collect();
-    assert_eq!(acts.len(), 3, "stop, link, start");
+    assert_eq!(acts.len(), 2, "stop, start");
     let rig = running(Rig::new(name));
     rig.kill.arm(pick(&acts));
     assert!(killable(|| Spy::new(&rig).cutover(&rig)).is_none());
@@ -71,25 +69,30 @@ fn cut_off(name: &str, pick: impl Fn(&[(String, u32)]) -> u32) -> Rig {
     rig
 }
 
-/// The unit is stopped, `link_moved` is marked and the link has not moved: it still names the
-/// previous release.
+/// The unit is stopped and only `stop_begun` is marked: the cutover was killed as it was to mark
+/// `link_moved`. The updater has moved the link to the staged release, as it does before a
+/// cutover.
 pub fn stopped(name: &str) -> Rig {
-    let rig = cut_off(name, |acts| acts[1].1);
-    assert_eq!(link_target(&rig), Some(previous(&rig)));
-    assert_eq!(unit_state(&rig), "inactive dead");
-    rig
-}
-
-/// The unit is stopped and the link names the staged release; `start_issued` is not marked.
-pub fn link_moved(name: &str) -> Rig {
-    let rig = cut_off(name, |acts| acts[2].1 - 1);
+    let rig = cut_off(name, |acts| acts[1].1 - 2);
     assert_eq!(link_target(&rig), Some(staged(&rig)));
     assert_eq!(unit_state(&rig), "inactive dead");
-    assert!(!rig.record().unwrap().start_issued);
+    let record = rig.record().unwrap();
+    assert!(record.stop_begun && !record.link_moved && !record.start_issued);
     rig
 }
 
-/// `start_issued` is marked and the start failed: the unit is `failed`, the link is staged.
+/// The unit is stopped, `link_moved` is marked and `start_issued` is not: the cutover was killed
+/// as it was to mark the start.
+pub fn link_moved(name: &str) -> Rig {
+    let rig = cut_off(name, |acts| acts[1].1 - 1);
+    assert_eq!(link_target(&rig), Some(staged(&rig)));
+    assert_eq!(unit_state(&rig), "inactive dead");
+    let record = rig.record().unwrap();
+    assert!(record.stop_begun && record.link_moved && !record.start_issued);
+    rig
+}
+
+/// `start_issued` is marked and the start failed: the unit is `failed`.
 pub fn start_failed(name: &str) -> Rig {
     let rig = running(Rig::new(name));
     rig.world.pause(WAIT);
@@ -165,8 +168,7 @@ pub fn assert_restored(rig: &Rig) {
     assert!(host.cordon.is_none(), "the cordon of this update is lifted");
 }
 
-/// A `cutover` was killed while the unit stopped: it is `deactivating`, the link still names the
-/// previous release.
+/// A `cutover` was killed while the unit stopped: it is `deactivating`.
 pub fn deactivating(name: &str) -> Rig {
     let rig = running(Rig::new(name));
     {
@@ -178,6 +180,5 @@ pub fn deactivating(name: &str) -> Rig {
     rig.kill.disarm();
     rig.world.pause(WAIT);
     assert_eq!(unit_state(&rig), "deactivating stop-sigterm");
-    assert_eq!(link_target(&rig), Some(previous(&rig)));
     rig
 }

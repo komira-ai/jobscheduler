@@ -5,7 +5,7 @@
 //! hello, a fault that is cleared before the step runs again, and rollback killed at every kill
 //! point after a `prepare` or a `cutover` that was cut short.
 //!
-//! A [`Bed`] is one sandbox of the harness's layout (`update_hook::conformance::Sandbox`), set
+//! A [`Bed`] is one sandbox of the harness's layout (`hostkeeper_hook::conformance::Sandbox`), set
 //! up by the conformance tests' [`AgentHost`] and given one params file, as the harness writes
 //! it. Each run is a process of its own, in a process group of its own, and is stopped at a kill
 //! point the way the harness stops one: on the parked line, the whole group is killed.
@@ -16,12 +16,12 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use js_testkit::dir::TestDir;
-use update_hook::conformance::{FakeService, Sandbox, Tree, changes, snapshot};
-use update_hook::{
+use hostkeeper_hook::conformance::{FakeService, Sandbox, Tree, changes, snapshot};
+use hostkeeper_hook::{
     ARTIFACT_DIGEST_KEY, Context, Next, Outcome, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY,
     Report, STAGED_RELEASE_KEY, Scalar, Step, TARGET_VERSION_KEY, Verdict, next,
 };
+use js_testkit::dir::TestDir;
 
 use super::conformance::{AgentHost, BIN, PREVIOUS_VERSION, agent_step};
 use super::fakes::harness::{self, COUNT_FILE, GATE_DIR_VAR, KILL_AT_VAR, PARKED, UNIT};
@@ -264,8 +264,8 @@ fn a_first_install_rollback_after_cutover_refuses_by_name_changes_nothing_and_sa
         assert_eq!(
             next(Step::Rollback, Outcome::Failure, &report, &ctx),
             Next::Report(Verdict::Failed {
-                phase: update_hook::Phase::AfterCommit,
-                class: update_hook::Class::Release,
+                phase: hostkeeper_hook::Phase::AfterCommit,
+                class: hostkeeper_hook::Class::Release,
             })
         );
     }
@@ -351,7 +351,7 @@ fn a_kill_between_a_start_and_its_hello_resumes_without_starting_the_unit_again(
 /// The lease server's view of the host without the session stamps, which follow the fake
 /// clock: an update that waited out a deferral says hello later than one that did not.
 fn without_stamps(mut tree: Tree) -> Tree {
-    use update_hook::conformance::Entry;
+    use hostkeeper_hook::conformance::Entry;
     for name in ["lease.json"] {
         if let Some(Entry::File(bytes)) = tree.get_mut(Path::new(name)) {
             let mut host: serde_json::Value = serde_json::from_slice(bytes).unwrap();

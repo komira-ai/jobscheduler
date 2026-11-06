@@ -29,7 +29,9 @@ fn run_over(rig: &Rig, tool: &Launchctl, gate: &Path, run: impl FnOnce(&Env<'_>)
     run(&env)
 }
 
+/// `cutover` as hostkeeper runs it: the release link is on the staged release.
 fn cutover(rig: &Rig, tool: &Launchctl, gate: &Path) -> Done {
+    rig.updater_links_staged();
     run_over(rig, tool, gate, |env| step::cutover(env, &rig.params))
 }
 
@@ -45,7 +47,7 @@ fn with_token(tmp: &TestDir) -> std::path::PathBuf {
 }
 
 #[test]
-fn a_mac_cutover_stops_boots_out_links_and_starts_the_agent_again() {
+fn a_mac_cutover_stops_boots_out_and_starts_the_agent_again() {
     let (rig, tool) = mac("hook-launchd-clean");
     let gate = with_token(&rig.tmp);
     let done = cutover(&rig, &tool, &gate);

@@ -89,7 +89,7 @@ pub(super) fn cut_over(name: &str, bound: u64) -> Rig {
     let done = Spy::new(&rig).cutover(&rig);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     rig.kill.disarm();
-    rig.declaration.timeouts.verify = bound + VERIFY_MARGIN_SECS;
+    rig.params.settings.timeouts.verify = bound + VERIFY_MARGIN_SECS;
     rig
 }
 
@@ -346,7 +346,7 @@ fn the_credential_comes_from_the_token_file_the_params_name_and_a_bad_one_is_nam
     let off_loopback = reach("http://192.0.2.1:8443", None, Some(token.clone()));
     assert_eq!(
         unreachable(lease(&off_loopback, RequestLimit::DEFAULT).host()),
-        "server: \"http://192.0.2.1:8443\" is plain http to a host off the loopback: a bearer \
+        "--server: \"http://192.0.2.1:8443\" is plain http to a host off the loopback: a bearer \
          token never crosses a network in clear, use https://"
     );
     let ca = files.path("no-such-ca.pem");
@@ -357,7 +357,7 @@ fn the_credential_comes_from_the_token_file_the_params_name_and_a_bad_one_is_nam
     assert_eq!(
         unreachable(lease(&pinned, RequestLimit::DEFAULT).host()),
         format!(
-            "ca_cert: {}: I/O error: No such file or directory (os error 2)",
+            "--ca-cert: {}: I/O error: No such file or directory (os error 2)",
             ca.display()
         )
     );
