@@ -133,6 +133,7 @@ async fn answer(
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
     let router = port(
         from_server(&state, WALL, logs::Ctx::default()).unwrap(),
         clients,

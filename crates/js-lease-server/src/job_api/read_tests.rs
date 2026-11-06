@@ -328,7 +328,7 @@ pub(super) fn spec(labels: &[(&str, &str)]) -> JobSpec {
         wall_limit_secs: 600,
         network: NetworkPolicy::None,
         ports: Vec::new(),
-        files: BTreeMap::new(),
+        files: js_jobs::JobFiles::default(),
         labels: Labels::from_caller(&labels).expect("labels"),
     }
 }

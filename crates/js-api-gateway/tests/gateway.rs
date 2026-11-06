@@ -369,12 +369,13 @@ fn refusal_to_status_table_matches_golden() {
 }
 
 /// The messages each gRPC code is tried with in the status table.
-const MESSAGES: [&str; 11] = [
+const MESSAGES: [&str; 12] = [
     "unknown-job",
     "expired",
     "not-finished",
     "state-write-failed",
     "field: spec.image",
+    "operator-only",
     "something else",
     "no-log-sink",
     "no-live-logs",
@@ -406,7 +407,8 @@ fn status_table_matches_golden() {
 /// carry, each select their own row, through the router: `NOT_FOUND` with `unknown-job`
 /// (404) and `expired` (410), `FAILED_PRECONDITION` with `not-finished` (409) and with a
 /// `no-capable-host` refusal (422), `INTERNAL` with `state-write-failed` (500
-/// `state-write-failed`) and with another message (500 `internal`), and the rest of the
+/// `state-write-failed`) and with another message (500 `internal`), `PERMISSION_DENIED` with
+/// `operator-only` (403) and with another message (500 `internal`), and the rest of the
 /// table. Catches two statuses of one code collapsing into one row, and a message that is
 /// ignored.
 #[tokio::test]
@@ -470,6 +472,16 @@ async fn a_status_message_selects_the_row() {
             Status::unimplemented("later"),
             501,
             json!({ "error": "unimplemented" }),
+        ),
+        (
+            Status::permission_denied("operator-only"),
+            403,
+            json!({ "error": "operator-only" }),
+        ),
+        (
+            Status::permission_denied("no"),
+            500,
+            json!({ "error": "internal" }),
         ),
         (
             Status::invalid_argument("field: spec.image"),

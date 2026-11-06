@@ -528,7 +528,7 @@ fn the_scan_verbs_are_routed_and_their_replies_capped() {
     let rig = furnished("leak-handle");
     let reply = |request| match rig.helper.handle(request, Vec::new()) {
         Outcome::Reply(reply) => reply,
-        Outcome::Running(child) => panic!("a process started: {child:?}"),
+        other => panic!("not a reply: {other:?}"),
     };
     open_window(&rig);
     assert!(matches!(reply(Request::Baseline), Reply::Baselined { .. }));

@@ -131,6 +131,10 @@ impl Answer {
                 }
                 _ => Self::internal(),
             },
+            Code::PermissionDenied => match message {
+                "operator-only" => Self::coded(StatusCode::FORBIDDEN, "operator-only"),
+                _ => Self::internal(),
+            },
             Code::Unimplemented => Self::coded(StatusCode::NOT_IMPLEMENTED, "unimplemented"),
             Code::InvalidArgument => Self::invalid(
                 message.strip_prefix("field: ").map(str::to_owned),
@@ -161,7 +165,6 @@ impl Answer {
             | Code::Unknown
             | Code::DeadlineExceeded
             | Code::AlreadyExists
-            | Code::PermissionDenied
             | Code::Aborted
             | Code::DataLoss
             | Code::Unauthenticated => Self::internal(),

@@ -65,6 +65,7 @@ use tonic::Status;
 
 use super::JobApi;
 use super::read::{self, view};
+use super::roles::Caller;
 use crate::adapt::SharedClock;
 use crate::file::{LogsConfig, ObjectStoreLogs};
 use crate::logs::StoreClock;
@@ -214,10 +215,11 @@ pub(super) fn stream_of(request: &GetLogsRequest) -> Option<Stream> {
     }
 }
 
-/// `GetLogs` of `stream` for the job `job`, whose row the call read: one page, waiting for
-/// new bytes when the request follows.
+/// `GetLogs` of `stream` for the job `job`, whose row the call read as `caller` may read it:
+/// one page, waiting for new bytes when the request follows.
 pub(super) async fn get_logs(
     api: &JobApi,
+    caller: &Caller,
     job: JobRecord,
     request: &GetLogsRequest,
     stream: Stream,
@@ -238,7 +240,7 @@ pub(super) async fn get_logs(
     };
     for _ in 0..FOLLOW_POLLS {
         api.logs.waiter.wait(FOLLOW_POLL).await;
-        let row = read::Reads(&api.jobs).job(&request.job_id)?;
+        let row = read::Reads(&api.jobs).job(&request.job_id, caller)?;
         job = read::unexpired(api, row)?;
         page = attempt(api, &source, &job, stream, from, max).await?;
         if job.state.is_ended() || !page.is_empty_after(from) {

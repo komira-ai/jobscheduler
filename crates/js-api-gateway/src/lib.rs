@@ -124,6 +124,7 @@
 //! | `OUT_OF_RANGE`, message `field: fromOffset` (a log offset past the end of the stream) | 400 | `out-of-range`, `field` `fromOffset` |
 //! | `RESOURCE_EXHAUSTED`, message `too-many-follows` | 429 | `too-many-follows` |
 //! | `UNAVAILABLE`, message `log-store-unavailable` | 503 | `log-store-unavailable` |
+//! | `PERMISSION_DENIED`, message `operator-only` (a fleet call of a client that is no operator) | 403 | `operator-only` |
 //! | `UNIMPLEMENTED` | 501 | `unimplemented` |
 //! | `INTERNAL`, message `state-write-failed` (a store write that failed) | 500 | `state-write-failed` |
 //! | any other status, an unknown refusal, a fault of the gateway | 500 | `internal` |

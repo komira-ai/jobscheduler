@@ -7,6 +7,8 @@
 //! the test's own ([`support::Stepping`]); nothing sleeps and nothing measures elapsed time.
 
 // This file is the root of its test binary, so its modules are found by path.
+#[path = "in_process/client_tokens.rs"]
+mod client_tokens;
 #[path = "in_process/elastic.rs"]
 mod elastic;
 #[path = "in_process/feature.rs"]

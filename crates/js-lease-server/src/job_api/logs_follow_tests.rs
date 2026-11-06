@@ -15,6 +15,7 @@ use super::JobApi;
 use super::logs::{self, FOLLOW_POLL, FOLLOW_POLLS, MAX_FOLLOW_WAIT};
 use super::logs_rig::{Rig, ask, end, sink, uri};
 use super::read_tests::{self, place, queue, run, running, spec, start};
+use super::roles::as_operator;
 use crate::file::LogsConfig;
 
 /// The follow of stdout of `job` from `from`.
@@ -199,7 +200,9 @@ async fn a_follow_waits_on_the_runtime_timer() {
     });
     let ctx = logs::Ctx::over(Arc::new(rig.store.clone()), &sink(1), read, &shared);
     let api = JobApi::new(jobs, shared).with_logs(ctx);
-    let answer = api.get_logs(Request::new(follow("timer-1", 0))).await;
+    let answer = api
+        .get_logs(as_operator(Request::new(follow("timer-1", 0))))
+        .await;
     let answer = answer.expect("a page").into_inner();
     assert_eq!(answer, empty(v1::JobState::Running, 0));
 }
