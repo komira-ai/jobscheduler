@@ -6,7 +6,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
+use js_elastic::{
+    AcquireId, Acquired, EventStream, Held, HostRef, Offer, ProviderError, Released, Secret,
+};
 use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 
@@ -25,6 +27,9 @@ pub enum Call {
     ReleaseHost,
     /// `Registry::mark_ending`.
     MarkEnding,
+    /// `Registry::cordon`, for the server's default cordon length: the host of a machine
+    /// the provider reclaimed takes no new work.
+    Cordon,
 }
 
 /// The shell's whole interface to the registry, the join tokens, the provider, the network
@@ -51,6 +56,14 @@ pub trait Effects: Send + Sync {
 
     /// The acquire ids the provider holds an unresolved call for.
     fn unresolved(&self) -> Vec<AcquireId>;
+
+    /// How many fetches of the provider's catalog have completed in this process
+    /// ([`crate::Catalogs::fetches`]). A count that moved since the last tick tells the
+    /// scaler a catalog refresh completed, which ends the `acquire_retry` wait of a request
+    /// every offer was refused for. Zero by default: no catalog is fetched.
+    fn catalog_fetches(&self) -> u64 {
+        0
+    }
 
     /// Whether a read of the machine `id` by id says the provider no longer has it.
     fn is_gone(&self, id: &HostRef) -> bool;
@@ -98,4 +111,10 @@ pub trait Effects: Send + Sync {
 
     /// Makes `call` on the registry for `host`.
     fn call(&self, call: Call, host: &str);
+
+    /// The provider's notices ([`js_elastic::CapacityProvider::events`]): `None` (the
+    /// default) for a provider that sends none.
+    fn events(&self) -> Option<EventStream> {
+        None
+    }
 }

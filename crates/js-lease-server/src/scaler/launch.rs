@@ -69,6 +69,11 @@ impl Launcher {
         self
     }
 
+    /// How many fetches of its provider's catalog completed ([`Catalogs::fetches`]).
+    pub(crate) fn catalog_fetches(&self) -> u64 {
+        self.catalogs.fetches(&self.provider.id())
+    }
+
     /// Launches the machine `plan` describes, booting with the join token `token`.
     ///
     /// The network mode's secret is made now, the boot plan is rendered and the payload is

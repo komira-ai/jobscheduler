@@ -8,7 +8,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, Labels};
 
 use super::*;
-use crate::result::{JobResult, JobTiming, ResourceUsage, ResultReason};
+use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::suite::{full_spec, whole_host_spec};
 
 fn at(secs: u64) -> StoreTime {
@@ -33,11 +33,17 @@ fn full_result() -> JobResult {
             cpu_time: Duration::from_secs(7),
             peak_memory_bytes: 4096,
         }),
+        logs: Some(LogLengths {
+            stdout_bytes: 2_621_440,
+            stderr_bytes: 100,
+            stdout_dropped: 1,
+            stderr_dropped: 2,
+        }),
     }
 }
 
 /// A job with every optional field set.
-fn full_job() -> JobRecord {
+pub(super) fn full_job() -> JobRecord {
     JobRecord {
         id: JobId::parse("full-1").expect("an id"),
         spec: full_spec(),
@@ -67,7 +73,7 @@ fn bare_job() -> JobRecord {
     spec.constraints = Constraints::default();
     spec.network = NetworkPolicy::None;
     spec.ports.clear();
-    spec.files.clear();
+    spec.files = crate::record::JobFiles::default();
     spec.labels = Labels::default();
     JobRecord {
         id: JobId::parse("bare-1").expect("an id"),
@@ -113,7 +119,7 @@ fn shape() -> Booked {
     }
 }
 
-fn job_row(job: &JobRecord) -> Vec<u8> {
+pub(super) fn job_row(job: &JobRecord) -> Vec<u8> {
     encode_job(job).expect("encodes")
 }
 
@@ -122,7 +128,7 @@ fn allocation_row(allocation: &AllocationRecord) -> Vec<u8> {
 }
 
 /// `row` without its field `tag`.
-fn without(row: &[u8], tag: u16) -> Vec<u8> {
+pub(super) fn without(row: &[u8], tag: u16) -> Vec<u8> {
     let mut fields = Fields::of(row).expect("the row parses");
     fields.0.remove(&tag);
     Writer(fields.0)
@@ -131,7 +137,7 @@ fn without(row: &[u8], tag: u16) -> Vec<u8> {
 }
 
 /// `row` with its field `tag` set to `value`.
-fn with(row: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
+pub(super) fn with(row: &[u8], tag: u16, value: &[u8]) -> Vec<u8> {
     set_field(row, tag, value).expect("the row parses")
 }
 
@@ -158,6 +164,7 @@ fn a_record_reads_back_as_written() {
                 ended_at: at(2),
             },
             usage: None,
+            logs: None,
         }),
         ..bare_job()
     };
@@ -323,7 +330,7 @@ fn an_enum_value_this_build_does_not_know_is_newer() {
 }
 
 /// A list value framed here, apart from the codec's own `list`.
-fn framed(items: &[&[u8]]) -> Vec<u8> {
+pub(super) fn framed(items: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for item in items {
         out.extend_from_slice(&u32::try_from(item.len()).expect("small").to_be_bytes());
@@ -404,6 +411,13 @@ fn the_layout_is_pinned_byte_for_byte() {
         (40, [seconds(7), 4096u64.to_be_bytes().to_vec()].concat()),
         (41, seconds(7)),
         (42, b"ci-1".to_vec()),
+        (
+            43,
+            [2_621_440u64, 100, 1, 2]
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .collect(),
+        ),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -465,7 +479,7 @@ fn the_layout_is_pinned_byte_for_byte() {
     );
     assert_eq!(field_of(&bare, 24), None, "None is not written");
     assert_eq!(field_of(&bare, 6), Some(Vec::new()), "a marker is empty");
-    for tag in 31..=40 {
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS]) {
         assert_eq!(
             field_of(&bare, tag),
             None,
@@ -556,6 +570,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_USAGE,
         job_tag::DEADLINE_FLOOR,
         job_tag::CLIENT,
+        job_tag::RESULT_LOGS,
     ] {
         row = without(&row, tag);
     }
@@ -575,12 +590,13 @@ fn a_field_the_row_lacks_reads_as_its_default() {
                 ..full_result().timing
             },
             usage: None,
+            logs: None,
             ..full_result()
         })
     );
     // A row without a reason, as every row before results were stored, has no result.
     let mut before_results = job_row(&full_job());
-    for tag in 31..=40 {
+    for tag in (31..=40).chain([job_tag::RESULT_LOGS]) {
         before_results = without(&before_results, tag);
     }
     assert_eq!(
@@ -594,7 +610,7 @@ fn a_field_the_row_lacks_reads_as_its_default() {
             job.spec.env.len(),
             job.spec.constraints.capabilities.len(),
             job.spec.ports.len(),
-            job.spec.files.len(),
+            job.spec.files.names().len(),
         ),
         (0, 0, 0, 0, 0, 0)
     );
@@ -850,6 +866,20 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
                 tag: t::RESULT_USAGE,
             },
         ),
+        (
+            t::RESULT_LOGS,
+            vec![0; 31],
+            BadLength {
+                tag: t::RESULT_LOGS,
+            },
+        ),
+        (
+            t::RESULT_LOGS,
+            vec![0; 33],
+            BadLength {
+                tag: t::RESULT_LOGS,
+            },
+        ),
     ];
     for (tag, value, why) in cases {
         assert_eq!(decode_job(&with(&job, tag, &value)), Err(why), "tag {tag}");
@@ -914,59 +944,5 @@ fn a_decode_error_says_what_and_which_field() {
     );
 }
 
-// Catches host ports dropped or reordered by a rewrite, or written for an allocation that holds
-// none, which would change every row written before ports were booked.
-#[test]
-fn a_ported_allocation_row_round_trips_with_a_later_field_beside_it() {
-    let ported = AllocationRecord {
-        host_ports: vec![1, 80, 8080, u16::MAX],
-        ..allocation(shape())
-    };
-    let row = allocation_row(&ported);
-    assert_eq!(decode_allocation(&row), Ok(ported.clone()));
-    assert_eq!(
-        field_of(&allocation_row(&allocation(shape())), 13),
-        None,
-        "an allocation that holds none writes no field 13"
-    );
-    let read = decode_allocation(&with(&row, 902, b"later")).expect("reads");
-    assert_eq!(read.host_ports, ported.host_ports);
-    let rewritten = allocation_row(&read);
-    assert_eq!(field_of(&rewritten, 902), Some(b"later".to_vec()));
-    assert_eq!(field_of(&rewritten, 13), field_of(&row, 13));
-}
-
-// Catches a row from before host ports that is refused, or read as holding some, when it
-// should read as holding none.
-#[test]
-fn an_allocation_row_from_before_host_ports_reads_as_holding_none() {
-    let row = allocation_row(&AllocationRecord {
-        host_ports: vec![80],
-        ..allocation(shape())
-    });
-    assert_eq!(
-        decode_allocation(&without(&row, 13)),
-        Ok(allocation(shape()))
-    );
-}
-
-// Catches host ports that are read from a value that is not a whole number of ports, or that
-// is not strictly ascending with no zero, which no writer produces.
-#[test]
-fn a_host_port_list_that_is_not_valid_is_refused_by_tag() {
-    let row = allocation_row(&allocation(shape()));
-    let cases: [(&[u8], DecodeError); 5] = [
-        (&[0, 80, 0], DecodeError::BadLength { tag: 13 }),
-        (&[0, 0], DecodeError::BadValue { tag: 13 }),
-        (&[0, 80, 0, 0], DecodeError::BadValue { tag: 13 }),
-        (&[0x1f, 0x90, 0, 80], DecodeError::BadValue { tag: 13 }),
-        (&[0, 80, 0, 80], DecodeError::BadValue { tag: 13 }),
-    ];
-    for (value, error) in cases {
-        assert_eq!(
-            decode_allocation(&with(&row, 13, value)),
-            Err(error),
-            "{value:?}"
-        );
-    }
-}
+#[path = "codec_port_tests.rs"]
+mod ports;

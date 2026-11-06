@@ -252,21 +252,24 @@ fn a_log_that_cannot_be_read_is_an_error() {
     assert!(error.0.starts_with("the log: "), "{}", error.0);
 }
 
-/// Asserts that a stop asks the helper to kill the user (every process of it, not only the
-/// one started), that the run then ends by the kill's signal, and that a refused kill is an
-/// error. It catches a stop that signals one process and leaves its children.
+/// Asserts that a stop asks the helper's `stop` with the grace it was given, that a run that
+/// ends on the `SIGTERM` ends by that signal, and that a refused stop is an error. It
+/// catches a stop that ignores its grace (the job never gets to flush) and a refusal taken
+/// for a stop.
 #[test]
-fn a_stop_kills_every_process_of_the_user() {
+fn a_stop_asks_the_helper_to_stop_with_its_grace() {
     let mut rig = Rig::new("stop");
     let id = rig.start("r1", "/bin/true", &[]);
     rig.rt
         .stop(&id, std::time::Duration::from_secs(10))
         .unwrap();
-    assert_eq!(rig.fake.verbs().last().unwrap(), "kill-uid 7.0");
-    assert_eq!(rig.settle(&id), exited(137));
-    rig.fake.refuse("kill-uid", "no");
+    let stop = rig.fake.seen().pop().unwrap();
+    assert_eq!((stop.verb.as_str(), stop.lease.as_str()), ("stop", "7.0"));
+    assert_eq!(stop.millis, Some(10_000));
+    assert_eq!(rig.settle(&id), exited(143));
+    rig.fake.refuse("stop", "no");
     let error = rig.rt.stop(&id, std::time::Duration::ZERO).unwrap_err();
-    assert!(error.0.starts_with("kill-uid: "), "{}", error.0);
+    assert!(error.0.starts_with("stop: "), "{}", error.0);
 }
 
 /// Asserts that a removal kills the user, deletes it (the helper sweeps its home), forgets
@@ -428,27 +431,6 @@ fn a_container_body_is_refused_before_any_user_is_made() {
     assert_eq!(rig.fake.verbs(), ["boot-reset"]);
 }
 
-/// Asserts that the native runtime does not take a job start's environment: asked at
-/// admission it answers `env-unsupported` for a non-empty one and passes an empty one, and a
-/// run handed to it directly with one fails before the helper is asked for a user. It
-/// catches a native run made without the environment its job start named.
-#[test]
-fn a_run_with_a_job_env_is_refused_before_any_user_is_made() {
-    let mut rig = Rig::new("job-env");
-    assert_eq!(rig.rt.check_env(&[]), Ok(()));
-    let env = vec![("A".to_owned(), "1".to_owned())];
-    let refused = rig.rt.check_env(&env).unwrap_err();
-    assert_eq!(refused.code, refusal::ENV_UNSUPPORTED);
-    let mut spec = rig.spec("r1", native("/bin/true", &[]));
-    spec.env = env;
-    let error = rig.rt.create_and_start(&spec).unwrap_err();
-    assert_eq!(
-        error.0,
-        "this runtime does not carry a job start's environment"
-    );
-    assert_eq!(rig.fake.verbs(), ["boot-reset"]);
-}
-
 /// Asserts the boot reset at open: asked for once; a helper that has reset already is fine;
 /// any other refusal, and a helper that cannot be reached, are errors that name the reset.
 /// It catches a runtime that works against a helper that refuses every verb, and one that
@@ -471,10 +453,9 @@ fn opening_asks_for_the_reset_and_takes_one_that_ran_already() {
 }
 
 /// Asserts what the runtime answers a native start before anything is made: a program under
-/// a tool root passes; one outside every root is `invalid-program`; inputs and a working
-/// directory, which this runtime cannot stage, are each `native-unsupported`; declared
-/// outputs, which it collects, pass. It catches a program run from anywhere on the Mac and
-/// a start whose inputs would be dropped without a word.
+/// a tool root passes; one outside every root is `invalid-program`; a mount input and a
+/// working directory below `exec/`, which this runtime stages, and declared outputs, which
+/// it collects, pass. It catches a program run from anywhere on the Mac.
 #[test]
 fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     let rig = Rig::new("check");
@@ -505,13 +486,9 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
     });
     let mut with_cwd = native("/bin/sh", &[]);
     with_cwd.cwd = "sub".to_owned();
-    for body in [with_input, with_cwd] {
-        let refused = rig.rt.check_native(&body).unwrap_err();
-        assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
-        let why = "this agent stages no inputs and runs in no subdirectory yet";
-        assert_eq!(refused.why, why);
+    for body in [with_input, with_cwd, with_output] {
+        assert_eq!(rig.rt.check_native(&body), Ok(()));
     }
-    assert_eq!(rig.rt.check_native(&with_output), Ok(()));
 }
 
 /// Asserts that the first program of the command is `sandbox-exec`, that the program of the
