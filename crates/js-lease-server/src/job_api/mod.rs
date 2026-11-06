@@ -108,6 +108,8 @@ mod access_tests;
 #[cfg(test)]
 mod clients_tests;
 #[cfg(test)]
+mod conformance_tests;
+#[cfg(test)]
 #[path = "fenced_tests.rs"]
 mod fenced_tests;
 #[cfg(test)]
