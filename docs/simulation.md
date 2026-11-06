@@ -427,8 +427,8 @@ family `faults` the first four seeds of the restart of the server with runs in f
 (`tests/cell/server_restart.rs`), family `whole_host` the first two seeds of the fifty
 whole-host requests under each value of `--placement`, and family `whole_host_faults` the
 first two seeds of the cancelled whole-host request (`tests/cell/whole_host_cancel.rs`)
-under each value of `--placement`, and family `jobs` the first seed of the lossy
-agent wire over the job front. A trace hash covers the
+under each value of `--placement`, and family `jobs` the first seed of jobs over
+the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts). A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its

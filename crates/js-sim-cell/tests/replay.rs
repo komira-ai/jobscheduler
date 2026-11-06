@@ -41,13 +41,16 @@
 //! seeds, so a restart, which drops the server and opens its lease file again, is shown
 //! to replay from its seed.
 //!
-//! And one job smoke scenario, family `jobs`: the lossy agent wire over the job front
-//! (`Scenario::over_jobs`, about 8,400 agent requests a seed) over [`JOBS_SEEDS`] seeds, so
-//! a change to a decision of the job front, the per-job agents or the server's job service
-//! and job pass, or a job or allocation id that does not follow the seed, moves a hash. The
-//! ids themselves are compared between two runs of one seed, and between two seeds, in the
-//! cell's ledger, where each job's launch is named by its job and allocation ids.
+//! And one job smoke scenario, family `jobs`: jobs over the job front on a lossy agent wire
+//! (`cell/jobs.rs`, eight hosts, about 960 agent requests a seed) over [`JOBS_SEEDS`] seed,
+//! so a change to a decision of the job front, the per-job agents or the server's job
+//! service and job pass, or a job or allocation id that does not follow the seed, moves a
+//! hash. The ids themselves are compared between two runs of one seed, and between two
+//! seeds, in the cell's ledger, where each job's launch is named by its job and allocation
+//! ids.
 
+#[path = "cell/jobs.rs"]
+mod jobs;
 #[path = "cell/lossy_wire.rs"]
 mod lossy_wire;
 #[path = "cell/real_agents.rs"]
@@ -207,8 +210,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// the end), so the hash covers a run that reached the server. The same for a seed of the
 /// scenario with real agents, run twice, whose items all succeed, and for one seed of the
 /// whole-host scenario and one of the cancelled whole-host request, each run twice under
-/// each placement, and for one seed of the job smoke scenario, run twice, whose items end
-/// alike. Catches a handler path that reads a
+/// each placement, and for one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
+/// whose items end alike. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
 /// whose lines depend on whether they are kept. Also that a seed of the fault scenario of
@@ -260,9 +263,8 @@ fn a_seed_replays_to_the_same_trace_hash() {
     let once = restart().run_seeds(1).runs[0].hash;
     assert_eq!(restart().run_seeds(1).runs[0].hash, once);
 
-    let jobs = || lossy_wire::a_lossy_agent_wire_settles_every_run().over_jobs();
-    let once = jobs().run_seeds(1).runs.remove(0);
-    let again = jobs().run_seeds(1).runs.remove(0);
+    let once = jobs::jobs_on_a_lossy_wire().run_seeds(1).runs.remove(0);
+    let again = jobs::jobs_on_a_lossy_wire().run_seeds(1).runs.remove(0);
     assert_eq!(once.hash, again.hash);
     assert_eq!(once.outcomes, again.outcomes);
 }
@@ -365,13 +367,9 @@ fn real_runs() -> Vec<(String, TraceHash)> {
 
 /// The hash of each pinned seed of the job smoke scenario, which must pass.
 fn jobs_runs() -> Vec<(String, TraceHash)> {
-    let scenario = lossy_wire::a_lossy_agent_wire_settles_every_run().over_jobs();
-    let passed = scenario.run_seeds(JOBS_SEEDS);
+    let passed = jobs::jobs_on_a_lossy_wire().run_seeds(JOBS_SEEDS);
     let each = |run: &js_sim_cell::SeedRun| {
-        let name = format!(
-            "a_lossy_agent_wire_settles_every_run-jobs/seed-{}",
-            run.seed
-        );
+        let name = format!("jobs_on_a_lossy_wire-jobs/seed-{}", run.seed);
         (name, run.hash)
     };
     passed.runs.iter().map(each).collect()

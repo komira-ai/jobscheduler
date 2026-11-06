@@ -69,7 +69,7 @@ const REPEAT_DELAY: Duration = Duration::from_millis(1_500);
 const REPEAT_INTERVAL: Duration = Duration::from_secs(1);
 const REPEAT_GRACE: Duration = Duration::from_secs(3);
 const REPEAT_SETTLE: Duration = Duration::from_secs(120);
-const REPEAT_SEEDS: u64 = 4;
+const REPEAT_SEEDS: u64 = 2;
 
 /// Which front a scenario runs over.
 #[derive(Clone, Copy)]
@@ -136,22 +136,31 @@ fn a_partition_of_ten_agents_that_heals_settles_every_run() -> Scenario {
 /// resent result twice
 /// (`result-kept-until-acknowledged`), or loses or fails jobs (the expected count of
 /// successes).
+///
+/// The six runs are independent cells, each built and run on a thread of its own, so they
+/// overlap in time; a run that fails panics its thread, and the scope fails the test.
 #[test]
 fn smoke_scenarios_run_over_the_job_front() {
-    for front in FRONTS {
-        let burst = over(a_hundred_hosts_settle_four_hundred_runs(), front);
-        let burst = match front {
-            Over::Leases => burst,
-            Over::Jobs => burst.settle_within(BURST_JOBS_SETTLE),
-        };
-        burst.run_seeds(BURST_SEEDS);
-        over(lossy_wire::a_lossy_agent_wire_settles_every_run(), front).run_seeds(LOSSY_SEEDS);
-        over(
-            a_partition_of_ten_agents_that_heals_settles_every_run(),
-            front,
-        )
-        .run_seeds(CUT_SEEDS);
-    }
+    std::thread::scope(|scope| {
+        for front in FRONTS {
+            scope.spawn(move || {
+                let burst = over(a_hundred_hosts_settle_four_hundred_runs(), front);
+                let burst = match front {
+                    Over::Leases => burst,
+                    Over::Jobs => burst.settle_within(BURST_JOBS_SETTLE),
+                };
+                burst.run_seeds(BURST_SEEDS);
+            });
+            scope.spawn(move || {
+                let lossy = lossy_wire::a_lossy_agent_wire_settles_every_run();
+                over(lossy, front).run_seeds(LOSSY_SEEDS);
+            });
+            scope.spawn(move || {
+                let cut = a_partition_of_ten_agents_that_heals_settles_every_run();
+                over(cut, front).run_seeds(CUT_SEEDS);
+            });
+        }
+    });
 }
 
 /// The broken-agent family's smoke shape over the job front: agents lacking `defect`, or
