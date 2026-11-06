@@ -12,9 +12,14 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
-use js_state::postgres::{PostgresConfig, TestDatabase, WRITER_LOCK_KEY, test_database};
+use js_state::postgres::{
+    PostgresConfig, PostgresStore, TestDatabase, WRITER_LOCK_KEY, test_database,
+};
 use js_state::sqlite::{Options, SqliteError, SqliteStore};
-use js_state::{Clock, LockRefused, ManualClock, WriterLock, WriterTarget};
+use js_state::{
+    Clock, Cond, LockRefused, ManualClock, Store, StoreError, Txn, WriterGeneration, WriterLock,
+    WriterTarget,
+};
 use js_testkit::dir::TestDir;
 use postgres::{Client, NoTls};
 
@@ -206,4 +211,197 @@ fn open_locked_refuses_a_postgres_writer_lock() {
     );
     let again = WriterLock::acquire(&target(&database)).expect("the refused lock was released");
     drop(again);
+}
+
+fn config(database: &TestDatabase) -> PostgresConfig {
+    PostgresConfig::parse(&database.url()).expect("the URL parses")
+}
+
+/// Ends the holder's lock session, as a lost network or a stalled process does: the server
+/// releases the lock with it, and the old holder does not know until it asks.
+fn lose_the_lock(admin: &mut Client) {
+    let pid = holder(admin).expect("the holder's backend");
+    let ended: bool = admin
+        .query_one("SELECT pg_terminate_backend($1, 60000)", &[&pid])
+        .expect("terminates")
+        .get(0);
+    assert!(ended, "the holder's backend ended");
+}
+
+fn put(key: &str) -> Txn {
+    Txn::new().put(key, "v", Cond::Any)
+}
+
+// Catches a writer that lost the lock and still commits (it would double-place work the new
+// holder places too): once a second process takes the lock, every commit path of the first
+// writer's store (a batch, a claim, a reap, a held commit) returns `Fenced` and none of its
+// rows is visible, while the new holder's store commits. The generation goes up by one for
+// each acquire. Before this change the first writer's commits succeeded.
+#[test]
+fn a_new_holder_fences_the_old_holders_commits() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    let first = WriterLock::acquire(&target(&database)).expect("the first acquire");
+    let first_generation = first
+        .generation()
+        .expect("a Postgres lock has a generation");
+    let old = PostgresStore::open(&config(&database))
+        .expect("opens")
+        .fenced(first_generation);
+    old.txn(put("before")).expect("commits").expect("applies");
+    old.txn(Txn::new().put("queue/a", "v", Cond::Any))
+        .expect("commits")
+        .expect("applies");
+    let held = old.begin(put("held")).expect("runs to the commit");
+
+    lose_the_lock(&mut admin);
+    let second = WriterLock::acquire(&target(&database)).expect("the lock is free");
+    let second_generation = second.generation().expect("a generation");
+    assert_eq!(
+        second_generation,
+        WriterGeneration::new(first_generation.get() + 1)
+    );
+
+    // The held commit first: it holds the commit head, which the others would queue on. Its
+    // snapshot is older than the new generation, so its read of the row is a serialization
+    // failure (a held commit is not run again); it commits nothing either way.
+    let refused = held.commit();
+    assert!(
+        matches!(&refused, Err(StoreError::Failed(why)) if why.contains("40001")),
+        "{refused:?}"
+    );
+    assert_eq!(old.txn(put("late")), Err(StoreError::Fenced));
+    assert_eq!(
+        old.apply_batch(vec![put("late1"), put("late2")]),
+        Err(StoreError::Fenced)
+    );
+    let claimed = old.claim("queue/", 10, |key, was| {
+        Some(Txn::new().delete(key, Cond::Version(was.version)))
+    });
+    assert_eq!(claimed, Err(StoreError::Fenced));
+    assert_eq!(old.reap_expired(), Err(StoreError::Fenced));
+
+    let new = PostgresStore::open(&config(&database))
+        .expect("opens")
+        .fenced(second_generation);
+    for key in ["late", "late1", "late2", "held"] {
+        assert_eq!(new.get(key), Ok(None), "{key} was not written");
+    }
+    assert!(new.get("queue/a").expect("reads").is_some(), "not claimed");
+    assert!(new.get("before").expect("reads").is_some());
+    new.txn(put("current")).expect("commits").expect("applies");
+    assert!(new.get("current").expect("reads").is_some());
+    drop(second);
+    drop(first);
+}
+
+// Catches a fence that refuses the current holder (the holder could never write) or one
+// that a store opened without a generation is subject to (a store of shared writers, which
+// takes no lock, would be refused): the holder commits before and after another acquire of
+// the lock fails as held, and an unfenced store commits whatever the row says.
+#[test]
+fn the_current_holder_and_an_unfenced_store_commit() {
+    let database = test_database();
+    let lock = WriterLock::acquire(&target(&database)).expect("acquired");
+    let store = PostgresStore::open(&config(&database))
+        .expect("opens")
+        .fenced(lock.generation().expect("a generation"));
+    store.txn(put("a")).expect("commits").expect("applies");
+    assert_eq!(
+        WriterLock::acquire(&target(&database)).err(),
+        Some(LockRefused::Held)
+    );
+    store.txn(put("b")).expect("commits").expect("applies");
+    let unfenced = PostgresStore::open(&config(&database)).expect("opens");
+    unfenced.txn(put("c")).expect("commits").expect("applies");
+}
+
+// Catches a reopened store that forgets its generation (a restarted frontend of the old
+// holder would commit after it lost the lock).
+#[test]
+fn a_reopened_fenced_store_stays_fenced() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    let first = WriterLock::acquire(&target(&database)).expect("acquired");
+    let old = PostgresStore::open(&config(&database))
+        .expect("opens")
+        .fenced(first.generation().expect("a generation"));
+    lose_the_lock(&mut admin);
+    let _second = WriterLock::acquire(&target(&database)).expect("the lock is free");
+    let reopened = old.reopen().expect("opens again");
+    assert_eq!(reopened.txn(put("late")), Err(StoreError::Fenced));
+    drop(first);
+}
+
+// Catches an acquire that keeps the lock without a generation (its store could not be
+// fenced) or keeps it when the increment fails (no one could take it until the process
+// ends): with the row gone the acquire is refused, says why, and leaves the lock free. Also
+// catches a fenced store that commits when it cannot read its generation: with the row gone
+// it is fenced, and with the table gone its commit fails and writes nothing.
+#[test]
+fn an_acquire_on_a_schema_without_a_generation_row_is_refused_and_frees_the_lock() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    admin
+        .batch_execute("DELETE FROM kbf_state.writer_generation")
+        .expect("removes the row");
+    assert_eq!(
+        WriterLock::acquire(&target(&database)).err(),
+        Some(LockRefused::Failed(
+            "the state schema has no writer generation row".to_owned()
+        ))
+    );
+    assert_eq!(holder(&mut admin), None, "the lock was given back");
+    let fenced = PostgresStore::open(&config(&database))
+        .expect("opens")
+        .fenced(WriterGeneration::new(1));
+    assert_eq!(
+        fenced.txn(put("k")),
+        Err(StoreError::Fenced),
+        "no row is no generation"
+    );
+    admin
+        .batch_execute("DROP TABLE kbf_state.writer_generation")
+        .expect("drops the table");
+    assert_eq!(
+        fenced.txn(put("k")),
+        Err(StoreError::Failed(
+            "ERROR: relation \"writer_generation\" does not exist (SQLSTATE 42P01)".to_owned()
+        )),
+        "a fence that cannot be read commits nothing"
+    );
+    assert_eq!(fenced.get("k"), Ok(None));
+    assert_eq!(
+        WriterLock::acquire(&target(&database)).err(),
+        Some(LockRefused::Failed(
+            "the state schema has no writer generation table (it is older than version 2): \
+             run the installer to bring it forward"
+                .to_owned()
+        ))
+    );
+    assert_eq!(holder(&mut admin), None, "the lock was given back");
+}
+
+// Catches an increment the server refuses for another reason (here a trigger raises) taken
+// for a missing table, or holding the lock: the refusal is the server's, by its SQLSTATE
+// alone, and the lock is free after it.
+#[test]
+fn an_increment_the_server_refuses_is_its_refusal_and_frees_the_lock() {
+    let database = test_database();
+    let mut admin = Client::connect(&database.url(), NoTls).expect("connects");
+    admin
+        .batch_execute(
+            "CREATE FUNCTION kbf_state.no_bump() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'no'; END $$; \
+             CREATE TRIGGER no_bump BEFORE UPDATE ON kbf_state.writer_generation \
+             FOR EACH ROW EXECUTE FUNCTION kbf_state.no_bump()",
+        )
+        .expect("a trigger that refuses the update");
+    assert_eq!(
+        WriterLock::acquire(&target(&database)).err(),
+        Some(LockRefused::Failed(
+            "the server refused (SQLSTATE P0001)".to_owned()
+        ))
+    );
+    assert_eq!(holder(&mut admin), None, "the lock was given back");
 }

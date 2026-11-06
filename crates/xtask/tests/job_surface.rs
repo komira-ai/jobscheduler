@@ -265,7 +265,10 @@ fn the_verb_writes_both_files_from_a_descriptor() {
         page.contains("| `POST /v1/jobs` | `SubmitJob` | 201 |\n"),
         "{page}"
     );
-    assert!(page.contains("The server serves `SubmitJob`"), "{page}");
+    assert!(
+        page.contains("The server serves every call of the service"),
+        "{page}"
+    );
 }
 
 /// Asserts that a call added to the definition, and nothing else, becomes a command: the

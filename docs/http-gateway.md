@@ -240,7 +240,7 @@ between the markers below is written by `cargo xtask gen-job-surface` from the s
 of the calls it serves, which a test of the server holds to what its service answers:
 
 <!-- gen-job-surface served begin -->
-The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult` and `GetLogs` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders` and `GetUsage`.
+The server serves every call of the service (`js_lease_server::SERVED_CALLS`).
 <!-- gen-job-surface served end -->
 
 A request carries at most 64 KiB over either transport: a larger gateway body is 413
@@ -388,7 +388,9 @@ generated paragraph above.
   name, kind, state, reasons, memory, machine count and last tick; per pool's provider its
   credentials check and its own checks, and the machines it launched. Nothing else of the
   status (the next launch's plan, the alerts, the orphans) is carried. A server with no elastic
-  pool answers empty lists.
+  pool answers empty lists. Both are served whatever the listen address: unlike
+  `GET /v1/pools`, which takes no token and is served only on a private address, they take a
+  client's token.
 - `GetUsage` reads the ended bookings of the usage store (see `usage-store.md`), oldest end
   first, from `from_ms` included to `to_ms` excluded, of one host or one job when asked. A page
   holds `page_size` records (100 when 0, at most 1000); the filters apply before the page is
@@ -396,6 +398,11 @@ generated paragraph above.
   it, so no record is read twice or skipped while records are written; it is empty on the last
   page. A token no answer gave is `INVALID_ARGUMENT` `invalid-page-token`. A server started
   with `--usage-off` answers an empty page.
+
+Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
+but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`
+(`NOT_FOUND`), and `cordon-unsaved`, `store-unavailable` and `usage-unavailable`
+(`UNAVAILABLE`), each answer 500 `internal`.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written
 `GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies; the

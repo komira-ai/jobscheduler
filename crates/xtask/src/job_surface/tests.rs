@@ -366,32 +366,35 @@ fn the_blocks_are_rendered_between_their_markers() {
 }
 
 /// Asserts that the served paragraph names exactly the calls of the served list, in the
-/// order of the routes, and every other call as unimplemented: one call added to a copy of
-/// the server's list moves it from the second list to the first; an empty list says no call
-/// is served, and a list of every call says every call is.
+/// order of the routes, and every other call as unimplemented: the server's list, which holds
+/// every call, says every call is served; a copy without `GetUsage` names the other eleven and
+/// `GetUsage` as unimplemented; a copy without `ListHosts` and `GetUsage` names both, in the
+/// order of the routes; and an empty list says no call is served.
 #[test]
 fn the_served_paragraph_follows_the_served_list() {
     use js_api_gateway::Rpc;
     let routes = js_api_gateway::ROUTES;
-    let now = served_paragraph(routes, &js_lease_server::SERVED_CALLS);
     assert_eq!(
-        now,
-        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult` and `GetLogs` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders` and `GetUsage`.\n"
+        served_paragraph(routes, &js_lease_server::SERVED_CALLS),
+        "The server serves every call of the service (`js_lease_server::SERVED_CALLS`).\n"
     );
-    let mut more = js_lease_server::SERVED_CALLS.to_vec();
-    more.push(Rpc::GetUsage);
+    let without = |left_out: &[Rpc]| -> Vec<Rpc> {
+        js_lease_server::SERVED_CALLS
+            .into_iter()
+            .filter(|rpc| !left_out.contains(rpc))
+            .collect()
+    };
     assert_eq!(
-        served_paragraph(routes, &more),
-        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs` and `GetUsage` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools` and `ListProviders`.\n"
+        served_paragraph(routes, &without(&[Rpc::GetUsage])),
+        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `GetUsage`.\n"
+    );
+    assert_eq!(
+        served_paragraph(routes, &without(&[Rpc::GetUsage, Rpc::ListHosts])),
+        "The server serves `SubmitJob`, `GetJob`, `ListJobs`, `CancelJob`, `GetResult`, `GetLogs`, `CordonHost`, `UncordonHost`, `ListPools` and `ListProviders` (`js_lease_server::SERVED_CALLS`). Every other call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the server serves it: `ListHosts` and `GetUsage`.\n"
     );
     assert_eq!(
         served_paragraph(routes, &[]),
         "The server serves no call yet (`js_lease_server::SERVED_CALLS`): every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`).\n"
-    );
-    let every: Vec<Rpc> = routes.iter().map(|route| route.rpc).collect();
-    assert_eq!(
-        served_paragraph(routes, &every),
-        "The server serves every call of the service (`js_lease_server::SERVED_CALLS`).\n"
     );
 }
 

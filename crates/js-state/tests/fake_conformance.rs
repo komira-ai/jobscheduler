@@ -4,7 +4,7 @@
 //! also pins the reason it fails.
 
 use js_state::conformance::{
-    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry,
+    c1_linearizable_cas, c2_atomic_txn, c3_monotonic_counter, c4_store_clock_expiry, c5_feed_trim,
     c5_ordered_feed, c6_durable_ack, c7_group_commit, c8_bounded_range_scan, run_all,
 };
 use js_state::fake::{FakeBackend, Flaw};
@@ -64,6 +64,28 @@ fn a_key_live_at_its_exact_expiry_fails_c4() {
 #[should_panic(expected = "C5 interleaved")]
 fn feed_past_an_uncommitted_revision_fails_c5() {
     c5_ordered_feed(&FakeBackend::new(Flaw::FeedPastPending));
+}
+
+// Catches a feed that serves a read below its trimmed floor from the rows that remain,
+// which skips the trimmed ones without telling the reader.
+#[test]
+#[should_panic(expected = "C5 trim stale")]
+fn a_feed_that_forgets_its_floor_fails_c5_trim() {
+    c5_feed_trim(&FakeBackend::new(Flaw::TrimKeepsNoFloor));
+}
+
+// Catches a trim that deletes the row past its bound: a reader at the bound loses a row.
+#[test]
+#[should_panic(expected = "C5 trim kept")]
+fn a_trim_that_deletes_past_its_bound_fails_c5_trim() {
+    c5_feed_trim(&FakeBackend::new(Flaw::TrimPastCursor));
+}
+
+// Catches a trim that reports a different number of rows than it deleted.
+#[test]
+#[should_panic(expected = "C5 trim count")]
+fn a_trim_that_miscounts_fails_c5_trim() {
+    c5_feed_trim(&FakeBackend::new(Flaw::TrimMiscounts));
 }
 
 // Catches an acknowledgement sent before the data is durable.
@@ -206,5 +228,9 @@ fn errors_say_what_failed() {
     assert_eq!(
         js_state::StoreError::Fenced.to_string(),
         "state store fenced: this handle is no longer the writer"
+    );
+    assert_eq!(
+        js_state::StoreError::Disconnected("connection closed".to_owned()).to_string(),
+        "state store connection lost: connection closed"
     );
 }

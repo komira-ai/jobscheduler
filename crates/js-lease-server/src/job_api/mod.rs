@@ -5,12 +5,12 @@
 //!
 //! Every call answers `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the
 //! file of its group serves it; the read group (`read.rs`) and the cancel group
-//! (`cancel.rs`) serve with every context at its default, and the submit and fleet groups'
-//! calls answer it until their contexts are given the server's handles
-//! (`submit::Ctx::served`, `fleet::Ctx::served`). The server builds the service from its
-//! state in one place, [`from_server`], which gives the submit group its handles and not yet
-//! the fleet group; [`SERVED_CALLS`] names the calls it serves. It serves both transports on
-//! the port of `--job-listen` through [`port`] (`wiring.rs`).
+//! (`cancel.rs`) are served, and the submit and fleet groups' calls answer it until their
+//! contexts are given the server's handles (`submit::Ctx::served`, `fleet::Ctx::served`), as
+//! the server's own service's are: it answers no call `UNIMPLEMENTED`. The server builds the
+//! service from its state in one place, [`from_server`]; [`SERVED_CALLS`] names the calls it
+//! serves. It serves both transports on the port of `--job-listen` through [`port`]
+//! (`wiring.rs`).
 //!
 //! # One file per call group
 //!
@@ -86,6 +86,7 @@ use tower::Layer;
 
 use crate::adapt::SharedClock;
 use crate::config::LiveClients;
+use crate::fence::Fence;
 use crate::job_store::ServerJobs;
 use roles::{Caller, admitted, caller_of};
 
@@ -106,6 +107,9 @@ pub(crate) use wiring::{from_server, port};
 mod access_tests;
 #[cfg(test)]
 mod clients_tests;
+#[cfg(test)]
+#[path = "fenced_tests.rs"]
+mod fenced_tests;
 #[cfg(test)]
 mod read_list_tests;
 #[cfg(test)]
@@ -137,6 +141,9 @@ pub struct JobApi {
     submit: submit::Ctx,
     cancel: cancel::Ctx,
     fleet: fleet::Ctx,
+    /// Trips when the job tables answer that this process is no longer their writer; with
+    /// the server it is the agent side's ([`crate::fence`]), so the server stops.
+    fence: Fence,
 }
 
 impl JobApi {
@@ -151,7 +158,15 @@ impl JobApi {
             submit: submit::Ctx::default(),
             cancel: cancel::Ctx::default(),
             fleet: fleet::Ctx::default(),
+            fence: Fence::new(),
         }
+    }
+
+    /// The service tripping `fence` when the job tables say this process is no longer their
+    /// writer, and answering `UNAVAILABLE` `state-fenced` to that call.
+    #[must_use]
+    pub(crate) fn with_fence(self, fence: Fence) -> JobApi {
+        JobApi { fence, ..self }
     }
 }
 

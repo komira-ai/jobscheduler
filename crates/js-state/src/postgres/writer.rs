@@ -7,11 +7,18 @@
 //! for any reason (the process exits, the connection breaks, an administrator terminates
 //! the backend) releases the lock on the server, which is what lets another process take
 //! it after a crash; [`LockSession::check`] is how the holder learns its session is gone.
+//!
+//! Once the lock is held, [`LockSession::take`] increments the store's writer generation, in
+//! its own transaction on the same connection: the update waits for every commit that holds
+//! the row shared (each commit of a fenced store does), so the old holder's last commit is
+//! ordered before the new holder starts, and none after it can succeed.
 
-use super::conn::Conn;
+use postgres::error::SqlState;
+
+use super::conn::{Conn, DialError};
 use super::{PostgresConfig, describe, failed};
-use crate::StoreError;
 use crate::writer::LockRefused;
+use crate::{StoreError, WriterGeneration};
 
 /// The key of the writer lock: the advisory lock (single `bigint` form) the active writer
 /// of a store holds for its life (design section 10.2, "one writer"). Its bytes spell
@@ -31,29 +38,69 @@ const TRY_LOCK: &str = "SELECT pg_try_advisory_lock($1)";
 /// the server when the drop returns (closing alone lets the backend release it later).
 const UNLOCK: &str = "SELECT pg_advisory_unlock($1)";
 
-/// The connection that holds the writer lock.
+/// Why an acquire on a schema older than version 2 is refused.
+const NO_TABLE: &str = "the state schema has no writer generation table (it is older than \
+                        version 2): run the installer to bring it forward";
+
+/// The connection that holds the writer lock, and the generation it took.
 pub(crate) struct LockSession {
     conn: Conn,
+    generation: WriterGeneration,
 }
 
 impl LockSession {
-    /// Opens a connection of its own to the database `config` names and takes the writer
-    /// lock on it, once.
+    /// Opens a connection of its own to the database `config` names, takes the writer lock
+    /// on it, once, and increments the writer generation of `config`'s schema.
     ///
     /// # Errors
     /// [`LockRefused::Held`] when another session holds the lock; [`LockRefused::Failed`]
-    /// when the server cannot be reached or refuses the login or the call.
+    /// when the server cannot be reached or refuses the login or a call, or the schema has no
+    /// writer generation row (a schema older than version 2: the installer brings it
+    /// forward). The lock is given back on every error.
     pub(crate) fn take(config: &PostgresConfig) -> Result<LockSession, LockRefused> {
-        let mut conn = Conn::connect(&config.pg).map_err(refused)?;
+        let mut conn = Conn::connect(&config.dial()).map_err(|err| match err {
+            DialError::Pg(err) => refused(err),
+            DialError::Tls(err) => LockRefused::Failed(err.to_string()),
+        })?;
         let taken: bool = conn
             .query_one(TRY_LOCK, &[&WRITER_LOCK_KEY])
             .map_err(refused)?
             .get(0);
-        if taken {
-            Ok(LockSession { conn })
-        } else {
-            Err(LockRefused::Held)
+        if !taken {
+            return Err(LockRefused::Held);
         }
+        // Held from here, so the drop gives the lock back if the increment fails.
+        let mut session = LockSession {
+            conn,
+            generation: WriterGeneration::new(0),
+        };
+        let bumped: Option<i64> = session
+            .conn
+            .query_opt(
+                &format!(
+                    "UPDATE {}.writer_generation SET generation = generation + 1 \
+                     RETURNING generation",
+                    config.schema
+                ),
+                &[],
+            )
+            .map_err(|err| {
+                if err.code() == Some(&SqlState::UNDEFINED_TABLE) {
+                    LockRefused::Failed(NO_TABLE.to_owned())
+                } else {
+                    refused(err)
+                }
+            })?
+            .map(|row| row.get(0));
+        session.generation = WriterGeneration::new(bumped.ok_or(LockRefused::Failed(
+            "the state schema has no writer generation row".to_owned(),
+        ))?);
+        Ok(session)
+    }
+
+    /// The generation this holder took.
+    pub(crate) fn generation(&self) -> WriterGeneration {
+        self.generation
     }
 
     /// A trivial query on the lock's own session: an error when the session is gone, and

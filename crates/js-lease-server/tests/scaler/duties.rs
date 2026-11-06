@@ -16,7 +16,9 @@ use js_scaler::{Blocked, Millis, Phase, Record, Records};
 use js_types::LeaseId;
 
 use crate::complete::run_for;
-use crate::fakes::{live, logged, only_saves, record, records, request, rig, rig_with, view};
+use crate::fakes::{
+    allocation, job, live, logged, only_saves, record, records, rig, rig_with, view,
+};
 
 fn mins(n: u64) -> Duration {
     Duration::from_secs(60 * n)
@@ -90,7 +92,7 @@ async fn a_step_gets_one_fresh_value_for_each_launch_it_may_make() {
     let mut settings = live();
     settings.max_step = 3;
     let rig = rig(Records::default(), settings.clone());
-    rig.world().waiting = (1..=5).map(|n| request(&format!("r{n}"))).collect();
+    rig.world().queued = (1..=5).map(|n| job(&format!("r{n}"))).collect();
     rig.scaler.tick().await;
     let names: Vec<String> = rig
         .scaler
@@ -107,7 +109,7 @@ async fn a_step_gets_one_fresh_value_for_each_launch_it_may_make() {
     assert_eq!(mints, 3);
 
     let dry = rig_with(Records::default(), settings, Box::new(Dry));
-    dry.world().waiting = vec![request("r1")];
+    dry.world().queued = vec![job("r1")];
     dry.scaler.tick().await;
     assert!(dry.log().is_empty());
     assert_eq!(dry.scaler.state().blocked["gpu"], Blocked::Entropy);
@@ -144,25 +146,25 @@ async fn a_machine_missing_from_the_registry_is_released_only_on_a_view_the_shel
     assert!(rig.world().gone_asked.iter().all(|id| id == "i-m"));
 }
 
-/// Asserts the lease flag of a silent host. Two machines whose hosts are lost: the host
+/// Asserts the work flag of a silent host. Two machines whose hosts are silent: the host
 /// that books nothing is, at `unknown_hold` of silence, drained and marked for release,
 /// then released once the mark is read back, and the step names it for the log, which says
-/// so; the host the registry still books a lease on gets no call at all. It catches a flag
-/// set from the wrong side, which would either keep a paid machine for ever or terminate
-/// one that holds a lease.
+/// so; the host a live job allocation is still on gets no call at all, since silence frees
+/// no allocation. It catches a flag set from the wrong side, which would either keep a paid
+/// machine for ever or terminate one that holds a job.
 #[tokio::test]
-async fn a_silent_host_that_books_nothing_is_released_and_one_that_books_a_lease_is_not() {
+async fn a_silent_host_that_books_nothing_is_released_and_one_that_holds_a_job_is_not() {
     let each = vec![
         registered("js-silent-free", "i-f"),
-        registered("js-silent-leased", "i-l"),
+        registered("js-silent-working", "i-l"),
     ];
     let rig = rig(records(each), live());
     let mut free = view("js-silent-free");
     free.state = HostState::Lost;
-    let mut leased = view("js-silent-leased");
-    leased.state = HostState::Awaiting;
-    leased.lease = Some(LeaseId::new(1, 7));
-    rig.world().hosts = vec![free, leased];
+    let mut working = view("js-silent-working");
+    working.state = HostState::Awaiting;
+    rig.world().hosts = vec![free, working];
+    rig.world().live = vec![allocation("j-silent", "js-silent-working")];
     rig.scaler.tick().await;
     rig.advance(mins(30) - Duration::from_secs(1));
     rig.scaler.tick().await;
@@ -187,7 +189,7 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_books_a_lease
     let log = rig.log();
     assert!(log.contains(&"revoke:js-silent-free".to_owned()), "{log:?}");
     assert!(
-        !log.iter().any(|entry| entry.contains("js-silent-leased")),
+        !log.iter().any(|entry| entry.contains("js-silent-working")),
         "{log:?}"
     );
 }
@@ -206,7 +208,7 @@ async fn a_machine_the_provider_no_longer_has_is_settled_when_its_host_is_silent
     let rig = rig(records(each), live());
     let mut lost = view("js-gone-lost");
     lost.state = HostState::Lost;
-    lost.lease = Some(LeaseId::new(1, 3));
+    rig.world().live = vec![allocation("j-gone", "js-gone-lost")];
     rig.world().hosts = vec![lost, view("js-gone-live")];
     rig.world().gone = vec!["i-gone".to_owned(), "i-live".to_owned()];
     rig.scaler.tick().await;
@@ -366,7 +368,7 @@ async fn a_machine_is_not_released_while_its_host_holds_a_lease() {
     rig.advance(mins(16));
     rig.scaler.tick().await;
     rig.advance(mins(5));
-    let said = times("the registry books a lease on the host");
+    let said = times("the host holds a lease or a job allocation");
     let mut booked = view("js-leased-late");
     booked.lease = Some(LeaseId::new(1, 4));
     rig.world().after_save = Some(vec![booked]);
@@ -378,9 +380,39 @@ async fn a_machine_is_not_released_while_its_host_holds_a_lease() {
             .count()
     };
     assert_eq!(released(&rig), 0, "{:?}", rig.log());
-    assert!(times("the registry books a lease on the host") > said);
+    assert!(times("the host holds a lease or a job allocation") > said);
 
     rig.world().hosts[0].lease = None;
+    rig.advance(Duration::from_secs(5));
+    rig.scaler.tick().await;
+    assert_eq!(released(&rig), 1, "{:?}", rig.log());
+}
+
+/// Asserts that a machine is not released while a job allocation is on its host, read just
+/// before the release, though the tick read the job tables without it: the host of a
+/// machine whose release is under way is placed a job after the records were written. No
+/// release is sent that tick, the refusal is logged, and the release goes out at the first
+/// tick after the allocation is freed. It catches a release that trusts the tick's read, or
+/// the registry's marks (which do not see jobs), and so terminates a machine under a job.
+#[tokio::test]
+async fn a_machine_is_not_released_while_a_job_allocation_is_on_its_host() {
+    let rig = rig(records(vec![record("js-job-late", Phase::Booting)]), live());
+    rig.advance(mins(16));
+    rig.scaler.tick().await;
+    rig.advance(mins(5));
+    let said = times("the host holds a lease or a job allocation");
+    rig.world().after_save_live = Some(vec![allocation("j-late", "js-job-late")]);
+    rig.scaler.tick().await;
+    let released = |rig: &crate::fakes::Rig| {
+        let log = rig.log();
+        log.iter()
+            .filter(|each| each.starts_with("release:"))
+            .count()
+    };
+    assert_eq!(released(&rig), 0, "{:?}", rig.log());
+    assert!(times("the host holds a lease or a job allocation") > said);
+
+    rig.world().live.clear();
     rig.advance(Duration::from_secs(5));
     rig.scaler.tick().await;
     assert_eq!(released(&rig), 1, "{:?}", rig.log());
@@ -415,10 +447,10 @@ async fn a_release_the_provider_does_not_confirm_is_said() {
 }
 
 /// Asserts that a booting machine whose host was put back after a restart and has not
-/// announced itself again (it holds a lease) is not condemned as short: it reaches the
-/// step with no shape, and a host with no shape is below nothing, where the pool's floor
+/// announced itself again (a job allocation is on it) is not condemned as short: it reaches
+/// the step with no shape, and a host with no shape is below nothing, where the pool's floor
 /// would be below every offer. It catches a healthy machine released, and the pool put in
-/// cooldown, after every restart that finds a lease on a host that has not said hello yet.
+/// cooldown, after every restart that finds a job on a host that has not said hello yet.
 #[tokio::test]
 async fn a_host_that_has_not_announced_itself_again_is_not_condemned_as_short() {
     let rig = rig(
@@ -428,7 +460,7 @@ async fn a_host_that_has_not_announced_itself_again_is_not_condemned_as_short() 
     let mut waiting = view("js-awaiting-shape");
     waiting.state = HostState::Awaiting;
     waiting.claim = None;
-    waiting.lease = Some(LeaseId::new(1, 5));
+    rig.world().live = vec![allocation("j-awaiting", "js-awaiting-shape")];
     let mut unknown = view("js-awaiting-unknown");
     unknown.state = HostState::Awaiting;
     unknown.claim = None;
