@@ -155,8 +155,8 @@ pub struct Hello {
     pub name: String,
     /// The cloud's id of the machine, when the agent knows it.
     pub instance_id: Option<String>,
-    /// The cloud's signed identity of the machine, when the agent sent one. The agent
-    /// sends none yet.
+    /// The cloud's signed identity of the machine, when the agent sent one (an agent sends
+    /// one when started with `--identity-source`).
     pub identity: Option<SignedIdentity>,
 }
 

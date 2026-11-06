@@ -145,5 +145,6 @@ that is not `terminated`, `/v1/pools` shows `instances.n` 0, and `orphans` and `
 
 One instance of one type in one region and one zone. It does not prove spot or a Capacity Block, the second
 architecture, a launch against the quota edge, a restart of the scheduler while the instance is up
-(**CI** only, with fakes), or the signed instance identity: the agent sends none yet, so a host is matched
-by its name and instance id.
+(**CI** only, with fakes), or the signed instance identity: an agent sends one only when started with
+`--identity-source aws`, and the lease server does not check it at the hello yet, so a host is matched by its
+name and instance id.
