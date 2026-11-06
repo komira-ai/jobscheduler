@@ -766,7 +766,7 @@ A Mac agent uses `NativeRuntime` (`js-agent/src/native/`) with a root helper, `j
 
 Evidence: an isolation test (`js-agent/tests/native_isolation/`) plants one item of each kind of leftover (files, processes, keychain, defaults, launchd agents, shared memory and semaphores), removes the run, starts a second run on the same uid and looks for the items. It prints one of four verdicts. It runs on a Mac only, on manual dispatch.
 
-A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. Not done: staging inputs and collecting outputs for a native run (a start with `files` is refused `native-unsupported`, `native/mod.rs`), adopting a job after an agent restart, soft stop (the helper only kills), and the reuse pool of fixed users. Native runs are not stopped when the agent stops; the wall limit runs only while an agent runs.
+A bundle store (`--bundle-store`, `js-agent/src/native/bundle.rs`) already gives native jobs pinned toolchain trees. A native run carries a job start's environment, stages its mount inputs into `exec/` and runs in its `cwd` below it, is adopted by the agent's next process (the lease journal's run record and the helper's `watch`), is stopped softly (the helper's `stop`: `SIGTERM`, `kill-uid` after the grace), and is bounded by a deadline of its wall limit and the stop grace that the helper holds itself, so it ends while no agent runs (`native/mod.rs`). Not done: `stage` inputs (no store of stage trees; refused `native-unsupported`) and the reuse pool of fixed users.
 
 ## 6. Background work
 
@@ -1058,7 +1058,7 @@ Order that follows from the dependencies: 1, 2, 5, 12 and 25 can start now. 3 an
 
 **Whole-host jobs.** Built: the tail rule; registry marks, drain, give-up, caps; wait list; persisted ledger; estimate feed; tail counters; backfill gate. In review: `request_id` on a whole-node lease acquire, which makes the whole path reachable from HTTP today; the job API makes it reachable as a job (steps 8, 27). Remaining: a proof that queue order is respected (step 8); the restart test of section 8 row 10; rows 25 and 28 of section 8 close by design in steps 8, 27 and 28; rows 39 and 40 in step 8.
 
-**Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process. Remaining: staging inputs and collecting outputs (step 17); the pool of reused users; adoption after restart; soft stop; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
+**Macs.** Built: native runtime; throwaway users; Seatbelt profile; packet-filter rule; teardown verdicts; isolation test; package and updater hook; disclaiming privacy-grant responsibility for every job process; a job start's environment; mount inputs and `cwd`; adoption after restart; soft stop; a deadline the helper holds. Remaining: `stage` inputs (step 17); the pool of reused users; a VM runtime with a network path; read model `allow`; notarized binaries; automated isolation test per release. MDM placement is out of scope here.
 
 **Cross-cutting.** A readiness endpoint; a Kubernetes or other supervisor definition in the repository; a deny list of hosts; spot reclaim handling; a Linux arm64 archive; a VM runtime; a safe restore verb; reservations of capacity (question 24).
 

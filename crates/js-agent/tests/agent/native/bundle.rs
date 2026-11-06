@@ -338,17 +338,17 @@ fn a_start_that_fails_after_the_user_exists_removes_the_user_and_the_pins() {
 }
 
 /// Asserts what the runtime accepts of a native body before it makes anything: a program of
-/// a bundle when it holds a store, `bundle-unsupported` when it holds none, and the staged
-/// inputs that are refused either way. It catches a runtime that takes `@bundle/...` for a
-/// path under a tool root, and one that says it can without a store.
+/// a bundle when it holds a store, `bundle-unsupported` when it holds none, and a working
+/// directory that leaves `exec/`, refused either way. It catches a runtime that takes
+/// `@bundle/...` for a path under a tool root, and one that says it can without a store.
 #[test]
 fn the_runtime_checks_a_bundle_program_against_its_store() {
     let s = Stored::new("check");
     assert!(s.rig.rt.check_native(&native("@bundle/tool", &[])).is_ok());
     let mut staged = native("@bundle/tool", &[]);
-    staged.cwd = "sub".to_owned();
+    staged.cwd = "../sub".to_owned();
     let refused = s.rig.rt.check_native(&staged).unwrap_err();
-    assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
+    assert_eq!(refused.code, refusal::INVALID_JOB);
     let bare = Rig::new("check-bare");
     let refused = bare
         .rt
