@@ -15,6 +15,10 @@
 //! system's unless [`Config::with_monotonic`] gives another: a caller that must read no real
 //! clock gives it one of its own.
 //!
+//! The scaler draws the random part of each acquire id, and so of each machine's name, from
+//! the operating system unless [`Config::with_entropy`] gives another source: a caller that
+//! must name the same machines on every run with the same inputs gives it a seeded one.
+//!
 //! A request carries no peer address, so the status routes (`/v1/pools`, `/status`) answer
 //! as they do for a peer the listener could not name: as a route that does not exist.
 //!

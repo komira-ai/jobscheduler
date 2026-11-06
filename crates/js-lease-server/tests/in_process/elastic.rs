@@ -20,6 +20,7 @@ use js_lease_server::{
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
+use js_registry::{SequentialSessions, SessionSource};
 use js_state::sqlite::{Options, SqliteStore};
 use js_types::{
     ExecMode, ImageDigestRef, Labels, LeaseId, Model, ProviderId, ResourceClass, Resources,
@@ -345,4 +346,86 @@ async fn one_tick_runs_the_checks_then_the_table_then_the_scaler() {
     assert!(!calls.iter().any(|call| call == "acquire"), "{calls:?}");
     let scaler = server.scaler().unwrap();
     assert_eq!(scaler.state().records.instances.len(), 1);
+}
+
+/// Starts a server with the live pool `burst` of [`file_text`] on a fresh elastic fake cloud
+/// and one job queued from the start, its scaler drawing from `entropy` when one is given,
+/// else from the default the configuration has, and runs one tick: the pool's checks pass
+/// and the scaler launches one machine for the job with its first draw. Returns the acquire
+/// id and the name of each machine the scaler then has a record of.
+async fn launches(name: &str, entropy: Option<Arc<dyn SessionSource>>) -> Vec<(String, String)> {
+    let scratch = Scratch::new(name);
+    let fake_clock = FakeClock::new(1_000_000_000_000);
+    let cloud = ElasticFake::new(fake_clock, Billing::Lambda, vec![offer()]);
+    let log: Log = Arc::default();
+    let key = scratch.path("api-key").display().to_string();
+    CLOUDS.lock().unwrap().insert(key, (cloud, log.clone()));
+    let path = scratch.write("js.toml", &file_text(&scratch), 0o644);
+    queue_job(&scratch, "wants-a100");
+    let (_clock, shared) = clock();
+    let kinds = Kinds::standard().with("logged-cloud", logged_cloud);
+    let config = Config::from_config_file(&path, &kinds, &OwnerOnlyFiles, shared.clone()).unwrap();
+    let config = config
+        .with_capacity_source(Box::new(LoggedStatic(log)))
+        .with_monotonic(Arc::new(Stepping::of(Duration::from_millis(1))));
+    let config = match entropy {
+        Some(entropy) => config.with_entropy(entropy),
+        None => config,
+    };
+    let server = InProcess::start(config, shared).unwrap();
+    server.tick().await;
+    let records = server.scaler().unwrap().state().records.instances;
+    let named = records.iter().map(|record| {
+        let acquire = record.acquire.as_ref().map(ToString::to_string);
+        (acquire.unwrap_or_default(), record.name.clone())
+    });
+    named.collect()
+}
+
+/// Asserts that two servers whose scalers are given seeded sources that answer the same
+/// bytes ([`SequentialSessions`], each its own) launch the same machine, with the same
+/// acquire id and the same host name; that the id is the pool's name and the source's first
+/// draw in hex; and that a source shared by one server and a server started after it (the
+/// same `Arc`) goes on with the next draw, so the second names a machine the first did not.
+/// It catches a scaler that ignores `Config::with_entropy` (its id would be the operating
+/// system's random one, different on each run), one that draws other than once a step, and
+/// a copy of the source that starts it over.
+#[tokio::test]
+async fn seeded_entropy_names_the_same_machines_on_every_run() {
+    let first_run = launches("seeded-a", Some(Arc::new(SequentialSessions::new()))).await;
+    let second_run = launches("seeded-b", Some(Arc::new(SequentialSessions::new()))).await;
+    assert_eq!(first_run.len(), 1, "{first_run:?}");
+    assert_eq!(first_run, second_run);
+    let (id, name) = &first_run[0];
+    assert_eq!(*id, format!("burst-{:032x}", 1));
+    assert!(name.starts_with("js-"), "{name}");
+
+    let shared: Arc<dyn SessionSource> = Arc::new(SequentialSessions::new());
+    let before = launches("shared-a", Some(Arc::clone(&shared))).await;
+    let after = launches("shared-b", Some(shared)).await;
+    assert_eq!(before, first_run);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].0, format!("burst-{:032x}", 2));
+    assert_ne!(after[0].1, before[0].1);
+}
+
+/// Asserts that a server given no source keeps the production default, the operating
+/// system's random source: the id is the pool's name and 32 hex digits whose value is past
+/// any small sequential count, and two runs on the same inputs name different machines.
+/// The chance two draws of 128 random bits agree is 2^-128, so the test does not flicker.
+/// It catches a default that is a fixed or sequential source, which would name the same
+/// machines on two production servers.
+#[tokio::test]
+async fn without_a_source_the_scaler_draws_from_the_operating_system() {
+    let first_run = launches("default-a", None).await;
+    let second_run = launches("default-b", None).await;
+    assert_eq!(first_run.len(), 1, "{first_run:?}");
+    assert_eq!(second_run.len(), 1, "{second_run:?}");
+    for (id, _) in first_run.iter().chain(&second_run) {
+        let hex = id.strip_prefix("burst-").unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(hex.len(), 32, "{id}");
+        let value = u128::from_str_radix(hex, 16).unwrap();
+        assert!(value > u128::from(u64::MAX), "{id}");
+    }
+    assert_ne!(first_run, second_run);
 }
