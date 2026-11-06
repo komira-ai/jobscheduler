@@ -1,0 +1,82 @@
+# The manifest of the hostkeeper package of js-agent on a Linux node, with three placeholders
+# `cargo xtask release hostkeeper-package` fills in (crates/xtask/src/release/hostkeeper_package.rs):
+#   @VERSION@         the release version, X.Y.Z, the text `js-agent --version` prints after the name
+#   @PLATFORM@        linux-x86_64 or linux-arm64
+#   @MIN_HOSTKEEPER@  the oldest hostkeeper that reads this manifest
+# hostkeeper's loader refuses any key it does not know, so every key here is one it reads; the
+# tests in crates/xtask/tests/hostkeeper_package load this file with that loader.
+#
+# [hook]
+#   command         the program of every step, relative to the version directory. hostkeeper runs
+#                   the update steps (prepare, cutover, verify, rollback, cleanup) as
+#                   `bin/js-agent <step> [<artifact>] --params <file>`, without the second word,
+#                   and the additive steps as `bin/js-agent update-hook <step> ...`: the agent's
+#                   hook takes both forms.
+#   verify_deadline_secs
+#                   the time from the end of cutover to the end of the verdict, at least verify
+#                   plus rollback (615 + 8220) so a failed verify can still be rolled back.
+#   cleanup_retries how many times hostkeeper retries a failed cleanup.
+# [hook.timeout_secs]  the bound of each step, in seconds; each is mirrored in [params] for the hook
+#   prepare   3900   staging and checking the new release; the step waits for the agent's running
+#                    jobs to be cordoned and drained (up to 3600 s), so the bound is the drain
+#                    plus a margin
+#   cutover   4320   the stop of the agent (a drain of up to 3600 s and 120 s to stop jobs), the
+#                    wait for the unit's cgroup to empty, and the start
+#   verify     615   the new agent runs and is registered
+#   rollback  8220   the stop and start back to the previous release
+#   cleanup    120   removing what the update left behind
+#   There is no `uninstall`: hostkeeper refuses an uninstall order for this package.
+# [units] run       the units hostkeeper starts, stops and enables: the agent's service. The GPU
+#                   oneshot (js-agent-crun-gpu.service) is pulled in by the service (Wants=).
+# [[files]]         the tmpfiles file the service's ExecStartPre reads, linked at the path the unit
+#                   names. The join token (/etc/js-agent/token) and the host's flags
+#                   (/etc/js-agent/flags) are the operator's: a package is public and the same on
+#                   every host, and hostkeeper links files into a world-readable tree, so it
+#                   places neither.
+# [params]          what the agent's update hook reads (hostkeeper passes it this table as the
+#                   `--params` file): the unit it restarts, its state directory, hostkeeper's
+#                   `current` link, the flags file and token file, the agent's state root and
+#                   runtime, the cordon and drain bounds, and the step bounds above.
+schema         = 1
+name           = "js-agent"
+version        = "@VERSION@"
+platform       = "@PLATFORM@"
+min_hostkeeper = "@MIN_HOSTKEEPER@"
+
+[hook]
+command              = ["bin/js-agent", "update-hook"]
+verify_deadline_secs = 9000
+cleanup_retries      = 3
+
+[hook.timeout_secs]
+prepare  = 3900
+cutover  = 4320
+verify   = 615
+rollback = 8220
+cleanup  = 120
+
+[units]
+run = ["js-agent-crun.service"]
+
+[[files]]
+source = "files/tmpfiles.conf"
+path   = "/etc/tmpfiles.d/js-agent-crun.conf"
+
+[params]
+unit                  = "js-agent-crun.service"
+state_dir             = "/var/lib/js-agent-update"
+release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
+flags_file            = "/etc/js-agent/flags"
+token_file            = "/etc/js-agent/token"
+state_root            = "/var/lib/js-agent/state"
+runtime               = "crun"
+cordon_lease_secs     = 300
+cordon_max_secs       = 17355
+drain_wait_secs       = 3600
+defer_retry_secs      = 300
+prepare_timeout_secs  = 3900
+cutover_timeout_secs  = 4320
+verify_timeout_secs   = 615
+rollback_timeout_secs = 8220
+cleanup_timeout_secs  = 120
+verify_deadline_secs  = 9000

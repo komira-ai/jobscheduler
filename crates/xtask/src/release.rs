@@ -7,6 +7,8 @@
 //!   before the build, so `--version` of every binary prints it. Nothing is committed.
 //! - [`stage`]: lays down the files of one release archive, the binary, `LICENSE` and, in the
 //!   Linux archives of `js-agent` and `js-lease-server`, the host updater's declaration.
+//! - [`hostkeeper_package`], [`hostkeeper_index`]: the hostkeeper package of `js-agent` for one
+//!   platform, and the release index of the three.
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
 //! (`js-lease-server`, `js` from `js-cli`, `js-agent`, `js-bundle` from `js-bundle-cli`, `js-mac-session`, `js-mac-provision`, `js-mdm`) depend on, through normal and build
@@ -30,6 +32,8 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+pub mod hostkeeper_index;
+pub mod hostkeeper_package;
 pub mod include;
 pub mod plan;
 pub mod stage;
@@ -122,6 +126,33 @@ pub enum Error {
         /// The line of the include.
         line: usize,
     },
+    /// `release hostkeeper-package` was given a target it makes no package for.
+    #[error(
+        "no hostkeeper package for the target {0:?}: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl or aarch64-apple-darwin"
+    )]
+    UnknownTarget(String),
+    /// The binary does not hold the text its `--version` is made of for the version, so it is
+    /// not a build of the version the package would name.
+    #[error(
+        "{path} does not hold the version {version} and its runtimes line: it is not a build of that version"
+    )]
+    VersionNotInBinary {
+        /// The binary.
+        path: String,
+        /// The version asked for.
+        version: String,
+    },
+    /// The tar of a package could not be written.
+    #[error("cannot write {what} of the package: {why}")]
+    Archive {
+        /// What was being written.
+        what: String,
+        /// The reason.
+        why: String,
+    },
+    /// The packages `release hostkeeper-index` found are not the three of the version.
+    #[error("the hostkeeper packages: {0}")]
+    Packages(String),
     /// The checkout is not at the commit the run is about.
     #[error("the checkout is at {actual}, not at --head {expected}")]
     WrongCheckout {
