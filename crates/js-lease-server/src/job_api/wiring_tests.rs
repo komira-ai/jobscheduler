@@ -135,6 +135,7 @@ async fn answer(
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
     let router = port(from_server(&state, WALL).unwrap(), clients);
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {
@@ -210,6 +211,7 @@ async fn the_served_calls_are_the_ones_the_server_serves() {
     let state = state(&dir, true, Some(Arc::new(jobs)));
     let api = Arc::new(from_server(&state, WALL).unwrap());
     let clients = crate::config::Clients::only(&token(), "--token-file");
+    let clients = crate::config::LiveClients::new(clients);
     let authorization = format!("Bearer {}", String::from_utf8(TOKEN.to_vec()).unwrap());
     let served = |name: &str| SERVED_CALLS.iter().any(|rpc| rpc.name() == name);
 

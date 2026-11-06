@@ -1,6 +1,11 @@
 //! The `[logs]` table of the configuration file: where live logs go
 //! (`docs/design/live-logs.md`, section 6).
 //!
+//! Its keys are `sink` (`"none"`, the default, or `"object_store"`) and, for an object store,
+//! `url`, `region`, `endpoint`, `path_style`, `read_key_file`, `credentials`, `sts_endpoint`,
+//! `role_arn`, `mint_key_file`, `credential_ttl` and `max_follow` ([`LogsConfig`]). The table
+//! and its two key files are read and checked at start.
+//!
 //! It is the only way to set a sink: no flag sets one, and a server run from flags has none.
 //! Every rule is checked at start, offline, and a refusal names the key and never repeats its
 //! value. The two key files are read here, owner-only like every key file of the server; their
@@ -135,7 +140,7 @@ impl AccessKey {
     /// The key from the bytes of a key file: a JSON object with exactly `access_key_id` (1 to
     /// 128 ASCII letters and digits) and `secret_access_key` (1 to 1024 printable ASCII bytes).
     /// `None` for anything else; the reason never quotes the file.
-    fn parse(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         let value: Value = serde_json::from_slice(bytes).ok()?;
         let object = value.as_object().filter(|object| object.len() == 2)?;
         let id = object.get("access_key_id")?.as_str()?;

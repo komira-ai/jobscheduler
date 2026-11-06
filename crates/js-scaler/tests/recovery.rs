@@ -239,19 +239,24 @@ fn a_capacity_refusal_tries_the_next_offer() {
 }
 
 /// Asserts that a pool whose only offer is refused for capacity over and over keeps no
-/// refused record and mints no token in the step that learns of the refusal: the records
-/// hold the one launch in flight and no more, after a thousand steps.
+/// refused record and mints no token in the step that learns of the refusal, and asks again
+/// only when `acquire_retry` (a minute) has passed: the records hold the one launch in flight
+/// and no more, after a thousand rounds. It catches a refused record that is kept, and a
+/// retry sent in the step that read the refusal.
 #[test]
 fn a_pool_refused_for_capacity_over_and_over_keeps_its_records_bounded() {
     let (mut rig, mut plan) = launched(settings("gpu"));
     let mut launches = 1;
-    for round in 1..=1000 {
+    let mut now = 0;
+    for _ in 1..=1000 {
         rig.input.acquired = vec![answered(&plan, refusal(RefusalCode::Capacity))];
-        let refusal_step = rig.tick(at((2 * round - 1) * SECOND));
+        now += SECOND;
+        let refusal_step = rig.tick(at(now));
         assert_eq!(kinds(&refusal_step), ["Save", "Revoke", "ForgetNetwork"]);
         assert!(rig.state.records.instances.is_empty());
 
-        let retry = rig.tick(at(2 * round * SECOND));
+        now += MINUTE;
+        let retry = rig.tick(at(now));
         plan = acquires(&retry).remove(0);
         launches += 1;
         assert_eq!(rig.state.records.instances.len(), 1);
@@ -259,13 +264,13 @@ fn a_pool_refused_for_capacity_over_and_over_keeps_its_records_bounded() {
     assert_eq!(launches, 1001);
 }
 
-/// Asserts that a quota, a denial and a shape refusal each block the pool, with their own
-/// reason, until `boot_fail_cooldown` has run, and that the pool launches again at the
-/// instant it ends and not a millisecond before.
+/// Asserts that a denial and a shape refusal each block the pool, with their own reason,
+/// until `boot_fail_cooldown` has run, and that the pool launches again at the instant it
+/// ends and not a millisecond before. A quota refusal is not among them: it blocks nothing
+/// (see `failover.rs`). It catches a refusal that starts no cooldown or one that never ends.
 #[test]
-fn quota_denied_and_shape_block_the_pool_for_the_cooldown() {
+fn denied_and_shape_block_the_pool_for_the_cooldown() {
     let cases = [
-        (RefusalCode::Quota, Blocked::Quota),
         (RefusalCode::Denied, Blocked::Denied),
         (RefusalCode::Shape, Blocked::Shape),
     ];

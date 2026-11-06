@@ -137,6 +137,7 @@ cause.
 | an unknown job | 404 | `unknown-job` |
 | a result or logs past retention | 410 | `expired` |
 | the result of a job that has not ended | 409 | `not-finished` |
+| a fleet call of a client that is no operator (`PERMISSION_DENIED`, `operator-only`) | 403 | `operator-only` |
 | an argument the service refuses | 400 | `invalid-argument`, with `field` when the service names one |
 | a method the service does not implement | 501 | `unimplemented` |
 | a store write that failed | 500 | `state-write-failed` |
@@ -163,10 +164,76 @@ clients are `default`, whose token is the one the lease routes take (`--token-fi
 `--client-token` of the server; a presented token is compared with every client's. A request
 that passes goes to its call as that client: `SubmitJob` records the client's name on the job,
 and every answer that carries a job shows it as `client` (absent on a job recorded before
-clients were named). The name comes from the token, never from the request. Every client may
-call every method on every job: job ids are one namespace, so the same id with the same job
-from any client answers the existing job with the client that recorded it, and another job
-under the id is `job-id-conflict` whoever sends it.
+clients were named). The name and the role (below) come from the token, never from the
+request.
+
+### Clients, roles and token reload
+
+**Roles.** Each client has a role, `client` or `operator`:
+
+| call | `client` | `operator` |
+|---|---|---|
+| `SubmitJob` | yes | yes |
+| `GetJob`, `GetResult`, `GetLogs`, `CancelJob` | its own jobs only | every job |
+| `ListJobs` | its own jobs only, whatever the filter | every job |
+| `ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage` | `PERMISSION_DENIED` `operator-only` (403 `operator-only`) | yes |
+
+A client's own jobs are the ones recorded with its name. A job recorded with no client
+(submitted before clients were named) belongs to no client, so only an operator can read or
+cancel it. When a client asks for another client's job, the answer is the same as for an id
+with no row: `NOT_FOUND` `unknown-job` (404). The client cannot tell another client's job from
+a job that does not exist. Job ids are still one namespace. An operator retrying any job gets
+the stored job back. A client retrying an id that another client's job holds gets
+`job-id-conflict` (409), whatever the job, so it never reads a job it does not own.
+
+**Token entries and the default role.** A named client gets its role from its entry:
+
+```toml
+[[client]]
+name = "console"
+token_file = "/run/credentials/js/console-token"
+role = "operator"            # optional: "client" (the default) or "operator"
+```
+
+With flags, the entry is `--client-token NAME=PATH` (role `client`) or
+`--client-token NAME:ROLE=PATH`. Any other role is refused at start, naming the entry and never
+repeating the value. **An entry with no role is a `client`**, the least privilege. So after an
+upgrade, every named client that calls the fleet calls or cancels other clients' jobs (an
+operator's console or admin tooling, for example) must be given `role = "operator"` in the
+deployment's configuration. Clients that only submit and follow their own jobs (CI, a build
+farm) keep the default. The client `default`, whose token is the one in `--token-file`
+(`server.client_token_file`), is always an `operator`. That token already opens the lease
+routes, the join-token routes and the brake reset, so a narrower role on the job service would
+restrict nothing its holder cannot already do.
+
+**Reload.** At every tick the server reads each named client's token file again (the same
+tick that reads the agent join tokens again). The bearer layer reads the set in force on every
+request. So when a token file is rewritten with a new token, the old token is refused (401,
+`UNAUTHENTICATED`) from the first request after the next tick, and the new one is accepted.
+This is how a leaked token is revoked without a restart. A reload is all or nothing. If any
+file cannot be read, holds no valid token, holds another client's token, or holds a join token
+of the agent side, the whole set in force is kept and one warning line names the entry (never
+the token). A good set is never replaced by an empty or partial one. A reload that changes a
+token logs one info line. Names, roles and paths come from the configuration and are read once
+at start, like every other key: adding or removing a client, or changing its role, takes a
+restart. The token of `default` is the lease routes' token and is read once at start along with
+them.
+
+**Audit.** Each call writes exactly one info line, `job service call`, with these fields:
+
+- `call`: the method.
+- `client` and `role`: the caller, from its token.
+- `target`: the job id, or the host for `CordonHost` and `UncordonHost`; empty for a listing.
+- `job`: the job alone, as before.
+- `outcome`: `ok`, `denied` (a client's fleet call, or another client's job, logged as
+  `denied` although the answer is `unknown-job`), `not-found`, `refused` (an argument, a
+  conflict or a precondition), or `failed` (the server could not answer).
+- `code`: the gRPC code.
+
+This includes the state-changing calls `SubmitJob`, `CancelJob`, `CordonHost` and
+`UncordonHost`. No line holds a token or its digest. A request whose token is no client's
+reaches no call and writes no call line. The job record does not take a `cancelled_by` field:
+the line is the record of who cancelled.
 
 Both transports are served on the port of `--job-listen` (off by default). The paragraph
 between the markers below is written by `cargo xtask gen-job-surface` from the server's list
@@ -247,7 +314,8 @@ answer from what the commit returned; neither holds anything of its own outside 
 | a wall limit above the server's ceiling | `INVALID_ARGUMENT` with the refusal | 400 `wall-time-above-ceiling`, `field` `spec.wallLimitSeconds` |
 | a job id that names a different job | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
 | a job nothing could ever serve | `FAILED_PRECONDITION` with the refusal | 422 `no-capable-host` |
-| `CancelJob` of an id with no job | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| `CancelJob` of an id with no job, or of another client's job by a `client` | `NOT_FOUND`, `unknown-job` | 404 `unknown-job` |
+| `SubmitJob` by a `client` of an id another client's job holds | `ALREADY_EXISTS` with the refusal | 409 `job-id-conflict` |
 | a store that failed (the commit, or the read before it) | `INTERNAL`, `state-write-failed` | 500 `state-write-failed` |
 
 **`SubmitJob`**, in order:
@@ -297,9 +365,10 @@ commit is `state-write-failed` and the job is as it was.
 ### The fleet calls
 
 The service's calls that are not about one job are an operator's view of the fleet. They
-take the same bearer token as the job calls, and no other gate. This is what `fleet.rs` does
-with the server's handles; whether the server serves these calls is the generated paragraph
-above.
+take the same bearer token as the job calls, and only a client of the role `operator` may call
+them: any other client is answered `PERMISSION_DENIED` `operator-only` (403). This is what
+`fleet.rs` does with the server's handles; whether the server serves these calls is the
+generated paragraph above.
 
 - `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
   the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or

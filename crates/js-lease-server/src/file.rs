@@ -30,7 +30,7 @@ use crate::adapt::SharedClock;
 use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{Clients, Token};
+use crate::config::{LiveClients, Token};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::job_expiry::JobLimits;
@@ -52,6 +52,7 @@ mod server;
 
 pub use brake::BrakePlan;
 pub use joined::JoinedPool;
+use limits::Failover;
 pub use limits::ProviderLimits;
 pub use logs::{AccessKey, LogsConfig, Minting, ObjectStoreLogs};
 use network::read_network;
@@ -229,6 +230,8 @@ pub struct ElasticPlan {
     pub(crate) share: u32,
     /// The pool's `provider_limits` on the provider, as admission reads them.
     pub(crate) limits: PoolLimits,
+    /// Pass 2's failover timing: its `provider_limits` `quota_backoff` and `acquire_retry`.
+    pub(crate) failover: Failover,
     /// How long the provider's cached catalog is used before it is fetched again: its
     /// `provider_limits` `catalog_refresh`.
     pub(crate) catalog_refresh: Duration,
@@ -305,6 +308,7 @@ impl Registering {
                 allowed_instance_types: limit.allowed_instance_types.clone(),
                 max_price_cents_per_hour: limit.max_price_cents_per_hour,
             };
+            plan.failover = limit.failover();
             plan.catalog_refresh = limit.catalog_refresh;
             plan.offer_cooldown = limit.offer_cooldown;
         });
@@ -326,7 +330,7 @@ pub(crate) enum LoadedHosts {
 pub(crate) struct Loaded {
     pub(crate) server: Server,
     pub(crate) client_token: Token,
-    pub(crate) clients: Clients,
+    pub(crate) clients: LiveClients,
     pub(crate) hosts: LoadedHosts,
     pub(crate) warnings: Vec<String>,
     /// Where live logs go: the `[logs]` table, or no sink.
@@ -382,7 +386,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let server = read_server(server)?;
     let budgets = budget::read_budgets(budget, server.totals, ld.kinds)?;
     let client_token = read_client_token(&server, ld)?;
-    let clients = clients::read(&mut root, &client_token, &server, ld)?;
+    let clients = LiveClients::new(clients::read(&mut root, &client_token, &server, ld)?);
     let logs = logs::read_logs(logs, ld.files)?;
     let mut resolved = platform::declared(machine_providers, platforms, ld.kinds)?;
     let mut static_pool = None;
@@ -544,7 +548,7 @@ fn read_pool(
     number: usize,
     ld: &Load<'_>,
     (client, scheduler, max_lease_wall, budgets): (
-        &Clients,
+        &LiveClients,
         &SchedulerId,
         Option<Duration>,
         &Budgets,
@@ -746,7 +750,11 @@ struct Elastic<'a> {
 }
 
 impl Elastic<'_> {
-    fn finish(self, built: ElasticBuilt, client: &Clients) -> Result<Registering, StartupError> {
+    fn finish(
+        self,
+        built: ElasticBuilt,
+        client: &LiveClients,
+    ) -> Result<Registering, StartupError> {
         let Self {
             s,
             name,
@@ -820,7 +828,7 @@ impl Elastic<'_> {
                 Ok(tokens) => tokens,
                 Err(err) => return Err(s.fail("join_token_file", err.reason())),
             },
-            None => AgentTokens::none(),
+            None => AgentTokens::none(client),
         };
         let gpu_class = built.floor.gpu_class.as_ref().map(ToString::to_string);
         let resources = match Resources::new(
@@ -878,6 +886,7 @@ impl Elastic<'_> {
             provider: Arc::from(built.provider),
             share: u32::try_from(max).unwrap_or(u32::MAX),
             limits: PoolLimits::default(),
+            failover: ProviderLimits::default().failover(),
             catalog_refresh: ProviderLimits::default().catalog_refresh,
             offer_cooldown: ProviderLimits::default().offer_cooldown,
         };

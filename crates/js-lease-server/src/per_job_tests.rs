@@ -37,6 +37,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
         &BeatContext {
             host: &host(),
             ceiling: &ceiling,
+            logs: None,
         },
         &[],
         std::slice::from_ref(&long),
@@ -66,6 +67,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
         &BeatContext {
             host: &host(),
             ceiling: &ceiling,
+            logs: None,
         },
         &listing,
         &[],
@@ -103,6 +105,7 @@ fn a_failed_end_commit_is_an_error() {
         &BeatContext {
             host: &host(),
             ceiling: &ceiling,
+            logs: None,
         },
         &listing,
         &[],
@@ -141,6 +144,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         &BeatContext {
             host: &host(),
             ceiling: &ceiling,
+            logs: None,
         },
         &[],
         &[],
@@ -161,6 +165,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         &BeatContext {
             host: &host(),
             ceiling: &ceiling,
+            logs: None,
         },
         &[],
         &[],

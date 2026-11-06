@@ -39,6 +39,7 @@ fn build(
         &BeatContext {
             host: &host,
             ceiling,
+            logs: None,
         },
     )
 }

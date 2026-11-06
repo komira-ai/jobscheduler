@@ -128,6 +128,7 @@ pub fn every_time_is_the_store_clock_at_its_step<B: Backend>(backend: &B) {
                 ended_at: at,
             },
             usage: None,
+            logs: None,
         }),
         retention_ends: Some(at.saturating_add(Retention::DEFAULT.window())),
         ..want
