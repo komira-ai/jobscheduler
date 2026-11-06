@@ -414,3 +414,32 @@ fn rw_mount_from_a_plain_root_still_runs() {
     fs::create_dir(h.dir.path("data/sub")).unwrap();
     assert_eq!(names(&h.start(job_mounting("rw", false))), ["started rw"]);
 }
+
+/// Asserts how a native input is resolved: a mount input below its root, read-only, with
+/// its `dest` as the target; one whose path leaves the root refused as a mount is; a `stage`
+/// input not at all (it names no root). It catches a mount input resolved outside the
+/// agent's roots, or staged writable.
+#[test]
+fn a_native_input_resolves_as_a_read_only_mount_at_its_dest() {
+    use js_agent_wire::InputRef;
+    let (dir, roots) = tree("mounts-input");
+    let input = |rel: &str| InputRef::Mount {
+        root_name: "data".to_owned(),
+        rel: rel.to_owned(),
+        dest: "in/x".to_owned(),
+    };
+    let resolved = roots.resolve_input(&input("ok")).unwrap().unwrap();
+    let host = fs::canonicalize(dir.path("data/ok")).unwrap();
+    assert_eq!(
+        (resolved.host, resolved.target.as_str(), resolved.ro),
+        (host, "in/x", true)
+    );
+    let escape = roots.resolve_input(&input("up")).unwrap();
+    assert_eq!(escape.unwrap_err(), MountError::Escapes);
+    let stage = InputRef::Stage {
+        stage_id: format!("sha256:{}", "a".repeat(64)),
+        dest: "in".to_owned(),
+        placement: Default::default(),
+    };
+    assert!(roots.resolve_input(&stage).is_none());
+}
