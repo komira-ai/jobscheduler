@@ -215,6 +215,11 @@ message Job {
   // The client asked to cancel the job and it has not yet ended. Also kept on a job that
   // ended lost after the cancel was asked for.
   bool cancel_requested = 31;
+  // The name of the client whose token submitted the job, as the server's configuration
+  // names it (`--client-token NAME=PATH`, a `[[client]]` table, or `default` for
+  // `--token-file`). Set by the server, never by the request: a retry of the same job from
+  // another client keeps the first. Absent on a job recorded before clients were named.
+  optional string client = 32;
 }
 
 // How an ended job ended, as its result says.

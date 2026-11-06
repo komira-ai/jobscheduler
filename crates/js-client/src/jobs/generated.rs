@@ -31,8 +31,8 @@ impl JobClient {
         answer.map_err(|_| self.timed_out(attempt)).and_then(|answer| answer.map(tonic::Response::into_inner).map_err(|status| self.classify(attempt, &status)))
     }
 
-    /// Lists jobs by state, label and the time they were queued, a page at a time. Changes
-    /// nothing.
+    /// Lists jobs by state, label, client and the time they were queued, a page at a time.
+    /// Changes nothing.
     pub async fn list_jobs(&mut self, request: v1::ListJobsRequest) -> Result<v1::ListJobsResponse, JobError> {
         let (attempt, request) = self.begin(request);
         let answer = tokio::time::timeout(self.limit, self.service.list_jobs(request)).await;

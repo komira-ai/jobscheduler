@@ -88,6 +88,7 @@ fn the_job_store_is_one_handle_shared_by_the_service() {
         id: Some(id.clone()),
         spec: spec(),
         priority: 0,
+        client: None,
     };
     assert!(held.insert_queued(new).unwrap().created);
     let seen = api
@@ -130,7 +131,8 @@ async fn answer(
     let dir = scratch("port");
     let (_, jobs) = tables();
     let state = state(&dir, true, Some(Arc::new(jobs)));
-    let router = port(from_server(&state, WALL).unwrap(), token());
+    let clients = crate::config::Clients::only(&token(), "--token-file");
+    let router = port(from_server(&state, WALL).unwrap(), clients);
     let mut request = Request::get("/v1/jobs/job-1");
     if let Some(content_type) = content_type {
         request = request.header(header::CONTENT_TYPE, content_type);

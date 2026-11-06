@@ -101,6 +101,7 @@ pub(crate) fn placed(
         id: Some(id.clone()),
         spec,
         priority: 0,
+        client: None,
     };
     jobs.insert_queued(new).unwrap();
     jobs.place(&id, js_types::HostId::new(host).unwrap(), booked)

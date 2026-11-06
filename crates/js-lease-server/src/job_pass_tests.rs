@@ -87,6 +87,7 @@ fn queue(rig: &Rig, id: &str, spec: JobSpec) -> JobId {
         id: Some(id.clone()),
         spec,
         priority: 0,
+        client: None,
     };
     rig.jobs.insert_queued(new).unwrap();
     id

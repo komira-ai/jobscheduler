@@ -1,4 +1,5 @@
-//! The ids of jobs and allocations, and where minted ids come from.
+//! The ids of jobs and allocations, the names of the clients that submit jobs, and where
+//! minted ids come from.
 //!
 //! A job id is the client's (1 to 63 bytes of letters, digits, `.`, `_` and `-`) or 128 bits
 //! the store mints, written as 32 lowercase hex digits, which is itself a valid job id. An
@@ -59,6 +60,59 @@ impl JobId {
 }
 
 impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The longest client name, in bytes.
+pub const MAX_CLIENT_NAME_LEN: usize = 40;
+
+/// The name of the client whose token is the server's own (`--token-file`).
+pub const DEFAULT_CLIENT_NAME: &str = "default";
+
+/// The name of a client of the job service, as the server's configuration names it: 1 to 40
+/// bytes of ASCII letters, digits, `.`, `_` and `-`. A job's record keeps the name of the
+/// client that submitted it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClientName(String);
+
+/// Text that is not a client name. It does not repeat the text, which could be a secret
+/// written in the wrong place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a client name must be 1 to 40 bytes of letters, digits, '.', '_' and '-'")]
+pub struct ClientNameError;
+
+impl ClientName {
+    /// The client name `text`.
+    ///
+    /// # Errors
+    /// [`ClientNameError`] when `text` is empty, longer than [`MAX_CLIENT_NAME_LEN`] bytes, or
+    /// holds a byte outside the alphabet of a job id.
+    pub fn parse(text: &str) -> Result<ClientName, ClientNameError> {
+        let in_range = (1..=MAX_CLIENT_NAME_LEN).contains(&text.len());
+        let in_alphabet = text.bytes().all(is_id_byte);
+        if [in_range, in_alphabet].into_iter().all(|ok| ok) {
+            Ok(ClientName(text.to_owned()))
+        } else {
+            Err(ClientNameError)
+        }
+    }
+
+    /// The client named [`DEFAULT_CLIENT_NAME`].
+    #[must_use]
+    pub fn default_client() -> ClientName {
+        ClientName(DEFAULT_CLIENT_NAME.to_owned())
+    }
+
+    /// The name as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ClientName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -217,6 +271,36 @@ mod tests {
         assert_eq!(
             said,
             "job id \"a b\" must be 1 to 63 bytes of letters, digits, '.', '_' and '-'"
+        );
+    }
+
+    // Catches a client name bound off by one at either end, an alphabet that admits a
+    // separator, a space, `=` or a byte of a multi-byte character, and a refusal that repeats
+    // the text (which may be a token written where the name belongs).
+    #[test]
+    fn client_name_grammar_is_enforced() {
+        let longest: String = ALLOWED
+            .iter()
+            .cycle()
+            .take(MAX_CLIENT_NAME_LEN)
+            .map(|b| char::from(*b))
+            .collect();
+        for good in ["a", longest.as_str(), "ci.Build_1-a", "default"] {
+            let name = ClientName::parse(good).expect("a client name");
+            assert_eq!((name.as_str(), name.to_string()), (good, good.to_owned()));
+        }
+        let too_long = "a".repeat(MAX_CLIENT_NAME_LEN + 1);
+        for bad in ["", too_long.as_str(), "a/b", "a b", "a=b", "caf\u{e9}"] {
+            assert_eq!(ClientName::parse(bad), Err(ClientNameError), "{bad:?}");
+        }
+        assert_eq!(
+            ClientName::parse(DEFAULT_CLIENT_NAME),
+            Ok(ClientName::default_client())
+        );
+        assert_eq!(ClientName::default_client().as_str(), "default");
+        assert_eq!(
+            ClientNameError.to_string(),
+            "a client name must be 1 to 40 bytes of letters, digits, '.', '_' and '-'"
         );
     }
 

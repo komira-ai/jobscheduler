@@ -46,6 +46,7 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
                     id: Some(super::job_id("fr-new")),
                     spec: full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .map(drop)
             }),

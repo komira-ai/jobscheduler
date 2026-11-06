@@ -53,6 +53,7 @@ fn full_job() -> JobRecord {
         result: Some(full_result()),
         retention_ends: Some(at(6)),
         deadline_floor: Some(at(7)),
+        client: Some(ClientName::parse("ci-1").expect("a client name")),
         carried: Carried::default(),
     }
 }
@@ -83,6 +84,7 @@ fn bare_job() -> JobRecord {
         result: None,
         retention_ends: None,
         deadline_floor: None,
+        client: None,
         carried: Carried::default(),
     }
 }
@@ -401,6 +403,7 @@ fn the_layout_is_pinned_byte_for_byte() {
         (39, seconds(4)),
         (40, [seconds(7), 4096u64.to_be_bytes().to_vec()].concat()),
         (41, seconds(7)),
+        (42, b"ci-1".to_vec()),
     ]);
     assert_eq!(job_row(&full_job()), job);
     assert_eq!(decode_job(&job), Ok(full_job()));
@@ -552,11 +555,13 @@ fn a_field_the_row_lacks_reads_as_its_default() {
         job_tag::RESULT_STARTED_AT,
         job_tag::RESULT_USAGE,
         job_tag::DEADLINE_FLOOR,
+        job_tag::CLIENT,
     ] {
         row = without(&row, tag);
     }
     let job = decode_job(&row).expect("reads");
     assert_eq!(job.deadline_floor, None, "a row before floors has none");
+    assert_eq!(job.client, None, "a row before clients were named has none");
     assert_eq!(
         job.result,
         Some(JobResult {
@@ -718,6 +723,8 @@ fn a_value_that_is_not_valid_for_its_field_is_refused_by_tag() {
         (t::ENV, items(&[b"K"]), BadValue { tag: t::ENV }),
         (t::ID, b"a b".to_vec(), BadValue { tag: t::ID }),
         (t::HOST, b"Host A".to_vec(), BadValue { tag: t::HOST }),
+        (t::CLIENT, b"a b".to_vec(), BadValue { tag: t::CLIENT }),
+        (t::CLIENT, not_utf8.to_vec(), NotUtf8 { tag: t::CLIENT }),
         (t::IMAGE, b"app:latest".to_vec(), BadValue { tag: t::IMAGE }),
         (t::WHOLE_HOST, vec![1], BadValue { tag: t::WHOLE_HOST }),
         (

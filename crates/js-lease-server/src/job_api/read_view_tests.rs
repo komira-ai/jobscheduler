@@ -97,6 +97,7 @@ async fn get_job_shows_every_field_of_the_record() {
         id: Some(id("full-1")),
         spec: full(),
         priority: 5,
+        client: None,
     };
     jobs.insert_queued(new).expect("recorded");
     let shown = v1::Job {
@@ -109,6 +110,7 @@ async fn get_job_shows_every_field_of_the_record() {
         times: Some(times_of(jobs, "full-1")),
         host_silent_since_ms: None,
         cancel_requested: false,
+        client: None,
     };
     assert_eq!(rig.get_job("full-1").await.expect("read"), shown);
 

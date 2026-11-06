@@ -406,3 +406,53 @@ fn refusal_status_writes_the_canonical_rich_error_bytes() {
         })
     );
 }
+
+/// Asserts that the client field is additive. The field golden holds `Job.client` (32) and
+/// `ListJobsRequest.client` (5) as optional strings beside every earlier row. A `Job` of the
+/// previous schema (the golden bytes, written before the field) decodes with no client and
+/// encodes back to the same bytes. A job with a client encodes it as one length-delimited
+/// field of number 32 after the bytes of the previous schema, which a reader without the
+/// field skips, reading every other field as written; a listing's filter is one field of
+/// number 5. Catches a number reused from an earlier field (the golden would decode into the
+/// client, or the earlier reader would read the client's bytes as another field) and a
+/// renumbered or retyped client.
+#[test]
+fn the_client_field_is_additive_in_the_proto() {
+    let rows = include_str!("golden/fields.txt");
+    for row in [
+        "Job.client = 32 : optional string",
+        "ListJobsRequest.client = 5 : optional string",
+        "Job.cancel_requested = 31 : bool",
+        "ListJobsRequest.queued_before_ms = 4 : optional uint64",
+    ] {
+        assert!(rows.lines().any(|line| line == row), "{row}");
+    }
+
+    let previous = Job::decode(job_golden().as_slice()).expect("the golden decodes");
+    assert_eq!(previous.client, None);
+    assert_eq!(previous, common::job());
+    assert_eq!(previous.encode_to_vec(), job_golden());
+
+    let named = Job {
+        client: Some("ci".to_owned()),
+        ..common::job()
+    };
+    let mut bytes = job_golden();
+    bytes.extend_from_slice(&[0x82, 0x02, 0x02, b'c', b'i']);
+    assert_eq!(named.encode_to_vec(), bytes);
+    assert_eq!(Job::decode(bytes.as_slice()).expect("decodes"), named);
+    assert_eq!(
+        LaterJob::decode(bytes.as_slice()).expect("an earlier reader decodes"),
+        LaterJob::decode(job_golden().as_slice()).expect("the golden decodes")
+    );
+
+    let filter = ListJobsRequest {
+        client: Some("ci".to_owned()),
+        ..ListJobsRequest::default()
+    };
+    assert_eq!(filter.encode_to_vec(), [0x2a, 0x02, b'c', b'i']);
+    assert_eq!(
+        ListJobsRequest::decode(filter.encode_to_vec().as_slice()).expect("decodes"),
+        filter
+    );
+}

@@ -167,73 +167,87 @@ pub const ROUTES: &[Route] = &[
 ];
 
 /// Calls the method `rpc` of `service` with `input`, a message of its request type,
-/// and answers its response as a message of `output` (see [`decode_as`] and
-/// [`answer_of`]).
+/// carrying `extensions` (those of the HTTP request, which the mounting server's
+/// layers may have set), and answers its response as a message of `output` (see
+/// [`decode_as`] and [`answer_of`]).
 async fn call<T: ::js_proto::v1::job_service_server::JobService>(
     service: &T,
     rpc: Rpc,
     input: ::prost_reflect::DynamicMessage,
     output: &::prost_reflect::MessageDescriptor,
+    extensions: ::tonic::Extensions,
 ) -> ::core::result::Result<::prost_reflect::DynamicMessage, Answer> {
     match rpc {
         Rpc::SubmitJob => {
             let request = decode_as::<::js_proto::v1::SubmitJobRequest>(&input)?;
-            let response = service.submit_job(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.submit_job(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::GetJob => {
             let request = decode_as::<::js_proto::v1::GetJobRequest>(&input)?;
-            let response = service.get_job(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.get_job(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListJobs => {
             let request = decode_as::<::js_proto::v1::ListJobsRequest>(&input)?;
-            let response = service.list_jobs(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.list_jobs(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::CancelJob => {
             let request = decode_as::<::js_proto::v1::CancelJobRequest>(&input)?;
-            let response = service.cancel_job(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.cancel_job(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::GetResult => {
             let request = decode_as::<::js_proto::v1::GetResultRequest>(&input)?;
-            let response = service.get_result(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.get_result(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::GetLogs => {
             let request = decode_as::<::js_proto::v1::GetLogsRequest>(&input)?;
-            let response = service.get_logs(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.get_logs(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListHosts => {
             let request = decode_as::<::js_proto::v1::ListHostsRequest>(&input)?;
-            let response = service.list_hosts(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.list_hosts(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::CordonHost => {
             let request = decode_as::<::js_proto::v1::CordonHostRequest>(&input)?;
-            let response = service.cordon_host(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.cordon_host(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::UncordonHost => {
             let request = decode_as::<::js_proto::v1::UncordonHostRequest>(&input)?;
-            let response = service.uncordon_host(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.uncordon_host(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListPools => {
             let request = decode_as::<::js_proto::v1::ListPoolsRequest>(&input)?;
-            let response = service.list_pools(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.list_pools(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::ListProviders => {
             let request = decode_as::<::js_proto::v1::ListProvidersRequest>(&input)?;
-            let response = service.list_providers(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.list_providers(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
         Rpc::GetUsage => {
             let request = decode_as::<::js_proto::v1::GetUsageRequest>(&input)?;
-            let response = service.get_usage(::tonic::Request::new(request)).await;
+            let request = ::tonic::Request::from_parts(::tonic::metadata::MetadataMap::new(), extensions, request);
+            let response = service.get_usage(request).await;
             answer_of(output, response.map(|response| ::prost::Message::encode_to_vec(response.get_ref())))
         }
     }

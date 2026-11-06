@@ -11,7 +11,7 @@ use crate::codec::{
     Carried, DecodeError, decode_allocation, decode_job, encode_allocation, encode_job,
 };
 use crate::error::JobStoreError;
-use crate::ids::{AllocationId, IdSource, JobId, RandomIds};
+use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
 use crate::keys;
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
@@ -34,7 +34,8 @@ pub const MINT_TRIES: usize = 8;
 /// The most jobs one [`JobStore::list_jobs`] page holds, whatever limit is asked for.
 pub const MAX_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(999);
 
-/// A job to record: its id if the client gave one, the job, and its priority.
+/// A job to record: its id if the client gave one, the job, its priority, and the client
+/// that submits it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
     /// The client's id, or `None` for the store to mint one.
@@ -43,6 +44,9 @@ pub struct NewJob {
     pub spec: JobSpec,
     /// Its priority.
     pub priority: i32,
+    /// The client that submits it, recorded on a new job ([`JobRecord::client`]); not
+    /// compared with a stored job of the same id.
+    pub client: Option<ClientName>,
 }
 
 /// What [`JobStore::insert_queued`] did.
@@ -191,8 +195,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// Records a job as queued (design section 5.3, steps 2 and 4).
     ///
     /// With an id: when a job with that id exists, the same job (every field of the spec;
-    /// the priority is not compared) is answered from the stored record, in whatever state
-    /// it is now, with `created: false`; a different one is [`JobStoreError::JobIdConflict`].
+    /// the priority and the client are not compared) is answered from the stored record, in
+    /// whatever state it is now and with the client that recorded it, with `created: false`;
+    /// a different one is [`JobStoreError::JobIdConflict`].
     /// Without an id: an id is minted, and minted again if taken, at most [`MINT_TRIES`]
     /// times.
     ///
@@ -201,14 +206,25 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::UnknownRow`] when the id's row is one a later build wrote,
     /// [`JobStoreError::Store`] or [`JobStoreError::Mint`].
     pub fn insert_queued(&self, job: NewJob) -> Result<Inserted, JobStoreError> {
-        let NewJob { id, spec, priority } = job;
+        let NewJob {
+            id,
+            spec,
+            priority,
+            client,
+        } = job;
         match id {
-            Some(id) => self.insert_with_id(id, spec, priority),
-            None => self.insert_minted(&spec, priority),
+            Some(id) => self.insert_with_id(id, spec, priority, client),
+            None => self.insert_minted(&spec, priority, client.as_ref()),
         }
     }
 
-    fn queued_record(&self, id: JobId, spec: JobSpec, priority: i32) -> JobRecord {
+    fn queued_record(
+        &self,
+        id: JobId,
+        spec: JobSpec,
+        priority: i32,
+        client: Option<ClientName>,
+    ) -> JobRecord {
         JobRecord {
             id,
             spec,
@@ -224,6 +240,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             result: None,
             retention_ends: None,
             deadline_floor: None,
+            client,
             carried: Carried::default(),
         }
     }
@@ -248,11 +265,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         id: JobId,
         spec: JobSpec,
         priority: i32,
+        client: Option<ClientName>,
     ) -> Result<Inserted, JobStoreError> {
         if let Some(found) = self.same_job(&id, &spec)? {
             return Ok(found);
         }
-        let record = self.queued_record(id, spec, priority);
+        let record = self.queued_record(id, spec, priority, client);
         let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
         match self.store.txn(txn)? {
             Ok(_) => Ok(Inserted {
@@ -268,10 +286,15 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
     }
 
-    fn insert_minted(&self, spec: &JobSpec, priority: i32) -> Result<Inserted, JobStoreError> {
+    fn insert_minted(
+        &self,
+        spec: &JobSpec,
+        priority: i32,
+        client: Option<&ClientName>,
+    ) -> Result<Inserted, JobStoreError> {
         for _ in 0..MINT_TRIES {
-            let record =
-                self.queued_record(JobId::minted(self.ids.mint()?), spec.clone(), priority);
+            let id = JobId::minted(self.ids.mint()?);
+            let record = self.queued_record(id, spec.clone(), priority, client.cloned());
             let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
             if self.store.txn(txn)?.is_ok() {
                 return Ok(Inserted {
@@ -825,6 +848,7 @@ mod tests {
             id,
             spec: crate::suite::full_spec(),
             priority: 0,
+            client: None,
         };
         assert_eq!(jobs.insert_queued(job(None)).map(drop), failed);
         let id = crate::JobId::parse("a").expect("an id");

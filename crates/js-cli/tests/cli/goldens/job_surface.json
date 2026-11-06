@@ -390,7 +390,7 @@
     "streaming": false
   },
   {
-    "doc": "Lists jobs by state, label and the time they were queued, a page at a time. Changes nothing.",
+    "doc": "Lists jobs by state, label, client and the time they were queued, a page at a time. Changes nothing.",
     "flags": [
       {
         "doc": "Only jobs in one of these states. Empty: every state.",
@@ -432,6 +432,17 @@
         ],
         "kind": "U64",
         "name": "queued-before-ms",
+        "oneof": null,
+        "repeated": false,
+        "required": false
+      },
+      {
+        "doc": "Only jobs submitted by the client of this name (Job.client). Absent: every client's.",
+        "field": [
+          "client"
+        ],
+        "kind": "Text",
+        "name": "client",
         "oneof": null,
         "repeated": false,
         "required": false

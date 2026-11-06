@@ -7,6 +7,7 @@
 --agent-pool-config default=none required=false
 --agent-token-file default=none required=false
 --boot default=none required=false values=initialise|resume
+--client-token default=none required=false
 --config default=none required=false
 --cpu-slack default=none required=false
 --default-ttl default=600s required=false
