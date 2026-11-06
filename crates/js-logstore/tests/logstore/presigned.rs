@@ -82,7 +82,7 @@ fn a_grant_writes_its_token_and_derives_its_credential() {
 /// an upper-case letter; a prefix that is empty, `/`, without its trailing `/`, with an empty,
 /// `.` or `..` segment, a `*`, or of 513 bytes before its `/`; an expiry at or before the
 /// epoch. And every refusal of a token: another version, too few fields, an expiry with a sign,
-/// a leading zero or past `u64`, and a field the grant refuses. A prefix of exactly 512 bytes
+/// a leading zero, past `u64` or past what a time can hold, and a field the grant refuses. A prefix of exactly 512 bytes
 /// is taken, and so is a bucket of every allowed kind of byte. It catches a grant whose prefix could widen its scope and a token read loosely.
 #[test]
 fn a_grant_refuses_each_malformed_field_and_token() {
@@ -137,6 +137,7 @@ fn a_grant_refuses_each_malformed_field_and_token() {
         "jspp1:K:logs:+1800003600:a/b/",
         "jspp1:K:logs:01800003600:a/b/",
         "jspp1:K:logs:99999999999999999999999:a/b/",
+        "jspp1:K:logs:18446744073709551615:a/b/",
         "",
     ] {
         assert_eq!(PrefixGrant::parse(text).err(), token, "{text}");

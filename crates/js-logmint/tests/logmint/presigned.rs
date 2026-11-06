@@ -8,8 +8,8 @@ use js_logmint::fake::FakeMinter;
 use js_logmint::{LogPrefix, MintError, MintRequest, Minter, PresignedPrefixMinter, Refusal};
 use js_logstore::fake::{Action, Policy};
 use js_logstore::{
-    Credential, Endpoint, JobPrefix, ManualClock, Metadata, PrefixGrant, PrefixSigner, Stream,
-    Transport,
+    Credential, Endpoint, GrantError, JobPrefix, ManualClock, Metadata, PrefixGrant, PrefixSigner,
+    Stream, Transport,
 };
 
 use crate::support::{BUCKET, REGION, Rig, START, URL, at, form, request};
@@ -142,7 +142,10 @@ fn a_jobs_log_written_with_a_grant_lands_under_its_hosts_prefix_and_reads_back()
     }
     let sibling = request("a/b", "host-b").host_prefix().unwrap();
     let theirs = format!("{}job-1/stdout.log", sibling.as_str());
-    assert!(signer.put(&theirs, b"x".to_vec(), &none).is_err());
+    assert_eq!(
+        signer.put(&theirs, b"x".to_vec(), &none),
+        Err(GrantError::OutsidePrefix)
+    );
 
     let reader = rig.client(rig.fake.issue(Policy {
         actions: vec![Action::Get, Action::List],

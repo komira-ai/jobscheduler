@@ -3,8 +3,9 @@
 //! with no STS, derived as a prefix grant (`docs/design/live-logs.md`, sections 4 and 4.1).
 //!
 //! - [`policy`] builds the session policy: one statement that allows `s3:PutObject` and
-//!   `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*`, where `L` is the configured log prefix with
-//!   its trailing `/` (`arn:aws:s3:::BUCKET/*` when the prefix is empty).
+//!   `s3:DeleteObject` on `arn:aws:s3:::BUCKET/LH*`, where `LH` is the host's prefix
+//!   ([`MintRequest::host_prefix`]): the configured log prefix `L` with its trailing `/` (empty
+//!   for none) and the host's segment `js-<32 hex>/`.
 //! - [`Minter`] turns a [`MintRequest`] (the bucket, the log prefix, the host and the lifetime)
 //!   into a [`Credential`]. [`StsMinter`] is the production one: one signed `AssumeRole` call
 //!   over a [`js_logstore::Transport`]. The `fake` feature's [`fake::FakeMinter`] issues
@@ -15,14 +16,15 @@
 //!   [`js_logstore::PrefixGrant`] of the host's own prefix, [`host_prefix`], until an absolute
 //!   expiry. [`host_segment`] names the host in both kinds: the STS session and the prefix.
 //!
-//! **What the STS credential can do**: put and delete any object under the log prefix, whichever
-//! job it belongs to, until it expires. **What it cannot do**: read or list any object, or touch
-//! any object outside the log prefix. A session policy can only narrow what the role allows, so
-//! the credential can do no more than this whatever the role grants.
+//! **What a credential can do**, of either kind: put and delete any object under its host's
+//! prefix, for any job of that host, until it expires. **What it cannot do**: read or list any
+//! object, or touch any object outside the host's prefix, another host's jobs included. A
+//! session policy can only narrow what the role allows, so the STS credential can do no more
+//! than this whatever the role grants.
 //!
 //! **What the operator configures in the store.** The role (`role_arn`) must allow at least
-//! `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*`, so that the session policy
-//! intersects with it to exactly that; its trust policy must let the mint key call
+//! `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::BUCKET/L*` (every host's prefix), so
+//! that each host's session policy narrows it to exactly that host's prefix; its trust policy must let the mint key call
 //! `sts:AssumeRole` on it; and its maximum session duration must be at least the lifetime asked
 //! (STS refuses a longer one, which is a [`MintError::Refused`]). A store that does not serve
 //! `AssumeRole` takes [`PresignedPrefixMinter`] instead, and must check prefix grants.

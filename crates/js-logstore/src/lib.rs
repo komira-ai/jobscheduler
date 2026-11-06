@@ -1,7 +1,8 @@
 //! The log object store: where a job's live logs are kept, and the client that reads and
 //! writes them (`docs/design/live-logs.md`).
 //!
-//! - [`layout`] names the objects: a job's prefix `P = prefix/job_id/`, its chunks
+//! - [`layout`] names the objects: a job's prefix `P = prefix/job_id/` under the host's prefix
+//!   `prefix`, its chunks
 //!   `P/stdout/<offset20>` and `P/stderr/<offset20>`, its gap markers (`<offset20>.gap`, body
 //!   `{"length":N}`) and its finals `P/stdout.log` and `P/stderr.log`. The agent, the scheduler
 //!   and the reader all build names here, so they agree.

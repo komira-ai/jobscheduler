@@ -11,7 +11,7 @@ use super::{
 use crate::credential::Credential;
 use crate::http::{HttpRequest, HttpResponse};
 use crate::presigned::{PrefixGrant, grant_key_id};
-use crate::sigv4::{Scope, Unsigned, presign};
+use crate::sigv4::{MAX_PRESIGN_SECS, Scope, Unsigned, presign};
 
 /// The query parameter that makes a request presigned.
 const SIGNATURE: &str = "X-Amz-Signature";
@@ -35,7 +35,8 @@ struct Auth<'q> {
     signed_names: Vec<&'q str>,
 }
 
-/// The parameters of `params`, or `None` when one is missing or malformed.
+/// The parameters of `params`, or `None` when one is missing or malformed, or `X-Amz-Expires`
+/// is outside 1 to [`MAX_PRESIGN_SECS`] (S3 refuses a longer one).
 fn auth(params: &[(String, String)]) -> Option<Auth<'_>> {
     let get = |name: &str| {
         params
@@ -48,7 +49,10 @@ fn auth(params: &[(String, String)]) -> Option<Auth<'_>> {
         key_id,
         token: get("X-Amz-Security-Token"),
         at: parse_stamp(get("X-Amz-Date")?)?,
-        expires: get("X-Amz-Expires")?.parse().ok()?,
+        expires: get("X-Amz-Expires")?
+            .parse()
+            .ok()
+            .filter(|secs| (1..=MAX_PRESIGN_SECS).contains(secs))?,
         signed_names: get("X-Amz-SignedHeaders")?.split(';').collect(),
     })
 }

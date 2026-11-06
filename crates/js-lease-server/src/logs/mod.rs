@@ -6,8 +6,9 @@
 //! the uploading; the job's container never sees a credential; and an agent that is compromised
 //! already controls every job on its host. A credential per job would buy nothing against that
 //! agent and would cost one `AssumeRole` call per start. The credential may put and delete under
-//! the configured log prefix and nothing else ([`js_logmint`]); with `credentials =
-//! "presigned_prefix"`, under the host's own prefix only, where each job of the host is put.
+//! the host's own prefix (the log prefix and `js-<32 hex of SHA-256 of the agent id>/`), where
+//! each job of the host is put, and nothing else ([`js_logmint`]), under either `credentials`
+//! kind.
 //!
 //! **What is in memory, and what is stored.** [`LogGrants`] holds, in memory only, the current
 //! credential of each agent that has one, by agent id, with what its next mint waits for. None

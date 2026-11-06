@@ -149,7 +149,10 @@ impl PrefixGrant {
             return Err(malformed());
         }
         let secs: u64 = expiry.parse().map_err(|_| malformed())?;
-        let grant = Self::new(key, bucket, prefix, UNIX_EPOCH + Duration::from_secs(secs))?;
+        let at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(secs))
+            .ok_or_else(malformed)?;
+        let grant = Self::new(key, bucket, prefix, at)?;
         match grant.token() == token {
             true => Ok(grant),
             false => Err(malformed()),

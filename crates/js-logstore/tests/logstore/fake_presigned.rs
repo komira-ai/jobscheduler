@@ -109,7 +109,7 @@ fn a_grant_puts_and_deletes_under_its_prefix_in_either_form_and_does_nothing_els
 }
 
 /// Asserts each refusal of a presigned put, in the order the fake checks: a signature
-/// parameter missing or malformed (the credential without its scope, the date, the expiry, the
+/// parameter missing or malformed (the credential without its scope, the date, an expiry that is not 1 to 604,800 seconds, the
 /// signed headers) is `SignatureDoesNotMatch`; a token that does not parse, that names a key
 /// the fake never issued or a key that is not a signing key, that is for another bucket, or
 /// whose access key id is not the token's is `InvalidAccessKeyId`; an expired grant is
@@ -146,7 +146,13 @@ fn a_presigned_request_is_refused_for_each_fault() {
         assert_eq!(put(&credential, &drop_param(name)), mismatch, "{name}");
     }
     assert_eq!(put(&credential, &set("X-Amz-Date", "yesterday")), mismatch);
-    assert_eq!(put(&credential, &set("X-Amz-Expires", "soon")), mismatch);
+    for expires in ["soon", "0", "604801", "18446744073709551615"] {
+        assert_eq!(
+            put(&credential, &set("X-Amz-Expires", expires)),
+            mismatch,
+            "{expires}"
+        );
+    }
 
     let invalid = "InvalidAccessKeyId";
     let token = |text: &str| Credential {
