@@ -41,6 +41,7 @@ async fn a_start_is_resent_until_listed() {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     };
     let mut last = None;
     for _ in 0..3 {

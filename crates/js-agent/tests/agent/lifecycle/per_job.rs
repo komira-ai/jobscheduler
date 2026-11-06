@@ -33,6 +33,7 @@ fn start(job_id: &str) -> JobStartSpec {
         network: Default::default(),
         ports: Vec::new(),
         log_sink: None,
+        kind: Default::default(),
     }
 }
 

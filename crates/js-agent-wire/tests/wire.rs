@@ -70,6 +70,7 @@ fn refusal_codes_snapshot() {
         refusal::IMAGE_NOT_ALLOWED,
         refusal::INVALID_LOG_SINK,
         refusal::INVALID_LOG_CREDENTIAL,
+        refusal::VM_UNAVAILABLE,
     ];
     assert_eq!(
         codes.join(" "),
@@ -81,7 +82,7 @@ fn refusal_codes_snapshot() {
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required quota-unavailable \
          network-above-ceiling port-above-ceiling ports-not-supported \
          platform-mismatch image-unsupported-here run-unsupported env-unsupported image-not-allowed \
-         invalid-log-sink invalid-log-credential"
+         invalid-log-sink invalid-log-credential vm-unavailable"
     );
 }
 
