@@ -8,6 +8,8 @@ mod answers;
 mod contract;
 mod contract_e2e;
 #[cfg(target_os = "linux")]
+mod crun_budget;
+#[cfg(target_os = "linux")]
 mod crun_e2e;
 #[cfg(target_os = "linux")]
 mod crun_egress;
