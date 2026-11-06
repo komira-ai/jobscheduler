@@ -10,8 +10,8 @@ use std::time::Duration;
 use js_agent_wire::Phase as WirePhase;
 use js_elastic::AcquireId;
 use js_elastic::{
-    Acquired, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released, SchedulerId,
-    Secret,
+    Acquired, EventStream, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released,
+    SchedulerId, Secret,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, Scaler, SharedClock};
@@ -44,6 +44,8 @@ pub struct World {
     /// The provider ids a read by id was made for, in order.
     pub gone_asked: Vec<String>,
     pub list_fails: bool,
+    /// The provider's `list` panics.
+    pub list_panics: bool,
     pub machines: Vec<Held>,
     pub saved: Option<Records>,
     /// The hosts last written as the ones the registry would not remove.
@@ -72,6 +74,11 @@ pub struct World {
     pub acquire_answers: VecDeque<Acquired>,
     /// The count of completed catalog fetches the provider reports.
     pub catalog_fetches: u64,
+    /// The notice streams the provider hands out, one per ask, in order; once none is
+    /// left it answers that it sends no notices.
+    pub notices: Vec<EventStream>,
+    /// How many times the provider was asked for its notices.
+    pub notices_asked: usize,
 }
 
 /// A provider call held at a gate: the call tells `entered` it is there and waits (for at
@@ -168,6 +175,7 @@ impl Effects for Handle {
             gate.pass();
         }
         let world = self.world();
+        assert!(!world.list_panics, "the provider panicked in list");
         match world.list_fails {
             true => Err(ProviderError::new("the list failed")),
             false => Ok(world.machines.clone()),
@@ -295,6 +303,21 @@ impl Effects for Handle {
                 let ending = Some(HostMark::Releasing);
                 world.mark(host, &[None, Some(HostMark::Draining)], ending);
             }
+            Call::Cordon => {
+                let until = Timestamp::from_millis(START + 5 * 60 * 1000);
+                for view in world.hosts.iter_mut().filter(|v| v.id.as_str() == host) {
+                    view.cordon_until = Some(until);
+                }
+            }
+        }
+    }
+
+    fn events(&self) -> Option<EventStream> {
+        let mut world = self.world();
+        world.notices_asked += 1;
+        match world.notices.is_empty() {
+            true => None,
+            false => Some(world.notices.remove(0)),
         }
     }
 }
@@ -363,6 +386,7 @@ pub fn new_world() -> Arc<Mutex<World>> {
         gone: Vec::new(),
         gone_asked: Vec::new(),
         list_fails: false,
+        list_panics: false,
         machines: Vec::new(),
         saved: None,
         saved_unremoved: None,
@@ -379,6 +403,8 @@ pub fn new_world() -> Arc<Mutex<World>> {
         lifetimes: Vec::new(),
         acquire_answers: VecDeque::new(),
         catalog_fetches: 0,
+        notices: Vec::new(),
+        notices_asked: 0,
     }))
 }
 
