@@ -411,10 +411,12 @@ async fn serve_jobs(
     let retired = heartbeat.retired_jobs.clone();
     let placing = Arc::clone(agents);
     let served = blocking(move || {
+        let metrics = placing.meter().sink();
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
             logs: logs.as_deref(),
+            metrics,
         };
         // The first listing after a hello loses the jobs that ran and are not listed: their
         // container went with the agent (design section 6.7, step 6). The listing's commit
@@ -425,7 +427,7 @@ async fn serve_jobs(
             .chain(retired.iter().map(String::as_str))
             .collect();
         let lost = match first {
-            true => job_loss::lose_unlisted(&jobs, &host, &held).map(drop),
+            true => job_loss::lose_unlisted(&jobs, &host, &held, metrics).map(drop),
             false => Ok(()),
         };
         let served = lost.and_then(|()| per_job::serve(&jobs, &context, &listed, &retired, room));
@@ -442,6 +444,7 @@ async fn serve_jobs(
             Ok(Some(served))
         }
         (host, Err(error)) => {
+            agents.meter().sink().store_write_failed();
             warn!(%host, %error, "a heartbeat's job listing could not be committed");
             Err(match agents.fence.note(&error) {
                 true => fenced(),

@@ -55,6 +55,7 @@ mod lambda_e2e_support;
 mod layering;
 mod limits;
 mod memory_percent;
+mod metrics_listen;
 mod placement;
 mod platform_default;
 mod pools_checks;

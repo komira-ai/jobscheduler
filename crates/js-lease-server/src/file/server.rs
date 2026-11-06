@@ -11,8 +11,8 @@ use js_lease::Settings;
 use super::{Load, Section};
 use crate::config::{
     BootMode, CpuSlack, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen,
-    Limits, MAX_JOB_WALL_MUST, Placement, TlsFiles, Token, parse_job_feed_retention,
-    parse_job_retention, parse_max_job_wall, parse_token,
+    Limits, MAX_JOB_WALL_MUST, MetricsListen, Placement, TlsFiles, Token, not_private,
+    parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -63,12 +63,15 @@ const SERVER_KEYS: &[&str] = &[
     "max_job_wall",
     "store",
     "allow_sqlite_store",
+    "metrics_listen",
 ];
 
 /// What the `[server]` table says.
 pub(crate) struct Server {
     pub(crate) listen: SocketAddr,
     pub(crate) agent_listen: Option<SocketAddr>,
+    /// `metrics_listen`: where the metrics are served, when the file turns them on.
+    pub(crate) metrics_listen: Option<MetricsListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) scheduler: SchedulerId,
     pub(crate) state_file: PathBuf,
@@ -209,6 +212,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let listen = s.address("listen")?;
     let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
     let agent_listen = s.address("agent_listen")?;
+    let metrics_listen = read_metrics_listen(&mut s)?;
     let advertise_url = s.string("advertise_url")?;
     let scheduler = s.string("scheduler_id")?.unwrap_or_else(|| "js".to_owned());
     let scheduler = match SchedulerId::new(&scheduler) {
@@ -280,6 +284,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     Ok(Server {
         listen,
         agent_listen,
+        metrics_listen,
         advertise_url,
         scheduler,
         state_file,
@@ -312,6 +317,19 @@ fn read_store(s: &mut Section) -> Result<(Option<PathBuf>, bool), StartupError> 
         (None, true) => Err(s.fail("allow_sqlite_store", "needs server.store")),
         _ => Ok((store, allow)),
     }
+}
+
+/// The `metrics_listen` key, refused when it is not a private address as `--metrics-listen`
+/// is; `None` when the file does not give it.
+fn read_metrics_listen(s: &mut Section) -> Result<Option<MetricsListen>, StartupError> {
+    let Some(addr) = s.address("metrics_listen")? else {
+        return Ok(None);
+    };
+    if let Some(reason) = not_private(addr) {
+        return Err(s.fail("metrics_listen", &reason));
+    }
+    let flag = "server.metrics_listen";
+    Ok(Some(MetricsListen { addr, flag }))
 }
 
 /// The `max_job_wall` key, read as `--max-job-wall` is; `None` when the file does not give

@@ -25,19 +25,18 @@
 //!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
 //!   same way and before the registry is asked to remove a host, so that a restart tries
 //!   them again.
-//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
-//!   [`Ticker`]) so a test steps both.
+//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`], [`Ticker`]) so a test steps both.
 //!
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The secrets,
-//! the bearer tokens, are read from files that only their owner can use.
+//! below has a key in the file, and a flag given beside `--config` is refused. The secrets, the bearer tokens, are read from files that only their owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
+//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the lease file |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
@@ -334,16 +333,15 @@
 //! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records and whose role says what it may call; `docs/design/configuration.md`):
 //! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
-//! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
-//! the registered hosts and the pool's catalog, committed before it answers; its wall limit
-//! held to `--max-job-wall`), `CancelJob`, and the reads; so are the fleet calls
-//! (`ListHosts`, `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`), over
-//! the server's hosts, the status of its pools and its usage store. The answers of each call
-//! are in `docs/http-gateway.md`. The port has the connection cap and the
-//! timeouts of the other listeners, and stops with them. The lease routes are not served on
-//! it, nor the job routes on `--listen`: the gateway's `/v1/hosts` and `/v1/pools` are other
-//! routes than the lease server's of those names, so the two cannot share a port while both
-//! exist.
+//! [`SERVED_CALLS`] are served: `SubmitJob` (validated, idempotent on the job id, admitted
+//! over the registered hosts and the pool's catalog, committed before it answers; its wall
+//! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
+//! `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
+//! hosts, the status of its pools and its usage store. `docs/http-gateway.md` has the answers
+//! of each call. The port has the connection cap and the timeouts of the other listeners, and
+//! stops with them. The lease routes are not served on it, nor the job routes on `--listen`:
+//! the gateway's `/v1/hosts` and `/v1/pools` are other routes than the lease server's of those
+//! names, so the two cannot share a port while both exist.
 //!
 //! The job store is a SQLite file beside the lease file, `<state file>.jobs`, owner-only: the
 //! single-node development backend. It moves into the shared store with the server's other
@@ -862,6 +860,7 @@ mod kinds;
 mod layered;
 mod listener;
 mod logs;
+mod metrics;
 pub mod network;
 mod per_job;
 mod platform;
@@ -904,6 +903,7 @@ pub use file::{
     ObjectStoreLogs, PoolSettings, ProviderLimits, Resolved, ResolvedMachineProvider,
     ResolvedPlatform, ResolvedPool,
 };
+pub use job_api::SERVED_CALLS;
 pub use kinds::{
     BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, PlatformKind,
     SecretFiles,

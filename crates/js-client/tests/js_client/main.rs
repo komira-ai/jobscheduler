@@ -9,6 +9,8 @@ mod client;
 #[cfg(feature = "jobs")]
 mod fake_jobs;
 #[cfg(feature = "jobs")]
+mod job_conformance;
+#[cfg(feature = "jobs")]
 mod jobs;
 mod run;
 mod server_url;

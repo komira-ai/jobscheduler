@@ -17,7 +17,8 @@ const LONG_HOST: &str =
 /// of a form; the form fields `Action`, `Version`, `RoleArn`, `RoleSessionName`,
 /// `DurationSeconds` and `Policy`, in that order, with exactly the values of the call (the
 /// API version, the role, `js-` and the first 32 hex digits of the agent id's SHA-256, the
-/// lifetime in seconds and the session policy), every value percent-encoded so that the body
+/// lifetime in seconds and the session policy of the host's own prefix `a/b/<session name>/`),
+/// every value percent-encoded so that the body
 /// holds only unreserved bytes, `=`, `&` and `%`; and an `Authorization` that is exactly the
 /// Signature Version 4 of that request for the service `sts` in the region, with the mint key,
 /// which the fake checks before it issues. It catches an unsigned request or one signed for
@@ -42,7 +43,9 @@ fn the_sts_request_is_signed_and_well_formed() {
 
     let session = format!("js-{}", &sha256_hex(LONG_HOST.as_bytes())[..32]);
     assert_eq!(session.len(), 35);
-    let policy = js_logmint::policy(&request("a/b", "x").bucket, &request("a/b", "x").prefix);
+    let asked = request("a/b", LONG_HOST);
+    let policy = js_logmint::policy(&asked.bucket, &asked.host_prefix().unwrap());
+    assert!(policy.contains(&format!("arn:aws:s3:::logs/a/b/{session}/*")));
     assert!(policy.contains(POLICY_VERSION));
     let fields = form(call);
     let expected = [

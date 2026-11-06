@@ -15,7 +15,7 @@ use axum::http::Uri;
 use hyper_util::rt::TokioIo;
 use js_agent_wire::{Hello, Phase as AgentPhase, Taint};
 use js_jobs::interfere::Interfere;
-use js_jobs::{DeclaredPort, EndReason, JobSpec, JobStore, Needs, RandomIds};
+use js_jobs::{DeclaredPort, EndReason, JobSpec, JobStore, Needs};
 use js_lease::{Boot, LeaseTable, ManualClock, Settings, Timestamp};
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_provider::{HostCapacity, Pool as _, RefusalCode, StartAck, StartSpec};
@@ -105,7 +105,8 @@ fn server(name: &str, agents: bool) -> Server {
         Flaw::None,
     )));
     let dynamic: Arc<dyn Store> = store.clone();
-    let jobs = Arc::new(JobStore::new(Arc::new(dynamic), RandomIds).unwrap());
+    let jobs =
+        Arc::new(JobStore::new(Arc::new(dynamic), crate::job_store::ServerIds::random()).unwrap());
     let side = Agents::over(registry.clone(), &shared_clock, dir.path()).with_jobs(jobs.clone());
     let token = parse_token(&[b'c'; 40]).unwrap();
     let shared = Arc::new(Shared::new(table, token, agents.then(|| Arc::new(side))));
@@ -517,7 +518,8 @@ fn api_over(
     history: Option<Arc<dyn History>>,
 ) -> JobApi {
     let store: Arc<dyn Store> = Arc::new(Fake::with_flaw(Arc::default(), Flaw::None));
-    let jobs = Arc::new(JobStore::new(Arc::new(store), RandomIds).unwrap());
+    let jobs =
+        Arc::new(JobStore::new(Arc::new(store), crate::job_store::ServerIds::random()).unwrap());
     let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
     JobApi::new(jobs, clock).with_fleet(Ctx::served(hosts, pools, history))
 }

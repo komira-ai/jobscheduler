@@ -10,7 +10,6 @@ use js_alert::AlertSink;
 use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 
-use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -22,6 +21,7 @@ use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering, UsageKeys};
 use crate::flags;
 use crate::job_expiry::JobLimits;
+use crate::job_store::JobSources;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
@@ -40,13 +40,14 @@ mod retention;
 mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
+use agent_setup::with_pool_settings;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub use feed_retention::FeedRetention;
 pub(crate) use feed_retention::{
     DEFAULT_JOB_FEED_RETENTION, JOB_FEED_RETENTION_MUST, parse_job_feed_retention,
 };
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
-pub(crate) use listen::{JobListen, clear_text};
+pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
 pub use placement::Placement;
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
@@ -86,6 +87,11 @@ pub struct Cli {
     /// Off the loopback it needs --tls-cert and --tls-key. Needs --agent-pool-config.
     #[arg(long)]
     pub job_listen: Option<SocketAddr>,
+    /// Serves the operator's metrics (`GET /metrics`, the Prometheus text format, no token)
+    /// here, to private peers only. Off unless given; an address that is not a private one is
+    /// refused.
+    #[arg(long)]
+    pub metrics_listen: Option<SocketAddr>,
     /// The lease file.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
@@ -420,6 +426,8 @@ pub struct Config {
     pub(crate) agent_listen: Option<SocketAddr>,
     /// Where the job service is served (`--job-listen`, `server.job_listen`); off when `None`.
     pub(crate) job_listen: Option<JobListen>,
+    /// Where the metrics are served (`--metrics-listen`, `server.metrics_listen`); off when `None`.
+    pub(crate) metrics_listen: Option<MetricsListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -513,6 +521,7 @@ impl Config {
             bound: None,
             agent_listen: None,
             job_listen: listen::job_listen(&cli),
+            metrics_listen: listen::metrics_listen(&cli)?,
             advertise_url: None,
             warnings,
             status,
@@ -605,6 +614,7 @@ impl Config {
                     max_lease_wall: server.max_lease_wall,
                     job_limits,
                     jobs: server.agents.job_store(server.job_store_windows()),
+                    job_sources: JobSources::default(),
                 });
                 (
                     Hosts::Layered {
@@ -637,6 +647,7 @@ impl Config {
             bound: None,
             agent_listen: server.agent_listen,
             job_listen: server.agents.job_listen(),
+            metrics_listen: server.metrics_listen,
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -689,6 +700,11 @@ impl Config {
     /// The address the job service is served on, when the flag or the file gives one.
     pub fn job_listen(&self) -> Option<SocketAddr> {
         self.job_listen.map(|job| job.addr)
+    }
+
+    /// The address the metrics are served on, when the flag or the file gives one.
+    pub fn metrics_listen(&self) -> Option<SocketAddr> {
+        self.metrics_listen.map(|metrics| metrics.addr)
     }
 
     /// The URL agents are told to dial, when the file gives one.
@@ -861,34 +877,6 @@ impl Config {
     }
 }
 
-/// `settings` with what the registered pool's file decides about whole-node leases: the
-/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
-/// (the lease table counts it; the registry counts the same figure per commit). A pool
-/// without whole-node settings, or no registered pool, leaves `settings` as the flags
-/// made them.
-fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
-    match hosts {
-        Hosts::Layered { agents, .. } => {
-            let whole = agents.pool.whole_node();
-            let settings = with_whole_node(settings, whole)?;
-            Ok(crate::reservations::with_restart_grace(settings, whole))
-        }
-        Hosts::Static(_) => Ok(settings),
-    }
-}
-
-fn with_whole_node(
-    settings: Settings,
-    whole: Option<&WholeNodeConfig>,
-) -> Result<Settings, StartupError> {
-    let Some(whole) = whole else {
-        return Ok(settings);
-    };
-    settings
-        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
-        .map_err(|err| StartupError::new("--agent-pool-config", err))
-}
-
 /// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
 /// `--config` is given, so a missing one means a `Cli` built by hand.
 fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
@@ -935,6 +923,7 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                     max_lease_wall: None,
                     job_limits: JobLimits::default(),
                     jobs: listen::job_store(cli),
+                    job_sources: JobSources::default(),
                 }),
             })
         }

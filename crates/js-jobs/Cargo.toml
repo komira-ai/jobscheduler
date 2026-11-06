@@ -31,6 +31,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The codec's property tests: records round-trip, malformed rows are typed errors.
+proptest.workspace = true
 # This crate's own tests see the suite and the scripted ids.
 js-jobs = { path = ".", features = ["test-support"] }
 # The in-memory fake and its deliberate defects, and the suite's `Backend` trait.

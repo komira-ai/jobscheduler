@@ -113,14 +113,14 @@ impl Rig {
     /// the account is empty of instances and offers `gpu_1x_a100`, and terminating removes
     /// the instance at once.
     pub async fn over(name: &str, tailnet: Fake, tailscale: bool) -> Self {
-        Self::over_cloud(name, tailnet, tailscale, None).await
+        Self::over_cloud(name, (tailnet, tailscale), None, "").await
     }
 
     /// A server whose pool is in `default` mode and launches on the elastic fake cloud
     /// `cloud`, on the clock the rig moves (`cloud` must read the clock it was made with,
     /// and [`Rig::advance`] moves both).
     pub async fn elastic(name: &str, cloud: ElasticFake) -> Self {
-        Self::over_cloud(name, tailnet(), false, Some(cloud)).await
+        Self::over_cloud(name, (tailnet(), false), Some(cloud), "").await
     }
 
     /// [`Rig::elastic`] over a provider whose list does not show a reclaim and whose notice
@@ -155,11 +155,28 @@ impl Rig {
         }
     }
 
+    /// [`Rig::elastic`], serving the metrics on a loopback port of the system's choice
+    /// (`server.metrics_listen`).
+    pub async fn elastic_metered(name: &str, cloud: ElasticFake) -> Self {
+        let metrics = "metrics_listen = \"127.0.0.1:0\"\n";
+        Self::over_cloud(name, (tailnet(), false), Some(cloud), metrics).await
+    }
+
+    /// The text of a scrape of the server's metrics.
+    pub async fn scrape(&self) -> String {
+        let addr = self.h.running.metrics_addr().unwrap();
+        let scraped = crate::support::request(addr, "GET", "/metrics", None, None).await;
+        assert_eq!(scraped.status, 200, "{}", scraped.body);
+        scraped.body
+    }
+
+    /// A server over `tailnet` (in Tailscale mode when the flag says so), launching on the
+    /// elastic fake cloud when one is given, with `serving` added to its `[server]` table.
     async fn over_cloud(
         name: &str,
-        tailnet: Fake,
-        tailscale: bool,
+        (tailnet, tailscale): (Fake, bool),
         elastic: Option<ElasticFake>,
+        serving: &str,
     ) -> Self {
         let scratch = Scratch::new(name);
         let account = match &elastic {
@@ -174,6 +191,7 @@ impl Rig {
         }
         let url = tailnet.url();
         let source = pool_text(&scratch, tailscale.then_some(url.as_str()), "initialise");
+        let source = source.replacen("[server]\n", &format!("[server]\n{serving}"), 1);
         let h = start(scratch, &source).await;
         Self {
             h,
