@@ -3,14 +3,12 @@
 
 use std::cell::Cell;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::update_hook::{
     Clock, Gate, Link, NoGate, PlatformUnits, PortError, SystemClock, SystemLink, SystemUnits,
-    Units, read_link, swap_link,
+    Units, read_link,
 };
 use js_testkit::dir::TestDir;
 
@@ -146,92 +144,22 @@ fn the_unit_port_of_the_platform_is_the_one_of_the_build() {
     assert_eq!(*runner.ran.borrow(), [want]);
 }
 
-fn target_of(link: &Path) -> PathBuf {
-    fs::read_link(link).unwrap()
-}
-
+/// The hook reads the release link and never writes it: the target is what the link says, as
+/// written (a relative one stays relative), a missing link has none, and something that is not
+/// a link is an error.
+///
+/// Catches a read that follows the link, or that takes a missing link for an error.
 #[test]
-fn relink_makes_the_link_and_repoints_it_without_leaving_the_new_name_behind() {
-    let tmp = dir("hook-relink");
+fn the_target_of_a_link_is_read_as_written_and_something_that_is_not_a_link_is_an_error() {
+    let tmp = dir("hook-link-target");
     let link = tmp.path().join("current");
     assert_eq!(SystemLink.target(&link), Ok(None));
-    SystemLink.relink(&link, Path::new("releases/1.0")).unwrap();
-    assert_eq!(SystemLink.target(&link), Ok(Some("releases/1.0".into())));
-    SystemLink.relink(&link, Path::new("releases/1.1")).unwrap();
-    assert_eq!(target_of(&link), Path::new("releases/1.1"));
-    let names: Vec<_> = fs::read_dir(tmp.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(names, ["current"]);
-}
-
-#[test]
-fn relink_to_the_target_it_has_changes_nothing() {
-    let tmp = dir("hook-relink-idem");
-    let link = tmp.path().join("current");
-    swap_link(&link, Path::new("a")).unwrap();
-    let before = fs::symlink_metadata(&link).unwrap();
-    swap_link(&link, Path::new("a")).unwrap();
-    let after = fs::symlink_metadata(&link).unwrap();
-    assert_eq!(
-        (before.ino(), before.ctime_nsec()),
-        (after.ino(), after.ctime_nsec())
-    );
-}
-
-#[test]
-fn relink_replaces_a_leftover_of_an_interrupted_swap() {
-    let tmp = dir("hook-relink-leftover");
-    let link = tmp.path().join("current");
-    swap_link(&link, Path::new("old")).unwrap();
-    std::os::unix::fs::symlink("stale", tmp.path().join("current.relink")).unwrap();
-    swap_link(&link, Path::new("new")).unwrap();
-    assert_eq!(target_of(&link), Path::new("new"));
-    assert!(!tmp.path().join("current.relink").exists());
-}
-
-#[test]
-fn a_swap_that_cannot_complete_leaves_the_link_as_it_was() {
-    let tmp = dir("hook-relink-fails");
-    let link = tmp.path().join("current");
-    swap_link(&link, Path::new("old")).unwrap();
-    // A directory where the new link goes: it cannot be removed as a file.
-    fs::create_dir(tmp.path().join("current.relink")).unwrap();
-    assert!(swap_link(&link, Path::new("new")).is_err());
-    assert_eq!(target_of(&link), Path::new("old"));
-    let err = SystemLink.relink(&link, Path::new("new")).unwrap_err();
-    assert!(matches!(err, PortError::Io(_)), "{err:?}");
-}
-
-#[test]
-fn a_swap_never_replaces_something_that_is_not_a_link() {
-    let tmp = dir("hook-relink-nonlink");
-    let file = tmp.path().join("current");
-    fs::write(&file, "a regular file").unwrap();
-    assert!(swap_link(&file, Path::new("new")).is_err());
-    assert_eq!(fs::read_to_string(&file).unwrap(), "a regular file");
-    let folder = tmp.path().join("releases");
-    fs::create_dir(&folder).unwrap();
-    fs::write(folder.join("keep"), "x").unwrap();
-    assert!(swap_link(&folder, Path::new("new")).is_err());
-    assert!(matches!(
-        SystemLink.relink(&folder, Path::new("new")),
-        Err(PortError::Io(_))
-    ));
-    assert_eq!(fs::read_to_string(folder.join("keep")).unwrap(), "x");
-    assert!(fs::symlink_metadata(&folder).unwrap().is_dir());
-    assert!(!tmp.path().join("releases.relink").exists());
-}
-
-#[test]
-fn the_target_of_something_that_is_not_a_link_is_an_error() {
-    let tmp = dir("hook-relink-file");
+    std::os::unix::fs::symlink("1.4.0", &link).unwrap();
+    assert_eq!(SystemLink.target(&link), Ok(Some("1.4.0".into())));
     let file = tmp.path().join("plain");
     fs::write(&file, "x").unwrap();
     assert!(read_link(&file).is_err());
     assert!(matches!(SystemLink.target(&file), Err(PortError::Io(_))));
-    assert!(swap_link(&tmp.path().join("missing/dir/link"), Path::new("t")).is_err());
 }
 
 #[test]

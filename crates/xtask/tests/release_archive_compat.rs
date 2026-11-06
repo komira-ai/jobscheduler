@@ -1,17 +1,16 @@
-//! The Linux js-agent archive gains one member, `updater.d/js-agent.toml`, and keeps its name,
-//! its top directory and its other members. Both archives here are made the way a release makes
-//! them, and both are read by the program a host reads them with:
+//! The Linux js-agent archive keeps its name, its top directory and its members (the binary and
+//! `LICENSE`): the agent is updated as a hostkeeper package, so its archive carries no host
+//! updater's declaration. Both archives here are made the way a release makes them, and both are
+//! read by the program a host reads them with:
 //!
 //! - the archive of a previous release: the step that release ran (`mkdir`, `cp` of the binary
 //!   and `LICENSE`, then GNU `tar` with the workflow's options and `gzip -n`);
 //! - the archive of this change: `cargo xtask release stage`, then the same `tar` and `gzip`;
 //! - the reader: GNU `tar -xzf`, as docs/release.md has a host unpack an archive, after which
-//!   the host runs `<archive name>/js-agent`; and, for the declaration, the file
-//!   `<archive name>/updater.d/js-agent.toml`, which this change adds and a previous release
-//!   lacks.
+//!   the host runs `<archive name>/js-agent`.
 //!
 //! So a host that follows the previous release's steps unpacks a new archive to the same binary
-//! and license, and a host that looks for the declaration finds none in a previous archive.
+//! and license, and the two archives list the same members.
 //!
 //! The arm64 Linux archive is made by the same step with the real `gzip -n`, twice from one staged
 //! tree, and the two must be the same bytes: the archiving half of the reproducibility the release
@@ -24,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, UNIX_EPOCH};
 
 use js_testkit::dir::TestDir;
-use xtask::release::stage::{DECLARATION_MEMBER, DECLARATION_SOURCE, StageArgs, run};
+use xtask::release::stage::{StageArgs, run};
 
 const TARGET: &str = "x86_64-unknown-linux-musl";
 const ARM_TARGET: &str = "aarch64-unknown-linux-musl";
@@ -107,27 +106,26 @@ fn checkout_for<'a>(tmp: &'a TestDir, target: &str) -> &'a Path {
     std::fs::create_dir_all(&release).expect("target");
     std::fs::write(release.join("js-agent"), "the agent").expect("binary");
     std::fs::write(dir.join("LICENSE"), "license").expect("license");
-    let declaration = dir.join(DECLARATION_SOURCE);
-    std::fs::create_dir_all(declaration.parent().expect("parent")).expect("packaging");
-    std::fs::write(&declaration, "name = \"js-agent\"\n").expect("declaration");
     // The modes a build leaves, whatever the umask: an executable binary, plain data files.
     for (file, mode) in [
         (release.join("js-agent"), 0o755),
         (dir.join("LICENSE"), 0o644),
-        (declaration, 0o644),
     ] {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("mode");
     }
     dir
 }
 
-/// A new archive unpacked as a host following a previous release's steps does gives the same
-/// binary and license at the same paths; the declaration is the one member more. Catches a
-/// layout change (a renamed top directory, a moved binary) that host would trip on.
+/// A previous release's archive, made by that release's own step, and this change's archive list
+/// the same members and unpack to the same binary and license at the same paths, and neither
+/// holds a declaration. Catches a layout change (a renamed top directory, a moved binary, a
+/// member more) that a host following the previous release's steps would trip on.
 #[test]
-fn a_new_archive_unpacked_by_a_previous_releases_steps_gives_the_same_files() {
-    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-new-read-old");
+fn a_new_archive_has_the_members_of_a_previous_releases_archive() {
+    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-new-and-old");
     let repo = checkout(&tmp);
+
+    // This change's archive.
     let stage = repo.join("stage");
     run(&StageArgs {
         bin: "js-agent".to_owned(),
@@ -137,69 +135,43 @@ fn a_new_archive_unpacked_by_a_previous_releases_steps_gives_the_same_files() {
         repo_dir: repo.to_owned(),
     })
     .expect("staged");
-    let name = format!("js-agent-1.4.0-{TARGET}");
-    let file = archive(&stage, &name, repo);
-    assert_eq!(
-        listed(&file),
-        [
-            format!("{name}/"),
-            format!("{name}/LICENSE"),
-            format!("{name}/js-agent"),
-            format!("{name}/updater.d/"),
-            format!("{name}/updater.d/js-agent.toml"),
-        ]
-    );
-    let host = unpack(&file, &repo.join("host")).join(&name);
-    assert_eq!(
-        std::fs::read(host.join("js-agent")).expect("binary"),
-        b"the agent"
-    );
-    assert_eq!(
-        std::fs::read(host.join("LICENSE")).expect("license"),
-        b"license"
-    );
-    assert_eq!(
-        std::fs::read(host.join(DECLARATION_MEMBER)).expect("declaration"),
-        b"name = \"js-agent\"\n"
-    );
-}
+    let new_name = format!("js-agent-1.4.0-{TARGET}");
+    let new_file = archive(&stage, &new_name, repo);
 
-/// A previous release's archive, made by that release's own step, unpacks to its binary and
-/// license, and holds no declaration: a host or an updater that looks for
-/// `updater.d/js-agent.toml` finds the path absent, not another file. Catches a reader that
-/// would need the declaration in every archive.
-#[test]
-fn a_previous_releases_archive_unpacks_to_its_binary_and_no_declaration() {
-    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "archive-old-read-new");
-    let repo = checkout(&tmp);
-    let name = format!("js-agent-1.3.0-{TARGET}");
     // The previous release's step: mkdir "stage-$bin/$name"; cp "target/$TARGET/release/$bin"
     // LICENSE "stage-$bin/$name/".
-    let stage = repo.join("stage-js-agent");
-    std::fs::create_dir_all(stage.join(&name)).expect("mkdir");
+    let old_name = format!("js-agent-1.3.0-{TARGET}");
+    let old_stage = repo.join("stage-js-agent");
+    std::fs::create_dir_all(old_stage.join(&old_name)).expect("mkdir");
     for source in [
         format!("target/{TARGET}/release/js-agent"),
         "LICENSE".to_owned(),
     ] {
         let base = Path::new(&source).file_name().expect("a name");
-        std::fs::copy(repo.join(&source), stage.join(&name).join(base)).expect("cp");
+        std::fs::copy(repo.join(&source), old_stage.join(&old_name).join(base)).expect("cp");
     }
-    let file = archive(&stage, &name, repo);
-    assert_eq!(
-        listed(&file),
-        [
-            format!("{name}/"),
-            format!("{name}/LICENSE"),
-            format!("{name}/js-agent"),
-        ]
-    );
-    let host = unpack(&file, &repo.join("host")).join(&name);
-    assert_eq!(
-        std::fs::read(host.join("js-agent")).expect("binary"),
-        b"the agent"
-    );
-    assert!(!host.join(DECLARATION_MEMBER).exists());
-    assert!(!host.join("updater.d").exists());
+    let old_file = archive(&old_stage, &old_name, repo);
+
+    for (file, name) in [(&new_file, &new_name), (&old_file, &old_name)] {
+        assert_eq!(
+            listed(file),
+            [
+                format!("{name}/"),
+                format!("{name}/LICENSE"),
+                format!("{name}/js-agent"),
+            ]
+        );
+        let host = unpack(file, &repo.join(format!("host-{name}"))).join(name);
+        assert_eq!(
+            std::fs::read(host.join("js-agent")).expect("binary"),
+            b"the agent"
+        );
+        assert_eq!(
+            std::fs::read(host.join("LICENSE")).expect("license"),
+            b"license"
+        );
+        assert!(!host.join("updater.d").exists());
+    }
 }
 
 /// `tar -C <stage> --sort=name --mtime=@COMMIT_TIME --owner=0 --group=0 --numeric-owner -cf -
@@ -249,7 +221,7 @@ fn touch_all(path: &Path, secs: u64) {
 /// The arm64 Linux agent archive made twice from one staged tree, the second time from another
 /// working directory and with every staged file and directory given another modification time, is
 /// the same bytes; its gzip header has no name and no time, and its tar headers say owner 0/0, no
-/// owner names, the commit time and the files' modes (the binary 0755, the others 0644); and
+/// owner names, the commit time and the files' modes (the binary 0755, the license 0644); and
 /// GNU `tar -xzf` unpacks it to the staged files, each with the commit time, the binary still
 /// executable. Catches a name, owner, file time or gzip header field that leaks into
 /// the archive, which would make a re-run's file differ from the published one and fail
@@ -320,8 +292,6 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
         format!("{name}/"),
         format!("{name}/LICENSE"),
         format!("{name}/js-agent"),
-        format!("{name}/updater.d/"),
-        format!("{name}/updater.d/js-agent.toml"),
     ]
     .into_iter()
     .map(|path| (path, 0, 0, COMMIT_TIME, true))
@@ -333,7 +303,6 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
         [
             (format!("{name}/LICENSE"), 0o644),
             (format!("{name}/js-agent"), 0o755),
-            (format!("{name}/updater.d/js-agent.toml"), 0o644),
         ]
     );
 
@@ -348,7 +317,6 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
     for (member, bytes) in [
         ("js-agent", &b"the agent"[..]),
         ("LICENSE", &b"license"[..]),
-        (DECLARATION_MEMBER, &b"name = \"js-agent\"\n"[..]),
     ] {
         assert_eq!(
             std::fs::read(host.join(member)).expect(member),
@@ -372,7 +340,5 @@ fn an_arm64_archive_is_byte_identical_when_made_again_and_reads_back_with_gnu_ta
             .mode()
     };
     assert_eq!(mode("js-agent") & 0o111, 0o111, "{:o}", mode("js-agent"));
-    for member in ["LICENSE", DECLARATION_MEMBER] {
-        assert_eq!(mode(member) & 0o111, 0, "{member}: {:o}", mode(member));
-    }
+    assert_eq!(mode("LICENSE") & 0o111, 0, "{:o}", mode("LICENSE"));
 }

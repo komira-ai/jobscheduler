@@ -877,6 +877,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostkeeper-config"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "hostkeeper-hook"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "hostkeeper-placed"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hostkeeper-config",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "hostkeeper-steps"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hostkeeper-config",
+ "hostkeeper-hook",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
+name = "hostkeeper-unpack"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hex",
+ "hostkeeper-config",
+ "hostkeeper-hook",
+ "hostkeeper-steps",
+ "rustix",
+ "ruzstd",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,10 +1096,12 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hex",
+ "hostkeeper-hook",
  "js-agent-usage",
  "js-agent-wire",
  "js-bundle",
  "js-caps",
+ "js-cli",
  "js-client",
  "js-contain",
  "js-lease",
@@ -1065,7 +1132,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "update-hook",
  "ureq",
 ]
 
@@ -3714,33 +3780,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "update-hook"
-version = "0.1.0"
-source = "git+https://github.com/komira-ai/kbf?rev=e74c32bf01dc398d3c78ef130b6703c2341e4af6#e74c32bf01dc398d3c78ef130b6703c2341e4af6"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "update-rights"
-version = "0.1.0"
-source = "git+https://github.com/komira-ai/kbf?rev=e74c32bf01dc398d3c78ef130b6703c2341e4af6#e74c32bf01dc398d3c78ef130b6703c2341e4af6"
-dependencies = [
- "hex",
- "libc",
- "rustix",
- "serde",
- "sha2 0.11.1",
- "thiserror",
- "toml",
- "update-hook",
-]
-
-[[package]]
 name = "ureq"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4053,6 +4092,9 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "hostkeeper-config",
+ "hostkeeper-placed",
+ "hostkeeper-unpack",
  "js-agent",
  "js-api-gateway",
  "js-cli",
@@ -4072,6 +4114,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-native-certs",
+ "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -4079,8 +4122,6 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
- "update-hook",
- "update-rights",
  "ureq",
 ]
 

@@ -1,0 +1,40 @@
+# The GPU flags of js-agent-crun.service, made from the host's NVIDIA nodes before each start of
+# that unit. It is the unit of packaging/js-agent/js-agent-crun-gpu.service in the hostkeeper
+# package (packaging/js-agent/hostkeeper), which hostkeeper links as
+#   /etc/systemd/system/js-agent-crun-gpu.service
+# and which runs the agent through hostkeeper's `current` link. It is not in the manifest's
+# `run` list: js-agent-crun.service pulls it in (Wants=) and starts after it (After=); nothing
+# enables it. crates/xtask/tests/hostkeeper_package pins the settings described here.
+#
+# `js-agent crun-gpu-dropin` runs `nvidia-smi -L` (which also makes the driver create the nodes of
+# the GPUs and nvidiactl) and checks the flags against the GPUs it lists, the ones the agent checks
+# at start; a list that differs from the nvidia<N> nodes is a warning. It lists /dev, and writes
+#   /run/systemd/system/js-agent-crun.service.d/zz-gpu.conf
+# with an `ExecStart=` reset and the crun unit's ExecStart (after its drop-ins in
+# /etc/systemd/system/js-agent-crun.service.d and in the /run directory above, by name) followed
+# by `--gpu-device`, `--gpu-mount` and `--gpu-env` flags, once the agent's own start check accepts
+# them. The name sorts after `override.conf`, the drop-in `systemctl edit` writes, so the GPU flags
+# are not dropped by it. The drop-in is in /run, so a reboot starts from the unit again. Nothing is written, and an earlier
+# drop-in is removed, on a host with no GPU node and no GPU in nvidia-smi's list, when the crun
+# unit's ExecStart lists a `--gpu-` flag already (the operator's own flags win), and when the check
+# refuses the flags (the journal of this unit says why): the agent then starts without GPUs, never
+# with flags it would refuse.
+# The driver's libraries and programs are read from /opt/nvidia-driver/lib64 and
+# /opt/nvidia-driver/bin (see docs/runbooks/crun-host-setup.md).
+#
+# After= the units that load the driver's modules and make its other nodes (nvidia-uvm and the
+# rest), where the host has them: the oneshot then lists /dev once they are there. An After= on a
+# unit the host does not have orders nothing.
+#
+# ExecStopPost= reloads systemd after the generator, whether it wrote, removed or refused, so the
+# crun unit's start that follows (After=) reads the drop-in as it is now.
+[Unit]
+Description=jobscheduler agent (crun runtime): GPU flags from the host's NVIDIA nodes
+Documentation=https://github.com/komira-ai/jobscheduler
+Before=js-agent-crun.service
+After=systemd-modules-load.service systemd-udev-settle.service nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/hostkeeper/packages/js-agent/current/bin/js-agent crun-gpu-dropin --out /run/systemd/system/js-agent-crun.service.d/zz-gpu.conf --unit /etc/systemd/system/js-agent-crun.service --dev-root /dev --driver-root /opt/nvidia-driver --nvidia-smi /usr/bin/nvidia-smi
+ExecStopPost=/usr/bin/systemctl daemon-reload

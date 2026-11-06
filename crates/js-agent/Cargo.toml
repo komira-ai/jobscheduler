@@ -72,6 +72,9 @@ ureq.workspace = true
 js-contain = { path = "../js-contain" }
 
 [dev-dependencies]
+# The `js join-token` verb's library entry point mints the join tokens the join round trip
+# starts agents with (tests/agent/join_round_trip.rs).
+js-cli = { path = "../js-cli" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 # The STS minter the uploader's tests against the S3-compatible test store take their
@@ -94,9 +97,8 @@ rustix = { workspace = true, features = ["net", "process", "thread"] }
 tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber.workspace = true
-# The hook contract's conformance harness, run against `js-update-hook-fake`
-# (tests/agent/update_hook/conformance.rs).
-update-hook.workspace = true
+# hostkeeper's hook contract and its conformance harness (tests/agent/update_hook/conformance.rs).
+hostkeeper-hook = { workspace = true, features = ["conformance"] }
 
 [lints]
 workspace = true

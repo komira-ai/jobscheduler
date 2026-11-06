@@ -1,33 +1,14 @@
-//! The fake host's own parts, in this process: the declaration it runs the hook under, the hang
-//! guard and the watchdog, and the words that name its faults and defects
+//! The fake host's own parts, in this process: the hang guard and the watchdog, and the words that name its faults and defects
 //! (tests/update_hook_fakes/harness.rs and watchdog.rs).
 
 use std::cell::Cell;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_testkit::dir::TestDir;
 
-use super::fakes::harness::{self, Defect, RELEASE_LINK};
+use super::fakes::harness::{self, Defect};
 use super::fakes::watchdog::{self, Window};
-
-/// The release link the params name is inside the declaration's write paths, as the hook's
-/// `cutover` requires, and the declaration parses over the harness's record directory.
-#[test]
-fn the_declaration_of_the_fake_parses_and_covers_the_release_link() {
-    let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-decl");
-    let record = tmp.path().join("record");
-    fs::create_dir_all(&record).unwrap();
-    let declaration = harness::declaration(&record).unwrap();
-    assert_eq!(declaration.state_dir, record);
-    assert!(
-        declaration
-            .write_paths
-            .iter()
-            .any(|path| Path::new(RELEASE_LINK).starts_with(path))
-    );
-}
 
 /// A clock of the test's: a pause moves it on by what was asked.
 struct TestClock(std::cell::Cell<u64>);
@@ -126,10 +107,11 @@ fn the_faults_a_step_can_end_with_and_the_words_that_name_faults_and_defects() {
         .copied()
         .filter(|(step, fault)| fault.reachable_on_first_install(*step))
         .collect();
+    // Nothing defers on a first install but `prepare`, when the join token file is not right.
     let without_defer: Vec<(S, F)> = reachable
         .iter()
         .copied()
-        .filter(|(_, fault)| *fault != F::Defer)
+        .filter(|(step, fault)| *fault != F::Defer || *step == S::Prepare)
         .collect();
     assert_eq!(on_first_install, without_defer);
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "hook-conf-faults");
@@ -220,27 +202,6 @@ fn kill_points_and_pauses_are_progress_events() {
     harness::Guard::new(&clock, Duration::from_secs(60), &fire).pause(Duration::from_secs(1));
     // Other tests of this process count too: at least these two.
     assert!(watchdog::events() >= before + 2);
-}
-
-/// A path with a quotation mark, a backslash or a control character is written into the
-/// declaration as a TOML string that parses back to it, as the state directory and as a
-/// write path.
-#[test]
-fn a_state_directory_with_quotes_backslashes_and_control_characters_round_trips() {
-    for text in [
-        "/var/lib/a\"b",
-        "/var/lib/a\\b",
-        "/var/lib/a\\\"b\\\\",
-        "/var/lib/tab\there",
-        "/var/lib/\\u0041",
-    ] {
-        let path = PathBuf::from(text);
-        let declaration = harness::declaration(&path)
-            .unwrap_or_else(|why| panic!("{text:?}: {why}\n{}", harness::declaration_text(&path)));
-        assert_eq!(declaration.state_dir, path, "{text:?}");
-        assert!(declaration.write_paths.contains(&path), "{text:?}");
-    }
-    assert_eq!(harness::toml_string("a\"b\\c\n"), "\"a\\\"b\\\\c\\u000A\"");
 }
 
 /// The watchdog's window from its variable: a span, the announcement with the default span or a

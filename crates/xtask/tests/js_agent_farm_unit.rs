@@ -79,7 +79,7 @@ fn agent_cli() -> Cli {
 }
 
 /// The directories the tmpfiles file makes (its `d` lines): path and mode. Every other line is
-/// the release link's `L` line (tests/js_agent_declaration.rs reads it).
+/// the release link's `L` line.
 fn directories() -> Vec<(PathBuf, u32)> {
     let lines = code(&read(TMPFILES));
     let (dirs, others): (Vec<String>, Vec<String>) =
@@ -274,7 +274,7 @@ fn the_unit_makes_its_directories_and_waits_for_the_scratch_disk() {
 /// The modes of the directories are the ones the agent and the job's ids need: the scratch root is
 /// what the agent's `Searchable` layout accepts (`0711`), the directory above it is the unit's
 /// `StateDirectoryMode`, so the two files agree and a start does not change the other's work, and
-/// the state root and the token directory stay private. The release layout of the update hook
+/// the state root and the token directory stay private. The release layout of the crun unit
 /// (`/opt/js-agent`, its releases and the link's directory) is root's and closed to writes by
 /// others. No other directory is made.
 #[test]

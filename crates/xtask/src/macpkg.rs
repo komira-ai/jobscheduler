@@ -57,16 +57,12 @@ fn files(version: &str) -> Vec<(String, u32)> {
             "usr/local/js-agent/share/com.komira.js-mac-session.plist".to_owned(),
             0o644,
         ),
-        (
-            "usr/local/js-agent/share/updater.d/js-agent.toml".to_owned(),
-            0o644,
-        ),
     ]
 }
 
 /// The directories the package makes that hold no file of its own: the link's directory
-/// (the update hook swaps the link by writing next to it), the log directory and the hook's
-/// state directory.
+/// (`postinstall` makes `current` in it), the log directory and the update hook's state
+/// directory (`state_dir` of the hostkeeper package's params).
 const EMPTY_DIRS: [(&str, u32); 3] = [
     ("usr/local/js-agent/link", 0o755),
     ("Library/Logs/js-agent", 0o755),
@@ -130,9 +126,6 @@ pub struct StageArgs {
     /// The helper's plist.
     #[arg(long)]
     pub session_plist: PathBuf,
-    /// The update hook's declaration.
-    #[arg(long)]
-    pub declaration: PathBuf,
     /// The directory to make, which must not exist: `root/` and `scripts/` go in it.
     #[arg(long)]
     pub out: PathBuf,
@@ -215,10 +208,6 @@ pub fn stage(args: &StageArgs) -> Result<String, Error> {
         (
             "usr/local/js-agent/share/com.komira.js-mac-session.plist".to_owned(),
             args.session_plist.clone(),
-        ),
-        (
-            "usr/local/js-agent/share/updater.d/js-agent.toml".to_owned(),
-            args.declaration.clone(),
         ),
     ];
     let mut bytes = BTreeMap::new();

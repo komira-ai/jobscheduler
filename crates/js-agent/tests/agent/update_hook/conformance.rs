@@ -1,5 +1,10 @@
 //! `js-agent update-hook` against the conformance harness of the host updater's hook contract
-//! (`update_hook::conformance`, kbf's `update-hook` crate at the revision the workspace pins).
+//! (`hostkeeper_hook::conformance`, hostkeeper's `hostkeeper-hook` crate at the revision the
+//! workspace pins).
+//!
+//! hostkeeper runs an update step as the bare word (`js-agent prepare ...`) and the steps it
+//! adds behind the verb (`js-agent update-hook uninstall ...`), so every check runs in both
+//! forms, in sandboxes of their own, and the two must give the same result.
 //!
 //! The harness starts `js-update-hook-fake` (the hook's own steps over the fake ports,
 //! tests/bin/update_hook_fake.rs) the way the updater starts a hook: a process of its own, an
@@ -17,12 +22,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use js_agent::update_hook::{NoGate, Report as AgentReport, swap_link};
-use js_testkit::dir::TestDir;
-use update_hook::conformance::{
+use hostkeeper_hook::conformance::{
     Allowances, Conformance, FakeService, Fault, HookCommand, LapsingCordon, Sandbox, Violation,
 };
-use update_hook::{Params, Scalar, Step};
+use hostkeeper_hook::{Params, Scalar, Step};
+use js_agent::update_hook::{NoGate, Report as AgentReport};
+use js_testkit::dir::TestDir;
+use js_update_hook::swap_link;
 
 use super::fakes::harness::{
     self, CONTROL_VAR, DEFECT_VAR, Defect, EXIT_GATE_BROKEN, HOST, OWNED_CORDON, PARAMS,
@@ -33,9 +39,15 @@ use super::fakes::{World, relative_to_link};
 
 pub(super) const BIN: &str = env!("CARGO_BIN_EXE_js-update-hook-fake");
 
-/// The version the harness's params name as the previous one (`update_hook::conformance`): the
+/// The version the harness's params name as the previous one (`hostkeeper_hook::conformance`): the
 /// agent that runs when the update begins says hello with it.
 pub(super) const PREVIOUS_VERSION: &str = "1.0.0";
+
+/// The unit file the staged and the previous release carry, and the one a changed unit has.
+pub(super) const UNIT_TEXT: &str = "[Service]\nExecStart=/usr/bin/js-agent\nDelegate=yes\n";
+/// See [`UNIT_TEXT`].
+pub(super) const NEW_UNIT_TEXT: &str =
+    "[Service]\nExecStart=/usr/bin/js-agent\nDelegate=yes\nDelegateSubgroup=supervisor\n";
 
 /// How far ahead the operator's cordon of [`AgentHost::operator_cordoned`] lapses, from the fake
 /// clock's start: a week, as an operator who renewed it would leave it. Longer than the hook's
@@ -57,6 +69,8 @@ pub(super) struct AgentHost {
     /// Readings of the host during `prepare` that still show a job draining
     /// ([`harness::DRAIN_LOOKS`]).
     drain_looks: u64,
+    /// The staged release carries a unit that differs from the previous release's.
+    unit_changed: bool,
 }
 
 impl AgentHost {
@@ -67,6 +81,16 @@ impl AgentHost {
             operator_cordon: false,
             window: None,
             drain_looks: 0,
+            unit_changed: false,
+        }
+    }
+
+    /// An update whose staged unit differs from the installed one: `cutover` waits, after the
+    /// stop, for the unit's cgroup to be empty.
+    pub(super) fn with_changed_unit() -> AgentHost {
+        AgentHost {
+            unit_changed: true,
+            ..AgentHost::update()
         }
     }
 
@@ -131,6 +155,17 @@ impl FakeService for AgentHost {
     fn init(&mut self, sandbox: &Sandbox) -> io::Result<()> {
         let world = Self::world(sandbox);
         world.state_root();
+        stage_unit(
+            &sandbox.artifact(),
+            if self.unit_changed {
+                NEW_UNIT_TEXT
+            } else {
+                UNIT_TEXT
+            },
+        )?;
+        if !self.first_install {
+            stage_unit(&sandbox.previous(), UNIT_TEXT)?;
+        }
         // The directory of the record's view is always there; only its file comes and goes.
         fs::create_dir_all(
             sandbox
@@ -139,7 +174,7 @@ impl FakeService for AgentHost {
         )?;
         if !self.first_install {
             world.seed_unit(UNIT, "active", "running");
-            let link = sandbox.world().join("link").join("current");
+            let link = Self::control(sandbox).join("link").join("current");
             swap_link(&link, &relative_to_link(&link, &sandbox.previous()))?;
             world.seed_host(HOST, PREVIOUS_VERSION);
             if self.operator_cordon {
@@ -224,6 +259,12 @@ impl FakeService for AgentHost {
     }
 }
 
+/// Puts the unit the release `dir` carries in its `units` directory.
+fn stage_unit(dir: &Path, text: &str) -> io::Result<()> {
+    fs::create_dir_all(dir.join("units"))?;
+    fs::write(dir.join("units").join(UNIT), text)
+}
+
 /// [`AgentHost::residue`].
 pub(super) fn residue_of(sandbox: &Sandbox, operator_cordon: bool) -> io::Result<Vec<String>> {
     let mut left = Vec::new();
@@ -257,6 +298,7 @@ pub(super) fn agent_step(step: Step) -> js_agent::update_hook::Step {
         Step::Verify => Agent::Verify,
         Step::Rollback => Agent::Rollback,
         Step::Cleanup => Agent::Cleanup,
+        Step::Uninstall => unreachable!("the harness runs no uninstall: the package declares none"),
     }
 }
 
@@ -285,16 +327,17 @@ fn hook() -> HookCommand {
     HookCommand::new(Path::new(BIN))
 }
 
-/// Runs `checks` on the hook with `fake`, in a directory of the test's.
-fn run<T>(
+/// Runs `checks` on the hook with `fake` in the form `hook` starts it in, in a directory of the
+/// test's.
+fn run_form<T>(
     name: &str,
+    hook: &HookCommand,
     mut fake: AgentHost,
-    checks: impl FnOnce(&mut Conformance<'_>) -> Result<T, Violation>,
+    checks: &impl Fn(&mut Conformance<'_>) -> Result<T, Violation>,
 ) -> Result<T, Violation> {
     let tmp = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
-    let hook = hook();
     let first_install = fake.first_install;
-    let harness = Conformance::new(&hook, &mut fake, tmp.path()).with_allowances(allowances());
+    let harness = Conformance::new(hook, &mut fake, tmp.path()).with_allowances(allowances());
     // The params of a first install have no previous release or version.
     let mut harness = if first_install {
         harness.with_first_install()
@@ -302,6 +345,27 @@ fn run<T>(
         harness
     };
     checks(&mut harness)
+}
+
+/// Runs `checks` on the hook with `fake` behind the verb (`update-hook <step>`) and with the bare
+/// step, and requires the two to give the same result.
+fn run<T: PartialEq + std::fmt::Debug>(
+    name: &str,
+    fake: AgentHost,
+    checks: impl Fn(&mut Conformance<'_>) -> Result<T, Violation>,
+) -> Result<T, Violation> {
+    let verb = run_form(name, &hook(), fake, &checks)?;
+    let bare = run_form(
+        &format!("{name}-bare"),
+        &hook().with_hook_args(&[]),
+        fake,
+        &checks,
+    )?;
+    assert_eq!(
+        verb, bare,
+        "the bare step and the verb gave different results"
+    );
+    Ok(verb)
 }
 
 #[test]
@@ -441,7 +505,7 @@ fn a_step_that_never_returns_is_stopped_by_the_hang_guard_and_refused() {
 /// reads).
 #[test]
 fn the_fake_binary_speaks_the_harness_kill_point_protocol() {
-    use update_hook::conformance::gate;
+    use hostkeeper_hook::conformance::gate;
     assert_eq!(harness::GATE_DIR_VAR, gate::GATE_DIR_VAR);
     assert_eq!(harness::KILL_AT_VAR, gate::KILL_AT_VAR);
     assert_eq!(harness::PARKED, gate::PARKED);
@@ -636,7 +700,7 @@ fn residue_that_cannot_be_read_fails_the_check_and_is_never_read_as_none() {
 /// failed `cutover`): the updater's table stops with a halt either way.
 #[test]
 fn a_tainted_rollback_halts_before_and_after_the_commit() {
-    use update_hook::Verdict;
+    use hostkeeper_hook::Verdict;
     for (n, first) in [Step::Prepare, Step::Cutover].into_iter().enumerate() {
         let faults = [(first, Fault::Fail), (Step::Rollback, Fault::Halt)];
         let trace = run(
@@ -649,7 +713,7 @@ fn a_tainted_rollback_halts_before_and_after_the_commit() {
         assert_eq!(trace.verdict, Verdict::Halt, "{:?}", trace.steps);
         assert_eq!(
             trace.steps.last(),
-            Some(&(Step::Rollback, update_hook::Outcome::Halt))
+            Some(&(Step::Rollback, hostkeeper_hook::Outcome::Halt))
         );
     }
 }
@@ -668,7 +732,7 @@ fn every_last_line_and_exit_code_of_the_hook_is_the_harness_contract() {
                     reversible,
                     ..AgentReport::failure(reason, "a detail")
                 };
-                let theirs = update_hook::Report::from_stdout(&format!("{}\n", mine.to_line()))
+                let theirs = hostkeeper_hook::Report::from_stdout(&format!("{}\n", mine.to_line()))
                     .unwrap_or_else(|why| panic!("{}: {why}", mine.to_line()));
                 assert_eq!(theirs.reason.as_deref(), Some(reason.as_str()));
                 assert_eq!(theirs.class.as_str(), class.as_str());
@@ -679,9 +743,9 @@ fn every_last_line_and_exit_code_of_the_hook_is_the_harness_contract() {
         }
     }
     let empty =
-        update_hook::Report::from_stdout(&format!("{}\n", AgentReport::default().to_line()))
+        hostkeeper_hook::Report::from_stdout(&format!("{}\n", AgentReport::default().to_line()))
             .unwrap();
-    let nothing = update_hook::Report::default();
+    let nothing = hostkeeper_hook::Report::default();
     assert_eq!(
         (
             empty.class,
@@ -698,33 +762,41 @@ fn every_last_line_and_exit_code_of_the_hook_is_the_harness_contract() {
     );
     assert!(empty.reversible && !empty.promotion_pending);
     for (mine, theirs) in [
-        (Outcome::Success, update_hook::Outcome::Success),
-        (Outcome::Failure, update_hook::Outcome::Failure),
-        (Outcome::Deferred, update_hook::Outcome::Deferred),
-        (Outcome::Halt, update_hook::Outcome::Halt),
+        (Outcome::Success, hostkeeper_hook::Outcome::Success),
+        (Outcome::Failure, hostkeeper_hook::Outcome::Failure),
+        (Outcome::Deferred, hostkeeper_hook::Outcome::Deferred),
+        (Outcome::Halt, hostkeeper_hook::Outcome::Halt),
     ] {
         assert_eq!(
-            update_hook::Outcome::from_code(i32::from(mine.code())),
+            hostkeeper_hook::Outcome::from_code(i32::from(mine.code())),
             Some(theirs)
         );
     }
 }
 
-/// A first install through the updater's table: success, and every fault the fake can make on a
-/// first install that leads to no rollback after the link moved, or to one that is itself made
-/// to fail. Each ends with the verdict the table gives it.
+/// A first install through the updater's table: success, a `prepare` deferred because the join
+/// token file is not right (retried in `defer_retry_secs`, with the rollback of the table
+/// finding nothing to undo), and every fault the fake can make on a first install that leads to
+/// no rollback after the link moved, or to one that is itself made to fail. Each ends with the
+/// verdict the table gives it.
 #[test]
 fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
-    use update_hook::{Class, Phase, Verdict};
+    use hostkeeper_hook::{Class, Phase, Verdict};
     let failed = |phase| Verdict::Failed {
         phase,
         class: Class::Release,
     };
-    let cases: [(&[(Step, Fault)], Verdict); 8] = [
+    let cases: [(&[(Step, Fault)], Verdict); 9] = [
         (
             &[],
             Verdict::Succeeded {
                 promotion_pending: false,
+            },
+        ),
+        (
+            &[(Step::Prepare, Fault::Defer)],
+            Verdict::Deferred {
+                retry_after_secs: Some(300),
             },
         ),
         (&[(Step::Prepare, Fault::Fail)], failed(Phase::BeforeCommit)),
@@ -754,24 +826,19 @@ fn a_first_install_through_the_updater_table_ends_as_each_fault_asks() {
         assert_eq!(trace.verdict, verdict, "{faults:?}: {:?}", trace.steps);
     }
     // What a first install has no way to end with.
-    for faults in [
-        [(Step::Prepare, Fault::Defer)],
-        [(Step::Cutover, Fault::Defer)],
-    ] {
-        let made = run(
-            "hook-conf-first-none",
-            AgentHost::first_install(),
-            |harness| harness.scenario(&faults),
-        )
-        .unwrap();
-        assert_eq!(made, None, "{faults:?}");
-    }
+    let made = run(
+        "hook-conf-first-none",
+        AgentHost::first_install(),
+        |harness| harness.scenario(&[(Step::Cutover, Fault::Defer)]),
+    )
+    .unwrap();
+    assert_eq!(made, None);
 }
 
 /// What the harness still refuses on a first install, and only that: its crash-resume and its
 /// sequences run a `rollback` after `cutover` and require it to succeed, and the hook's fails
 /// `no_previous_release` by design (rollback.rs, item 3). The first-install allowance covers
-/// the `rollback` of the run-twice check alone (update_hook::conformance::Allowances). Catches a
+/// the `rollback` of the run-twice check alone (hostkeeper_hook::conformance::Allowances). Catches a
 /// first install that fails anything else on the way, and tells when the harness extends the
 /// allowance: then these become the checks themselves. The harness's refusal carries no
 /// reason; conformance_runs.rs drives the same paths without it and asserts the reason, the
@@ -784,8 +851,8 @@ fn on_a_first_install_the_harness_refuses_only_the_designed_rollback_after_cutov
                 refused,
                 Violation::UnexpectedOutcome {
                     step: Step::Rollback,
-                    wanted: update_hook::Outcome::Success,
-                    got: update_hook::Outcome::Failure,
+                    wanted: hostkeeper_hook::Outcome::Success,
+                    got: hostkeeper_hook::Outcome::Failure,
                 }
             ),
             "{refused}"
@@ -867,4 +934,27 @@ fn without_the_allowances_the_harness_refuses_exactly_the_three_designed_behavio
         ),
         "{c3}"
     );
+}
+
+/// A staged unit that differs from the installed one: `cutover` waits, after the stop, for the
+/// unit's cgroup to hold no process before it starts, and the update runs twice at each step and
+/// killed at every kill point as an update with an unchanged unit does, in both forms.
+///
+/// Catches a restart plan that the record keeps differently from one run to the next, and a wait
+/// whose progress is not in the record.
+#[test]
+fn an_update_whose_unit_changes_is_idempotent_and_resumes_from_every_kill_point() {
+    run(
+        "hook-conf-unit-twice",
+        AgentHost::with_changed_unit(),
+        |harness| harness.idempotence(),
+    )
+    .unwrap();
+    let points = run(
+        "hook-conf-unit-resume",
+        AgentHost::with_changed_unit(),
+        |harness| harness.crash_resume(),
+    )
+    .unwrap();
+    assert!(points > 0, "the steps reached no kill point");
 }

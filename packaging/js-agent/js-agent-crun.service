@@ -58,12 +58,12 @@
 #                         killed (its main process alone, as above: what it still ran is
 #                         adopted) and Restart=always brings it back. Raise it with either flag.
 #   ExecStart=/opt/js-agent/link/current/js-agent
-#                         the program is run through the release link, which the host updater's
-#                         js-agent hook moves from one release to the next (`cutover`, and back on
-#                         `rollback`); packaging/js-agent/updater.d/js-agent.toml names the link
-#                         (--release-link) and this unit. The tmpfiles file makes the link, once,
-#                         pointing at /usr/bin, so until an update moves it the program is the
-#                         package's /usr/bin/js-agent; it never replaces a link that is there
+#                         the program is run through a release link, which nothing in this
+#                         repository moves any more: the hostkeeper package of js-agent
+#                         (packaging/js-agent/hostkeeper) runs the agent through hostkeeper's own
+#                         link instead. The tmpfiles file makes this link, once, pointing at
+#                         /usr/bin, so the program is the package's /usr/bin/js-agent; it never
+#                         replaces a link that is there
 #   Wants=/After=js-agent-crun-gpu.service
 #                         a oneshot that writes, before each start, the drop-in with the --gpu-*
 #                         flags for the host's NVIDIA nodes, and reloads systemd (see that unit).

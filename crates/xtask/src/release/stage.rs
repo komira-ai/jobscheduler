@@ -5,20 +5,15 @@
 //!
 //! Every archive holds its binary and the repository's `LICENSE`. The Linux archive, of either
 //! architecture (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`), of a binary that has
-//! a host updater's declaration ([`DECLARATIONS`]: `js-agent` and `js-lease-server`) also holds it
-//! as `updater.d/<binary>.toml` ([`declaration_member`]), the name kbf's release unpacker takes it
+//! a host updater's declaration ([`DECLARATIONS`]: `js-lease-server`) also holds it as
+//! `updater.d/<binary>.toml` ([`declaration_member`]), the name kbf's release unpacker takes it
 //! by, so the updater reads the rights of a release from the release itself. The Mac archives do
-//! not: a Mac runs no generic updater, and the agent's package carries its own declaration.
+//! not, and neither does the archive of `js-agent`: the agent is updated as a hostkeeper package
+//! (`release hostkeeper-package`), which carries what the update needs.
 
 use std::path::{Path, PathBuf};
 
 use super::{Error, Version, io_error};
-
-/// The host updater's declaration of js-agent in the repository: the file the deb carries too.
-pub const DECLARATION_SOURCE: &str = "packaging/js-agent/updater.d/js-agent.toml";
-
-/// js-agent's declaration's path inside the archive's directory.
-pub const DECLARATION_MEMBER: &str = "updater.d/js-agent.toml";
 
 /// The host updater's declaration of js-lease-server in the repository.
 pub const SERVER_DECLARATION_SOURCE: &str =
@@ -26,10 +21,7 @@ pub const SERVER_DECLARATION_SOURCE: &str =
 
 /// The binaries whose Linux archives carry a host updater's declaration, each with its file in
 /// the repository.
-pub const DECLARATIONS: [(&str, &str); 2] = [
-    ("js-agent", DECLARATION_SOURCE),
-    ("js-lease-server", SERVER_DECLARATION_SOURCE),
-];
+pub const DECLARATIONS: [(&str, &str); 1] = [("js-lease-server", SERVER_DECLARATION_SOURCE)];
 
 /// The path of `bin`'s declaration inside its archive's directory: `updater.d/<bin>.toml`.
 #[must_use]

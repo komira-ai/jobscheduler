@@ -3,12 +3,13 @@
 //! sees what the process did:
 //!
 //! - `world/`, the observable state of the service the hook acts on, which the harness
-//!   compares between runs: `units/<unit>` (the unit manager), `link/<name>` (release links),
-//!   `lease.json` (the lease server's view of the host, but its cordon), `cordon.json` (the
+//!   compares between runs: `units/<unit>` (the unit manager), `lease.json` (the lease server's view of the host, but its cordon), `cordon.json` (the
 //!   host's cordon, there only while the server holds one) and `state/` (the agent's state
 //!   root).
 //! - `control/`, what the harness must not compare: the clock (`clock`, milliseconds) and the
-//!   count of pauses (`ticks`), and the skew of the lease server's clock (`server-skew-ms`).
+//!   count of pauses (`ticks`), the skew of the lease server's clock (`server-skew-ms`) and the
+//!   release links (`link/<name>`), which are the updater's: the hook reads them and never
+//!   writes one, and the updater moves them whatever the hook's lock says.
 //!
 //! Every change to `world/` passes the [`Gate`] first; a read, and a call that changes nothing,
 //! does not. Nothing here sleeps: [`Clock::pause`] moves the fake clock on and counts.
@@ -22,9 +23,10 @@ use std::time::Duration;
 use js_agent::lifecycle::StateRoot;
 use js_agent::update_hook::{
     Clock, CordonView, Cordoned, Gate, HostReading, Lease, LeaseError, Link, MAX_CORDON_SECS,
-    Params, PortError, Uncordoned, UnitState, Units, read_link, swap_link,
+    Params, PortError, Uncordoned, UnitState, Units, read_link,
 };
 use js_agent_wire::Taint;
+use js_update_hook::swap_link;
 use serde::{Deserialize, Serialize};
 
 pub mod harness;
@@ -68,9 +70,8 @@ impl World {
         for dir in [world, control] {
             fs::create_dir_all(dir).unwrap();
         }
-        for sub in ["units", "link"] {
-            fs::create_dir_all(world.join(sub)).unwrap();
-        }
+        fs::create_dir_all(world.join("units")).unwrap();
+        fs::create_dir_all(control.join("link")).unwrap();
         Self {
             world: world.to_owned(),
             control: control.to_owned(),
@@ -168,7 +169,7 @@ impl World {
     }
 
     /// The world before an update that `params` describes. The release that runs is linked at
-    /// `link` exactly as the params spell it, and the host is known to the server with the
+    /// `link`, and the host is known to the server with the
     /// version that runs. A first install (neither previous key) has no link and the server
     /// knows no host.
     ///
@@ -452,7 +453,7 @@ impl World {
     /// release link points at (see [`World::register_release`]); none when the link or the
     /// release is not known.
     fn linked_version(&self) -> Result<Option<String>, PortError> {
-        let mut names: Vec<PathBuf> = fs::read_dir(self.world.join("link"))
+        let mut names: Vec<PathBuf> = fs::read_dir(self.control.join("link"))
             .map_err(|why| io_err(&why))?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .collect();
@@ -481,7 +482,7 @@ impl World {
 
     fn link_file(&self, link: &Path) -> Result<PathBuf, PortError> {
         link.file_name()
-            .map(|name| self.world.join("link").join(name))
+            .map(|name| self.control.join("link").join(name))
             .ok_or_else(|| PortError::Io(format!("{}: no file name", link.display())))
     }
 }
@@ -548,6 +549,19 @@ impl World {
         }
         self.gate();
         swap_link(&file, &relative_to_link(&file, target)).map_err(|why| io_err(&why))
+    }
+}
+
+impl World {
+    /// The updater's own act, which the hook never makes: points the link of `link` at
+    /// `target` (a path of the world's, kept relative as [`World::relink_relative`] keeps it),
+    /// behind no kill point.
+    ///
+    /// # Panics
+    /// The link could not be made.
+    pub fn set_link(&self, link: &Path, target: &Path) {
+        let file = self.link_file(link).unwrap();
+        swap_link(&file, &relative_to_link(&file, target)).unwrap();
     }
 }
 

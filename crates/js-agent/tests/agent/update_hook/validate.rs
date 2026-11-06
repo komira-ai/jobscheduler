@@ -4,22 +4,19 @@
 use std::path::PathBuf;
 
 use js_agent::update_hook::{
-    CUTOVER_MARGIN_SECS, Cordon, Declaration, EXPIRY_SLACK_MS, Invalid, MAX_VERSION_LEN, POLL_SECS,
-    PREPARE_MARGIN_SECS, Params, ROLLBACK_HELLO_SECS, ROLLBACK_MARGIN_SECS, Record, Rollback,
-    SCHEMA, START_WAIT_SECS, Timeouts, UpdateInfo, VERIFY_MARGIN_SECS, validate,
+    CUTOVER_MARGIN_SECS, Cordon, EXPIRY_SLACK_MS, Invalid, MAX_CHANGE_LEN, MAX_CHANGES,
+    MAX_VERSION_LEN, POLL_SECS, PREPARE_MARGIN_SECS, Params, ROLLBACK_HELLO_SECS,
+    ROLLBACK_MARGIN_SECS, Record, Rollback, SCHEMA, START_WAIT_SECS, Settings, Timeouts,
+    UnitRestart, UpdateInfo, VERIFY_MARGIN_SECS, validate,
 };
 
 const UNIT: &str = "js-agent-crun.service";
 
-fn declaration() -> Declaration {
-    Declaration {
+fn settings() -> Settings {
+    Settings {
         state_dir: PathBuf::from("/var/lib/js-agent-update"),
-        units: vec![UNIT.to_owned(), "js-agent-docker.service".to_owned()],
-        write_paths: vec![
-            PathBuf::from("/opt/js-agent"),
-            PathBuf::from("/opt/js-agent-link"),
-            PathBuf::from("/var/lib/js-agent-update"),
-        ],
+        unit: UNIT.to_owned(),
+        runtime: "crun".to_owned(),
         timeouts: Timeouts {
             prepare: 3900,
             cutover: 4320,
@@ -27,13 +24,14 @@ fn declaration() -> Declaration {
             rollback: 8220,
             cleanup: 120,
         },
-        runtime: "crun".to_owned(),
+        verify_deadline_secs: 9000,
     }
 }
 
 /// The table the updater would have passed for the update `record` is of.
 fn params_for(record: &Record) -> Params {
     Params {
+        settings: settings(),
         cordon_lease_secs: 300,
         cordon_max_secs: 17355,
         drain_wait_secs: 3600,
@@ -42,10 +40,12 @@ fn params_for(record: &Record) -> Params {
         promotion_ceiling_secs: None,
         staged_release: record.update.staged.clone(),
         previous_release: record.update.previous_target.clone(),
-        release_link: None,
+        release_link: PathBuf::from("/var/lib/hostkeeper/packages/js-agent/current"),
+        flags_file: PathBuf::from("/etc/js-agent/flags"),
         target_version: record.update.target.clone(),
         previous_version: record.update.previous.clone(),
-        connect: Default::default(),
+        state_root: PathBuf::from("/var/lib/js-agent/state"),
+        token_file: PathBuf::from("/etc/js-agent/token"),
     }
 }
 
@@ -74,7 +74,7 @@ fn good() -> Record {
 }
 
 fn check(record: &Record) -> Result<(), Invalid> {
-    validate(record, &declaration(), &params_for(record))
+    validate(record, &params_for(record))
 }
 
 /// The rule `record` breaks, after `change` is applied to a good one.
@@ -106,10 +106,10 @@ fn the_schema_must_be_the_one_the_hook_writes() {
 }
 
 #[test]
-fn the_unit_must_be_a_declared_unit() {
-    passes(|r| r.update.unit = "js-agent-docker.service".to_owned());
+fn the_unit_must_be_the_unit_the_params_name() {
     for unit in [
         "",
+        "js-agent-docker.service",
         "js-agent-crun",
         "sshd.service",
         "js-agent-crun.service ",
@@ -249,7 +249,7 @@ fn a_first_install_has_no_previous_version_or_release() {
     let mut record = good();
     first(&mut record);
     assert_eq!(
-        validate(&record, &declaration(), &params()),
+        validate(&record, &params()),
         Err(Invalid::ParamsMismatch { field: "previous" })
     );
     // And the record naming a previous the first-install table lacks.
@@ -257,7 +257,7 @@ fn a_first_install_has_no_previous_version_or_release() {
     table.previous_version = None;
     table.previous_release = None;
     assert_eq!(
-        validate(&good(), &declaration(), &table),
+        validate(&good(), &table),
         Err(Invalid::ParamsMismatch { field: "previous" })
     );
 }
@@ -265,7 +265,7 @@ fn a_first_install_has_no_previous_version_or_release() {
 #[test]
 fn the_record_must_say_what_the_params_table_says() {
     let record = good();
-    assert_eq!(validate(&record, &declaration(), &params()), Ok(()));
+    assert_eq!(validate(&record, &params()), Ok(()));
     type Change = fn(&mut Params);
     let cases: [(&str, Change); 4] = [
         ("target", |p| p.target_version = "1.4.1".to_owned()),
@@ -283,7 +283,7 @@ fn the_record_must_say_what_the_params_table_says() {
         let mut table = params();
         change(&mut table);
         assert_eq!(
-            validate(&record, &declaration(), &table),
+            validate(&record, &table),
             Err(Invalid::ParamsMismatch { field }),
             "{field}"
         );
@@ -292,7 +292,7 @@ fn the_record_must_say_what_the_params_table_says() {
     let mut record = good();
     record.update.staged = PathBuf::from("/opt/js-agent/../../etc");
     assert_eq!(
-        validate(&record, &declaration(), &params_for(&record)),
+        validate(&record, &params_for(&record)),
         Err(Invalid::Path { field: "staged" })
     );
 }
@@ -372,7 +372,7 @@ fn a_cordon_expires_no_later_than_the_cap_after_its_first_placement() {
         cordon_max_secs: 20_000,
         ..params()
     };
-    assert_eq!(validate(&record, &declaration(), &roomy), Ok(()));
+    assert_eq!(validate(&record, &roomy), Ok(()));
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn a_cap_too_large_to_add_saturates_and_never_wraps() {
         first_ms: 1,
         expires_ms: u64::MAX,
     };
-    assert_eq!(validate(&record, &declaration(), &huge), Ok(()));
+    assert_eq!(validate(&record, &huge), Ok(()));
     // The sum does not fit either: it does not wrap to a small limit that refuses a stamp
     // near the end of time.
     record.cordon = Cordon {
@@ -398,7 +398,7 @@ fn a_cap_too_large_to_add_saturates_and_never_wraps() {
         first_ms: u64::MAX - 10,
         expires_ms: u64::MAX,
     };
-    assert_eq!(validate(&record, &declaration(), &params()), Ok(()));
+    assert_eq!(validate(&record, &params()), Ok(()));
 }
 
 #[test]
@@ -481,7 +481,7 @@ fn every_rule_has_words_for_the_log() {
             Invalid::Unit {
                 found: "x".to_owned(),
             },
-            "unit \"x\" is not a declared unit",
+            "unit \"x\" is not the hook's unit",
         ),
         (
             Invalid::SameVersion,
@@ -537,14 +537,14 @@ fn the_comparison_with_the_table_is_exact_not_by_path_components() {
         let mut table = params();
         table.staged_release = PathBuf::from(spelling);
         assert_eq!(
-            validate(&good(), &declaration(), &table),
+            validate(&good(), &table),
             Err(Invalid::ParamsMismatch { field: "staged" }),
             "{spelling}"
         );
         let mut table = params();
         table.previous_release = Some(PathBuf::from(spelling));
         assert_eq!(
-            validate(&good(), &declaration(), &table),
+            validate(&good(), &table),
             Err(Invalid::ParamsMismatch {
                 field: "previous_target"
             }),
@@ -563,7 +563,7 @@ fn the_previous_version_and_the_previous_release_come_together_or_not_at_all() {
         let mut record = good();
         change(&mut record);
         assert_eq!(
-            validate(&record, &declaration(), &params_for(&record)),
+            validate(&record, &params_for(&record)),
             Err(Invalid::Unpaired { side: "record" })
         );
     }
@@ -575,7 +575,7 @@ fn the_previous_version_and_the_previous_release_come_together_or_not_at_all() {
         let mut table = params();
         change(&mut table);
         assert_eq!(
-            validate(&good(), &declaration(), &table),
+            validate(&good(), &table),
             Err(Invalid::Unpaired { side: "params" })
         );
     }
@@ -609,7 +609,7 @@ fn the_recorded_digest_must_be_the_one_the_updater_passes() {
         ..params_for(&record)
     };
     assert_eq!(
-        validate(&record, &declaration(), &other),
+        validate(&record, &other),
         Err(Invalid::ParamsMismatch {
             field: "artifact_digest"
         })
@@ -629,15 +629,14 @@ fn a_provisional_cordon_is_a_placed_one() {
 }
 
 #[test]
-fn the_declared_prepare_timeout_must_outlast_the_drain_wait_by_the_margin() {
+fn the_prepare_timeout_must_outlast_the_drain_wait_by_the_margin() {
     let record = good();
-    let mut declaration = declaration();
-    let params = params_for(&record);
+    let mut params = params_for(&record);
     let needed = params.drain_wait_secs + PREPARE_MARGIN_SECS;
-    declaration.timeouts.prepare = needed;
-    assert_eq!(validate(&record, &declaration, &params), Ok(()));
-    declaration.timeouts.prepare = needed - 1;
-    let error = validate(&record, &declaration, &params).unwrap_err();
+    params.settings.timeouts.prepare = needed;
+    assert_eq!(validate(&record, &params), Ok(()));
+    params.settings.timeouts.prepare = needed - 1;
+    let error = validate(&record, &params).unwrap_err();
     assert_eq!(
         error,
         Invalid::PrepareTimeout {
@@ -650,15 +649,14 @@ fn the_declared_prepare_timeout_must_outlast_the_drain_wait_by_the_margin() {
 }
 
 #[test]
-fn the_declared_cutover_timeout_must_leave_time_to_stop() {
+fn the_cutover_timeout_must_leave_time_to_stop() {
     let record = good();
-    let mut declaration = declaration();
-    let params = params_for(&record);
+    let mut params = params_for(&record);
     let needed = START_WAIT_SECS + CUTOVER_MARGIN_SECS + 1;
-    declaration.timeouts.cutover = needed;
-    assert_eq!(validate(&record, &declaration, &params), Ok(()));
-    declaration.timeouts.cutover = needed - 1;
-    let error = validate(&record, &declaration, &params).unwrap_err();
+    params.settings.timeouts.cutover = needed;
+    assert_eq!(validate(&record, &params), Ok(()));
+    params.settings.timeouts.cutover = needed - 1;
+    let error = validate(&record, &params).unwrap_err();
     assert_eq!(
         error,
         Invalid::CutoverTimeout {
@@ -677,11 +675,11 @@ fn a_first_install_may_move_the_link_without_a_stop_but_not_start_before_it() {
     record.cordon = Cordon::default();
     record.link_moved = true;
     let params = params_for(&record);
-    assert_eq!(validate(&record, &declaration(), &params), Ok(()));
+    assert_eq!(validate(&record, &params), Ok(()));
     record.link_moved = false;
     record.start_issued = true;
     assert_eq!(
-        validate(&record, &declaration(), &params),
+        validate(&record, &params),
         Err(Invalid::Marks {
             mark: "start_issued",
             needs: "link_moved"
@@ -696,7 +694,7 @@ fn an_update_with_a_previous_release_may_not_move_the_link_without_a_stop() {
     record.link_moved = true;
     assert!(record.update.previous.is_some());
     assert_eq!(
-        validate(&record, &declaration(), &params_for(&record)),
+        validate(&record, &params_for(&record)),
         Err(Invalid::Marks {
             mark: "link_moved",
             needs: "stop_begun"
@@ -705,16 +703,15 @@ fn an_update_with_a_previous_release_may_not_move_the_link_without_a_stop() {
 }
 
 #[test]
-fn the_declared_verify_timeout_must_outlast_the_margin_and_one_poll() {
+fn the_verify_timeout_must_outlast_the_margin_and_one_poll() {
     let record = good();
-    let mut declaration = declaration();
-    let params = params_for(&record);
+    let mut params = params_for(&record);
     let needed = VERIFY_MARGIN_SECS + POLL_SECS + 1;
-    declaration.timeouts.verify = needed;
-    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    params.settings.timeouts.verify = needed;
+    assert_eq!(validate(&record, &params), Ok(()));
     for refused in [needed - 1, VERIFY_MARGIN_SECS, 1, 0] {
-        declaration.timeouts.verify = refused;
-        let error = validate(&record, &declaration, &params).unwrap_err();
+        params.settings.timeouts.verify = refused;
+        let error = validate(&record, &params).unwrap_err();
         assert!(
             error.to_string().contains("verify timeout"),
             "{refused}: {error}"
@@ -803,17 +800,16 @@ fn a_record_without_the_session_before_the_stop_is_still_read_and_a_missing_one_
 }
 
 #[test]
-fn the_declared_rollback_timeout_must_outlast_the_drain_the_start_the_hello_and_a_margin() {
+fn the_rollback_timeout_must_outlast_the_drain_the_start_the_hello_and_a_margin() {
     let record = good();
-    let mut declaration = declaration();
-    let params = params_for(&record);
+    let mut params = params_for(&record);
     let needed =
         params.drain_wait_secs + START_WAIT_SECS + ROLLBACK_HELLO_SECS + ROLLBACK_MARGIN_SECS + 1;
-    declaration.timeouts.rollback = needed;
-    assert_eq!(validate(&record, &declaration, &params), Ok(()));
+    params.settings.timeouts.rollback = needed;
+    assert_eq!(validate(&record, &params), Ok(()));
     for refused in [needed - 1, params.drain_wait_secs, 1, 0] {
-        declaration.timeouts.rollback = refused;
-        let error = validate(&record, &declaration, &params).unwrap_err();
+        params.settings.timeouts.rollback = refused;
+        let error = validate(&record, &params).unwrap_err();
         assert_eq!(
             error,
             Invalid::RollbackTimeout {
@@ -926,4 +922,57 @@ fn the_session_before_the_rollbacks_first_act_is_left_out_of_the_file_when_absen
     assert_eq!(serde_json::from_value::<Record>(older).unwrap(), record);
     let with = serde_json::to_value(with_rb_session(&record, 9)).unwrap();
     assert_eq!(with["rb_pre_stop_session_ms"], serde_json::json!(9));
+}
+
+/// A record that holds a restart plan (the unit changed) is a good record; a plan that names no
+/// change, too many, or a name that is empty, too long or has a control character in it is not:
+/// the names go into the report.
+///
+/// Catches a plan that is taken as given, whatever it holds.
+#[test]
+fn a_unit_restart_plan_names_a_few_plain_changes() {
+    let plan =
+        |changed: Vec<String>| move |r: &mut Record| r.unit_restart = Some(UnitRestart { changed });
+    passes(plan(vec!["Service.ExecStart".to_owned()]));
+    passes(plan(vec!["x".repeat(MAX_CHANGE_LEN); MAX_CHANGES]));
+    for changed in [
+        Vec::new(),
+        vec![String::new()],
+        vec!["x".repeat(MAX_CHANGE_LEN + 1)],
+        vec!["bad\nname".to_owned()],
+        vec!["Service.ExecStart".to_owned(); MAX_CHANGES + 1],
+    ] {
+        assert_eq!(
+            broken(plan(changed.clone())),
+            Invalid::UnitRestart,
+            "{changed:?}"
+        );
+    }
+    assert!(Invalid::UnitRestart.to_string().contains("64"));
+}
+
+/// A record written before the plan existed (no `unit_restart` key) reads, and one without a
+/// plan is written without the key: the file is what the earlier hook wrote.
+///
+/// Catches a plan that is required, or written as `null`, which would make the earlier
+/// release's records unreadable by this one and this one's by the earlier.
+#[test]
+fn a_record_without_a_plan_is_written_and_read_as_before() {
+    let record = good();
+    let mut value = serde_json::to_value(&record).unwrap();
+    assert!(value.get("unit_restart").is_none());
+    assert_eq!(
+        serde_json::from_value::<Record>(value.clone()).unwrap(),
+        record
+    );
+    let mut with = record.clone();
+    with.unit_restart = Some(UnitRestart {
+        changed: vec!["Service.Slice".to_owned()],
+    });
+    value = serde_json::to_value(&with).unwrap();
+    assert_eq!(
+        value["unit_restart"]["changed"],
+        serde_json::json!(["Service.Slice"])
+    );
+    assert_eq!(serde_json::from_value::<Record>(value).unwrap(), with);
 }

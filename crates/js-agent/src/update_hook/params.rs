@@ -1,11 +1,18 @@
 //! The `--params <file>` table.
 //!
-//! The declaration's `[hook.params]` table is opaque to the updater: it checks that every value
+//! The package manifest's `[params]` table is opaque to the updater: it checks that every value
 //! is a scalar and writes the table to a file. The file is TOML, a flat table of scalars. The
 //! updater adds reserved keys ([`PROMOTION_CEILING_KEY`], the staged and previous release, the
-//! versions and [`ARTIFACT_DIGEST_KEY`]). This hook needs four keys as whole numbers of
-//! seconds; any other scalar key is the declaration's own business and is ignored:
+//! versions and [`ARTIFACT_DIGEST_KEY`]). The keys the manifest gives are [`KEYS`]; every one is
+//! required, and any other scalar key is ignored:
 //!
+//! - `unit`, `state_dir`, `runtime` and the five `*_timeout_secs` and `verify_deadline_secs`:
+//!   the [`Settings`] (the unit the hook manages, its record's directory, the runtime the agent
+//!   must have, and the updater's bound on each step);
+//! - `release_link`: hostkeeper's `current` link of the package, which the hook only reads;
+//! - `flags_file`: the host's own agent flags (the file `js-agent --flags-file` reads), where
+//!   the hook finds the lease server, the certificate to trust and the host id;
+//! - `token_file` and `state_root`: the agent's `--token-file` and `--state-root` values;
 //! - `cordon_lease_secs`: how long a cordon lives between renewals; at least
 //!   [`MIN_CORDON_LEASE_SECS`] (three polls) and not zero;
 //! - `cordon_max_secs`: the longest a cordon is held from its first placement; not zero and
@@ -14,28 +21,18 @@
 //! - `defer_retry_secs`: what a deferred `prepare` asks the coordinator to wait before
 //!   ordering the host again. Zero is allowed and means "retry now".
 //!
-//! The hook on a machine also reads five optional keys, the values of the agent's own flags of
-//! the same names, which say how to reach the lease server and the agent's state
-//! ([`ConnectParams`]): `server`, `state_root`, `token_file`, `ca_cert` and `host_id`. The
-//! declaration of a host names them, as the plist of its agent does. A first install needs none
-//! of them; every step of an update needs `state_root`, and one that asks the lease server needs
-//! `server` too.
-//!
-//! These text values, and `release_link`, may come instead as flags before the step
-//! ([`Flags`], put in by [`Params::with_flags`]): the updater refuses a string in the
-//! `[hook.params]` of a hook that runs as root, so a Linux declaration gives them in its
-//! `hook_args`. A value comes from one place: the flag or the key, never both.
-//!
 //! The reserved key contains a dot, so in the file it is a quoted key. Written bare, TOML makes
 //! it a table `updater`, which is not a scalar and is refused.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::flags::Flags;
+use js_update_hook::is_plain;
+
+use super::settings::{RUNTIMES, Settings, Timeouts};
 use super::validate::is_digest;
 
-/// The reserved key the updater sets from the declaration's `promotion_ceiling_secs`.
+/// The reserved key with the promotion ceiling in seconds, which hostkeeper applies and passes on.
 pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
 
 /// The key of the lifetime of a cordon between renewals.
@@ -66,10 +63,9 @@ pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 /// The reserved key: the release directory that runs now. Absent on a first install.
 pub const PREVIOUS_RELEASE_KEY: &str = "updater.previous_release";
 
-/// The key of the release link, the symbolic link to the release directory that runs, in the
-/// declaration's `[hook.params]` (not a reserved key): an absolute path inside a declared write
-/// path, which the updater's loader checks. `cutover` moves it from the previous release to the
-/// staged one.
+/// The key of the release link, hostkeeper's `current` link of the package: the symbolic link
+/// to the release directory that runs. The updater moves it (to the staged release before
+/// `cutover`, back to the previous one before `rollback`); the hook reads it and never writes it.
 pub const RELEASE_LINK_KEY: &str = "release_link";
 
 /// The reserved key: the version being installed.
@@ -78,20 +74,63 @@ pub const TARGET_VERSION_KEY: &str = "updater.target_version";
 /// The reserved key: the version that runs now. Absent on a first install.
 pub const PREVIOUS_VERSION_KEY: &str = "updater.previous_version";
 
-/// The key of the lease server, as the agent's `--server`.
-pub const SERVER_KEY: &str = "server";
-
 /// The key of the agent's state root, as the agent's `--state-root`.
 pub const STATE_ROOT_KEY: &str = "state_root";
 
 /// The key of the file holding the host's join token, as the agent's `--token-file`.
 pub const TOKEN_FILE_KEY: &str = "token_file";
 
-/// The key of the PEM file to trust for `https://`, as the agent's `--ca-cert`.
-pub const CA_CERT_KEY: &str = "ca_cert";
+/// The key of the file of the host's own agent flags, as the agent's `--flags-file`.
+pub const FLAGS_FILE_KEY: &str = "flags_file";
 
-/// The key of the host's id, as the agent's `--host-id`.
-pub const HOST_ID_KEY: &str = "host_id";
+/// The key of the unit the hook manages.
+pub const UNIT_KEY: &str = "unit";
+
+/// The key of the directory of the hook record.
+pub const STATE_DIR_KEY: &str = "state_dir";
+
+/// The key of the runtime the agent must have.
+pub const RUNTIME_KEY: &str = "runtime";
+
+/// The key of the updater's bound on `prepare`, in seconds.
+pub const PREPARE_TIMEOUT_KEY: &str = "prepare_timeout_secs";
+
+/// The key of the updater's bound on `cutover`, in seconds.
+pub const CUTOVER_TIMEOUT_KEY: &str = "cutover_timeout_secs";
+
+/// The key of the updater's bound on `verify`, in seconds.
+pub const VERIFY_TIMEOUT_KEY: &str = "verify_timeout_secs";
+
+/// The key of the updater's bound on `rollback`, in seconds.
+pub const ROLLBACK_TIMEOUT_KEY: &str = "rollback_timeout_secs";
+
+/// The key of the updater's bound on `cleanup`, in seconds.
+pub const CLEANUP_TIMEOUT_KEY: &str = "cleanup_timeout_secs";
+
+/// The key of the time the updater allows a `verify` and the `rollback` after it, in seconds.
+pub const VERIFY_DEADLINE_KEY: &str = "verify_deadline_secs";
+
+/// Every key the hook reads from the package manifest's `[params]` table, and requires. A
+/// manifest gives exactly these (the reserved `updater.*` keys are the updater's).
+pub const KEYS: [&str; 17] = [
+    UNIT_KEY,
+    STATE_DIR_KEY,
+    RELEASE_LINK_KEY,
+    FLAGS_FILE_KEY,
+    TOKEN_FILE_KEY,
+    STATE_ROOT_KEY,
+    RUNTIME_KEY,
+    CORDON_LEASE_KEY,
+    CORDON_MAX_KEY,
+    DRAIN_WAIT_KEY,
+    DEFER_RETRY_KEY,
+    PREPARE_TIMEOUT_KEY,
+    CUTOVER_TIMEOUT_KEY,
+    VERIFY_TIMEOUT_KEY,
+    ROLLBACK_TIMEOUT_KEY,
+    CLEANUP_TIMEOUT_KEY,
+    VERIFY_DEADLINE_KEY,
+];
 
 /// Why a params file was refused.
 #[derive(Debug, thiserror::Error)]
@@ -139,49 +178,56 @@ pub enum ParamsError {
     /// A key this hook reads is not a whole, non-negative number of seconds.
     #[error("params key {0:?} must be a whole number of seconds, not negative")]
     NotSeconds(String),
-    /// A value given both by a flag before the step and by its key in the params file.
-    #[error("params key {0:?} is also given as a flag before the step; give it once")]
-    Twice(&'static str),
-}
-
-/// Puts the flag's value in `slot`, which must be empty when the flag is given.
-fn from_flag<T: Clone>(
-    slot: &mut Option<T>,
-    flag: Option<&T>,
-    key: &'static str,
-) -> Result<(), ParamsError> {
-    match (slot.is_some(), flag) {
-        (true, Some(_)) => Err(ParamsError::Twice(key)),
-        (false, Some(value)) => {
-            *slot = Some(value.clone());
-            Ok(())
-        }
-        (_, None) => Ok(()),
-    }
+    /// `state_dir` is not an absolute path of plain components (no `.`, `..`, doubled or
+    /// trailing slash).
+    #[error("params key {0:?} must be an absolute path of plain components")]
+    NotPlain(String),
+    /// `unit` is empty.
+    #[error("params key {0:?} must not be empty")]
+    Empty(String),
+    /// `runtime` is not one of the runtimes an agent has.
+    #[error("runtime {0:?} is not one of crun, docker, native")]
+    UnknownRuntime(String),
+    /// `verify_deadline_secs` is shorter than the `verify` bound plus the `rollback` bound: the
+    /// updater would roll back a verify that is still allowed to run.
+    #[error(
+        "verify_deadline_secs {deadline} is less than the verify bound {verify} plus the rollback bound {rollback}"
+    )]
+    VerifyDeadline {
+        /// `verify_deadline_secs`.
+        deadline: u64,
+        /// `verify_timeout_secs`.
+        verify: u64,
+        /// `rollback_timeout_secs`.
+        rollback: u64,
+    },
 }
 
 /// How the hook on a machine reaches the lease server and the agent's state: the values of the
-/// agent's own flags of the same names, in the declaration's `[hook.params]`. None is needed
-/// by the parse; on the machine's host a first install needs none of them, every step of an
-/// update needs `state_root`, and a step that asks the lease server needs `server`.
+/// agent's own flags of the same names. `state_root` and `token_file` are params keys
+/// ([`Params::state_root`], [`Params::token_file`]); `server`, `ca_cert` and `host_id` come from
+/// the host's flags file, which the machine reads when a step asks the lease server (a first
+/// install asks none).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectParams {
-    /// The lease server (`server`).
+    /// The lease server (`--server` of the flags file).
     pub server: Option<String>,
     /// The agent's state root (`state_root`), where the host credential and the taint are.
     pub state_root: Option<PathBuf>,
     /// The join token file (`token_file`), used when no state root is there or a private one
     /// holds no credential; never in place of a state root that is there and not private.
     pub token_file: Option<PathBuf>,
-    /// The certificate to trust (`ca_cert`).
+    /// The certificate to trust (`--ca-cert` of the flags file).
     pub ca_cert: Option<PathBuf>,
-    /// The host's id (`host_id`); the machine's own id when absent.
+    /// The host's id (`--host-id` of the flags file); the machine's own id when absent.
     pub host_id: Option<String>,
 }
 
 /// What the hook reads of its params file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Params {
+    /// The unit, the record's directory, the runtime and the bounds.
+    pub settings: Settings,
     /// How long a cordon lives between renewals.
     pub cordon_lease_secs: u64,
     /// The most a cordon may be held, counted from its first placement.
@@ -200,14 +246,18 @@ pub struct Params {
     /// The release directory that runs now (`updater.previous_release`); `None` on a first
     /// install.
     pub previous_release: Option<PathBuf>,
-    /// The release link (`release_link`), when the declaration names it.
-    pub release_link: Option<PathBuf>,
+    /// The release link (`release_link`), which the hook reads and never writes.
+    pub release_link: PathBuf,
+    /// The file of the host's own agent flags (`flags_file`).
+    pub flags_file: PathBuf,
     /// The version being installed (`updater.target_version`).
     pub target_version: String,
     /// The version that runs now (`updater.previous_version`); `None` on a first install.
     pub previous_version: Option<String>,
-    /// How to reach the lease server and the agent's state.
-    pub connect: ConnectParams,
+    /// The agent's state root (`state_root`), where the host credential and the taint are.
+    pub state_root: PathBuf,
+    /// The join token file (`token_file`).
+    pub token_file: PathBuf,
 }
 
 impl Params {
@@ -233,8 +283,7 @@ impl Params {
         let cordon_lease_secs = positive(&table, CORDON_LEASE_KEY)?;
         let cordon_max_secs = positive(&table, CORDON_MAX_KEY)?;
         let drain_wait_secs = positive(&table, DRAIN_WAIT_KEY)?;
-        let defer_retry_secs =
-            seconds(&table, DEFER_RETRY_KEY)?.ok_or(ParamsError::Missing(DEFER_RETRY_KEY))?;
+        let defer_retry_secs = required_seconds(&table, DEFER_RETRY_KEY)?;
         if cordon_lease_secs < MIN_CORDON_LEASE_SECS {
             return Err(ParamsError::LeaseTooShort {
                 lease: cordon_lease_secs,
@@ -253,63 +302,79 @@ impl Params {
             return Err(ParamsError::NotDigest(ARTIFACT_DIGEST_KEY.to_owned()));
         }
         Ok(Params {
+            settings: settings(&table)?,
             cordon_lease_secs,
             cordon_max_secs,
             drain_wait_secs,
             defer_retry_secs,
             artifact_digest,
             promotion_ceiling_secs: seconds(&table, PROMOTION_CEILING_KEY)?,
-            staged_release: path(&table, STAGED_RELEASE_KEY)?
-                .ok_or(ParamsError::Missing(STAGED_RELEASE_KEY))?,
+            staged_release: required_path(&table, STAGED_RELEASE_KEY)?,
             previous_release: path(&table, PREVIOUS_RELEASE_KEY)?,
-            release_link: path(&table, RELEASE_LINK_KEY)?,
+            release_link: required_path(&table, RELEASE_LINK_KEY)?,
+            flags_file: required_path(&table, FLAGS_FILE_KEY)?,
             target_version: string_of(&table, TARGET_VERSION_KEY)?
                 .ok_or(ParamsError::Missing(TARGET_VERSION_KEY))?,
             previous_version: string_of(&table, PREVIOUS_VERSION_KEY)?,
-            connect: ConnectParams {
-                server: string_of(&table, SERVER_KEY)?,
-                state_root: path(&table, STATE_ROOT_KEY)?,
-                token_file: path(&table, TOKEN_FILE_KEY)?,
-                ca_cert: path(&table, CA_CERT_KEY)?,
-                host_id: string_of(&table, HOST_ID_KEY)?,
-            },
+            state_root: required_path(&table, STATE_ROOT_KEY)?,
+            token_file: required_path(&table, TOKEN_FILE_KEY)?,
         })
     }
 }
 
-impl Params {
-    /// The params with the values of the flags before the step ([`Flags`]) put in: a flag
-    /// fills the key of the same name, which the file must then leave out.
-    ///
-    /// # Errors
-    /// [`ParamsError::Twice`] for a value given both ways.
-    pub fn with_flags(mut self, flags: &Flags) -> Result<Params, ParamsError> {
-        let connect = &mut self.connect;
-        from_flag(
-            &mut self.release_link,
-            flags.release_link.as_ref(),
-            RELEASE_LINK_KEY,
-        )?;
-        from_flag(&mut connect.server, flags.server.as_ref(), SERVER_KEY)?;
-        from_flag(
-            &mut connect.state_root,
-            flags.state_root.as_ref(),
-            STATE_ROOT_KEY,
-        )?;
-        from_flag(
-            &mut connect.token_file,
-            flags.token_file.as_ref(),
-            TOKEN_FILE_KEY,
-        )?;
-        from_flag(&mut connect.ca_cert, flags.ca_cert.as_ref(), CA_CERT_KEY)?;
-        from_flag(&mut connect.host_id, flags.host_id.as_ref(), HOST_ID_KEY)?;
-        Ok(self)
+/// The unit, the record's directory, the runtime and the bounds of the table.
+fn settings(table: &toml::Table) -> Result<Settings, ParamsError> {
+    let state_dir = required_path(table, STATE_DIR_KEY)?;
+    if !is_plain(&state_dir) {
+        return Err(ParamsError::NotPlain(STATE_DIR_KEY.to_owned()));
     }
+    let unit = string_of(table, UNIT_KEY)?.ok_or(ParamsError::Missing(UNIT_KEY))?;
+    if unit.is_empty() {
+        return Err(ParamsError::Empty(UNIT_KEY.to_owned()));
+    }
+    let runtime = string_of(table, RUNTIME_KEY)?.ok_or(ParamsError::Missing(RUNTIME_KEY))?;
+    if !RUNTIMES.contains(&runtime.as_str()) {
+        return Err(ParamsError::UnknownRuntime(runtime));
+    }
+    let timeouts = Timeouts {
+        prepare: required_seconds(table, PREPARE_TIMEOUT_KEY)?,
+        cutover: required_seconds(table, CUTOVER_TIMEOUT_KEY)?,
+        verify: required_seconds(table, VERIFY_TIMEOUT_KEY)?,
+        rollback: required_seconds(table, ROLLBACK_TIMEOUT_KEY)?,
+        cleanup: required_seconds(table, CLEANUP_TIMEOUT_KEY)?,
+    };
+    // The updater rolls back a verify that has not succeeded by the deadline: it must not do
+    // that to one that is still allowed to run, and the rollback needs its own bound.
+    let verify_deadline_secs = required_seconds(table, VERIFY_DEADLINE_KEY)?;
+    if verify_deadline_secs < timeouts.verify.saturating_add(timeouts.rollback) {
+        return Err(ParamsError::VerifyDeadline {
+            deadline: verify_deadline_secs,
+            verify: timeouts.verify,
+            rollback: timeouts.rollback,
+        });
+    }
+    Ok(Settings {
+        state_dir,
+        unit,
+        runtime,
+        timeouts,
+        verify_deadline_secs,
+    })
+}
+
+/// A required key that is a whole number of seconds.
+fn required_seconds(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> {
+    seconds(table, key)?.ok_or(ParamsError::Missing(key))
+}
+
+/// A required key that is an absolute path.
+fn required_path(table: &toml::Table, key: &'static str) -> Result<PathBuf, ParamsError> {
+    path(table, key)?.ok_or(ParamsError::Missing(key))
 }
 
 /// A required key that is a whole number of seconds and not zero.
 fn positive(table: &toml::Table, key: &'static str) -> Result<u64, ParamsError> {
-    match seconds(table, key)?.ok_or(ParamsError::Missing(key))? {
+    match required_seconds(table, key)? {
         0 => Err(ParamsError::Zero(key.to_owned())),
         secs => Ok(secs),
     }

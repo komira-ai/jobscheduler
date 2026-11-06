@@ -15,7 +15,9 @@
 //!    `nvidia-uvm`, `nvidia-uvm-tools` and the entries of `nvidia-caps/`;
 //! 3. reads the `ExecStart=` that applies to the unit (`--unit`, then the `*.conf` drop-ins of
 //!    its `.d` directory and of `--out`'s directory, by name, but not `--out`'s own name); a
-//!    quoted word is refused, since the verb splits on white space;
+//!    quoted word is refused, since the verb splits on white space; a `--flags-file` there is
+//!    expanded as the agent expands it ([`crate::flags_file`]) for the checks below, and kept as
+//!    it is in the drop-in, so the agent reads the file again at its own start;
 //! 4. adds the flags ([`flags`]): `--gpu-device /dev/nvidia{index}` for the GPUs, one
 //!    `--gpu-device` for each other node, the driver's `lib64` and `bin` below `--driver-root`
 //!    as `--gpu-mount`s at [`LIB_TARGET`] and [`BIN_TARGET`], and `LD_LIBRARY_PATH` and `PATH`
@@ -101,7 +103,13 @@ pub(crate) struct Host<'a> {
     pub(crate) smi: &'a dyn Fn(&str) -> Result<String, String>,
     /// Reads a node, for the check of the flags: [`crate::crun::read_node`] on a machine.
     pub(crate) read: ReadNode,
+    /// Expands a `--flags-file` in a command line: [`crate::flags_file::expand`] on a machine.
+    pub(crate) expand: Expand<'a>,
 }
+
+/// How the verb expands a `--flags-file` in the unit's command line, as the agent does.
+pub(crate) type Expand<'a> =
+    &'a dyn Fn(Vec<OsString>) -> Result<Vec<OsString>, crate::flags_file::FlagsFileError>;
 
 /// The NVIDIA nodes of a host.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -312,7 +320,13 @@ fn generate(
         ));
     }
     let words: Vec<&str> = base.split_whitespace().collect();
-    if words.iter().any(|w| w.starts_with(GPU_FLAG_PREFIX)) {
+    // The agent reads its flags file before it parses its command line; so do the checks.
+    let expanded: Vec<String> = (host.expand)(words.iter().map(OsString::from).collect())
+        .map_err(|why| format!("the ExecStart of {}: {why}", args.unit.display()))?
+        .into_iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+    if expanded.iter().any(|w| w.starts_with(GPU_FLAG_PREFIX)) {
         let _ = writeln!(
             out,
             "{VERB}: the ExecStart of {} lists GPU flags already: no drop-in written",
@@ -332,7 +346,11 @@ fn generate(
         .copied()
         .chain(gpu_flags.iter().map(String::as_str))
         .collect();
-    let cli = Cli::try_parse_from(&line).map_err(|why| {
+    let checked = expanded
+        .iter()
+        .map(String::as_str)
+        .chain(gpu_flags.iter().map(String::as_str));
+    let cli = Cli::try_parse_from(checked).map_err(|why| {
         format!(
             "the ExecStart of {} with the GPU flags is not an agent command line: {}",
             args.unit.display(),

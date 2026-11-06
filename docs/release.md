@@ -21,12 +21,16 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (`js-lease-server`, `js`, `js-agent`, `js-bundle`, `js-mdm`, for each of the two Linux architectures) and `aarch64-apple-darwin` (`js`, `js-agent`, `js-bundle`, `js-mac-session`, `js-mac-provision`), each target on a GitHub-hosted runner of its own architecture, checks that
    the Linux ones are static and that `--version` prints the release version, and packages them:
    `cargo xtask release stage` lays down the files of each archive (`crates/xtask/src/release/stage.rs`
-   lists them) and `tar` makes it. `sums` writes one `SHA256SUMS` over the archives.
-5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
-   `verify` then checks the attestations the way a user does (below).
+   lists them) and `tar` makes it. Each of the three targets also packages the `js-agent` it built for
+   hostkeeper with `cargo xtask release hostkeeper-package` (below). `sums` writes the hostkeeper
+   release index of the three packages with `cargo xtask release hostkeeper-index`, then one
+   `SHA256SUMS` over the archives, the packages and the index.
+5. `attest` attests every archive, package and the index with build provenance
+   (`actions/attest-build-provenance`, from `SHA256SUMS`); `verify` then checks the attestations
+   the way a user does (below).
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
-   commit), uploads the archives and `SHA256SUMS` to it, and publishes it in one call. Publishing
-   creates the tag `vX.Y.Z` on the commit.
+   commit), uploads the archives, the packages, the index and `SHA256SUMS` to it, and publishes it
+   in one call. Publishing creates the tag `vX.Y.Z` on the commit.
 
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
@@ -50,7 +54,8 @@ that is not on `main` (pushed by hand, or left on a side branch) blocks every re
 `gamma` stays off there without its variables.
 
 The archives are made to be byte-identical when built again from the same commit: sorted file names,
-the commit's time as modification time, numeric owner 0, `gzip -n`. A full re-run therefore uploads
+the commit's time as modification time, numeric owner 0, `gzip -n`. The packages are too: their tar
+headers carry no owner, name or time, and the zstd frame is a fixed encoder's output. A full re-run therefore uploads
 the same files the first run did; if a build still came out different, the run fails at the
 comparison rather than mix two builds (see Recovery).
 
@@ -69,7 +74,7 @@ that holds a write permission runs repository code, except that `gamma` runs the
 that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
 dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest` and `gamma` only) are pinned by
-`crates/xtask/tests/release_workflow.rs`.
+`crates/xtask/tests/release_workflow`.
 
 ## What is released
 
@@ -79,8 +84,11 @@ from the dependency graph (`cargo metadata`), not listed: the crates of `js-leas
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`,
-and `packaging/js-agent/updater.d/js-agent.toml` and `packaging/js-lease-server/updater.d/js-lease-server.toml`,
-the host updater's declarations, which the Linux `js-agent` and `js-lease-server` archives carry as they are.
+`packaging/js-lease-server/updater.d/js-lease-server.toml`, the host updater's declaration, which the
+Linux `js-lease-server` archives carry as they are, and the files under
+`packaging/js-agent/hostkeeper/` and `packaging/js-agent-macos/hostkeeper/` (markdown aside),
+which the hostkeeper packages of `js-agent` are made of (`release hostkeeper-package` compiles
+them in).
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -125,7 +133,7 @@ For version `X.Y.Z`:
 |---|---|
 | `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary, `LICENSE` and `updater.d/js-lease-server.toml`, the host updater's declaration (below) |
 | `js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE` |
-| `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary, `LICENSE` and `updater.d/js-agent.toml`, the host updater's declaration (below) |
+| `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
@@ -133,28 +141,71 @@ For version `X.Y.Z`:
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
 | `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-lease-server.toml`, as in the x86_64 archive |
 | `js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js` binary for arm64 Linux hosts and `LICENSE` |
-| `js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-agent` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-agent.toml`, as in the x86_64 archive |
+| `js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-agent` binary for arm64 Linux hosts and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-bundle` binary for arm64 Linux hosts and `LICENSE` |
 | `js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-mdm` binary for arm64 Linux hosts and `LICENSE` |
 | `js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-session` root helper for Apple silicon Macs and `LICENSE` |
 | `js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-mac-provision` pf anchor installer for Apple silicon Macs and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the fifteen archives |
+| `js-agent-X.Y.Z-linux-x86_64.tar.zst` | the hostkeeper package of `js-agent` for x86_64 Linux hosts (below) |
+| `js-agent-X.Y.Z-linux-arm64.tar.zst` | the hostkeeper package of `js-agent` for arm64 Linux hosts |
+| `js-agent-X.Y.Z-macos-arm64.tar.zst` | the hostkeeper package of `js-agent` for Apple silicon Macs |
+| `js-agent-index.json` | the release index of the three packages: for each platform the package's file name, SHA-256 and size |
+| `SHA256SUMS` | SHA-256 of the fifteen archives, the three packages and the index |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux `js-agent` and `js-lease-server` archives, of both architectures, also hold `updater.d/js-agent.toml` and
-`updater.d/js-lease-server.toml`, the declarations the host updater loads each hook's rights from
-(`packaging/js-agent/updater.d/js-agent.toml` and `packaging/js-lease-server/updater.d/js-lease-server.toml`; the
-updater's own install step puts each in `/etc/updater.d` from a verified release, after checking
-it asks for no more than the approved one). Each sits beside its binary, at the name kbf's release
-unpacker takes a declaration by (`updater.d/<binary>.toml`), and the attestation of each archive
-covers it. The agent's is the file the js-agent deb carries as
-`/usr/share/js-agent/updater.d/js-agent.toml`; the server has no deb, and its archive is where the
-declaration comes from. `crates/xtask/tests/js_agent_declaration.rs` loads the agent's, and
-`crates/xtask/tests/js_lease_server_declaration.rs` the server's, each with the updater's own
-validator (kbf's `update-rights`, at the revision the root manifest pins) and with the hook's;
-the first fails if the deb or the archive leaves it out, and `crates/xtask/tests/release_stage.rs`
-fails if an archive does. What the server's hook does is in [lease-server-update.md](lease-server-update.md).
+The Linux `js-lease-server` archives, of both architectures, also hold `updater.d/js-lease-server.toml`,
+the declaration the host updater loads the hook's rights from
+(`packaging/js-lease-server/updater.d/js-lease-server.toml`; the updater's own install step puts it
+in `/etc/updater.d` from a verified release, after checking it asks for no more than the approved
+one). It sits beside the binary, at the name kbf's release unpacker takes a declaration by
+(`updater.d/<binary>.toml`), and the attestation of the archive covers it.
+`crates/xtask/tests/js_lease_server_declaration.rs` reads it as the declaration's shape and with the
+hook's own reader, and `crates/xtask/tests/release_stage.rs` fails if the archive leaves it out.
+What the server's hook does is in [lease-server-update.md](lease-server-update.md). The `js-agent`
+archives carry no declaration: the agent is updated through hostkeeper (next section).
+
+### The hostkeeper packages of js-agent
+
+`js-agent` is a hostkeeper service, named `js-agent`. A hostkeeper package is a `.tar.zst` that holds
+`bin/js-agent`, a `manifest.toml` and the unit files (`units/`) hostkeeper links into place, and for
+the Linux packages `files/tmpfiles.conf`. `build` makes one per platform from the binary it just
+built, with `cargo xtask release hostkeeper-package --binary <path> --target <triple> --version X.Y.Z
+--out dist`:
+
+| Target | Platform | Unit |
+|---|---|---|
+| `x86_64-unknown-linux-musl` | `linux-x86_64` | `js-agent-crun.service` and its GPU oneshot |
+| `aarch64-unknown-linux-musl` | `linux-arm64` | the same |
+| `aarch64-apple-darwin` | `macos-arm64` | the launchd job `js-agent` |
+
+The files come from the repository, compiled into `xtask` (`packaging/js-agent/hostkeeper` for Linux,
+`packaging/js-agent-macos/hostkeeper` for a Mac); the verb fills in the version, the platform and
+`min_hostkeeper` in the manifest template, and refuses a version that is not `X.Y.Z`, a binary that
+does not print that version, and a target it has no platform for. The manifest's `[params]` are the
+inputs of `js-agent update-hook` (`js_agent::update_hook::params::KEYS`;
+`crates/xtask/tests/hostkeeper_package` checks the manifests against that list). The package
+carries no server address, pool, token or host name: the host's own flags are in `/etc/js-agent/flags`
+(read with `--flags-file`) and its join token in `/etc/js-agent/token`, which an operator places.
+
+`cargo xtask release hostkeeper-index --dir dist --version X.Y.Z` writes `js-agent-index.json` from the
+three packages. It refuses a directory that lacks one of them or holds another `.tar.zst`. `SHA256SUMS`
+lists the packages and the index, `attest` attests them and `verify` checks each one as it does an
+archive, so hostkeeper can trust a package it fetched by the attestation of this workflow.
+
+hostkeeper's channel-sync does not trust a package by its name: it needs an entry for the service
+that says whose attestation is accepted. For `js-agent` the entry is:
+
+| Field | Value |
+|---|---|
+| service | `js-agent` |
+| repository | `komira-ai/jobscheduler` |
+| workflow | `.github/workflows/release.yml` |
+| refs | `refs/heads/main` |
+
+This is what `gh attestation verify ... --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml
+--source-ref refs/heads/main` checks (below). The entry is hostkeeper's configuration, not this
+repository's: this repository documents it and does not set it.
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`. The js-agent Debian package (`.github/workflows/js-agent-deb.yml`) is built for x86_64 only: there is no arm64 deb, and an arm64 host takes the agent from its release archive.
 
@@ -176,7 +227,7 @@ gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R 
 `git rev-parse` needs a clone with the tags; without one, the commit is the one the release page shows
 for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead
 (`js-[0-9]*` keeps the other archives out of the match), and for the agent
-`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`, and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
+`-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'` (the hostkeeper package: `-p 'js-agent-*-linux-x86_64.tar.zst' -p js-agent-index.json`), and for the bundle tool `-p 'js-bundle-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 On an arm64 Linux host, write `aarch64-unknown-linux-musl` where these say `x86_64-unknown-linux-musl`,
 in the pattern and in the file name: for the agent `-p 'js-agent-*-aarch64-unknown-linux-musl.tar.gz'`

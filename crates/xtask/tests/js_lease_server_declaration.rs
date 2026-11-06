@@ -1,15 +1,18 @@
 //! The host updater's declaration of js-lease-server
 //! (`packaging/js-lease-server/updater.d/js-lease-server.toml`), read as the repository has it:
-//! the updater's own validator accepts it (kbf's `update-rights`, at the revision the root
-//! manifest pins), the hook reads it and the flags in its `hook_args`, its timeouts are the hook's
+//! it parses into the shape below (the keys the host updater reads, and the rules this file
+//! keeps of them), the hook reads it and the flags in its `hook_args`, its timeouts are the hook's
 //! bounds exactly, its write paths are exactly the release directory, the release link's
 //! directory and the hook record, and the unit it names is the one the flags name. Nothing here
 //! runs the updater or the hook: these are checks of the file. (The release archive that carries
 //! it is checked in `release_stage.rs`.)
 #![cfg(target_os = "linux")]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 use js_lease_server::update_hook::{
     CLEANUP_SECS, Declaration as HookDeclaration, Invocation, LOCK_WAIT_SECS, MIN_TIMEOUTS,
@@ -19,7 +22,6 @@ use js_update_hook::{
     CUTOVER_MARGIN_SECS, PREPARE_MARGIN_SECS, ROLLBACK_MARGIN_SECS, START_WAIT_SECS,
     VERIFY_MARGIN_SECS,
 };
-use update_rights::{Declaration, Refusal, reserved};
 use xtask::release::stage::SERVER_DECLARATION_SOURCE;
 
 /// Where the updater stages the releases of js-lease-server, one directory each.
@@ -34,6 +36,87 @@ const UPDATER_KEYS: &str = concat!(
 );
 const WRITE_PATHS: &str = r#"write_paths  = ["/opt/js-lease-server/releases", "/opt/js-lease-server/link", "/var/lib/js-lease-server-update"]"#;
 
+/// Directories nothing may be written in by a hook that runs as root.
+const RESERVED: [&str; 3] = ["/etc", "/usr", "/bin"];
+
+/// The signer of a declaration.
+#[derive(Deserialize)]
+struct Signer {
+    repository: String,
+    workflow: String,
+}
+
+/// The bounds of the five steps, in seconds.
+#[derive(Deserialize)]
+struct Timeouts {
+    prepare: u64,
+    cutover: u64,
+    verify: u64,
+    rollback: u64,
+    cleanup: u64,
+}
+
+/// The `[hook]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookTable {
+    user: String,
+    group: String,
+    capabilities: Vec<String>,
+    read_paths: Vec<PathBuf>,
+    write_paths: Vec<PathBuf>,
+    units: BTreeSet<String>,
+    address_families: Vec<String>,
+    environment: BTreeMap<String, String>,
+    timeout_secs: Timeouts,
+    params: toml::Table,
+}
+
+/// The declaration as the host updater reads it. Unknown keys are refused, so a key that
+/// appears in the file is a key this test knows.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Updater {
+    name: String,
+    binary: String,
+    hook_args: Vec<String>,
+    signer: Signer,
+    uid: String,
+    registration_ttl_secs: u64,
+    verify_deadline_secs: u64,
+    state_dir: String,
+    hook: HookTable,
+}
+
+/// Why a write path of a hook that runs as root is refused: it is in a reserved directory, or is
+/// not at or below a directory named for the service.
+fn write_path_problem(path: &Path, service: &str) -> Option<String> {
+    for dir in RESERVED {
+        if path.starts_with(dir) {
+            return Some(format!(
+                "path {path:?} is inside the reserved directory {dir}, where nothing may be written"
+            ));
+        }
+    }
+    let named = path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|name| name.starts_with(service))
+    });
+    (!named).then(|| {
+        format!("path {path:?} is not at or below a directory named for the service, which a hook that runs as root needs")
+    })
+}
+
+/// Why a word of `hook_args` is refused: the words are 1 to 64 letters, digits and `._=:/@+-`.
+fn word_problem(word: &str) -> Option<String> {
+    let fine = (1..=64).contains(&word.len())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._=:/@+-".contains(c));
+    (!fine).then(|| format!("{word:?} is not 1 to 64 letters, digits and `._=:/@+-`"))
+}
+
 fn shipped() -> String {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
     std::fs::read_to_string(root.join(SERVER_DECLARATION_SOURCE))
@@ -43,7 +126,7 @@ fn shipped() -> String {
 /// What the hook makes of a declaration: the updater's view, the hook's own, the command line of
 /// `hook_args` and the params of an update with its flags put in.
 struct Read {
-    updater: Declaration,
+    updater: Updater,
     hook: HookDeclaration,
     invocation: Invocation,
     params: Params,
@@ -51,29 +134,50 @@ struct Read {
 
 /// Every rule a declaration of js-lease-server must keep, the reason for the first it breaks.
 ///
-/// The updater's rules are its own code: `Declaration::parse` (the rules of the text) and, for a
-/// hook that runs as root, the loader's rule that each write path is in a directory named for
-/// the service (`reserved::check_service_write`). The loader's other rules read the host and are
-/// the host's, not the file's.
+/// The rules of the text are this file's own (`Updater`, `write_path_problem`, `word_problem`
+/// and the checks below); the hook's reading of the same text is the hook's
+/// (`HookDeclaration::parse`).
 fn check(text: &str) -> Result<Read, String> {
-    let updater = Declaration::parse(text).map_err(|e| format!("the updater refuses it: {e}"))?;
+    let updater: Updater =
+        toml::from_str(text).map_err(|e| format!("the declaration does not parse: {e}"))?;
     if updater.name != "js-lease-server" || updater.binary != "js-lease-server" {
         return Err(format!(
             "name {:?} and binary {:?} are not js-lease-server",
             updater.name, updater.binary
         ));
     }
+    for word in &updater.hook_args {
+        if let Some(why) = word_problem(word) {
+            return Err(format!("the declaration is refused: hook_args: {why}"));
+        }
+    }
     if updater.hook.user == "root" {
         for path in &updater.hook.write_paths {
-            reserved::check_service_write(path, &updater.name).map_err(|why| {
-                let refusal = Refusal::Reserved {
-                    field: "hook.write_paths",
-                    path: path.clone(),
-                    why,
-                };
-                format!("the updater refuses it: {refusal}")
-            })?;
+            if let Some(why) = write_path_problem(path, &updater.name) {
+                return Err(format!(
+                    "the declaration is refused: hook.write_paths: {why}"
+                ));
+            }
         }
+        if updater
+            .hook
+            .params
+            .values()
+            .any(|value| !value.is_integer())
+        {
+            return Err(
+                "the declaration is refused: hook.params: a hook that runs as root takes whole numbers, not strings"
+                    .to_owned(),
+            );
+        }
+    }
+    let theirs = &updater.hook.timeout_secs;
+    if updater.verify_deadline_secs < theirs.verify + theirs.rollback {
+        return Err(format!(
+            "the declaration is refused: verify_deadline_secs {} is less than the verify and rollback bounds together ({})",
+            updater.verify_deadline_secs,
+            theirs.verify + theirs.rollback
+        ));
     }
     let hook = HookDeclaration::parse(text).map_err(|e| format!("the hook refuses it: {e}"))?;
     let (verb, flags) = updater
@@ -127,7 +231,6 @@ fn check(text: &str) -> Result<Read, String> {
             "write paths {found:?} are not the release directory, the release link's directory and the state directory {want:?}"
         ));
     }
-    let theirs = &updater.hook.timeout_secs;
     let declared = [
         theirs.prepare,
         theirs.cutover,
@@ -141,7 +244,7 @@ fn check(text: &str) -> Result<Read, String> {
     if hook.timeouts != MIN_TIMEOUTS {
         return Err("the hook's timeouts are not its bounds".to_owned());
     }
-    if updater.hook.units != [hook.unit.clone()].into() || params.unit != hook.unit {
+    if updater.hook.units != BTreeSet::from([hook.unit.clone()]) || params.unit != hook.unit {
         return Err(format!(
             "the unit {:?} is not the one --unit names ({:?})",
             hook.unit, params.unit
@@ -169,7 +272,7 @@ fn shipped_with(old: &str, new: &str) -> String {
     text.replace(old, new)
 }
 
-/// The file passes the updater's validator and the hook's reading, and says what the hook needs:
+/// The file parses into the shape of the declaration and passes the hook's reading, and says what the hook needs:
 /// root, the server's unit, a release link, the store and the address as flags, numbers only in
 /// `[hook.params]`, and timeouts that are each the sum of the waits of the step. Catches a
 /// declaration the updater would mark `unmanaged`, or one whose timeouts drifted from the hook's.
@@ -181,6 +284,11 @@ fn js_lease_server_declaration_loads_with_the_updater_validator_and_the_hook_rea
     assert_eq!(read.updater.hook.user, "root");
     assert_eq!(read.updater.hook.group, "root");
     assert!(read.updater.hook.capabilities.is_empty());
+    assert_eq!(
+        read.updater.hook.address_families,
+        ["AF_UNIX", "AF_INET", "AF_INET6"]
+    );
+    assert_eq!(read.updater.registration_ttl_secs, 300);
     assert!(read.updater.hook.environment.is_empty());
     assert_eq!(read.updater.signer.repository, "komira-ai/jobscheduler");
     assert_eq!(read.updater.signer.workflow, "release.yml");
@@ -286,11 +394,11 @@ fn js_lease_server_declaration_with_nested_write_paths_is_refused() {
     );
     assert_eq!(
         refused(&widen("/var/lib/other")),
-        "the updater refuses it: hook.write_paths: path \"/var/lib/other\" is not at or below a directory named for the service, which a hook that runs as root needs"
+        "the declaration is refused: hook.write_paths: path \"/var/lib/other\" is not at or below a directory named for the service, which a hook that runs as root needs"
     );
     assert_eq!(
         refused(&widen("/etc/js-lease-server")),
-        "the updater refuses it: hook.write_paths: path \"/etc/js-lease-server\" is inside the reserved directory /etc, where nothing may be written"
+        "the declaration is refused: hook.write_paths: path \"/etc/js-lease-server\" is inside the reserved directory /etc, where nothing may be written"
     );
     // The release directory left out is refused too: the layout is exact.
     assert_eq!(
@@ -340,7 +448,7 @@ fn a_timeout_above_its_bound_loads_in_the_hook_but_not_in_the_checker() {
     );
 }
 
-/// A verify deadline below `verify` plus `rollback` is refused by the updater, and a longer one
+/// A verify deadline below `verify` plus `rollback` is refused by the checker, and a longer one
 /// is accepted. Catches a rollback ordered while a verify is still allowed to run.
 #[test]
 fn a_verify_deadline_below_verify_plus_rollback_is_refused_by_the_updater() {
@@ -349,7 +457,7 @@ fn a_verify_deadline_below_verify_plus_rollback_is_refused_by_the_updater() {
             "verify_deadline_secs = 720",
             "verify_deadline_secs = 719"
         )),
-        "the updater refuses it: verify_deadline_secs 719 is less than the verify and rollback bounds together (720)"
+        "the declaration is refused: verify_deadline_secs 719 is less than the verify and rollback bounds together (720)"
     );
     check(&shipped_with(
         "verify_deadline_secs = 720",
@@ -358,8 +466,8 @@ fn a_verify_deadline_below_verify_plus_rollback_is_refused_by_the_updater() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// The text values are flags because the updater refuses a string in the params of a hook that
-/// runs as root; a release link that is missing, relative or in a directory that is not a write
+/// The text values are flags because a string in the params of a hook that runs as root is
+/// refused; a release link that is missing, relative or in a directory that is not a write
 /// path, an unknown flag and a verb other than `update-hook` are refused. Catches a declaration
 /// the hook cannot run cutover from.
 #[test]
@@ -370,7 +478,7 @@ fn the_text_values_are_flags_and_a_bad_hook_args_is_refused() {
     );
     assert_eq!(
         refused(&with_param),
-        "the updater refuses it: hook.params: a hook that runs as root takes numbers and booleans, not strings"
+        "the declaration is refused: hook.params: a hook that runs as root takes whole numbers, not strings"
     );
     assert_eq!(
         refused(&shipped_with(
@@ -408,7 +516,7 @@ fn the_text_values_are_flags_and_a_bad_hook_args_is_refused() {
 
 /// A `--healthz-url` that is not plain http to a loopback address and port is refused by the
 /// hook's reading of `hook_args`, naming the value; another loopback address is accepted, and the
-/// IPv6 one is refused by the updater's own limit on the characters of a word. Catches a
+/// IPv6 one is refused by the checker's limit on the characters of a word. Catches a
 /// probe that would leave the host.
 #[test]
 fn a_healthz_url_that_is_not_loopback_is_refused() {
@@ -436,7 +544,7 @@ fn a_healthz_url_that_is_not_loopback_is_refused() {
     .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         refused(&shipped_with("http://127.0.0.1:7300", "http://[::1]:7300")),
-        "the updater refuses it: hook_args: \"--healthz-url=http://[::1]:7300\" is not 1 to 64 letters, digits and `._=:/@+-`"
+        "the declaration is refused: hook_args: \"--healthz-url=http://[::1]:7300\" is not 1 to 64 letters, digits and `._=:/@+-`"
     );
 }
 

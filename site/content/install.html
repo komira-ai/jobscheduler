@@ -16,9 +16,11 @@
     <tr><td><code>js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-bundle-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code>, <code>js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the tool that packs, prints and verifies darwin bundles</td></tr>
     <tr><td><code>js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz</code>, <code>js-mdm-X.Y.Z-aarch64-unknown-linux-musl.tar.gz</code></td><td>the MDM that enrolls Macs as compute hosts, set up on one Linux host</td></tr>
     <tr><td><code>js-mac-session-X.Y.Z-aarch64-apple-darwin.tar.gz</code>, <code>js-mac-provision-X.Y.Z-aarch64-apple-darwin.tar.gz</code></td><td>the root helper and the pf anchor installer a Mac node installs</td></tr>
-    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives</td></tr>
+    <tr><td><code>js-agent-X.Y.Z-linux-x86_64.tar.zst</code>, <code>js-agent-X.Y.Z-linux-arm64.tar.zst</code>, <code>js-agent-X.Y.Z-macos-arm64.tar.zst</code></td><td>the agent as a hostkeeper package</td></tr>
+    <tr><td><code>js-agent-index.json</code></td><td>the index of the three packages</td></tr>
+    <tr><td><code>SHA256SUMS</code></td><td>the SHA-256 of the fifteen archives, the three packages and the index</td></tr>
     </tbody></table></div>
-    <p>Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>, and holds the binary and <code>LICENSE</code>. The Linux agent and lease-server archives also hold <code>updater.d/js-agent.toml</code> or <code>updater.d/js-lease-server.toml</code>.</p>
+    <p>Each archive unpacks to a directory named like the archive without <code>.tar.gz</code>, and holds the binary and <code>LICENSE</code>. The Linux lease-server archives also hold <code>updater.d/js-lease-server.toml</code>.</p>
   </li>
   <li>
     <h3>Verify them <span class="tag tag-ok">works today</span></h3>

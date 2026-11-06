@@ -1,0 +1,57 @@
+# The manifest of the hostkeeper package of js-agent on a Mac, with three placeholders
+# `cargo xtask release hostkeeper-package` fills in (crates/xtask/src/release/hostkeeper_package.rs):
+#   @VERSION@         the release version, X.Y.Z, the text `js-agent --version` prints after the name
+#   @PLATFORM@        macos-arm64
+#   @MIN_HOSTKEEPER@  the oldest hostkeeper that reads this manifest
+# The keys are those of packaging/js-agent/hostkeeper/manifest.toml.in, whose header explains
+# them; the tests in crates/xtask/tests/hostkeeper_package load this file with hostkeeper's
+# loader. What differs from Linux:
+#   - [units] run names a launchd label, `js-agent`, whose plist is units/js-agent.plist.
+#     hostkeeper requires the label to be the service's name (or start with `js-agent.`), so it is
+#     not the `com.komira.js-agent` of the installer package.
+#   - There is no [[files]] entry: a Mac has no tmpfiles file.
+#   - The cutover, verify and rollback bounds are shorter: launchd stops the job within
+#     ExitTimeOut (120 s).
+#   - The paths are the Mac's: /var/db for the update state and the agent's state root, and the
+#     native runtime.
+# The join token and the host's flags are the operator's, as on Linux; launchd starts the job
+# only while the token file exists (KeepAlive PathState).
+schema         = 1
+name           = "js-agent"
+version        = "@VERSION@"
+platform       = "@PLATFORM@"
+min_hostkeeper = "@MIN_HOSTKEEPER@"
+
+[hook]
+command              = ["bin/js-agent", "update-hook"]
+verify_deadline_secs = 1200
+cleanup_retries      = 3
+
+[hook.timeout_secs]
+prepare  = 3900
+cutover  = 300
+verify   = 600
+rollback = 600
+cleanup  = 300
+
+[units]
+run = ["js-agent"]
+
+[params]
+unit                  = "js-agent"
+state_dir             = "/var/db/js-agent-update"
+release_link          = "/var/lib/hostkeeper/packages/js-agent/current"
+flags_file            = "/etc/js-agent/flags"
+token_file            = "/etc/js-agent/token"
+state_root            = "/var/db/js-agent/state"
+runtime               = "native"
+cordon_lease_secs     = 300
+cordon_max_secs       = 14400
+drain_wait_secs       = 3600
+defer_retry_secs      = 300
+prepare_timeout_secs  = 3900
+cutover_timeout_secs  = 300
+verify_timeout_secs   = 600
+rollback_timeout_secs = 600
+cleanup_timeout_secs  = 300
+verify_deadline_secs  = 1200

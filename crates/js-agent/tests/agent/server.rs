@@ -329,6 +329,29 @@ impl Agent {
         Self::launch(url, None, extra, host, connector, machine, false)
     }
 
+    /// An agent whose command line is exactly `--flags-file FILE`, plus `--token-file
+    /// TOKEN` when a token file is given: the server, the pool and the rest come from the
+    /// flags file, as a hostkeeper-packaged unit starts the agent.
+    pub fn spawn_flags_file(
+        flags: &Path,
+        token: Option<&Path>,
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+    ) -> Self {
+        let mut args = vec![
+            "--flags-file".to_owned(),
+            flags.to_str().unwrap().to_owned(),
+        ];
+        if let Some(token) = token {
+            args.extend([
+                "--token-file".to_owned(),
+                token.to_str().unwrap().to_owned(),
+            ]);
+        }
+        let machine = Arc::new(FakeMachine::new());
+        Self::run_args(args, host, connector, machine, false)
+    }
+
     fn launch(
         url: String,
         token: Option<PathBuf>,
@@ -338,9 +361,6 @@ impl Agent {
         machine: Arc<dyn Machine>,
         defaulted: bool,
     ) -> Self {
-        let (tell, worker) = channel();
-        let (slept, waits) = channel();
-        let (go, gate) = channel();
         let mut args: Vec<String> = vec!["--server".into(), url];
         if let Some(token) = token {
             args.extend([
@@ -352,6 +372,19 @@ impl Agent {
             args.extend(["--pool".to_owned(), "macs".to_owned()]);
         }
         args.extend(extra.iter().map(|flag| (*flag).to_owned()));
+        Self::run_args(args, host, connector, machine, defaulted)
+    }
+
+    fn run_args(
+        args: Vec<String>,
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<dyn Machine>,
+        defaulted: bool,
+    ) -> Self {
+        let (tell, worker) = channel();
+        let (slept, waits) = channel();
+        let (go, gate) = channel();
         // The token is a file's content: only the file's path is an argument.
         assert!(!args.concat().contains(JOIN));
         let handle = thread::spawn(move || {

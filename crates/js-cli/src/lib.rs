@@ -37,7 +37,24 @@
 //! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
 //!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
 //!                 [--wall <dur>]
+//! js join-token mint --provider NAME --instance-id ID [--ttl <dur>] [--out FILE]
+//! js join-token revoke --provider NAME --instance-id ID
 //! ```
+//!
+//! `join-token mint` asks for a one-time join token (`POST /v1/agent/join-tokens`, behind
+//! the client token like the lease commands) for the machine a provider launched as
+//! `NAME:ID`; the agent that runs there names the same pair in its `--instance-file` and
+//! reads the token from its `--token-file`. `--ttl` is how long the token may be used
+//! (default 30 minutes, at most 24h). Without `--out` the token alone is printed on stdout
+//! (`--json`: `{"token", "expires_at_ms"}`); it is the only command that prints a secret.
+//! With `--out FILE` the file is created new with mode 0600 and holds the token and a
+//! newline, stdout says where it went and when it expires (`expires` is the server's clock
+//! in milliseconds) and never shows the token, and a `FILE` that exists is refused (exit 2)
+//! before the server is asked for anything; a mint that fails leaves no file. Minting again
+//! for an instance replaces its unused tokens. `join-token revoke` drops every token of
+//! the instance, used or not (idempotent). A server that admits no agents has no such route
+//! and answers `join-tokens-unsupported` (exit 3); a provider the pool does not admit, an
+//! id that is not valid or a `--ttl` above a day is exit 4.
 //!
 //! `native` queues a native job (a program run on the host, no image) on a held lease and
 //! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
@@ -258,6 +275,7 @@ mod command;
 mod events;
 mod failure;
 pub mod jobs;
+mod join_token;
 mod leases;
 mod render;
 mod renewals;
@@ -374,13 +392,27 @@ fn dispatch(
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
     let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
-    let Command::Lease(action) = cli.command;
+    match cli.command {
+        Command::Lease(action) => lease_action(action, &client, render, out, err, services),
+        Command::JoinToken(action) => join_token::run(&client, render, action, out),
+    }
+}
+
+/// Runs a lease command over a connected client.
+fn lease_action(
+    action: Action,
+    client: &Client,
+    render: Render,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    services: Services,
+) -> Result<u8, Failure> {
     match action {
-        Action::Acquire(args) => leases::acquire(&client, render, &args, &*services.waiter, out),
-        Action::Renew(args) => leases::renew(&client, render, &args, out),
-        Action::Release(args) => leases::release(&client, render, &args, out),
-        Action::List => leases::list(&client, render, out),
-        Action::Run(args) => run::run(&client, render, &args, services, err),
-        Action::Native(args) => leases::native(&client, render, &args, out),
+        Action::Acquire(args) => leases::acquire(client, render, &args, &*services.waiter, out),
+        Action::Renew(args) => leases::renew(client, render, &args, out),
+        Action::Release(args) => leases::release(client, render, &args, out),
+        Action::List => leases::list(client, render, out),
+        Action::Run(args) => run::run(client, render, &args, services, err),
+        Action::Native(args) => leases::native(client, render, &args, out),
     }
 }

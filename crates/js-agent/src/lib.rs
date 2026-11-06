@@ -36,6 +36,13 @@
 //! unit's `ExecStart`, after checking them as the agent's start does; it writes none on a host
 //! without a GPU node; see `gpu_dropin` and docs/runbooks/crun-host-setup.md.
 //!
+//! `js-agent prepare|cutover|verify|rollback|cleanup [<artifact>] --params <file>` (Linux and
+//! macOS, run as root by hostkeeper), also written `js-agent update-hook <step> ...`, is the
+//! agent's side of hostkeeper's hook contract: it cordons the host, stops the agent and starts
+//! the staged release, and says how it ended in one JSON line. It reads the package manifest's
+//! `[params]` table from the file and the host's `--flags-file` for the lease server; see
+//! [`update_hook`].
+//!
 //! # Flags
 //!
 //! Configuration is flags only: `js-agent` reads no environment variable.
@@ -240,6 +247,14 @@
 //! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
 //! around any [`Quiesce`], for a host driven in-thread.
 //!
+//! # Flags in a file
+//!
+//! `--flags-file <PATH>` (or `--flags-file=<PATH>`) is replaced, before the other flags are
+//! read, by the words of the file, one flag per line; see [`flags_file`] for the rules of the
+//! file (owner, mode, size, form). It is for a package unit that is the same on every host
+//! and takes the host's `--server` and `--pool` from `/etc/js-agent/flags`. The flag may be
+//! given once, and a flags file may not name another.
+//!
 //! # Secrets
 //!
 //! The join token is read from its file by `js-client`, held there, and sent in the
@@ -269,6 +284,7 @@ pub mod disk;
 pub mod egress;
 mod exclusive;
 mod facts;
+pub mod flags_file;
 #[cfg(target_os = "linux")]
 mod gpu_dropin;
 mod host;
@@ -552,14 +568,16 @@ pub fn main_with(
         let host = gpu_dropin::Host {
             smi: &smi,
             read: crun::read_node,
+            expand: &flags_file::expand,
         };
         return gpu_dropin::run(&args, out, err, &host);
     }
     // The updater's hook is answered here too, before `install()`: it is a short-lived
-    // step of another program, and installs no signal handler.
+    // step of another program, and installs no signal handler. hostkeeper runs an update step as
+    // the bare word (`js-agent prepare ...`) and its other steps behind the verb.
     if args
         .get(1)
-        .is_some_and(|verb| verb.to_str() == Some(update_hook::VERB))
+        .is_some_and(|word| update_hook::is_hook_word(word))
     {
         return update_hook::run(&args, out, err, &update_hook::Host::system());
     }
@@ -638,6 +656,9 @@ fn execute(
     err: &mut dyn Write,
     services: &mut Services<'_>,
 ) -> Result<(), Failure> {
+    // `--flags-file PATH` is replaced by the file's words before anything else reads the
+    // arguments, so every later check sees the flags the file holds. Clap never sees the flag.
+    let args = flags_file::expand(args).map_err(|why| Failure::Usage(why.to_string()))?;
     // A removed flag is refused by name with what replaces it, before clap would call it
     // unknown, and before anything is read or the agent registers.
     if let Some(refusal) = cli::removed_flag(&args) {

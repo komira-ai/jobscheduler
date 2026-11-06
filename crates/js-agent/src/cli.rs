@@ -37,6 +37,14 @@ pub struct Cli {
     /// clear.
     #[arg(long, value_name = "URL")]
     pub server: String,
+    /// A file of more flags, one argument word per line (`--server=https://leases.example:7300`;
+    /// empty lines and lines that start with `#` are skipped), read in place of this flag
+    /// before the other flags are parsed. A regular file owned by the user running the agent
+    /// or by root, not writable by group or others, at most 64 KiB; given once, and not
+    /// inside a flags file. For a unit or job that is the same on every host and so cannot
+    /// name the host's server and pool.
+    #[arg(long, value_name = "PATH")]
+    pub flags_file: Option<PathBuf>,
     /// A file holding the pool's join token, or the one-time token minted for this
     /// instance: a regular file owned by the user running the agent, mode 0600 or 0400.
     /// The token is sent only in the `Authorization` header. Without `--state-root` a

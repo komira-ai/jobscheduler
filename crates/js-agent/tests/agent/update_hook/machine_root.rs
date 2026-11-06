@@ -1,5 +1,5 @@
 //! The agent's state root as the hook on a machine finds it, before any step runs: an update
-//! with none, a state root that is there and not usable on a first install and on an update,
+//! whose state root is not there, a state root that is there and not usable on a first install and on an update,
 //! the record's commit kept in the refusal, a refusal that needs no lock and takes none, and the
 //! lease's credential from an unusable state root. No socket is opened: the params name a lease
 //! server ([`NO_SERVER`]) the client refuses to be made for, by its text alone, so a step that
@@ -81,7 +81,7 @@ fn unusable_roots(files: &Scratch) -> Vec<(PathBuf, String)> {
 const NO_SERVER: &str = "http://lease.invalid";
 
 /// What every lease call answers when the params name [`NO_SERVER`].
-const NO_SERVER_SAID: &str = "server: \"http://lease.invalid\" is plain http to a host off the \
+const NO_SERVER_SAID: &str = "--server: \"http://lease.invalid\" is plain http to a host off the \
                               loopback: a bearer token never crosses a network in clear, use https://";
 
 /// The params lines that name [`NO_SERVER`] as `mac-1`, with a token file.
@@ -116,32 +116,23 @@ fn assert_refused(done: &Done, said: &str, reversible: bool, what: &str) {
     assert_eq!(done.report.class, Class::Release, "{what}");
 }
 
-/// Asserts that an update whose params name no state root, or name a path where nothing is,
-/// fails every step `state_invalid` in exact words that say which of the two it is, and
-/// reversibly (no record says anything was done); that nothing is made in the hook's state
-/// directory, not even the lock file; and that the lease is not asked anything. It catches
-/// an absent root read as "no taint, nothing owed" on an update, and a check that comes after
-/// the lock or the lease.
+/// Asserts that an update whose state root is a path where nothing is fails every step
+/// `state_invalid` in exact words, and reversibly (no record says anything was done); that
+/// nothing is made in the hook's state directory, not even the lock file; and that the lease is
+/// not asked anything. It catches an absent root read as "no taint, nothing owed" on an update,
+/// and a check that comes after the lock or the lease.
 #[test]
-fn an_update_with_no_state_root_or_one_that_is_not_there_fails_every_step_before_the_lock() {
+fn an_update_whose_state_root_is_not_there_fails_every_step_before_the_lock() {
     let tree = Tree::new("hook-root-update-none");
     let server = lease_lines(&tree.files);
     let absent = tree.root.join("no-such-state");
-    for (extra, said) in [
-        (
-            server.clone(),
-            "state_root: an update needs the state root of the agent that runs, and the params \
-             name none"
-                .to_owned(),
-        ),
-        (
-            format!("{server}state_root = \"{}\"\n", absent.display()),
-            format!(
-                "state_root: {} is not there, and an update needs the state root of the agent \
-                 that runs",
-                absent.display()
-            ),
-        ),
+    let said = format!(
+        "state_root: {} is not there, and an update needs the state root of the agent that runs",
+        absent.display()
+    );
+    for extra in [
+        server.clone(),
+        format!("{server}state_root = \"{}\"\n", absent.display()),
     ] {
         let params = tree.params(true, &extra);
         for step in Step::ALL {
@@ -152,8 +143,8 @@ fn an_update_with_no_state_root_or_one_that_is_not_there_fails_every_step_before
     assert!(state_files(&tree).is_empty());
 }
 
-/// Asserts that a first install, whose params name a lease server and a token file and no
-/// state root, or a state root where nothing is, runs `prepare` to success and writes its
+/// Asserts that a first install, whose params name a lease server and a token file and a state
+/// root where nothing is, runs `prepare` to success and writes its
 /// record, and that it asks the lease nothing. It catches the update's rule
 /// applied to a first install.
 #[test]
@@ -229,8 +220,10 @@ fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
     let server = lease_lines(&tree.files);
     let open = open_state_root(&tree.files);
     let open_said = unusable(&open, OPEN);
-    let none_said = "state_root: an update needs the state root of the agent that runs, and the \
-                     params name none";
+    let none_said = format!(
+        "state_root: {} is not there, and an update needs the state root of the agent that runs",
+        tree.root.join("no-such-state").display()
+    );
     let records = [
         (false, &["stop_begun"][..], true),
         (true, &["link_moved"][..], true),
@@ -250,7 +243,7 @@ fn a_refused_step_whose_record_is_past_its_commit_says_it_cannot_be_undone() {
             open_said.clone(),
         )];
         if !first_install {
-            cases.push((server.clone(), none_said.to_owned()));
+            cases.push((server.clone(), none_said.clone()));
         }
         for (extra, said) in cases {
             let params = tree.params(!first_install, &extra);
@@ -316,9 +309,10 @@ fn a_refusal_of_the_state_root_needs_no_lock_and_changes_nothing() {
         ),
         (
             server.clone(),
-            "state_root: an update needs the state root of the agent that runs, and the params \
-             name none"
-                .to_owned(),
+            format!(
+                "state_root: {} is not there, and an update needs the state root of the agent that runs",
+                tree.root.join("no-such-state").display()
+            ),
         ),
     ] {
         let params = tree.params(true, &extra);

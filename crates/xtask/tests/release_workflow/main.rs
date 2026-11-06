@@ -6,6 +6,12 @@
 
 use std::path::Path;
 
+use xtask::release::Version;
+use xtask::release::hostkeeper_index::INDEX_FILE;
+use xtask::release::hostkeeper_package::{Platform, file_name};
+
+mod hostkeeper;
+
 /// The workflow's text.
 fn workflow() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
@@ -323,8 +329,8 @@ fn the_macos_leg_builds_the_client_agent_bundle_and_mac_tools_and_packs_with_gnu
 }
 
 /// Asserts that the files of every archive are laid down by `cargo xtask release stage`, the one
-/// list of what an archive holds (the Linux js-agent archive carries the updater's declaration),
-/// and not copied by the step itself, so an archive cannot drift from what the tests read.
+/// list of what an archive holds (the Linux js-lease-server archive carries the updater's
+/// declaration), and not copied by the step itself, so an archive cannot drift from what the tests read.
 #[test]
 fn the_archives_are_staged_by_the_xtask_list_and_nothing_else() {
     let text = workflow();
@@ -533,13 +539,14 @@ fn expected_assets(sums: &[String]) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
 }
 
-/// Asserts that `sums` expects exactly the fifteen archives: each of `js-lease-server`, `js`,
+/// Asserts that `sums` expects exactly the fifteen archives (each of `js-lease-server`, `js`,
 /// `js-agent`, `js-bundle` and `js-mdm` for both Linux targets, `js`, `js-agent` and `js-bundle`
-/// and the two Mac host tools for darwin, which is also what the matrix builds; and that the
-/// list is in `LC_ALL=C` order once `$VERSION` is a version, as `ls | LC_ALL=C sort` prints
-/// the files. Catches a missing or extra name (a build that stops making an archive must fail
-/// here, before attest) and an unsorted list, which would never equal the listing and would
-/// fail every real release.
+/// and the two Mac host tools for darwin, which is also what the matrix builds), the three
+/// hostkeeper packages of js-agent (named as `hostkeeper_package::file_name` names them) and
+/// `js-agent-index.json`; and that the list is in `LC_ALL=C` order once `$VERSION` is a version,
+/// as `ls | LC_ALL=C sort` prints the files. Catches a missing or extra name (a build that stops
+/// making an asset must fail here, before attest) and an unsorted list, which would never equal
+/// the listing and would fail every real release.
 #[test]
 fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_is_sorted() {
     let text = workflow();
@@ -560,11 +567,20 @@ fn the_sums_job_expects_every_linux_binary_for_both_architectures_and_the_list_i
     ] {
         wanted.push(format!("{bin}-$VERSION-aarch64-apple-darwin.tar.gz"));
     }
-    assert_eq!(expected.len(), 15, "{expected:?}");
+    let archives = wanted.clone();
+    // The packages, named by the verb's own function, and the index it writes.
+    let version: Version = "1.2.3".parse().expect("a version");
+    for platform in Platform::ALL {
+        wanted.push(file_name(version, platform).replace("1.2.3", "$VERSION"));
+    }
+    wanted.push(INDEX_FILE.to_owned());
+    assert_eq!(expected.len(), 19, "{expected:?}");
     let mut have = expected.clone();
     have.sort();
     wanted.sort();
     assert_eq!(have, wanted);
+    let mut wanted = archives;
+    wanted.sort();
     // What the matrix builds is what `sums` expects.
     let mut built: Vec<String> = legs(job(&jobs, "build"))
         .iter()

@@ -31,6 +31,7 @@ mod e2e;
 mod exclusive;
 mod facts;
 mod flags;
+mod flags_file;
 #[cfg(target_os = "linux")]
 mod helper_modes;
 mod identity;
@@ -38,6 +39,7 @@ mod identity;
 mod image_budget;
 mod integrity;
 mod jobs;
+mod join_round_trip;
 mod lifecycle;
 mod native;
 mod quota;
