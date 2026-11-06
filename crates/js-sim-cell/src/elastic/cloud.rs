@@ -278,6 +278,7 @@ mod tests {
         let hello = Hello {
             name: "js-0-0".to_owned(),
             instance_id: None,
+            identity: None,
         };
         assert_eq!(provider.id(), fake.id());
         assert_eq!(provider.can_launch(), fake.can_launch());
