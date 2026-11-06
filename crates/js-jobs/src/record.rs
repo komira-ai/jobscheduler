@@ -1,4 +1,4 @@
-//! The job and allocation records, as the store's callers read and write them.
+//! The job, allocation and mark records, as the store's callers read and write them.
 
 use std::collections::BTreeMap;
 

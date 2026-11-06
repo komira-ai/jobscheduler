@@ -17,7 +17,7 @@ pub const ALLOCATION: &str = "alloc/";
 /// a scan. No `idx/` space names it.
 pub const MARK: &str = "mark/";
 
-/// `meta/jobs/schema`: the schema version of the job and allocation rows, four bytes,
+/// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
 

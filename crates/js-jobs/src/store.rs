@@ -71,7 +71,7 @@ pub struct JobPage {
     pub resume: Option<ResumeToken>,
 }
 
-/// The job and allocation tables over a state store. Every operation that writes is one
+/// The job, allocation and mark tables over a state store. Every operation that writes is one
 /// [`Store::txn`]: it commits fully or returns an error having written nothing, and the
 /// record it returns is what it committed. Nothing is cached: each operation reads the rows
 /// it needs, decides, and commits with the versions it read as preconditions, so a row that
