@@ -3,10 +3,13 @@
 //! HTTP/JSON gateway.
 //!
 //! The header is read with the lease routes' [`bearer`] and the token compared with every
-//! client's by [`Clients::identify`]; the layer holds no comparison of its own. A request
-//! whose token is a client's goes on with that client's name ([`ClientName`]) in its
-//! extensions, where the calls read it (the gateway hands a call the extensions of its HTTP
-//! request), so the name comes from the token and never from the request's body. A request
+//! client's by [`Clients::identify`](crate::config::Clients::identify); the layer holds no
+//! comparison of its own. The clients are read from the shared handle ([`LiveClients`]) at
+//! each request, so a token the tick's reload removed is refused from the next request on,
+//! and one it added is admitted. A request whose token is a client's goes on with that
+//! client's name and role ([`Caller`]) in its extensions, where the calls read it (the gateway
+//! hands a call the extensions of its HTTP request), so the name and the role come from the
+//! token and never from the request's body. A request
 //! whose header is missing, is not `Bearer <token>`, or names no client's token reaches no
 //! handler: a gRPC request (`content-type: application/grpc...`) is answered
 //! `UNAUTHENTICATED` with an empty message, any other request 401 with an empty body.
@@ -16,12 +19,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::http::{HeaderMap, Request, Response, StatusCode, header};
-use js_jobs::ClientName;
 use tonic::Status;
 use tower::{Layer, Service};
 
+use super::roles::Caller;
 use crate::api::bearer;
-use crate::config::Clients;
+use crate::config::LiveClients;
 
 /// The content type every gRPC request carries, alone or with a suffix such as `+proto`.
 const GRPC_CONTENT_TYPE: &[u8] = b"application/grpc";
@@ -29,12 +32,13 @@ const GRPC_CONTENT_TYPE: &[u8] = b"application/grpc";
 /// The layer that puts [`Bearer`] in front of a service.
 #[derive(Clone)]
 pub(crate) struct BearerLayer {
-    clients: Clients,
+    clients: LiveClients,
 }
 
 impl BearerLayer {
-    /// The layer that admits requests that present the token of one of `clients`.
-    pub(crate) fn new(clients: Clients) -> BearerLayer {
+    /// The layer that admits requests that present the token of one of the clients in
+    /// force in `clients`.
+    pub(crate) fn new(clients: LiveClients) -> BearerLayer {
         BearerLayer { clients }
     }
 }
@@ -51,14 +55,14 @@ impl<S> Layer<S> for BearerLayer {
 }
 
 /// A service that passes on a request that presents a client's token, with the client's
-/// name, and answers any other itself.
+/// name and role, and answers any other itself.
 ///
 /// It is ready when the service behind it is. A refused request is answered without a
 /// call, which leaves that readiness unused; the services it guards (the generated gRPC
 /// server and the gateway's routes) are always ready and keep no state between calls.
 #[derive(Clone)]
 pub(crate) struct Bearer<S> {
-    clients: Clients,
+    clients: LiveClients,
     inner: S,
 }
 
@@ -81,9 +85,9 @@ where
     }
 
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
-        match client(&self.clients, request.headers()) {
-            Some(name) => {
-                request.extensions_mut().insert(name);
+        match caller(&self.clients, request.headers()) {
+            Some(caller) => {
+                request.extensions_mut().insert(caller);
                 Box::pin(self.inner.call(request))
             }
             None => Box::pin(ready(Ok(refusal(request.headers())))),
@@ -91,13 +95,15 @@ where
     }
 }
 
-/// The client whose token `headers` present, as an `Authorization` value `Bearer <token>`.
-fn client(clients: &Clients, headers: &HeaderMap) -> Option<ClientName> {
-    headers
+/// The client in force whose token `headers` present, as an `Authorization` value
+/// `Bearer <token>`.
+fn caller(clients: &LiveClients, headers: &HeaderMap) -> Option<Caller> {
+    let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(bearer)
-        .and_then(|given| clients.identify(given.as_bytes()))
+        .and_then(bearer)?;
+    let (name, role) = clients.now().identify(given.as_bytes())?;
+    Some(Caller { name, role })
 }
 
 /// The answer to a request that does not present the token, with an empty body of the

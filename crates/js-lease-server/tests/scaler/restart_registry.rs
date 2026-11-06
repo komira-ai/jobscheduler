@@ -113,6 +113,9 @@ impl Effects for Wired {
             Call::ReleaseHost => {
                 let _ = self.registry.release_host(&id);
             }
+            Call::Cordon => {
+                let _ = self.registry.cordon(&id, Duration::from_secs(300));
+            }
         }
     }
 }

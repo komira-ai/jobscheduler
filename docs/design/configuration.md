@@ -21,7 +21,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
-| `--client-token NAME=PATH` (repeatable) | a `[[client]]` table with `name` and `token_file`: one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
+| `--client-token NAME=PATH` or `NAME:ROLE=PATH` (repeatable) | a `[[client]]` table with `name`, `token_file` and, optionally, `role` (`"client"`, the default, or `"operator"`): one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
@@ -35,20 +35,27 @@ HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind one c
 without one is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one
 TLS setup and one connection cap for the service, whichever client calls it.
 
-The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME=PATH` or `[[client]]` table:
+The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME[:ROLE]=PATH` or `[[client]]`
+table:
 
 ```toml
 [[client]]
 name       = "ci"                             # 1 to 40 bytes of letters, digits, '.', '_' and '-'; unique; not "default"
 token_file = "/run/credentials/js/ci-token"   # owner-only (0600 or 0400), one token of at least 32 bytes, as client_token_file
+role       = "client"                         # optional: "client" (the default) or "operator"; anything else is refused
 ```
 
 A start is refused, naming the entry and never the token, for two clients of one name, a client named `default`, a name that is not
 one, a short token, a token file others can read, the same token in two entries, and a client token that the join token file of the
 pool also holds. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
 client's, records the client's name on each job it submits (`Job.client`, and the `client` filter of `ListJobs`), and logs the
-client and the job on each call's line. Every client may read and cancel every job; job ids are one namespace. To revoke a client,
-remove its entry and restart the server: the set is read at start only, and a restart ends no job.
+client, its role, the target and the outcome on each call's line. A `client` reads, lists and cancels only its own jobs and makes no
+fleet call; an `operator`, and `default` always, may call everything on every job. An entry with no role is a `client`, so an entry
+whose holder calls the fleet calls or cancels other clients' jobs needs `role = "operator"` (the role model is in
+[http-gateway.md](../http-gateway.md), "Clients, roles and token reload"). Every tick reads each named client's token file again:
+to rotate or revoke a token, write the new token into its file, and the old one is refused from the request after the next tick;
+a file that cannot be read or holds no valid token keeps every token in force, with a warning. Adding or removing a client, or
+changing its role, takes a restart (a restart ends no job); `default`'s token is read at start only, with the lease routes'.
 
 - **TLS.** The rule of `--listen`: an address off the loopback is refused at start without `--tls-cert` and `--tls-key` (the same two
   flags, not new ones), with a message naming `--job-listen` and saying that a bearer token never crosses a network in clear. With
@@ -202,8 +209,9 @@ when the table is absent) with any other key present is refused, naming the key.
 file is owner-only like every other key file (mode 0600 or 0400, owned by the service user), holding exactly
 `{"access_key_id": ..., "secret_access_key": ...}`: an id of 1 to 128 letters and digits and a secret of 1 to 1,024 printable ASCII
 bytes. The server reads and checks the table and both key files at start, offline, refusing a bad value naming its key and never
-repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). Nothing uses the table
-yet: no credential is minted and no log is read.
+repeating it, and names the sink in its start log line (`logs=object_store` or `logs=none`, never a key). With `object_store` the
+server mints each uploading host's credential with the mint key, delivers and renews it in heartbeat replies, and puts each job's sink
+in its start (live-logs.md, sections 3.1 and 4); the read key is not used yet, since no log is read.
 
 The rules the server checks at start: `url` is `s3://BUCKET` or `s3://BUCKET/PREFIX`, with the prefix of the object layout (live-logs.md,
 section 2: no leading or trailing `/`, segments of `[A-Za-z0-9._-]`, none empty, `.` or `..`, at most 512 bytes); `region` is 1 to 64

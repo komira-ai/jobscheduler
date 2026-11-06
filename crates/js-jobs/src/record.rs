@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, Resources};
+use sha2::{Digest as _, Sha256};
 
 use crate::codec::Carried;
 use crate::ids::{AllocationId, ClientName, JobId};
@@ -52,6 +53,107 @@ pub struct DeclaredPort {
     pub container: u16,
 }
 
+/// The SHA-256 of a file's contents: what an ended job keeps of each of its files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileDigest([u8; 32]);
+
+impl FileDigest {
+    /// The digest of `contents`.
+    #[must_use]
+    pub fn of(contents: &[u8]) -> FileDigest {
+        FileDigest(Sha256::digest(contents).into())
+    }
+
+    /// The digest as a row stored it: 32 bytes.
+    #[must_use]
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> FileDigest {
+        FileDigest(bytes)
+    }
+
+    /// The 32 bytes of the digest.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// The files handed to a job, by name. Their contents are secret (a read token, an upload
+/// URL): a job keeps them while it is live, so its host can be sent them, and when it ends
+/// they are replaced by their digests in the same write that ends it, so an ended job's
+/// record holds the names and no contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobFiles {
+    /// The contents, as submitted: a job that has not ended.
+    Contents(BTreeMap<String, Vec<u8>>),
+    /// The SHA-256 of each file's contents: a job that has ended.
+    Digests(BTreeMap<String, FileDigest>),
+}
+
+impl Default for JobFiles {
+    /// No files.
+    fn default() -> JobFiles {
+        JobFiles::Contents(BTreeMap::new())
+    }
+}
+
+impl JobFiles {
+    /// The files' names, in order.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            JobFiles::Contents(files) => files.keys().map(String::as_str).collect(),
+            JobFiles::Digests(files) => files.keys().map(String::as_str).collect(),
+        }
+    }
+
+    /// The contents by name; `None` once they were replaced by their digests.
+    #[must_use]
+    pub fn contents(&self) -> Option<&BTreeMap<String, Vec<u8>>> {
+        match self {
+            JobFiles::Contents(files) => Some(files),
+            JobFiles::Digests(_) => None,
+        }
+    }
+
+    /// The digest of each file by name, computed from the contents or as stored.
+    fn digests(&self) -> BTreeMap<&str, FileDigest> {
+        match self {
+            JobFiles::Contents(files) => files
+                .iter()
+                .map(|(name, contents)| (name.as_str(), FileDigest::of(contents)))
+                .collect(),
+            JobFiles::Digests(files) => files
+                .iter()
+                .map(|(name, digest)| (name.as_str(), *digest))
+                .collect(),
+        }
+    }
+
+    /// These files with each content replaced by its digest; files already digested are
+    /// returned as they are.
+    pub(crate) fn digested(self) -> JobFiles {
+        match self {
+            JobFiles::Contents(files) => JobFiles::Digests(
+                files
+                    .into_iter()
+                    .map(|(name, contents)| (name, FileDigest::of(&contents)))
+                    .collect(),
+            ),
+            digests @ JobFiles::Digests(_) => digests,
+        }
+    }
+
+    /// Whether these are the same files as `other`: the same names, and for each the same
+    /// contents, compared byte for byte when both sides hold contents and by digest when
+    /// either holds digests.
+    fn same_as(&self, other: &JobFiles) -> bool {
+        match (self, other) {
+            (JobFiles::Contents(mine), JobFiles::Contents(theirs)) => mine == theirs,
+            _ => self.digests() == other.digests(),
+        }
+    }
+}
+
 /// A job as it was submitted: everything the idempotency check compares (design section
 /// 5.3, step 2). The priority is not here, because a resubmit may change it and still be
 /// the same job.
@@ -75,10 +177,53 @@ pub struct JobSpec {
     pub network: NetworkPolicy,
     /// The host ports the job declares.
     pub ports: Vec<DeclaredPort>,
-    /// Files handed to the job, by path (for example the upload URL its client minted).
-    pub files: BTreeMap<String, Vec<u8>>,
+    /// Files handed to the job, by path (for example the upload URL its client minted): their
+    /// contents while the job is live, their digests once it has ended.
+    pub files: JobFiles,
     /// The job's labels.
     pub labels: Labels,
+}
+
+impl JobSpec {
+    /// Whether `self`, a stored job, and `submitted` are the same job (design section 5.3,
+    /// step 2): every field equal, the files compared as [`JobFiles`] compares them, so a
+    /// resubmit of an ended job, whose files are digests, matches by the digest of each
+    /// submitted file.
+    pub(crate) fn same_job_as(&self, submitted: &JobSpec) -> bool {
+        // Every field named, so a field added later cannot be left out of the comparison.
+        let JobSpec {
+            image,
+            command,
+            args,
+            env,
+            needs,
+            constraints,
+            wall_limit_secs,
+            network,
+            ports,
+            files,
+            labels,
+        } = self;
+        (*image == submitted.image)
+            & (*command == submitted.command)
+            & (*args == submitted.args)
+            & (*env == submitted.env)
+            & (*needs == submitted.needs)
+            & (*constraints == submitted.constraints)
+            & (*wall_limit_secs == submitted.wall_limit_secs)
+            & (*network == submitted.network)
+            & (*ports == submitted.ports)
+            & files.same_as(&submitted.files)
+            & (*labels == submitted.labels)
+    }
+
+    /// This spec with its files' contents replaced by their digests: what an ended job keeps.
+    pub(crate) fn digested(self) -> JobSpec {
+        JobSpec {
+            files: self.files.digested(),
+            ..self
+        }
+    }
 }
 
 /// Why a job did not get to run (design section 3.2).
@@ -369,6 +514,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Catches files digested twice (a digest replaced by the digest of its own bytes) and a
+    // digest that is not the SHA-256 of the contents: digesting is done once and stays done.
+    #[test]
+    fn files_are_digested_once() {
+        let contents = JobFiles::Contents(BTreeMap::from([("a".to_owned(), b"abc".to_vec())]));
+        let digested = contents.clone().digested();
+        // SHA-256 of "abc", from FIPS 180-2, appendix B.1.
+        let abc = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+        assert_eq!(
+            digested,
+            JobFiles::Digests(BTreeMap::from([(
+                "a".to_owned(),
+                FileDigest::from_bytes(abc)
+            )]))
+        );
+        assert_eq!(digested.clone().digested(), digested);
+        assert_eq!(contents.contents().map(BTreeMap::len), Some(1));
+        assert_eq!(digested.contents(), None);
+        assert_eq!(digested.names(), ["a"]);
     }
 
     // Catches an ended state read as live (it could then move again) or a live one read as
