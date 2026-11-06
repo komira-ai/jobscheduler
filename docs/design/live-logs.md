@@ -515,6 +515,9 @@ agent's `logs` module (the uploader, the progress record, the end); the server's
 credential table. Each new crate is added to `layers.toml` in the change that adds it. Built so far: `js-logstore`, `js-logmint`, the log
 fields in `js-agent-wire`, the agent's `logs` module without the progress record (the uploader and the end), the server's host
 credential table, and `GetLogs`'s fields in `js-proto` with the server's `job_api/logs` (the reader and the long poll).
+Besides the fakes, CI's `test` job runs the whole path with STS minting against an S3-compatible store with STS (MinIO, in a service
+container pinned by digest; `js_testkit::s3`): the client and the minter, the agent's uploader (a renewal through the heartbeat, a
+failed request, a restart from the progress record) and `GetLogs` over what the uploader put.
 
 **Decided: an object store without `AssumeRole`** (design section 13, question 28). The scheduler has a second minting kind,
 `credentials = "presigned_prefix"` (4.1): the farm's store (tierstore) has no STS, and a grant derived from a signing key needs no call
