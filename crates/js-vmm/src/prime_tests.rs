@@ -721,6 +721,7 @@ fn the_flags_parse_and_prime_is_dispatched_with_its_deadline() {
         cli,
         Some(&sys),
         crate::probe::Timing::instant(),
+        &mut std::io::empty(),
         &mut out,
         &mut err,
     );
@@ -746,6 +747,7 @@ fn the_flags_parse_and_prime_is_dispatched_with_its_deadline() {
         cli,
         Some(&sys),
         crate::probe::Timing::instant(),
+        &mut std::io::empty(),
         &mut out,
         &mut err,
     );

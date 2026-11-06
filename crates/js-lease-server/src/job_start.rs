@@ -138,6 +138,7 @@ pub(crate) fn start_of(
         network,
         ports,
         log_sink,
+        kind: Default::default(),
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

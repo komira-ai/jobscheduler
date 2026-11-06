@@ -111,6 +111,7 @@ mod quiesce;
 use crate::native::NativeChecks;
 use crate::system::{Backend, Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
+use crate::vm::VmSettings;
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
 
@@ -173,6 +174,8 @@ pub struct Plan {
     /// How long the server may be silent before every job is stopped (`--silence-stop`);
     /// none for a worker that never stops a job for silence, which the agent never builds.
     pub silence_stop: Option<Duration>,
+    /// The VM backend (`--vm-driver`, `--vm-store`); none when it is off.
+    pub vm: Option<VmSettings>,
 }
 
 /// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
@@ -202,6 +205,7 @@ pub struct Rescue {
     max: usize,
     bound: Duration,
     wind: Duration,
+    vm: Option<VmSettings>,
 }
 
 impl Rescue {
@@ -225,7 +229,16 @@ impl Rescue {
             max: RESCUE_MAX,
             bound: RESCUE_BOUND.max(stop_grace.saturating_add(WIND_DOWN_MARGIN)),
             wind: stop_grace.saturating_add(WIND_DOWN_MARGIN),
+            vm: None,
         }
+    }
+
+    /// The same, whose runtime has the VM runtime of `vm` beside it, so the rescue destroys
+    /// the VMs it finds as well.
+    #[must_use]
+    pub fn with_vms(mut self, vm: Option<VmSettings>) -> Self {
+        self.vm = vm;
+        self
     }
 
     /// The same, with the number of stops and the time they may take given: for a test.
@@ -252,8 +265,11 @@ impl Rescue {
             platform: &self.platform,
             stop_grace: self.stop_grace,
         };
-        let mut runtime = match self.machine.runtime(&wanted) {
-            Ok((runtime, _)) => runtime,
+        let built = self.machine.runtime(&wanted).and_then(|(runtime, _)| {
+            crate::vm::with_vms(&*self.machine, self.vm.as_ref(), runtime)
+        });
+        let mut runtime = match built {
+            Ok(runtime) => runtime,
             Err(why) => return vec![format!("rescue: no runtime: {why}")],
         };
         // The runs a native runtime cannot list are ended from its journal.
@@ -544,7 +560,8 @@ impl Worker {
             plan.host_id.clone(),
             plan.platform.clone(),
             stop_grace,
-        );
+        )
+        .with_vms(plan.vm.clone());
         let rescue = plan
             .rescue_bound
             .into_iter()
@@ -752,6 +769,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         watch,
         machine,
         usage,
+        vm,
         ..
     } = plan;
     let stop_grace = config.stop_grace;
@@ -761,7 +779,8 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         platform: &platform,
         stop_grace,
     };
-    let (mut runtime, mut lines) = machine.runtime(&wanted)?;
+    let (runtime, mut lines) = machine.runtime(&wanted)?;
+    let mut runtime = crate::vm::with_vms(&*machine, vm.as_ref(), runtime)?;
     // What an earlier process left that no list of the runtime's can say (a native run).
     lines.extend(runtime.reclaim());
     // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`

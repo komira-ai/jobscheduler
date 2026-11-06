@@ -48,7 +48,7 @@
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress` and `egress-ports` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec`, `gpu-toolkit`, `gpu-passthrough`, `run-files`, `disk-gib`, `scratch-quota`, `scratch-default-gib`, `bundle`, `bundle-root`, `per-job`, `egress`, `egress-ports`, `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -72,6 +72,8 @@
 //! | `--native-pf-uid-start <uid>`, `--native-pf-uid-count <n>` | the uids of the pool whose egress the anchor limits (the helper's `--uid-range`); both required with `--native-network on`, refused otherwise (with `open` the agent does not start) |
 //! | `--native-pf-endpoint <ip:port>` | an endpoint the pool may reach, as given to `js-mac-provision install --endpoint`; repeatable; needs `--native-network on` |
 //! | `--native-pf-anchor <name>`, `--native-pf-state-dir <path>`, `--native-pfctl <path>` | the anchor (default `com.apple/com.komira.js.pool`), the provisioner's state directory (default `/var/db/com.komira.js-pf`) and the `pfctl` (default `/sbin/pfctl`); absolute paths; need `--native-network on` |
+//! | `--vm-driver <path>` | turns the VM backend on (see [`vm`]): the absolute path of the signed `js-vmm` binary, started as `js-vmm lease` (one process for each VM, through the disclaiming spawner) to make and drive the VMs; a VM start (`kind: vm`) then runs in a fresh VM cloned from the base image and destroyed when it ends, at most two at once (a third is refused `no-capacity`), and the hello reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`; without it a VM start is refused `vm-unavailable`; macOS only; needs `--vm-store` and `--native-helper-socket` |
+//! | `--vm-store <dir>` | the directory of the VM backend: the base image in `base` and each run's clone under `runs/`, on one APFS volume; needs `--vm-driver` |
 //! | `--native-tool-root <path>` | a directory a native start's program must lie under; repeatable; by default `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`; needs `--native-helper-socket` |
 //! | `--native-deny-read <path>` | a path no native run may read, beside the agent's roots, token, instance and CA files, the helper's socket directory and `/etc/kcpassword`; repeatable; name the helper's `--state-dir`; must exist; needs `--native-helper-socket` |
 //! | `--native-max-file-mib <n>` | the most MiB any one file a native run writes may reach, its output included (the run's `RLIMIT_FSIZE`); by default 4096; a run that writes more is ended by `SIGXFSZ`; needs `--native-helper-socket` |
@@ -289,6 +291,7 @@ mod transport;
 mod trusted_file;
 pub mod update_hook;
 pub mod usage;
+pub mod vm;
 mod worker;
 
 use std::ffi::OsString;
@@ -729,6 +732,8 @@ fn execute(
         .native
         .take()
         .map(|native| native.with_log_file_cap(cap));
+    local.vm =
+        vm::VmSettings::from_cli(&cli, platform, local.native.is_some()).map_err(Failure::Usage)?;
     if let Some(why) = &local.files_warning {
         let _ = writeln!(err, "js-agent: warning: {why}");
     }
@@ -847,6 +852,9 @@ fn execute(
         )),
         (false, None) => None,
     };
+    if local.vm.is_some() {
+        vm::report(&mut offer.hello);
+    }
     if let Some(found) = reported {
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");

@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         cli,
         sys,
         Timing::real(),
+        &mut std::io::BufReader::new(std::io::stdin()),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
