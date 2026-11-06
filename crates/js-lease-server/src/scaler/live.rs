@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, Acquired, CapacityProvider, Demand, Held, HostName, HostRef, Offer, ProviderError,
-    Released, SchedulerId, Secret,
+    AcquireId, Acquired, CapacityProvider, Demand, EventStream, Held, HostName, HostRef, Offer,
+    ProviderError, Released, SchedulerId, Secret,
 };
 use js_jobs::JobStoreError;
 use js_registry::{Busy, HostView, Waiting};
@@ -18,6 +18,7 @@ use tracing::warn;
 use super::{Call, Effects, JobTables, Launcher, RecordsFile, UnremovedFile};
 use crate::agents::Agents;
 use crate::checks::Health as Checks;
+use crate::cordon::DEFAULT_CORDON;
 
 /// The pool's side of the server, as the shell uses it.
 pub(crate) struct Live {
@@ -187,10 +188,19 @@ impl Effects for Live {
                 registry.mark_ending(&id);
                 Ok(())
             }
+            // The registry holds no host by that id: the same answer as a mark's.
+            Call::Cordon => registry
+                .cordon(&id, DEFAULT_CORDON)
+                .map(drop)
+                .map_err(|_| Busy::UnknownHost),
         };
         if let Err(busy) = done {
             warn!(%host, %busy, ?call, "the registry did not do it");
         }
+    }
+
+    fn events(&self) -> Option<EventStream> {
+        self.provider.events()
     }
 
     fn remove(&self, host: &str) -> Result<(), Busy> {
@@ -413,8 +423,8 @@ mod tests {
 
     /// Asserts that the reads and the provider's calls pass through: no waiting request and
     /// no host in a new registry, a pool not yet checked with no offers, the provider's
-    /// list, release, acquire, unresolved acquire ids and by-id read as the provider answers
-    /// them. It catches a method wired to the wrong call.
+    /// list, release, acquire, unresolved acquire ids, by-id read and notices as the provider
+    /// answers them. It catches a method wired to the wrong call.
     #[tokio::test]
     async fn the_reads_and_the_providers_calls_pass_through() {
         let (live, _dir) = live("pass");
@@ -449,6 +459,7 @@ mod tests {
         assert_eq!(live.unresolved(), [AcquireId::new("u1").unwrap()]);
         assert!(live.is_gone(&HostRef("i-gone".to_owned())));
         assert!(!live.is_gone(&id));
+        assert!(live.events().is_none(), "the stand-in sends no notices");
         // The stand-in's calls the shell does not make, so that it is whole.
         assert_eq!(live.provider.id().as_str(), "stub");
         assert!(!live.provider.can_launch());
@@ -581,7 +592,8 @@ mod tests {
 
     /// Asserts each call on the registry for a host it does not hold: the busy answers
     /// are logged and nothing fails, a remove of a host it never held is fine (and so is text that is no host id), a mark of
-    /// ending is kept for the host's first hello, and text that is no host id is ignored.
+    /// ending is kept for the host's first hello, a cordon of a host it does not hold is logged,
+    /// and text that is no host id is ignored.
     #[test]
     fn registry_calls_for_an_unknown_host_are_harmless() {
         let (live, _dir) = live("calls");
@@ -592,6 +604,7 @@ mod tests {
             Call::Undrain,
             Call::ReleaseHost,
             Call::MarkEnding,
+            Call::Cordon,
         ] {
             live.call(call, &host);
             live.call(call, "Not A Host Id");

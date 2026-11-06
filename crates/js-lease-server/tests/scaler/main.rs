@@ -14,6 +14,7 @@ mod fakes;
 mod jobs;
 mod launcher;
 mod lifetime;
+mod notices;
 mod records_file;
 mod restart_hold;
 mod restart_registry;

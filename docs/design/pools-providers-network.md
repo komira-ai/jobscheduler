@@ -914,7 +914,11 @@ Rules, each tied to a requirement or to existing behaviour:
   Unknown, `registration.md` Lifecycle), and not while the registry still holds its leases.
   If the provider reports `terminated` or `preempted`, or `get_instance` answers not-found
   (the input names the machine), the scaler revokes, forgets the device and removes the host so
-  its slot is free. A silent machine the scaler launched also costs money, so once the host books nothing
+  its slot is free. A provider whose `events()` stream sends `Reclaimed` for a machine is not waited for
+  until its list shows it: the shell's reader (`scaler/events.rs`) cordons the host at once, passes
+  the provider id to the step (`Input::reclaimed`) and runs a tick, and the step takes the route of a
+  listed `preempted` machine (the same release, brake strike and removal). A stream that ends is
+  opened again at the next tick; a provider that returns `None` keeps the list as its only signal. A silent machine the scaler launched also costs money, so once the host books nothing
   (the lease grace has given up its leases, or it held none; the shell says so in the host facts,
   `lease_given_up`, and sets it for every silent host that has no bookings) and it has stayed
   silent for `unknown_hold`, it is released the way an idle one is: drained and marked for
