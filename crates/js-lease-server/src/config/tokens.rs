@@ -19,7 +19,7 @@ use js_registry::Credential;
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 
-use super::{Cli, read_private_reason};
+use super::{Cli, MIN_TOKEN_BYTES, read_private_reason};
 use crate::error::StartupError;
 
 /// The bearer token. It is compared in constant time and never printed.
@@ -51,11 +51,6 @@ impl fmt::Debug for Token {
         f.write_str("Token(..)")
     }
 }
-
-/// The fewest bytes a bearer token may have after its trailing whitespace is dropped.
-/// A token that anyone on the network can try to guess is only as strong as it is long;
-/// 32 bytes of a random source is out of reach.
-pub const MIN_TOKEN_BYTES: usize = 32;
 
 /// The token a file's bytes hold: its content without trailing whitespace, which must
 /// be one run of printable ASCII (an HTTP header value cannot carry anything else, so

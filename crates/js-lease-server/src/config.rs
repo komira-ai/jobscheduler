@@ -47,8 +47,8 @@ pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub use tokens::Token;
 pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
-pub use tokens::{MIN_TOKEN_BYTES, Token};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -892,6 +892,11 @@ fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
 fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
     is_file & matches!(mode, 0o600 | 0o400) & (owner == euid)
 }
+
+/// The fewest bytes a bearer token may have after its trailing whitespace is dropped.
+/// A token that anyone on the network can try to guess is only as strong as it is long;
+/// 32 bytes of a random source is out of reach.
+pub const MIN_TOKEN_BYTES: usize = 32;
 
 /// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
 /// that it is a regular file owned by the server's user that only that user can use.
