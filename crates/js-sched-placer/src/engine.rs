@@ -37,9 +37,14 @@
 //! shape leaves after both.
 //!
 //! The engine is given no learned curves: each lease is charged what it books, and each
-//! host by its load readings when it has fresh ones.
+//! host by its load readings when it has fresh ones. Under whole-node settings the engine
+//! also keeps the registry's whole-node queue: it marks, grants and cancels the pool's
+//! whole-node requests ([`whole`]), and its drain cost reads the registry's expected lives
+//! of its leases through the scheduler's curve source ([`crate::lives::Lives`]), which
+//! gives no curve.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use js_caps::NodeCaps;
 use js_provider::Candidate;
@@ -54,17 +59,21 @@ use js_types::sched::usage::{LeaseClock, LeaseCost, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, WaiterId, WorkKey,
 };
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, RequestId, Shape};
 
+use crate::lives::Lives;
 use crate::map::{self, MapError};
 
 #[path = "jobs.rs"]
 pub mod jobs;
+#[path = "whole.rs"]
+pub mod whole;
 
-/// The term the engine grants leases in. A lease it places is numbered `TERM-<seq>`, with
-/// the sequence of the registry's lease, so the tie-break between equal hosts (a hash of
-/// the lease and the host) varies by lease as it does in the registry. A lease it takes
-/// up when it is built is numbered in term 0.
+/// The term the engine grants the registry's starts in. A start it places is numbered
+/// `TERM-<seq>`, with the sequence of the registry's lease, so the tie-break between equal
+/// hosts (a hash of the lease and the host) varies by lease as it does in the registry. A
+/// lease it takes up when it is built is numbered in term 0, a job's allocation in
+/// [`jobs::JOB_TERM`] and a whole-node request's lease in [`whole::WHOLE_TERM`].
 const TERM: u64 = 1;
 
 /// How the engine is built: the settings of the server's configuration.
@@ -115,6 +124,26 @@ pub struct Engine {
     /// ([`jobs`]): the live allocations of the job table, and the placements of the pass
     /// under way until their commit answers.
     jobs: BTreeMap<js_jobs::JobId, jobs::JobHold>,
+    /// The operation of each whole-node request the engine queues for the registry, until
+    /// the registry commits its lease ([`whole`]).
+    whole: BTreeMap<RequestId, OperationId>,
+    /// The give-ups and bars of whole-node requests a rebuild carried over, until each is
+    /// queued again ([`Engine::carry_whole`]).
+    carried: BTreeMap<RequestId, whole::Carried>,
+    /// The last pass of the whole-node queue the registry handed over, which a rebuild
+    /// hands to the new engine; it also holds the whole-node settings the scheduler has.
+    round: Option<js_registry::WholeRound>,
+    /// The sequence the next lease of a whole-node request gets, in [`whole::WHOLE_TERM`].
+    whole_seq: u64,
+    /// The hosts the engine cordons because the registry stands them lost, or would not book
+    /// them now while they carry nothing.
+    cordoned: BTreeSet<HostId>,
+    /// The hosts the engine gives a phase other than serving because the registry stands
+    /// them tainted (quarantined) or leaving (draining).
+    phased: BTreeSet<HostId>,
+    /// The expected life of each lease the registry knows one for, which the scheduler
+    /// reads as its learned curves.
+    lives: Arc<Lives>,
 }
 
 /// How many readings of a host are kept for a rebuild: two windows, the most the
@@ -126,10 +155,12 @@ impl Engine {
     /// the leases on each, at `now`. Every host with a scheduler form is a worker; every
     /// lease is taken up on its host, as a lease recovered after a restart is.
     pub fn build(settings: Settings, every: &[Candidate], now: FarmTime) -> Self {
+        let lives = Arc::new(Lives::default());
         let mut sched = Scheduler::new(TERM)
             .with_backfill(settings.backfill)
             .with_load_config(settings.load)
-            .with_memory_percent(settings.memory);
+            .with_memory_percent(settings.memory)
+            .with_curves(lives.clone());
         let held = every
             .iter()
             .flat_map(|candidate| candidate.leases.iter().map(move |held| (candidate, held)));
@@ -155,6 +186,13 @@ impl Engine {
             taken: u64::try_from(holds.len()).unwrap_or(u64::MAX),
             readings: BTreeMap::new(),
             jobs: BTreeMap::new(),
+            whole: BTreeMap::new(),
+            carried: BTreeMap::new(),
+            round: None,
+            whole_seq: 0,
+            cordoned: BTreeSet::new(),
+            phased: BTreeSet::new(),
+            lives,
         };
         for candidate in every {
             engine.host_up(&candidate.host, &candidate.shape, now);
@@ -194,6 +232,8 @@ impl Engine {
         for candidate in every {
             engine.heard(&candidate.host, None, now);
         }
+        // The whole-node queue is not in the registry's books either: it is carried over.
+        engine.carry_whole(self, now);
         engine
     }
 
@@ -201,6 +241,9 @@ impl Engine {
     /// the engine still holds a lease there (it then waits for the next rebuild) or a job's
     /// allocation (which only its host's confirmation or the provider's absence frees).
     pub fn host_gone(&mut self, host: &HostId) {
+        // A whole-node request granted the host and not committed there waits again.
+        let worker = map::worker(host);
+        self.unplace_whole_where(|on| *on == worker);
         let leased = self.on.get(host).is_some_and(|leases| !leases.is_empty());
         if leased | self.holds_jobs_on(host) {
             return;
@@ -210,12 +253,18 @@ impl Engine {
         self.on.remove(host);
         self.outside.remove(host);
         self.readings.remove(host);
+        self.cordoned.remove(host);
+        self.phased.remove(host);
     }
 
-    /// Feeds `event` at `now`, or at the last time fed if that is later.
+    /// Feeds `event` at `now`, or at the last time fed if that is later. A whole-node
+    /// request it grants a worker outside its own round is put back
+    /// ([`Engine::settle_whole`]).
     pub fn feed(&mut self, now: FarmTime, event: Event) -> Vec<Effect> {
         self.now = self.now.max(now);
-        feed(&mut self.sched, self.now, event)
+        let effects = feed(&mut self.sched, self.now, event);
+        self.settle_whole();
+        effects
     }
 
     /// Records that the engine holds `lease` of the registry on `host` as `placed`, and
@@ -271,10 +320,10 @@ impl Engine {
     }
 
     /// A heartbeat of `host` the registry accepted, with the reading it brought. The heartbeat
-    /// lists every lease and job allocation the engine holds there as running, so none is given up
-    /// for a beat; the reading's leases are named as the engine numbers them, and a lease the
-    /// engine does not hold is left out of it. The scheduler takes no heartbeat of a host that is
-    /// no worker of it.
+    /// lists every lease, job allocation and pending grant of a whole-node request the engine
+    /// holds there as running, so none is given up for a beat; the reading's leases are named
+    /// as the engine numbers them, and a lease the engine does not hold is left out of it. The
+    /// scheduler takes no heartbeat of a host that is no worker of it.
     pub fn heard(&mut self, host: &HostId, load: Option<&NodeLoad>, now: FarmTime) {
         let here = self.on.get(host);
         let ours = |lease: &SchedLeaseId| {
@@ -286,6 +335,7 @@ impl Engine {
             .into_iter()
             .flat_map(|leases| leases.values().map(|placed| placed.lease))
             .chain(self.job_leases_on(host))
+            .chain(self.pending_on(&map::worker(host)))
             .collect();
         let translated = load.map(|load| NodeLoad {
             covered: load.covered.iter().filter_map(ours).collect(),
@@ -326,7 +376,13 @@ impl Engine {
             return;
         };
         self.back.remove(&placed.lease);
-        self.release(placed);
+        // The lease of a whole-node request the engine queued ends with its request.
+        match placed.lease.term == whole::WHOLE_TERM {
+            true => {
+                let _ = self.sched.cancel_whole(placed.operation);
+            }
+            false => self.release(placed),
+        }
     }
 
     /// Lets go of what `placed` holds in the scheduler: its booking and its operation.
@@ -420,6 +476,8 @@ impl Engine {
                 },
             );
         }
+        // The whole-node requests are placed first, numbered in their own term.
+        self.whole_tick(now);
         let operation = self.sched.next_operation();
         let lease = spec.lease();
         self.sched
@@ -455,7 +513,9 @@ impl Engine {
                 let _ = self.sched.forget_queued(operation);
             }
         }
-        if let Some(pin) = pin {
+        // A host the engine cordons for the registry stays cordoned.
+        let cordoned: BTreeSet<_> = self.cordoned.iter().map(map::worker).collect();
+        if let Some(pin) = pin.filter(|pin| !cordoned.contains(pin)) {
             self.feed(now, Event::Uncordon { worker: pin });
         }
         Ok(at.map(|(index, _)| index))
@@ -488,8 +548,15 @@ impl Engine {
     }
 
     /// Holds the hosts of `marked` outside the engine, each until the end of its tail as
-    /// the mark took it, and ends the hold of a host no longer marked.
+    /// the mark took it, and ends the hold of a host no longer marked. A host one of the
+    /// engine's own whole-node requests holds is held by that request, not outside.
     fn mark(&mut self, marked: &MarkedTails) {
+        let own = self.whole_hosts();
+        let marked: MarkedTails = marked
+            .iter()
+            .filter(|(host, _)| !own.contains(*host))
+            .map(|(host, left)| (host.clone(), *left))
+            .collect();
         let gone: Vec<HostId> = self
             .outside
             .iter()
@@ -500,7 +567,7 @@ impl Engine {
             self.sched.release_outside(&map::worker(&host));
             self.outside.remove(&host);
         }
-        for (host, left) in marked {
+        for (host, left) in &marked {
             let end = left.map(|left| millis(left).saturating_add(self.now.as_millis()));
             let start = end.map(FarmTime::from_millis);
             self.sched.reserve_outside(map::worker(host), start);

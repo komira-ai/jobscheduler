@@ -310,6 +310,35 @@ fn with_the_flag_a_host_with_a_lease_of_unknown_end_takes_no_backfill() {
     assert_eq!(l.on("h1"), [LeaseId::new(1, 1)]);
 }
 
+/// Asserts, through the server, that the engine lets go of a mark on a host the registry
+/// stands lost at its next pass: `q` marks `h1`, whose lease ends first; once `h1` has
+/// been silent past the pool's grace, `q` marks `h2` instead, with the tail of `h2`'s
+/// lease. It catches the engine waiting out its own lease grace (or for ever) on a host
+/// the registry no longer hears from.
+#[test]
+fn with_the_flag_a_lost_host_loses_its_mark_at_the_next_pass() {
+    let flags = ["--placement", "js-sched"];
+    let mut l = live("whole_lost", &["h1", "h2"], &flags);
+    let second = Duration::from_secs(1);
+    // The scheduler packs a lease onto the busier host, so each host is given its lease
+    // while the other is cordoned for a second.
+    let cordon = |l: &Live, host: &str| {
+        let host = HostId::new(host).unwrap();
+        l.agents.registry.cordon(&host, second).unwrap();
+    };
+    cordon(&l, "h2");
+    assert_eq!(l.share(1, 600).as_deref(), Ok("h1"));
+    l.at(2_000);
+    cordon(&l, "h1");
+    assert_eq!(l.share(5, 900).as_deref(), Ok("h2"));
+    l.at(4_000);
+    assert!(host_of(&l.whole(2, "q")).is_none());
+    assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
+    l.sessions.retain(|(host, _, _)| host != "h1");
+    l.at(30_000);
+    assert_eq!(l.mark("q"), Some(("h2".to_owned(), Some(T0 + 902_000))));
+}
+
 /// Asserts that without the flag nothing shares a host, so no host a whole-node request
 /// sets aside is ever backfilled: a pool file with a `share_class` is refused at start,
 /// naming the flag, and a whole-node pool without one serves no class that shares a host,
