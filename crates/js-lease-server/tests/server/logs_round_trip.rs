@@ -541,7 +541,7 @@ async fn follow_from(
 /// asked. A second follow from the new end waits; the job ends (finals written, the result
 /// with the lengths accepted) and the follow answers an empty page at the end. Catches a
 /// follow that answers before anything new is there, one that never sees a chunk put while it
-/// waits, and one that waits on after the job ended.
+/// waits, and one that answers anything but the end once the job ended.
 #[test]
 #[ignore = "needs the S3-compatible test store: JS_TEST_S3_URL and JS_TEST_S3_REGION (CI's test job)"]
 fn a_follow_returns_bytes_written_after_it_began_and_ends_with_the_job() {

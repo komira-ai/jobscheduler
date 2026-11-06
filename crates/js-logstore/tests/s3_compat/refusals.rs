@@ -35,7 +35,15 @@ fn a_request_signed_for_another_region_is_refused() {
     );
     let key = rig.job(&rig.prefix, "job-1").chunk_key(Stream::Stdout, 0);
     let put = elsewhere.put(&key, b"x".to_vec(), &Metadata::new());
-    assert!(put.is_err(), "a put signed for {wrong} was taken");
+    // The store answers 400 `AuthorizationHeaderMalformed`, a status the client does not
+    // expect of a put.
+    assert_eq!(
+        put,
+        Err(StoreError::Malformed(
+            "the store answered a status the client does not expect"
+        )),
+        "a put signed for {wrong}"
+    );
     let root = rig.client(rig.root());
     assert_eq!(root.get_range(&key, 0, 1), Ok(None));
     let request = rig.request(&unique("host-a"), SHORTEST_TTL);

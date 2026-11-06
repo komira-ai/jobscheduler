@@ -174,7 +174,7 @@ jobs:
         env:
           JS_TEST_S3_URL: http://jsciroot:js-ci-throwaway@127.0.0.1:${{ job.services.s3.ports['9000'] }}/js-live-logs
           JS_TEST_S3_REGION: js-test-1
-        run: cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::
+        run: 'cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::'
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
