@@ -47,8 +47,11 @@ What is real, the production code as it runs in the server:
 - the registry (`js-registry`): registration through the real hello and its limiter, loss
   after the grace, forgetting after the lost retention;
 - the lease table (`js-lease`), which times its saves on the cell's clock;
-- the scaler and placement, as the server's tick runs them every 5 s of virtual time (the
-  cell's pool is one whose hosts register themselves; no provider launches machines);
+- the scaler and placement, as the server's tick runs them every 5 s of virtual time. The
+  cell's pool is one whose hosts register themselves, unless it is an elastic pool
+  (`ServerSpec::elastic_pool`): then the server reads a configuration file whose one pool
+  launches its machines through the scaler, on an elastic fake cloud (below), with the
+  scaler's acquire ids, and so its machines' names, drawn from the seed;
 - the wire's types and their checks (`js-agent-wire`): each agent builds the hello and
   heartbeat bodies a real agent builds and checks every answer with the wire's own
   `validate()`;
@@ -86,6 +89,15 @@ What is simulated:
   does not hold retires the id, each result rides in every heartbeat until an answer
   acknowledges it, and each retired id until an answer acknowledges it. A real agent's
   node does not speak them.
+- an elastic pool's cloud: the elastic fake (`js-elastic-fake`), its clock advanced to the
+  virtual time of every input of the server, behind a recording wrapper the scaler is
+  handed, which forwards every call and writes down each acquire, release and list with
+  its arguments, its answer and the virtual time of its step (`CloudCall`). Each machine
+  the scaler launches boots into a fake agent node (`m000`, `m001`, ... in launch order)
+  the cloud's boot time later, its join token and host id read from the launch payload
+  (`ElasticFake::user_data`); a machine the cloud releases, preempts or drops has its
+  agent killed in the same step. The wrapper sends no reclaim notices: the server reads
+  such a stream on a thread of its own, which would act at a moment of real time.
 
 The crate keeps the kernel's rules: no clock, no random source and no hashed collection,
 so a run replays from its seed. The crate doc of `js-sim-cell` says the same at more
@@ -138,6 +150,7 @@ with `#[path = ...]`; they are not binaries of their own.
 | `whole_host_faults` | `tests/whole_host_faults.rs` | The whole-host fault family: hosts silent on a prepare, a refused prepare for each refusal reason, a drain behind busy hosts, a ready report racing the prepare deadline (a scenario per second of the sweep), an agent that restarts while its host is committed, a cancelled request (queued and marked), and a held lease whose agent restarts, each over sixteen seeds under every value of `--placement`. The scenarios are in `tests/cell/whole_host_faults.rs` and `tests/cell/whole_host_cancel.rs`. |
 | `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path (under its own request id, a given one or none) and the answers it keeps, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations (on a raw answer, on the server as it stands when judged, at the end or at a virtual time, and over a request's tries), `Scenario::under`, the list of refusal reasons, and the server spec's class, whole-node keys and placement. |
 | `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts under every placement over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
+| `elastic` | `tests/elastic.rs` | The elastic family: a hundred whole-host runs scale an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over sixteen seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, and the operator's brake reset. The scenarios are in `tests/cell/elastic.rs`. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
 
@@ -404,6 +417,11 @@ counts the jobs an agent runs beside its runs.
 | `freed-only-when-confirmed` | An allocation is freed only on the host's word (a heartbeat whose listing left the job out, or named it retired, sent after the allocation was committed, after the host read the job's start and after it read the verdict on its result), when the server no longer lists the host, or for a whole-host prepare that failed before any launch: never on silence, never on an unknown. | `allocation <a> of job sim-job-3 on host h002 was read freed at 70000 with no listing of the host since 12000 that left the job out, while the server lists the host` | every step |
 | `no-start-without-allocation` | Every job start an agent read names an allocation of that job on that host that the server committed no later than the agent read the start. | `host h002 was sent a start of job sim-job-3 under allocation <a> at 12000 that no allocation committed before it names` | every step |
 | `result-kept-until-acknowledged` | A per-job agent sends a result it made in every heartbeat until it reads an answer that acknowledges it (unless its process was killed), and no job's result is accepted twice. | `host h002 sent a heartbeat at 70000 without the result of job sim-job-3 it made at 64000, before any answer acknowledged it`, or `the result of job sim-job-3 was accepted twice: on host h001 at 64010 and on host h001 at 69010` | every step |
+| `instances-within-limits` | By the elastic fake itself, never the scheduler's records, the cloud runs no more of the scheduler's machines (launched by an acquire, not foreign) than the pool's `max_instances`. | `the cloud of pool burst runs 41 of this scheduler's machines, past its max_instances of 40` | every step |
+| `only-own-machines-released` | Every release in the recording wrapper's calls names a machine the scheduler launched: one an acquire was answered with, or a list showed. | `a release of machine fake-0009 at 64000, which this scheduler never launched` | every step |
+| `no-acquire-while-plan-only` | Once the pool's brake reads tripped (the scaler's state, read after every tick), the wrapper's calls gain no acquire until the operator resets the brake (`Cell::reset_brake`) or it no longer reads tripped. | `an acquire of offer sim_1x_a100 in zone zone-a at 64000, while the brake of pool burst has read tripped since 60000 with no reset` | every step |
+| `throttle-honoured` | After the cloud answered an acquire with a 429 (a deferral of `THROTTLE_WAIT`, 30 s), the wrapper's calls show no acquire of the pool inside that wait. | `an acquire of offer sim_1x_a100 in zone zone-a at 70000, inside the 30s throttle wait of the 429 answered at 64000` | every step |
+| `launched-machines-settle` | Once quiet, every machine the scheduler launched has joined and been released, is gone, or was preempted: none the cloud still runs has no work (its agent runs no run and no job) and no drain (its host is neither drained nor being released). | `machine m003 (fake-0004, host js-<12 hex>-<12 hex>) still runs with no work and no drain once the cell is quiet (it joined)` | at the end |
 
 The step invariants are checked after every kernel step, every poll of the client and
 every client call; the end invariants once, after the scenario has been quiet (no partition, no
@@ -481,6 +499,10 @@ The cell writes its own lines, `<t> cell ...`, for what the kernel does not see:
 | `<t> cell listing <host> live\|lost leases=<n> aside=<bool>` | the server's listing of a host changed |
 | `<t> cell listing <host> forgotten` | the server no longer lists the host |
 | `<t> cell launch <host>` | an agent launched a run or a job (an entry of the launch ledger) |
+| `<t> cell cloud launch m<n>` | the cell first saw the elastic pool's cloud run the scheduler's machine number `n` (in launch order) |
+| `<t> cell cloud boot m<n>`, `<t> cell cloud boot m<n> silent` | machine `n`'s agent started, its boot time after its launch; or, for a pool whose machines do not join, the boot that starts no agent |
+| `<t> cell cloud release m<n>`, `<t> cell cloud preempt m<n>`, `<t> cell cloud drop m<n>` | the cloud stopped running machine `n`: released by the scheduler, preempted, or gone outside it; its agent is killed in this step |
+| `<t> cell cloud brake reset <bool>` | the operator asked the scaler to reset the pool's brake, and whether the scaler took the pool's name |
 | `<t> cell job <job> <state>` | the server's job table showed the job in a new state |
 | `<t> cell allocation <job> <step> <host>` | the server's allocation table showed the job's allocation `booked`, `releasing` or `freed` on the host (never its id) |
 | `<t> cell violation <invariant>` | the violation that stopped the run |
@@ -510,8 +532,10 @@ family `faults` the first four seeds of the restart of the server with runs in f
 (`tests/cell/server_restart.rs`), family `whole_host` the first two seeds of the fifty
 whole-host requests under each value of `--placement`, and family `whole_host_faults` the
 first two seeds of the cancelled whole-host request (`tests/cell/whole_host_cancel.rs`)
-under each value of `--placement`, and family `jobs` the first seed of jobs over
-the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts). A trace hash covers the
+under each value of `--placement`, family `jobs` the first seed of jobs over
+the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts), and family
+`elastic` the first seed of the EC2-like elastic pool scaled up to forty machines and back
+to none (`tests/cell/elastic.rs`). A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
@@ -521,8 +545,9 @@ own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 `the_smoke_scenario_matches_the_golden_file`,
 `the_real_agent_scenario_matches_the_golden_file`,
 `the_whole_host_scenario_matches_the_golden_file_under_every_placement`,
-`the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement` and
-`the_job_scenario_matches_the_golden_file` fail on a moved
+`the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement`,
+`the_job_scenario_matches_the_golden_file` and
+`the_elastic_scenario_matches_the_golden_file` fail on a moved
 hash and print the command
 that regenerates the lines:
 
@@ -564,8 +589,11 @@ model:
   itself after the time its `Work` names. Covered by the agent's own tests
   (`crates/js-agent/tests/`) and the conformance suite
   (`crates/js-conformance/tests/agent_suite.rs`).
-- **Real clouds.** The cell's pool registers its own hosts; no provider launches or ends a
-  machine. Covered by the elastic fake's conformance suite
+- **Real clouds.** An elastic pool launches its machines on the elastic fake, never a
+  real cloud; what the fake models and does not (its bill, its scripts, its lags) is in its
+  crate doc. The cell scripts none of the fake's faults yet (refusals, lost calls, 429s,
+  failed lists) and sends no reclaim notice.
+  The fake itself is covered by its conformance suite
   (`crates/js-elastic-fake/tests/conformance.rs`) and the server's end-to-end test over it
   (`crates/js-lease-server/tests/server/elastic_fake_e2e.rs`).
 - **Usage recording.** Its store reads the system's clock, so the cell turns it off.
@@ -610,6 +638,14 @@ real agent does in the situations of section 7 ("Result lost", "Duplicate start"
 of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
+
+The elastic family (`tests/elastic.rs`) covers no row of section 8 yet: row 16 (a scaler
+tick skipped while the last is busy) needs a slow provider, and row 34 (the token of a
+retried launch) a crash after a launch, which the family does not script. It covers section
+7's "Scaler double launch" (each acquire id launched one machine, and the cloud never ran
+more of the scheduler's machines than `max_instances`) and section 6.5's idle release (every
+machine released once quiet), under every invariant of `Invariant::ALL`; its bill check
+holds the cloud's clock to the server's, and says nothing of the scheduler's cost.
 
 The whole-host family covers no row yet. Its fifty requests wait on the server's wait list
 and are presented again at every tick, but it pins neither the order the list serves

@@ -12,6 +12,11 @@ publish.workspace = true
 js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-conformance = { path = "../js-conformance" }
+# The provider trait the recording wrapper implements, and its call and answer types
+# (src/elastic/cloud.rs).
+js-elastic = { path = "../js-elastic" }
+# The in-memory cloud an elastic pool launches its machines on (src/elastic/).
+js-elastic-fake = { path = "../js-elastic-fake" }
 # The job and allocation tables' types, and the scripted id source (feature `test-support`)
 # the cell's server mints its ids from, so a seed replays (src/server/ids.rs).
 js-jobs = { path = "../js-jobs", features = ["test-support"] }
@@ -29,6 +34,8 @@ axum.workspace = true
 # `ValueEnum`, through which the server's `--placement` values are listed and spelled.
 clap.workspace = true
 serde_json.workspace = true
+# The table the server hands a provider kind (src/elastic/config.rs).
+toml.workspace = true
 # The current-thread runtime each request and tick of the server runs on.
 tokio = { workspace = true, features = ["rt"] }
 # `oneshot`, to call a router as a service.

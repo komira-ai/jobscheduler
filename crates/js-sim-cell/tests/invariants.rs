@@ -2,8 +2,8 @@
 //!
 //! Each invariant has negative cases that it must flag, alone, and correct siblings it
 //! must not flag, so a check that flags nothing fails the first and a check that flags
-//! everything fails the second. [`NEGATIVE_CASES`] and the whole-host module's table
-//! list every negative case; a new invariant without one fails
+//! everything fails the second. [`NEGATIVE_CASES`] and the whole-host, job and elastic
+//! modules' tables list every negative case; a new invariant without one fails
 //! `every_invariant_has_a_negative_case_in_the_table`.
 
 use std::collections::BTreeSet;
@@ -19,6 +19,9 @@ use js_types::{HostId, LeaseId, Resources};
 // The boundary cases, a module of this test binary (not a test target of its own).
 #[path = "invariants/boundaries.rs"]
 mod boundaries;
+// The invariants of an elastic pool's cloud, a module of this test binary too.
+#[path = "invariants/elastic.rs"]
+mod elastic;
 // The invariants of the fault family, a module of this test binary too.
 #[path = "invariants/faults.rs"]
 mod faults;
@@ -942,7 +945,7 @@ fn a_step_that_touched_one_agent_is_not_checked_against_every_agent() {
 }
 
 /// Asserts that every member of `Invariant::ALL` has a negative case in
-/// `NEGATIVE_CASES` or the whole-host or job module's table, that no two members share a name, and that each case is flagged
+/// `NEGATIVE_CASES` or the whole-host, job or elastic module's table, that no two members share a name, and that each case is flagged
 /// by exactly the invariant of its row. Catches an invariant added without a negative
 /// case, two invariants reported under one name, and a negative case that passes by
 /// tripping another invariant.
@@ -954,7 +957,10 @@ fn every_invariant_has_a_negative_case_in_the_table() {
         Invariant::ALL.len(),
         "two invariants share a name"
     );
-    let table = || jobs::table(NEGATIVE_CASES.iter().chain(whole_host::NEGATIVE_CASES));
+    let others = whole_host::NEGATIVE_CASES
+        .iter()
+        .chain(elastic::NEGATIVE_CASES);
+    let table = || jobs::table(NEGATIVE_CASES.iter().chain(others.clone()));
     for invariant in Invariant::ALL {
         let rows = table().filter(|(row, _)| *row == invariant);
         assert!(

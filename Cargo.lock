@@ -1788,6 +1788,8 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-conformance",
+ "js-elastic",
+ "js-elastic-fake",
  "js-jobs",
  "js-lease",
  "js-lease-server",
@@ -1798,6 +1800,7 @@ dependencies = [
  "js-types",
  "serde_json",
  "tokio",
+ "toml",
  "tower",
 ]
 

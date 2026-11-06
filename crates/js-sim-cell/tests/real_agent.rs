@@ -70,6 +70,7 @@ fn spec(root: &TestDir) -> AgentSpec {
         labels: BTreeMap::new(),
         hello_interval: INTERVAL,
         kind: AgentKind::Real(root.path().to_path_buf()),
+        instance: None,
     }
 }
 
