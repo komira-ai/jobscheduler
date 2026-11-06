@@ -20,7 +20,7 @@ use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Clients, Config, JobListen, Limits, MetricsListen, TlsFiles, Token};
+use crate::config::{Config, JobListen, Limits, LiveClients, MetricsListen, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
@@ -244,8 +244,8 @@ pub(crate) struct Listeners {
     metrics: Option<(MetricsListen, Arc<Recorder>)>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
     max_job_wall: Duration,
-    /// The clients the job service's bearer layer admits.
-    clients: Clients,
+    /// The clients the job service's bearer layer admits, as the tick reloads them.
+    clients: LiveClients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }

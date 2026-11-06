@@ -46,7 +46,7 @@ use super::{
     submit,
 };
 use crate::adapt::SharedClock;
-use crate::config::{Clients, parse_token};
+use crate::config::{Clients, LiveClients, parse_token};
 use crate::job_store::ServerJobs;
 
 /// The token the services under test are built with.
@@ -94,9 +94,9 @@ const NOW_MS: u64 = 1_800_000_000_000;
 const UNIMPLEMENTED_BODY: &str = r#"{"error":"unimplemented"}"#;
 
 /// The clients the services under test admit: the client `default`, whose token is [`TOKEN`].
-pub(super) fn token() -> Clients {
+pub(super) fn token() -> LiveClients {
     let token = parse_token(TOKEN.as_bytes()).expect("the test token is a valid token");
-    Clients::only(&token, "--token-file")
+    LiveClients::new(Clients::only(&token, "--token-file"))
 }
 
 fn clock() -> SharedClock {

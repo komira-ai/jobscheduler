@@ -303,7 +303,11 @@ fn submit_does_not_wait_for_placement() {
     let request = Request::new(SubmitJobRequest {
         spec: Some(wire("job-w")),
     });
-    let mut call = pin!(submit_job(&api, request));
+    let caller = crate::job_api::roles::Caller {
+        name: js_jobs::ClientName::default_client(),
+        role: crate::config::Role::Operator,
+    };
+    let mut call = pin!(submit_job(&api, &caller, request));
     let polled = call.as_mut().poll(&mut Context::from_waker(Waker::noop()));
     let state = polled.map(|answer| answer.unwrap().into_inner().job.unwrap().state());
     assert_eq!(state, Poll::Ready(v1::JobState::Queued));
