@@ -44,7 +44,11 @@ pub(crate) fn from_server(state: &Shared, max_job_wall: Duration) -> Option<JobA
     let admission = JobAdmission::new(state.admit().clone(), agents.registry.clone());
     let submit = submit::Ctx::served(max_job_wall, Arc::new(admission));
     let api = JobApi::new(jobs, agents.clock.clone());
-    Some(api.with_read(read).with_submit(submit))
+    Some(
+        api.with_read(read)
+            .with_submit(submit)
+            .with_fence(agents.fence.clone()),
+    )
 }
 
 /// The router of the job service's port: gRPC and the gateway over `api`, each behind the

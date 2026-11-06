@@ -47,10 +47,12 @@ fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
 }
 
-/// The lines of the lease journal of `rig`.
+/// The lines of the lease journal of `rig` that add or remove a lease (the run records,
+/// `=` lines, are read in `native/adopt.rs`).
 fn journal(rig: &Rig) -> Vec<String> {
     let text = fs::read_to_string(rig.dir.path("native-leases")).unwrap_or_default();
-    text.lines().map(str::to_owned).collect()
+    let leases = text.lines().filter(|line| !line.starts_with("= "));
+    leases.map(str::to_owned).collect()
 }
 
 /// Asserts that a declared output is copied after the kill and before the user is deleted:

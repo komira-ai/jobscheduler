@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The root helper that gives every Mac lease its own throwaway user. It builds everywhere
+# The root helper that lends every Mac lease a user of its pool. It builds everywhere
 # so its logic is tested on every CI runner; the binary serves only on macOS.
 [[bin]]
 name = "js-mac-session"

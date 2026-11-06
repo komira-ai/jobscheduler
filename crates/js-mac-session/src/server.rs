@@ -216,7 +216,11 @@ pub fn connection_on(
         Outcome::Reply(answer) => reply(stream, &answer),
         Outcome::Running(mut child) => {
             reply(stream, &Reply::Started { pid: child.id() });
-            reply(stream, &exited(child.wait()));
+            reply(stream, &exited(helper.wait(&mut child)));
+        }
+        Outcome::Watching(lease, pid) => {
+            reply(stream, &Reply::Started { pid });
+            reply(stream, &watched(helper.wait_watched(&lease)));
         }
     }
 }
@@ -242,6 +246,16 @@ fn exited(status: io::Result<ExitStatus>) -> Reply {
         },
         Err(why) => Reply::Refused {
             reason: format!("waiting for the process: {why}"),
+        },
+    }
+}
+
+/// The reply to a watched run that ended: how it ended, or that the table no longer has it.
+fn watched(ended: Option<crate::helper::Ended>) -> Reply {
+    match ended {
+        Some((code, signal)) => Reply::Exited { code, signal },
+        None => Reply::Refused {
+            reason: "the run was forgotten: its user was deleted".to_owned(),
         },
     }
 }

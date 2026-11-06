@@ -134,6 +134,10 @@ impl Store for RecordingStore {
         self.inner.changes(after, limit)
     }
 
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        self.inner.trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.log().reaps += 1;
         self.inner.reap_expired()

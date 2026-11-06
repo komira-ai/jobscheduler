@@ -600,6 +600,10 @@ impl Store for Hooked {
         self.inner.changes(after, limit)
     }
 
+    fn trim_feed(&self, before: js_state::Revision) -> Result<u64, js_state::StoreError> {
+        self.inner.trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, js_state::StoreError> {
         self.inner.reap_expired()
     }

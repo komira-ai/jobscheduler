@@ -1,5 +1,8 @@
 //! What `user-delete` removes besides the user record: everything keyed by the lease
-//! user's name or uid that would outlive the account (S4.2, "Sweep on delete").
+//! user's name or uid that would outlive the account (S4.2, "Sweep on delete"); and what
+//! a pool user's reset removes between two leases, with the same walk ([`sweep`] for the
+//! places it sweeps, [`empty_keeping`] for its `DARWIN_USER_DIR` entry). Each sweep's
+//! [`Swept::errors`] is its verdict: the helper takes a sweep with any error as not done.
 //!
 //! Root walks places other lease users can write while their leases run, so the walk
 //! never follows a symbolic link: every directory is opened relative to its parent

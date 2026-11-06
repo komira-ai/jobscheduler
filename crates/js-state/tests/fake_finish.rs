@@ -77,3 +77,34 @@ fn deleting_a_key_that_is_not_there_commits_and_writes_nothing() {
     assert_eq!(rows.len(), 1, "only the put is in the feed: {rows:?}");
     assert_eq!(rows[0].revision, first.revision);
 }
+
+// Catches a trim that passes a revision a prepared transaction still holds: a trim bounded
+// past the head stops below the first revision that can still commit, so the prepared row is
+// read after its commit from the floor the trim left.
+#[test]
+fn a_trim_stops_below_a_revision_that_can_still_commit() {
+    let (_clock, store) = fake(Flaw::None);
+    for key in ["a", "b"] {
+        store
+            .txn(Txn::new().put(key, "v", Cond::Any))
+            .expect("store")
+            .expect("commits");
+    }
+    let deferred = store.prepare(Txn::new().put("late", "v", Cond::Absent));
+    store
+        .txn(Txn::new().put("c", "v", Cond::Any))
+        .expect("store")
+        .expect("commits");
+    assert_eq!(store.trim_feed(js_state::Revision(u64::MAX)), Ok(2));
+    store.finish(deferred).expect("commits");
+    let page = store.changes(js_state::Revision(2), 10).expect("store");
+    let keys: Vec<&str> = page.rows.iter().map(|row| row.key.as_str()).collect();
+    assert_eq!(keys, ["late", "c"], "a row the trim must keep was lost");
+    assert_eq!(
+        store.changes(js_state::Revision(1), 10),
+        Err(js_state::StoreError::StaleCursor {
+            after: js_state::Revision(1),
+            floor: js_state::Revision(2),
+        })
+    );
+}
