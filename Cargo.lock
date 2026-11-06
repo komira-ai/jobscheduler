@@ -1366,6 +1366,7 @@ dependencies = [
  "js-types",
  "js-usage",
  "log",
+ "postgres",
  "prost-reflect",
  "prost-types",
  "rcgen",

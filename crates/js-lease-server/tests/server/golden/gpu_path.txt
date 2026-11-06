@@ -6,6 +6,7 @@
 --agent-hello-interval default=1s required=false
 --agent-pool-config default=none required=false
 --agent-token-file default=none required=false
+--allow-sqlite-store default=none required=false values=true|false
 --boot default=none required=false values=initialise|resume
 --client-token default=none required=false
 --config default=none required=false
@@ -29,6 +30,7 @@
 --read-timeout default=30s required=false
 --require-host-credential default=none required=false values=true|false
 --state-file default=none required=false
+--store default=none required=false
 --tick default=5s required=false
 --tls-cert default=none required=false
 --tls-key default=none required=false

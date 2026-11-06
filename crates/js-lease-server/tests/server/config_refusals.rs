@@ -70,7 +70,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
          require_host_credential, placement, estimate_feed, cpu_slack, usage_db, usage_off, profile_store_bytes, \
          history_retention_days, alert_webhook_url, alert_webhook_token_file, alert_repeat_after, \
          max_spend_per_day_total, max_spend_per_month_total, max_spend_since_go_total, \
-         job_retention, job_listen, max_job_wall"
+         job_retention, job_listen, max_job_wall, store, allow_sqlite_store"
     );
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(

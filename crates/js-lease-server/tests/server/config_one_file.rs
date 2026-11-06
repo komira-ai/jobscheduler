@@ -220,6 +220,7 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--job-retention", "3d"),
         key("--job-listen", "127.0.0.1:0"),
         key("--max-job-wall", "12h"),
+        key("--store", "/store"),
     ];
     rows.push((
         vec!["--usage-off"],
@@ -233,6 +234,10 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         vec!["--require-host-credential"],
         "--require-host-credential: not allowed with --config; set server.require_host_credential"
             .to_owned(),
+    ));
+    rows.push((
+        vec!["--allow-sqlite-store"],
+        "--allow-sqlite-store: not allowed with --config; set server.allow_sqlite_store".to_owned(),
     ));
     let moved = [
         ("--token-file", "set server.client_token_file"),

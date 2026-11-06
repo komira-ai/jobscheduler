@@ -40,6 +40,7 @@ mod listen;
 mod placement;
 mod resolve;
 mod retention;
+mod store;
 mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
@@ -47,6 +48,7 @@ pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub(crate) use store::{StoreNames, StoreSetting};
 pub use tokens::Token;
 pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
 
@@ -242,6 +244,15 @@ pub struct Cli {
     /// asking for more is refused `wall-time-above-ceiling`. Read once at start.
     #[arg(long, value_parser = parse_max_job_wall)]
     pub max_job_wall: Option<Duration>,
+    /// A file holding the store's connection, one line: `postgres://...`,
+    /// `postgresql://...`, or `sqlite:<path>` (needs --allow-sqlite-store). Owner-only, as
+    /// --token-file is. The server takes the store's writer lock before anything else.
+    #[arg(long)]
+    pub store: Option<PathBuf>,
+    /// Accepts a `sqlite:` store: SQLite is for tests and single-node development. With a
+    /// Postgres store it has no effect. Needs --store.
+    #[arg(long)]
+    pub allow_sqlite_store: bool,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -420,6 +431,8 @@ pub struct Config {
     /// The most a submitted job's wall limit may be (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
     pub(crate) logs: file::LogsConfig,
+    /// The store the server's state is kept in (`--store`, `server.store`); none unless set.
+    pub(crate) store: Option<StoreSetting>,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -467,6 +480,7 @@ impl Config {
             history_retention_days: cli.history_retention_days,
         };
         let usage = usage_setup(keys, &state_file);
+        let store = store::from_flags(&cli)?;
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
@@ -496,6 +510,7 @@ impl Config {
             job_retention: cli.job_retention,
             max_job_wall: job_wall::or_default(cli.max_job_wall),
             logs: file::LogsConfig::None,
+            store,
         })
     }
 
@@ -575,6 +590,7 @@ impl Config {
             }
         };
         let alerts = alert_sink(server.alerts.as_ref(), files)?;
+        let store = store::from_file(server.store.as_deref(), server.allow_sqlite_store, files)?;
         let alert_repeat = server
             .alerts
             .as_ref()
@@ -616,6 +632,7 @@ impl Config {
             job_retention: server.job_retention,
             max_job_wall: job_wall::or_default(server.max_job_wall),
             logs,
+            store,
         })
     }
 

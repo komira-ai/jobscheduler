@@ -30,6 +30,7 @@ use crate::reservations::{self, Handed};
 use crate::run_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
+use crate::store::{LockLost, ServerStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
@@ -67,6 +68,8 @@ pub(crate) struct Shared {
     handed: Handed,
     /// Admission of a lease request: the pool's launching machine providers.
     admit: Admit,
+    /// The store, under the writer lock the server holds for its life (`--store`).
+    store: Option<ServerStore>,
 }
 
 impl Shared {
@@ -87,6 +90,7 @@ impl Shared {
             counted: std::sync::Mutex::new(WholeCounts::default()),
             handed,
             admit: Admit::default(),
+            store: None,
         }
     }
 
@@ -109,6 +113,26 @@ impl Shared {
     pub(crate) fn with_scaler(mut self, scaler: Option<Scaler>) -> Self {
         self.scaler = scaler;
         self
+    }
+
+    /// The same state holding `store` and its writer lock.
+    #[must_use]
+    pub(crate) fn with_store(mut self, store: Option<ServerStore>) -> Self {
+        self.store = store;
+        self
+    }
+
+    /// The store the server holds; `None` without a store setting.
+    pub(crate) fn server_store(&self) -> Option<&ServerStore> {
+        self.store.as_ref()
+    }
+
+    /// Whether the store's writer lock is still held; always without a store.
+    pub(crate) async fn check_store(&self) -> Result<(), LockLost> {
+        match &self.store {
+            Some(store) => store.check().await,
+            None => Ok(()),
+        }
     }
 
     /// The same state serving the status routes from `status`.
