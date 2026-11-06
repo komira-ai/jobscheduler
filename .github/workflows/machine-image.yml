@@ -1,0 +1,128 @@
+# Builds a jobscheduler machine image for one architecture and boot-checks it, by hand only
+# (docs/runbooks/machine-images.md). No pull request, push or schedule starts it, and it is not a
+# check of any pull request.
+#
+# `cargo xtask image-recipe` writes the recipe of each platform and the cloud-init seed that builds
+# it, and the list of build tools (QEMU, its firmware and the seed tool) pinned by URL and SHA-256,
+# which are downloaded, checked and installed from those files. The base image is downloaded and
+# checked against the recipe's SHA-256, and booted once in
+# QEMU with the build seed: cloud-init downloads and checks the pinned archives, installs them,
+# runs the crun host setup and powers the machine off, and the last build step prints
+# `js-image-build-done` on the console. A copy-on-write layer of the built image is then booted with
+# the fake user data of packaging/machine-image/check, whose last step prints
+# `js-image-check-passed` once the agent's unit started with that user data and the agent passed
+# its start checks of the host. The built image itself is never booted, so it carries no machine
+# id, host key, agent state or token of the check.
+#
+# It publishes nothing: no registry, no cloud account, no secret. The image, its recipe and both
+# consoles are the run's artifact (7 days), which the held publish step of the runbook starts from.
+# GitHub-hosted runners of the image's own architecture; QEMU uses KVM where the runner offers it.
+name: machine-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: The architecture of the image
+        type: choice
+        options: [x86_64, arm64]
+        default: x86_64
+
+permissions: {}
+
+concurrency:
+  group: machine-image-${{ inputs.arch }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  PLATFORM: linux-${{ inputs.arch }}
+  # Where the recipe and the seed of the platform are written, and the image is built.
+  IMAGE_DIR: ${{ github.workspace }}/target/machine-image/linux-${{ inputs.arch }}
+  CHECK_DIR: ${{ github.workspace }}/packaging/machine-image/check
+
+jobs:
+  image:
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Write the recipes and the build seeds
+        run: cargo xtask image-recipe --out target/machine-image
+      - run: sudo apt-get update
+      # QEMU, its firmware and the seed tool, pinned by URL and SHA-256 in the `tools` table of
+      # packaging/machine-image/pins.toml: downloaded into a directory of their own, checked, and
+      # installed from those files; apt takes only the libraries they depend on from the archive.
+      - name: Download the pinned build tools
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: mkdir tools && wget --quiet --https-only --directory-prefix tools --input-file tools.urls
+      - name: Check the build tools' SHA-256
+        working-directory: ${{ env.IMAGE_DIR }}/tools
+        run: sha256sum --check --strict ../tools.sha256
+      - name: Install the build tools from the checked files
+        working-directory: ${{ env.IMAGE_DIR }}/tools
+        run: sudo apt-get install -y --no-install-recommends ./*.deb
+      - name: Download the base image the recipe names
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: curl --fail --silent --show-error --location --proto =https --proto-redir =https --output base.img "$(jq --raw-output .base.url recipe.json)"
+      - name: Check the base image's SHA-256
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: sha256sum --check --strict base.sha256
+      - name: Make the image's disk, a layer over the base image
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: qemu-img create -q -f qcow2 -F qcow2 -b base.img image.qcow2 20G
+      - name: Make the build seed
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: cloud-localds build-seed.img user-data meta-data
+      - name: Build the image (x86_64)
+        if: ${{ inputs.arch == 'x86_64' }}
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: sudo timeout 3600 qemu-system-x86_64 -machine q35,accel=kvm:tcg -cpu max -smp 2 -m 4096 -display none -no-reboot -serial file:build-console.log -drive file=image.qcow2,if=virtio,format=qcow2 -drive file=build-seed.img,if=virtio,format=raw -nic user,model=virtio-net-pci
+      - name: Build the image (arm64)
+        if: ${{ inputs.arch == 'arm64' }}
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: sudo timeout 3600 qemu-system-aarch64 -machine virt,accel=kvm:tcg -cpu max -smp 2 -m 4096 -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd -display none -no-reboot -serial file:build-console.log -drive file=image.qcow2,if=virtio,format=qcow2 -drive file=build-seed.img,if=virtio,format=raw -nic user,model=virtio-net-pci
+      - name: The build ran every step
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: grep --quiet --fixed-strings js-image-build-done build-console.log
+      - name: Make the check's disk, a layer over the built image
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: qemu-img create -q -f qcow2 -F qcow2 -b image.qcow2 check.qcow2
+      - name: Make the check seed with the fake user data
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: cloud-localds check-seed.img "$CHECK_DIR/user-data" "$CHECK_DIR/meta-data"
+      - name: Boot the image with the fake user data (x86_64)
+        if: ${{ inputs.arch == 'x86_64' }}
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: sudo timeout 1800 qemu-system-x86_64 -machine q35,accel=kvm:tcg -cpu max -smp 2 -m 4096 -display none -no-reboot -serial file:check-console.log -drive file=check.qcow2,if=virtio,format=qcow2 -drive file=check-seed.img,if=virtio,format=raw -nic user,model=virtio-net-pci
+      - name: Boot the image with the fake user data (arm64)
+        if: ${{ inputs.arch == 'arm64' }}
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: sudo timeout 1800 qemu-system-aarch64 -machine virt,accel=kvm:tcg -cpu max -smp 2 -m 4096 -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd -display none -no-reboot -serial file:check-console.log -drive file=check.qcow2,if=virtio,format=qcow2 -drive file=check-seed.img,if=virtio,format=raw -nic user,model=virtio-net-pci
+      - name: The agent started with the user data
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: grep --quiet --fixed-strings js-image-check-passed check-console.log
+      - name: Write the image as one compressed file
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: qemu-img convert -c -O qcow2 image.qcow2 "jobscheduler-$PLATFORM.qcow2"
+      - name: The end of each console, when a step failed
+        if: ${{ failure() }}
+        working-directory: ${{ env.IMAGE_DIR }}
+        run: tail --lines 200 build-console.log check-console.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: machine-image-${{ inputs.arch }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ env.IMAGE_DIR }}/jobscheduler-${{ env.PLATFORM }}.qcow2
+            ${{ env.IMAGE_DIR }}/recipe.json
+            ${{ env.IMAGE_DIR }}/build-console.log
+            ${{ env.IMAGE_DIR }}/check-console.log
