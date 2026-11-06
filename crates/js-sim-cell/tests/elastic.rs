@@ -74,14 +74,19 @@ fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
 }
 
 /// A cell of seed `seed` with an elastic pool of at most two machines of `pool`'s kind,
-/// keeping its trace lines, one whole-host item submitted at the start.
+/// keeping its trace lines, one whole-host item of [`LONG_RUN`] submitted at the start.
 fn cell_of(name: &str, seed: u64, pool: ElasticPool) -> Cell {
+    cell_running(name, seed, pool, LONG_RUN)
+}
+
+/// [`cell_of`], its first item running for `run`.
+fn cell_running(name: &str, seed: u64, pool: ElasticPool, run: Duration) -> Cell {
     let spec = ServerSpec::elastic_pool(pool, elastic::shape());
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-sim-cell");
     let dir = TestDir::under(root, &format!("{name}-{seed}"));
     let setup = Setup::new(seed).with_trace_lines();
     let mut cell = Cell::new(setup, spec, dir, Faults::default()).expect("the cell starts");
-    cell.submit(&Work::whole_host(LONG_RUN));
+    cell.submit(&Work::whole_host(run));
     cell
 }
 
@@ -426,4 +431,51 @@ fn a_statement_of_the_scenarios_own_fails_the_seed_with_what_it_found() {
         .expect_that("nothing is wrong", |_| None)
         .try_run_seeds(1);
     assert!(passed.is_ok(), "{passed:?}");
+}
+
+/// Asserts that a restart of the server of an elastic pool keeps the pool's cloud: the
+/// machine launched before it still runs and its agent still beats, the calls recorded
+/// before it stay first in the record, and a demand made after it is met by a second
+/// machine, launched under an acquire id of its own (the scaler's entropy goes on from
+/// where it was, rather than starting the seed's again). Catches a restart that starts a
+/// second cloud (the first machine and its record lost to the invariants), and one that
+/// draws the scaler's entropy afresh, which could name a new machine as an earlier one.
+#[test]
+fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
+    // The first item runs past the end, so the second item can only be met by a second
+    // machine.
+    let run = Duration::from_secs(3_000);
+    let mut cell = cell_running("a_restarted_elastic_server", 1, small_pool(), run);
+    cell.run_until(LOOK_AT).expect("no invariant fails");
+    let cloud = cell.cloud().expect("an elastic pool").clone();
+    let before = cloud.calls();
+    assert_eq!(cloud.fake().launched(), 1);
+    cell.restart_server();
+    assert!(cell.take_refused().is_none(), "the server starts again");
+    let after = cell.cloud().expect("the same pool");
+    assert!(after.calls().starts_with(&before), "the record is kept");
+    cell.submit(&Work::whole_host(LONG_RUN));
+    cell.run_until(FarmTime::from_millis(1_200_000))
+        .expect("no invariant fails");
+    let calls = cell.cloud().expect("the same pool").calls();
+    let accepted: Vec<String> = calls
+        .iter()
+        .filter_map(|call| match &call.event {
+            CloudEvent::Acquire {
+                acquire,
+                answer: AcquireAnswer::Accepted { .. },
+                ..
+            } => Some(acquire.clone()),
+            _ => None,
+        })
+        .collect();
+    let distinct: std::collections::BTreeSet<&String> = accepted.iter().collect();
+    assert_eq!(distinct.len(), 2, "{accepted:?}");
+    assert_eq!(cloud.fake().launched(), 2);
+    assert_eq!(cloud.fake().running().len(), 2);
+    assert!(
+        cell.machine(0).and_then(|m| m.truth()).is_some(),
+        "machine 0 still runs"
+    );
+    assert!(cell.machine(1).is_some(), "the second machine booted");
 }

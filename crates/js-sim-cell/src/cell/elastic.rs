@@ -26,12 +26,6 @@ use crate::invariant::Touched;
 use crate::node::CellNode;
 use crate::observe::Killed;
 
-/// The capabilities the agent of a launched machine announces beside the server's shape's:
-/// those of the agent the boot script starts, which runs containers (`--container-bin`)
-/// with the GPU toolkit (`--gpu-toolkit-hook`).
-const LAUNCHED_CAPABILITIES: [(&str, &str); 2] =
-    [("runtime", "container"), ("gpu-toolkit", "true")];
-
 /// What the cell knows of the machines of its elastic pool's cloud.
 #[derive(Default)]
 pub(super) struct Machines {
@@ -143,11 +137,10 @@ impl Cell {
             let payload = Payload::read(&fake.user_data(n));
             let held = payload.and_then(|payload| {
                 let name = Some(payload.host.as_str());
-                let held = truth
-                    .iter()
-                    .find(|machine| machine.name.as_deref() == name)?;
-                let host = HostId::new(&payload.host).ok()?;
-                Some((held.id.as_str().to_owned(), payload, host))
+                let found = truth.iter().find(|machine| machine.name.as_deref() == name);
+                let host = HostId::new(&payload.host).ok();
+                let both = found.zip(host);
+                both.map(|(held, host)| (held.id.as_str().to_owned(), payload, host))
             });
             if let Some((id, payload, host)) = held {
                 self.launch(&cloud, id, payload, host);
@@ -205,8 +198,10 @@ impl Cell {
         let host = machine.host.clone();
         let token = machine.payload.token.clone();
         let mut capabilities = self.spec.shape().capabilities.clone();
-        let launched = LAUNCHED_CAPABILITIES.map(|(k, v)| (k.to_owned(), v.to_owned()));
-        capabilities.extend(launched);
+        // Those of the agent the boot script starts, which runs containers
+        // (`--container-bin`) with the GPU toolkit (`--gpu-toolkit-hook`).
+        capabilities.insert("runtime".to_owned(), "container".to_owned());
+        capabilities.insert("gpu-toolkit".to_owned(), "true".to_owned());
         let pool = self.spec.pool().to_owned();
         let instance = InstanceIdentity {
             provider: pool.clone(),
