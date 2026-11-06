@@ -160,6 +160,8 @@ allowed_instance_types = ["gpu_1x_a10"] # names, none empty, none twice
 max_price_cents_per_hour = 200          # 1 or more
 max_machines = 2                        # 1 or more, at most the pool's
 max_spot_machines = 1                   # at most this table's max_machines
+quota_backoff = "1h"                    # default 1h; a positive duration, zero is refused
+acquire_retry = "60s"                   # default 60s; a positive duration, zero is refused
 catalog_refresh = "1h"                  # default 1h; a positive duration, zero is refused
 offer_cooldown = "1h"                   # default 1h; a positive duration, zero is refused
 ```
@@ -183,8 +185,12 @@ machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the p
 it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
 next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance
 type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it; it is read and checked,
-and nothing enters a cool-down yet (the check of a host's hello against its offer will). Zero for either is refused, naming the key: a
-zero refresh would ask the cloud at every tick, and a zero cool-down is none. A limit
+and nothing enters a cool-down yet (the check of a host's hello against its offer will). `quota_backoff` is how long, after the provider refuses a launch for quota, pass 2 passes over that
+instance type in that region (in that zone, for providers whose zones are regions); the provider as a whole is not braked.
+`acquire_retry` is how long a request waits when every offer was refused or passed over: it stays waiting and pass 2 asks again after
+this long, or at once after a completed catalog refresh. Zero for any of the four is refused, naming the key: a
+zero refresh would ask the cloud at every tick, a zero cool-down is none, a zero back-off passes over nothing, and a zero retry would
+ask at every tick. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 

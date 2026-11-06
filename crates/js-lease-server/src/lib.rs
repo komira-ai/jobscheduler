@@ -170,11 +170,11 @@
 //! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
 //! passed) and `live_until_ms`.
 //!
-//! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
+//! Failure brake. A refused launch (denied, a shape that fits nothing), a boot given up
 //! on, and a spot preemption count as failures, but a pool is struck at most once in a step
 //! (a wave of reclaims, or several launches of one step refused together, is one failure). A
 //! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, from
-//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or such a refusal the pool launches nothing for 10 minutes, doubled
 //! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, from 10
 //! minutes to 24 hours); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
 //! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
@@ -286,8 +286,8 @@
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
-//! below); `catalog_refresh` (a positive duration, one hour when not given; zero is
-//! refused) is how long the provider's cached catalog is used before the tick fetches it
+//! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
+//! `catalog_refresh` (a positive duration, one hour, zero refused) is how long the provider's cached catalog is used before the tick fetches it
 //! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
 //! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
 //! whole-node request of the pool waits once no host could serve it (the registry's

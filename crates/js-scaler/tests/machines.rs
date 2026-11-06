@@ -208,14 +208,15 @@ fn the_extras_of_an_accepted_launch_are_recorded() {
 }
 
 /// Asserts that the first action of a step that changed the records is all of them, the
-/// cooldowns with them, and that a step that changes nothing writes nothing.
+/// cooldowns with them (the refusal is a denial, which starts one; a quota refusal starts
+/// none), and that a step that changes nothing writes nothing.
 #[test]
 fn the_whole_records_are_written_first() {
     let (mut rig, plan) = launched(settings("gpu"));
     rig.input.acquired = vec![answered(
         &plan,
         Acquired::Refused(Refusal {
-            code: RefusalCode::Quota,
+            code: RefusalCode::Denied,
             reason: Reason::DryRun,
         }),
     )];
