@@ -42,6 +42,7 @@ fn at(jobs: &ServerJobs, text: &str, on: &str, state: JobState) -> JobId {
         id: Some(id.clone()),
         spec: spec(),
         priority: 0,
+        client: None,
     };
     jobs.insert_queued(new).unwrap();
     jobs.place(&id, host(on), BOOKED).unwrap();

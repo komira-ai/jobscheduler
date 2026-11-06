@@ -216,9 +216,9 @@ impl Agents {
     /// the routes without a socket.
     #[cfg(test)]
     pub(crate) fn over(registry: Registry, clock: &SharedClock, dir: &Path) -> Self {
-        use crate::config::parse_token;
+        use crate::config::{Clients, parse_token};
         use crate::rate::HelloLimit;
-        let client = parse_token(&[b'c'; 40]).unwrap();
+        let client = Clients::only(&parse_token(&[b'c'; 40]).unwrap(), "--token-file");
         let tokens = dir.join("agent-tokens");
         std::fs::write(&tokens, [b'j'; 40]).unwrap();
         std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o600))

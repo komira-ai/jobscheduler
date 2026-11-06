@@ -549,8 +549,9 @@ name prefix, both needed to terminate, either counted toward the cap) stay insid
 Lambda crate.
 
 The scaler, not the provider, picks the offer. Today the Lambda crate picks
-(`select.rs::candidates`: cheapest, then fewest gpus, then name, then region). That moves to
-`js-scaler::choose`, so the next kind does not copy it. The Lambda crate keeps the
+(`select.rs::candidates`: cheapest, then fewest gpus, then name, then region). That moves out
+of the provider, so the next kind does not copy it: the pick is pass 2 of placement
+(`js_sched::acquire::pick`), and the scaler stages what it picks. The Lambda crate keeps the
 catalog-to-offer conversion and the `OptionTable` filter.
 
 `ElasticConfig`'s `enabled` and `Mode::DryRun/Live` stay as a second lock under the pool's
@@ -1080,8 +1081,9 @@ released at `boot_timeout` (F22).
 
 1. A consumer's whole-node request finds no free host and waits in the registry; `Launchable` is true,
    so it is not refused `no-capable-host`.
-2. Next tick the scaler sees one uncovered request, takes offers from the catalog the checks last read, picks the
-   cheapest fit, passes the caps and writes the Launching record (6.2).
+2. Next tick the scaler sees one uncovered request, takes offers from the catalog the checks last read, stages
+   the offer pass 2 picks (`js_sched::acquire::pick`: the cheapest fit inside the pool's
+   `provider_limits`), passes the caps and writes the Launching record (6.2).
 3. The shell mints the join token for `(pool, host name)` (7.2), gets the Tailscale key (8),
    renders the bootstrap (7.3), ensures the no-inbound ruleset exists in the region (5.3), and
    `acquire` launches: type, region, one ssh key name, ruleset, `user_data`, name, tags.

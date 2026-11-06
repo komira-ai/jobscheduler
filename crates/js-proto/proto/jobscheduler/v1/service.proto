@@ -64,8 +64,8 @@ service JobService {
       get: "/v1/jobs/{job_id}"
     };
   }
-  // Lists jobs by state, label and the time they were queued, a page at a time. Changes
-  // nothing.
+  // Lists jobs by state, label, client and the time they were queued, a page at a time.
+  // Changes nothing.
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {
     option (google.api.http) = {
       get: "/v1/jobs"
@@ -171,6 +171,8 @@ message ListJobsRequest {
   optional uint64 queued_after_ms = 3;
   // Only jobs queued before this time, in milliseconds since the Unix epoch.
   optional uint64 queued_before_ms = 4;
+  // Only jobs submitted by the client of this name (Job.client). Absent: every client's.
+  optional string client = 5;
   // The most jobs in one answer. 0: the server's own page size. A server may answer
   // fewer.
   uint32 page_size = 10;

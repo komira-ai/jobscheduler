@@ -207,6 +207,7 @@ pub(crate) fn job(job: &JobRecord) -> v1::Job {
         times: Some(times(job)),
         host_silent_since_ms: None,
         cancel_requested: job.cancel_requested,
+        client: job.client.as_ref().map(|client| client.as_str().to_owned()),
     }
 }
 

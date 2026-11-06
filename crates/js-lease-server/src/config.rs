@@ -14,9 +14,8 @@ use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
-use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, WholeNodeConfig};
+use js_registry::WholeNodeConfig;
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -42,12 +41,15 @@ mod listen;
 mod placement;
 mod resolve;
 mod retention;
+mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, clear_text};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
+pub use tokens::Token;
+pub(crate) use tokens::{Clients, Taken, parse_token, token_at};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -90,9 +92,15 @@ pub struct Cli {
     /// (`--agent-pool-config`); one of the two sources is required.
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
-    /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
+    /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400). On the
+    /// job service it is the token of the client named `default`.
     #[arg(long, required_unless_present = "config")]
     pub token_file: Option<PathBuf>,
+    /// One more client of the job service, as `NAME=PATH`: its name (1 to 40 letters,
+    /// digits, `.`, `_` and `-`, not `default`) and a file holding its own bearer token,
+    /// checked as `--token-file` is. Repeatable. Needs `--job-listen`.
+    #[arg(long, value_name = "NAME=PATH")]
+    pub client_token: Vec<String>,
     /// The pool's shared join tokens: a file holding the tokens agents present, one per
     /// line (several while one is being replaced), each at least 32 bytes and the file
     /// owner-only like `--token-file`. Read again at every tick. Needs
@@ -365,36 +373,6 @@ fn status_policy(flag: &str, listen: SocketAddr, warnings: &mut Vec<String>) -> 
     private
 }
 
-/// The bearer token. It is compared in constant time and never printed.
-#[derive(Clone)]
-pub struct Token(Vec<u8>);
-
-impl Token {
-    /// Whether `given` is the token. The comparison takes the same time for any two
-    /// tokens of one length; a token of another length is refused at once (the length
-    /// of a token is not a secret).
-    pub(crate) fn matches(&self, given: &[u8]) -> bool {
-        self.0.ct_eq(given).into()
-    }
-
-    /// Whether `other` is the same token, compared as [`Token::matches`] does.
-    pub(crate) fn same_as(&self, other: &Token) -> bool {
-        self.matches(&other.0)
-    }
-
-    /// The credential a host admitted with this token is bound to. A token is printable
-    /// ASCII, so its text is exact.
-    pub(crate) fn credential(&self) -> Credential {
-        Credential::of_token(&String::from_utf8_lossy(&self.0))
-    }
-}
-
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Token(..)")
-    }
-}
-
 /// The certificate and key files of `--tls-cert` and `--tls-key`.
 #[derive(Debug, Clone)]
 pub struct TlsFiles {
@@ -426,6 +404,8 @@ pub struct Config {
     pub(crate) settings: Settings,
     pub(crate) tick: Duration,
     pub(crate) token: Token,
+    /// The clients of the job service, the token of `--token-file` among them.
+    pub(crate) clients: Clients,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
@@ -476,8 +456,9 @@ impl Config {
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;
+        let clients = tokens::from_flags(&token, &cli)?;
         let limits = Limits::from(&cli);
-        let hosts = hosts(&cli, &token)?;
+        let hosts = hosts(&cli, &clients)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
         let keys = UsageKeys {
@@ -505,6 +486,7 @@ impl Config {
             settings,
             tick: cli.tick,
             token,
+            clients,
             tls,
             limits,
             hosts,
@@ -540,6 +522,7 @@ impl Config {
         let Loaded {
             server,
             client_token,
+            clients,
             hosts,
             mut warnings,
             unrunnable,
@@ -624,6 +607,7 @@ impl Config {
             settings,
             tick: server.tick,
             token: client_token,
+            clients,
             tls: server.tls,
             limits: server.limits,
             hosts,
@@ -857,7 +841,7 @@ fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> 
 
 /// The sources of hosts the flags name. At least one is required; the shared join token
 /// file needs the agent pool file, which alone turns registration on.
-fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
+fn hosts(cli: &Cli, clients: &Clients) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
         .as_ref()
@@ -871,7 +855,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
         }),
         (tokens, Some(pool)) => {
             let tokens = match tokens {
-                Some(path) => AgentTokens::open(path, client)?,
+                Some(path) => AgentTokens::open(path, clients)?,
                 None => AgentTokens::none(),
             };
             let pool = agent_pool::read(pool)?;
@@ -916,26 +900,6 @@ fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool
 /// A token that anyone on the network can try to guess is only as strong as it is long;
 /// 32 bytes of a random source is out of reach.
 pub const MIN_TOKEN_BYTES: usize = 32;
-
-/// The token a file's bytes hold: its content without trailing whitespace, which must
-/// be one run of printable ASCII (an HTTP header value cannot carry anything else, so
-/// any other token could never match a request) of at least [`MIN_TOKEN_BYTES`] bytes.
-pub(crate) fn parse_token(bytes: &[u8]) -> Result<Token, String> {
-    let token = bytes.trim_ascii_end();
-    let printable = token.iter().all(u8::is_ascii_graphic);
-    match (token.is_empty(), printable, token.len() < MIN_TOKEN_BYTES) {
-        (true, _, _) => Err("is empty".to_string()),
-        (false, false, _) => Err(
-            "must hold one token of printable ASCII with no space or line break inside it"
-                .to_string(),
-        ),
-        (false, true, true) => Err(format!(
-            "holds a token of {} bytes; a token must have at least {MIN_TOKEN_BYTES} (use a random one)",
-            token.len()
-        )),
-        (false, true, false) => Ok(Token(token.to_vec())),
-    }
-}
 
 /// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
 /// that it is a regular file owned by the server's user that only that user can use.
@@ -988,5 +952,7 @@ fn read_token(path: &Path) -> Result<Token, StartupError> {
         .map_err(|reason| StartupError::new("--token-file", format!("{} {reason}", path.display())))
 }
 
+#[cfg(test)]
+pub(crate) mod clients_rig;
 #[cfg(test)]
 mod tests;

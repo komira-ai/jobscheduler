@@ -63,6 +63,8 @@ fn offer_of(shape: &Shape, booked: &Shape, exec: ExecMode) -> Offer {
         price_unit: PriceUnit::UsCents,
         available: true,
         purchase: None,
+        quota: None,
+        block: None,
     }
 }
 

@@ -336,6 +336,7 @@ pub(super) fn queue(jobs: &ServerJobs, text: &str, spec: JobSpec) -> JobId {
         id: Some(id(text)),
         spec,
         priority: 0,
+        client: None,
     };
     jobs.insert_queued(new)
         .expect("the job is recorded")

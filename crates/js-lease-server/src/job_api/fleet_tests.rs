@@ -624,6 +624,7 @@ async fn fleet_calls_need_the_service_token() {
     let s = server("auth", true);
     s.register("h1");
     let token = parse_token(&[b'f'; 40]).unwrap();
+    let token = crate::config::Clients::only(&token, "--token-file");
     let api = Arc::new(s.api);
     let (client_end, server_end) = tokio::io::duplex(64 * 1024);
     let service = super::super::grpc(api, token);

@@ -116,6 +116,7 @@ impl<T: JobService> Gateway<T> {
             binding.route.rpc,
             input,
             &binding.output,
+            parts.extensions,
         )
         .await?;
         respond(binding.status, &output)

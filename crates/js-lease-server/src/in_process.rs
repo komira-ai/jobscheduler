@@ -77,7 +77,6 @@ impl InProcess {
     /// [`crate::start_with_checks`] does, except that no listen address can fail.
     pub fn start(config: Config, clock: SharedClock) -> Result<Self, StartupError> {
         let (prepared, listeners) = prepare(config, &clock)?;
-        let token = prepared.token.clone();
         let Opened {
             shared,
             scaler,
@@ -90,7 +89,7 @@ impl InProcess {
             schedule: Schedule::first(clock.now()),
         });
         let job = job_api::from_server(&shared, listeners.max_job_wall)
-            .map(|api| job_api::port(api, token));
+            .map(|api| job_api::port(api, listeners.clients));
         Ok(Self {
             shared,
             scaler,
@@ -116,7 +115,8 @@ impl InProcess {
 
     /// The job service as the port of `--job-listen` serves it: gRPC for a request whose
     /// content type is `application/grpc`, the HTTP/JSON gateway (`/v1/jobs`, ...) for any
-    /// other, both behind the bearer token. `None` while the job service is off. A clone
+    /// other, both behind the bearer layer of the job service's clients (the token of
+    /// `--token-file` among them). `None` while the job service is off. A clone
     /// holds the job tables: drop it with the other routers before a second server opens
     /// the same files.
     pub fn job_router(&self) -> Option<Router> {

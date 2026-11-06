@@ -104,6 +104,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
                     id: Some(job_id("f-new")),
                     spec: super::full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .map(drop)
             }),
@@ -115,6 +116,7 @@ pub fn a_failed_commit_changes_nothing<B: Backend>(backend: &B) {
                     id: None,
                     spec: super::full_spec(),
                     priority: 0,
+                    client: None,
                 })
                 .map(drop)
             }),

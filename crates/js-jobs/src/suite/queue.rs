@@ -27,6 +27,7 @@ pub fn queued_lists_the_queue_in_order<B: Backend>(backend: &B) {
             id: Some(job_id(text)),
             spec: full_spec(),
             priority,
+            client: None,
         };
         rig.jobs.insert_queued(new).expect("recorded");
     };

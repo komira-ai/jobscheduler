@@ -42,6 +42,7 @@ use super::{JobApi, gateway, grpc};
 use crate::adapt::SharedClock;
 use crate::admit::{Admit, JobAdmission};
 use crate::agent_api::job_rig::{OneClock, Rig, START_MS, tables_on};
+use crate::config::Clients;
 use crate::job_expiry::JobLimits;
 use crate::job_store::ServerJobs;
 
@@ -112,10 +113,21 @@ impl Writes {
         clock: SharedClock,
         admission: Arc<dyn Admission>,
     ) -> Writes {
+        Writes::with_clients(jobs, clock, admission, token()).await
+    }
+
+    /// The service over `jobs` and `clock`, admitting through `admission`, behind the bearer
+    /// layer of `clients`.
+    pub(super) async fn with_clients(
+        jobs: Arc<ServerJobs>,
+        clock: SharedClock,
+        admission: Arc<dyn Admission>,
+        clients: Clients,
+    ) -> Writes {
         let submit = submit::Ctx::served(CEILING, admission);
         let api = Arc::new(JobApi::new(Arc::clone(&jobs), clock).with_submit(submit));
-        let channel = connect(grpc(Arc::clone(&api), token())).await;
-        let router = gateway(api, token());
+        let channel = connect(grpc(Arc::clone(&api), clients.clone())).await;
+        let router = gateway(api, clients);
         Writes {
             jobs,
             channel,
@@ -129,11 +141,25 @@ impl Writes {
         Req: Message + Send + Sync + 'static,
         Resp: Message + Default + Send + Sync + 'static,
     {
+        self.grpc_as(TOKEN, method, request).await
+    }
+
+    /// The answer of `method` to `request` over gRPC, with the token `token`.
+    pub(super) async fn grpc_as<Req, Resp>(
+        &self,
+        token: &str,
+        method: &str,
+        request: Req,
+    ) -> Result<Resp, Status>
+    where
+        Req: Message + Send + Sync + 'static,
+        Resp: Message + Default + Send + Sync + 'static,
+    {
         let mut grpc = Grpc::new(self.channel.clone());
         grpc.ready().await.expect("the channel is ready");
         let path = PathAndQuery::try_from(format!("/{SERVICE}/{method}")).expect("a path");
         let mut request = Request::new(request);
-        let bearer = MetadataValue::try_from(format!("Bearer {TOKEN}")).expect("ASCII");
+        let bearer = MetadataValue::try_from(format!("Bearer {token}")).expect("ASCII");
         request.metadata_mut().insert("authorization", bearer);
         let codec = ProstCodec::<Req, Resp>::default();
         let response = grpc.unary(request, path, codec).await;
@@ -143,12 +169,24 @@ impl Writes {
     /// The status and body of the gateway's answer to `POST uri` with the JSON `body`, with
     /// the token.
     pub(super) async fn post(&self, uri: &str, body: &Value) -> (StatusCode, Vec<u8>) {
+        self.http_as(TOKEN, "POST", uri, Some(body)).await
+    }
+
+    /// The status and body of the gateway's answer to `method uri`, with the token `token`
+    /// and, when given, the JSON `body`.
+    pub(super) async fn http_as(
+        &self,
+        token: &str,
+        method: &str,
+        uri: &str,
+        body: Option<&Value>,
+    ) -> (StatusCode, Vec<u8>) {
         let request = HttpRequest::builder()
-            .method("POST")
+            .method(method)
             .uri(uri)
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
+            .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
             .expect("the request builds");
         let response = self
             .router

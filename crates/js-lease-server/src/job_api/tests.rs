@@ -46,7 +46,7 @@ use super::{
     submit,
 };
 use crate::adapt::SharedClock;
-use crate::config::{Token, parse_token};
+use crate::config::{Clients, parse_token};
 use crate::job_store::ServerJobs;
 
 /// The token the services under test are built with.
@@ -93,8 +93,10 @@ const NOW_MS: u64 = 1_800_000_000_000;
 /// The body the gateway answers a call the service does not implement with.
 const UNIMPLEMENTED_BODY: &str = r#"{"error":"unimplemented"}"#;
 
-pub(super) fn token() -> Token {
-    parse_token(TOKEN.as_bytes()).expect("the test token is a valid token")
+/// The clients the services under test admit: the client `default`, whose token is [`TOKEN`].
+pub(super) fn token() -> Clients {
+    let token = parse_token(TOKEN.as_bytes()).expect("the test token is a valid token");
+    Clients::only(&token, "--token-file")
 }
 
 fn clock() -> SharedClock {
@@ -130,7 +132,7 @@ pub(super) fn scratch(name: &str) -> TestDir {
 
 /// The method names of the job service in the service definition, in its order: the
 /// generated service serves exactly these paths.
-fn methods() -> Vec<String> {
+pub(super) fn methods() -> Vec<String> {
     let set = FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).expect("the descriptor set decodes");
     set.file
         .iter()
@@ -185,7 +187,11 @@ pub(super) async fn connect<T: JobService>(service: Bearer<JobServiceServer<T>>)
 /// The answer of the gRPC call of `method` with an empty request, sent with `authorization`
 /// as its metadata of that name (none when `None`): `Ok` when the call succeeded (whatever
 /// its response), else its status.
-async fn call(channel: &Channel, method: &str, authorization: Option<&str>) -> Result<(), Status> {
+pub(super) async fn call(
+    channel: &Channel,
+    method: &str,
+    authorization: Option<&str>,
+) -> Result<(), Status> {
     let mut grpc = Grpc::new(channel.clone());
     grpc.ready().await.expect("the channel is ready");
     let path = PathAndQuery::try_from(format!("/{SERVICE}/{method}")).expect("the path parses");
@@ -202,7 +208,10 @@ async fn call(channel: &Channel, method: &str, authorization: Option<&str>) -> R
 /// The status and body of the gateway's answer to each of its routes, in the order of
 /// `ROUTES`, with `authorization` as the `Authorization` header (none when `None`). A
 /// route's path variables are each `x1`; a POST carries the body `{}` as JSON.
-async fn send_all(router: &Router, authorization: Option<HeaderValue>) -> Vec<(StatusCode, Bytes)> {
+pub(super) async fn send_all(
+    router: &Router,
+    authorization: Option<HeaderValue>,
+) -> Vec<(StatusCode, Bytes)> {
     let mut answers = Vec::new();
     for route in js_api_gateway::ROUTES {
         let mut request = HttpRequest::builder()
@@ -251,26 +260,26 @@ fn fill(template: &str) -> String {
 }
 
 /// The header value of `text`.
-fn value(text: &str) -> HeaderValue {
+pub(super) fn value(text: &str) -> HeaderValue {
     HeaderValue::from_str(text).expect("the text is a header value")
 }
 
 /// The job service that counts the calls that reach it and answers each as [`JobApi`] does:
 /// a call it counts is a call that reached the group function of [`JobApi`].
-struct Recording {
+pub(super) struct Recording {
     api: JobApi,
     calls: AtomicUsize,
 }
 
 impl Recording {
-    fn new() -> Arc<Recording> {
+    pub(super) fn new() -> Arc<Recording> {
         Arc::new(Recording {
             api: JobApi::new(over_fake(), clock()),
             calls: AtomicUsize::new(0),
         })
     }
 
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 }

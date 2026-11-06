@@ -480,7 +480,7 @@ fn generated_names_follow_prost() {
         "{text}"
     );
     assert!(
-        text.contains("service.get_http_usage(::tonic::Request::new(request))"),
+        text.contains("let response = service.get_http_usage(request).await;"),
         "{text}"
     );
     assert!(text.contains("verb: Verb::Get,"), "{text}");

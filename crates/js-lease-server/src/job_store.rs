@@ -191,6 +191,7 @@ mod tests {
             id: Some(id.clone()),
             spec: crate::agent_api::job_rig::spec(),
             priority: 0,
+            client: None,
         };
         let queued = jobs.insert_queued(new).unwrap().record;
         assert_eq!(queued.deadline_floor, None);

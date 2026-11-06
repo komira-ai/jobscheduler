@@ -98,6 +98,8 @@ fn request(scheduler: &str, offer: &str, zone: &str) -> AcquireRequest {
             price_unit: PriceUnit::UsCents,
             available: true,
             purchase: None,
+            quota: None,
+            block: None,
         },
         labels: Vec::new(),
         payload: BootPayload::new("payload".to_owned()),

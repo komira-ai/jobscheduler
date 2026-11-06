@@ -20,7 +20,7 @@ use crate::api::{Shared, Table, agent_router, router};
 use crate::capacity::Seated;
 use crate::catalogs::{Cached, Catalogs};
 use crate::checks::Checker;
-use crate::config::{Config, JobListen, Limits, TlsFiles, Token};
+use crate::config::{Clients, Config, JobListen, Limits, TlsFiles, Token};
 use crate::error::StartupError;
 use crate::job_api;
 use crate::listener::{Slots, serve, serve_both};
@@ -129,7 +129,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         None => None,
     };
     let job_acceptor = tls.as_ref().map(tls::Tls::job_acceptor);
-    let token = prepared.token.clone();
+    let clients = listeners.clients;
     let served_tls = acceptor.is_some();
     let Opened {
         shared,
@@ -178,7 +178,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         .map(|((listener, addr), api)| {
             let (stop, stopped) = oneshot::channel::<()>();
             let slots = Arc::new(Slots::new(limits.max_connections));
-            let app = job_api::port(api, token);
+            let app = job_api::port(api, clients);
             let serving = serve_both(listener, job_acceptor, app, limits, slots, stopped);
             info!(%addr, tls = served_tls, "listening for the job service");
             Port {
@@ -218,6 +218,8 @@ pub(crate) struct Listeners {
     job_listen: Option<JobListen>,
     /// The ceiling on a submitted job's wall limit (`--max-job-wall`, `server.max_job_wall`).
     pub(crate) max_job_wall: Duration,
+    /// The clients the job service's bearer layer admits.
+    pub(crate) clients: Clients,
     tls: Option<TlsFiles>,
     limits: Limits,
 }
@@ -235,7 +237,7 @@ pub(crate) struct Prepared {
     boot: Boot,
     settings: Settings,
     tick: Duration,
-    pub(crate) token: Token,
+    token: Token,
     monotonic: Arc<dyn Monotonic>,
     warnings: Vec<String>,
     status: bool,
@@ -278,6 +280,7 @@ pub(crate) fn prepare(
         settings,
         tick,
         token,
+        clients,
         tls,
         limits,
         hosts,
@@ -359,6 +362,7 @@ pub(crate) fn prepare(
         agent_listen,
         job_listen,
         max_job_wall,
+        clients,
         tls,
         limits,
     };
