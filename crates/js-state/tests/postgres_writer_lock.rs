@@ -559,3 +559,30 @@ fn probe_errors_never_contain_the_url_or_password() {
     assert!(!debug.contains(password), "{debug}");
     assert!(!debug.contains(&url), "{debug}");
 }
+
+// Catches a probe that takes any lock on the writer's key for the writer: a shared advisory
+// lock some other client holds on it (or a second row for the key, which would fail the
+// probe's one-row read) is not a writer, so the probe reads `Free` while it is held.
+#[test]
+fn a_shared_advisory_lock_on_the_writer_key_is_not_a_holder() {
+    let database = test_database();
+    let mut other = Client::connect(&database.url(), NoTls).expect("connects");
+    let mut another = Client::connect(&database.url(), NoTls).expect("connects");
+    for client in [&mut other, &mut another] {
+        client
+            .execute("SELECT pg_advisory_lock_shared($1)", &[&WRITER_LOCK_KEY])
+            .expect("takes the shared lock");
+    }
+    assert_eq!(probe(&target(&database)), LockState::Free);
+    let shared: i64 = other
+        .query_one(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
+             AND mode = 'ShareLock' AND objsubid = 1 \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+             AND ((classid::bigint << 32) | objid::bigint) = $1",
+            &[&WRITER_LOCK_KEY],
+        )
+        .expect("the lock view")
+        .get(0);
+    assert_eq!(shared, 2, "both shared locks are still held");
+}
