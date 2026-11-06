@@ -286,6 +286,7 @@ pub(crate) fn prepare(
         hosts,
         usage,
         monotonic,
+        entropy,
         alerts,
         alert_repeat,
         max_job_wall,
@@ -329,6 +330,7 @@ pub(crate) fn prepare(
                 health: pool.health.clone(),
                 mode: pool.mode(),
                 catalogs: Arc::clone(cached.catalogs()),
+                entropy,
             };
             Some(build(plan, parts)?)
         }

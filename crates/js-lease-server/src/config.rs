@@ -15,7 +15,7 @@ use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 
-use js_registry::WholeNodeConfig;
+use js_registry::{OsSessions, SessionSource, WholeNodeConfig};
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -410,6 +410,10 @@ pub struct Config {
     pub(crate) hosts: Hosts,
     pub(crate) usage: UsageSetup,
     pub(crate) monotonic: Arc<dyn Monotonic>,
+    /// Where the scaler draws the random part of each acquire id, and so of each machine's
+    /// name: the operating system's ([`OsSessions`]) unless [`Config::with_entropy`] gives
+    /// another.
+    pub(crate) entropy: Arc<dyn SessionSource>,
     /// Where the scaler's alerts go besides the log; from `server.alert_webhook_url`, or
     /// [`Config::with_alert_sink`].
     pub(crate) alerts: Option<Arc<dyn AlertSink>>,
@@ -491,6 +495,7 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            entropy: Arc::new(OsSessions),
             alerts: None,
             alert_repeat: DEFAULT_ALERT_REPEAT,
             job_retention: cli.job_retention,
@@ -611,6 +616,7 @@ impl Config {
             hosts,
             usage,
             monotonic: Arc::new(SystemMonotonic::default()),
+            entropy: Arc::new(OsSessions),
             alerts,
             alert_repeat,
             job_retention: server.job_retention,
@@ -715,6 +721,18 @@ impl Config {
     /// The same configuration timing the lease table's steps on `clock`.
     pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
         self.monotonic = clock;
+        self
+    }
+
+    /// The same configuration drawing the random part of each acquire id the scaler makes
+    /// from `entropy` instead of the operating system ([`OsSessions`], the default). A
+    /// machine's name is derived from its acquire id, so two servers given sources that
+    /// answer the same bytes in the same order name the same machines. The source is shared:
+    /// a server started again with the same `Arc` goes on with the next bytes rather than
+    /// repeating the first ones. Only the scaler reads it; the registry's session secrets
+    /// and the join tokens still come from the operating system.
+    pub fn with_entropy(mut self, entropy: Arc<dyn SessionSource>) -> Self {
+        self.entropy = entropy;
         self
     }
 
