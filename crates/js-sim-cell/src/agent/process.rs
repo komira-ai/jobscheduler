@@ -382,7 +382,7 @@ impl Process {
             host_id: spec.host.as_str().to_owned(),
             pool: spec.pool.clone(),
             agent_version: AGENT_VERSION.to_owned(),
-            instance: None,
+            instance: spec.instance.clone(),
             shape: WireShape::from_resources(&spec.capacity),
             capabilities: spec.capabilities.clone(),
             gpu_devices: Vec::new(),

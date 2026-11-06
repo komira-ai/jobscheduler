@@ -16,6 +16,7 @@ use std::time::Duration;
 use js_elastic::{CapacityProvider, SchedulerId};
 use js_lease::Clock as LeaseClock;
 use js_provider_ec2 as ec2;
+use js_provider_gce as gce;
 use js_provider_lambdalabs as lambda;
 use js_types::{AcceleratorNeed, ExecMode, MemoryPercent, Model, ResourceClass};
 
@@ -169,13 +170,14 @@ pub struct Kinds {
 }
 
 impl Kinds {
-    /// The kinds compiled into the server: provider kinds `static`, `lambdalabs` and `ec2`,
-    /// and platform kind `default`.
+    /// The kinds compiled into the server: provider kinds `static`, `lambdalabs`, `ec2`
+    /// and `gce`, and platform kind `default`.
     pub fn standard() -> Self {
         Self::default()
             .with("static", static_kind)
             .with("lambdalabs", lambdalabs_kind)
             .with("ec2", ec2_kind)
+            .with("gce", gce_kind)
             .with_platform(PlatformKind::DEFAULT)
     }
 
@@ -331,6 +333,45 @@ fn ec2_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError>
     }))
 }
 
+/// The Compute Engine provider's clock over the server's: the milliseconds the server's
+/// clock reads.
+struct GceClock(SharedClock);
+
+impl gce::Clock for GceClock {
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.0.now().millis())
+    }
+}
+
+/// The `gce` kind: `js_provider_gce::kind::build` over the pool's table. The provider is
+/// built disabled and in dry-run unless the pool's `launch` is `live`; the hosts it
+/// launches run containers, and the kind promises no GPU, so its floor is zero; but its
+/// catalog has GPU sizes, so `idle_costs` holds the pool to the lifetime keys. Compute
+/// Engine has a run-duration limit, which the provider sets from the pool's lifetime, yet
+/// the pool is held to the lifetime keys all the same, as an `ec2` pool is.
+fn gce_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
+    let max = usize::try_from(ctx.max_instances).unwrap_or(usize::MAX);
+    let kind_ctx = gce::kind::Context {
+        scheduler: ctx.scheduler.clone(),
+        max_machines: NonZeroUsize::new(max).unwrap_or(NonZeroUsize::MIN),
+        live: ctx.launch == Launch::Live,
+        clock: Arc::new(GceClock(ctx.clock.clone())),
+    };
+    let built = gce::kind::build(table, &kind_ctx).map_err(|refused| KindError {
+        field: refused.field,
+        reason: refused.reason,
+    })?;
+    Ok(Built::Elastic(ElasticBuilt {
+        idle_costs: true,
+        provider: Box::new(built.provider),
+        floor: Floor {
+            gpus: 0,
+            gpu_class: None,
+        },
+        exec: vec![ExecMode::Container],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use js_lease::{ManualClock, Timestamp};
@@ -361,5 +402,19 @@ mod tests {
         assert_eq!(clock.now(), Duration::from_millis(9_000));
         server.advance(Duration::from_secs(3));
         assert_eq!(clock.now(), Duration::from_millis(12_000));
+    }
+
+    /// Asserts that the Compute Engine provider's clock reads the server's, in milliseconds
+    /// since the epoch, and moves when it moves. It catches a provider clock that counts
+    /// from another origin, which would make the launch interval and the unknown hold a
+    /// guess.
+    #[test]
+    fn the_gce_providers_clock_is_the_servers() {
+        use gce::Clock as _;
+        let server = ManualClock::new(Timestamp::from_millis(11_000));
+        let clock = GceClock(SharedClock::new(server.clone()));
+        assert_eq!(clock.now(), Duration::from_millis(11_000));
+        server.advance(Duration::from_secs(4));
+        assert_eq!(clock.now(), Duration::from_millis(15_000));
     }
 }

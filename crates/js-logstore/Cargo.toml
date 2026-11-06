@@ -27,6 +27,10 @@ ureq.workspace = true
 [dev-dependencies]
 # tests/ see only the features turned on, so the fake store comes in through this entry.
 js-logstore = { path = ".", features = ["fake"] }
+# The STS minter, and where the S3-compatible test store is, for the client's tests against
+# that store (tests/s3_compat, ignored unless CI's test job runs them).
+js-logmint = { path = "../js-logmint" }
+js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true

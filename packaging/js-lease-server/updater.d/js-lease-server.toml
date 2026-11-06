@@ -1,0 +1,68 @@
+# /etc/updater.d/js-lease-server.toml   root:root, mode 0644: the host updater's declaration for
+# js-lease-server on a Linux host (kbf's host-updates design, 2.4 and 4.2). The js-lease-server
+# archive of each release carries it as updater.d/js-lease-server.toml beside the binary; the
+# updater's own install step puts it in /etc/updater.d from a verified release. Edit the store file
+# and the server's address (`--store=` and `--healthz-url=` below) to this host's.
+#
+# The hook is `js-lease-server update-hook <step>`, run as root: it stops and starts the server's
+# unit, moves the release link, and probes the store's writer lock without taking it. An update
+# restarts the server in place: no host is cordoned and no job is waited for. The updater refuses a
+# string in the [hook.params] of a hook that runs as root, so the hook's text values are flags in
+# `hook_args`:
+#   --release-link  the link the server's unit runs its program through; `cutover` and `rollback`
+#                   move it. It lies inside /opt/js-lease-server/link, a write path, and is not one
+#                   itself: the swap writes the link's parent
+#   --unit          the unit that runs the server. This repository ships no unit for the server:
+#                   whatever supervises it is the operator's, and is named here
+#   --store         the file that holds the store's connection, the one the server's own --store
+#                   names; the hook prints nothing of it
+#   --healthz-url   the server's own address, plain http to the loopback only: a server that serves
+#                   TLS on every listener cannot be checked this way
+#
+# Top-level keys come first: in TOML a key after a table header belongs to that table.
+# crates/xtask/tests/js_lease_server_declaration.rs loads this file with the updater's own validator
+# and with the hook's, and pins the rules said here.
+name   = "js-lease-server"
+binary = "js-lease-server"
+hook_args = ["update-hook", "--release-link=/opt/js-lease-server/link/current", "--unit=js-lease-server.service", "--store=/etc/js-lease-server/store", "--healthz-url=http://127.0.0.1:7300"]
+signer = { repository = "komira-ai/jobscheduler", workflow = "release.yml" }
+# The account the server's unit runs it as.
+uid    = "js-lease-server"
+# The server is stopped for the length of a cutover; the registration outlives a restart.
+registration_ttl_secs = 300
+# At least verify + rollback (300 + 420 = 720).
+verify_deadline_secs = 720
+# The hook record: root's, mode 0700, outside the server's paths.
+state_dir = "/var/lib/js-lease-server-update"
+
+[hook]
+user  = "root"
+group = "root"
+# Root keeps file ownership and systemd's authority over the unit; no capability beyond it.
+capabilities = []
+# The releases and the link, and the store file.
+read_paths   = ["/opt/js-lease-server", "/etc/js-lease-server"]
+# Exactly three, none inside another: the release directories the updater stages, the directory of
+# the release link, and the hook record (the state_dir above).
+write_paths  = ["/opt/js-lease-server/releases", "/opt/js-lease-server/link", "/var/lib/js-lease-server-update"]
+units        = ["js-lease-server.service"]
+# dbus (the unit manager), the store and the server's /healthz.
+address_families = ["AF_UNIX", "AF_INET", "AF_INET6"]
+environment  = { }
+
+[hook.timeout_secs]
+# The store's reads 30 + 60 (crates/js-lease-server/src/update_hook/declaration.rs, MIN_TIMEOUTS).
+prepare  = 90
+# The stop 90 + the writer lock's release 30 + start to active 120 + 60.
+cutover  = 300
+# verify looks at the unit, the store and /healthz every 10 s (POLL_SECS) for 285 s, + 15.
+verify   = 300
+# The stop 90 + the lock's release 30 + start 120 + the previous release taking the lock 120 + 60.
+rollback = 420
+# The record's delete.
+cleanup  = 60
+
+[hook.params]
+# Whole seconds, read by the hook (crates/js-lease-server/src/update_hook/params.rs): what a
+# prepare that could not reach the store asks the updater to wait before ordering it again.
+defer_retry_secs = 60

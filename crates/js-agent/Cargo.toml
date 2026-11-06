@@ -72,6 +72,9 @@ js-contain = { path = "../js-contain" }
 [dev-dependencies]
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
+# The STS minter the uploader's tests against the S3-compatible test store take their
+# credentials from (tests/agent/lifecycle/live_logs.rs, tests/crun_stand_in/s3_compat.rs).
+js-logmint = { path = "../js-logmint" }
 # The in-memory log store the uploader's tests put to (src/logs, tests/crun_stand_in).
 js-logstore = { path = "../js-logstore", features = ["fake"] }
 js-provider = { path = "../js-provider" }

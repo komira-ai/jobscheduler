@@ -34,7 +34,7 @@ images = { arm64 = "<ami id>", x86_64 = "<ami id>" }     # at least one architec
 
 The kind refuses a key it does not know, so a mistyped key stops the start. There is no key for a
 credential: a `secret_access_key`, `api_key` or the like is refused naming the key. **CI**
-(`kind_ec2_builds_and_gce_is_still_refused`). An image id is `ami-` followed by 8 to 17 lower-case
+(`kind_ec2_builds_and_refuses_an_unknown_key`). An image id is `ami-` followed by 8 to 17 lower-case
 hexadecimal digits; `aarch64` is accepted as another spelling of `arm64`. **CI** (the `images_config_is_validated_at_parse`
 test of `js-provider-ec2`).
 

@@ -28,6 +28,16 @@
 //!
 //! The lease file, the pool file and the token files live in a [`TestDir`] the node owns.
 //!
+//! # An elastic pool
+//!
+//! A server of [`ServerSpec::elastic_pool`] reads its configuration from a file, with the
+//! cell's provider kind over the pool's [`Cloud`], which the node makes at its start and
+//! keeps across a restart, with the scaler's entropy drawn from the seed
+//! ([`SeededEntropy`]). Before every input, beside the server's clock, the node advances
+//! the cloud's clock to the input's virtual time; after every tick it reads whether the
+//! pool's brake has tripped (`Scaler::state`), the one read of the scaler's state the cell
+//! makes, and notes it with the cloud's calls.
+//!
 //! # A restart
 //!
 //! [`ServerNode::restart`] stops the server and starts it again over the same directory,
@@ -52,7 +62,7 @@ use js_jobs::ScriptedIds;
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
-use js_registry::{HostState, HostView, Registry};
+use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
 use js_sim::{Event, NodeId, NodeInput, Output};
 use js_testkit::dir::TestDir;
 use js_types::HostId;
@@ -61,6 +71,7 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt;
 
 use crate::bus::{Msg, Route};
+use crate::elastic::{Cloud, SeededEntropy};
 use crate::observe::{ServerHost, ServerView};
 
 mod ids;
@@ -164,6 +175,11 @@ pub struct ServerNode {
     calls: BTreeMap<CallKey, u64>,
     /// The ids the job store mints, kept across a restart.
     ids: Arc<ScriptedIds>,
+    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`], kept across
+    /// a restart.
+    cloud: Option<Cloud>,
+    /// What the scaler draws its acquire ids from, kept across a restart.
+    entropy: Arc<dyn SessionSource>,
     /// Dropped last: the server's files, which a restart starts over.
     dir: TestDir,
 }
@@ -187,7 +203,9 @@ impl ServerNode {
     /// As [`ServerNode::start`].
     pub fn start_seeded(spec: &ServerSpec, dir: TestDir, seed: u64) -> Result<Self, StartupError> {
         let clock = ManualClock::new(wall_time(FarmTime::default()));
-        let config = spec.config(dir.path(), &clock)?;
+        let cloud = spec.elastic().map(|pool| Cloud::new(pool, spec.shape()));
+        let entropy: Arc<dyn SessionSource> = Arc::new(SeededEntropy::new(seed));
+        let config = configure(spec, dir.path(), &clock, cloud.as_ref(), &entropy)?;
         let tick = config.tick_period();
         let mut build = tokio::runtime::Builder::new_current_thread();
         let runtime = build.build().map_err(StartupError::because("runtime"))?;
@@ -201,6 +219,8 @@ impl ServerNode {
             out: Vec::new(),
             calls: BTreeMap::new(),
             ids,
+            cloud,
+            entropy,
             dir,
         })
     }
@@ -217,10 +237,9 @@ impl ServerNode {
         if let Some(up) = self.up.take() {
             up.shutdown();
         }
-        let config = spec
-            .clone()
-            .resuming()
-            .config(self.dir.path(), &self.clock)?;
+        let spec = spec.clone().resuming();
+        let cloud = self.cloud.as_ref();
+        let config = configure(&spec, self.dir.path(), &self.clock, cloud, &self.entropy)?;
         self.up = Some(Up::start(config, &self.clock, &self.ids, &self.runtime)?);
         Ok(())
     }
@@ -236,12 +255,50 @@ impl ServerNode {
     /// service is on. The answer's body is read as text. A server that is down answers 503
     /// with no body.
     pub fn client_call(&mut self, now: FarmTime, request: Request<Body>) -> Response<String> {
-        self.clock.set(wall_time(now));
+        self.set_clocks(now);
         let Some(up) = &self.up else {
             return down();
         };
         let router = up.router_for(request.uri().path());
         self.runtime.block_on(call(router, request))
+    }
+
+    /// The elastic pool's cloud, for a server of [`ServerSpec::elastic_pool`].
+    #[must_use]
+    pub fn cloud(&self) -> Option<&Cloud> {
+        self.cloud.as_ref()
+    }
+
+    /// Asks the server's scaler to reset the brake of the elastic pool, as an operator
+    /// does, and notes the reset with the cloud's calls; the scaler applies it at its
+    /// next tick. `false`, and nothing recorded, for a server that is down or has no
+    /// elastic pool.
+    pub fn reset_brake(&self) -> bool {
+        let scaler = self.server().and_then(InProcess::scaler);
+        let (Some(cloud), Some(scaler)) = (&self.cloud, scaler) else {
+            return false;
+        };
+        let reset = scaler.reset_brake(cloud.pool().name());
+        cloud.note_reset();
+        reset
+    }
+
+    /// Sets the server's clock, and the cloud's, to virtual time `now`.
+    fn set_clocks(&self, now: FarmTime) {
+        self.clock.set(wall_time(now));
+        if let Some(cloud) = &self.cloud {
+            cloud.advance_to(now);
+        }
+    }
+
+    /// Notes whether the elastic pool's brake reads tripped, from the scaler's state,
+    /// when that changed: read after every tick.
+    fn read_brake(&self) {
+        let scaler = self.server().and_then(InProcess::scaler);
+        if let (Some(cloud), Some(scaler)) = (&self.cloud, scaler) {
+            let tripped = scaler.state().records.tripped(cloud.pool().name());
+            cloud.note_brake(tripped);
+        }
     }
 
     /// The server: its registry, scaler and counts; `None` while it is down.
@@ -282,6 +339,7 @@ impl ServerNode {
                 lost: host.state == HostState::Lost,
                 leases: host.leases,
                 set_aside: host.mark.is_some(),
+                leaving: matches!(host.mark, Some(HostMark::Draining | HostMark::Releasing)),
                 reserved_for: host.reserved_for.map(|request| request.to_string()),
                 tail_end: tail_end.map(virtual_time),
             };
@@ -354,13 +412,14 @@ impl StateMachine for ServerNode {
     type Input = NodeInput<Msg>;
 
     fn apply(&mut self, input: NodeInput<Msg>) -> Vec<Effect> {
-        self.clock.set(wall_time(input.now));
+        self.set_clocks(input.now);
         match input.event {
             Event::Start => self.arm(),
             Event::Timer { .. } => {
                 if let Some(up) = &self.up {
                     self.runtime.block_on(up.server.tick());
                 }
+                self.read_brake();
                 self.arm();
             }
             Event::Message { from, msg } => self.on_message(from, msg),
@@ -373,6 +432,22 @@ impl ServerNode {
     /// Takes the outputs queued by earlier inputs, oldest first.
     pub(crate) fn take_outputs(&mut self) -> Vec<Output<Msg>> {
         std::mem::take(&mut self.out)
+    }
+}
+
+/// The configuration of the server `spec` describes, its files in `dir`, on `clock`: over
+/// `cloud` and drawing the scaler's acquire ids from `entropy` for a node with an elastic
+/// pool's cloud, else from the spec's command line.
+fn configure(
+    spec: &ServerSpec,
+    dir: &std::path::Path,
+    clock: &ManualClock,
+    cloud: Option<&Cloud>,
+    entropy: &Arc<dyn SessionSource>,
+) -> Result<Config, StartupError> {
+    match cloud {
+        Some(cloud) => spec.elastic_config(dir, clock, cloud, entropy.clone()),
+        None => spec.config(dir, clock),
     }
 }
 

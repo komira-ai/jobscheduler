@@ -40,9 +40,6 @@ const MADE: char = '+';
 /// The machine provider kind of the hosts that register themselves.
 const STATIC: &str = "static";
 
-/// Machine provider kinds that are planned and not built.
-const UNBUILT_PROVIDERS: &[&str] = &["gce"];
-
 /// Platform kinds that are planned and not built.
 const UNBUILT_PLATFORMS: &[&str] = &["kubernetes", "cloud_run", "ecs"];
 
@@ -500,9 +497,6 @@ fn machine_provider(
     let name = name_of(&mut s, &taken, "machine provider")?;
     s.head = format!("machine_provider {name:?}: ");
     let kind = s.required_string("kind")?;
-    if UNBUILT_PROVIDERS.contains(&kind.as_str()) {
-        return Err(s.fail("kind", &format!("{kind:?} is not built in this version")));
-    }
     if kind == STATIC {
         s.only(&["name", "kind"])?;
     } else if !kinds.has(&kind) {

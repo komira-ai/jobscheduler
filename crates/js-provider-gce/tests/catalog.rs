@@ -918,16 +918,21 @@ fn reads_only(method: Method) -> bool {
         Method::MachineTypes | Method::AcceleratorTypes | Method::Prices | Method::RegionQuotas => {
             true
         }
+        Method::InsertInstance
+        | Method::GetInstance
+        | Method::DeleteInstance
+        | Method::ListInstances
+        | Method::GetOperation => false,
     }
 }
 
 /// Asserts that a full catalog (both models, two regions, quotas) makes only calls that
-/// read, the machine and accelerator types once for the configured project and zones, the
-/// prices and the quotas once per region, and that every method's name is the cloud's.
-/// Catches a write call added to the port without notice, or a call for another project
-/// or zone.
+/// read (none of the launch side's five), the machine and accelerator types once for the
+/// configured project and zones, the prices and the quotas once per region, and that the
+/// name of each catalog method is the cloud's. Catches a catalog that reaches the launch
+/// side of the port, or a call for another project or zone.
 #[test]
-fn fake_and_port_are_read_only() {
+fn the_catalog_makes_only_read_calls() {
     let zones = [ZONES[0], OTHER_ZONE];
     let fake = priced();
     fake.add_machine_type(a2(OTHER_ZONE));

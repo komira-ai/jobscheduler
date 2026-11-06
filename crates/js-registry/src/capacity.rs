@@ -64,6 +64,7 @@ fn held(view: &HostView) -> Held {
         offer: String::new(),
         zone: None,
         status: status(view),
+        ends_unix_seconds: None,
     }
 }
 

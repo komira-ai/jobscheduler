@@ -1039,6 +1039,7 @@ dependencies = [
  "js-contain",
  "js-lease",
  "js-lease-server",
+ "js-logmint",
  "js-logstore",
  "js-mac-pool",
  "js-mac-provision",
@@ -1384,6 +1385,7 @@ dependencies = [
  "js-provider",
  "js-provider-ec2",
  "js-provider-fake",
+ "js-provider-gce",
  "js-provider-lambdalabs",
  "js-registry",
  "js-scaler",
@@ -1392,6 +1394,7 @@ dependencies = [
  "js-state",
  "js-testkit",
  "js-types",
+ "js-update-hook",
  "js-usage",
  "log",
  "postgres",
@@ -1433,7 +1436,9 @@ name = "js-logstore"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "js-logmint",
  "js-logstore",
+ "js-testkit",
  "rustls",
  "serde_json",
  "sha2 0.11.1",
@@ -1641,10 +1646,17 @@ dependencies = [
 name = "js-provider-gce"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "js-caps",
  "js-elastic",
+ "js-logstore",
  "js-types",
+ "ring",
+ "serde_json",
+ "sha2 0.11.1",
  "thiserror",
+ "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1776,6 +1788,8 @@ dependencies = [
  "js-agent",
  "js-agent-wire",
  "js-conformance",
+ "js-elastic",
+ "js-elastic-fake",
  "js-jobs",
  "js-lease",
  "js-lease-server",
@@ -1786,6 +1800,7 @@ dependencies = [
  "js-types",
  "serde_json",
  "tokio",
+ "toml",
  "tower",
 ]
 
@@ -4044,6 +4059,7 @@ dependencies = [
  "js-mac-session",
  "js-proto",
  "js-testkit",
+ "js-update-hook",
  "proc-macro2",
  "prost",
  "prost-types",

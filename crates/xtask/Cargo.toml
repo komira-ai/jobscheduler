@@ -64,6 +64,8 @@ js-client = { path = "../js-client" }
 # generator renders for the test definition (tests/job_surface.rs).
 js-cli = { path = "../js-cli" }
 js-elastic = { path = "../js-elastic" }
+# The hook's step bounds, which the lease server's declaration must keep (tests/js_lease_server_declaration.rs).
+js-update-hook = { path = "../js-update-hook" }
 # The plists the package carries must be flags the programs accept (tests/macos_pkg.rs).
 js-mac-provision = { path = "../js-mac-provision" }
 js-mac-session = { path = "../js-mac-session" }

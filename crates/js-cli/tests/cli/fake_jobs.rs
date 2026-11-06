@@ -34,7 +34,15 @@ pub enum Answer {
     Hang,
     /// A refused submit: this refusal, carried in the status details.
     Refused(js_proto::v1::RefusalCode, &'static str),
+    /// The backing service's answer, though answers are scripted.
+    Backed,
+    /// The backing service acts on the request, and then no answer comes: every connection
+    /// of the fake is dropped, as when an answer is lost after the call took effect.
+    BackedThenLost,
 }
+
+/// An answer made from the request's message bytes.
+pub type Responder = Arc<dyn Fn(&[u8]) -> Answer + Send + Sync>;
 
 /// One request the fake read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +59,7 @@ pub struct Seen {
 #[derive(Clone, Default)]
 pub struct Fake {
     answers: Arc<Mutex<BTreeMap<String, Vec<Answer>>>>,
+    responders: Arc<Mutex<BTreeMap<String, Responder>>>,
     seen: Arc<Mutex<Vec<Seen>>>,
     tasks: Arc<Mutex<Vec<AbortHandle>>>,
     backing: Option<ReferenceJobs>,
@@ -79,6 +88,21 @@ impl Fake {
         self
     }
 
+    /// Answers every call of `method` with what `responder` makes of its request, in place
+    /// of scripted answers: for calls that may come in any order, such as two follows at
+    /// once.
+    pub fn respond(
+        &self,
+        method: &str,
+        responder: impl Fn(&[u8]) -> Answer + Send + Sync + 'static,
+    ) {
+        let path = format!("/jobscheduler.v1.JobService/{method}");
+        self.responders
+            .lock()
+            .unwrap()
+            .insert(path, Arc::new(responder));
+    }
+
     /// The requests read so far.
     pub fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
@@ -101,8 +125,12 @@ impl Fake {
         })
     }
 
-    /// The scripted answer to the next call of `path`, if any is scripted.
-    fn next_answer(&self, path: &str) -> Option<Answer> {
+    /// The answer to the next call of `path` with `message`, if any is scripted.
+    fn next_answer(&self, path: &str, message: &[u8]) -> Option<Answer> {
+        let responder = self.responders.lock().unwrap().get(path).cloned();
+        if let Some(responder) = responder {
+            return Some(responder(message));
+        }
         let mut answers = self.answers.lock().unwrap();
         let queue = answers.get_mut(path)?;
         match queue.len() {
@@ -173,25 +201,29 @@ impl Service<http::Request<Body>> for Fake {
             fake.seen.lock().unwrap().push(Seen {
                 path: path.clone(),
                 authorization,
-                message,
+                message: message.clone(),
             });
-            let answer = match fake.next_answer(&path) {
-                Some(answer) => answer,
-                None => match &fake.backing {
-                    Some(jobs) => {
-                        let forwarded =
-                            http::Request::from_parts(parts, Body::new(Full::new(body)));
-                        let mut service = JobServiceServer::new(jobs.clone());
-                        return service.call(forwarded).await;
-                    }
-                    None => Answer::Message(Vec::new()),
-                },
+            let backed = |jobs: &ReferenceJobs| {
+                let forwarded = http::Request::from_parts(parts, Body::new(Full::new(body)));
+                JobServiceServer::new(jobs.clone()).call(forwarded)
+            };
+            let answer = match (fake.next_answer(&path, &message), &fake.backing) {
+                (Some(Answer::Backed) | None, Some(jobs)) => return backed(jobs).await,
+                (Some(Answer::BackedThenLost), Some(jobs)) => {
+                    let _ = backed(jobs).await;
+                    Answer::Hang
+                }
+                (Some(answer), _) => answer,
+                (None, None) => Answer::Message(Vec::new()),
             };
             Ok(match answer {
                 Answer::Message(bytes) => ok(bytes),
                 Answer::Status(code, message) => Status::new(code, message).into_http(),
                 Answer::Refused(code, detail) => {
                     js_proto::refusal::refusal_status(code, detail).into_http()
+                }
+                Answer::Backed | Answer::BackedThenLost => {
+                    unreachable!("a backed answer needs a fake serving a backing service")
                 }
                 Answer::Hang => {
                     fake.tasks

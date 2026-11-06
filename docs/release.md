@@ -79,8 +79,8 @@ from the dependency graph (`cargo metadata`), not listed: the crates of `js-leas
 dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`,
-and `packaging/js-agent/updater.d/js-agent.toml`, the host updater's declaration, which the
-Linux `js-agent` archive carries as it is.
+and `packaging/js-agent/updater.d/js-agent.toml` and `packaging/js-lease-server/updater.d/js-lease-server.toml`,
+the host updater's declarations, which the Linux `js-agent` and `js-lease-server` archives carry as they are.
 
 A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
 the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
@@ -123,7 +123,7 @@ For version `X.Y.Z`:
 
 | Asset | Contents |
 |---|---|
-| `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary and `LICENSE` |
+| `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary, `LICENSE` and `updater.d/js-lease-server.toml`, the host updater's declaration (below) |
 | `js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE` |
 | `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary, `LICENSE` and `updater.d/js-agent.toml`, the host updater's declaration (below) |
 | `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
@@ -131,7 +131,7 @@ For version `X.Y.Z`:
 | `js-mdm-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-mdm` binary and `LICENSE` |
 | `js-bundle-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-bundle` binary (packs, prints and verifies darwin bundles) and `LICENSE` |
 | `js-bundle-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-bundle` binary for Apple silicon Macs and `LICENSE` |
-| `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts and `LICENSE` |
+| `js-lease-server-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-lease-server.toml`, as in the x86_64 archive |
 | `js-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js` binary for arm64 Linux hosts and `LICENSE` |
 | `js-agent-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-agent` binary for arm64 Linux hosts, `LICENSE` and `updater.d/js-agent.toml`, as in the x86_64 archive |
 | `js-bundle-X.Y.Z-aarch64-unknown-linux-musl.tar.gz` | the `js-bundle` binary for arm64 Linux hosts and `LICENSE` |
@@ -142,15 +142,19 @@ For version `X.Y.Z`:
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux `js-agent` archives, of both architectures, also hold `updater.d/js-agent.toml`, the declaration the host
-updater loads the js-agent hook's rights from (`packaging/js-agent/updater.d/js-agent.toml`; the
-updater's own install step puts it in `/etc/updater.d` from a verified release, after checking
-it asks for no more than the approved one). It sits beside the binary, at the name kbf's release
+The Linux `js-agent` and `js-lease-server` archives, of both architectures, also hold `updater.d/js-agent.toml` and
+`updater.d/js-lease-server.toml`, the declarations the host updater loads each hook's rights from
+(`packaging/js-agent/updater.d/js-agent.toml` and `packaging/js-lease-server/updater.d/js-lease-server.toml`; the
+updater's own install step puts each in `/etc/updater.d` from a verified release, after checking
+it asks for no more than the approved one). Each sits beside its binary, at the name kbf's release
 unpacker takes a declaration by (`updater.d/<binary>.toml`), and the attestation of each archive
-covers it. It is the file the js-agent deb carries as
-`/usr/share/js-agent/updater.d/js-agent.toml`. `crates/xtask/tests/js_agent_declaration.rs` loads
-it with the updater's own validator (kbf's `update-rights`, at the revision the root manifest
-pins) and with the hook's, and fails if the deb or the archive leaves it out.
+covers it. The agent's is the file the js-agent deb carries as
+`/usr/share/js-agent/updater.d/js-agent.toml`; the server has no deb, and its archive is where the
+declaration comes from. `crates/xtask/tests/js_agent_declaration.rs` loads the agent's, and
+`crates/xtask/tests/js_lease_server_declaration.rs` the server's, each with the updater's own
+validator (kbf's `update-rights`, at the revision the root manifest pins) and with the hook's;
+the first fails if the deb or the archive leaves it out, and `crates/xtask/tests/release_stage.rs`
+fails if an archive does. What the server's hook does is in [lease-server-update.md](lease-server-update.md).
 
 The Linux binaries are statically linked against musl, for both architectures (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`), so each runs on any Linux host of its architecture, including `gcr.io/distroless/cc-debian12`. Each Linux target is built natively on a GitHub-hosted runner of its architecture (`ubuntu-24.04` for x86_64, `ubuntu-24.04-arm` for arm64), with no cross linker and no emulation, so the `--version` check runs every binary on a host of the kind it is for, and the static check (no `NEEDED` entry in `readelf -d`) is the same for both. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools` on both Linux runners (on the arm64 runner a link gives its `musl-gcc` the name `aarch64-linux-musl-gcc`, the one the `cc` crate looks for there); musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-15` runner with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned (the build fails if a binary's minimum macOS is above it) and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. `js-mac-session` and `js-mac-provision` are the host tools a Mac node installs; `js-mac-pool` is a library and `js-mac-probe` runs only on hosted CI runners, so neither is shipped. The darwin binaries, including the root helper `js-mac-session`, are not codesigned or notarized. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`. The js-agent Debian package (`.github/workflows/js-agent-deb.yml`) is built for x86_64 only: there is no arm64 deb, and an arm64 host takes the agent from its release archive.
 

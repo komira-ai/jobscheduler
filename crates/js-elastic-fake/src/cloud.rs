@@ -153,6 +153,7 @@ impl Inner {
             offer: machine.offer.id.clone(),
             zone: machine.offer.zone.clone(),
             status,
+            ends_unix_seconds: None,
         }
     }
 

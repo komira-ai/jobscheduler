@@ -237,9 +237,10 @@
 //! `[[machine_provider]]` has a `name` (the grammar of pool names) and a `kind`: `static`
 //! (the hosts that run `js-agent` and register themselves; no other key) or a provider kind
 //! compiled in, such as `lambdalabs`, whose other keys are that kind's, as under a pool's
-//! `provider` (`api_key_file` and the rest; secrets stay paths). `gce` is refused as
-//! not built. A `[[platform]]` has a `name` and a `kind`; only `default` is built
-//! (`kubernetes`, `cloud_run` and `ecs` are refused as not built), and its
+//! `provider` (`api_key_file` and the rest; secrets stay paths). `ec2` and `gce` are built
+//! (their keys are in `crates/js-provider-ec2` and `crates/js-provider-gce`). A
+//! `[[platform]]` has a `name` and a `kind`; only `default` is built (`kubernetes`,
+//! `cloud_run` and `ecs` are refused as not built), and its
 //! `machine_providers` lists declared machine providers first to last. A pool's `platforms`
 //! lists declared platforms first to last; it is refused beside `provider`. Each declared
 //! machine provider must be named by a platform, and each platform by a pool.
@@ -880,6 +881,7 @@ mod store;
 mod store_health;
 mod ticker;
 mod tls;
+pub mod update_hook;
 mod usage;
 mod usage_api;
 mod usage_hub;
@@ -947,12 +949,21 @@ pub fn main() -> ExitCode {
 /// a refusal or failure goes to `err`.
 ///
 /// Exit status: 0 after an orderly stop (and for `--help`), 2 for a usage error or a
-/// start that was refused (the message names the flag), 1 for any other failure.
+/// start that was refused (the message names the flag), 1 for any other failure. The verb
+/// `update-hook` is answered first, before any flag is read ([`update_hook`]).
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
+    run_words(args.into_iter().collect(), out, err)
+}
+
+/// [`run`] on the collected words: one body for every caller's iterator.
+fn run_words(args: Vec<OsString>, out: &mut dyn Write, err: &mut dyn Write) -> ExitCode {
+    if update_hook::is_verb(&args) {
+        return update_hook::run(&args, out, err, &update_hook::Host::system());
+    }
     let parsed = Cli::try_parse_from(args);
     let cli = match parsed {
         Ok(cli) => cli,

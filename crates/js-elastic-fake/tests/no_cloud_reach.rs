@@ -59,6 +59,20 @@ const EC2_HOST_FILES: [&str; 2] = [
     "crates/js-provider-ec2/tests/http/",
 ];
 
+/// The Compute Engine provider crate: its insert call sits behind the same guarded launch
+/// path.
+const GCE_CRATE: &str = "crates/js-provider-gce/";
+
+/// The Compute Engine provider's live-port files, by path prefix (`src/http.rs`,
+/// `src/http/`), the files of its `tests/http/` that build the addresses the client must
+/// send to, and its service-account key fixture, whose token address the key file names:
+/// the only places in that crate that name the API hosts.
+const GCE_HOST_FILES: [&str; 3] = [
+    "crates/js-provider-gce/src/http",
+    "crates/js-provider-gce/tests/http/",
+    "crates/js-provider-gce/tests/fixtures/credential/",
+];
+
 /// The one file that may name the production host: the default address of the
 /// `lambdalabs` kind, which a pool's `api_url` overrides.
 const LAMBDA_DEFAULT_ADDRESS: &str = "crates/js-provider-lambdalabs/src/kind.rs";
@@ -108,7 +122,14 @@ fn rules() -> Vec<Rule> {
                 joined(&["windows", ".net"]),
                 joined(&["oracle", "cloud.com"]),
             ],
-            allowed: vec![LAMBDA_DEFAULT_ADDRESS, EC2_HOST_FILES[0], EC2_HOST_FILES[1]],
+            allowed: vec![
+                LAMBDA_DEFAULT_ADDRESS,
+                EC2_HOST_FILES[0],
+                EC2_HOST_FILES[1],
+                GCE_HOST_FILES[0],
+                GCE_HOST_FILES[1],
+                GCE_HOST_FILES[2],
+            ],
         },
         Rule {
             what: "a purchase API",
@@ -119,8 +140,10 @@ fn rules() -> Vec<Rule> {
                 joined(&["Create", "Fleet"]),
                 joined(&["queued", "Resources"]),
                 joined(&["CreateQueued", "Resource"]),
+                joined(&["instances", ".insert"]),
+                joined(&["insert", "_instance"]),
             ],
-            allowed: vec![LAMBDA_CRATE, EC2_CRATE],
+            allowed: vec![LAMBDA_CRATE, EC2_CRATE, GCE_CRATE],
         },
         Rule {
             what: "the raw API of a provider",
@@ -368,6 +391,38 @@ fn the_scan_fails_on_planted_reaches_and_passes_the_guarded_places() {
     assert!(found[1].starts_with("crates/js-provider-ec2/tests/offline/rig.rs "));
     assert!(found[2].starts_with("crates/js-provider-ec2x/src/http.rs "));
     assert!(found[3].starts_with("crates/js-scaler/src/http.rs "));
+
+    // The Compute Engine crate likewise: its hosts only in its live-port files, its HTTP
+    // tests and its key fixture, its insert call anywhere in the crate, and neither elsewhere.
+    let gce_host = joined(&["https://compute.", "google", "apis.com/compute/v1"]);
+    let gce_call = joined(&["insert", "_instance"]);
+    let gce_method = joined(&["instances", ".insert"]);
+    let gce_guarded = [
+        file("crates/js-provider-gce/src/http.rs", &gce_host),
+        file("crates/js-provider-gce/src/http/credential.rs", &gce_host),
+        file("crates/js-provider-gce/tests/http/launch.rs", &gce_host),
+        file(
+            "crates/js-provider-gce/tests/fixtures/credential/test-key.json",
+            &gce_host,
+        ),
+        file("crates/js-provider-gce/src/provider.rs", &gce_call),
+        file("crates/js-provider-gce/src/api.rs", &gce_method),
+    ];
+    assert_eq!(violations(&gce_guarded, &rules), Vec::<String>::new());
+    let gce_misses = [
+        file("crates/js-provider-gce/src/provider.rs", &gce_host),
+        file("crates/js-provider-gce/tests/offline/rig.rs", &gce_host),
+        file("crates/js-lease-server/src/kinds.rs", &gce_call),
+        file("crates/js-scaler/src/plan.rs", &gce_method),
+    ];
+    let found = violations(&gce_misses, &rules);
+    assert_eq!(found.len(), 4, "{found:#?}");
+    assert!(found[0].starts_with("crates/js-provider-gce/src/provider.rs "));
+    assert!(found[0].contains("host"));
+    assert!(found[1].starts_with("crates/js-provider-gce/tests/offline/rig.rs "));
+    assert!(found[2].starts_with("crates/js-lease-server/src/kinds.rs "));
+    assert!(found[2].contains("purchase"));
+    assert!(found[3].starts_with("crates/js-scaler/src/plan.rs "));
 
     let other_file_of_the_provider = file("crates/js-provider-lambdalabs/tests/t.rs", &host);
     assert_eq!(violations(&[other_file_of_the_provider], &rules).len(), 1);

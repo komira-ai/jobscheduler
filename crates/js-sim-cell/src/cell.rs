@@ -33,7 +33,8 @@
 //! restarted or its restart refused, the bus's faults changed, a
 //! client call and its status, an item submitted or cancelled and each event the client
 //! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
-//! changes, each launch in the ledger, and the violation that stopped the run. A line
+//! changes, each launch in the ledger, what the cloud of an elastic pool did to each
+//! machine by its number (module `elastic`), and the violation that stopped the run. A line
 //! names hosts, statuses and counts; it never holds a token, a bearer, a session secret,
 //! a body or an id the server generated. The hash of a run ([`Cell::trace_hash`]) is the
 //! hash of the cell's trace closed by the kernel's hash, so it covers both. With trace
@@ -66,6 +67,8 @@ use crate::observe::{ClientEvent, Heard, ItemId, ItemRecord, Killed, Observation
 use crate::server::{JOIN_TOKEN, ServerNode, ServerSpec};
 use crate::text;
 use crate::work::Work;
+
+mod elastic;
 
 /// How long an agent waits between two hellos that were not welcomed (design section
 /// 5.1: a one second base).
@@ -193,6 +196,8 @@ pub struct Cell {
     kernel_lines: usize,
     /// What the cell last read of the server's job tables.
     tables: Reader,
+    /// What the cell knows of the machines of its elastic pool's cloud.
+    machines: elastic::Machines,
 }
 
 impl Cell {
@@ -254,6 +259,7 @@ impl Cell {
             merged,
             kernel_lines: 0,
             tables: Reader::default(),
+            machines: elastic::Machines::default(),
         };
         cell.set_faults(faults);
         Ok(cell)
@@ -304,6 +310,7 @@ impl Cell {
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
             kind,
+            instance: None,
         };
         let mut agent = AgentNode::new(spec, self.ledger.clone());
         agent.report_to(self.applied.clone());
@@ -382,6 +389,7 @@ impl Cell {
         let end = self.sim.now().saturating_add(within);
         self.run_until(end)?;
         self.reread(true);
+        self.read_cloud();
         self.observations.at = self.sim.now();
         let at = self.observations.at;
         let found = Checker::end(&self.observations, within).unwrap_or_else(|refused| {
@@ -729,9 +737,9 @@ impl Cell {
     }
 
     fn agent_of(&self, host: &HostId) -> Option<&AgentNode> {
-        self.sim
-            .node(&NodeId::new(host.as_str()))
-            .and_then(CellNode::as_agent)
+        let machine = self.machines.node(host).cloned();
+        let node = machine.unwrap_or_else(|| NodeId::new(host.as_str()));
+        self.sim.node(&node).and_then(CellNode::as_agent)
     }
 
     /// Reads the server's listing into the observations, with the bookings it starts and
@@ -810,6 +818,7 @@ impl Cell {
 
     /// Checks the step invariants over what `touched` names, after reading the ledger.
     fn check(&mut self, touched: Touched) {
+        self.read_cloud();
         self.observations.at = self.sim.now();
         let launches = self.ledger.launches_after(self.observations.ledger.len());
         for launch in &launches {
