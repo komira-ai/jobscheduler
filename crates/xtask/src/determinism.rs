@@ -85,6 +85,7 @@ pub const CRATES: &[&str] = &[
     "js-registry",
     "js-scaler",
     "js-sched",
+    "js-sched-placer",
     "js-sim",
     "js-sim-cell",
     "js-sizing",
@@ -92,6 +93,7 @@ pub const CRATES: &[&str] = &[
     "js-testkit",
     "js-treestore",
     "js-types",
+    "js-update-hook",
     "js-usage",
     "js-whole",
 ];
@@ -760,7 +762,7 @@ pub const ALLOWED: &[Allowed] = &[
         reason: "the agent program's clock; the cell gives the agent lifecycle its virtual clock in place of System",
     },
     Allowed {
-        file: "crates/js-agent/src/update_hook/ports.rs",
+        file: "crates/js-update-hook/src/ports.rs",
         item: "SystemClock::now_ms",
         token: Token::SystemTimeNow,
         sites: 1,
