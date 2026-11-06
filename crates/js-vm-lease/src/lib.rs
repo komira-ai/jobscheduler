@@ -1,11 +1,13 @@
-//! The lifecycle of the VM one run of a lease gets: a fresh clone of the base image,
-//! booted, the run's command executed in it through the guest agent (`js-guest`), its
-//! output collected, then the VM stopped and its clone destroyed.
+//! `js-vm-lease`: the lifecycle of the VM one run of a lease gets: a fresh clone of the base
+//! image, booted, the run's command run in it through the guest agent (`js-guest`), its output
+//! collected, then the VM stopped and its clone destroyed.
 //!
-//! [`VmDriver`] is the seam. The host agent (`js-agent`) drives it; the real driver is
-//! [`crate::lease_system::SystemDriver`] (it boots the VM through the `js-vmm vm-run`
-//! helper, macOS only), and the `fake` feature gives a recording one
-//! ([`crate::lease_fake::FakeDriver`]) so the order of the calls is tested without a Mac.
+//! [`VmDriver`] is the seam. The host agent (`js-agent`) drives it. The real driver is
+//! `js-vmm`'s `SystemDriver` (it boots the VM through the `js-vmm vm-run` helper, macOS only);
+//! it runs in the signed `js-vmm` binary, which the agent starts as `js-vmm lease` and drives
+//! over the line protocol of [`protocol`], so the agent itself links nothing that starts a
+//! program. The `fake` feature gives a recording driver ([`fake::FakeDriver`]) so the order
+//! of the calls is tested without a Mac.
 //!
 //! A VM is named by its run ([`VmName`]) and every call names it, so one driver serves
 //! every VM of the host from any thread: the agent runs each VM's steps on a thread of its
@@ -14,13 +16,19 @@
 //! # The order of the calls
 //!
 //! For one VM: [`VmDriver::clone_base`], [`VmDriver::boot`], [`VmDriver::wait_ready`],
-//! [`VmDriver::exec`], [`VmDriver::collect`], then [`VmDriver::stop`] and
+//! [`VmDriver::run_command`], [`VmDriver::collect`], then [`VmDriver::stop`] and
 //! [`VmDriver::destroy`]. A step that fails skips to `stop` and `destroy`, which run
 //! whatever came before: `stop` of a VM that never booted and `destroy` of one whose clone
 //! was never made succeed and do nothing. A VM is never reused: after `destroy` the name
 //! may be cloned again, and that is a new VM.
 
+#[cfg(feature = "fake")]
+pub mod fake;
+pub mod protocol;
+
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// The longest VM name: the longest run id the wire takes.
 pub const MAX_NAME_LEN: usize = 128;
@@ -28,7 +36,8 @@ pub const MAX_NAME_LEN: usize = 128;
 /// The name of one VM: the id of the run it is for. It names the clone's directory, so it
 /// is 1 to [`MAX_NAME_LEN`] bytes of `[A-Za-z0-9._-]` beginning with a letter or digit
 /// (never `.` or `..`, never a path).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct VmName(String);
 
 impl VmName {
@@ -57,6 +66,20 @@ impl VmName {
     }
 }
 
+impl TryFrom<String> for VmName {
+    type Error = VmError;
+
+    fn try_from(name: String) -> Result<Self, VmError> {
+        Self::new(&name)
+    }
+}
+
+impl From<VmName> for String {
+    fn from(name: VmName) -> String {
+        name.0
+    }
+}
+
 impl fmt::Display for VmName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -64,7 +87,7 @@ impl fmt::Display for VmName {
 }
 
 /// What a VM boots with: whole CPUs and MiB of memory, fixed for its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSize {
     /// Virtual CPUs.
     pub cpus: u32,
@@ -73,7 +96,7 @@ pub struct VmSize {
 }
 
 /// The one command a VM runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRequest {
     /// The program and its arguments; the guest runs it without a shell.
     pub argv: Vec<String>,
@@ -84,7 +107,7 @@ pub struct ExecRequest {
 }
 
 /// How the command ended, as the guest reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecEnd {
     /// It exited with this status.
     Exited(i32),
@@ -98,7 +121,7 @@ pub enum ExecEnd {
 
 /// What the command wrote to its standard output and standard error: the last bytes of
 /// each, at most what [`VmDriver::collect`] was asked for.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Collected {
     /// The end of the standard output.
     pub stdout: Vec<u8>,
@@ -109,7 +132,7 @@ pub struct Collected {
 }
 
 /// A step of a VM's life, as a [`VmError`] names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Step {
     /// [`VmDriver::clone_base`].
     Clone,
@@ -117,7 +140,7 @@ pub enum Step {
     Boot,
     /// [`VmDriver::wait_ready`].
     Ready,
-    /// [`VmDriver::exec`].
+    /// [`VmDriver::run_command`].
     Exec,
     /// [`VmDriver::collect`].
     Collect,
@@ -142,7 +165,7 @@ impl fmt::Display for Step {
 }
 
 /// Why a call of a [`VmDriver`] failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum VmError {
     /// The text is no [`VmName`].
     #[error(
@@ -208,10 +231,10 @@ pub trait VmDriver: Send + Sync {
     /// # Errors
     ///
     /// The guest refused the command or the connection to it broke.
-    fn exec(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError>;
+    fn run_command(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError>;
 
     /// Ends the command `vm` runs, from any thread, and marks `vm` killed so that a later
-    /// [`VmDriver::exec`] runs nothing. Killing a VM that runs nothing only marks it; one the
+    /// [`VmDriver::run_command`] runs nothing. Killing a VM that runs nothing only marks it; one the
     /// driver does not know yet (its clone is not made) may be left unmarked, so a caller
     /// that can stop a VM that early keeps its own mark and checks it after the clone.
     fn kill(&self, vm: &VmName);

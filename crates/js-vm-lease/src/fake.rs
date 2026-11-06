@@ -3,7 +3,7 @@
 //! scripted it. A test reads the calls back ([`FakeDriver::calls`]) to check the order of a
 //! VM's life, and waits for a call ([`FakeDriver::wait_for`]) instead of for time.
 //!
-//! With [`FakeDriver::holding`] an exec does not end by itself: it waits until the test
+//! With [`FakeDriver::holding`] a command does not end by itself: it waits until the test
 //! lets it ([`FakeDriver::finish`]) or the VM is killed, so a test holds VMs in flight for
 //! as long as it needs them.
 
@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use crate::lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
+use crate::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
 /// How long a wait of the fake lasts before it gives up: far above any test, so it ends a
 /// test that would otherwise hang, and never decides one that passes.
@@ -26,7 +26,7 @@ pub enum Call {
     Boot(VmName, VmSize),
     /// [`VmDriver::wait_ready`].
     WaitReady(VmName),
-    /// [`VmDriver::exec`], with the request.
+    /// [`VmDriver::run_command`], with the request.
     Exec(VmName, ExecRequest),
     /// [`VmDriver::kill`].
     Kill(VmName),
@@ -282,7 +282,7 @@ impl VmDriver for FakeDriver {
         self.record(Call::WaitReady(vm.clone()))
     }
 
-    fn exec(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
+    fn run_command(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
         self.record(Call::Exec(vm.clone(), request.clone()))?;
         let state = self.lock();
         let (holding, deaf, guard) = (state.holding, state.deaf, state.guard());

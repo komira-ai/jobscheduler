@@ -24,9 +24,6 @@ pub mod guest_command;
 pub mod harvest;
 pub mod hostfs;
 pub mod image;
-pub mod lease;
-#[cfg(feature = "fake")]
-pub mod lease_fake;
 pub mod lease_system;
 pub mod matrix;
 pub mod offline_put;

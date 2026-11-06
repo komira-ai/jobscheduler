@@ -384,7 +384,7 @@ fn a_vm_is_cloned_booted_run_collected_stopped_and_destroyed() {
     let guest = spawn_agent(r.run());
     d.wait_ready(vm).expect("ready");
     let end = d
-        .exec(vm, &shell("printf out; printf err >&2; exit 3"))
+        .run_command(vm, &shell("printf out; printf err >&2; exit 3"))
         .expect("exec");
     assert_eq!(end, ExecEnd::Exited(3));
     guest.join().expect("guest");
@@ -405,7 +405,7 @@ fn a_vm_is_cloned_booted_run_collected_stopped_and_destroyed() {
     // The name is free again, and the new VM is a new one.
     assert_eq!(d.clone_base(vm), Ok(()));
     assert_eq!(
-        d.exec(vm, &shell("exit 0"))
+        d.run_command(vm, &shell("exit 0"))
             .map_err(|e| e.to_string())
             .unwrap_err(),
         "VM run-1: exec failed: the guest agent is not connected (not ready, or the command already ran)"
@@ -448,7 +448,7 @@ fn each_end_the_guest_reports_is_the_end_exec_returns() {
             env: vec![("A".to_owned(), "b".to_owned())],
             timeout_ms: 1234,
         };
-        assert_eq!(r.driver.exec(&r.vm, &request), Ok(want));
+        assert_eq!(r.driver.run_command(&r.vm, &request), Ok(want));
         guest.join().expect("guest");
     }
 }
@@ -474,12 +474,12 @@ fn a_refused_request_a_broken_connection_and_a_second_exec_are_errors() {
     });
     r.driver.wait_ready(&r.vm).expect("ready");
     assert_eq!(
-        r.error_of(r.driver.exec(&r.vm, &shell("true"))),
+        r.error_of(r.driver.run_command(&r.vm, &shell("true"))),
         "VM run-1: exec failed: the guest refused (BadRequest): nope"
     );
     guest.join().expect("guest");
     assert_eq!(
-        r.error_of(r.driver.exec(&r.vm, &shell("true"))),
+        r.error_of(r.driver.run_command(&r.vm, &shell("true"))),
         "VM run-1: exec failed: the guest agent is not connected (not ready, or the command already ran)"
     );
 
@@ -491,7 +491,7 @@ fn a_refused_request_a_broken_connection_and_a_second_exec_are_errors() {
         send(&mut s, &GuestMsg::Started { pid: 5 });
     });
     r.driver.wait_ready(&r.vm).expect("ready");
-    let err = r.error_of(r.driver.exec(&r.vm, &shell("true")));
+    let err = r.error_of(r.driver.run_command(&r.vm, &shell("true")));
     assert!(err.starts_with("VM run-1: exec failed: "), "{err}");
     guest.join().expect("guest");
 }
@@ -504,7 +504,10 @@ fn exec_on_a_killed_vm_returns_killed_and_runs_nothing() {
     let r = Rig::new("lease-killed-first");
     r.driver.clone_base(&r.vm).expect("clone");
     r.driver.kill(&r.vm);
-    assert_eq!(r.driver.exec(&r.vm, &shell("true")), Ok(ExecEnd::Killed));
+    assert_eq!(
+        r.driver.run_command(&r.vm, &shell("true")),
+        Ok(ExecEnd::Killed)
+    );
     assert_eq!(r.driver.stop(&r.vm), Ok(()));
 }
 
@@ -526,7 +529,7 @@ fn kill_while_the_command_runs_ends_it() {
     });
     r.driver.wait_ready(&r.vm).expect("ready");
     let (d, vm) = (r.driver.clone(), r.vm.clone());
-    let exec = std::thread::spawn(move || d.exec(&vm, &shell("long-running")));
+    let exec = std::thread::spawn(move || d.run_command(&vm, &shell("long-running")));
     started_rx.recv().expect("started");
     r.driver.kill(&r.vm);
     assert_eq!(exec.join().expect("exec"), Ok(ExecEnd::Killed));
@@ -553,7 +556,7 @@ fn a_kill_that_races_the_start_is_repeated_after_it() {
     });
     r.driver.wait_ready(&r.vm).expect("ready");
     assert_eq!(
-        r.driver.exec(&r.vm, &shell("long-running")),
+        r.driver.run_command(&r.vm, &shell("long-running")),
         Ok(ExecEnd::Killed)
     );
     guest.join().expect("guest");
@@ -569,7 +572,7 @@ fn a_vm_that_was_never_cloned_is_unknown_to_every_step() {
     for (text, step) in [
         (r.error_of(d.boot(vm, Rig::size())), "boot"),
         (r.error_of(d.wait_ready(vm)), "wait for the guest"),
-        (r.error_of(d.exec(vm, &shell("true"))), "exec"),
+        (r.error_of(d.run_command(vm, &shell("true"))), "exec"),
     ] {
         assert_eq!(
             text,
@@ -668,7 +671,7 @@ fn boot_failures_are_errors_of_the_boot_step() {
     assert_eq!(r.driver.stop(&r.vm), Ok(()));
 }
 
-const MAX_NAME: usize = crate::lease::MAX_NAME_LEN;
+const MAX_NAME: usize = js_vm_lease::MAX_NAME_LEN;
 
 /// Asserts each way the wait for the guest fails names the reason: the helper ending (with
 /// its log), the helper reporting an error, the VM never starting, the guest never

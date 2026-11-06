@@ -6,8 +6,8 @@ use std::sync::Arc;
 use js_agent::lifecycle::{Event, Lifecycle, NoChecks, Runtime, detail, label};
 use js_agent::vm::{NoVmSlot, VmRuntime, WithVms};
 use js_agent_wire::{Command, HeldJob, JobStartSpec, Outcome, refusal};
-use js_vmm::lease::{ExecEnd, Step};
-use js_vmm::lease_fake::FakeDriver;
+use js_vm_lease::fake::FakeDriver;
+use js_vm_lease::{ExecEnd, Step};
 use serde_json::{Value, json};
 
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};

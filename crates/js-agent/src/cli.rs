@@ -346,8 +346,9 @@ pub struct Cli {
     #[arg(long)]
     pub allow_container_engine: bool,
     /// Turns the VM backend on (macOS, beside `--native-helper-socket`): the absolute path of
-    /// the signed `js-vmm` binary each VM runs in. A VM start then runs in a fresh VM cloned
-    /// from the base image and destroyed when it ends, at most two at once, and the hello
+    /// the signed `js-vmm` binary, started as `js-vmm lease` for each VM. A VM start then runs
+    /// in a fresh VM cloned from the base image and destroyed when it ends, at most two at
+    /// once, and the hello
     /// reports `vm.slots`, `vm.max_cpus` and `vm.max_mem_gib`. Without it a VM start is
     /// refused `vm-unavailable`. Needs `--vm-store`.
     #[arg(long, value_name = "PATH")]

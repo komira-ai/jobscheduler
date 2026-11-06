@@ -7,7 +7,7 @@
 //! the directory `JS_NATIVE_PRIV_ROOT` names: `js-vmm`, the `js-vmm` binary signed with the
 //! virtualization entitlement, and `vm-store/base`, a base image (`js-vmm image base`)
 //! whose guest runs the guest agent as the VM driver's module documentation requires
-//! (`js_vmm::lease_system`). It boots one VM and needs no network.
+//! (`js-vmm`'s `lease_system`). It boots one VM and needs no network.
 
 use std::fs;
 use std::path::Path;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{Body, Exit, RunHandle, RunSpec, Runtime, Status, label};
-use js_agent::vm::VmRuntime;
+use js_agent::vm::{HelperDriver, HelperLaunch, VmRuntime};
 use js_agent_wire::Isolation;
 
 /// What the runtime says of `id` once it ends, polled with a pause between polls: a real
@@ -39,8 +39,8 @@ fn a_command_runs_in_a_fresh_vm_and_the_vm_is_destroyed() {
         std::env::var_os(super::ROOT).unwrap_or_else(|| panic!("{} is not set", super::ROOT));
     let root = Path::new(&root);
     let store = root.join("vm-store");
-    let driver = js_vmm::lease_system::real(root.join("js-vmm"), store.clone());
-    let mut rt = VmRuntime::new(Arc::new(driver));
+    let launch = HelperLaunch::new(root.join("js-vmm"), store.clone());
+    let mut rt = VmRuntime::new(Arc::new(HelperDriver::new(launch)));
     let spec = RunSpec {
         run_id: "vm-priv-1".to_owned(),
         body: Body::Container {

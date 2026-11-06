@@ -9,8 +9,8 @@ use js_agent::lifecycle::{Body, Exit, RunHandle, Runtime, Status};
 use js_agent::vm::{NoVmSlot, VM_SLOTS, VmRuntime};
 use js_agent_wire::limits::{MAX_LOG_STREAM_LEN, MAX_WALL_MS};
 use js_agent_wire::{LogTail, refusal};
-use js_vmm::lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
-use js_vmm::lease_fake::{Call, FakeDriver};
+use js_vm_lease::fake::{Call, FakeDriver};
+use js_vm_lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
 use super::{ended, runtime, spec, vm};
 
@@ -313,9 +313,9 @@ impl VmDriver for Wrapped {
     fn wait_ready(&self, vm: &VmName) -> Result<(), VmError> {
         self.inner.wait_ready(vm)
     }
-    fn exec(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
+    fn run_command(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
         self.panic_if(Step::Exec, vm);
-        self.inner.exec(vm, request)
+        self.inner.run_command(vm, request)
     }
     fn kill(&self, vm: &VmName) {
         self.inner.kill(vm);

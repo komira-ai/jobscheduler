@@ -2,8 +2,8 @@
 //! of its own, cloned from the base image for that run and destroyed when it ends, whatever
 //! its end (`docs/design/vm-backend.md`, 5.14). The machine is reused, the VM never.
 //!
-//! The backend is off unless the agent is given `--vm-driver` (the signed `js-vmm` binary
-//! that runs each VM) and `--vm-store` (the directory of the base image, `base`, and the
+//! The backend is off unless the agent is given `--vm-driver` (the signed `js-vmm` binary,
+//! which the agent starts as `js-vmm lease` for each VM: [`HelperDriver`]) and `--vm-store` (the directory of the base image, `base`, and the
 //! clones, `runs/`); both are flags, never environment. It runs on a Mac only, beside the
 //! native jobs (`--native-helper-socket`). With it off the hello says nothing of VMs and a
 //! VM start is refused [`js_agent_wire::refusal::VM_UNAVAILABLE`]; with it on the hello
@@ -12,9 +12,12 @@
 //! - [`VmSlots`]: the gate of the two VMs a host runs at once. A third is refused
 //!   ([`NoVmSlot`]), never queued, and a slot is given back on every way a run ends.
 //! - [`VmRuntime`]: the [`Runtime`] of VM runs, a thread per VM over a
-//!   [`js_vmm::lease::VmDriver`].
+//!   [`js_vm_lease::VmDriver`].
 //! - [`WithVms`]: the agent's runtime with the VM runtime beside it.
+//! - [`HelperDriver`]: the real driver, one `js-vmm lease` process for each VM, started
+//!   through the disclaiming spawner and driven over [`js_vm_lease::protocol`].
 
+mod helper;
 mod runtime;
 mod split;
 
@@ -22,8 +25,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use js_agent_wire::Hello;
-use js_vmm::lease::VmDriver;
+use js_vm_lease::VmDriver;
 
+pub use self::helper::{HelperDriver, HelperLaunch, Launch, Launched};
 pub use self::runtime::VmRuntime;
 pub use self::split::WithVms;
 use crate::cli::Cli;
@@ -170,15 +174,16 @@ pub fn with_vms(
     }
 }
 
-/// The VMs of this machine: `js-vmm`'s driver over the flags' binary and store.
+/// The VMs of this machine: the `js-vmm` binary of the flags, one `js-vmm lease` process for
+/// each VM ([`HelperDriver`]).
 ///
 /// # Errors
 ///
 /// None on macOS.
 #[cfg(target_os = "macos")]
 pub fn system_driver(settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
-    let driver = js_vmm::lease_system::real(settings.driver.clone(), settings.store.clone());
-    Ok(Arc::new(driver))
+    let launch = HelperLaunch::new(settings.driver.clone(), settings.store.clone());
+    Ok(Arc::new(HelperDriver::new(launch)))
 }
 
 /// The VMs of this machine: none, off macOS.

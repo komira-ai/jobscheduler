@@ -1037,7 +1037,7 @@ dependencies = [
  "js-testkit",
  "js-treestore",
  "js-types",
- "js-vmm",
+ "js-vm-lease",
  "libc",
  "rustix",
  "serde",
@@ -1828,6 +1828,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-vm-lease"
+version = "0.1.0"
+dependencies = [
+ "js-vm-lease",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-vmm"
 version = "0.1.0"
 dependencies = [
@@ -1838,7 +1848,7 @@ dependencies = [
  "hex",
  "js-guest",
  "js-testkit",
- "js-vmm",
+ "js-vm-lease",
  "libc",
  "objc2",
  "objc2-foundation",

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use js_agent_wire::limits::{MAX_LOG_STREAM_LEN, MAX_WALL_MS};
 use js_agent_wire::{LogTail, refusal};
-use js_vmm::lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
+use js_vm_lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
 use super::{VmSlot, VmSlots};
 use crate::cli_runtime::tail_of;
@@ -128,7 +128,7 @@ fn life(
         }
         driver.boot(&name, size)?;
         driver.wait_ready(&name)?;
-        let end = driver.exec(&name, &request)?;
+        let end = driver.run_command(&name, &request)?;
         // Output that cannot be read costs the result its tail, never its end.
         let collected = driver.collect(&name, MAX_LOG_STREAM_LEN);
         if let Err(why) = &collected {

@@ -24,8 +24,8 @@ use js_agent::quota::{FakeQuota, ScratchQuota};
 use js_agent::vm::VmSettings;
 use js_agent::{Backend, FileReader, Machine, RuntimeBuild, SharedClock};
 use js_mac_session::client::Client;
-use js_vmm::lease::VmDriver;
-use js_vmm::lease_fake::FakeDriver;
+use js_vm_lease::VmDriver;
+use js_vm_lease::fake::FakeDriver;
 
 /// How long a test waits for the other thread before it fails.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);

@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_vmm::lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
-use js_vmm::lease_fake::{Call, FakeDriver, HANG_GUARD};
+use js_vm_lease::fake::{Call, FakeDriver, HANG_GUARD};
+use js_vm_lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
 fn vm(name: &str) -> VmName {
     VmName::new(name).unwrap()
@@ -29,7 +29,7 @@ fn whole_life(driver: &FakeDriver, name: &VmName) -> ExecEnd {
     driver.clone_base(name).unwrap();
     driver.boot(name, SIZE).unwrap();
     driver.wait_ready(name).unwrap();
-    let end = driver.exec(name, &request()).unwrap();
+    let end = driver.run_command(name, &request()).unwrap();
     driver.collect(name, 16).unwrap();
     driver.stop(name).unwrap();
     driver.destroy(name).unwrap();
@@ -108,7 +108,10 @@ fn it_answers_as_scripted() {
         driver.clone_base(&one),
         Err(VmError::step(&one, Step::Clone, "the clone exists"))
     );
-    assert_eq!(driver.exec(&one, &request()), Ok(ExecEnd::Signaled(15)));
+    assert_eq!(
+        driver.run_command(&one, &request()),
+        Ok(ExecEnd::Signaled(15))
+    );
     assert_eq!(
         driver.collect(&one, 3),
         Ok(Collected {
@@ -148,7 +151,7 @@ fn a_step_told_to_fail_fails_once() {
             Step::Clone => driver.clone_base(&one),
             Step::Boot => driver.boot(&one, SIZE),
             Step::Ready => driver.wait_ready(&one),
-            Step::Exec => driver.exec(&one, &request()).map(|_| ()),
+            Step::Exec => driver.run_command(&one, &request()).map(|_| ()),
             Step::Collect => driver.collect(&one, 1).map(|_| ()),
             Step::Stop => driver.stop(&one),
             Step::Destroy => driver.destroy(&one),
@@ -182,7 +185,7 @@ fn a_held_exec_ends_when_let_or_killed() {
         let one = vm(name);
         let running = {
             let (driver, one) = (driver.clone(), one.clone());
-            std::thread::spawn(move || driver.exec(&one, &request()))
+            std::thread::spawn(move || driver.run_command(&one, &request()))
         };
         driver.wait_for(&one, Step::Exec);
         match end {
@@ -193,7 +196,7 @@ fn a_held_exec_ends_when_let_or_killed() {
     }
     let early = vm("early");
     driver.kill(&early);
-    assert_eq!(driver.exec(&early, &request()), Ok(ExecEnd::Killed));
+    assert_eq!(driver.run_command(&early, &request()), Ok(ExecEnd::Killed));
 }
 
 /// Asserts that a held exec nobody lets end gives up at the guard with an error, and that the
@@ -203,7 +206,7 @@ fn a_held_exec_gives_up_at_the_guard() {
     let driver = FakeDriver::new().holding().guarded(Duration::ZERO);
     let one = vm("run-1");
     assert_eq!(
-        driver.exec(&one, &request()),
+        driver.run_command(&one, &request()),
         Err(VmError::step(
             &one,
             Step::Exec,
@@ -231,7 +234,7 @@ fn a_deaf_exec_ignores_the_kill_and_ends_when_the_vm_stops() {
     let one = vm("run-1");
     let running = {
         let (driver, one) = (driver.clone(), one.clone());
-        std::thread::spawn(move || driver.exec(&one, &request()))
+        std::thread::spawn(move || driver.run_command(&one, &request()))
     };
     driver.wait_for(&one, Step::Exec);
     driver.kill(&one);
@@ -242,5 +245,5 @@ fn a_deaf_exec_ignores_the_kill_and_ends_when_the_vm_stops() {
     );
     driver.destroy(&one).unwrap();
     driver.finish(&one);
-    assert_eq!(driver.exec(&one, &request()), Ok(ExecEnd::Exited(0)));
+    assert_eq!(driver.run_command(&one, &request()), Ok(ExecEnd::Exited(0)));
 }

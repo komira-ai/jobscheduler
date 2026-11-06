@@ -6,8 +6,8 @@ use std::time::Duration;
 use js_agent::lifecycle::{Prepared, RunHandle, Runtime, Status, label};
 use js_agent::vm::{VmRuntime, WithVms};
 use js_agent_wire::{LogReport, LogTail, NetworkLevel, refusal};
-use js_vmm::lease::{ExecEnd, Step};
-use js_vmm::lease_fake::FakeDriver;
+use js_vm_lease::fake::FakeDriver;
+use js_vm_lease::{ExecEnd, Step};
 
 use super::super::lifecycle::fake::{FakeRuntime, Log, ManualClock};
 use super::super::native::native;

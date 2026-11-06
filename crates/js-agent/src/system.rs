@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use js_mac_session::client::Client;
-use js_vmm::lease::VmDriver;
+use js_vm_lease::VmDriver;
 
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::{FileReader, Platform, SystemFiles};

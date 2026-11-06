@@ -40,7 +40,7 @@
 //!
 //! Every call names its VM. A VM's state is behind locks of its own, so the steps of one VM
 //! run on one thread while [`VmDriver::kill`] comes from another: `kill` never waits for
-//! `exec`, it only marks the VM killed and writes `Kill` to the guest's connection.
+//! `run_command`, it only marks the VM killed and writes `Kill` to the guest's connection.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -55,9 +55,9 @@ use js_guest::run::{STDERR, STDOUT};
 use js_guest::wire::{End, RunRequest, TOKEN_LEN};
 
 use crate::bundle::{self, Identity};
-use crate::lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 use crate::spec::{Event, ExecBridge, TaggedShare, VmSpec};
 use crate::system::{Poll, System, VmProcess};
+use js_vm_lease::{Collected, ExecEnd, ExecRequest, Step, VmDriver, VmError, VmName, VmSize};
 
 /// The vsock port the guest's agent dials on the host; the helper bridges it to
 /// `exec.sock`. (5000 is the probes' results port, 5001 the guest's shutdown daemon.)
@@ -111,7 +111,7 @@ struct Launched {
     listener: UnixListener,
 }
 
-/// What `kill` and `exec` share.
+/// What `kill` and `run_command` share.
 #[derive(Default)]
 struct Control {
     killed: bool,
@@ -149,14 +149,6 @@ pub struct SystemDriver<S> {
     timing: DriverTiming,
     token: fn() -> io::Result<[u8; TOKEN_LEN]>,
     vms: Mutex<BTreeMap<VmName, Arc<VmState>>>,
-}
-
-/// The driver of the macOS VMs of `store`, started from the signed `js-vmm` binary at
-/// `helper`.
-#[cfg(target_os = "macos")]
-#[must_use]
-pub fn real(helper: PathBuf, store: PathBuf) -> SystemDriver<crate::real::RealSystem> {
-    SystemDriver::new(crate::real::RealSystem::with_helper(helper), store)
 }
 
 impl<S: System + Send + Sync> SystemDriver<S> {
@@ -365,7 +357,7 @@ impl<S: System + Send + Sync> VmDriver for SystemDriver<S> {
         Ok(())
     }
 
-    fn exec(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
+    fn run_command(&self, vm: &VmName, request: &ExecRequest) -> Result<ExecEnd, VmError> {
         let state = self.state(vm, Step::Exec)?;
         let fail = |why: String| VmError::step(vm, Step::Exec, why);
         if lock(&state.control).killed {

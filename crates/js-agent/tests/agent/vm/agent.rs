@@ -4,7 +4,7 @@
 use std::fs;
 use std::sync::Arc;
 
-use js_vmm::lease_fake::FakeDriver;
+use js_vm_lease::fake::FakeDriver;
 use serde_json::Value;
 
 use super::super::native::agent::{native_flags, private};
@@ -66,7 +66,7 @@ fn the_hello_reports_two_vm_slots_with_the_flags_and_none_without() {
     assert_eq!(caps["vm.max_cpus"], cpus.to_string());
     assert_eq!(caps["vm.max_mem_gib"], mem_gib.to_string());
     assert_eq!(caps["runtime"], "sandbox-exec");
-    assert_eq!(driver.calls(), [js_vmm::lease_fake::Call::Leftovers]);
+    assert_eq!(driver.calls(), [js_vm_lease::fake::Call::Leftovers]);
 
     let off = Scratch::new("vm-agent-off");
     let fake = FakeHelper::start(&off);

@@ -4,6 +4,7 @@
 //! driver's calls, never for time.
 
 mod agent;
+mod helper;
 mod lifecycle;
 mod runtime;
 mod split;
@@ -15,8 +16,8 @@ use std::sync::Arc;
 use js_agent::lifecycle::{Body, RunHandle, RunSpec, Runtime, Status, label};
 use js_agent::vm::VmRuntime;
 use js_agent_wire::Isolation;
-use js_vmm::lease::{Step, VmName};
-use js_vmm::lease_fake::FakeDriver;
+use js_vm_lease::fake::FakeDriver;
+use js_vm_lease::{Step, VmName};
 
 /// The VM name of `run_id`.
 pub fn vm(run_id: &str) -> VmName {
