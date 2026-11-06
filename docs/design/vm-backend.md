@@ -61,6 +61,18 @@ above, nothing else. A fake `VmRuntime` (13.1) is the executable spec.
 | `--vm-boot-timeout`, `--vm-log-cap`, `--vm-transfer-cap` | bounds on boot, on spooled log bytes and on archives over the channel |
 | `--vm-allow-shares`, `--vm-allow-writable-shares` | read-only virtual shares, and writable ones (both off) |
 
+**Built so far** (`js-agent::vm`, the `js-vm-lease` seam, `js-vmm`'s `lease_system`): `--vm-driver` (the signed `js-vmm` binary, which the
+agent starts through the disclaiming spawner as `js-vmm lease`, one process per VM, and drives over a JSON-lines protocol) and `--vm-store` (the base image in
+`base`, the clones under `runs/`) turn the backend on, on a Mac beside `--native-helper-socket`; there is no `--vms`: the count is
+fixed at two, what macOS lets one host run, and the hello reports it as `vm.slots` with `vm.max_cpus` and `vm.max_mem_gib` (the
+host's offered CPUs and GiB). A job start says `kind: vm` (an additive field a server sends only to a host that reports `vm.slots`).
+Each run is cloned, booted, run through the guest agent, collected, stopped and destroyed on a thread of its own; a destroy runs on
+every path, and a third VM is refused `no-capacity`, never queued. A VM start on an agent without the backend is refused
+`vm-unavailable`; one that asks for a GPU, run files, network, ports or a `run` body is refused with that field's code. The other flags
+above, the `vm` object of a start, live logs of a VM job (its output reaches the result as its tail) and the base-image choice
+per start are not built yet: every VM boots the one base image. A stop kills the command at once and forces the VM off when the
+command has not ended within the stop grace.
+
 ### `JobSpec`: additive fields (R3)
 
 `runtime` (`container` by default; `vm`), and for `vm` a `vm` object: `base_image` (a name in the host's `base_images`), `outputs`

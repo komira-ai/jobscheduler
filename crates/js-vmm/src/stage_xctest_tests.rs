@@ -553,6 +553,7 @@ mod flow {
             cli,
             Some(&sys),
             crate::probe::Timing::instant(),
+            &mut std::io::empty(),
             &mut out,
             &mut Vec::new(),
         );

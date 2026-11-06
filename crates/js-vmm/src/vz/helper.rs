@@ -7,7 +7,9 @@
 //! thread only waits on channels; it is never needed by the framework.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -28,7 +30,7 @@ use super::config::{self, ConsoleFds};
 use super::{Queued, Shared, describe};
 use crate::guest_command::Arbiter;
 use crate::sink::{self, Limiter, MAX_CONNECTIONS, Results};
-use crate::spec::{Event, SHUTDOWN_COMMAND, VmSpec};
+use crate::spec::{Event, ExecBridge, SHUTDOWN_COMMAND, VmSpec};
 
 /// Prints one event line.
 fn emit(e: &Event) {
@@ -47,6 +49,9 @@ struct Sink {
 struct ObserverIvars {
     /// Present when the spec asks for the guest's frames to be written to files.
     sink: Option<Sink>,
+    /// Present when the spec bridges a vsock port to a Unix socket (the guest agent's
+    /// connection, `lease_system`).
+    bridge: Option<ExecBridge>,
     /// Tells the main thread the guest stopped by itself.
     done: Mutex<Sender<()>>,
     guest_stopped: Arc<AtomicBool>,
@@ -105,6 +110,22 @@ define_class!(
             // keeps alive for this call.
             let port = unsafe { connection.destinationPort() };
             emit(&Event::Vsock { port });
+            if let Some(bridge) = self.ivars().bridge.as_ref().filter(|b| b.port == port) {
+                // SAFETY: as for the sink's connection below: the descriptor stays open for
+                // as long as the retained connection lives, which the thread holds until the
+                // bridge ends.
+                let fd = unsafe { connection.fileDescriptor() };
+                // SAFETY: as for the sink's connection below (`Shared` is only dropped).
+                let keep = unsafe { Shared::new(connection.retain()) };
+                let socket: PathBuf = bridge.socket.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = bridge_connection(fd, &socket) {
+                        eprintln!("js-vmm: vsock port {port}: bridge: {e}");
+                    }
+                    drop(keep);
+                });
+                return Bool::YES;
+            }
             let Some(sink) = &self.ivars().sink else {
                 // SAFETY: as above; the helper does not use the connection afterwards.
                 unsafe { connection.close() };
@@ -135,6 +156,44 @@ define_class!(
     }
 );
 
+/// Copies bytes between the guest's vsock connection `fd` and a new connection to the Unix
+/// socket `socket` (the host agent's listener) until either side closes, then closes the
+/// other. The caller keeps the connection object, and so `fd`, open until this returns.
+///
+/// UNCERTAIN until a Mac runs it: that the connection's descriptor takes `shutdown(2)` to
+/// wake the thread reading it (otherwise the guest-to-host thread ends when the guest
+/// closes), and that the guest's agent dials host vsock port
+/// [`crate::lease_system::EXEC_PORT`].
+fn bridge_connection(fd: RawFd, socket: &Path) -> Result<(), String> {
+    let describe_io = |what: &str, e: std::io::Error| format!("{what}: {e}");
+    let host = UnixStream::connect(socket)
+        .map_err(|e| describe_io(&format!("connect {}", socket.display()), e))?;
+    let mut host_in = host.try_clone().map_err(|e| describe_io("dup host", e))?;
+    // SAFETY: `fd` is open for as long as the caller's connection object lives, which is
+    // until this returns, and it is only borrowed here to be duplicated: the duplicate is
+    // the bridge's own, and the connection object still owns and closes `fd`.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    // The vsock connection is a stream socket: read, write, duplicate and `shutdown(2)` are
+    // the calls the bridge makes, and they are the same for it as for a Unix one.
+    let guest = UnixStream::from(
+        borrowed
+            .try_clone_to_owned()
+            .map_err(|e| describe_io("dup guest", e))?,
+    );
+    let mut guest_in = guest.try_clone().map_err(|e| describe_io("dup guest", e))?;
+    let mut guest_out = guest.try_clone().map_err(|e| describe_io("dup guest", e))?;
+    let mut host_out = host;
+    let to_host = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut guest_in, &mut host_out);
+        let _ = host_out.shutdown(std::net::Shutdown::Both);
+    });
+    let _ = std::io::copy(&mut host_in, &mut guest_out);
+    // Ends the guest's side too, which wakes the copy to the host.
+    let _ = guest.shutdown(std::net::Shutdown::Both);
+    let _ = to_host.join();
+    Ok(())
+}
+
 /// Answers the frames on the connection `fd` until it ends, writing them into `results`.
 /// A connection whose timeouts cannot be set is dropped unread.
 fn serve_connection(fd: RawFd, results: &Results) {
@@ -153,9 +212,11 @@ impl Observer {
         guest_stopped: Arc<AtomicBool>,
         began: Instant,
         sink: Option<Sink>,
+        bridge: Option<ExecBridge>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(ObserverIvars {
             sink,
+            bridge,
             done: Mutex::new(done),
             guest_stopped,
             began,
@@ -387,7 +448,9 @@ pub fn run(spec: &VmSpec) -> Result<(), String> {
     let (start_tx, start_rx) = mpsc::channel::<Result<(), (String, Option<String>)>>();
 
     let cfg = Queued::new(built.config);
-    let ports = spec.vsock_ports.clone();
+    let mut ports = spec.vsock_ports.clone();
+    ports.extend(spec.exec_bridge.iter().map(|b| b.port));
+    let bridge = spec.exec_bridge.clone();
     // Opened before the VM starts, without following a link; every file is made through
     // this descriptor.
     let results = match spec.results_dir.as_deref().map(Results::open).transpose() {
@@ -410,7 +473,7 @@ pub fn run(spec: &VmSpec) -> Result<(), String> {
                 results,
                 limiter: Limiter::new(MAX_CONNECTIONS),
             });
-            let observer = Observer::new(dtx, gs, began, sink);
+            let observer = Observer::new(dtx, gs, began, sink, bridge);
             vm.setDelegate(Some(ProtocolObject::from_ref(&*observer)));
             let mut listeners = Vec::new();
             for dev in vm.socketDevices().iter() {

@@ -9,6 +9,8 @@
 #   JS_NATIVE_PRIV_ROOT=<a new root-owned 0755 directory every user can search down to> \
 #     ./native_privileged --ignored --test-threads=1 --nocapture
 # (libtest flags come first.) The helper's users get the uids 680 to 689.
+# The binary also holds the real-VM test of the VM runtime (tests/native_privileged/vm.rs), which
+# needs `js-vmm` (signed) and `vm-store/base` (a base image) in that directory; it boots one VM.
 #
 # Manual runs only. It publishes nothing: the binary is a workflow artifact for seven days.
 name: js-agent-native-privileged-tests

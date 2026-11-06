@@ -81,6 +81,7 @@ pub fn start(
         image_allow: _,
         egress: _,
         silence_stop,
+        vm,
     } = local;
     // `Local` holds at most one of the two, and a state root and a scratch root with it.
     let (backend, scratch, state) = match (container, native, scratch, state) {
@@ -122,6 +123,7 @@ pub fn start(
         rescue_bound: seams.rescue_bound,
         readiness: seams.readiness,
         silence_stop: Some(silence_stop),
+        vm,
     })
     .map_err(|why| format!("{flag}: {why}"))?;
     worker.take_lines().iter().for_each(|line| {

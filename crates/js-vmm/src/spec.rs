@@ -22,6 +22,17 @@ pub struct TaggedShare {
     pub read_only: bool,
 }
 
+/// A vsock port the host bridges to a Unix socket: when the guest connects to `port`, the
+/// helper connects to `socket` and copies bytes both ways until either side closes. The
+/// host agent listens on `socket`, so the guest's agent is reached without any network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecBridge {
+    /// The vsock port the guest connects to.
+    pub port: u32,
+    /// The Unix socket the helper connects to for each guest connection.
+    pub socket: PathBuf,
+}
+
 /// One VM to run, from a bundle on disk (see `bundle`). There is no network device: the
 /// type has no field for one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +58,10 @@ pub struct VmSpec {
     /// Without it a connection is only counted and closed.
     #[serde(default)]
     pub results_dir: Option<PathBuf>,
+    /// When set, the guest's connections to this vsock port are bridged to a Unix socket
+    /// on the host instead of being served into `results_dir`.
+    #[serde(default)]
+    pub exec_bridge: Option<ExecBridge>,
 }
 
 impl VmSpec {
@@ -63,6 +78,7 @@ impl VmSpec {
             vsock_ports: Vec::new(),
             console_ports: Vec::new(),
             results_dir: None,
+            exec_bridge: None,
         }
     }
 }
@@ -185,6 +201,17 @@ mod tests {
         assert_eq!(s.results_dir, None);
     }
 
+    /// Catches a spec file written before `exec_bridge` existed no longer loading, and a
+    /// default that bridges a port nobody asked for.
+    #[test]
+    fn a_spec_without_an_exec_bridge_still_loads_with_none() {
+        let text = serde_json::to_string(&VmSpec::minimal("/b".into())).expect("json");
+        let mut v: serde_json::Value = serde_json::from_str(&text).expect("value");
+        v.as_object_mut().expect("object").remove("exec_bridge");
+        let s: VmSpec = serde_json::from_value(v).expect("old spec");
+        assert_eq!(s.exec_bridge, None);
+    }
+
     /// Catches a spec that loses a field on its way to the helper's file.
     #[test]
     fn a_spec_round_trips_through_json() {
@@ -208,6 +235,10 @@ mod tests {
         s.vsock_ports = vec![5000];
         s.console_ports = vec!["kbf.probe".into()];
         s.results_dir = Some("/share/results".into());
+        s.exec_bridge = Some(ExecBridge {
+            port: 5002,
+            socket: "/run/exec.sock".into(),
+        });
         let text = serde_json::to_string(&s).expect("json");
         assert_eq!(serde_json::from_str::<VmSpec>(&text).expect("parse"), s);
     }
