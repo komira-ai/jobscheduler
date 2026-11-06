@@ -291,6 +291,8 @@ impl Checker {
             } => self.heartbeat(&worker, &running),
             // The world switches no node's session.
             Event::Phase { .. } => unreachable!("F4 feeds no node phase"),
+            // The world ends no host.
+            Event::HostEnd { .. } => unreachable!("F4 feeds no host end"),
             Event::Submit { waiter, request } => self.submit(waiter, request),
             Event::Committed(ControlRecord::Lease(grant)) => self.lease_committed(&grant),
             Event::Committed(ControlRecord::Result(record)) => self.result_committed(&record),

@@ -174,6 +174,20 @@ fn every_event_has_its_fixed_spelling() {
             Event::Uncordon { worker: worker() },
             "uncordon(worker=w1)".to_owned(),
         ),
+        (
+            Event::HostEnd {
+                worker: worker(),
+                ends_at: Some(FarmTime::from_millis(9_000)),
+            },
+            "host_end(worker=w1 ends_at=9000)".to_owned(),
+        ),
+        (
+            Event::HostEnd {
+                worker: worker(),
+                ends_at: None,
+            },
+            "host_end(worker=w1 ends_at=none)".to_owned(),
+        ),
     ];
     for (event, expected) in &cases {
         assert_eq!(&trace_text::event(event), expected);

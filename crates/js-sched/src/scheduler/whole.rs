@@ -372,6 +372,8 @@ impl Scheduler {
     /// the latest time there is, so a worker holding it drains last. Set it with the
     /// submit and again for an operation taken up after a restart (a recovered lease's
     /// start is the recovery, so its bound is that plus this). Dropped with the operation.
+    /// When the operation is placed on a worker whose host ends ([`crate::Event::HostEnd`]), the
+    /// time is cut to the time left ([`Scheduler::max_wall`]).
     pub fn set_max_wall(&mut self, operation: OperationId, max_wall: Duration) {
         self.max_walls.insert(operation, max_wall);
     }
@@ -384,14 +386,17 @@ impl Scheduler {
         let mut ends: BTreeMap<&WorkerId, Vec<(u64, Option<u64>)>> = BTreeMap::new();
         for held in self.held.values() {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            let end = self.end_times(held.operation, start);
+            let end = self.end_times(held.operation, (start, self.lease_host_end(held.operation)));
             let holding = self.ops[&held.operation].state.holding();
             holding
                 .into_iter()
                 .for_each(|(_, worker)| ends.entry(worker).or_default().push(end));
         }
         for (operation, placed) in placed {
-            let end = self.end_times(*operation, self.now.as_millis());
+            let end = self.end_times(
+                *operation,
+                (self.now.as_millis(), self.host_end_ms(&placed.worker)),
+            );
             ends.entry(&placed.worker).or_default().push(end);
         }
         let loads: Vec<HostLoad> = self
@@ -414,10 +419,15 @@ impl Scheduler {
     /// The end bound (start plus max wall time, the latest time there is for a lease with
     /// none) and the estimated end (start plus the P90 of the wall minutes of its key, raw;
     /// unknown when the key has none) of a lease of `operation` started at `start`.
-    fn end_times(&self, operation: OperationId, start: u64) -> (u64, Option<u64>) {
+    fn end_times(
+        &self,
+        operation: OperationId,
+        (start, host_end): (u64, u64),
+    ) -> (u64, Option<u64>) {
         let bound = self.max_walls.get(&operation).map_or(u64::MAX, |wall| {
             start.saturating_add(u64::try_from(wall.as_millis()).unwrap_or(u64::MAX))
         });
+        let bound = bound.min(host_end);
         let key = &self.ops[&operation].request.key;
         let estimate = self
             .admission
@@ -443,12 +453,18 @@ impl Scheduler {
         };
         let held = self.held.iter().map(|(lease, held)| {
             let start = held.started_at.unwrap_or(held.granted_at).as_millis();
-            (*lease, end(self.end_times(held.operation, start)))
+            (
+                *lease,
+                end(self.end_times(held.operation, (start, self.lease_host_end(held.operation)))),
+            )
         });
         let now = self.now.as_millis();
-        let this_round = (0u64..).zip(placed).map(|(i, (operation, _))| {
+        let this_round = (0u64..).zip(placed).map(|(i, (operation, placed))| {
             let lease = LeaseId::new(self.term, self.next_seq.saturating_add(i));
-            (lease, end(self.end_times(*operation, now)))
+            (
+                lease,
+                end(self.end_times(*operation, (now, self.host_end_ms(&placed.worker)))),
+            )
         });
         held.chain(this_round).collect()
     }
@@ -605,6 +621,7 @@ impl Scheduler {
             let mark = self
                 .drain
                 .mark(id, (&name, tail), turn.kept, self.now, cfg, max_wall);
+            let mark = self.end_bounded(mark);
             let start = mark
                 .tail_end
                 .and_then(|end| backfill::kept(Some(end.as_millis()), tail));
