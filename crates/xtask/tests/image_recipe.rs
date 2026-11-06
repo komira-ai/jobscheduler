@@ -594,6 +594,60 @@ fn the_program_writes_the_recipes() {
     }
 }
 
+/// Asserts that `--pins` selects the pins file the recipes are made from: given another file
+/// under `--root`, whose js-agent pin of linux-x86_64 differs, the program writes that pin into
+/// the linux-x86_64 recipe and seed, and the default pins file, still under the root, is not read
+/// (its pin appears nowhere).
+#[test]
+fn the_pins_flag_selects_another_pins_file() {
+    let root = copied_root("pins-flag");
+    let default = text(&root, PINS);
+    let pins = image::parse_pins(Path::new(PINS), &default).expect("pins");
+    let old = pins.of(image::Arch::X86_64).js_agent.clone();
+    let (url, sha) = (
+        "https://example.org/js-agent-9.9.9-x86_64-unknown-linux-musl.tar.gz",
+        "9".repeat(64),
+    );
+    let other = default
+        .replacen(&old.url, url, 1)
+        .replacen(&old.sha256.to_string(), &sha, 1);
+    assert_ne!(other, default);
+    let rel = "packaging/machine-image/other-pins.toml";
+    std::fs::write(root.join(rel), other).expect("write");
+    let out = root.join("out");
+    let program = Command::new(XTASK)
+        .args(["image-recipe", "--out"])
+        .arg(&out)
+        .arg("--root")
+        .arg(&*root)
+        .args(["--pins", rel])
+        .output()
+        .expect("xtask");
+    assert_eq!(program.status.code(), Some(0), "{program:?}");
+    let recipe = recipe(&out, "linux-x86_64");
+    let agent = &recipe["archives"][2];
+    assert_eq!(agent["name"], "js-agent");
+    assert_eq!(
+        (&agent["url"], &agent["sha256"]),
+        (&Value::from(url), &Value::from(sha.as_str()))
+    );
+    for platform in ["linux-x86_64", "linux-arm64"] {
+        for name in ["recipe.json", "user-data"] {
+            let written = text(&out, &format!("{platform}/{name}"));
+            assert!(!written.contains(&old.url), "{platform}/{name}");
+        }
+    }
+    assert!(
+        text(&out, "linux-x86_64/user-data")
+            .contains(&format!("{sha}  /var/tmp/js-image/js-agent.tar.gz"))
+    );
+    assert_eq!(
+        text(&root, PINS),
+        default,
+        "the default pins file is left as it was"
+    );
+}
+
 /// Asserts that the machine-image workflow starts only by hand (no pull request, push or
 /// schedule), holds only read access to the repository and no secret, pins every action by a
 /// commit SHA, runs on GitHub-hosted runners, writes the recipe with the verb, and runs no command

@@ -37,8 +37,11 @@ build refuses a download whose SHA-256 differs. The units enabled at boot are
 The image holds no credential, token, server address or worker property. The crun unit is written
 at build time with the server `https://set-by-user-data.invalid` and the pool `set-by-user-data`,
 which never resolve and which the user data replaces. `cargo xtask image-recipe` refuses a pins
-key, or a key in any file the image bakes (a `NAME=` or a `--name`), that looks like secret
-material (a token, a password, a key), naming the file, the line or field, and the key.
+key, or a key in a baked configuration file (the units, the drop-in, the mount unit and the
+tmpfiles file; a `NAME=` or a `--name` on any line), that looks like secret material (a token, a
+password, a key), naming the file, the line or field, and the key. The baked
+`crun_host_setup.sh` is not scanned: it is a program, whose shell variables are not settings, and
+the recipe pins it by its SHA-256.
 
 ### The crun host setup
 
@@ -143,7 +146,8 @@ what it would do, and only then run it again without the dry-run flag.
    `gh run download <run id> --name machine-image-<arch>`. Check that `recipe.json` in it equals
    the recipe `cargo xtask image-recipe` writes at the run's commit, and note the recipe's
    SHA-256 the run printed.
-2. Make the disk the cloud imports: `qemu-img convert -O raw image.qcow2 disk.raw`.
+2. Make the disk the cloud imports from the artifact's image, `jobscheduler-linux-<arch>.qcow2`
+   (`<arch>` the architecture of the run): `qemu-img convert -O raw jobscheduler-linux-<arch>.qcow2 disk.raw`.
 3. EC2:
    1. `aws s3 cp --dryrun disk.raw s3://<bucket>/<name>.raw`, then without `--dryrun`.
    2. `aws ec2 import-snapshot --dry-run --disk-container Format=RAW,UserBucket="{S3Bucket=<bucket>,S3Key=<name>.raw}"`,
