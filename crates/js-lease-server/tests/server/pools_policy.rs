@@ -33,13 +33,26 @@ async fn the_status_routes_are_on_the_listen_port_only_and_need_no_token() {
 }
 
 /// Asserts that a server run on flags, which has no elastic pool, answers the route with
-/// no pools.
+/// no pools, and with the health of its store paths before any tick: no failure, no
+/// alert, no lock (it has no store setting) and the default window.
 #[tokio::test]
 async fn a_server_without_an_elastic_pool_lists_none() {
     let h = Harness::new("policy_flags").await;
     let reply = request(h.addr(), "GET", "/v1/pools", None, None).await;
     assert_eq!(reply.status, 200);
-    assert_eq!(reply.json(), json!({ "pools": [], "warnings": [] }));
+    let store = json!({
+        "consecutive_failures": 0,
+        "failing_since_ms": null,
+        "last_error": null,
+        "last_ok_ms": null,
+        "latency_ms": null,
+        "lock": "none",
+        "unreachable_after_ms": 60_000,
+        "unreachable": false,
+        "alerts": {},
+    });
+    let expected = json!({ "pools": [], "warnings": [], "store": store });
+    assert_eq!(reply.json(), expected);
 }
 
 /// Asserts which addresses are private: the loopback, the private ranges, link-local, the

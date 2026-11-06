@@ -1,0 +1,83 @@
+# The sweep of the simulation cell: the smoke family (crates/js-sim-cell/tests/sweep.rs) over
+# far more seeds than a pull request runs, split into shards, one job a shard
+# (docs/simulation.md, "Sweep many seeds"). It runs every night and by hand; it is not a
+# check of pull requests.
+#
+# GitHub-hosted runners only, actions pinned to commit SHAs, and no permission beyond
+# reading the repository. It writes nothing anywhere: a failing seed is printed in its
+# shard's log, with the failure report and the command that replays it.
+#
+# A nightly run starts at the run's id, so each night sweeps seeds no night swept before;
+# the sweep binary's first line of output (`sweep: seeds ...`) names each shard's seeds.
+#
+# No Cargo cache is restored: ci.yml's caches hold its jobs' debug builds, which a release
+# build cannot reuse, and only a push to main saves a cache.
+name: sim-sweep
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed_start:
+        description: The first seed of the sweep
+        required: true
+        default: "0"
+        type: string
+      seed_count:
+        description: How many seeds the sweep runs, over all its shards
+        required: true
+        default: "64"
+        type: string
+      shards:
+        description: How many shards (jobs) the seeds are split into
+        required: true
+        default: "4"
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: 0
+  # The inputs of a run by hand; a nightly run's are its id, 2,400 seeds and 16 shards.
+  SEED_START: ${{ github.event_name == 'schedule' && github.run_id || inputs.seed_start }}
+  SEED_COUNT: ${{ github.event_name == 'schedule' && '2400' || inputs.seed_count }}
+  SHARDS: ${{ github.event_name == 'schedule' && '16' || inputs.shards }}
+
+jobs:
+  # The shard numbers, 0 to SHARDS - 1, as the JSON list the sweep's matrix reads.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      shards: ${{ steps.list.outputs.shards }}
+    steps:
+      - id: list
+        name: List the shards
+        run: jq -rn --argjson n "$SHARDS" '"shards=\([range($n)])"' >> "$GITHUB_OUTPUT"
+
+  sweep:
+    name: sweep (shard ${{ matrix.shard }})
+    needs: plan
+    runs-on: ubuntu-latest
+    # A release build (about 20 minutes), then about 150 seeds at about nine seconds each.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      # Every shard runs to its end, so one red night names every failing seed.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Sweep one shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: cargo test --release --locked -p js-sim-cell --test sweep -- --start "$SEED_START" --count "$SEED_COUNT" --shards "$SHARDS" --shard "$SHARD"

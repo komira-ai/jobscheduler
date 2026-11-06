@@ -40,6 +40,7 @@
 //! | `--state-file <path>` | the lease file |
 //! | `--store <path>` | none unless given: an owner-only file (as `--token-file`'s is) holding the store's connection on one line, `postgres://...` or `postgresql://...`, or `sqlite:<absolute path>`; the server takes the store's writer lock before anything else (see "The store" below). Its content is never printed |
 //! | `--allow-sqlite-store` | off by default: accepts a `sqlite:` store, which is for tests and single-node development; without it such a store is refused at start naming this flag. No effect with a Postgres store. Needs `--store` |
+//! | `--store-unreachable-after <duration>` | `60s`: how long the store paths of the tick (the lease file's write, the job pass over the job tables) may fail tick after tick before `/healthz` answers 503 `store unreachable` and the alert `store:unreachable` holds; the first tick whose store work succeeds clears both. Zero or an unparsable value is refused at start naming the flag |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | the pool's shared join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Optional: without it the pool admits only hosts whose one-time join token verifies. Needs `--agent-pool-config` |
@@ -97,6 +98,7 @@
 //! tls_key           = "/run/credentials/js/tls-key"
 //! # store: the path of an owner-only file holding the store's connection (never the
 //! # connection itself); allow_sqlite_store (false): refused as true without store
+//! # store_unreachable_after ("60s"): the flag's name, default and rules
 //! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
@@ -118,7 +120,7 @@
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
-//! # scaler is also POSTed as {source, key, text} JSON
+//! # scaler, and the store's store:unreachable, is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every
 //! # alert_repeat_after while it holds, and again if it clears and returns; delivery is off the
 //! # tick path. The token file (owner-only) holds the bearer token the receiver wants. The token
@@ -397,8 +399,8 @@
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape {cpu_millis, memory_bytes, gpus, gpu_class?, disk_bytes?}, memory {configured_bytes, schedulable_percent, bookable_bytes}, capabilities, labels, lease?, leases?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `leases` lists every lease on the host in booking order and is left out when the host has at most one (`lease` is the first); `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host; so is `cordon {expires_at_ms}`, present while the host is cordoned (see "Cordon" below: a cordon left by a dead hook lapses within its last `lease_secs`, at most 3600 s after its last extension, or the host's own `:uncordon` lifts it) |
-//! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /healthz` | 200 `ok`, no token; 503 `tick loop stopped` once the tick loop has stopped; else 503 `store unreachable` while the tick's store paths have failed for `--store-unreachable-after` (until a tick's store work succeeds) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, memory {configured_bytes, schedulable_percent, bookable_bytes}, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines {host, state, offer, zone, price_cents_per_hour, provider_id}, orphans, last_tick_ms, scaler, next_launch}], warnings, store}`; `store` is `{consecutive_failures, failing_since_ms, last_error, last_ok_ms, latency_ms, lock, unreachable_after_ms, unreachable, alerts}`, the health of the tick's store paths, `last_error` a kind (`disconnected`, `failed`, `fenced`, `stale_cursor`, `lease_file`) and never an error's text, `lock` `none`, `held` or `lost`, `alerts` by key; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `POST /v1/pools/{pool}/brake/reset` | 202 `{pool, reset: "requested"}`; 401; 404 for another pool |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
@@ -805,7 +807,8 @@
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
 //! ticks the table (then advances the agent registry, when agent registration is on) at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
-//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped. On
+//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped, or while the
+//! store paths have failed for `--store-unreachable-after`. On
 //! SIGTERM or ctrl-c the server stops accepting, gives the requests
 //! in flight `--drain-timeout` to finish (a connection still open then is cut), ticks
 //! once more and exits 0. If that last tick cannot write the lease file the file is
@@ -874,6 +877,7 @@ mod sched;
 mod server;
 mod status;
 mod store;
+mod store_health;
 mod ticker;
 mod tls;
 mod usage;

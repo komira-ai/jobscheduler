@@ -1,7 +1,8 @@
 # The watcher and the abort (`js-watch`)
 
 The lease server tells an operator about leaks: the scaler's alerts are on `/v1/pools` and
-`/status`, and (with `server.alert_webhook_url`) are POSTed to a webhook. A server that is down or
+`/status`, and (with `server.alert_webhook_url`) are POSTed to a webhook, as is the store's
+`store:unreachable`, which every ticking server raises, scaler or not. A server that is down or
 wedged tells nobody, which is when machines leak. `js-watch` is a separate program that does not run
 inside the server; run it on a different host.
 
@@ -13,7 +14,7 @@ read-only key, if the cloud offers one, would make it true of the credential too
 
 | part | does | holds |
 |---|---|---|
-| `server.alert_webhook_url` | every alert key of the scaler is POSTed `{source, key, text}` when it begins to hold, again every `server.alert_repeat_after` (default 1 h) while it holds, and again if it clears and returns. Delivery is on a thread of its own with a bounded queue (64; the oldest is dropped and counted), so a receiver that refuses or hangs never delays a scaler tick. A refused POST is retried after 5 s, doubling to 10 min, and stays pending until delivered once even if the alert clears meanwhile | a URL, and (optional) a bearer token read from an owner-only file |
+| `server.alert_webhook_url` | every alert key of the scaler, and the store's `store:unreachable` (the tick's store paths have failed for `server.store_unreachable_after`), is POSTed `{source, key, text}` when it begins to hold, again every `server.alert_repeat_after` (default 1 h) while it holds, and again if it clears and returns. Delivery is on a thread of its own with a bounded queue (64; the oldest is dropped and counted), so a receiver that refuses or hangs never delays a tick of the scaler or of the table. A refused POST is retried after 5 s, doubling to 10 min, and stays pending until delivered once even if the alert clears meanwhile | a URL, and (optional) a bearer token read from an owner-only file |
 | `js-watch run` | each tick: compares the cloud's list of the scheduler's instances with the machines on the server's `GET /v1/pools`; checks that `last_tick_ms` still moves; every `sweep_every_secs` lists leftovers; alerts through the same webhook | read-only handles only (no launch, no terminate) |
 | `js-watch abort` | stops every instance that carries one scheduler id; dry run unless `--apply` | the cloud client that can terminate, built only for this command |
 

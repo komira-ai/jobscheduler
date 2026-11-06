@@ -185,10 +185,11 @@ async fn a_running_server_sends_its_alerts_to_the_sink() {
     assert_eq!(pools["pools"][0]["last_tick_ms"], T0);
 }
 
-/// Asserts that a file that names a webhook but has no elastic pool starts and serves
-/// (there is no scaler to give the sink to) and says at start that no alert has a source.
-/// It catches a silent webhook that an operator believes is watching, and a start that refuses a server for
-/// having a place to send alerts it can never raise.
+/// Asserts that a file that names a webhook but has no elastic pool starts and serves, with
+/// no warning that no alert has a source: the store's `store:unreachable` is raised by every
+/// server that ticks, scaler or not. It catches a start that refuses a server for having a
+/// place to send alerts, and a warning that tells the operator the webhook is idle when it
+/// is not.
 #[tokio::test]
 async fn a_server_without_a_scaler_starts_with_a_webhook_named() {
     let (scratch, config) = loaded(
@@ -196,10 +197,11 @@ async fn a_server_without_a_scaler_starts_with_a_webhook_named() {
         "alert_webhook_url = \"http://127.0.0.1:9/never\"",
     );
     let config = config.unwrap();
-    let warned = config.warnings().iter().any(|warning| {
-        warning.contains("server.alert_webhook_url is set but no pool launches machines")
-    });
-    assert!(warned, "{:?}", config.warnings());
+    let warned = config
+        .warnings()
+        .iter()
+        .any(|warning| warning.contains("server.alert_webhook_url"));
+    assert!(!warned, "{:?}", config.warnings());
     let h = Harness::over(scratch, config).await;
     let health = h.call("GET", "/healthz", None).await;
     assert_eq!(health.status, 200, "{}", health.body);
