@@ -766,9 +766,9 @@ fn nothing_may_come_from_kbf_as_any_kind_of_dependency() {
     assert_eq!(copy.found(), [from_kbf("Cargo.toml", "step-contract")]);
 
     for (kind, name) in [
-        ("dependencies", "kbf-normal"),
-        ("dev-dependencies", "kbf-dev"),
-        ("build-dependencies", "kbf-build"),
+        ("dependencies", "kbf-none-normal"),
+        ("dev-dependencies", "kbf-none-dev"),
+        ("build-dependencies", "kbf-none-build"),
     ] {
         let copy = Copy::new(name);
         copy.edit("Cargo.toml", "[workspace.dependencies]", root);
