@@ -34,14 +34,22 @@ use tower::ServiceExt;
 /// A time in milliseconds since the Unix epoch above 2^53: a JSON number would round it.
 pub const BIG: u64 = (1 << 53) + 1;
 
-/// One call as the stub received it: the method's name and the encoded request.
+/// One call as the stub received it: the method's name, the encoded request, and the
+/// [`Marker`] its extensions carried, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Call {
     /// The method's name in the service, such as `GetJob`.
     pub rpc: &'static str,
     /// The request message, encoded.
     pub request: Vec<u8>,
+    /// The marker a layer in front of the router set on the HTTP request.
+    pub marker: Option<Marker>,
 }
+
+/// A value a layer in front of the router sets in the extensions of an HTTP request, as a
+/// server's bearer layer sets who the caller is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker(pub String);
 
 /// A [`JobService`] that records every call and answers each with a fixed sample, or every
 /// call with one status.
@@ -89,6 +97,7 @@ impl Stub {
             .push(Call {
                 rpc,
                 request: request.get_ref().encode_to_vec(),
+                marker: request.extensions().get::<Marker>().cloned(),
             });
         match &self.failure {
             Some(status) => Err(status.clone()),
@@ -406,6 +415,7 @@ pub fn job() -> Job {
         times: Some(times()),
         host_silent_since_ms: Some(BIG + 4000),
         cancel_requested: true,
+        client: Some("client-a".to_owned()),
     }
 }
 

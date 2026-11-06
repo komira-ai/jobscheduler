@@ -31,8 +31,8 @@
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
-//! the bearer token, is read from a file that only its owner can use.
+//! below has a key in the file, and a flag given beside `--config` is refused. The secrets,
+//! the bearer tokens, are read from files that only their owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
@@ -48,7 +48,7 @@
 //! | `--placement registry\|js-sched` | who picks the host of a lease on a host that registered itself, `registry` unless given. `registry` books the first free host by id: a lease holds a whole host, and a class that books part of a host is refused `unsupported-class`. `js-sched` keeps one `js-sched` scheduler for the life of the server, built once and told of every hello, accepted heartbeat (with its load reading) and stop as the registry takes them, and of every host the registry forgets, and books the host it names among the hosts that could take the lease (they fit it, have room beside the leases already there, and are bookable): for a class that books part of a host, the hosts' load readings choose among those that still fit, then the host the lease fits most tightly, so the most booked first, equal hosts by a hash of the lease and the host; a lease that books a whole host is not scored and takes the first free host by id, as under `registry`. A start costs time in the open hosts plus their leases, under the registry's lock; the scheduler is built again only when its picture of those hosts and the registry's books disagree, keeping each host's last three readings (the two windows its load is read from), and the start is counted. A class that books part of a host is then leasable, and its leases share a host that has room, a host running its first lease taking a second. The registry still checks the room (CPU up to `--cpu-slack` over a host's cores) and makes the booking. The pool's `memory_schedulable_percent` is the scheduler's rule under this placement: the registry books each host's whole `[shape]` and the scheduler books no more than the percent of its memory; a request above the percent still fits no host (`no-fit`), and `GET /v1/hosts` still shows the cut memory as `shape.memory_bytes`, beside the percent. A request the scheduler cannot describe is booked on the first host with room for it within the pool's memory percent (none if no host has, and the start answers `no-capacity`); one the scheduler places nowhere is booked nowhere (`no-capacity`); each is counted and logged. A host a whole-node request has set aside takes, under `js-sched`, a lease of the pool's `share_class` (not a probe) only as backfill: when its max wall time ends, with a minute to spare, by the end of the host's tail as the mark took it, a wall time above `server.max_lease_wall` never does, and a host whose tail is unknown or past takes none; the registry's own placement keeps such a host for its request alone. The flag is refused at start for a pool whose capabilities name no `arch`. Leases restored from the lease file are seated with the resources it records whatever the flag says now. Needs `--agent-pool-config` |
 //! | `--cpu-slack <multiplier>` | how far above a host's cores the scheduler of `--placement js-sched` may charge it, from `1.0` to `2.0` with at most three decimals, such as `1.1`; the scheduler's own default (1.1) unless given. The registry's book lets the leases sharing a host book that much CPU and no more of anything else. Needs `--placement js-sched` (refused naming it otherwise) and `--agent-pool-config` |
 //! | `--estimate-feed` | off by default. When a whole-node request has to pick a host to drain, each lease is costed at its estimated end, cut to its max-wall bound: the lease's start plus the largest P90 wall time, among the profiles the usage file has learned, of the runs queued on it with a profile name. A lease with no such run is costed at its bound, as every lease is without the flag, and a lease with neither (no such run, and a max wall so long that its end saturates) ranks its host after every host whose tail is known. A usage sink that keeps no curves leaves every lease at its bound. A lease restored from the lease file keeps the start and the bound the file records (its acquire, or for a whole-node lease the moment it was ready). Needs `--agent-pool-config`; not with `--usage-off` |
-//! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
+//! | `--token-file <path>`, `--client-token <NAME>=<PATH>` | `--token-file`: required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start. The token of the lease routes, and on the job service the token of the client named `default`. `--client-token`: repeatable, none by default: one more client of the job service (see `docs/design/configuration.md`), its name (1 to 40 bytes of letters, digits, `.`, `_` and `-`, each name once, not `default`) and the file of its own token, checked as `--token-file`'s is. A bad entry is refused by its position without repeating it; a short token, a file others can read, a name or a token another client has, and a token the join token file holds are refused naming the entry, never the token. Needs `--job-listen` |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `250ms`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file; a symbolic link (as secret mounts are) is followed and the file it leads to is checked, so a link to a 0600 key is accepted and a link to a group-readable one is refused. Both are read at start and again on SIGHUP: a renewed pair is served from the next handshake, with no restart (connections already open keep theirs). The pair is checked whole first (key owner-only, key matches the certificate, certificate valid now by the server's clock); one that fails is refused with a logged error and the old pair stays |
@@ -77,7 +77,7 @@
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
 //! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
-//! `join_token_file`, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
+//! `join_token_file`, a `--client-token` a `[[client]]` table, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
 //! value of the file; a syntax error says the line. Nothing is checked over the network
@@ -170,11 +170,11 @@
 //! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
 //! passed) and `live_until_ms`.
 //!
-//! Failure brake. A refused launch (quota, denied, a shape that fits nothing), a boot given up
+//! Failure brake. A refused launch (denied, a shape that fits nothing), a boot given up
 //! on, and a spot preemption count as failures, but a pool is struck at most once in a step
 //! (a wave of reclaims, or several launches of one step refused together, is one failure). A
 //! machine whose host has been heard from, unbroken, for `boot_fail_reset_after` (`"10m"`, from
-//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or a refusal the pool launches nothing for 10 minutes, doubled
+//! a minute to 24 hours) ends the count; a host that says hello and goes quiet does not. After a boot failure or such a refusal the pool launches nothing for 10 minutes, doubled
 //! for each further failure in a row up to `boot_fail_cooldown_max` (`"2h"`, from 10
 //! minutes to 24 hours); after `boot_fail_trip_after` failures in a row (3, from 1 to 100) the brake trips
 //! the pool to `plan`: it launches nothing, `GET /v1/pools` shows `launch` as `plan` and
@@ -286,8 +286,8 @@
 //! a positive duration) and the `provider_limits` tables (for a launching machine provider
 //! of the pool's platforms; unknown keys are refused) are read and checked. Admission reads
 //! `allowed_instance_types`, `max_price_cents_per_hour` and `max_machines` (see "Admission"
-//! below); `catalog_refresh` (a positive duration, one hour when not given; zero is
-//! refused) is how long the provider's cached catalog is used before the tick fetches it
+//! below); `quota_backoff` and `acquire_retry` (1h and 60s by default) time pass 2's failover;
+//! `catalog_refresh` (a positive duration, one hour, zero refused) is how long the provider's cached catalog is used before the tick fetches it
 //! again; `offer_cooldown` (the same) is how long an offer that is cooled down is passed
 //! over by the pick of an offer, which nothing enters yet; and `path_grace` is how long a
 //! whole-node request of the pool waits once no host could serve it (the registry's
@@ -330,8 +330,8 @@
 //! HTTP/1.1 and HTTP/2 on it, whichever the client starts with: a request whose content type
 //! is `application/grpc` (with any suffix) goes to the gRPC service, every other request to
 //! its HTTP/JSON gateway (`js-api-gateway`, routes under `/v1/`, listed in
-//! `docs/http-gateway.md`). Both are behind one check of the bearer token of `--token-file`:
-//! without it a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
+//! `docs/http-gateway.md`). Both are behind one check of the token of a client (`default`, of `--token-file`, or a `--client-token`, whose name each job records; `docs/design/configuration.md`):
+//! without one a gRPC call is answered `UNAUTHENTICATED` with an empty message and an HTTP
 //! request 401 with an empty body. A request carries at most 64 KiB over either transport.
 //! The job calls are served: `SubmitJob` (validated, idempotent on the job id, admitted over
 //! the registered hosts and the pool's catalog, committed before it answers; its wall limit
@@ -531,9 +531,9 @@
 //! the grace period) and serving. A host that goes silent keeps its lease and reads
 //! `Unknown` until it is heard again or the lease ends by its ttl or a release.
 //!
-//! **Tokens.** The join tokens and the client token are different secrets: each is a 401
-//! with an empty body on the other's routes, and a join-token file that holds the client
-//! token is refused. A file may hold several tokens, so that a new one can be added
+//! **Tokens.** The join tokens and the client tokens are different secrets: each is a 401
+//! with an empty body on the other's routes, and a join-token file that holds the token of
+//! any client is refused. A file may hold several tokens, so that a new one can be added
 //! before an old one is removed; the file is read again at every tick, and a read that
 //! fails (a half-saved edit, a mode that is no longer private) keeps the tokens in force,
 //! is logged and is counted in [`Running::agent_errors`]. A host id is bound to the

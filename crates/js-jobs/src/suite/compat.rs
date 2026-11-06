@@ -158,6 +158,7 @@ pub fn a_row_this_build_cannot_read_refuses_every_write<B: Backend>(backend: &B)
                         id: Some(id.clone()),
                         spec: full_spec(),
                         priority: 0,
+                        client: None,
                     })
                     .map(drop),
             ),

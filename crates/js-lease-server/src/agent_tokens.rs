@@ -6,7 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use js_registry::Credential;
 
-use crate::config::{Token, parse_token, read_private};
+use crate::config::{Clients, Token, parse_token, read_private};
 use crate::error::StartupError;
 
 /// The most tokens the file may hold. A request is compared against each of them, so the
@@ -30,20 +30,20 @@ struct Accepted {
 /// no shared token file ([`AgentTokens::none`]) accepts no shared token, so only the
 /// one-time tokens of launched hosts can register one.
 pub(crate) struct AgentTokens {
-    /// The file the set comes from and the client token it is checked against; `None` for
-    /// a pool with no shared token.
-    file: Option<(PathBuf, Token)>,
+    /// The file the set comes from and the clients whose tokens it is checked against;
+    /// `None` for a pool with no shared token.
+    file: Option<(PathBuf, Clients)>,
     accepted: RwLock<Arc<Vec<Accepted>>>,
 }
 
 impl AgentTokens {
-    /// Reads the file at `path`. `client` is the token of the lease routes: the two
-    /// kinds of token must differ, or the join token would open the lease routes' side
-    /// of the server's trust and the other way round.
-    pub(crate) fn open(path: &Path, client: &Token) -> Result<Self, StartupError> {
-        let accepted = read(path, client)?;
+    /// Reads the file at `path`. `clients` are the clients of the server, the token of the
+    /// lease routes (`default`) among them: a join token must be none of theirs, or it
+    /// would open the clients' side of the server's trust and the other way round.
+    pub(crate) fn open(path: &Path, clients: &Clients) -> Result<Self, StartupError> {
+        let accepted = read(path, clients)?;
         Ok(Self {
-            file: Some((path.to_path_buf(), client.clone())),
+            file: Some((path.to_path_buf(), clients.clone())),
             accepted: RwLock::new(Arc::new(accepted)),
         })
     }
@@ -60,10 +60,10 @@ impl AgentTokens {
     /// Reads the file again and, when it is valid, replaces the set. The file's text is
     /// never in the error. With no file there is nothing to read and the call is `Ok`.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
-        let Some((path, client)) = &self.file else {
+        let Some((path, clients)) = &self.file else {
             return Ok(());
         };
-        let accepted = read(path, client)?;
+        let accepted = read(path, clients)?;
         *self
             .accepted
             .write()
@@ -118,15 +118,16 @@ fn parse(bytes: &[u8]) -> Result<Vec<Token>, String> {
 }
 
 /// Reads and checks the file: owner-only like the client token file, every line a token
-/// of at least [`crate::MIN_TOKEN_BYTES`], none the client token.
-fn read(path: &Path, client: &Token) -> Result<Vec<Accepted>, StartupError> {
+/// of at least [`crate::MIN_TOKEN_BYTES`], none the token of a client. A refusal names the
+/// client's entry and never the token.
+fn read(path: &Path, clients: &Clients) -> Result<Vec<Accepted>, StartupError> {
     let bytes = read_private(path, FLAG)?;
     let named = |reason: String| StartupError::new(FLAG, format!("{} {reason}", path.display()));
     let tokens = parse(&bytes).map_err(named)?;
-    if tokens.iter().any(|token| token.same_as(client)) {
-        return Err(named(
-            "holds the client token (--token-file): the two must differ".to_string(),
-        ));
+    if let Some(client) = tokens.iter().find_map(|token| clients.holder_of(token)) {
+        return Err(named(format!(
+            "holds the client token of {client}: the two must differ"
+        )));
     }
     Ok(tokens
         .into_iter()

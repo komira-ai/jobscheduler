@@ -337,6 +337,7 @@ mod tests {
             result: None,
             retention_ends,
             deadline_floor: None,
+            client: None,
             carried: crate::codec::Carried::default(),
         }
     }

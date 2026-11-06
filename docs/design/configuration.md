@@ -21,6 +21,7 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--max-job-wall` | `server.max_job_wall`, `"30d"` unless given (the job service's default, the longest `server.max_lease_wall` accepts; it does not follow `server.max_lease_wall`): the most a submitted job's wall limit may be, as a whole count of days or a duration such as `12h` or `90m`, at least one second; zero, a negative or unparsable value, or less than a second is refused at start naming the flag or the key. A job asking for more is refused `wall-time-above-ceiling`. It is read once at start; without `--job-listen` it is checked and kept, and nothing reads it |
 | none (the file only) | `server.alert_webhook_url`, `server.alert_webhook_token_file` and `server.alert_repeat_after`: every alert of the scaler is also POSTed as `{source, key, text}` JSON to the URL (`https`, or `http` to a loopback address) when it begins to hold, again every `alert_repeat_after` (default 1h, plus up to one tick and the receiver's latency) while it holds, and again if it clears and returns; delivery is off the tick path; the token file is owner-only and holds the bearer token the receiver wants; both other keys are refused without the URL |
 | `--token-file` | `server.client_token_file` |
+| `--client-token NAME=PATH` (repeatable) | a `[[client]]` table with `name` and `token_file`: one more client of the job service (see "The job service's port" below); refused without `--job-listen` (`server.job_listen`) |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
 | `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
@@ -30,9 +31,24 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 `--job-listen <addr>` (`server.job_listen`) serves the job service (`jobscheduler.v1.JobService`) on a port of its own. It is off
 by default: without it the server binds no other port, opens no job store and behaves as before. On, one listener speaks HTTP/1.1
 and HTTP/2 on that port: a request whose content type is `application/grpc` goes to the gRPC service, every other request to the
-HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind the one bearer token of `--token-file`; a request without
-it is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one TLS
-setup and one connection cap for the service, whichever client calls it.
+HTTP/JSON gateway ([http-gateway.md](../http-gateway.md)). Both are behind one check of the bearer token of a client; a request
+without one is answered `UNAUTHENTICATED` (gRPC) or 401 with an empty body (HTTP). One port for both protocols keeps one address, one
+TLS setup and one connection cap for the service, whichever client calls it.
+
+The clients are `default`, whose token is the one of `--token-file`, and one per `--client-token NAME=PATH` or `[[client]]` table:
+
+```toml
+[[client]]
+name       = "ci"                             # 1 to 40 bytes of letters, digits, '.', '_' and '-'; unique; not "default"
+token_file = "/run/credentials/js/ci-token"   # owner-only (0600 or 0400), one token of at least 32 bytes, as client_token_file
+```
+
+A start is refused, naming the entry and never the token, for two clients of one name, a client named `default`, a name that is not
+one, a short token, a token file others can read, the same token in two entries, and a client token that the join token file of the
+pool also holds. The server keeps each named client's token only as its SHA-256 digest, compares a presented token with every
+client's, records the client's name on each job it submits (`Job.client`, and the `client` filter of `ListJobs`), and logs the
+client and the job on each call's line. Every client may read and cancel every job; job ids are one namespace. To revoke a client,
+remove its entry and restart the server: the set is read at start only, and a restart ends no job.
 
 - **TLS.** The rule of `--listen`: an address off the loopback is refused at start without `--tls-cert` and `--tls-key` (the same two
   flags, not new ones), with a message naming `--job-listen` and saying that a bearer token never crosses a network in clear. With
@@ -144,6 +160,8 @@ allowed_instance_types = ["gpu_1x_a10"] # names, none empty, none twice
 max_price_cents_per_hour = 200          # 1 or more
 max_machines = 2                        # 1 or more, at most the pool's
 max_spot_machines = 1                   # at most this table's max_machines
+quota_backoff = "1h"                    # default 1h; a positive duration, zero is refused
+acquire_retry = "60s"                   # default 60s; a positive duration, zero is refused
 catalog_refresh = "1h"                  # default 1h; a positive duration, zero is refused
 offer_cooldown = "1h"                   # default 1h; a positive duration, zero is refused
 ```
@@ -167,8 +185,12 @@ machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the p
 it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
 next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance
 type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it; it is read and checked,
-and nothing enters a cool-down yet (the check of a host's hello against its offer will). Zero for either is refused, naming the key: a
-zero refresh would ask the cloud at every tick, and a zero cool-down is none. A limit
+and nothing enters a cool-down yet (the check of a host's hello against its offer will). `quota_backoff` is how long, after the provider refuses a launch for quota, pass 2 passes over that
+instance type in that region (in that zone, for providers whose zones are regions); the provider as a whole is not braked.
+`acquire_retry` is how long a request waits when every offer was refused or passed over: it stays waiting and pass 2 asks again after
+this long, or at once after a completed catalog refresh. Zero for any of the four is refused, naming the key: a
+zero refresh would ask the cloud at every tick, a zero cool-down is none, a zero back-off passes over nothing, and a zero retry would
+ask at every tick. A limit
 names a launching machine provider of the pool's platforms (a `static` one launches nothing and is refused), and an unknown key in it is
 refused.
 

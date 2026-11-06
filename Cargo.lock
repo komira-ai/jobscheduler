@@ -1374,6 +1374,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "subtle",
  "thiserror",
  "tokio",
@@ -1606,6 +1607,18 @@ version = "0.1.0"
 dependencies = [
  "js-provider",
  "js-types",
+]
+
+[[package]]
+name = "js-provider-gce"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-elastic",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

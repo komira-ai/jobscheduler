@@ -22,7 +22,7 @@ The gateway's router holds `/v1/hosts`, `/v1/pools` and `/v1/usage` and every pa
 (`/v1/hosts/{*rest}` and so on), so the two routers cannot be merged as they are: axum refuses
 the overlapping routes. The server that mounts the gateway beside the lease routes has to
 decide which one answers those paths. The lease server therefore does not mount the gateway beside its lease routes: it serves
-the gateway and the gRPC service together on a port of their own, `--job-listen`, behind its one bearer token
+the gateway and the gRPC service together on a port of their own, `--job-listen`, behind the bearer tokens of its clients
 ([configuration.md](design/configuration.md)).
 
 ## Routes
@@ -153,9 +153,16 @@ code this version does not know, is a 500 `internal`. The crate's goldens
 The lease server holds the job service in `crates/js-lease-server/src/job_api/`: one service
 object that both transports call, gRPC (the generated `JobService` server) and this gateway,
 with one bearer layer in front of both. A request that does not present
-`Authorization: Bearer <token>` with the server's token reaches no call: over gRPC it is
-answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The token is the one the
-lease routes take, compared by the same code.
+`Authorization: Bearer <token>` with the token of one of the server's clients reaches no call:
+over gRPC it is answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The
+clients are `default`, whose token is the one the lease routes take (`--token-file`), and each
+`--client-token` of the server; a presented token is compared with every client's. A request
+that passes goes to its call as that client: `SubmitJob` records the client's name on the job,
+and every answer that carries a job shows it as `client` (absent on a job recorded before
+clients were named). The name comes from the token, never from the request. Every client may
+call every method on every job: job ids are one namespace, so the same id with the same job
+from any client answers the existing job with the client that recorded it, and another job
+under the id is `job-id-conflict` whoever sends it.
 
 Both transports are served on the port of `--job-listen` (off by default). Every call answers
 `UNIMPLEMENTED` (over the gateway, 501 `unimplemented`) until the file of its group in that
@@ -208,8 +215,9 @@ that has not ended (queued, placed, starting or running) empty tails and `trunca
 never an error. Live output is read with a stream.
 
 **`ListJobs`** keeps the jobs in any of the `states` (a state this server does not know
-matches none), carrying every one of the `labels` with the same value, and queued in the
-half-open window from `queuedAfterMs` (in) to `queuedBeforeMs` (out). Jobs come in the order
+matches none), carrying every one of the `labels` with the same value, submitted by the
+`client` of that name when it is given (a job recorded with no client matches none), and
+queued in the half-open window from `queuedAfterMs` (in) to `queuedBeforeMs` (out). Jobs come in the order
 of their ids. A page holds 100 jobs when the request asks for 0, and at most 1000: a larger
 `pageSize` is cut to 1000, not refused. A call reads the table 1000 rows at a time and stops
 when its page is full, at the end of the table, or after 10,000 rows; so a page is short only

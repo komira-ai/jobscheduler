@@ -19,8 +19,8 @@
 //! - [`Offer`] is what one launchable thing would give, and [`Offer::fit`] says whether
 //!   it serves a [`Demand`] (an alias of `js_types::Requirements`), naming the
 //!   [`Dimension`] it fails. An offer may say how it is bought ([`Purchase`], with the
-//!   [`BlockTerms`] of a reserved block) and the account's vCPU [`Quota`] for it, both
-//!   information the fit does not read.
+//!   [`BlockTerms`] of a reserved block) and the account's vCPU and accelerator [`Quota`]
+//!   for it, both information the fit does not read.
 //! - [`Acquired`], [`Released`] and [`Held`] are the answers. A release that answers
 //!   [`Released::Unknown`] means "not known": callers must retry it, never read it as
 //!   "gone".
@@ -66,7 +66,7 @@ pub use boot::{
 pub use cache::{Catalog, CatalogCache, Cooldowns, Instant, OfferKey, Recorded};
 pub use caps::{Capacity, ProviderCaps};
 pub use ids::{AcquireId, Hello, HostName, HostRef, InvalidId, SchedulerId, SignedIdentity};
-pub use offer::{BlockTerms, Demand, Dimension, Offer, PriceUnit, Purchase, Quota};
+pub use offer::{BlockTerms, Demand, Dimension, Offer, PriceUnit, Purchase, Quota, QuotaLimit};
 pub use provider::{
     AcquireRequest, CapacityProvider, CatalogFuture, CheckResult, EventStream, ProviderError,
     ProviderEvent,

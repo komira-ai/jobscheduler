@@ -126,6 +126,7 @@ mod backfill;
 pub mod ceiling;
 mod cordon;
 mod devices;
+pub mod failover;
 pub mod fence;
 pub mod harness;
 mod headroom;

@@ -57,6 +57,7 @@ where
     same_id_same_job_returns_the_existing_row(backend);
     same_id_different_job_is_a_conflict(backend);
     a_priority_only_difference_is_the_same_job(backend);
+    a_retry_by_another_client_keeps_the_first(backend);
     the_same_job_is_found_by_value_not_by_bytes(backend);
     a_concurrent_insert_answers_from_the_job_it_made(backend);
     minted_ids_do_not_repeat_across_instances(backend);
@@ -139,6 +140,7 @@ macro_rules! job_store_tests {
             same_id_same_job_returns_the_existing_row,
             same_id_different_job_is_a_conflict,
             a_priority_only_difference_is_the_same_job,
+            a_retry_by_another_client_keeps_the_first,
             the_same_job_is_found_by_value_not_by_bytes,
             a_concurrent_insert_answers_from_the_job_it_made,
             minted_ids_do_not_repeat_across_instances,
@@ -242,6 +244,7 @@ impl<S: Store> Rig<S> {
                 id: Some(job_id(text)),
                 spec,
                 priority: 0,
+                client: None,
             })
             .expect("a fresh job is recorded");
         assert!(inserted.created, "a fresh job is created");
