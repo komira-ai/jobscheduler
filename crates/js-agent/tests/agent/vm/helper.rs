@@ -48,9 +48,9 @@ impl Launch for Served {
         self.launches.fetch_add(1, Ordering::SeqCst);
         let driver = Arc::clone(&self.driver);
         let session = session_to(move |helper| {
-            let input = BufReader::new(helper.try_clone().unwrap());
+            let mut input = BufReader::new(helper.try_clone().unwrap());
             let mut output = helper;
-            let _ = serve(&*driver, input, &mut output);
+            let _ = serve(&*driver, &mut input, &mut output);
         });
         Ok(Launched {
             session,
@@ -60,13 +60,13 @@ impl Launch for Served {
 }
 
 /// A driver whose helpers serve `driver`, and the count of the helpers started.
-fn served(driver: &Arc<FakeDriver>) -> (HelperDriver<Served>, Arc<AtomicUsize>) {
+fn served(driver: &Arc<FakeDriver>) -> (HelperDriver, Arc<AtomicUsize>) {
     let launches = Arc::new(AtomicUsize::new(0));
     let launch = Served {
         driver: Arc::clone(driver),
         launches: Arc::clone(&launches),
     };
-    (HelperDriver::new(launch), launches)
+    (HelperDriver::new(Box::new(launch)), launches)
 }
 
 /// Asserts that each call of a VM's life reaches the driver behind the helper and comes back
@@ -222,7 +222,7 @@ impl Launch for Answering {
 /// as success.
 #[test]
 fn a_reply_out_of_turn_is_an_error_of_the_call() {
-    let helpers = HelperDriver::new(Answering(Reply::Names { names: Vec::new() }));
+    let helpers = HelperDriver::new(Box::new(Answering(Reply::Names { names: Vec::new() })));
     let one = vm("run-1");
     let said = |step: Step| VmError::step(&one, step, "the VM helper answered Names { names: [] }");
     assert_eq!(helpers.clone_base(&one), Err(said(Step::Clone)));
@@ -232,7 +232,7 @@ fn a_reply_out_of_turn_is_an_error_of_the_call() {
     assert_eq!(helpers.collect(&one, 1), Err(said(Step::Collect)));
     assert_eq!(helpers.stop(&one), Err(said(Step::Stop)));
     assert_eq!(helpers.destroy(&one), Err(said(Step::Destroy)));
-    let helpers = HelperDriver::new(Answering(Reply::Done));
+    let helpers = HelperDriver::new(Box::new(Answering(Reply::Done)));
     assert_eq!(
         helpers.leftovers(),
         Err(VmError::List("the VM helper answered Done".to_owned()))
@@ -248,7 +248,10 @@ fn a_reply_out_of_turn_is_an_error_of_the_call() {
 fn the_real_launcher_starts_the_driver_and_reports_one_that_is_no_helper() {
     let dir = Scratch::new("vm-helper-launch");
     let store = dir.path("store");
-    let missing = HelperDriver::new(HelperLaunch::new(dir.path("no-js-vmm"), store.clone()));
+    let missing = HelperDriver::new(Box::new(HelperLaunch::new(
+        dir.path("no-js-vmm"),
+        store.clone(),
+    )));
     let one = vm("run-1");
     let error = missing.clone_base(&one).unwrap_err().to_string();
     assert!(
@@ -263,7 +266,7 @@ fn the_real_launcher_starts_the_driver_and_reports_one_that_is_no_helper() {
     );
 
     let quits = dir.write("quits", "#!/bin/sh\nexit 0\n", 0o755);
-    let quitting = HelperDriver::new(HelperLaunch::new(quits, store));
+    let quitting = HelperDriver::new(Box::new(HelperLaunch::new(quits, store)));
     let error = quitting.clone_base(&one).unwrap_err().to_string();
     assert!(
         error.starts_with("VM run-1: clone failed: the VM helper: "),

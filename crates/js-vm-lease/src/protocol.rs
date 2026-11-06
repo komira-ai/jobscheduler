@@ -107,7 +107,8 @@ fn reply_of<T>(result: Result<T, VmError>, ok: impl FnOnce(T) -> Reply) -> Reply
     result.map_or_else(|error| Reply::Failed { error }, ok)
 }
 
-/// Makes the call `request` names on `driver`. A kill is made by [`serve`] as it reads it.
+/// Makes the call `request` names on `driver`. [`serve`] makes a kill as it reads it and
+/// sends no reply to it.
 fn answer(driver: &dyn VmDriver, request: Request) -> Reply {
     let done = |()| Reply::Done;
     match request {
@@ -140,7 +141,7 @@ fn answer(driver: &dyn VmDriver, request: Request) -> Reply {
 /// The input could not be read or a reply could not be written.
 pub fn serve(
     driver: &dyn VmDriver,
-    input: impl BufRead + Send,
+    input: &mut (dyn BufRead + Send),
     output: &mut dyn Write,
 ) -> io::Result<()> {
     let (calls, queue) = mpsc::channel::<Result<Request, String>>();
@@ -148,7 +149,10 @@ pub fn serve(
         let reader = scope.spawn(move || -> io::Result<()> {
             for line in input.lines() {
                 match serde_json::from_str::<Request>(&line?) {
-                    Ok(Request::Kill { vm }) => driver.kill(&vm),
+                    // A kill is made here, as it is read, and answered by nothing.
+                    Ok(kill @ Request::Kill { .. }) => {
+                        let _ = answer(driver, kill);
+                    }
                     Ok(request) => {
                         let _ = calls.send(Ok(request));
                     }
@@ -241,8 +245,8 @@ mod tests {
     use super::*;
     use crate::fake::{Call, FakeDriver};
 
-    /// Asserts that a kill handed to `answer` (which `serve` never does: it kills as it
-    /// reads) still kills and answers done. Catches a kill that is dropped on this path.
+    /// Asserts that `answer` makes a kill on the driver and answers done (a reply `serve`
+    /// drops: a kill gets none). Catches a kill that is dropped on this path.
     #[test]
     fn a_kill_answered_in_turn_still_kills() {
         let driver = FakeDriver::new();

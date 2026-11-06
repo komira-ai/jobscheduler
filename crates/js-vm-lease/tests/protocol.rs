@@ -20,9 +20,9 @@ fn served(driver: &Arc<FakeDriver>) -> (Arc<Session>, JoinHandle<io::Result<()>>
     let (agent, helper) = UnixStream::pair().unwrap();
     let driver = Arc::clone(driver);
     let service = std::thread::spawn(move || {
-        let input = BufReader::new(helper.try_clone()?);
+        let mut input = BufReader::new(helper.try_clone()?);
         let mut output = helper;
-        serve(&*driver, input, &mut output)
+        serve(&*driver, &mut input, &mut output)
     });
     let requests = Box::new(agent.try_clone().unwrap());
     let session = Session::new(requests, Box::new(BufReader::new(agent)));
@@ -131,9 +131,9 @@ fn a_line_that_is_no_request_is_refused_and_the_service_goes_on() {
     let service = {
         let driver = Arc::clone(&driver);
         std::thread::spawn(move || {
-            let input = BufReader::new(helper.try_clone()?);
+            let mut input = BufReader::new(helper.try_clone()?);
             let mut output = helper;
-            serve(&*driver, input, &mut output)
+            serve(&*driver, &mut input, &mut output)
         })
     };
     agent
@@ -183,10 +183,10 @@ impl Read for Unreadable {
 #[test]
 fn the_service_ends_when_it_cannot_write_or_read() {
     let driver = FakeDriver::new();
-    let input = Cursor::new(b"{\"op\":\"leftovers\"}\n".to_vec());
-    let wrote = serve(&driver, input, &mut Broken).unwrap_err();
+    let mut input = Cursor::new(b"{\"op\":\"leftovers\"}\n".to_vec());
+    let wrote = serve(&driver, &mut input, &mut Broken).unwrap_err();
     assert_eq!(wrote.to_string(), "the agent is gone");
-    let read = serve(&driver, BufReader::new(Unreadable), &mut Vec::new()).unwrap_err();
+    let read = serve(&driver, &mut BufReader::new(Unreadable), &mut Vec::new()).unwrap_err();
     assert_eq!(read.to_string(), "the pipe broke");
 }
 

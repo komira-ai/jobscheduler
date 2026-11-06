@@ -81,8 +81,8 @@ struct Helper {
 }
 
 /// The driver; see the [module](self).
-pub struct HelperDriver<L> {
-    launch: L,
+pub struct HelperDriver {
+    launch: Box<dyn Launch>,
     vms: Mutex<BTreeMap<VmName, Helper>>,
 }
 
@@ -103,9 +103,9 @@ fn done(vm: &VmName, step: Step, reply: Reply) -> Result<(), VmError> {
     }
 }
 
-impl<L: Launch> HelperDriver<L> {
+impl HelperDriver {
     /// A driver whose VM helpers `launch` starts.
-    pub fn new(launch: L) -> Self {
+    pub fn new(launch: Box<dyn Launch>) -> Self {
         Self {
             launch,
             vms: Mutex::new(BTreeMap::new()),
@@ -150,7 +150,7 @@ fn end(helper: Helper) {
     }
 }
 
-impl<L: Launch> VmDriver for HelperDriver<L> {
+impl VmDriver for HelperDriver {
     fn clone_base(&self, vm: &VmName) -> Result<(), VmError> {
         let reply = self.call(vm, Step::Clone, &Request::Clone { vm: vm.clone() })?;
         done(vm, Step::Clone, reply)

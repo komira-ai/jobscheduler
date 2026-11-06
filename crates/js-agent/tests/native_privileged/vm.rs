@@ -40,7 +40,7 @@ fn a_command_runs_in_a_fresh_vm_and_the_vm_is_destroyed() {
     let root = Path::new(&root);
     let store = root.join("vm-store");
     let launch = HelperLaunch::new(root.join("js-vmm"), store.clone());
-    let mut rt = VmRuntime::new(Arc::new(HelperDriver::new(launch)));
+    let mut rt = VmRuntime::new(Arc::new(HelperDriver::new(Box::new(launch))));
     let spec = RunSpec {
         run_id: "vm-priv-1".to_owned(),
         body: Body::Container {

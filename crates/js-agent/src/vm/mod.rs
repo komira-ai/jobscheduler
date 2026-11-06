@@ -183,7 +183,7 @@ pub fn with_vms(
 #[cfg(target_os = "macos")]
 pub fn system_driver(settings: &VmSettings) -> Result<Arc<dyn VmDriver>, String> {
     let launch = HelperLaunch::new(settings.driver.clone(), settings.store.clone());
-    Ok(Arc::new(HelperDriver::new(launch)))
+    Ok(Arc::new(HelperDriver::new(Box::new(launch))))
 }
 
 /// The VMs of this machine: none, off macOS.
