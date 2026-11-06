@@ -171,6 +171,7 @@ pub fn a_backlog_of_freed_allocations_clears_over_several_ticks<B: Backend>(back
         .txn(bulk)
         .expect("reachable")
         .expect("unconditional puts commit");
+    rig.reindex();
     rig.clock.advance(WINDOW);
 
     let mut left = allocations(&*rig.store).len();

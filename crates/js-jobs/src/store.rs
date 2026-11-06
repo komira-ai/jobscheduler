@@ -7,9 +7,7 @@ use std::sync::Arc;
 use js_state::{Commit, Cond, ResumeToken, ScanRange, Store, Txn, Version, Versioned};
 use js_types::HostId;
 
-use crate::codec::{
-    Carried, DecodeError, decode_allocation, decode_job, encode_allocation, encode_job,
-};
+use crate::codec::{Carried, DecodeError, decode_allocation, decode_job};
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
 use crate::keys;
@@ -21,7 +19,10 @@ use crate::result::{JobEnd, Output, Retention};
 
 mod ending;
 mod hosts;
+mod index;
 mod queue;
+
+pub use index::Backfill;
 
 pub use queue::queue_order;
 
@@ -144,12 +145,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// The job store over `store`, minting ids from `ids`. The schema row is read; when there
     /// is none, this build's version is written with `Cond::Absent`, and when another store
     /// wrote one first, that one is read. A version above this build's is accepted, since rows
-    /// change only by adding fields. As with every operation, an error means nothing was
-    /// written: no read follows the commit that writes the row.
+    /// change only by adding fields. Then the index backfill runs
+    /// ([`JobStore::backfill_indexes`]), so the store opened reads indexes that agree with its
+    /// tables. An error of the schema step means nothing was written; one of the backfill may
+    /// follow committed batches of it, which the next open completes.
     ///
     /// # Errors
     /// [`JobStoreError::Store`] when the store fails; [`JobStoreError::Corrupt`] when the
-    /// schema row is not four bytes.
+    /// schema row is not four bytes; as [`JobStore::backfill_indexes`].
     pub fn new(store: Arc<S>, ids: I) -> Result<JobStore<S, I>, JobStoreError> {
         let schema = match store.get(keys::SCHEMA)? {
             Some(row) => schema_of(Some(row))?,
@@ -166,13 +169,15 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 }
             }
         };
-        Ok(JobStore {
+        let jobs = JobStore {
             store,
             ids,
             schema,
             retention: Retention::DEFAULT,
             allocation_retention: Retention::ALLOCATION_DEFAULT,
-        })
+        };
+        jobs.backfill_indexes()?;
+        Ok(jobs)
     }
 
     /// The same job store keeping each job that ends from now on for `retention` after its
@@ -292,7 +297,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             return Ok(found);
         }
         let record = self.queued_record(id, spec, priority, client);
-        let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
+        let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
         match self.store.txn(txn)? {
             Ok(_) => Ok(Inserted {
                 record,
@@ -316,7 +321,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         for _ in 0..MINT_TRIES {
             let id = JobId::minted(self.ids.mint()?);
             let record = self.queued_record(id, spec.clone(), priority, client.cloned());
-            let txn = Txn::new().put(keys::job(&record.id), encode_job(&record)?, Cond::Absent);
+            let txn = index::put_job(Txn::new(), None, &record, Cond::Absent)?;
             if self.store.txn(txn)?.is_ok() {
                 return Ok(Inserted {
                     record,
@@ -356,7 +361,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 found: job.state,
             },
         )?;
-        let (allocation_cond, earlier_id) = match self.read_allocation(id)? {
+        let earlier = self.read_allocation(id)?;
+        let (allocation_cond, earlier_id) = match &earlier {
             None => (Cond::Absent, None),
             Some((earlier, version)) => {
                 ensure(
@@ -366,7 +372,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                         step: earlier.step,
                     },
                 )?;
-                (Cond::Version(version), Some(earlier.allocation_id))
+                (Cond::Version(*version), Some(earlier.allocation_id))
             }
         };
         let allocation_id = self.fresh_allocation_id(earlier_id)?;
@@ -388,19 +394,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             state: JobState::Placed,
             host: Some(host),
             placed_at: Some(now),
-            ..job
+            ..job.clone()
         };
-        let txn = Txn::new()
-            .put(
-                keys::job(id),
-                encode_job(&placed)?,
-                Cond::Version(job_version),
-            )
-            .put(
-                keys::allocation(id),
-                encode_allocation(&allocation)?,
-                allocation_cond,
-            );
+        let txn = index::put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
+        let earlier = earlier.as_ref().map(|(record, _)| record);
+        let txn = index::put_allocation(txn, earlier, &allocation, allocation_cond)?;
         self.commit(id, txn)?;
         Ok((placed, allocation))
     }
@@ -444,13 +442,9 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             started_at: (next == JobState::Running)
                 .then_some(now)
                 .or(job.started_at),
-            ..job
+            ..job.clone()
         };
-        let txn = Txn::new().put(
-            keys::job(id),
-            encode_job(&moved)?,
-            Cond::Version(job_version),
-        );
+        let txn = index::put_job(Txn::new(), Some(&job), &moved, Cond::Version(job_version))?;
         self.commit(id, txn)?;
         Ok(moved)
     }
@@ -501,25 +495,21 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             state: JobState::Queued,
             host: None,
             placed_at: None,
-            ..job
+            ..job.clone()
         };
         let freed = AllocationRecord {
             step: AllocationStep::Freed,
             freed_at: Some(now),
             end_reason: Some(EndReason::FailedPrepare),
-            ..allocation
+            ..allocation.clone()
         };
-        let txn = Txn::new()
-            .put(
-                keys::job(id),
-                encode_job(&queued)?,
-                Cond::Version(job_version),
-            )
-            .put(
-                keys::allocation(id),
-                encode_allocation(&freed)?,
-                Cond::Version(allocation_version),
-            );
+        let txn = index::put_job(Txn::new(), Some(&job), &queued, Cond::Version(job_version))?;
+        let txn = index::put_allocation(
+            txn,
+            Some(&allocation),
+            &freed,
+            Cond::Version(allocation_version),
+        )?;
         self.commit(id, txn)?;
         Ok((queued, freed))
     }
@@ -542,7 +532,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         let asked = JobRecord {
             cancel_requested: true,
             cancel_requested_at: Some(now),
-            ..job
+            ..job.clone()
         };
         let (txn, next) = if asked.state == JobState::Queued {
             let cancelled = JobEnd::Cancelled {
@@ -551,11 +541,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             };
             self.end_txn(asked, job_version, cancelled, now)?
         } else {
-            let txn = Txn::new().put(
-                keys::job(id),
-                encode_job(&asked)?,
-                Cond::Version(job_version),
-            );
+            let txn = index::put_job(Txn::new(), Some(&job), &asked, Cond::Version(job_version))?;
             (txn, asked)
         };
         self.commit(id, txn)?;
@@ -582,13 +568,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         }
         let releasing = AllocationRecord {
             step: AllocationStep::Releasing,
-            ..allocation
+            ..allocation.clone()
         };
-        let txn = Txn::new().put(
-            keys::allocation(id),
-            encode_allocation(&releasing)?,
+        let txn = index::put_allocation(
+            Txn::new(),
+            Some(&allocation),
+            &releasing,
             Cond::Version(version),
-        );
+        )?;
         self.commit(id, txn)?;
         Ok(releasing)
     }
@@ -625,13 +612,14 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             step: AllocationStep::Freed,
             freed_at: Some(self.store.now()),
             end_reason: Some(reason),
-            ..allocation
+            ..allocation.clone()
         };
-        let txn = Txn::new().put(
-            keys::allocation(id),
-            encode_allocation(&freed)?,
+        let txn = index::put_allocation(
+            Txn::new(),
+            Some(&allocation),
+            &freed,
             Cond::Version(version),
-        );
+        )?;
         self.commit(id, with_rows(txn, beside(&freed)))?;
         Ok(freed)
     }
@@ -697,7 +685,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     }
 
     /// What the live (booked and releasing) allocations on `host` book, summed. It reads
-    /// every allocation row, freed ones included.
+    /// the rows of the host's on-host entries and the allocation rows this build cannot read.
     ///
     /// # Errors
     /// [`JobStoreError::UnknownRow`] or [`JobStoreError::Corrupt`] when an allocation row
@@ -705,7 +693,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// [`JobStoreError::BookingOverflow`]; [`JobStoreError::Store`].
     pub fn booked_on(&self, host: &HostId) -> Result<HostBooking, JobStoreError> {
         let mut total = HostBooking::default();
-        for (key, row) in self.store.scan_prefix(keys::ALLOCATION)? {
+        let on_host = keys::on_host_prefix(host);
+        let spans = [
+            index::Span::all(&on_host),
+            index::Span::all(keys::UNREAD_ALLOCATION),
+        ];
+        for (key, row) in self.indexed_rows(&spans)? {
             let allocation = allocation_at(&key, &row.value)?;
             if allocation.host == *host && allocation.step != AllocationStep::Freed {
                 total = total

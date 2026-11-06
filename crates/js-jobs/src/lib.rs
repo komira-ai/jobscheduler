@@ -34,6 +34,20 @@
 //! | `job/<id>` | the job's [`JobRecord`] |
 //! | `alloc/<id>` | the [`AllocationRecord`] of the job `<id>`: one allocation per job at a time, found from its job without a scan |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
+//! | `idx/job/active/<id>` | empty: the job has not ended |
+//! | `idx/job/due/<end>/<id>` | empty: the job has a retention end, `<end>` its nanoseconds on the store's clock as twenty digits |
+//! | `idx/alloc/host/<host>/<id>` | empty: the job's allocation is live (booked or releasing) on `<host>` |
+//! | `idx/alloc/freed/<at>/<id>` | empty: the job's allocation was freed at `<at>`, as twenty digits |
+//! | `idx/job/unread/<id>`, `idx/alloc/unread/<id>` | empty: the row is one this build cannot read (a later build's, or one that does not parse) |
+//!
+//! The `idx/` keys are secondary indexes: each write of a job or allocation row moves the
+//! row's entries in the same transaction, and every read the tick, the placement engine and a
+//! heartbeat make goes through them, so none scans a table whose size grows with history. A
+//! read judges the row an entry points at, never the entry alone. [`JobStore::new`] runs
+//! [`JobStore::backfill_indexes`], which makes the entries agree with the rows the tables hold
+//! (rows an earlier release wrote included), so every open, a server's start among them,
+//! begins from indexes that agree. A key under `idx/` this build does not name is left as it
+//! is.
 //!
 //! A job id is 1 to 63 bytes of letters, digits, `.`, `_` and `-` ([`JobId::parse`]), so a
 //! key never needs escaping. A minted job id is 128 random bits as 32 lowercase hex digits;
@@ -75,7 +89,11 @@
 //!
 //! Two reads serve the placement engine: [`JobStore::queued`], every queued job in queue
 //! order ([`queue_order`]: the higher priority first, then the earlier submit, then the job
-//! id), and [`JobStore::live_allocations`], every booked or releasing allocation.
+//! id), and [`JobStore::live_allocations`], every booked or releasing allocation. Both read
+//! through the `idx/` entries.
+//!
+//! Every operation that writes also moves the `idx/` entries of the rows it writes, in the
+//! same transaction (the table above names only the rows).
 //!
 //! Times are the store's own clock ([`Store::now`](js_state::Store::now)); nothing here reads
 //! a system clock.
@@ -115,6 +133,6 @@ pub use result::{
     RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Beside, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, Row, SCHEMA_VERSION,
-    queue_order,
+    Backfill, Beside, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, Row,
+    SCHEMA_VERSION, queue_order,
 };
