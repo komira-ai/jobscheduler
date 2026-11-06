@@ -452,7 +452,7 @@ fn a_pending_grant_is_kept_by_the_heartbeats_and_let_go_with_its_host() {
 /// Catches: a host held for a request not presented since a restart taken by another, or
 /// the engine holding a host its own request holds outside itself (the request could then
 /// not take it). `a` is held outside: `r` is granted `b`. Told the marks the registry
-/// shows (both), the engine holds `a` outside and not `b`.
+/// shows (both), the engine holds `a` outside and not `b`; told none, it holds nothing.
 #[test]
 fn a_host_held_outside_is_left_and_the_engines_own_is_not_held_outside() {
     let mut e = engine(&[("a", &[]), ("b", &[])]);
@@ -463,6 +463,9 @@ fn a_host_held_outside_is_left_and_the_engines_own_is_not_held_outside() {
     let shown = MarkedTails::from([(host("a"), None), (host("b"), None)]);
     e.mark(&shown);
     assert_eq!(e.outside, BTreeSet::from([host("a")]));
+    // Once the registry no longer shows `a` set aside, the engine lets it go.
+    e.mark(&MarkedTails::new());
+    assert!(e.outside.is_empty());
 }
 
 /// Catches: a request whose operation the scheduler finished (refused as unservable)
