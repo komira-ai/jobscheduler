@@ -33,7 +33,7 @@ use js_state::StoreTime;
 use js_types::{ExecMode, HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
 
 use crate::error::JobStoreError;
-use crate::ids::{AllocationId, JobId};
+use crate::ids::{AllocationId, ClientName, JobId};
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, JobRecord,
     JobSpec, JobState, Needs, NetworkPolicy, StartFailure,
@@ -129,6 +129,8 @@ pub(crate) mod job_tag {
     pub const RESULT_USAGE: u16 = 40;
     /// The earliest instant a time limit may end the job (time).
     pub const DEADLINE_FLOOR: u16 = 41;
+    /// The name of the client that submitted the job (text).
+    pub const CLIENT: u16 = 42;
 }
 
 /// The tags of an allocation row.
@@ -360,6 +362,10 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put_opt(t::RETENTION_ENDS, job.retention_ends.map(time));
     result_fields::put_result(&mut row, job.result.as_ref());
     row.put_opt(t::DEADLINE_FLOOR, job.deadline_floor.map(time));
+    row.put_opt(
+        t::CLIENT,
+        job.client.as_ref().map(|name| text(name.as_str())),
+    );
     row.finish(&job.carried)
 }
 
@@ -677,6 +683,10 @@ fn job_id_of(tag: u16, value: Vec<u8>) -> Result<JobId, DecodeError> {
     JobId::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
 
+fn client_of(tag: u16, value: Vec<u8>) -> Result<ClientName, DecodeError> {
+    ClientName::parse(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
+}
+
 fn host_of(tag: u16, value: Vec<u8>) -> Result<HostId, DecodeError> {
     HostId::new(&text_of(tag, value)?).map_err(|_| DecodeError::BadValue { tag })
 }
@@ -881,6 +891,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let retention_ends = fields.opt(t::RETENTION_ENDS, time_of)?;
     let result = result_fields::take_result(&mut fields)?;
     let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
+    let client = fields.opt(t::CLIENT, client_of)?;
     Ok(JobRecord {
         id,
         spec,
@@ -896,6 +907,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         result,
         retention_ends,
         deadline_floor,
+        client,
         carried: fields.carried(),
     })
 }

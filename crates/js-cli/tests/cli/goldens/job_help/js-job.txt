@@ -5,7 +5,7 @@ Usage: js job [OPTIONS] <COMMAND>
 Commands:
   submit  Submits a job.
   get     Reads a job: its state, its host once placed, its times and its host's silence.
-  list    Lists jobs by state, label and the time they were queued, a page at a time.
+  list    Lists jobs by state, label, client and the time they were queued, a page at a time.
   cancel  Cancels a job.
   result  Reads the result of an ended job, for the retention window after it ended.
   logs    Reads the log tail held so far, also for a running job, and for the retention window after the job ended.

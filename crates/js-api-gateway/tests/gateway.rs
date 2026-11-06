@@ -179,6 +179,30 @@ async fn an_unannotated_rpc_is_not_exposed() {
     assert_eq!(stub.rpcs(), Vec::<&str>::new());
 }
 
+/// Asserts that a value a layer in front of the router sets in the extensions of the HTTP
+/// request reaches the service's call of every route, and that a request without the layer
+/// carries none. Catches a gateway that builds each call's request afresh and drops what the
+/// mounting server's layers attached (the caller its bearer layer named).
+#[tokio::test]
+async fn an_extension_a_layer_sets_reaches_every_call() {
+    for route in ROUTES {
+        let (stub, router) = serve();
+        let marked = router
+            .clone()
+            .layer(axum::Extension(common::Marker("caller-1".to_owned())));
+        let path = fill(route.template);
+        let body = if route.body { "{}" } else { "" };
+        send(&marked, route.verb.as_str(), &path, body).await;
+        send(&router, route.verb.as_str(), &path, body).await;
+        let markers: Vec<_> = stub.calls().into_iter().map(|call| call.marker).collect();
+        assert_eq!(
+            markers,
+            [Some(common::Marker("caller-1".to_owned())), None],
+            "{path}"
+        );
+    }
+}
+
 /// Asserts that `GetJob`, `ListJobs` and `GetResult` answer over HTTP the message the
 /// service's trait answers, field for field, for messages with every field set, among them
 /// 64-bit fields above 2^53 and enums; that those are written as decimal strings and enum
@@ -218,6 +242,7 @@ async fn json_and_grpc_return_the_same_job() {
         json!("NETWORK_LEVEL_ALLOW_LIST")
     );
     assert_eq!(json["job"]["spec"]["priority"], json!(-7));
+    assert_eq!(json["job"]["client"], json!("client-a"));
     assert_eq!(
         json["job"].get("host_id"),
         None,

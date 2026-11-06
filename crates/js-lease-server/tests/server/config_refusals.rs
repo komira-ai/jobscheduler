@@ -59,7 +59,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     );
     assert_eq!(
         refusal(&scratch, &text),
-        "extra: unknown field; known: server, pool, budget, machine_provider, platform, logs"
+        "extra: unknown field; known: server, client, pool, budget, machine_provider, platform, logs"
     );
     assert_eq!(
         refused_server("config_unknown_server", "status_token_file = \"/x\""),

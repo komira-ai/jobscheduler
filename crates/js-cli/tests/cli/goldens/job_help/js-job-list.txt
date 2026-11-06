@@ -1,4 +1,4 @@
-Lists jobs by state, label and the time they were queued, a page at a time. Changes nothing.
+Lists jobs by state, label, client and the time they were queued, a page at a time. Changes nothing.
 
 Usage: js job list [OPTIONS]
 
@@ -14,6 +14,9 @@ Options:
 
       --json
           Print machine output (one JSON object per line, or the server's own JSON for `list`) instead of text; errors too
+
+      --client <TEXT>
+          Only jobs submitted by the client of this name (Job.client). Absent: every client's.
 
       --labels <KEY=VALUE>
           Only jobs that carry every one of these labels with the same value. Empty: any labels. KEY=VALUE; repeat for more.
