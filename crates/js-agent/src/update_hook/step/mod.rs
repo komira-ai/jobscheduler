@@ -92,7 +92,7 @@ fn open_state(env: &Env<'_>, params: &Params) -> Result<(Held, Option<Record>), 
 /// Holds `record` to the rules of the declaration and the params table.
 fn check(env: &Env<'_>, params: &Params, record: &Record) -> Result<(), Done> {
     validate(record, env.declaration, params)
-        .map_err(StateError::from)
+        .map_err(StateError::Invalid)
         .map_err(state_failure)
 }
 
