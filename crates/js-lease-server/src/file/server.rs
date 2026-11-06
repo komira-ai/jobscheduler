@@ -10,8 +10,9 @@ use js_lease::Settings;
 
 use super::{Load, Section};
 use crate::config::{
-    BootMode, CpuSlack, JOB_RETENTION_MUST, JobListen, Limits, MAX_JOB_WALL_MUST, MetricsListen,
-    Placement, TlsFiles, Token, not_private, parse_job_retention, parse_max_job_wall, parse_token,
+    BootMode, CpuSlack, FeedRetention, JOB_FEED_RETENTION_MUST, JOB_RETENTION_MUST, JobListen,
+    Limits, MAX_JOB_WALL_MUST, MetricsListen, Placement, TlsFiles, Token, not_private,
+    parse_job_feed_retention, parse_job_retention, parse_max_job_wall, parse_token,
 };
 use crate::error::StartupError;
 use crate::job_store::JobStoreSetup;
@@ -56,6 +57,8 @@ const SERVER_KEYS: &[&str] = &[
     "max_spend_per_month_total",
     "max_spend_since_go_total",
     "job_retention",
+    "job_feed_retention",
+    "job_allocation_retention",
     "job_listen",
     "max_job_wall",
     "metrics_listen",
@@ -85,6 +88,12 @@ pub(crate) struct Server {
     pub(crate) alerts: Option<AlertKeys>,
     /// `job_retention`: how long an ended job is kept; seven days unless the file sets it.
     pub(crate) job_retention: Retention,
+    /// `job_feed_retention`: how many of the newest changes of the job store's feed are
+    /// kept; 100000 unless the file sets it.
+    pub(crate) job_feed_retention: FeedRetention,
+    /// `job_allocation_retention`: how long a freed allocation's row is kept; fourteen days
+    /// unless the file sets it.
+    pub(crate) job_allocation_retention: Retention,
     /// `max_job_wall`: the most a submitted job's wall limit may be, when the file sets it.
     pub(crate) max_job_wall: Option<Duration>,
 }
@@ -178,10 +187,16 @@ impl AgentKeys {
     }
 
     /// The job store's setup when the file turns the job service on: named by its key, and
-    /// keeping an ended job for `retention`.
-    pub(crate) fn job_store(&self, retention: Retention) -> Option<JobStoreSetup> {
+    /// keeping an ended job, the newest changes of its feed and a freed allocation as
+    /// `windows` says.
+    pub(crate) fn job_store(&self, windows: JobStoreWindows) -> Option<JobStoreSetup> {
         let flag = "server.job_listen";
-        self.job_listen.map(|_| JobStoreSetup { flag, retention })
+        self.job_listen.map(|_| JobStoreSetup {
+            flag,
+            retention: windows.retention,
+            feed_retention: windows.feed_retention,
+            allocation_retention: windows.allocation_retention,
+        })
     }
 }
 
@@ -246,6 +261,8 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let totals = super::budget::read_totals(&mut s)?;
     let alerts = read_alerts(&mut s)?;
     let job_retention = read_job_retention(&mut s)?;
+    let job_feed_retention = read_job_feed_retention(&mut s)?;
+    let job_allocation_retention = read_job_allocation_retention(&mut s)?;
     let max_job_wall = read_max_job_wall(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
@@ -276,6 +293,8 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         totals,
         alerts,
         job_retention,
+        job_feed_retention,
+        job_allocation_retention,
         max_job_wall,
     })
 }
@@ -310,6 +329,49 @@ fn read_job_retention(s: &mut Section) -> Result<Retention, StartupError> {
         return Ok(Retention::DEFAULT);
     };
     parse_job_retention(&text).map_err(|_| s.fail("job_retention", JOB_RETENTION_MUST))
+}
+
+/// The `job_feed_retention` key, read as `--job-feed-retention` is; [`FeedRetention::DEFAULT`]
+/// when the file does not give it. A refusal says what the value must be and does not
+/// repeat it.
+fn read_job_feed_retention(s: &mut Section) -> Result<FeedRetention, StartupError> {
+    let Some(text) = s.string("job_feed_retention")? else {
+        return Ok(FeedRetention::DEFAULT);
+    };
+    parse_job_feed_retention(&text)
+        .map_err(|_| s.fail("job_feed_retention", JOB_FEED_RETENTION_MUST))
+}
+
+/// The `job_allocation_retention` key, read as `--job-allocation-retention` is;
+/// [`Retention::ALLOCATION_DEFAULT`] when the file does not give it. A refusal says what the
+/// value must be and does not repeat it.
+fn read_job_allocation_retention(s: &mut Section) -> Result<Retention, StartupError> {
+    let Some(text) = s.string("job_allocation_retention")? else {
+        return Ok(Retention::ALLOCATION_DEFAULT);
+    };
+    parse_job_retention(&text).map_err(|_| s.fail("job_allocation_retention", JOB_RETENTION_MUST))
+}
+
+/// The windows of the job store the `[server]` table gives, for [`AgentKeys::job_store`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JobStoreWindows {
+    /// `job_retention`.
+    pub(crate) retention: Retention,
+    /// `job_feed_retention`.
+    pub(crate) feed_retention: FeedRetention,
+    /// `job_allocation_retention`.
+    pub(crate) allocation_retention: Retention,
+}
+
+impl Server {
+    /// The job store's windows this table gives.
+    pub(crate) fn job_store_windows(&self) -> JobStoreWindows {
+        JobStoreWindows {
+            retention: self.job_retention,
+            feed_retention: self.job_feed_retention,
+            allocation_retention: self.job_allocation_retention,
+        }
+    }
 }
 
 /// The alert keys. The token file and the repeat period mean something only with the URL.

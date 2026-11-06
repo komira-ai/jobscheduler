@@ -14,6 +14,10 @@
 //!    allocation is read once; a host the provider reads absent has its allocations freed and
 //!    its jobs lost.
 //!
+//! After the passes, whether they succeeded or not, the tick trims the job store's change feed to its newest
+//! `--job-feed-retention` changes ([`crate::job_store::FeedTrim`]); a failed trim is logged
+//! and never fails the pass.
+//!
 //! Presence and marks (`registry.advance()`) and placement follow in the tick
 //! ([`crate::api::Shared::tick`]). Every state change is one store transaction carrying the
 //! allocation change that goes with it (section 8, row 25). The pass reads no clock of its
@@ -156,6 +160,20 @@ impl Agents {
                 sink.store_write_failed();
                 warn!(%error, "the job pass failed; the next tick passes again");
             }
+        }
+        self.trim_feed();
+    }
+
+    /// Trims the job store's change feed to the newest `--job-feed-retention` changes, and
+    /// logs how many rows went. A store that fails is logged; the next tick trims again.
+    fn trim_feed(&self) {
+        let Some(feed) = &self.job_feed else {
+            return;
+        };
+        match feed.pass() {
+            Ok(0) => {}
+            Ok(trimmed) => info!(trimmed, "the job store's change feed was trimmed"),
+            Err(error) => warn!(%error, "trimming the job store's change feed failed"),
         }
     }
 }

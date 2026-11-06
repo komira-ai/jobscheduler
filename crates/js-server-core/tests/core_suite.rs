@@ -185,6 +185,10 @@ impl Store for Flaky {
         self.fake().changes(after, limit)
     }
 
+    fn trim_feed(&self, before: Revision) -> Result<u64, StoreError> {
+        self.fake().trim_feed(before)
+    }
+
     fn reap_expired(&self) -> Result<usize, StoreError> {
         self.fake().reap_expired()
     }
