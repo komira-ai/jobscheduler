@@ -224,7 +224,7 @@ fn a_terminate_takes_effect_unless_it_fails_before_or_names_an_unknown_id() {
     assert_eq!(fake.instances()[0].state, InstanceState::Pending);
     fake.fail_next(Action::TerminateInstances, ApiError::Timeout);
     assert_eq!(
-        fake.terminate_instances(&[one.clone()]),
+        fake.terminate_instances(std::slice::from_ref(&one)),
         Err(ApiError::Timeout)
     );
     assert_eq!(fake.terminates(), 0);
@@ -265,7 +265,8 @@ fn a_read_after_the_next_terminate_can_be_failed() {
     let one = launch(&fake, "a");
     fake.fail_read_after_next_terminate(ApiError::Timeout);
     assert!(fake.describe_instances(&by_tags(&[])).is_ok());
-    fake.terminate_instances(&[one.clone()]).unwrap();
+    fake.terminate_instances(std::slice::from_ref(&one))
+        .unwrap();
     assert_eq!(
         fake.describe_instances(&by_tags(&[])),
         Err(ApiError::Timeout)

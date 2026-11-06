@@ -8,5 +8,4 @@ mod credential;
 mod launch;
 mod pricing;
 mod script;
-mod secrets;
 mod wire;

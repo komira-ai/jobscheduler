@@ -398,7 +398,7 @@ fn a_platform_kind_not_built_is_refused() {
     let table = "[[machine_provider]]\nname = \"cloud\"\nkind = \"nonsense\"\n";
     assert_eq!(
         refused(&scratch, &beside(&scratch, table)),
-        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, lambdalabs, listed, static"
+        "machine_provider \"cloud\": kind: unknown machine provider kind \"nonsense\"; known: any-mode, broken-floor, ec2, lambdalabs, listed, static"
     );
 }
 
