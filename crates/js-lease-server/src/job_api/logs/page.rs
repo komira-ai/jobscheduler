@@ -49,7 +49,7 @@
 //! earlier job's objects are older by at least its retention window.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use js_logstore::layout::{FIRST_BYTE_AT_MS, decode_gap, parse_chunk_name};
 use js_logstore::{
@@ -252,7 +252,7 @@ impl Walk<'_> {
         let Some(entry) = listed.entries.into_iter().find(|entry| entry.key == key) else {
             return Ok(None);
         };
-        if millis(entry.last_modified) < self.ask.cutoff_ms {
+        if since_epoch_ms(entry.last_modified.duration_since(UNIX_EPOCH)) < self.ask.cutoff_ms {
             return Ok(None);
         }
         let room = entry.size.saturating_sub(self.pos);
@@ -465,7 +465,7 @@ struct Named {
 /// layout's, an object of an earlier job, or one past the stream's limit.
 fn named(ask: &Ask, prefix: &str, entry: js_logstore::Entry) -> Option<Named> {
     let name = entry.key.strip_prefix(prefix).and_then(parse_chunk_name)?;
-    let written_ms = millis(entry.last_modified);
+    let written_ms = since_epoch_ms(entry.last_modified.duration_since(UNIX_EPOCH));
     let kept = name.offset < ask.limit() && written_ms >= ask.cutoff_ms;
     kept.then_some(Named {
         key: entry.key,
@@ -509,9 +509,10 @@ fn settled(at_ms: u64, now_ms: u64) -> bool {
     at_ms.saturating_add(duration_millis(LOG_SETTLE)) <= now_ms
 }
 
-/// `time` in milliseconds since the Unix epoch; 0 before it.
-fn millis(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH).map_or(0, duration_millis)
+/// The milliseconds since the Unix epoch of an instant whose distance from the epoch is
+/// `since`; 0 for one before the epoch.
+fn since_epoch_ms<E>(since: Result<Duration, E>) -> u64 {
+    since.map_or(0, duration_millis)
 }
 
 /// `duration` in whole milliseconds, the largest value when it does not fit.
