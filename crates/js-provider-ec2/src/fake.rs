@@ -34,11 +34,12 @@ struct State {
     next: BTreeMap<Action, VecDeque<ApiError>>,
     always: BTreeMap<Action, ApiError>,
     calls: Vec<Call>,
+    block_hours: Vec<u32>,
 }
 
 /// One region of an account in memory. The answers are in the order they were added, as a
 /// cloud's answers are in its own order; a Capacity Block offering is answered whatever
-/// length is asked for.
+/// length is asked for, and the length asked is recorded ([`FakeEc2::block_hours_asked`]).
 #[derive(Default)]
 pub struct FakeEc2 {
     state: Mutex<State>,
@@ -127,6 +128,11 @@ impl FakeEc2 {
         self.state().calls.clone()
     }
 
+    /// The block length, in hours, of every Capacity Block offering read so far, in order.
+    pub fn block_hours_asked(&self) -> Vec<u32> {
+        self.state().block_hours.clone()
+    }
+
     /// Records a call of `action` and answers it with `answer` of the state, or the
     /// scripted failure.
     fn answer<T>(
@@ -185,8 +191,9 @@ impl Ec2Api for FakeEc2 {
     fn capacity_block_offerings(
         &self,
         region: &Region,
-        _hours: u32,
+        hours: u32,
     ) -> Result<Vec<BlockOffering>, ApiError> {
+        self.state().block_hours.push(hours);
         self.answer(Action::DescribeCapacityBlockOfferings, region, |state| {
             state.blocks.clone()
         })

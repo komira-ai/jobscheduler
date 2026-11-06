@@ -696,6 +696,19 @@ fn the_purchase_finding_is_enforced() {
     );
 }
 
+/// Asserts that the block length the settings name (`capacity_block_hours`) is the length
+/// the catalog asks `DescribeCapacityBlockOfferings` for: 48 hours, then 24 for a catalog
+/// set to 24. Catches a length that is fixed, defaulted, or not passed to the port.
+#[test]
+fn the_configured_block_length_reaches_the_port() {
+    let fake = priced();
+    for hours in [48, 24] {
+        let blocks = Ec2CatalogSettings::new(REGION, &["capacity-block"], None, Some(hours));
+        catalog(&fake, blocks.unwrap());
+    }
+    assert_eq!(fake.block_hours_asked(), [48, 24]);
+}
+
 /// The fake of the ordering test, its answers added in the order `forward` says.
 fn ordered(forward: bool) -> Arc<FakeEc2> {
     let fake = Arc::new(FakeEc2::new());
