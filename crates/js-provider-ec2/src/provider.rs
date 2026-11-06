@@ -285,7 +285,8 @@ impl Ec2Provider {
                     Ok(bought) => bought,
                     Err(error) => {
                         // A purchase that got no answer may have landed; the unknown entry
-                        // stays and a retry reads the reservations first.
+                        // stays, so a retry is deferred until the hold passes, and then
+                        // reads the reservations before it buys.
                         let answer = launch_answer(&error);
                         if matches!(answer, Acquired::Refused(_)) {
                             unknown.remove(wanted);

@@ -14,7 +14,9 @@ mod digest;
 mod whole_rig;
 
 use js_sched::{Event, Request, Scheduler};
-use js_types::sched::{FarmTime, LeaseKind, OperationId};
+use js_types::sched::{
+    ControlRecord, Effect, Failure, FarmTime, LeaseKind, LostWhy, OperationId, Outcome,
+};
 use js_whole::WholeNodeConfig;
 
 use crate::whole_rig::{Farm, caps, request, secs, w};
@@ -269,4 +271,92 @@ fn a_request_no_host_can_finish_holds_nothing() {
     assert_eq!(f.held_for(op), None);
     assert_eq!(f.s.whole_mark(op), None);
 }
+}
+
+/// Submits a job that may run `wall_s` seconds (none: no wall time), places it and starts
+/// it on `a`, then cordons `a` and its run is lost (the worker's daemon restarted), which
+/// queues it again and leaves it waiting: the operation.
+fn placed_then_lost(f: &mut Farm, wall_s: Option<u64>) -> OperationId {
+    f.next_n += 1;
+    let operation = f.s.next_operation();
+    if let Some(wall_s) = wall_s {
+        f.s.set_max_wall(operation, secs(wall_s));
+    }
+    f.submit(request(f.next_n, LeaseKind::Action));
+    let grant = f.grants().pop().expect("placed on a");
+    assert_eq!(grant.worker, w("a"));
+    f.start(&grant);
+    f.running.retain(|(_, lease)| *lease != grant.lease);
+    f.feed(Event::Cordon { worker: w("a") });
+    let proposed = f.feed(Event::Report {
+        operation,
+        lease: grant.lease,
+        outcome: Outcome::Failed(Failure::Lost(LostWhy::DaemonRestarted)),
+    });
+    for effect in proposed {
+        if let Effect::Commit(record) = effect {
+            f.feed(Event::Committed(record));
+        }
+    }
+    operation
+}
+
+both_rules! {
+/// Asserts that the cut wall time belongs to one placement: a job with no wall time placed
+/// on the host that ends at 100 s has 100 s; once its run is lost it has no wall time
+/// while it waits, and placed again on the same worker after the end is cleared it still
+/// has none. Catches: the cut written over the time given, so a job run again keeps the
+/// wall time of a host it no longer runs on (before the fix it read 100 s after the loss).
+fn a_job_run_again_has_the_wall_time_given_again() {
+    let mut f = farm(&["a"]);
+    end_a(&mut f, None);
+    end_a(&mut f, Some(100_000));
+    let operation = placed_then_lost(&mut f, None);
+    assert_eq!(f.s.max_wall(operation), None);
+    end_a(&mut f, None);
+    assert_eq!(uncordon_a(&mut f), [operation]);
+    assert_eq!(f.s.max_wall(operation), None);
+}
+}
+
+both_rules! {
+/// Asserts that a job given 300 s on a host that ends at 1000 s keeps 300 s, and that
+/// once the end moves to 200 s and its run is lost it reads the 300 s it was given while
+/// it waits and is not placed again on the host that now ends too soon. Catches: the time
+/// given lost once a cut was taken.
+fn a_job_run_again_keeps_the_time_it_was_given() {
+    let mut f = farm(&["a"]);
+    end_a(&mut f, Some(1_000_000));
+    let operation = placed_then_lost(&mut f, Some(300));
+    end_a(&mut f, Some(200_000));
+    assert_eq!(f.s.max_wall(operation), Some(secs(300)));
+    assert!(uncordon_a(&mut f).is_empty());
+    assert_eq!(f.s.max_wall(operation), Some(secs(300)));
+}
+}
+
+both_rules! {
+/// Asserts that a job with no wall time placed on the host that ends at 100 s, lost, and
+/// placed again at 40 s on the same host gets the 60 s left then. Catches: the first cut
+/// kept for the second placement.
+fn a_job_placed_again_on_an_ending_host_is_cut_anew() {
+    let mut f = farm(&["a"]);
+    let operation = placed_then_lost(&mut f, None);
+    assert_eq!(f.s.max_wall(operation), None);
+    f.at(40_000);
+    f.beat();
+    assert_eq!(uncordon_a(&mut f), [operation]);
+    assert_eq!(f.s.max_wall(operation), Some(secs(60)));
+}
+}
+
+/// Uncordons `a`, which places queued work at once: the operations granted.
+fn uncordon_a(f: &mut Farm) -> Vec<OperationId> {
+    f.feed(Event::Uncordon { worker: w("a") })
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::Commit(ControlRecord::Lease(grant)) => Some(grant.operation),
+            _ => None,
+        })
+        .collect()
 }

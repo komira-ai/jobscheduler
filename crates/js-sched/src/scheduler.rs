@@ -272,6 +272,9 @@ pub struct Scheduler {
     /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
     /// the log or the `Eq` memory state.
     max_walls: BTreeMap<OperationId, Duration>,
+    /// The max wall time of each operation placed on a worker whose host ends, cut to the
+    /// time that host had left ([`Scheduler::max_wall`]); `max_walls` keeps what was given.
+    capped_walls: BTreeMap<OperationId, Duration>,
     /// The marks, give-up counts and bars of whole-machine requests
     /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
     drain: whole::Drain,
@@ -314,6 +317,7 @@ impl Scheduler {
             head_holds: BTreeMap::new(),
             whole_node: None,
             max_walls: BTreeMap::new(),
+            capped_walls: BTreeMap::new(),
             drain: whole::Drain::default(),
             backfill: gate::Gate::default(),
         }
@@ -414,6 +418,7 @@ impl Scheduler {
             self.memory.forget(id);
             self.size_keys.remove(&id);
             self.max_walls.remove(&id);
+            self.capped_walls.remove(&id);
             self.drain.forget(id);
             self.admission.forget(id);
             self.backfill.forget(id);

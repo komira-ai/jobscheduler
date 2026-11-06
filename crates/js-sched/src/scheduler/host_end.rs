@@ -30,24 +30,34 @@ impl Scheduler {
     }
 
     /// The longest `operation` may run once leased: the time given with
-    /// [`Scheduler::set_max_wall`], cut to the time its worker's host has left when it was
-    /// placed on one that ends. The caller reads it when it builds the lease. `None` for an
-    /// operation with no max wall time that was not placed on a worker with an end.
+    /// [`Scheduler::set_max_wall`], cut to the time its worker's host had left when it was
+    /// placed there if that host ends. The caller reads it when it builds the lease. The
+    /// cut holds only while the operation holds that worker: requeued, the operation has
+    /// the time given again, and placed anew it is cut again for its new worker. `None`
+    /// for an operation with no max wall time that holds no worker with an end.
     #[must_use]
     pub fn max_wall(&self, operation: OperationId) -> Option<Duration> {
-        self.max_walls.get(&operation).copied()
+        let holds = self
+            .ops
+            .get(&operation)
+            .is_some_and(|op| op.state.holding().is_some());
+        let capped = self.capped_walls.get(&operation).filter(|_| holds);
+        capped.or_else(|| self.max_walls.get(&operation)).copied()
     }
 
     /// Cuts the max wall time of `operation`, just placed on `worker`, to the time left
-    /// until the host of `worker` ends; an operation with none gets that time. Nothing
-    /// changes on a worker with no end.
+    /// until the host of `worker` ends; an operation with none gets that time. The time
+    /// given stays in `max_walls` for a later placement. On a worker with no end the
+    /// operation keeps the time given.
     pub(super) fn cap_wall(&mut self, operation: OperationId, worker: &WorkerId) {
         let Some(end) = self.host_end(worker) else {
+            self.capped_walls.remove(&operation);
             return;
         };
         let left = end.saturating_duration_since(self.now);
-        let wall = self.max_wall(operation).map_or(left, |wall| wall.min(left));
-        self.max_walls.insert(operation, wall);
+        let given = self.max_walls.get(&operation).copied();
+        let wall = given.map_or(left, |wall| wall.min(left));
+        self.capped_walls.insert(operation, wall);
     }
 
     /// The host end of `worker` as farm milliseconds, the latest time there is for a worker
