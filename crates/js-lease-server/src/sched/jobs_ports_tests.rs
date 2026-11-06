@@ -22,6 +22,7 @@ use super::*;
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::assemble_placed;
 use crate::job_alloc::{Freed, answer_retired, free_allocation};
+use crate::metrics::NoMetrics;
 use crate::sched::engine_rig::{GIB, hello_of, pool};
 use crate::sched::wiring_tests::{JOIN, config_of, scratch};
 
@@ -51,7 +52,9 @@ fn pass_with(
     jobs: &ServerJobs,
     open: &BTreeMap<HostId, NetworkCeiling>,
 ) -> Vec<String> {
-    let placed = placer.place_jobs(jobs, open, &NoStarts).unwrap();
+    let placed = placer
+        .place_jobs(jobs, open, (&NoStarts, &NoMetrics))
+        .unwrap();
     placed.iter().map(ToString::to_string).collect()
 }
 
@@ -254,13 +257,18 @@ fn ports_commit_with_the_placement() {
         seen: Mutex::new(Vec::new()),
     };
     let a = queue_spec(&jobs, "job-a", ported(&[8080]), 0);
-    placer.place_jobs(&jobs, &open, &starts).unwrap();
+    placer
+        .place_jobs(&jobs, &open, (&starts, &NoMetrics))
+        .unwrap();
     assert_eq!(*starts.seen.lock().unwrap(), [[8080]]);
     finish(&jobs, &a);
 
     queue_spec(&jobs, "job-b", ported(&[8080]), 0);
     store.fail_next();
-    assert_eq!(placer.place_jobs(&jobs, &open, &starts), Ok(Vec::new()));
+    assert_eq!(
+        placer.place_jobs(&jobs, &open, (&starts, &NoMetrics)),
+        Ok(Vec::new())
+    );
     let b = JobId::parse("job-b").unwrap();
     assert_eq!(jobs.get_allocation(&b).unwrap(), None);
     assert_eq!(state(&jobs, "job-b"), JobState::Queued);
