@@ -44,6 +44,7 @@ use tracing::warn;
 use crate::job_alloc::{self, Freed};
 use crate::job_start::start_of;
 use crate::job_store::ServerJobs;
+use crate::metrics::MetricsSink;
 
 /// The exit code a failure is recorded with when the agent reports it with none (a job
 /// stopped without a cancel, a failure the agent could not read a status for).
@@ -80,6 +81,8 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) host: &'a HostId,
     /// The most network the host's agent reported it gives a job.
     pub(crate) ceiling: &'a NetworkCeiling,
+    /// Where a start failure the host reports is counted.
+    pub(crate) metrics: &'a dyn MetricsSink,
 }
 
 /// The per-job half of a heartbeat of the host `context` names, listing `listed` and
@@ -231,8 +234,17 @@ fn commit_result(
     } else {
         job
     };
+    let failure = match &end {
+        JobEnd::FailedToStart(failure) => Some(*failure),
+        _ => None,
+    };
     match jobs.end_job(&job.id, end) {
-        Ok(_) => Ok(Some(Ack::Accepted)),
+        Ok(_) => {
+            failure
+                .into_iter()
+                .for_each(|failure| context.metrics.start_failed(failure));
+            Ok(Some(Ack::Accepted))
+        }
         Err(JobStoreError::IllegalTransition { from, to, .. }) => {
             warn!(host = %context.host, job = %job.id, ?from, ?to, "a listed end the job's state cannot take is answered stale");
             Ok(Some(Ack::Stale))

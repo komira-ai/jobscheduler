@@ -1,0 +1,89 @@
+# HELP js_jobs Jobs in the job tables, by state.
+# TYPE js_jobs gauge
+js_jobs{state="queued"} 2
+js_jobs{state="placed"} 2
+js_jobs{state="starting"} 1
+js_jobs{state="running"} 1
+js_jobs{state="succeeded"} 1
+js_jobs{state="failed"} 1
+js_jobs{state="cancelled"} 1
+js_jobs{state="lost"} 1
+js_jobs{state="failed-to-start"} 1
+# HELP js_queue_oldest_age_seconds How long the oldest queued job has waited since its submit; 0 with none queued.
+# TYPE js_queue_oldest_age_seconds gauge
+js_queue_oldest_age_seconds 90.064
+# HELP js_job_placements_total Queued jobs placed on a host.
+# TYPE js_job_placements_total counter
+js_job_placements_total 2
+# HELP js_queue_wait_seconds How long each placed job waited in the queue, from its submit to its placement.
+# TYPE js_queue_wait_seconds histogram
+js_queue_wait_seconds_bucket{le="1"} 1
+js_queue_wait_seconds_bucket{le="5"} 1
+js_queue_wait_seconds_bucket{le="30"} 1
+js_queue_wait_seconds_bucket{le="60"} 2
+js_queue_wait_seconds_bucket{le="300"} 2
+js_queue_wait_seconds_bucket{le="900"} 2
+js_queue_wait_seconds_bucket{le="3600"} 2
+js_queue_wait_seconds_bucket{le="14400"} 2
+js_queue_wait_seconds_bucket{le="86400"} 2
+js_queue_wait_seconds_bucket{le="+Inf"} 2
+js_queue_wait_seconds_sum 46
+js_queue_wait_seconds_count 2
+# HELP js_job_start_failures_total Jobs that failed to start, by failure code.
+# TYPE js_job_start_failures_total counter
+js_job_start_failures_total{code="no-capacity"} 1
+js_job_start_failures_total{code="start-timeout"} 1
+js_job_start_failures_total{code="exclusive-not-ready"} 1
+js_job_start_failures_total{code="agent-refused"} 1
+# HELP js_jobs_lost_total Jobs lost with their host or container.
+# TYPE js_jobs_lost_total counter
+js_jobs_lost_total 2
+# HELP js_store_write_failures_total Passes over the job tables the server makes itself (the job pass, a placement, a heartbeat's job listing) that failed, so their write did not commit.
+# TYPE js_store_write_failures_total counter
+js_store_write_failures_total 1
+# HELP js_job_pass_duration_seconds How long each job pass of the tick took.
+# TYPE js_job_pass_duration_seconds histogram
+js_job_pass_duration_seconds_bucket{le="0.001"} 0
+js_job_pass_duration_seconds_bucket{le="0.005"} 1
+js_job_pass_duration_seconds_bucket{le="0.01"} 1
+js_job_pass_duration_seconds_bucket{le="0.05"} 2
+js_job_pass_duration_seconds_bucket{le="0.1"} 2
+js_job_pass_duration_seconds_bucket{le="0.5"} 2
+js_job_pass_duration_seconds_bucket{le="1"} 2
+js_job_pass_duration_seconds_bucket{le="5"} 2
+js_job_pass_duration_seconds_bucket{le="+Inf"} 2
+js_job_pass_duration_seconds_sum 0.033
+js_job_pass_duration_seconds_count 2
+# HELP js_acquires_total Launches the scaler ran, by pool, whatever their answer.
+# TYPE js_acquires_total counter
+js_acquires_total{pool="gpu"} 3
+# HELP js_acquire_failovers_total Launches refused for capacity or quota, after which the scaler tries another offer, by pool.
+# TYPE js_acquire_failovers_total counter
+js_acquire_failovers_total{pool="gpu"} 1
+# HELP js_host_cpu_booked_millicores CPU booked on each host, in thousandths of a core.
+# TYPE js_host_cpu_booked_millicores gauge
+js_host_cpu_booked_millicores{host="host-a"} 17000
+js_host_cpu_booked_millicores{host="host-b"} 0
+js_host_cpu_booked_millicores{host="host-c"} 8000
+js_host_cpu_booked_millicores{host="host-d"} 0
+# HELP js_host_cpu_free_millicores CPU free on each host, in thousandths of a core.
+# TYPE js_host_cpu_free_millicores gauge
+js_host_cpu_free_millicores{host="host-a"} 0
+js_host_cpu_free_millicores{host="host-b"} 8000
+js_host_cpu_free_millicores{host="host-c"} 0
+js_host_cpu_free_millicores{host="host-d"} 8000
+# HELP js_host_memory_booked_bytes Memory booked on each host.
+# TYPE js_host_memory_booked_bytes gauge
+js_host_memory_booked_bytes{host="host-a"} 23622320128
+js_host_memory_booked_bytes{host="host-b"} 0
+js_host_memory_booked_bytes{host="host-c"} 17179869184
+js_host_memory_booked_bytes{host="host-d"} 0
+# HELP js_host_memory_free_bytes Memory free on each host, of what it may book.
+# TYPE js_host_memory_free_bytes gauge
+js_host_memory_free_bytes{host="host-a"} 0
+js_host_memory_free_bytes{host="host-b"} 17179869184
+js_host_memory_free_bytes{host="host-c"} 0
+js_host_memory_free_bytes{host="host-d"} 17179869184
+# HELP js_host_whole_mark 1 for each host set aside whole, by its mark: reserved, held, draining or releasing.
+# TYPE js_host_whole_mark gauge
+js_host_whole_mark{host="host-d",state="draining"} 1

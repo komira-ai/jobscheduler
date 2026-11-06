@@ -10,6 +10,7 @@ use js_types::{HostId, JobNetwork as Level, PortMap};
 
 use super::{Unsendable, start_of};
 use crate::agent_api::job_rig::{BOOKED, image, placed, spec, tables};
+use crate::metrics::NoMetrics;
 use crate::per_job::BeatContext;
 
 /// A placed job's records, with the spec's network, ports, environment and files set.
@@ -39,6 +40,7 @@ fn build(
         &BeatContext {
             host: &host,
             ceiling,
+            metrics: &NoMetrics,
         },
     )
 }

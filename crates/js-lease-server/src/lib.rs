@@ -25,19 +25,18 @@
 //!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
 //!   same way and before the registry is asked to remove a host, so that a restart tries
 //!   them again.
-//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
-//!   [`Ticker`]) so a test steps both.
+//! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`], [`Ticker`]) so a test steps both.
 //!
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The secrets,
-//! the bearer tokens, are read from files that only their owner can use.
+//! below has a key in the file, and a flag given beside `--config` is refused. The secrets, the bearer tokens, are read from files that only their owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--job-listen <addr>` | off unless given: serves the job service on this address, gRPC and its HTTP/JSON gateway on one port (see "The job service" below); off the loopback it needs both TLS flags, and with them the port speaks TLS over the same reloaded pair. Turning it on opens the job store, `<state file>.jobs`, which the heartbeats of agents that report the `per-job` capability then read and update; an address in use, or a store file that cannot be made owner-only and opened, is refused at start naming the flag. Needs `--agent-pool-config` |
+//! | `--metrics-listen <addr>` | off unless given: serves `GET /metrics`, the operator's metrics in the Prometheus text format (the jobs by state, the oldest queued job's age, the queue wait, the placements, the start failures by code, the lost jobs, the failed writes of the job tables, the job pass's duration, the launches and failovers by pool, and each host's CPU and memory booked and free and its whole-host mark), on a listener of its own, plain HTTP with no token, to private peers only. It names no job, lease or token. An address that is not a private one, or one in use, is refused at start naming the flag |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]; its top-level `memory_schedulable_percent`, 1 to 100 and default 100, is the share of each host's `memory_bytes` that is booked, rounded down); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
@@ -110,10 +109,10 @@
 //! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456),
 //! # history_retention_days (90): the flags' names, defaults and rules; usage_db is refused
 //! # beside usage_off = true
-//! # job_retention ("7d"): the flag's name, default and rules
-//! # max_job_wall ("30d"): the flag's name, default and rules
+//! # job_retention ("7d"), max_job_wall ("30d"): the flags' names, defaults and rules
 //! # job_listen: off by default; the flag's name and rules (TLS off the loopback, from
 //! # tls_cert and tls_key); refused unless a pool registers agents
+//! # metrics_listen: off by default; the flag's name and rules (a private address, no TLS)
 //! # alert_webhook_url, alert_webhook_token_file, alert_repeat_after (1h): every alert of the
 //! # scaler is also POSTed as {source, key, text} JSON
 //! # to the https URL (http only to a loopback address) when it begins to hold, every
@@ -829,6 +828,7 @@ mod join_tokens;
 mod kinds;
 mod layered;
 mod listener;
+mod metrics;
 pub mod network;
 mod per_job;
 mod platform;

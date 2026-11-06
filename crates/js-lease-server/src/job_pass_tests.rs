@@ -27,6 +27,7 @@ use crate::job_api::JobApi;
 use crate::job_api::read::{Ctx, Silence};
 use crate::job_expiry::JobLimits;
 use crate::job_loss::{Observe, Seen};
+use crate::metrics::NoMetrics;
 
 const SECOND: Duration = Duration::from_secs(1);
 const MINUTE: Duration = Duration::from_secs(60);
@@ -125,7 +126,13 @@ impl Observe for Provider {
 
 /// One pass over the rig's tables at its clock, under `limits`, reading hosts from `provider`.
 fn pass(rig: &Rig, limits: JobLimits, provider: &Provider) -> Passed {
-    run(&rig.jobs, limits, provider, store_time(now_ms(rig))).unwrap()
+    run(
+        &rig.jobs,
+        limits,
+        (provider, &NoMetrics),
+        store_time(now_ms(rig)),
+    )
+    .unwrap()
 }
 
 /// Places the job `id` on the host of `agent` and walks it through the agent's heartbeats to

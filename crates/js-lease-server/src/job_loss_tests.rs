@@ -13,6 +13,7 @@ use js_types::HostId;
 use super::{Observe, Seen, lose_absent, lose_unlisted};
 use crate::agent_api::job_rig::{BOOKED, spec, tables_on};
 use crate::job_store::ServerJobs;
+use crate::metrics::NoMetrics;
 
 /// A provider whose reading of each host the test sets: unknown unless set.
 struct Provider(BTreeMap<&'static str, Result<Seen, String>>);
@@ -102,12 +103,15 @@ fn only_an_absent_host_loses_its_jobs_and_frees_its_allocations() {
             ("host-a", seen),
             ("host-b", Ok(Seen::Present)),
         ]));
-        assert_eq!(lose_absent(&jobs, &provider).unwrap(), Vec::<JobId>::new());
+        assert_eq!(
+            lose_absent(&jobs, &provider, &NoMetrics).unwrap(),
+            Vec::<JobId>::new()
+        );
         assert_eq!(states(&jobs, &running).1, AllocationStep::Booked);
     }
 
     let provider = Provider(BTreeMap::from([("host-a", Ok(Seen::Absent))]));
-    let lost = lose_absent(&jobs, &provider).unwrap();
+    let lost = lose_absent(&jobs, &provider, &NoMetrics).unwrap();
     assert_eq!(lost, [cancelled.clone(), running.clone()]);
     let freed = (AllocationStep::Freed, Some(EndReason::HostAbsent));
     assert_eq!(states(&jobs, &running), (JobState::Lost, freed.0, freed.1));
@@ -124,7 +128,10 @@ fn only_an_absent_host_loses_its_jobs_and_frees_its_allocations() {
         states(&jobs, &elsewhere),
         (JobState::Running, AllocationStep::Booked, None)
     );
-    assert_eq!(lose_absent(&jobs, &provider).unwrap(), Vec::<JobId>::new());
+    assert_eq!(
+        lose_absent(&jobs, &provider, &NoMetrics).unwrap(),
+        Vec::<JobId>::new()
+    );
 }
 
 // Catches a placed job taken for lost on a returning host (its start is due again), a job
@@ -149,7 +156,7 @@ fn a_listing_after_a_hello_loses_only_the_jobs_that_ran_and_are_not_named() {
     let other = at(&jobs, "job-other", "host-b", JobState::Running);
 
     let held = BTreeSet::from(["job-listed", "job-retired"]);
-    let lost = lose_unlisted(&jobs, &host("host-a"), &held).unwrap();
+    let lost = lose_unlisted(&jobs, &host("host-a"), &held, &NoMetrics).unwrap();
     assert_eq!(lost, [running.clone(), starting.clone()]);
     for id in [&running, &starting] {
         assert_eq!(

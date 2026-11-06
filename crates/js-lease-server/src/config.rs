@@ -44,7 +44,7 @@ mod tokens;
 pub(crate) use agent_setup::AgentSetup;
 pub use cpu_slack::{CpuSlack, CpuSlackError};
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
-pub(crate) use listen::{JobListen, clear_text};
+pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
 pub use placement::Placement;
 pub(crate) use retention::{DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST, parse_job_retention};
 pub use tokens::Token;
@@ -79,6 +79,11 @@ pub struct Cli {
     /// Off the loopback it needs --tls-cert and --tls-key. Needs --agent-pool-config.
     #[arg(long)]
     pub job_listen: Option<SocketAddr>,
+    /// Serves the operator's metrics (`GET /metrics`, the Prometheus text format, no token)
+    /// here, to private peers only. Off unless given; an address that is not a private one is
+    /// refused.
+    #[arg(long)]
+    pub metrics_listen: Option<SocketAddr>,
     /// The lease file.
     #[arg(long, required_unless_present = "config")]
     pub state_file: Option<PathBuf>,
@@ -392,6 +397,8 @@ pub struct Config {
     pub(crate) agent_listen: Option<SocketAddr>,
     /// Where the job service is served (`--job-listen`, `server.job_listen`); off when `None`.
     pub(crate) job_listen: Option<JobListen>,
+    /// Where the metrics are served (`--metrics-listen`, `server.metrics_listen`); off when `None`.
+    pub(crate) metrics_listen: Option<MetricsListen>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
     /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
@@ -475,6 +482,7 @@ impl Config {
             bound: None,
             agent_listen: None,
             job_listen: listen::job_listen(&cli),
+            metrics_listen: listen::metrics_listen(&cli)?,
             advertise_url: None,
             warnings,
             status,
@@ -595,6 +603,7 @@ impl Config {
             bound: None,
             agent_listen: server.agent_listen,
             job_listen: server.agents.job_listen(),
+            metrics_listen: server.metrics_listen,
             advertise_url: server.advertise_url,
             warnings,
             status,
@@ -644,6 +653,11 @@ impl Config {
     /// The address the job service is served on, when the flag or the file gives one.
     pub fn job_listen(&self) -> Option<SocketAddr> {
         self.job_listen.map(|job| job.addr)
+    }
+
+    /// The address the metrics are served on, when the flag or the file gives one.
+    pub fn metrics_listen(&self) -> Option<SocketAddr> {
+        self.metrics_listen.map(|metrics| metrics.addr)
     }
 
     /// The URL agents are told to dial, when the file gives one.

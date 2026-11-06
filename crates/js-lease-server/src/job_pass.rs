@@ -43,6 +43,7 @@ use crate::agents::Agents;
 use crate::job_expiry::{self, JobLimits};
 use crate::job_loss::{self, Observe, Seen};
 use crate::job_store::ServerJobs;
+use crate::metrics::MetricsSink;
 use crate::sched::place::SchedPlacer;
 
 /// What one pass changed.
@@ -64,7 +65,8 @@ impl Passed {
 }
 
 /// One pass over `jobs` at `now`, under `limits`, reading each host's presence through
-/// `observer` (the steps of the module docs), and what it changed.
+/// `observer` (the steps of the module docs), and what it changed. Each start failure and loss
+/// is told to `metrics` as its commit lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
@@ -72,12 +74,12 @@ impl Passed {
 pub(crate) fn run(
     jobs: &ServerJobs,
     limits: JobLimits,
-    observer: &dyn Observe,
+    (observer, metrics): (&dyn Observe, &dyn MetricsSink),
     now: StoreTime,
 ) -> Result<Passed, JobStoreError> {
-    let expired = job_expiry::expire(jobs, limits, now)?;
+    let expired = job_expiry::expire(jobs, limits, now, metrics)?;
     let deleted = jobs.tick()?;
-    let lost = job_loss::lose_absent(jobs, observer)?;
+    let lost = job_loss::lose_absent(jobs, observer, metrics)?;
     Ok(Passed {
         expired,
         deleted,
@@ -117,7 +119,9 @@ impl Agents {
     /// The job pass of this tick ([`run`]) when the server holds the job tables, at the
     /// server's clock, under the pool's limits, with the hosts the registry removed read absent;
     /// then those removals are settled. A failed pass is logged and changes no removal; the
-    /// next tick passes again. Without the job tables, nothing.
+    /// next tick passes again. The pass's duration, the start failures and losses it made,
+    /// and a failure of it, are counted on the agent side's meter ([`Agents::meter`]). Without
+    /// the job tables, nothing.
     pub(crate) fn job_pass(&self) {
         let Some(jobs) = &self.jobs else {
             return;
@@ -132,7 +136,12 @@ impl Agents {
             gone: &gone,
         };
         let now = store_time(self.clock.now().millis());
-        match run(jobs, self.job_limits, &observer, now) {
+        let meter = self.meter();
+        let sink = meter.sink();
+        let limits = self.job_limits;
+        let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
+        sink.job_pass_took(took);
+        match passed {
             Ok(passed) => {
                 if !passed.is_empty() {
                     let expired = passed.expired.len();
@@ -143,6 +152,7 @@ impl Agents {
                 self.placer.iter().for_each(settle);
             }
             Err(error) => {
+                sink.store_write_failed();
                 warn!(%error, "the job pass failed; the next tick passes again");
             }
         }
