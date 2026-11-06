@@ -1,6 +1,11 @@
 //! The `[logs]` table of the configuration file: where live logs go
 //! (`docs/design/live-logs.md`, section 6).
 //!
+//! Its keys are `sink` (`"none"`, the default, or `"object_store"`) and, for an object store,
+//! `url`, `region`, `endpoint`, `path_style`, `read_key_file`, `credentials`, `sts_endpoint`,
+//! `role_arn`, `mint_key_file`, `credential_ttl` and `max_follow` ([`LogsConfig`]). The table
+//! and its two key files are read and checked at start.
+//!
 //! It is the only way to set a sink: no flag sets one, and a server run from flags has none.
 //! Every rule is checked at start, offline, and a refusal names the key and never repeats its
 //! value. The two key files are read here, owner-only like every key file of the server; their

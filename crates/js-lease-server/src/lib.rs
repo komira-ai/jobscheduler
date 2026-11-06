@@ -127,15 +127,9 @@
 //! provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
 //! ```
 //!
-//! A `[logs]` table says where live logs go (`docs/design/live-logs.md`, section 6): `sink`
-//! (`"none"`, the default, or `"object_store"`) and, for an object store, `url`, `region`,
-//! `endpoint`, `path_style`, `read_key_file`, `credentials`, `sts_endpoint`, `role_arn`,
-//! `mint_key_file`, `credential_ttl` and `max_follow` ([`LogsConfig`]). No flag sets a sink.
-//! The table and its two key files are read and checked at start, and the start log line names
-//! the sink (`logs=object_store` or `logs=none`). With an object store the server mints one
-//! upload credential per agent that reports `log-upload`, delivers and renews it in heartbeat
-//! replies, puts each job's sink in its start, and keeps the stream lengths an agent reports
-//! with the job's result (the `logs` module, and `agent_api`'s "Live logs"); it reads no log.
+//! A `[logs]` table says where live logs go ([`LogsConfig`], whose module lists its keys); no
+//! flag sets one, and the start log line names it. With an object store the `logs` module
+//! mints, delivers and renews the agents' upload credentials, and each start carries its sink.
 //!
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
