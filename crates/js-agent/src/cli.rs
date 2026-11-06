@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, ValueEnum};
 
 use crate::facts::Platform;
+use crate::identity::IdentityFlags;
 
 /// What `--version` prints after the version: the runtimes this build can run jobs with, on a
 /// line a script can read (`js-agent --version | grep -x 'runtimes: docker crun'`). A build
@@ -54,6 +55,10 @@ pub struct Cli {
     /// refuses a hello that names another instance or none. The file is not secret.
     #[arg(long, value_name = "PATH")]
     pub instance_file: Option<PathBuf>,
+    /// The cloud's signed identity of this machine, sent in the hello (see
+    /// [`crate::identity`]).
+    #[command(flatten)]
+    pub identity: IdentityFlags,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
     /// authority that issued it); only those certificates are trusted then. Optional:
     /// without it an `https://` server is verified against the public roots bundled in the

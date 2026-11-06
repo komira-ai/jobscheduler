@@ -747,6 +747,7 @@ fn accepted(gpus: Gpus) -> Result<Gpus, String> {
         phase: Phase::Serving,
         held: Vec::new(),
         accepts_host_credential: false,
+        identity: None,
     };
     probe
         .validate()

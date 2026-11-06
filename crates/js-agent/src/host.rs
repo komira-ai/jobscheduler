@@ -19,6 +19,7 @@ use crate::disk::{ImageReserve, image_budget_bytes, image_reserve_bytes};
 use crate::facts::{
     self, CommandRunner, FileReader, GIB, Platform, detect, free_bytes, host_id, machine_id,
 };
+use crate::identity;
 
 /// The hello, and what the operator should be told about how it was made.
 #[derive(Debug)]
@@ -207,8 +208,9 @@ pub struct StoreView<'a> {
 ///
 /// # Errors
 ///
-/// A fact cannot be detected, a flag raises what was detected, or the host id cannot be
-/// made. The text names the flag when a flag is at fault.
+/// A fact cannot be detected, a flag raises what was detected, the host id cannot be
+/// made, or the signed identity of `--identity-source` cannot be read (the text names the
+/// source and the URL). The text names the flag when a flag is at fault.
 pub fn offer(
     cli: &Cli,
     platform: &Platform,
@@ -246,6 +248,11 @@ pub fn offer(
     );
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;
+    // Read once, and last of the facts: a configured source that fails stops the agent
+    // here, before any hello, never sending one without the identity.
+    let identity = identity::source(&cli.identity)?
+        .fetch()
+        .map_err(|why| why.to_string())?;
     let devices: Vec<_> = detected
         .gpus
         .devices
@@ -276,6 +283,7 @@ pub fn offer(
             held: Vec::new(),
             // The credential has a home only under a state root.
             accepts_host_credential: cli.state_root.is_some(),
+            identity,
         },
         warnings: detected
             .warnings

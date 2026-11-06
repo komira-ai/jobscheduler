@@ -31,7 +31,9 @@ server's TLS offers only `http/1.1` in ALPN (`crates/js-lease-server/src/tls.rs`
 **Messages** (`crates/js-agent-wire`, protocol name `jobscheduler.agent.v1`, `PROTOCOL_MAJOR` 1):
 
 - `Hello`: `protocol` (a `ProtocolRange` of majors), `host_id`, `pool`, `agent_version`, `instance`, `shape` (`WireShape`),
-  `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`.
+  `capabilities`, `gpu_devices`, `labels`, `phase`, `held` (the runs held), `accepts_host_credential`, `identity` (the cloud's
+  signed identity of the machine, `{"document", "signature"}` as its metadata service served them, `js_elastic::SignedIdentity`;
+  sent only by an agent started with `--identity-source aws` or `gce`, absent otherwise; no server reads it yet).
 - `Welcome`: `protocol`, `epoch`, `heartbeat_interval_ms`, `grace_ms`, `pool`, `session`, `host_credential`. Over HTTP the welcome is
   bare (200) and a refusal is the API's `{"error", "supported", "field"}` body; `HelloReply` is the transport-neutral form.
 - `Heartbeat`: `host_id`, `epoch`, `session`, `phase`, `held` (`HeldRun`), `results` (`RunResult`), `taint`, `exclusive_ready`,
@@ -85,6 +87,7 @@ constant is in `crates/js-agent-wire/src/lib.rs`).
 | `MAX_RESULTS` | 4,096 | results in a heartbeat; run and job acks in a reply |
 | `MAX_COMMANDS` | 1,024 | commands in one reply |
 | `MAX_ID_LEN` | 128 bytes | the ids of a message (run, lease, job, allocation, host, pool, instance); `session` has `MAX_SESSION_LEN` 128 and a lease id inside a load `MAX_LEASE_REF_LEN` 41 |
+| `MAX_IDENTITY_DOCUMENT_LEN`, `MAX_IDENTITY_SIGNATURE_LEN` | 16 KiB; 4 KiB | a hello's `identity`: its `document` (at least 1 byte) and its `signature` (may be empty) |
 | `MAX_DETAIL_LEN`, `MAX_LOG_STREAM_LEN` | 1,024 bytes; 8 KiB | a result's `detail`; each log stream of a result's tail |
 | `MAX_LOAD_BYTES` | 28 KiB | a `NodeLoad` at every cap, serialised |
 | `HEARTBEAT_BODY_BUDGET` | 65,536 bytes | the heartbeat body; "the server's own limit must equal it" |

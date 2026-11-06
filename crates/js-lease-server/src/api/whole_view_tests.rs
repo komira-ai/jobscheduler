@@ -170,6 +170,7 @@ impl Rig {
             phase: Phase::Serving,
             held: Vec::new(),
             accepts_host_credential: false,
+            identity: None,
         };
         let classes = vec![share_class(), ResourceClass::whole_node()];
         let mut asker = registry.provider().with_classes(classes.clone());

@@ -1046,6 +1046,8 @@ dependencies = [
  "js-mac-session",
  "js-oci",
  "js-provider",
+ "js-provider-ec2",
+ "js-provider-gce",
  "js-registry",
  "js-testkit",
  "js-treestore",
@@ -1064,6 +1066,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "update-hook",
+ "ureq",
 ]
 
 [[package]]
@@ -1075,6 +1078,7 @@ name = "js-agent-wire"
 version = "0.1.0"
 dependencies = [
  "cap",
+ "js-elastic",
  "js-types",
  "proptest",
  "serde",

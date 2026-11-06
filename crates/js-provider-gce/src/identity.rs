@@ -9,9 +9,9 @@
 //! named by the `kid` of the token's header. [`GoogleIdentityVerifier`] checks a token
 //! against the keys pinned in [`GOOGLE_KEYS`], by key id. No key is pinned in this release:
 //! Google replaces its keys every few weeks, so a key pinned now would refuse every token
-//! soon after, and the agent sends no identity yet. Until a key is pinned, every hello that
-//! carries an identity is refused, which is the safe answer; a hello without one is
-//! matched by its name and instance id.
+//! soon after, and an agent sends an identity only when started with `--identity-source
+//! gce`. Until a key is pinned, every hello that carries an identity is refused, which is
+//! the safe answer; a hello without one is matched by its name and instance id.
 //!
 //! **What is not checked.** The token's `aud` and `exp`: the provider has no wall clock,
 //! and a token, however old, names only the instance it was issued to, which the provider

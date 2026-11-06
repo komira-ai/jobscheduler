@@ -184,6 +184,9 @@ pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireAccelerator,
     WireShape,
 };
+/// The cloud's signed identity of a machine ([`Hello::identity`]): `js-elastic`'s type,
+/// the one the providers verify.
+pub use js_elastic::SignedIdentity;
 pub use kind::StartKind;
 pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
 pub use log_sink::{LogGrant, LogGrantState, LogReport, LogSink};
