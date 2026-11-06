@@ -17,7 +17,7 @@ example below no longer matches the code.
 One run of the cell is one seed of one scenario. The pieces, and how they talk:
 
 ```text
-  client driver (LeaseFront)
+  client driver (LeaseFront or JobFront)
       |  calls at exact virtual times, never dropped
       v
   server node                  bus                    agent nodes
@@ -32,7 +32,8 @@ The kernel (`js_sim`) owns the only clock and the only random source, both from 
 Each event it takes (a message delivered, a timer, a partition) goes to one node. The
 server node and the agent nodes exchange one HTTP call as a request and its answer
 (`js_sim_cell::Msg`). The client driver is not a node: the cell's run loop polls it at the
-virtual times it asks for, and its calls go straight to the server's client router. After
+virtual times it asks for, and its calls go straight to the server's client router (or, for
+a path under `/v1/jobs`, to its job service's router). After
 every kernel step, every poll and every action, the cell gathers what changed into its
 observations and the checker tests the step invariants over them; at the end of the
 scenario it tests the end invariants.
@@ -49,7 +50,14 @@ What is real, the production code as it runs in the server:
   cell's pool is one whose hosts register themselves; no provider launches machines);
 - the wire's types and their checks (`js-agent-wire`): each agent builds the hello and
   heartbeat bodies a real agent builds and checks every answer with the wire's own
-  `validate()`.
+  `validate()`;
+- with `ServerSpec::jobs` (which `Scenario::over_jobs` sets): the job service's HTTP/JSON
+  gateway (`--job-listen`, reached in process, never bound), its job and allocation
+  tables (`js-jobs`, the SQLite store beside the lease file), the per-job heartbeat and
+  the job pass of the tick, placing as `js-sched`. The tables stamp their rows with the
+  cell's clock and mint their allocation ids from js-jobs's scripted source over ids drawn
+  from the seed, both given through the server's in-process seam, so a job run replays
+  from its seed too.
 
 What is simulated:
 
@@ -67,8 +75,16 @@ What is simulated:
 - time: virtual. The server reads a manual clock that the node sets to the kernel's time
   before every input. Usage recording, whose store reads the system's clock, is off.
 - the clients: `LeaseFront` turns each unit of `Work` into the calls `js run` makes today
-  and reports what it hears as client events. Its calls are never dropped, delayed or
-  reordered.
+  and reports what it hears as client events; `JobFront` submits each unit of `Work` as a
+  job (`SubmitJob` under an id of its own, `sim-job-<n>`, then `GetJob` until it is
+  terminal, `GetResult`, and `CancelJob` for a cancel or a give-up) and reports the same
+  events. Their calls are never dropped, delayed or reordered.
+- the per-job agents: with `ServerSpec::jobs`, each fake agent reports the per-job
+  capability in its hello and speaks the per-job messages with a second `FakeAgent`, keyed
+  by job id, as their engine: a start of a job it holds is a repeat, a stop of a job it
+  does not hold retires the id, each result rides in every heartbeat until an answer
+  acknowledges it, and each retired id until an answer acknowledges it. A real agent's
+  node does not speak them.
 
 The crate keeps the kernel's rules: no clock, no random source and no hashed collection,
 so a run replays from its seed. The crate doc of `js-sim-cell` says the same at more
@@ -102,6 +118,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | binary | file | what it holds |
 |---|---|---|
 | `smoke` | `tests/smoke.rs` | The smoke family: a hundred hosts settling four hundred runs, a lossy agent wire, and a partition of ten agents that heals. |
+| `smoke_jobs` | `tests/smoke_jobs.rs` | The core's smoke scenarios (`smoke.rs` runs them over the lease front) over the job front (`Scenario::over_jobs`), and the two negative cases of the per-job agents: agents that drop an unacknowledged result fail `result-kept-until-acknowledged`, and agents that relaunch a repeated job start fail `at-most-one-launch`, each with its correct twin. |
+| `job_front` | `tests/job_front.rs` | The job front, driven through a scripted client port: each answer of the job service mapped to its event, the submit's body, and what a cancel and a give-up do at each stage. |
 | `broken_agent` | `tests/broken_agent.rs` | The negative cases of the harness: agents that lack a behaviour the server relies on must fail a named invariant, and correct agents must pass with the witness held. |
 | `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a run it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
 | `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
@@ -283,7 +301,9 @@ The rules:
 Every scenario checks every invariant of `Invariant::ALL`. A violation is written as one
 line, `<name> at <virtual ms>: <detail>`; hosts are `h000`, `h001`, ...; a lease is
 `<term>.<sequence>`; a run is `run "<id>"`; an item is `item<n>`, numbered from zero in
-submission order.
+submission order; a job is its id (`sim-job-<n>` for item `n` of the job front), and an
+allocation its 32 hex digits (`<a>` below). The capacity check of `no-double-booking`
+counts the jobs an agent runs beside its runs.
 
 | invariant | the property | what a violation says | checked |
 |---|---|---|---|
@@ -298,6 +318,11 @@ submission order.
 | `held-means-ready` | A whole-host item is granted its lease on a host only after that host's agent sent a ready report naming exactly that lease (what the agent sent, not what the server took). | `whole-host item3 was granted lease 1.5 on host h002 at 41000 before the host's agent reported ready for that lease` | every step |
 | `drain-kills-nothing` | No run on a host the server sets aside for a whole-host request is sent a stop or a cancel unless its own client asked first (it cancelled the item or sent its release), or the run's own wall limit had run out. | `host h002, set aside for request sim-item-7, was sent a cancel of run "a" of lease 1.4 at 52000 that its client did not ask for` | every step |
 | `marked-hosts-serve-no-ordinary-start` | A host the server sets aside for a whole-host request is sent no start of a lease of an item that did not ask for a whole host, unless it is backfill that ends inside the host's tail. | `host h002, set aside for request sim-item-7 with its tail ending at 90000, was sent a start of run "a" of ordinary lease 1.4 at 52000 that may run until 120000` | every step |
+| `one-allocation-per-job` | By the server's allocation table, a job has at most one allocation booked at a time, and an allocation id names one placement: never read for a second job or host, never read live again once read freed. By the agents' own truth, no job runs on two hosts at once. | `job sim-job-3 has allocations <a> and <b> booked at once`, or `allocation <a> of job sim-job-3 on host h001 was read at 64000 for job sim-job-4 on host h001`, or `allocation <a> of job sim-job-3 was read booked at 64000 after it was read freed`, or `job sim-job-3 runs on host h001 and on host h004` | every step |
+| `lost-is-terminal` | A job the server's table read lost is never read in another state after, and an answer to a per-job heartbeat that listed it running, sent after it read lost, carries a stop of it. | `job sim-job-3 read running at 70000 after it read lost at 65000`, or `host h002 listed job sim-job-3 at 70000, after it read lost at 65000, and the answer carried no stop of it` | every step |
+| `freed-only-when-confirmed` | An allocation is freed only on the host's word (a heartbeat whose listing left the job out, or named it retired, sent after the allocation was committed, after the host read the job's start and after it read the verdict on its result), when the server no longer lists the host, or for a whole-host prepare that failed before any launch: never on silence, never on an unknown. | `allocation <a> of job sim-job-3 on host h002 was read freed at 70000 with no listing of the host since 12000 that left the job out, while the server lists the host` | every step |
+| `no-start-without-allocation` | Every job start an agent read names an allocation of that job on that host that the server committed no later than the agent read the start. | `host h002 was sent a start of job sim-job-3 under allocation <a> at 12000 that no allocation committed before it names` | every step |
+| `result-kept-until-acknowledged` | A per-job agent sends a result it made in every heartbeat until it reads an answer that acknowledges it (unless its process was killed), and no job's result is accepted twice. | `host h002 sent a heartbeat at 70000 without the result of job sim-job-3 it made at 64000, before any answer acknowledged it`, or `the result of job sim-job-3 was accepted twice: on host h001 at 64010 and on host h001 at 69010` | every step |
 
 The step invariants are checked after every kernel step, every poll of the client and
 every client call; the end invariants once, after the scenario has been quiet (no partition, no
@@ -372,7 +397,9 @@ The cell writes its own lines, `<t> cell ...`, for what the kernel does not see:
 | `<t> cell faults delay=<min>..<max>ms [<kinds>]` | the bus's faults changed; the kinds are among `drop`, `duplicate` and `reorder` |
 | `<t> cell listing <host> live\|lost leases=<n> aside=<bool>` | the server's listing of a host changed |
 | `<t> cell listing <host> forgotten` | the server no longer lists the host |
-| `<t> cell launch <host>` | an agent launched a run (an entry of the launch ledger) |
+| `<t> cell launch <host>` | an agent launched a run or a job (an entry of the launch ledger) |
+| `<t> cell job <job> <state>` | the server's job table showed the job in a new state |
+| `<t> cell allocation <job> <step> <host>` | the server's allocation table showed the job's allocation `booked`, `releasing` or `freed` on the host (never its id) |
 | `<t> cell violation <invariant>` | the violation that stopped the run |
 
 A worked example, three lines of the shape a lossy run writes (the numbers are
@@ -400,7 +427,8 @@ family `faults` the first four seeds of the restart of the server with runs in f
 (`tests/cell/server_restart.rs`), family `whole_host` the first two seeds of the fifty
 whole-host requests under each value of `--placement`, and family `whole_host_faults` the
 first two seeds of the cancelled whole-host request (`tests/cell/whole_host_cancel.rs`)
-under each value of `--placement`. A trace hash covers the
+under each value of `--placement`, and family `jobs` the first seed of jobs over
+the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts). A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
@@ -409,8 +437,9 @@ own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 `replay`'s tests `pinned_seeds_match_the_golden_file`,
 `the_smoke_scenario_matches_the_golden_file`,
 `the_real_agent_scenario_matches_the_golden_file`,
-`the_whole_host_scenario_matches_the_golden_file_under_every_placement` and
-`the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement` fail on a moved
+`the_whole_host_scenario_matches_the_golden_file_under_every_placement`,
+`the_whole_host_fault_scenario_matches_the_golden_file_under_every_placement` and
+`the_job_scenario_matches_the_golden_file` fail on a moved
 hash and print the command
 that regenerates the lines:
 
@@ -457,6 +486,11 @@ model:
   (`crates/js-elastic-fake/tests/conformance.rs`) and the server's end-to-end test over it
   (`crates/js-lease-server/tests/server/elastic_fake_e2e.rs`).
 - **Usage recording.** Its store reads the system's clock, so the cell turns it off.
+- **Jobs that book GPUs, and whole-host jobs.** The server sends no start for a job that
+  books GPUs (it records no device indices), and places no whole-host job, so the job
+  front asks for a work's cpu and memory only, and a whole-host job stays queued. The job
+  service's gRPC transport is covered where it lives (`crates/js-lease-server`); the cell
+  reaches the HTTP/JSON gateway.
 
 ## Which section 8 rows have a scenario
 

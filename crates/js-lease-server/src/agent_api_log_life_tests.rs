@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::{HeldJob, HeldState, LogGrant, LogReport, NetworkCeiling, Outcome};
-use js_jobs::{JobId, JobState, LogLengths, RandomIds, Retention};
+use js_jobs::{JobId, JobState, LogLengths, Retention};
 use js_logmint::{MintError, Refusal};
 use js_logstore::{Endpoint, Unavailable};
 use js_state::sqlite::{Options, SqliteStore};
@@ -365,7 +365,7 @@ fn sqlite(path: &Path, clock: &Arc<StateClock>) -> ServerJobs {
     let clock: Arc<dyn js_state::Clock> = clock.clone();
     let store = SqliteStore::open(path, clock, Options::default()).unwrap();
     let store: Arc<dyn Store> = Arc::new(store);
-    js_jobs::JobStore::new(Arc::new(store), RandomIds).unwrap()
+    js_jobs::JobStore::new(Arc::new(store), crate::job_store::ServerIds::random()).unwrap()
 }
 
 /// The ended job `id` listed with its result, as the agent of `host-a` lists it.

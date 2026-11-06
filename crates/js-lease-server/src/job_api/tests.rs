@@ -14,7 +14,7 @@ use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::http::{HeaderValue, Request as HttpRequest, StatusCode, Uri, header};
 use hyper_util::rt::TokioIo;
-use js_jobs::{JobStore, RandomIds};
+use js_jobs::JobStore;
 use js_lease::{Clock, ManualClock, Timestamp};
 use js_proto::FILE_DESCRIPTOR_SET;
 use js_proto::v1::job_service_server::{JobService, JobServiceServer};
@@ -121,7 +121,8 @@ fn clock() -> SharedClock {
 /// Job tables over `store`, as the server holds them.
 fn tables(store: impl Store + 'static) -> Arc<ServerJobs> {
     let store: Arc<dyn Store> = Arc::new(store);
-    let jobs = JobStore::new(Arc::new(store), RandomIds).expect("the job tables open");
+    let jobs = JobStore::new(Arc::new(store), crate::job_store::ServerIds::random())
+        .expect("the job tables open");
     Arc::new(jobs)
 }
 
