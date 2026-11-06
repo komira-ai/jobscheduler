@@ -77,6 +77,11 @@ rcgen.workspace = true
 # ships must pass (tests/js_agent_declaration.rs).
 # The hook contract's `Step`, which the updater's launch takes (tests/js_agent_declaration_load.rs).
 update-hook.workspace = true
+# hostkeeper's unpacker, manifest loader and placer: the js-agent packages are read with the code
+# a host runs (tests/hostkeeper_package).
+hostkeeper-config.workspace = true
+hostkeeper-placed.workspace = true
+hostkeeper-unpack.workspace = true
 # `test-support`: `Declared::by_hand`, a loaded declaration made without reading the host's own
 # paths (tests/js_agent_declaration_load.rs).
 update-rights = { workspace = true, features = ["test-support"] }

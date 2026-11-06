@@ -877,6 +877,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostkeeper-config"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "hostkeeper-hook"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "hostkeeper-placed"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hostkeeper-config",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "hostkeeper-steps"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hostkeeper-config",
+ "hostkeeper-hook",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
+name = "hostkeeper-unpack"
+version = "0.1.0"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=7ff14da1d0f800334db0c45ae5586acef2574e76#7ff14da1d0f800334db0c45ae5586acef2574e76"
+dependencies = [
+ "hex",
+ "hostkeeper-config",
+ "hostkeeper-hook",
+ "hostkeeper-steps",
+ "rustix",
+ "ruzstd",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,6 +1096,7 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hex",
+ "hostkeeper-hook",
  "js-agent-usage",
  "js-agent-wire",
  "js-bundle",
@@ -4046,6 +4112,9 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "hostkeeper-config",
+ "hostkeeper-placed",
+ "hostkeeper-unpack",
  "js-agent",
  "js-api-gateway",
  "js-cli",

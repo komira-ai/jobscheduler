@@ -135,6 +135,15 @@ tonic-prost-build = { version = "0.14.9", default-features = false, features = [
 tower = { version = "0.5.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+# hostkeeper's own code, from its public repository at one pinned commit of main (v0.1.92): the
+# hook contract and its conformance harness (`hostkeeper-hook`, a dev-dependency of js-agent,
+# whose tests drive `js-agent update-hook` through the harness), and the readers a host runs on a
+# package, with which xtask's tests unpack, load and place the js-agent packages
+# (`hostkeeper-unpack`, `hostkeeper-config`, `hostkeeper-placed`; tests/hostkeeper_package).
+hostkeeper-config = { git = "https://github.com/komira-ai/hostkeeper", rev = "7ff14da1d0f800334db0c45ae5586acef2574e76" }
+hostkeeper-hook = { git = "https://github.com/komira-ai/hostkeeper", rev = "7ff14da1d0f800334db0c45ae5586acef2574e76" }
+hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "7ff14da1d0f800334db0c45ae5586acef2574e76" }
+hostkeeper-unpack = { git = "https://github.com/komira-ai/hostkeeper", rev = "7ff14da1d0f800334db0c45ae5586acef2574e76" }
 # The host updater's hook contract and its conformance harness, from kbf at a pinned revision
 # (the crate depends on nothing else of kbf). A dev-dependency only: of js-agent, whose tests
 # drive `js-agent update-hook` through the harness (tests/agent/update_hook/conformance.rs), and

@@ -124,4 +124,4 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # of kbf: dev-dependencies of js-agent and xtask, pinned by one revision in Cargo.toml. The
 # layering test refuses any other dependency from kbf's repository, by any name, and these two
 # as anything but dev-dependencies (docs/layering.md).
-allow-git = ["https://github.com/komira-ai/kbf"]
+allow-git = ["https://github.com/komira-ai/hostkeeper", "https://github.com/komira-ai/kbf"]
