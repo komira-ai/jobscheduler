@@ -11,6 +11,7 @@ mod fake_jobs;
 mod flags;
 mod help;
 mod job_conformance;
+mod job_loops;
 mod jobs;
 mod lost_reply;
 mod native;

@@ -52,7 +52,7 @@ pub struct Cli {
 /// The whole command line: the lease commands of [`Cli`] and the job commands generated
 /// from the job service ([`crate::jobs::commands`]).
 pub(crate) fn command() -> clap::Command {
-    Cli::command().subcommands(crate::jobs::commands(crate::jobs::surface()))
+    Cli::command().subcommands(crate::jobs::tree())
 }
 
 impl Cli {

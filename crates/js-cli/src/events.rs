@@ -1,4 +1,4 @@
-//! What a command waits on: the injected waiter, the signals and the events the
+//! What a command waits on: the injected waiters, the signals and the events the
 //! supervising loop of `lease run` reads.
 
 use std::io;
@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_client::jobs::Dialer;
+use js_client::jobs::{Dialer, TokioWaiter};
 use rustix::process::Signal;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::failure::Failure;
 use crate::signals;
@@ -126,7 +127,7 @@ impl Events {
 
     /// The handle a signal source reports to.
     pub(crate) fn signaller(&self) -> Signaller {
-        Signaller(self.sender())
+        Signaller(Route::Lease(self.sender()))
     }
 
     /// The signal `js` was sent, if one has arrived, without blocking. Only the signal
@@ -148,26 +149,50 @@ impl Events {
 
 /// Where a signal source reports the signals `js` receives.
 #[derive(Debug, Clone)]
-pub struct Signaller(Sender<Event>);
+pub struct Signaller(Route);
+
+/// Who reads the signals a [`Signaller`] reports.
+#[derive(Debug, Clone)]
+enum Route {
+    /// The supervising loop of `lease run`.
+    Lease(Sender<Event>),
+    /// `job run`, which reads them as it waits.
+    Job(UnboundedSender<ForwardedSignal>),
+}
 
 impl Signaller {
-    /// Reports `signal`; the supervising loop hands it on to the command. A report after
-    /// the command has ended is dropped.
+    /// The handle that reports to `job run` through `to`.
+    pub(crate) fn job(to: UnboundedSender<ForwardedSignal>) -> Self {
+        Self(Route::Job(to))
+    }
+
+    /// Reports `signal`: `lease run` hands it on to the command, `job run` cancels its job
+    /// (or, the second time, stops waiting). A report after the run has ended is dropped.
     pub fn deliver(&self, signal: ForwardedSignal) {
-        let _ = self.0.send(Event::Signal(signal));
+        match &self.0 {
+            Route::Lease(to) => {
+                let _ = to.send(Event::Signal(signal));
+            }
+            Route::Job(to) => {
+                let _ = to.send(signal);
+            }
+        }
     }
 }
 
-/// How `lease run` learns of SIGINT, SIGTERM and SIGHUP: called once, before the lease
-/// is asked for, with the handle to report them to. The program's source installs the
-/// handlers (and only for `lease run`: the other commands keep the signals' default
-/// behaviour); a signal that arrives while the lease is being obtained is held until
-/// the run can act on it.
+/// How `lease run` and `job run` learn of SIGINT, SIGTERM and SIGHUP: called once, before
+/// the lease is asked for or the job submitted, with the handle to report them to. The
+/// program's source installs the handlers (and only for those two: the other commands keep
+/// the signals' default behaviour); a signal that arrives before the run can act on it is
+/// held until it can.
 pub type SignalSource = Box<dyn FnOnce(Signaller) -> io::Result<()> + Send>;
 
 /// The effects a command has beyond HTTP, injected so a test drives them.
 pub struct Services {
     pub(crate) waiter: Arc<dyn Waiter>,
+    /// The pauses of the job commands' loops (`job wait`, `job follow`, `job run`): tokio's
+    /// timer unless a test hands in another.
+    pub(crate) job_waiter: Arc<dyn js_client::jobs::Waiter>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
     /// How the job commands open their connection: TCP unless a test hands in another.
@@ -175,10 +200,12 @@ pub struct Services {
 }
 
 impl Services {
-    /// Services over this waiter, clock and signal source; the job commands dial TCP.
+    /// Services over this waiter, clock and signal source; the job commands dial TCP and
+    /// pause on tokio's timer.
     pub fn new(waiter: Arc<dyn Waiter>, clock: Arc<dyn Clock>, signals: SignalSource) -> Self {
         Self {
             waiter,
+            job_waiter: Arc::new(TokioWaiter),
             clock,
             signals,
             dialer: Dialer::tcp(),
@@ -189,6 +216,12 @@ impl Services {
     #[must_use]
     pub fn with_dialer(self, dialer: Dialer) -> Self {
         Self { dialer, ..self }
+    }
+
+    /// These services with the job commands' loops pausing on `job_waiter`.
+    #[must_use]
+    pub fn with_job_waiter(self, job_waiter: Arc<dyn js_client::jobs::Waiter>) -> Self {
+        Self { job_waiter, ..self }
     }
 
     /// The program's own: a sleeping thread, the system clock and tokio's signal
