@@ -32,7 +32,7 @@ use js_update_hook::is_plain;
 use super::settings::{RUNTIMES, Settings, Timeouts};
 use super::validate::is_digest;
 
-/// The reserved key the updater sets from the declaration's `promotion_ceiling_secs`.
+/// The reserved key with the promotion ceiling in seconds, which hostkeeper applies and passes on.
 pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
 
 /// The key of the lifetime of a cordon between renewals.

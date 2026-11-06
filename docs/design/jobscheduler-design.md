@@ -196,7 +196,7 @@ One limit is accepted. A host that goes silent for good without the provider say
 
 ### 3.3 Layers
 
-`layers.toml`, checked by `cargo test -p xtask --test layering`, assigns each crate to `types`, `pure`, `runtime`, `server` or `app`. A crate may depend on its own layer or lower. Pure crates may not use clock, sleep, hash maps with random order, or sockets (a clippy configuration denies them). This is why placement and the whole-node cost rules are testable as functions. The dependency rule for projects is one-way: a client project such as kbf depends on jobscheduler and never the reverse; a layering test refuses any `kbf-*` crate, except the `update-hook` and `update-rights` dev-dependencies.
+`layers.toml`, checked by `cargo test -p xtask --test layering`, assigns each crate to `types`, `pure`, `runtime`, `server` or `app`. A crate may depend on its own layer or lower. Pure crates may not use clock, sleep, hash maps with random order, or sockets (a clippy configuration denies them). This is why placement and the whole-node cost rules are testable as functions. The dependency rule for projects is one-way: a client project such as kbf depends on jobscheduler and never the reverse; a layering test refuses any crate from kbf, as any kind of dependency.
 
 ### 3.4 One placement engine
 

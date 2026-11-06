@@ -62,7 +62,7 @@
 # repository code: `attest` and `publish` run only pinned actions, `sha256sum`, `cmp` and
 # `gh`, and `gamma` runs the `xtask` binary that the permissionless `deploy-tool` job built
 # (so no build script ever sees the token service's address and key), after the pinned
-# actions. A test (crates/xtask/tests/release_workflow.rs) pins these rules.
+# actions. A test (crates/xtask/tests/release_workflow) pins these rules.
 name: release
 
 on:

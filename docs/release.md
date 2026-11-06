@@ -74,7 +74,7 @@ that holds a write permission runs repository code, except that `gamma` runs the
 that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
 dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
 actions, no permission at the top, `id-token` write in `attest` and `gamma` only) are pinned by
-`crates/xtask/tests/release_workflow.rs`.
+`crates/xtask/tests/release_workflow`.
 
 ## What is released
 
