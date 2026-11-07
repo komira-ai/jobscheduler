@@ -610,24 +610,27 @@ pub trait Placer: Send + Sync {
     }
 }
 
+/// A placer that picks nothing and takes every default: for the crate's own unit tests,
+/// which cannot name the engine of `js-sched-placer` (that crate depends on this one).
+#[cfg(test)]
+pub(crate) struct Plain;
+
+#[cfg(test)]
+impl Placer for Plain {
+    fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use js_types::Resources;
 
     use super::*;
 
-    /// A placer that picks nothing and takes every default.
-    struct Plain;
-
-    impl Placer for Plain {
-        fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
-            None
-        }
-    }
-
     /// Catches a default that keeps a wait list or a record: a placer that takes the
-    /// defaults enters, binds, lists, puts back and holds nothing, and answers no request
-    /// as held or waiting.
+    /// defaults enters, binds, lists, puts back, keeps for the ledger and holds nothing, and
+    /// answers no request as held or waiting.
     #[test]
     fn a_placer_that_takes_the_defaults_keeps_no_wait_list() {
         let id = RequestId::new("r").unwrap();
@@ -674,6 +677,12 @@ mod tests {
         placer.whole_commit(lease, &key);
         assert!(!placer.whole_held_by_other(&id, &lease));
         assert!(!placer.whole_start(&key));
+        assert_eq!(placer.whole_record(&key), None);
+        placer.whole_forget(&id);
+        assert_eq!(placer.whole_reservations(), None);
+        assert!(placer.whole_ledger().is_empty());
+        let kept = WholeKept::default();
+        assert!(!placer.whole_restore(&id, &kept, false, at));
         assert_eq!(placer.whole_record(&key), None);
     }
 }

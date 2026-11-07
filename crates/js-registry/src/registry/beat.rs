@@ -215,19 +215,9 @@ mod tests {
     use js_lease::ManualClock;
     use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 
-    use js_provider::{Candidate, StartSpec};
-
     use super::*;
-    use crate::{MIN_LOST_RETENTION_MS, MarkedTails, Placer, SequentialSessions};
-
-    /// A placer that books nothing and keeps nothing: these tests start no lease.
-    struct Books;
-
-    impl Placer for Books {
-        fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
-            None
-        }
-    }
+    use crate::placer::Plain;
+    use crate::{MIN_LOST_RETENTION_MS, SequentialSessions};
 
     fn macos() -> BTreeMap<String, String> {
         BTreeMap::from([("os".to_string(), "macos".to_string())])
@@ -307,7 +297,7 @@ mod tests {
     fn a_check_with_housekeeping_due_leaves_the_raw_state_as_it_was() {
         let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
         let sessions = SequentialSessions::new();
-        let registry = Registry::with_sessions(config(), clock.clone(), sessions, Arc::new(Books));
+        let registry = Registry::with_sessions(config(), clock.clone(), sessions, Arc::new(Plain));
         let credential = Credential::of_token("t");
         let welcome = registry.hello(&hello(), &credential).unwrap();
         let beat = heartbeat(welcome.session);

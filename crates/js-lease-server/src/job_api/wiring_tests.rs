@@ -57,10 +57,18 @@ fn bare_state(
     let pool = PoolConfig::new(
         ProviderId::new("builders").unwrap(),
         ResourceClass::gpu_host(),
-        Shape::new(resources, Default::default()),
+        Shape::new(
+            resources,
+            std::collections::BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+        ),
         2,
     );
-    let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        pool,
+        clock.clone(),
+        SequentialSessions::new(),
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool::new(Box::new(registry.provider())),

@@ -78,7 +78,9 @@ impl Registry {
     pub fn bind_waiting(&self, held: &[(LeaseId, RequestId)]) -> usize {
         let _state = self.lock();
         let placer = self.placer();
-        let bound = held.iter().filter(|(lease, id)| placer.whole_bind(id, *lease));
+        let bound = held
+            .iter()
+            .filter(|(lease, id)| placer.whole_bind(id, *lease));
         bound.count()
     }
 

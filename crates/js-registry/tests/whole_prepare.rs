@@ -1,8 +1,7 @@
 //! What the registry does when a committed whole-node lease does not become ready: a
 //! typed refusal, the `prepare_timeout`, the host and request effects of each reason, and
 //! the cap on tries. The registry is driven directly, on a manual clock, with
-//! hand-built heartbeats, and every test runs over both placement engines (the registry's
-//! own pass and js-sched's) with the same assertions. Every start carries a request id, so
+//! hand-built heartbeats, and the placement is js-sched's. Every start carries a request id, so
 //! a request is its id: the tests place the same request under a new lease id each time,
 //! and read its record by that id. A start that finds no free host while some host could
 //! ever hold the request waits (`Unknown`, nothing booked).
@@ -33,7 +32,7 @@ fn whole() -> ResourceClass {
 
 fn plain_config() -> PoolConfig {
     let name = ProviderId::new("builders").unwrap();
-    PoolConfig::new(name, whole(), world_shape(), 4)
+    PoolConfig::new(name, whole(), pool_shape(), 4)
 }
 
 /// Short settings, so a test walks the whole deadline in a few steps: a prepare timeout
@@ -77,17 +76,13 @@ fn exclusive_not_ready() -> StartAck {
     StartAck::Refused(RefusalCode::ExclusiveNotReady)
 }
 
-/// A pool of `config` placed by `engine` with every host in `names` joined, and the epochs
+/// A pool of `config` placed by js-sched with every host in `names` joined, and the epochs
 /// they got.
-fn pool(
-    config: PoolConfig,
-    names: &[&'static str],
-    engine: Placement,
-) -> (Fixture, Vec<(&'static str, u64)>) {
-    let fx = fixture_in(config, engine);
+fn pool(config: PoolConfig, names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
+    let fx = fixture_of(config);
     let hosts = names
         .iter()
-        .map(|name| (*name, fx.join_world(name)))
+        .map(|name| (*name, fx.join(name, "t")))
         .collect();
     (fx, hosts)
 }
@@ -146,8 +141,8 @@ fn exclusions(pairs: &[(&str, Exclusion)]) -> BTreeMap<js_types::HostId, Exclusi
 /// and is not terminal, the host is not tainted, and the same request waits (`Unknown`,
 /// nothing booked) rather than take that host (the only one) until exactly
 /// `reserve_backoff` after the refusal.
-fn backoff_row(code: RefusalReason, engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+fn backoff_row(code: RefusalReason) {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, 5_000);
@@ -170,16 +165,19 @@ fn backoff_row(code: RefusalReason, engine: Placement) {
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(3)));
 }
 
-fn not_quiet_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
-    backoff_row(RefusalReason::NotQuiet, engine);
+#[test]
+fn not_quiet_excludes_the_host_for_the_backoff_and_requeues() {
+    backoff_row(RefusalReason::NotQuiet);
 }
 
-fn noise_over_bound_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
-    backoff_row(RefusalReason::NoiseOverBound, engine);
+#[test]
+fn noise_over_bound_excludes_the_host_for_the_backoff_and_requeues() {
+    backoff_row(RefusalReason::NoiseOverBound);
 }
 
-fn setup_failed_excludes_the_host_for_the_backoff_and_requeues(engine: Placement) {
-    backoff_row(RefusalReason::SetupFailed, engine);
+#[test]
+fn setup_failed_excludes_the_host_for_the_backoff_and_requeues() {
+    backoff_row(RefusalReason::SetupFailed);
 }
 
 /// Asserts the `host-unsafe` row: the host is tainted (as by a finding) and takes no
@@ -187,8 +185,9 @@ fn setup_failed_excludes_the_host_for_the_backoff_and_requeues(engine: Placement
 /// its own (the taint is the host's effect), and it is placed again on another host at
 /// once. Another request then waits and books nothing: the tainted host takes no lease
 /// however long it waits.
-fn host_unsafe_taints_the_host_and_requeues_on_another(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+#[test]
+fn host_unsafe_taints_the_host_and_requeues_on_another() {
+    let (fx, hosts) = pool(short_config(), &["a", "b"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::HostUnsafe, "a finding");
@@ -216,8 +215,9 @@ fn host_unsafe_taints_the_host_and_requeues_on_another(engine: Placement) {
 /// Asserts the `unsupported` row: the host is left out for the rest of the request's
 /// life (two back-offs later it is still refused, and another request takes it), and the
 /// request counts one failure and goes to another host at once.
-fn unsupported_excludes_the_host_for_good_and_requeues_on_another(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+#[test]
+fn unsupported_excludes_the_host_for_good_and_requeues_on_another() {
+    let (fx, hosts) = pool(short_config(), &["a", "b"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::Unsupported, "no hook");
@@ -240,8 +240,9 @@ fn unsupported_excludes_the_host_for_good_and_requeues_on_another(engine: Placem
 /// Asserts that a refusal puts the request on another host at once: with host `a`
 /// restored and free (and first by id) the same request still goes to `b`, and the
 /// lease it left is `Absent` at once, not at the prepare timeout.
-fn a_refused_request_is_placed_on_another_host_at_once(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+#[test]
+fn a_refused_request_is_placed_on_another_host_at_once() {
+    let (fx, hosts) = pool(short_config(), &["a", "b"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
@@ -256,8 +257,9 @@ fn a_refused_request_is_placed_on_another_host_at_once(engine: Placement) {
 /// A code the wire does not know decodes as `setup-failed` and acts as that row: the
 /// host is excluded for the back-off, not for good and not tainted, and a terminal
 /// failure names `setup-failed`.
-fn an_unknown_code_acts_as_setup_failed(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn an_unknown_code_acts_as_setup_failed() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let refused_at = fx.clock.now();
@@ -289,8 +291,9 @@ fn an_unknown_code_acts_as_setup_failed(engine: Placement) {
 /// is released to restore, the request counts one failure and none toward give-ups, and
 /// the host is excluded for `reserve_backoff` counted from the deadline. The last code
 /// is `prepare-timeout` with no detail.
-fn the_lease_ends_exactly_at_prepare_timeout(engine: Placement) {
-    let (fx, hosts) = pool(plain_config(), &["a"], engine);
+#[test]
+fn the_lease_ends_exactly_at_prepare_timeout() {
+    let (fx, hosts) = pool(plain_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, DEFAULT_PREPARE_TIMEOUT_MS - 1);
@@ -321,9 +324,10 @@ fn the_lease_ends_exactly_at_prepare_timeout(engine: Placement) {
 /// The silent agent (it never beats again after the commit, so the host goes lost) and
 /// the host that goes lost in the interval end at the same deadline, whether the clock is
 /// read by `advance` or by the lease table's observe.
-fn a_silent_agent_and_a_lost_host_end_at_the_deadline(engine: Placement) {
+#[test]
+fn a_silent_agent_and_a_lost_host_end_at_the_deadline() {
     for beating_for in [0, TIMEOUT - 30_000] {
-        let (fx, hosts) = pool(short_config(), &["a"], engine);
+        let (fx, hosts) = pool(short_config(), &["a"]);
         let mut provider = fx.provider.clone();
         assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
         wait(&fx, &hosts, beating_for);
@@ -343,8 +347,9 @@ fn a_silent_agent_and_a_lost_host_end_at_the_deadline(engine: Placement) {
 
 /// The timeout reads the pool's own settings: with a two-minute timeout the lease
 /// survives one minute and ends at two.
-fn the_timeout_is_the_pools_setting(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn the_timeout_is_the_pools_setting() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     wait(&fx, &hosts, TIMEOUT / 2);
@@ -356,8 +361,9 @@ fn the_timeout_is_the_pools_setting(engine: Placement) {
 /// Asserts the cap: with `max_replace` of two, one failure leaves the request open and
 /// the second makes it terminal, naming the last code and detail (the code of the
 /// second, not the first); a terminal request is placed nowhere, though a host is free.
-fn the_request_fails_not_ready_after_max_replace_failures(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b", "c"], engine);
+#[test]
+fn the_request_fails_not_ready_after_max_replace_failures() {
+    let (fx, hosts) = pool(short_config(), &["a", "b", "c"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::SetupFailed, "first");
@@ -386,9 +392,10 @@ fn the_request_fails_not_ready_after_max_replace_failures(engine: Placement) {
 
 /// The default cap is three: two failures leave the request open, the third ends it, and
 /// a timeout counts as one of them.
-fn the_default_cap_is_three_and_a_timeout_counts(engine: Placement) {
+#[test]
+fn the_default_cap_is_three_and_a_timeout_counts() {
     let config = plain_config();
-    let (fx, hosts) = pool(config, &["a", "b", "c"], engine);
+    let (fx, hosts) = pool(config, &["a", "b", "c"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::NotQuiet, "");
@@ -406,8 +413,9 @@ fn the_default_cap_is_three_and_a_timeout_counts(engine: Placement) {
 /// A detail of the longest the wire allows, 256 bytes, is stored as received; and the
 /// scheduler reads no detail: a `not-quiet` refusal whose text names the other codes
 /// is still only a back-off exclusion.
-fn the_detail_is_stored_verbatim_and_never_read(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+#[test]
+fn the_detail_is_stored_verbatim_and_never_read() {
+    let (fx, hosts) = pool(short_config(), &["a", "b"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let detail = "host-unsafe unsupported taint ".repeat(9)[..256].to_string();
@@ -430,8 +438,9 @@ fn the_detail_is_stored_verbatim_and_never_read(engine: Placement) {
 
 /// A refusal names a lease: one for another lease, and one for a lease already reported
 /// ready, change nothing.
-fn a_refusal_for_another_lease_or_a_ready_one_is_ignored(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn a_refusal_for_another_lease_or_a_ready_one_is_ignored() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-9", RefusalReason::NotQuiet, "other");
@@ -450,8 +459,9 @@ fn a_refusal_for_another_lease_or_a_ready_one_is_ignored(engine: Placement) {
 
 /// A request that failed once and is then reported ready loses its record, and a lease
 /// its consumer stops is no failure.
-fn a_granted_request_forgets_its_failures_and_a_stop_counts_none(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a", "b"], engine);
+#[test]
+fn a_granted_request_forgets_its_failures_and_a_stop_counts_none() {
+    let (fx, hosts) = pool(short_config(), &["a", "b"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     refuse(&fx, hosts[0], "1-1", RefusalReason::NotQuiet, "");
@@ -462,7 +472,7 @@ fn a_granted_request_forgets_its_failures_and_a_stop_counts_none(engine: Placeme
     fx.registry.heartbeat(&message, &cred("t")).unwrap();
     assert!(fx.registry.request_record(&rid()).is_none());
 
-    let (fx, _hosts) = pool(short_config(), &["a"], engine);
+    let (fx, _hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     provider.stop(&lease(1));
@@ -471,8 +481,9 @@ fn a_granted_request_forgets_its_failures_and_a_stop_counts_none(engine: Placeme
 
 /// A whole-node booking put back after a restart has no request in memory: its lease
 /// still ends at the deadline, and no request is charged for it.
-fn a_restored_booking_times_out_without_charging_a_request(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn a_restored_booking_times_out_without_charging_a_request() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     provider.seat(&host("b"), lease(7), None).unwrap();
     wait(&fx, &hosts, TIMEOUT);
@@ -524,7 +535,7 @@ fn committed_again_with_a_run(fx: &Fixture, epoch: u64) -> (&'static str, u64) {
     let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
     assert_eq!(queued.unwrap().state, RunState::Queued);
     fx.pass_grace();
-    let mut again = world_hello("a");
+    let mut again = hello("a");
     again.held = vec![HeldRun {
         run_id: "r1".into(),
         state: HeldState::Running,
@@ -555,8 +566,9 @@ fn stop_r1() -> Vec<Command> {
 /// A refused prepare asks the runs of the committed lease to stop: the host that still
 /// lists the run is told to stop it, on the heartbeat after the refusal. It catches a
 /// failed prepare that ends the lease and leaves its container running.
-fn a_refused_prepare_asks_the_leases_runs_to_stop(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn a_refused_prepare_asks_the_leases_runs_to_stop() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
@@ -577,8 +589,9 @@ fn a_refused_prepare_asks_the_leases_runs_to_stop(engine: Placement) {
 
 /// A prepare that times out asks the runs of the committed lease to stop, as a refusal
 /// does: nothing is sent a millisecond before the deadline, the stop from the deadline.
-fn a_prepare_timeout_asks_the_leases_runs_to_stop(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn a_prepare_timeout_asks_the_leases_runs_to_stop() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut provider = fx.provider.clone();
     assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
     let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
@@ -596,8 +609,9 @@ fn a_prepare_timeout_asks_the_leases_runs_to_stop(engine: Placement) {
 
 /// A booking restored on a host that lists live runs is ready already: it is not
 /// overdue however long it waits, and no request is charged.
-fn a_restored_booking_with_live_runs_never_times_out(engine: Placement) {
-    let (fx, hosts) = pool(short_config(), &["a"], engine);
+#[test]
+fn a_restored_booking_with_live_runs_never_times_out() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
     let mut message = fx.heartbeat("a", hosts[0].1);
     message.held = vec![HeldRun {
         run_id: "r1".into(),
@@ -614,25 +628,3 @@ fn a_restored_booking_with_live_runs_never_times_out(engine: Placement) {
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(7)));
     assert!(fx.registry.request_record(&rid()).is_none());
 }
-
-crate::both!(
-    not_quiet_excludes_the_host_for_the_backoff_and_requeues,
-    noise_over_bound_excludes_the_host_for_the_backoff_and_requeues,
-    setup_failed_excludes_the_host_for_the_backoff_and_requeues,
-    host_unsafe_taints_the_host_and_requeues_on_another,
-    unsupported_excludes_the_host_for_good_and_requeues_on_another,
-    a_refused_request_is_placed_on_another_host_at_once,
-    an_unknown_code_acts_as_setup_failed,
-    the_lease_ends_exactly_at_prepare_timeout,
-    a_silent_agent_and_a_lost_host_end_at_the_deadline,
-    the_timeout_is_the_pools_setting,
-    the_request_fails_not_ready_after_max_replace_failures,
-    the_default_cap_is_three_and_a_timeout_counts,
-    the_detail_is_stored_verbatim_and_never_read,
-    a_refusal_for_another_lease_or_a_ready_one_is_ignored,
-    a_granted_request_forgets_its_failures_and_a_stop_counts_none,
-    a_restored_booking_times_out_without_charging_a_request,
-    a_refused_prepare_asks_the_leases_runs_to_stop,
-    a_prepare_timeout_asks_the_leases_runs_to_stop,
-    a_restored_booking_with_live_runs_never_times_out,
-);

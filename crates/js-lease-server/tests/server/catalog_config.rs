@@ -114,11 +114,13 @@ fn catalog_refresh_and_offer_cooldown_default_to_one_hour() {
 /// A registry of the whole-node pool `gpu`, for the scaler settings a plan gives.
 fn registry() -> Registry {
     let resources = Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap();
-    let shape = Shape::new(resources, BTreeMap::new());
+    let arch = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+    let shape = Shape::new(resources, arch);
     let name = ProviderId::new("gpu").unwrap();
     Registry::new(
         PoolConfig::new(name, ResourceClass::whole_node(), shape, 4),
         clock(),
+        std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
     )
 }
 

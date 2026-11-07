@@ -39,6 +39,7 @@ fn body(host: &str) -> Bytes {
             "gpus": 1,
             "gpu_class": "nvidia-a100",
         },
+        "capabilities": { "arch": "x86_64" },
         "phase": "serving",
     });
     Bytes::from(hello.to_string())
@@ -73,10 +74,18 @@ fn agents(name: &str) -> Arc<Agents> {
     let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
     let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_string())).unwrap();
-    let shape = Shape::new(resources, BTreeMap::new());
+    let shape = Shape::new(
+        resources,
+        BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+    );
     let name = ProviderId::new("burst").unwrap();
     let pool = PoolConfig::new(name, ResourceClass::gpu_host(), shape, 4);
-    let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        pool,
+        clock,
+        SequentialSessions::new(),
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     Arc::new(Agents::over(registry, &shared, &dir))
 }
 

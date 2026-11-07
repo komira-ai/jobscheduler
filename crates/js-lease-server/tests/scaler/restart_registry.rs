@@ -158,7 +158,7 @@ fn hello() -> Hello {
             max_leases: None,
             accelerator: None,
         },
-        capabilities: BTreeMap::new(),
+        capabilities: BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]),
         gpu_devices: Vec::new(),
         labels: BTreeMap::new(),
         phase: Phase::Serving,
@@ -189,10 +189,18 @@ fn spec() -> StartSpec {
 /// A registry with the host `HOST` joined and booked under [`lease`], and then silent for
 /// longer than the grace, so that its state is lost.
 fn registry_with_a_lost_leased_host(clock: &ManualClock) -> Registry {
-    let shape = Shape::new(resources(1000, 1 << 30), BTreeMap::new());
+    let shape = Shape::new(
+        resources(1000, 1 << 30),
+        BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+    );
     let pool = ProviderId::new("gpu").unwrap();
     let config = PoolConfig::new(pool, ResourceClass::gpu_host(), shape, 4);
-    let registry = Registry::with_sessions(config, clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        config,
+        clock.clone(),
+        SequentialSessions::new(),
+        std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     registry
         .hello(&hello(), &Credential::of_token("t"))
         .unwrap();

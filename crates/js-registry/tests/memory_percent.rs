@@ -3,8 +3,9 @@
 mod support;
 
 use js_agent_wire::{JobSpec, refusal};
+use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
-use js_registry::{PoolConfig, Refusal, RunRefusal, WholeNodeConfig};
+use js_registry::{PoolConfig, Refusal, Registry, RunRefusal, SequentialSessions, WholeNodeConfig};
 use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
 use support::world::{HOUR_S, World};
 use support::*;
@@ -67,10 +68,11 @@ fn the_default_books_all_of_the_listed_memory() {
     assert_eq!(config(4).memory_percent(), MemoryPercent::FULL);
 }
 
-/// Asserts that a host claiming far more than the pool lists is booked at the cut
-/// memory all the same, in the listing the provider gives the lease table and in the
-/// registry's own view. It catches a booking that follows the agent's claim, which would
-/// let an agent inflate a lease.
+/// Asserts that a host claiming far more than the pool lists is booked at the pool's
+/// numbers all the same: the listing the provider gives the lease table shows the listed
+/// memory (8 GiB, which the placer cuts to the percent) with the cut as its bookable
+/// memory, and the registry's own view shows the cut. It catches a booking that follows
+/// the agent's claim, which would let an agent inflate a lease.
 #[test]
 fn a_larger_claim_never_raises_what_is_booked() {
     let fx = fixture_of(ninety());
@@ -78,7 +80,9 @@ fn a_larger_claim_never_raises_what_is_booked() {
     big.shape.memory_bytes = 512 << 30;
     fx.hello(&big, &cred("t")).unwrap();
     let listed = fx.provider.capacity();
-    assert_eq!(listed[0].shape.resources().memory_bytes(), NINETY);
+    // The lease table is listed the whole listed memory (the placer holds the percent), never
+    // the 512 GiB the host claims.
+    assert_eq!(listed[0].shape.resources().memory_bytes(), LISTED);
     assert_eq!(listed[0].memory.bookable_bytes(), NINETY);
     let view = &fx.registry.hosts()[0];
     assert_eq!(view.shape.resources().memory_bytes(), NINETY);
@@ -112,19 +116,25 @@ fn a_hello_is_held_to_the_unreduced_memory() {
     assert_eq!(fx.registry.hosts().len(), 1);
 }
 
-/// Asserts that a run's memory limit is bound by the cut memory: the exact cut is queued
-/// and one byte more is refused `limits-exceed-shape`. It catches a run bound that still
-/// reads the unreduced shape, which would let a job use the memory the pool keeps back.
+/// Asserts that a run's memory limit is bound by the cut memory when the registry books the
+/// cut (a pool not set to book the whole memory, placed by a placer that holds all of what
+/// is booked): the exact cut is queued and one byte more is refused `limits-exceed-shape`.
+/// It catches a run bound that still reads the unreduced shape, which would let a job use
+/// the memory the pool keeps back.
 #[test]
 fn a_run_is_bound_by_the_cut_memory() {
-    let mut fx = fixture_of(ninety());
-    fx.join("a", "t");
-    assert_eq!(started_on(&fx.provider.start(asking(1, 1))), Some("a"));
-    let queued = fx.registry.queue_run(&host("a"), &lease(1), job(NINETY));
+    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+    let placer = sched_placer(100, &clock);
+    let sessions = SequentialSessions::new();
+    let registry = Registry::with_sessions(ninety(), clock, sessions, placer);
+    let mut provider = registry.provider();
+    registry.hello(&hello("a"), &cred("t")).unwrap();
+    assert_eq!(started_on(&provider.start(asking(1, 1))), Some("a"));
+    let queued = registry.queue_run(&host("a"), &lease(1), job(NINETY));
     assert!(queued.is_ok(), "{queued:?}");
     let mut over = job(NINETY + 1);
     over.run_id = "r2".into();
-    let refused = fx.registry.queue_run(&host("a"), &lease(1), over);
+    let refused = registry.queue_run(&host("a"), &lease(1), over);
     assert_eq!(refused.unwrap_err(), RunRefusal::LimitsExceedShape);
 }
 

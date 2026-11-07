@@ -1,5 +1,5 @@
-//! The whole-node queue the engine keeps for the registry under `--placement js-sched`
-//! ([`Engine::whole_round`]): the engine, not the registry's own pass, marks, commits and
+//! The whole-node queue the engine keeps for the registry
+//! ([`Engine::whole_round`]): the engine marks, commits and
 //! cancels the pool's whole-node requests.
 //!
 //! At each pass of the queue (each tick and each start) the registry hands over how it
@@ -54,7 +54,7 @@
 //! The whole-host jobs the engine queues ([`super::whole_jobs`]) are operations of the same
 //! scheduler, in the same term and rounds: the helpers that walk the queue's operations
 //! (the grants put back, the hosts held, the grants a heartbeat lists) walk theirs too. The
-//! reservations shown to the registry, the ceiling's drop and the ledger stay those of the registry's requests.
+//! reservations shown to the registry, the ceiling's drop and the ledger stay those of the whole-node requests.
 //!
 //! A rebuild of the engine keeps the queue: the last round is handed to the new engine with
 //! the marks and bars of the old one ([`Engine::carry_whole`]). A restart keeps it

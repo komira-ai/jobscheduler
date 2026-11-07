@@ -1,8 +1,9 @@
-//! A placer that keeps the whole-node queue (`Placer::whole_round`, the engine of
-//! `--placement js-sched`): the registry hands it the wait list and its view of the hosts
-//! at every pass, shows the marks it answers as its reservations in place of its own
-//! pass's, and commits a request on the host set aside for it. The registry is driven on a
-//! manual clock; the placer here answers marks from a script and records every round.
+//! A placer that keeps the whole-node queue (`Placer::whole_round` and the `whole_*` calls,
+//! the engine of `--placement js-sched`): the registry hands it its view of the hosts at
+//! every pass, shows the marks it holds ([`Placer::whole_reservations`]) as its
+//! reservations, commits a request on the host set aside for it and tells it when a
+//! request leaves the wait list. The registry is driven on a manual clock; the placer here
+//! answers presentations and marks from a script and records every round.
 
 mod support;
 
@@ -10,37 +11,33 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent_wire::{DEFAULT_GRACE_MS, RefusalReason};
-use js_lease::{ExclusionEnd, Held, Queued, ReservationRecord, Timestamp};
-use js_provider::{Candidate, StartAck, StartSpec};
-use js_registry::PoolConfig;
+use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Taint};
+use js_lease::{ManualClock, Timestamp};
+use js_provider::{Candidate, Pool, StartAck, StartSpec};
 use js_registry::{
-    DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, MarkedTails, Placer,
-    ProfileLives, Reservation, Restored, Standing, WaitingWhole, WholeHost, WholeNodeConfig,
-    WholeRound,
+    DEFAULT_PREPARE_TIMEOUT_MS, MarkedTails, Placer, PoolConfig, Presented, ProfileLives,
+    RegisteredProvider, Registry, Reservation, SequentialSessions, Standing, WholeHost,
+    WholeNodeConfig, WholeRound,
 };
-use js_types::{ProviderId, RequestId};
+use js_types::{Clock, LeaseId, ProviderId, Request, RequestId};
 use js_usage::ProfileKey;
 use support::world::*;
 use support::*;
 
-/// A placer that keeps the queue: it books the first host it is shown, answers each
-/// presented request the mark the script holds for it, and records every round.
+/// A placer that keeps the queue: it books the first host it is shown, lets each presented
+/// request wait, holds the marks the script gives it, and records every round and every
+/// request taken off its wait list.
 #[derive(Default)]
 struct Queue {
-    script: Mutex<BTreeMap<RequestId, Reservation>>,
+    /// The marks the placer holds now ([`Placer::whole_reservations`]).
+    held: Mutex<Vec<Reservation>>,
+    /// What the placer answers each round with, which the registry does not take as marks.
+    answered: Mutex<Vec<Reservation>>,
     rounds: Mutex<Vec<WholeRound>>,
+    cancelled: Mutex<Vec<RequestId>>,
 }
 
 impl Queue {
-    /// Answers `mark` for its request from now on.
-    fn answer(&self, mark: Reservation) {
-        self.script
-            .lock()
-            .unwrap()
-            .insert(mark.request.clone(), mark);
-    }
-
     /// The last round the registry handed over.
     fn last(&self) -> WholeRound {
         self.rounds.lock().unwrap().last().cloned().unwrap()
@@ -59,9 +56,27 @@ impl Placer for Queue {
 
     fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
         self.rounds.lock().unwrap().push(round.clone());
-        let script = self.script.lock().unwrap();
-        let marks = round.waiting.iter().filter_map(|w| script.get(&w.id));
-        Some(marks.cloned().collect())
+        Some(self.answered.lock().unwrap().clone())
+    }
+
+    fn whole_reservations(&self) -> Option<Vec<Reservation>> {
+        Some(self.held.lock().unwrap().clone())
+    }
+
+    fn whole_present(
+        &self,
+        _: &RequestId,
+        _: LeaseId,
+        _: &Request,
+        _: bool,
+        _: Duration,
+    ) -> Presented {
+        Presented::Waiting(0)
+    }
+
+    fn whole_cancel(&self, id: &RequestId) -> bool {
+        self.cancelled.lock().unwrap().push(id.clone());
+        true
     }
 }
 
@@ -74,18 +89,88 @@ impl ProfileLives for Table {
     }
 }
 
-/// Cordons `name` for ten minutes: the registry books nothing on it until then.
-fn cordon(w: &World, name: &str) {
-    let ten = Duration::from_secs(600);
-    w.fx.registry.cordon(&host(name), ten).unwrap();
+/// A registry of up to four hosts, placed by a [`Queue`], on a manual clock.
+struct Rig {
+    registry: Registry,
+    provider: RegisteredProvider,
+    clock: ManualClock,
+    queue: Arc<Queue>,
+    /// Each joined host's epoch and session secret.
+    joined: BTreeMap<String, (u64, String)>,
 }
 
-/// `hosts` with the default whole-node settings and the queue placer set.
-fn world(hosts: &[&str]) -> (World, Arc<Queue>) {
-    let w = World::new(hosts, plain);
-    let queue = Arc::new(Queue::default());
-    w.fx.registry.set_placer(queue.clone());
-    (w, queue)
+impl Rig {
+    /// A dedicated pool of the default whole-node settings with `hosts` joined.
+    fn new(hosts: &[&str]) -> Self {
+        let name = ProviderId::new("builders").unwrap();
+        let config = PoolConfig::new(name, whole(), pool_shape(), 5);
+        let config = config
+            .with_whole_node(WholeNodeConfig::dedicated(5))
+            .unwrap();
+        let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+        let queue = Arc::new(Queue::default());
+        let sessions = SequentialSessions::new();
+        let registry = Registry::with_sessions(config, clock.clone(), sessions, queue.clone());
+        let provider = registry
+            .provider()
+            .with_classes(vec![share_class(), whole()]);
+        let mut rig = Self {
+            registry,
+            provider,
+            clock,
+            queue,
+            joined: BTreeMap::new(),
+        };
+        hosts.iter().for_each(|name| rig.join(name));
+        rig
+    }
+
+    /// Says hello for `name`, keeping its epoch and session.
+    fn join(&mut self, name: &str) {
+        let welcome = self.registry.hello(&hello(name), &cred("t")).unwrap();
+        self.joined
+            .insert(name.to_owned(), (welcome.epoch, welcome.session));
+    }
+
+    /// A heartbeat of `name` in its current epoch and session.
+    fn message(&self, name: &str) -> Heartbeat {
+        let (epoch, session) = self.joined[name].clone();
+        Heartbeat {
+            session,
+            ..heartbeat(name, epoch)
+        }
+    }
+
+    /// Sends `message` as `name`'s heartbeat.
+    fn send(&self, message: &Heartbeat) {
+        self.registry.heartbeat(message, &cred("t")).unwrap();
+    }
+
+    /// Moves the clock on by `ms`.
+    fn step(&self, ms: u64) {
+        self.clock.advance(Duration::from_millis(ms));
+    }
+
+    fn now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
+    /// Starts whole-node request `name` for lease `sequence`.
+    fn ask(&mut self, sequence: u64, name: &str) -> StartAck {
+        let spec = World::whole_spec(sequence, Some(name), 600);
+        self.provider.start(spec)
+    }
+
+    /// The lease booked on `name`, if any.
+    fn lease_on(&self, name: &str) -> Option<LeaseId> {
+        self.provider.booked().get(&host(name)).copied()
+    }
+
+    /// Cordons `name` for ten minutes: the registry books nothing on it until then.
+    fn cordon(&self, name: &str) {
+        let ten = Duration::from_secs(600);
+        self.registry.cordon(&host(name), ten).unwrap();
+    }
 }
 
 /// A mark of request `name` on `on`, made at `at` ms with a deadline a minute later.
@@ -100,67 +185,50 @@ fn mark(name: &str, on: &str, at: u64, assigned: bool) -> Reservation {
     }
 }
 
-/// Catches: the registry running its own pass beside the placer's (it would assign the
-/// quiet `b`), the placer's mark not shown, or the placer handed a request in another
-/// shape than the registry holds it. `a` is cordoned and the placer marks it for `r`: the
-/// registry shows that mark, holds `a` for `r` (whose start books nothing while `a` is
-/// cordoned, and waits), and hands the placer `r` with its wall time, first presentation and mark.
+/// Catches: the registry adopting the marks a placer answers its round with instead of the
+/// ones it holds (the registry would show `b` set aside for `decoy`), the placer's held
+/// mark not shown, or the placer handed a request, a mark held outside or lives of the
+/// registry's own. `a` is cordoned and the placer holds a mark of `r` on it: the registry
+/// shows that mark alone, and hands the placer a round with the pool's whole-node settings
+/// and nothing waiting, held outside or living.
 #[test]
-fn the_registry_shows_the_placers_marks_and_runs_no_pass_of_its_own() {
-    let (mut w, queue) = world(&["a", "b"]);
-    cordon(&w, "a");
-    let since = w.now();
-    let drain = mark("r", "a", since.millis(), false);
-    queue.answer(drain.clone());
-    // It waits: its start answers that the lease is pending.
-    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
-    assert_eq!(w.reservations(), std::slice::from_ref(&drain));
-    let first = WaitingWhole {
-        id: id("r"),
-        max_wall: Duration::from_secs(600),
-        since,
-        give_ups: 0,
-        exclusions: BTreeMap::new(),
-        mark: None,
-    };
-    let round = queue.last();
-    assert_eq!(round.waiting, std::slice::from_ref(&first));
-    assert_eq!(round.settings, WholeNodeConfig::dedicated(4));
-    assert!(round.outside.is_empty() & round.lives.is_empty());
-    w.step(5_000);
-    let again = WaitingWhole {
-        mark: Some(drain),
-        ..first
-    };
-    assert_eq!(queue.last().waiting, [again]);
-    assert_eq!(w.lease_on("b"), None);
+fn the_registry_shows_the_marks_the_placer_holds_and_hands_it_no_request() {
+    let mut rig = Rig::new(&["a", "b"]);
+    rig.cordon("a");
+    let drain = mark("r", "a", rig.now().millis(), false);
+    *rig.queue.held.lock().unwrap() = vec![drain.clone()];
+    *rig.queue.answered.lock().unwrap() = vec![mark("decoy", "b", rig.now().millis(), false)];
+    assert_eq!(rig.ask(2, "r"), StartAck::Unknown);
+    assert_eq!(rig.registry.reservations(), [drain]);
+    let round = rig.queue.last();
+    assert_eq!(round.settings, WholeNodeConfig::dedicated(5));
+    assert!(round.waiting.is_empty());
+    assert!(round.outside.is_empty());
+    assert!(round.lives.is_empty());
+    assert_eq!(rig.lease_on("b"), None);
 }
 
-/// Catches: a request whose start is not booked on the quiet host the placer set aside for
-/// it, or a placer left uninformed once the request has left the wait list (it would keep
-/// the request queued). The placer assigns the quiet `b` to `r`: its start commits there.
-/// The registry then hands the placer an empty wait list at its next pass, and a request
-/// cancelled while waiting leaves the wait list and its mark at once.
+/// Catches: a request whose start is not booked on the quiet host the placer holds for it,
+/// or a placer left uninformed once the request is placed (it would keep the request
+/// queued), or a cancel the registry answers itself. The placer holds the quiet `b` for
+/// `r` (`a` carries a lease): the start of `r` commits there, and the placer is told `r`
+/// left its wait list. A cancel of `s` is handed to the placer and answered as it answers.
 #[test]
-fn a_request_commits_on_the_host_set_aside_and_then_leaves_the_round() {
-    let (mut w, queue) = world(&["a", "b"]);
-    assert_eq!(started_on(&w.share(1, 900)), Some("a"));
-    queue.answer(mark("r", "b", w.now().millis(), true));
-    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
-    assert_eq!(w.lease_on("b"), Some(lease(2)));
-    let asked = queue.count();
-    w.fx.registry.advance();
-    assert_eq!(queue.count(), asked + 1);
-    assert!(queue.last().waiting.is_empty());
-    cordon(&w, "a");
-    queue.answer(mark("s", "a", w.now().millis(), false));
-    w.ask(3, "s");
-    let shown = vec![("s".to_string(), "a".to_string())];
-    assert_eq!(names(&w.reservations()), shown);
-    assert!(w.cancel("s"));
-    assert!(w.reservations().is_empty());
-    w.fx.registry.advance();
-    assert!(queue.last().waiting.is_empty());
+fn a_request_commits_on_the_host_set_aside_and_the_placer_is_told_it_left() {
+    let mut rig = Rig::new(&["a", "b"]);
+    assert_eq!(
+        started_on(&rig.provider.start(World::share_spec(1, 900))),
+        Some("a")
+    );
+    *rig.queue.held.lock().unwrap() = vec![mark("r", "b", rig.now().millis(), true)];
+    assert_eq!(rig.ask(2, "r"), StartAck::Unknown);
+    assert_eq!(rig.lease_on("b"), Some(lease(2)));
+    assert_eq!(*rig.queue.cancelled.lock().unwrap(), [id("r")]);
+    let asked = rig.queue.count();
+    rig.registry.advance();
+    assert_eq!(rig.queue.count(), asked + 1);
+    assert!(rig.registry.cancel_request(&id("s")));
+    assert_eq!(*rig.queue.cancelled.lock().unwrap(), [id("r"), id("s")]);
 }
 
 /// Catches: a host handed to the placer as able to hold a request when the registry would
@@ -169,20 +237,24 @@ fn a_request_commits_on_the_host_set_aside_and_then_leaves_the_round() {
 /// is open.
 #[test]
 fn the_round_stands_each_host_as_the_registry_does() {
-    let name = ProviderId::new("builders").unwrap();
-    let config = PoolConfig::new(name, whole(), world_shape(), 5);
-    let config = config
-        .with_whole_node(WholeNodeConfig::dedicated(5))
-        .unwrap();
-    let mut w = World::of(config, &["a", "b", "c", "d", "e"]);
-    let queue = Arc::new(Queue::default());
-    w.fx.registry.set_placer(queue.clone());
-    w.taint("b");
-    w.fx.registry.retire(&host("c")).unwrap();
-    cordon(&w, "d");
-    w.silent.insert("e".to_owned());
-    w.step(DEFAULT_GRACE_MS + 5_000);
-    w.fx.registry.advance();
+    let mut rig = Rig::new(&["a", "b", "c", "d", "e"]);
+    let mut tainted = rig.message("b");
+    tainted.taint = Some(Taint {
+        reason: "check".into(),
+        run_id: None,
+        check: None,
+    });
+    rig.send(&tainted);
+    rig.registry.retire(&host("c")).unwrap();
+    rig.cordon("d");
+    // Every host but `e` is heard from again just before `e` has been silent for the grace.
+    rig.step(DEFAULT_GRACE_MS - 1_000);
+    for name in ["a", "b", "c", "d"] {
+        rig.send(&rig.message(name));
+    }
+    rig.step(6_000);
+    rig.registry.advance();
+    rig.joined.remove("e");
     let standing = [
         ("a", Standing::Live),
         ("b", Standing::Tainted),
@@ -199,7 +271,7 @@ fn the_round_stands_each_host_as_the_registry_does() {
             open: *standing == Standing::Live,
         })
         .collect();
-    assert_eq!(queue.last().hosts, expected);
+    assert_eq!(rig.queue.last().hosts, expected);
 }
 
 /// Catches: the lives of the booked leases not handed over (the engine's drain cost would
@@ -208,192 +280,41 @@ fn the_round_stands_each_host_as_the_registry_does() {
 /// run.
 #[test]
 fn the_round_carries_the_expected_life_of_each_booked_lease() {
-    let (mut w, queue) = world(&["a", "b"]);
+    let mut rig = Rig::new(&["a", "b"]);
     let table = BTreeMap::from([("slow", 8), ("fast", 1)]);
-    w.fx.registry.set_lives(Arc::new(Table(table)));
-    w.share(1, 900);
-    w.share(2, 900);
+    rig.registry.set_lives(Arc::new(Table(table)));
+    rig.provider.start(World::share_spec(1, 900));
+    rig.provider.start(World::share_spec(2, 900));
     for (run, key) in [("r1", "slow"), ("r2", "unknown"), ("r3", "fast")] {
         let key = ProfileKey::parse(key).unwrap();
-        w.fx.registry
+        rig.registry
             .queue_keyed_run(&host("a"), &lease(1), job(run), Some(key))
             .unwrap();
     }
-    w.fx.registry.advance();
-    assert_eq!(queue.last().lives, BTreeMap::from([(lease(1), 8)]));
+    rig.registry.advance();
+    assert_eq!(rig.queue.last().lives, BTreeMap::from([(lease(1), 8)]));
 }
 
-/// Catches: a mark put back from the ledger dropped by the placer's pass before its
-/// request is presented again, or not handed over (another request could take its host);
-/// and the request's restored exclusions and mark not handed over once it is presented, or
-/// an old record's give-up count carried into what is handed over. `q` held `a`, with a
-/// give-up count from an older release, and `b` left out for life.
+/// Catches: a placer that does not time a prepare (`prepare_overdue` answers `None`) left
+/// without the registry's own deadline: a lease committed from the placer's hold on `b` and
+/// reported ready, whose agent then says hello again, fails at the registry's
+/// `prepare_timeout` counted from that hello, not from the commit.
 #[test]
-fn a_restored_mark_is_held_outside_until_its_request_is_presented() {
-    let (mut w, queue) = world(&["a", "b"]);
-    let at = w.now().millis();
-    let record = ReservationRecord {
-        request_id: "q".to_string(),
-        held: Some(Held {
-            host: host("a"),
-            reserved_at: Timestamp::from_millis(at),
-            deadline: Timestamp::from_millis(at + 3_600_000),
-            assigned: false,
-            tail_end: Some(at + 600_000),
-        }),
-        queued: Some(Queued {
-            place: 0,
-            since: Timestamp::from_millis(at),
-        }),
-        give_ups: 1,
-        prepare_failures: 0,
-        exclusions: vec![js_lease::Exclusion {
-            host: host("b"),
-            until: ExclusionEnd::Forever,
-        }],
-        claim_by: None,
-    };
-    let restored = w.fx.registry.restore_reservations(&[record]);
-    assert_eq!(
-        restored,
-        Restored {
-            resumed: 1,
-            dropped: 0
-        }
-    );
-    let kept = w.reservations();
-    w.step(10_000);
-    w.fx.registry.advance();
-    let round = queue.last();
-    assert!(round.waiting.is_empty());
-    let left = Some(Duration::from_millis(590_000));
-    assert_eq!(round.outside, MarkedTails::from([(host("a"), left)]));
-    assert_eq!(w.reservations(), kept);
-    w.ask(3, "q");
-    let round = queue.last();
-    assert!(round.outside.is_empty());
-    let presented = &round.waiting[0];
-    assert_eq!(presented.give_ups, 0);
-    let excluded = BTreeMap::from([(host("b"), Exclusion::ForLife)]);
-    assert_eq!(presented.exclusions, excluded);
-    assert_eq!(
-        presented.mark.as_ref().map(|m| m.host.clone()),
-        Some(host("a"))
-    );
-    assert!(w.reservations().is_empty());
-}
-
-/// Catches: a placer that keeps the whole-node queue but not the prepares (one that does not
-/// answer the prepare calls) taking the registry's rules with it: the failed-prepare count,
-/// the bars, the record a ready report clears, the deadline a hello restarts and the record a
-/// cancel forgets must stay the registry's. The placer sets a quiet host aside for `r` each
-/// time. `r` is refused on `a` and counted here, is placed on `b` and reported ready, which clears its record; `b`'s agent restarts, and the lease
-/// fails at the registry's own deadline from that hello; the next try waits and is cancelled,
-/// which forgets the record.
-#[test]
-fn a_placer_that_keeps_no_prepare_leaves_it_to_the_registry() {
-    let (mut w, queue) = world(&["a", "b"]);
-    // The placer sets the quiet host aside for the request: its start commits there.
-    queue.answer(mark("r", "a", w.now().millis(), true));
-    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
-    assert_eq!(w.lease_on("a"), Some(lease(2)));
-    let refused = w.now();
-    w.refuse("a", &lease(2), RefusalReason::NotQuiet);
-    w.drop_ask(2);
-    let kept = w.fx.registry.request_record(&id("r")).unwrap();
-    assert_eq!(kept.prepare_failures, 1);
-    let backoff = Duration::from_millis(DEFAULT_RESERVE_BACKOFF_MS);
-    let until = Exclusion::Until(refused.plus(backoff));
-    assert_eq!(kept.exclusions, BTreeMap::from([(host("a"), until)]));
-    queue.answer(mark("r", "b", w.now().millis(), true));
-    assert_eq!(w.ask(3, "r"), StartAck::Unknown);
-    assert_eq!(w.lease_on("b"), Some(lease(3)));
-    w.ready("b", &lease(3));
-    assert_eq!(w.fx.registry.request_record(&id("r")), None);
-    w.silent.insert("b".to_owned());
-    w.step(DEFAULT_GRACE_MS + 5_000);
-    let epoch = w.fx.hello(&world_hello("b"), &cred("t")).unwrap().epoch;
-    w.epochs.insert("b".to_owned(), epoch);
-    w.silent.remove("b");
-    w.step(DEFAULT_PREPARE_TIMEOUT_MS - 1);
-    w.fx.registry.advance();
-    assert_eq!(w.lease_on("b"), Some(lease(3)));
-    w.step(1);
-    w.fx.registry.advance();
-    assert_eq!(w.lease_on("b"), None);
-    assert_eq!(
-        w.fx.registry
-            .request_record(&id("r"))
-            .unwrap()
-            .prepare_failures,
-        1
-    );
-    w.drop_ask(3);
-    cordon(&w, "a");
-    assert_eq!(w.ask(4, "r"), StartAck::Unknown);
-    assert_eq!(w.lease_on("b"), None);
-    w.drop_ask(4);
-    w.stop(4);
-    assert_eq!(w.fx.registry.request_record(&id("r")), None);
-}
-
-/// A placer that keeps only the pass of the queue and, beside it, the marks as it holds
-/// them and the prepares of the leases committed from it.
-#[derive(Default)]
-struct Keeping {
-    queue: Queue,
-    /// The marks as the placer holds them now.
-    held: Mutex<Vec<Reservation>>,
-}
-
-impl Placer for Keeping {
-    fn pick(&self, spec: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
-        self.queue.pick(spec, open, marked)
-    }
-
-    fn whole_round(&self, round: &WholeRound) -> Option<Vec<Reservation>> {
-        self.queue.whole_round(round)
-    }
-
-    fn whole_reservations(&self) -> Option<Vec<Reservation>> {
-        Some(self.held.lock().unwrap().clone())
-    }
-
-    fn prepare_failed(&self, _: &js_types::LeaseId, _: &js_registry::PrepareFailure) -> bool {
-        true
-    }
-}
-
-/// Catches a placer that keeps only the pass read as one that keeps the wait list (the
-/// registry would drop its own marks and records), a mark read from the registry where the
-/// placer holds the same host for the same request (its deadline would be the registry's),
-/// and a failed prepare the placer keeps counted by the registry as well. `r` is marked on
-/// the cordoned `a`: the registry shows the placer's deadline for it, not for a mark the
-/// placer holds on another host, and the request has no record. Then `s` is committed on the
-/// quiet `b` and refused: the registry counts no failure of its own.
-#[test]
-fn a_placer_that_keeps_only_the_pass_is_read_for_its_marks_and_failures() {
-    let mut w = World::new(&["a", "b"], plain);
-    let placer = Arc::new(Keeping::default());
-    w.fx.registry.set_placer(placer.clone());
-    cordon(&w, "a");
-    let now = w.now().millis();
-    let drain = mark("r", "a", now, false);
-    placer.queue.answer(drain.clone());
-    let later = Reservation {
-        deadline: Timestamp::from_millis(now + 90_000),
-        ..drain.clone()
-    };
-    *placer.held.lock().unwrap() = vec![later.clone(), mark("q", "b", now, false)];
-    assert_eq!(w.ask(2, "r"), StartAck::Unknown);
-    assert_eq!(w.reservations(), [later]);
-    assert_eq!(w.fx.registry.request_record(&id("r")), None);
-    placer.held.lock().unwrap().clear();
-    assert_eq!(w.reservations(), [drain]);
-    placer.queue.answer(mark("s", "b", w.now().millis(), true));
-    assert_eq!(w.ask(3, "s"), StartAck::Unknown);
-    assert_eq!(w.lease_on("b"), Some(lease(3)));
-    w.refuse("b", &lease(3), RefusalReason::NotQuiet);
-    assert_eq!(w.lease_on("b"), None);
-    assert_eq!(w.fx.registry.request_record(&id("s")), None);
+fn a_placer_that_does_not_time_a_prepare_leaves_the_deadline_to_the_registry() {
+    let mut rig = Rig::new(&["a", "b"]);
+    *rig.queue.held.lock().unwrap() = vec![mark("r", "b", rig.now().millis(), true)];
+    assert_eq!(rig.ask(3, "r"), StartAck::Unknown);
+    assert_eq!(rig.lease_on("b"), Some(lease(3)));
+    let mut ready = rig.message("b");
+    ready.exclusive_ready = Some(lease(3).to_string());
+    rig.send(&ready);
+    // The agent falls silent past the grace and says hello again: its preparation is void.
+    rig.step(DEFAULT_GRACE_MS + 5_000);
+    rig.join("b");
+    rig.step(DEFAULT_PREPARE_TIMEOUT_MS - 1);
+    rig.registry.advance();
+    assert_eq!(rig.lease_on("b"), Some(lease(3)));
+    rig.step(1);
+    rig.registry.advance();
+    assert_eq!(rig.lease_on("b"), None);
 }

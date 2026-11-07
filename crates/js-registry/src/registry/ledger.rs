@@ -245,7 +245,8 @@ fn revive(
         let _ = ctx.placer.whole_restore(&id, &counts, terminal, since);
     }
     let wants_place = record.queued;
-    let placed = wants_place.is_some_and(|queued| ctx.placer.whole_restore_place(&id, queued.since));
+    let placed =
+        wants_place.is_some_and(|queued| ctx.placer.whole_restore_place(&id, queued.since));
     dropped += usize::from(wants_place.is_some() & !placed);
     let mut marked = false;
     if let Some(held) = &record.held {

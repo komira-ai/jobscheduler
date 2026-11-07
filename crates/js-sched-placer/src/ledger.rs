@@ -1,5 +1,4 @@
-//! What the engine keeps of the registry's whole-node requests across a restart under
-//! `--placement js-sched`: it hands the registry's reservation ledger (design
+//! What the engine keeps of the registry's whole-node requests across a restart: it hands the registry's reservation ledger (design
 //! `whole-node.md`, D55) the failed prepares and bars of its requests
 //! ([`Engine::whole_ledger`]) and the marks they hold ([`Engine::whole_held`]), and
 //! takes them back from the ledger a restart read ([`Engine::whole_restore`]).
@@ -20,7 +19,7 @@
 //!   A record with failed prepares is a prepare record at once ([`super::prepare`]), so a
 //!   terminal request is refused at its next start whether or not it is queued first. What
 //!   is put back and not queued within the registry's idle horizon goes
-//!   ([`Engine::whole_sweep`]), as the registry's own records do.
+//!   ([`Engine::whole_sweep`]).
 //!
 //! The place of a request put back and its mark are not taken here: the wait list keeps them
 //! ([`super::wait`]) until the request is presented again and its mark's host has said

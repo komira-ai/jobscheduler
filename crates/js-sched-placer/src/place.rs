@@ -19,7 +19,7 @@
 //! is built again: a start in the normal course costs time in the hosts it is offered and
 //! their leases, not in every host and lease. The engine then places the start among
 //! `open` alone, and the registry books the host it names, checking the room as it does
-//! without a placer (with the CPU slack, [`Placer::cpu_slack_permille`]).
+//! (with the CPU slack, [`Placer::cpu_slack_permille`]).
 //!
 //! How it picks depends on the lease's class:
 //!
@@ -31,7 +31,7 @@
 //!   hosts that carry no lease, and the scheduler gives a worker that a request would own
 //!   whole no score and takes the first by worker name, which is the host id here
 //!   ([`map::worker`]). So the lease takes the first open host by id, whatever its number
-//!   or the order the hosts are fed in: the host a registry with no placer books.
+//!   or the order the hosts are fed in: the first host by id, whatever the hosts' loads.
 //!
 //! A host a whole-node request has set aside (a mark of the registry) is shown only to a
 //! start that may backfill it (a class that books part of a host, not a probe), with the
@@ -42,8 +42,8 @@
 //! A start it places elsewhere or nowhere never falls back to a marked host.
 //!
 //! The engine also keeps the registry's whole-node queue ([`Placer::whole_round`],
-//! [`super::engine::whole`]) over its own wait list and request records
-//! ([`Placer::keeps_wait_list`], [`super::engine::wait`]): at each pass the registry hands it
+//! [`super::engine::whole`]) over its wait list and request records
+//! ([`super::engine::wait`]): at each pass the registry hands it
 //! its view of the hosts, and shows the marks the engine holds as its reservations. A host
 //! one of the engine's own requests has set aside is held by that request in the engine,
 //! not outside it, and is backfilled by the same rule against the tail the mark was made

@@ -123,7 +123,7 @@ fn row(rig: &Rig, name: &str) -> ReservationRecord {
 /// new one, a count carried over from an older row, and a mark dropped at its deadline.
 #[tokio::test]
 async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
-    let mut rig = Rig::over_file_in("sched_rebinds", WITH_OLD_GIVE_UP_COUNT, true).await;
+    let mut rig = Rig::over_file("sched_rebinds", WITH_OLD_GIVE_UP_COUNT).await;
     rig.lease().await;
     rig.ask("r1");
     let before = rig.registry.reservations();
@@ -170,7 +170,7 @@ async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
 /// mark's.
 #[tokio::test]
 async fn hosts_api_and_d55_goldens_unchanged() {
-    let mut rig = Rig::sched("sched_listing").await;
+    let mut rig = Rig::new("sched_listing").await;
     let plain = rig.hosts().await;
     for key in ["mark", "reserved_for", "drain_deadline_ms"] {
         assert!(!plain.contains(key), "{plain}");
@@ -197,7 +197,7 @@ async fn hosts_api_and_d55_goldens_unchanged() {
 /// or required by the ledger written from the engine, and an older row that no longer parses.
 #[tokio::test]
 async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
-    let mut rig = Rig::sched("sched_cross_out").await;
+    let mut rig = Rig::new("sched_cross_out").await;
     rig.lease().await;
     rig.ask("r1");
     rig.shared.tick().await;
@@ -225,7 +225,7 @@ async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
     drop(rig);
 
     let rewritten = previous::write(&document);
-    let back = Rig::over_file_in("sched_cross_back", &rewritten, true).await;
+    let back = Rig::over_file("sched_cross_back", &rewritten).await;
     let kept = back.registry.reservations();
     assert_eq!(kept.len(), 1);
     assert_eq!(
@@ -247,7 +247,7 @@ async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
         previous::row("r10", None, (1, T0), 0, None),
     ];
     let old = previous::write(&previous::file(rows));
-    let resumed = Rig::over_file_in("sched_cross_in", &old, true).await;
+    let resumed = Rig::over_file("sched_cross_in", &old).await;
     let marks = resumed.registry.reservations();
     assert_eq!(marks.len(), 1);
     assert_eq!(
