@@ -29,12 +29,12 @@
 <div class="table-wrap"><table>
 <thead><tr><th>Proposal</th><th>State</th></tr></thead>
 <tbody>
-<tr><td>A lease server is deployed; kbf leases whole hosts from it</td><td><span class="tag tag-ok">the lease API exists</span> <span class="tag tag-planned">kbf's client: not built</span></td></tr>
-<tr><td>kbf submits each action as a run on its lease, through <code>POST</code>, <code>GET</code> and <code>DELETE</code> on <code>/v1/leases/{id}/runs</code></td><td><span class="tag tag-ok">the interim run API exists</span> <span class="tag tag-muted">runs are in memory only: a restart forgets them</span></td></tr>
+<tr><td>A lease server is deployed; kbf leases whole hosts from it</td><td><span class="tag tag-ok">the job service exists</span> <span class="tag tag-planned">kbf's client: not built</span></td></tr>
+<tr><td>kbf submits each action as a run on its lease, through <code>POST</code>, <code>GET</code> and <code>DELETE</code> on <code>/v1/leases/{id}/runs</code></td><td><span class="tag tag-planned">removed: the job service is the client API</span> <span class="tag tag-muted">an unknown route is a 404, the lease and run routes of earlier releases among them</span></td></tr>
 <tr><td><code>js-agent</code> stands alone on every host, with no kbf process beside it</td><td><span class="tag tag-ok">the agent is standalone</span> <span class="tag tag-planned">kbf on it: design only</span></td></tr>
 <tr><td>Each action runs in its own digest-pinned image; the agent returns the container's exit code</td><td><span class="tag tag-planned">design only</span></td></tr>
 <tr><td>The task writes its outputs with one presigned upload, and kbf's frontend verifies what it reads back</td><td><span class="tag tag-planned">design only</span></td></tr>
 <tr><td>A kbf flag, <code>--executor</code>, chooses between the agent and kbf's own daemon, as the way back</td><td><span class="tag tag-planned">design only</span></td></tr>
 </tbody></table></div>
 <p>The document keeps jobscheduler generic: kbf's own types stay in kbf, and jobscheduler gets only generic fields.</p>
-<p class="source-note">Sources: <code>docs/design/kbf-on-js-agent.md</code> (its first lines, section 1 and requirement R1), <code>crates/js-lease-server/src/run_api.rs</code> (the module documentation) and <code>crates/js-lease-server/src/lib.rs</code> (the API table).</p>
+<p class="source-note">Sources: <code>docs/design/kbf-on-js-agent.md</code> (its first lines, section 1 and requirement R1), and <code>crates/js-lease-server/src/lib.rs</code> (the module documentation: "The job service" and the note on unknown routes).</p>

@@ -1,26 +1,30 @@
-//! `cargo xtask site-demo [--out <path>] [--bin-dir <dir>] [--port <n>]`: records the demonstration on
-//! the landing page of jobscheduler.dev, `site/test/demo.transcript`. It builds the lease server and the
-//! client, leases a host from a static host file on this machine, lists the lease and releases it, and
-//! writes the transcript to `--out` (default `site/test/demo.transcript` under `--root`). It needs cargo
-//! and a free port 7300 on 127.0.0.1 (`--port 0` lets the server pick one; the transcript then shows the
-//! port it picked). Lease ids and times differ on every run, so a new recording differs from the committed
-//! one in those.
+//! `cargo xtask site-demo [--out <path>] [--bin-dir <dir>] [--port <n>] [--job-port <n>]`: records the
+//! demonstration on the landing page of jobscheduler.dev, `site/test/demo.transcript`. It builds the
+//! server and the client, starts the server on this machine with the job service on, asks the job
+//! service for a GPU job and lists the jobs, and writes the transcript to `--out` (default
+//! `site/test/demo.transcript` under `--root`). It needs cargo and free ports 7300 and 7301 on 127.0.0.1
+//! (`--port 0` and `--job-port 0` let the server pick them; the transcript then shows the ports it
+//! picked). No agent joins the pool, so no host could ever serve the job: the server refuses it as
+//! `no-capable-host` (`js` exits 3) and records nothing, and the list is empty. Nothing the commands
+//! print differs from run to run, so a new recording is the committed one word for word.
 //!
-//! The recording, in order: the host file (a `#` line saying what it is, then the file), the command that
-//! writes the token file, the server start (a command and no output), then `js lease acquire`, `list`,
-//! `release <id>` and `list` again, each with what it printed. The commands are the ones [`commands`]
-//! builds and nothing else is typed in the transcript, so the test `committed_transcript_shows_the_commands_this_verb_runs`
-//! compares them with `site/test/demo.transcript`, and a command changed here and not there fails it.
+//! The recording, in order: the pool file (a `#` line saying what it is, then the file), the command that
+//! writes the token file, the server start (a command and no output), then `js job submit` with the
+//! refusal it printed and `js job list` with the nothing it printed. The commands are the ones
+//! [`commands`] builds and nothing else is typed in the transcript, so the test
+//! `committed_transcript_shows_the_commands_this_verb_runs` compares them with
+//! `site/test/demo.transcript`, and a command changed here and not there fails it.
 //!
 //! The steps, each a piece with its own tests:
 //! - [`build`] runs `cargo build --release -p js-lease-server -p js-cli` in the repository root, unless
 //!   `--bin-dir` names a directory that already holds `js-lease-server` and `js`;
-//! - the host file and the token file are written into a scratch directory
+//! - the pool file and the token file are written into a scratch directory
 //!   (`js_testkit::dir::TestDir`, removed on every way out, a failed run too);
 //! - the server is started there (`js_testkit::reaped`: stopped and reaped when the verb ends) with its
-//!   output in `server.log`. It prints `listening on <address>` once it is bound, and the verb reads the
-//!   address from the log, so the client talks to the port the server really holds. [`wait_ready`] then
-//!   asks `GET /healthz` until it answers 200 or a deadline passes, with the probe and the clock given to
+//!   output in `server.log`. It prints `listening on <address>` once it is bound, and the verb reads that
+//!   address from the log, and the job service's from the log line `listening for the job service
+//!   addr=<address>`, so the client talks to the ports the server really holds. [`wait_ready`] asks
+//!   `GET /healthz` until it answers 200 or a deadline passes, with the probe and the clock given to
 //!   it so a test needs neither a server nor time;
 //! - [`Recorder`] makes the transcript text, from the commands and what they printed.
 //!
@@ -36,26 +40,33 @@ use std::time::{Duration, Instant};
 
 use js_testkit::dir::TestDir;
 
-/// The port the recording uses: the lease server's default.
+/// The port the recording uses for the server's health route: its default.
 pub(crate) const DEFAULT_PORT: u16 = 7300;
+/// The port the recording gives the job service (`--job-listen`; the server has no default for it).
+pub(crate) const DEFAULT_JOB_PORT: u16 = 7301;
 /// The recording's default place, under the repository root.
 pub(crate) const DEFAULT_OUT: &str = "site/test/demo.transcript";
-/// What the recording says the host file is.
-const HOSTS_COMMENT: &str = "# hosts.toml: one host, listed by hand; there is no agent";
-/// The host file: one host of eight GPUs.
-const HOSTS_TOML: &str = r#"[[host]]
-id = "gpu-01"
-gpu_class = "nvidia-a100"
+/// What the recording says the pool file is.
+const POOL_COMMENT: &str = "# pool.toml: the pool agents would join; no agent has";
+/// The pool file: one pool of hosts with eight GPUs each.
+const POOL_TOML: &str = r#"name = "gpu"
+class = "gpu-host"
+max_machines = 1
 
-[host.resources]
+[shape]
 cpu_millis = 64000
 memory_bytes = 549755813888
 gpus = 8
-
-[host.capabilities]
-isa = "x86-64-v3"
-driver = "550"
+gpu_class = "nvidia-a100"
 "#;
+/// The pool file's name in the scratch directory.
+const POOL_FILE: &str = "pool.toml";
+/// The job the recording submits: its id.
+const JOB_ID: &str = "demo-1";
+/// The job the recording submits: its image, pinned by digest as the server requires.
+const JOB_IMAGE: &str = "registry.example/train@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// The exit status of `js` for a definite refusal of the server, such as `no-capable-host`.
+const REFUSED: i32 = 3;
 /// The client's token: printable ASCII of at least 32 bytes, as the server requires.
 const TOKEN: &str = "a-local-token-of-at-least-32-bytes";
 /// The token file's name in the scratch directory.
@@ -66,6 +77,8 @@ pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_INTERVAL: Duration = Duration::from_millis(100);
 /// What the server prints, followed by the address it is bound to, once it can be reached.
 const LISTENING: &str = "listening on ";
+/// What the server's log says before the address of the job service.
+const JOB_LISTENING: &str = "listening for the job service addr=";
 
 /// Why the recording failed.
 #[derive(Debug, thiserror::Error)]
@@ -156,11 +169,19 @@ pub enum Error {
         /// What it printed.
         output: String,
     },
-    /// `js lease acquire` succeeded and printed no lease id.
-    #[error("`js lease acquire` printed no lease id: {output}")]
-    NoLeaseId {
+    /// `js job submit` succeeded where the recording needs the server's refusal.
+    #[error("`{command}` was not refused, and the recording shows the refusal: {output}")]
+    NotRefused {
+        /// The command line, as the recording shows it.
+        command: String,
         /// What it printed.
         output: String,
+    },
+    /// The server's log does not say where the job service listens.
+    #[error("js-lease-server did not say where the job service listens: {log}")]
+    NoJobAddress {
+        /// What the server printed.
+        log: String,
     },
     /// The directory of the transcript could not be made.
     #[error("cannot make the directory {path}: {source}")]
@@ -198,30 +219,32 @@ fn token_command() -> String {
 }
 
 /// The flags of the server start: `--listen` only off the default port.
-fn server_args(port: u16) -> Vec<String> {
+fn server_args(port: u16, job_port: u16) -> Vec<String> {
     let mut args: Vec<String> = [
         "--state-file",
-        "leases.toml",
+        "state",
         "--boot",
         "initialise",
         "--token-file",
         TOKEN_FILE,
-        "--pool-config",
-        "hosts.toml",
+        "--agent-pool-config",
+        POOL_FILE,
+        "--job-listen",
     ]
     .map(str::to_owned)
     .into();
+    args.push(format!("127.0.0.1:{job_port}"));
     if port != DEFAULT_PORT {
         args.extend(["--listen".to_owned(), format!("127.0.0.1:{port}")]);
     }
     args
 }
 
-/// The arguments of `js` for `rest` (the verb and its arguments) against the server on `port`.
-fn client_args(port: u16, rest: &[&str]) -> Vec<String> {
+/// The arguments of `js` for `rest` (the verb and its arguments) against the job service on `job_port`.
+fn client_args(job_port: u16, rest: &[&str]) -> Vec<String> {
     let mut args = vec![
         "--server".to_owned(),
-        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{job_port}"),
         "--token-file".to_owned(),
         TOKEN_FILE.to_owned(),
     ];
@@ -229,57 +252,52 @@ fn client_args(port: u16, rest: &[&str]) -> Vec<String> {
     args
 }
 
-/// The arguments of the lease the recording acquires: a whole GPU host for an hour.
-fn acquire_args(port: u16) -> Vec<String> {
+/// The arguments of the job the recording submits: one GPU for an hour.
+fn submit_args(job_port: u16) -> Vec<String> {
     client_args(
-        port,
+        job_port,
         &[
-            "lease",
-            "acquire",
-            "--class",
-            "gpu-host",
-            "--gpus",
+            "job",
+            "submit",
+            "--id",
+            JOB_ID,
+            "--spec.image",
+            JOB_IMAGE,
+            "--spec.needs.gpus",
             "1",
-            "--gpu-class",
+            "--spec.needs.gpu-class",
             "nvidia-a100",
-            "--max-wall",
+            "--spec.wall-limit-seconds",
             "1h",
         ],
     )
 }
 
-/// The arguments of `js lease list`.
-fn list_args(port: u16) -> Vec<String> {
-    client_args(port, &["lease", "list"])
+/// The arguments of `js job list`.
+fn list_args(job_port: u16) -> Vec<String> {
+    client_args(job_port, &["job", "list"])
 }
 
-/// The arguments of `js lease release <id>`.
-fn release_args(port: u16, id: &str) -> Vec<String> {
-    client_args(port, &["lease", "release", id])
-}
-
-/// Every command line the recording shows, in order, for a lease acquired as `id`: the token file, the
-/// server start (with its `&`), and the four client commands.
-fn commands(port: u16, id: &str) -> Vec<String> {
+/// Every command line the recording shows, in order: the token file, the server start (with its `&`), and
+/// the two client commands.
+fn commands(port: u16, job_port: u16) -> Vec<String> {
     vec![
         token_command(),
-        format!("{} &", shown("js-lease-server", &server_args(port))),
-        shown("js", &acquire_args(port)),
-        shown("js", &list_args(port)),
-        shown("js", &release_args(port, id)),
-        shown("js", &list_args(port)),
+        format!(
+            "{} &",
+            shown("js-lease-server", &server_args(port, job_port))
+        ),
+        shown("js", &submit_args(job_port)),
+        shown("js", &list_args(job_port)),
     ]
 }
 
-/// The lease id `js lease acquire` printed (`lease <id> host <host> ends <ms>`), if it did.
-fn lease_id(acquired: &str) -> Option<String> {
-    acquired.lines().find_map(|line| {
-        let mut words = line.split(' ');
-        if words.next() != Some("lease") {
-            return None;
-        }
-        let id = words.next()?;
-        (words.next() == Some("host")).then(|| id.to_owned())
+/// The address of the job service in the server's log: the first `listening for the job service
+/// addr=<address>` line.
+fn job_listening_addr(log: &str) -> Option<SocketAddr> {
+    log.lines().find_map(|line| {
+        let (_, after) = line.split_once(JOB_LISTENING)?;
+        after.split_whitespace().next()?.parse().ok()
     })
 }
 
@@ -290,10 +308,10 @@ struct Recorder {
 }
 
 impl Recorder {
-    /// A transcript that starts with the host file and the line that says what it is.
-    fn with_host_file() -> Self {
+    /// A transcript that starts with the pool file and the line that says what it is.
+    fn with_pool_file() -> Self {
         Self {
-            text: format!("{HOSTS_COMMENT}\n{HOSTS_TOML}"),
+            text: format!("{POOL_COMMENT}\n{POOL_TOML}"),
         }
     }
 
@@ -475,6 +493,8 @@ pub struct SiteDemo<'a> {
     pub scratch: &'a Path,
     /// The server's port on 127.0.0.1; 0 lets the server pick a free one.
     pub port: u16,
+    /// The job service's port on 127.0.0.1; 0 lets the server pick a free one.
+    pub job_port: u16,
     /// How long to wait for the server to answer.
     pub ready_timeout: Duration,
 }
@@ -507,10 +527,10 @@ fn build(cargo: &std::ffi::OsStr, root: &Path) -> Result<PathBuf, Error> {
     Ok(root.join("target").join("release"))
 }
 
-/// Writes the host file and the token file (owner-only) in `dir`, and makes the server's log there: two
+/// Writes the pool file and the token file (owner-only) in `dir`, and makes the server's log there: two
 /// handles to it, for the server's standard output and error.
 fn prepare(dir: &Path) -> std::io::Result<(std::fs::File, std::fs::File)> {
-    std::fs::write(dir.join("hosts.toml"), HOSTS_TOML)?;
+    std::fs::write(dir.join(POOL_FILE), POOL_TOML)?;
     let mut token = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -522,8 +542,9 @@ fn prepare(dir: &Path) -> std::io::Result<(std::fs::File, std::fs::File)> {
     Ok((log, err_log))
 }
 
-/// Runs `js` with `args` in `dir` and returns what it printed (standard output, then standard error).
-fn run_client(js: &Path, dir: &Path, args: &[String]) -> Result<String, Error> {
+/// Runs `js` with `args` in `dir` and returns how it ended and what it printed (standard output, then
+/// standard error).
+fn call_client(js: &Path, dir: &Path, args: &[String]) -> Result<(ExitStatus, String), Error> {
     let out = Command::new(js)
         .args(args)
         .current_dir(dir)
@@ -534,13 +555,39 @@ fn run_client(js: &Path, dir: &Path, args: &[String]) -> Result<String, Error> {
         })?;
     let mut printed = String::from_utf8_lossy(&out.stdout).into_owned();
     printed.push_str(&String::from_utf8_lossy(&out.stderr));
-    if out.status.success() {
+    Ok((out.status, printed))
+}
+
+/// Runs `js` with `args` and returns what it printed; any failure status is an error.
+fn run_client(js: &Path, dir: &Path, args: &[String]) -> Result<String, Error> {
+    let (status, printed) = call_client(js, dir, args)?;
+    if status.success() {
         return Ok(printed);
     }
     Err(Error::Client {
         command: shown("js", args),
-        status: out.status,
+        status,
         output: printed.trim().to_owned(),
+    })
+}
+
+/// Runs `js` with `args` and returns what it printed, which must be the server's refusal (exit status
+/// [`REFUSED`]): a success is [`Error::NotRefused`], and any other failure status is [`Error::Client`].
+fn run_refused(js: &Path, dir: &Path, args: &[String]) -> Result<String, Error> {
+    let (status, printed) = call_client(js, dir, args)?;
+    if status.code() == Some(REFUSED) {
+        return Ok(printed);
+    }
+    let command = shown("js", args);
+    let output = printed.trim().to_owned();
+    Err(if status.success() {
+        Error::NotRefused { command, output }
+    } else {
+        Error::Client {
+            command,
+            status,
+            output,
+        }
     })
 }
 
@@ -568,7 +615,7 @@ pub fn run(demo: &SiteDemo<'_>) -> Result<String, Error> {
     let server_program = bins.join("js-lease-server");
     let mut server = js_testkit::reaped::spawn(
         Command::new(&server_program)
-            .args(server_args(demo.port))
+            .args(server_args(demo.port, demo.job_port))
             .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(log)
@@ -596,26 +643,26 @@ pub fn run(demo: &SiteDemo<'_>) -> Result<String, Error> {
     let ready = wait_ready(&mut probe, &mut clock, demo.ready_timeout, READY_INTERVAL)?;
     let addr = settle(ready, listening, demo.port, demo.ready_timeout)?;
 
-    // The port the server really holds (the one asked for, unless that was 0): the recording shows the
-    // commands as typed for that port, as if it had been asked for.
+    // The ports the server really holds (the ones asked for, unless that was 0): the recording shows the
+    // commands as typed for those ports, as if they had been asked for.
     let port = addr.port();
-    let js = bins.join("js");
-    let mut rec = Recorder::with_host_file();
-    // The first three lines do not depend on the lease.
-    for line in &commands(port, "")[..3] {
-        rec.command(line);
-    }
-    let acquired = run_client(&js, &dir, &acquire_args(port))?;
-    let id = lease_id(&acquired).ok_or_else(|| Error::NoLeaseId {
-        output: acquired.trim().to_owned(),
+    // A log that cannot be read now has no address in it either.
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let job_addr = job_listening_addr(&log).ok_or_else(|| Error::NoJobAddress {
+        log: log.trim().to_owned(),
     })?;
-    rec.output(&acquired);
-    let lines = commands(port, &id);
-    let rest = [list_args(port), release_args(port, &id), list_args(port)];
-    for (line, args) in lines[3..].iter().zip(&rest) {
+    let job_port = job_addr.port();
+    let js = bins.join("js");
+    let mut rec = Recorder::with_pool_file();
+    let lines = commands(port, job_port);
+    // The first two lines print nothing.
+    for line in &lines[..2] {
         rec.command(line);
-        rec.output(&run_client(&js, &dir, args)?);
     }
+    rec.command(&lines[2]);
+    rec.output(&run_refused(&js, &dir, &submit_args(job_port))?);
+    rec.command(&lines[3]);
+    rec.output(&run_client(&js, &dir, &list_args(job_port))?);
     if let Some(parent) = demo.out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|source| Error::CreateDir {
             path: parent.to_path_buf(),

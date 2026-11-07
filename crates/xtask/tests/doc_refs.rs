@@ -49,7 +49,7 @@ fn the_runbooks_name_only_commands_and_routes_that_exist() {
 }
 
 /// Asserts that the check reads the runbooks and the page of the repository, and that the
-/// server's own routes it reads hold the lease, agent, host, pool and usage routes.
+/// server's own routes it reads hold the agent, host, pool and usage routes.
 #[test]
 fn the_check_reads_the_repositorys_documents_and_routes() {
     let read = documents(Path::new(ROOT)).expect("the runbooks are listed");
@@ -67,7 +67,6 @@ fn the_check_reads_the_repositorys_documents_and_routes() {
     let server = server_routes(&Path::new(ROOT).join("crates/js-lease-server/src"))
         .expect("the server's source reads");
     for route in [
-        "/v1/leases",
         "/v1/agent/hello",
         "/v1/hosts/{target}",
         "/v1/pools/{pool}/brake/reset",
