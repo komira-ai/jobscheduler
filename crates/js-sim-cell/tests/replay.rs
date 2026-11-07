@@ -55,6 +55,12 @@
 //! to how the cell boots, joins or ends a launched machine, or a machine name that does
 //! not follow the seed, moves a hash.
 //!
+//! And one elastic fault scenario, family `elastic_faults`: the first acquire's answer
+//! lost though it landed (`cell/elastic_faults.rs`, one machine, under 200 agent requests a
+//! seed) over [`ELASTIC_FAULTS_SEEDS`] seed, so a change to how the scaler takes a lost
+//! answer, to a scripted fault of the cloud, or to the text of its trace lines, moves a
+//! hash.
+//!
 //! And one store scenario, family `store`: the restart over the store, over SQLite
 //! (`cell/store.rs`, nine hosts, about 600 agent requests a seed) over two seeds, so a
 //! change to what the server keeps in its store across a restart, to how the cell mints
@@ -67,6 +73,12 @@
     reason = "the elastic scenarios are shared with tests/elastic.rs, which runs the Lambda-like one this binary does not pin"
 )]
 mod elastic;
+#[path = "cell/elastic_faults.rs"]
+#[allow(
+    dead_code,
+    reason = "the elastic fault scenarios are shared with tests/elastic_faults.rs, which runs the ones this binary does not pin"
+)]
+mod elastic_faults;
 #[path = "cell/jobs.rs"]
 mod jobs;
 #[path = "cell/lossy_wire.rs"]
@@ -169,6 +181,11 @@ const JOBS_FAMILY: &str = "jobs";
 const ELASTIC_SEEDS: u64 = 1;
 const ELASTIC_FAMILY: &str = "elastic";
 
+/// How many seeds of the elastic fault scenario the golden file pins, and the family they
+/// are kept under.
+const ELASTIC_FAULTS_SEEDS: u64 = 1;
+const ELASTIC_FAULTS_FAMILY: &str = "elastic_faults";
+
 /// The jobs of the cell whose ids are compared: four hosts, eight jobs of [`JOB_RUN`].
 const JOB_HOSTS: usize = 4;
 const JOBS: usize = 8;
@@ -249,7 +266,9 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// whole-host scenario and one of the cancelled whole-host request, each run twice under
 /// each placement, and for one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
 /// whose items end alike, and for one seed of the EC2-like elastic scenario
-/// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the restart
+/// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the lost but
+/// landed acquire (`cell/elastic_faults.rs`), run twice, whose items end alike, and for one
+/// seed of the restart
 /// over a SQLite store (`cell/store.rs`), run twice. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
@@ -312,6 +331,18 @@ fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(once.hash, again.hash);
     assert_eq!(once.outcomes, again.outcomes);
     assert_eq!(once.outcomes.len(), elastic::RUNS as usize);
+
+    let once = elastic_faults::lost_but_landed()
+        .run_seeds(1)
+        .runs
+        .remove(0);
+    let again = elastic_faults::lost_but_landed()
+        .run_seeds(1)
+        .runs
+        .remove(0);
+    assert_eq!(once.hash, again.hash);
+    assert_eq!(once.outcomes, again.outcomes);
+    assert_eq!(once.outcomes.len(), 1);
 
     let once = store::restart(Store::Sqlite).run_seeds(1).runs[0].hash;
     assert_eq!(
@@ -510,6 +541,28 @@ fn the_elastic_scenario_matches_the_golden_file() {
     golden_of(ELASTIC_FAMILY).assert_matches(&elastic_runs());
 }
 
+/// The hash of each pinned seed of the elastic fault scenario, which must pass.
+fn elastic_faults_runs() -> Vec<(String, TraceHash)> {
+    let passed = elastic_faults::lost_but_landed().run_seeds(ELASTIC_FAULTS_SEEDS);
+    let each = |run: &js_sim_cell::SeedRun| {
+        let name = format!(
+            "an_acquire_whose_answer_is_lost_but_landed_launches_one_machine/seed-{}",
+            run.seed
+        );
+        (name, run.hash)
+    };
+    passed.runs.iter().map(each).collect()
+}
+
+/// Asserts that the hashes of the pinned seeds of the elastic fault scenario equal the
+/// golden file's (family `elastic_faults`). Catches any change to how the scaler takes an
+/// acquire whose answer was lost, to how the cell scripts a fault into the cloud, or to the
+/// text of its trace lines, and a run with a scripted fault that differs between processes.
+#[test]
+fn the_elastic_fault_scenario_matches_the_golden_file() {
+    golden_of(ELASTIC_FAULTS_FAMILY).assert_matches(&elastic_faults_runs());
+}
+
 /// The hash of each pinned seed of the fault scenario, which must pass.
 fn faults_runs() -> Vec<(String, TraceHash)> {
     let scenario =
@@ -590,6 +643,9 @@ fn regenerate_golden_hashes() {
     golden_of(JOBS_FAMILY).regenerate(&jobs_runs()).unwrap();
     golden_of(ELASTIC_FAMILY)
         .regenerate(&elastic_runs())
+        .unwrap();
+    golden_of(ELASTIC_FAULTS_FAMILY)
+        .regenerate(&elastic_faults_runs())
         .unwrap();
     golden_of(store::FAMILY).regenerate(&store_runs()).unwrap();
 }

@@ -1,9 +1,10 @@
-//! What an agent node counts: how a test, or a scenario's witness, shows that the
-//! situation it is about happened.
+//! What an agent node, or an elastic pool's cloud, counts: how a test, or a scenario's
+//! witness, shows that the situation it is about happened.
 
 use std::collections::BTreeMap;
 
-/// One thing an agent node counts.
+/// One thing an agent node counts, or (the last four) the cell's elastic pool's cloud
+/// ([`crate::Cloud::counters`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Counter {
     /// A start delivered for a run the agent process already holds or has run (and has
@@ -24,11 +25,21 @@ pub enum Counter {
     CutWithUnlistedRun,
     /// A heartbeat answered 409 `unknown-host`: the server had forgotten the host.
     UnknownHost,
+    /// The cloud gave the scaler no answer to an acquire (`Acquired::Unknown`): the call
+    /// may have landed.
+    AcquireLost,
+    /// The cloud deferred an acquire (`Acquired::Deferred`): a 429, or an acquire of an id
+    /// whose answer was lost and is not yet resolved.
+    AcquireThrottled,
+    /// The cloud refused an acquire (`Acquired::Refused`), whatever the code.
+    AcquireRefused,
+    /// The cloud preempted a machine it was running ([`crate::Cell::preempt_machine`]).
+    MachinePreempted,
 }
 
 impl Counter {
     /// Every counter, in order.
-    pub const ALL: [Counter; 7] = [
+    pub const ALL: [Counter; 11] = [
         Counter::StartRepeated,
         Counter::StartAfterStop,
         Counter::StartDroppedLate,
@@ -36,6 +47,10 @@ impl Counter {
         Counter::ReplyInvalid,
         Counter::CutWithUnlistedRun,
         Counter::UnknownHost,
+        Counter::AcquireLost,
+        Counter::AcquireThrottled,
+        Counter::AcquireRefused,
+        Counter::MachinePreempted,
     ];
 
     /// A stable snake_case name.
@@ -49,6 +64,10 @@ impl Counter {
             Counter::ReplyInvalid => "reply_invalid",
             Counter::CutWithUnlistedRun => "cut_with_unlisted_run",
             Counter::UnknownHost => "unknown_host",
+            Counter::AcquireLost => "acquire_lost",
+            Counter::AcquireThrottled => "acquire_throttled",
+            Counter::AcquireRefused => "acquire_refused",
+            Counter::MachinePreempted => "machine_preempted",
         }
     }
 }
@@ -111,6 +130,10 @@ mod tests {
                 "reply_invalid",
                 "cut_with_unlisted_run",
                 "unknown_host",
+                "acquire_lost",
+                "acquire_throttled",
+                "acquire_refused",
+                "machine_preempted",
             ]
         );
     }

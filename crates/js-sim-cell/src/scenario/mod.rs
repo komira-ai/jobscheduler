@@ -61,6 +61,7 @@ use crate::server::{ServerSpec, Shape, Store};
 use crate::work::Work;
 
 mod answer;
+mod cloud;
 mod expect;
 mod facts;
 mod launched_on;
