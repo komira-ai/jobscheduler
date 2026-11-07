@@ -224,6 +224,7 @@ fn a_silent_child_times_out_and_a_talking_one_gives_its_line() {
 }
 
 /// The process is gone or a zombie waiting for its reaper (an orphan's reaper is init).
+#[cfg(target_os = "linux")]
 fn dead(pid: i32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Err(_) => true,
@@ -237,6 +238,7 @@ fn dead(pid: i32) -> bool {
 /// The helper half of [`a_guarded_child_dies_when_its_parent_dies_without_unwinding`]: runs
 /// only when started by it. Spawns a guarded `sleep`, writes its pid, and ends the process
 /// with `exit`, which runs no destructor (as a kill of the harness would not).
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "started by a_guarded_child_dies_when_its_parent_dies_without_unwinding"]
 fn orphaning_parent_helper() {
@@ -252,7 +254,9 @@ fn orphaning_parent_helper() {
 
 /// Catches a guard that covers only an orderly end: when the process that spawned the child
 /// ends without running destructors (killed harness, `exit`), the child must go too, not run
-/// on holding the build slots.
+/// on holding the build slots. Linux only: the parent-death kill is `PR_SET_PDEATHSIG`, which
+/// only Linux has (`reaped::spawn` sets it there alone), and `dead` reads `/proc`.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_guarded_child_dies_when_its_parent_dies_without_unwinding() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "reaped-orphan");

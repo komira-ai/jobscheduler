@@ -1,5 +1,5 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
-//! read as it is in the repository. Two jobs: `build` runs on pull requests and by hand,
+//! read as it is in the repository. Two jobs: `build` runs on every pull request and by hand,
 //! holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
 //! environment `macos-signing`, takes the checked unsigned package from `build` without
 //! rebuilding, and is the only place a secret is named, on the steps that sign and
@@ -78,19 +78,49 @@ fn the_workflow_has_a_build_job_and_a_sign_job() {
     assert_eq!(names, ["build", "sign"]);
 }
 
-#[test]
-fn the_workflow_starts_on_a_pull_request_and_by_hand_only() {
-    let text = read(WORKFLOW);
-    let on: Vec<&str> = text
-        .lines()
+/// The lines of the `on:` block, without comments.
+fn on_block(text: &str) -> Vec<&str> {
+    text.lines()
         .skip_while(|l| *l != "on:")
         .skip(1)
         .take_while(|l| l.starts_with("  ") || l.starts_with('#') || l.is_empty())
-        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
-        .map(str::trim)
-        .collect();
-    assert_eq!(on, ["pull_request:", "workflow_dispatch:"]);
+        .filter(|l| l.starts_with("  ") && !l.trim_start().starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn the_workflow_starts_on_every_pull_request_and_by_hand_only() {
+    let text = read(WORKFLOW);
+    let on: Vec<&str> = on_block(&text).into_iter().map(str::trim).collect();
+    // No paths and no types under `pull_request`: every pull request runs the build.
+    assert_eq!(
+        on,
+        [
+            "pull_request:",
+            "workflow_dispatch:",
+            "inputs:",
+            "version:",
+            "description: The package version, MAJOR.MINOR.PATCH",
+            "required: true",
+            "type: string",
+        ]
+    );
     assert!(!text.contains("pull_request_target"));
+    assert!(!text.contains("workflow_call"));
+    // A pull request builds version 0.0.0.
+    assert!(
+        text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
+        "the version"
+    );
+}
+
+#[test]
+fn a_newer_push_to_a_pull_request_cancels_its_older_build_and_manual_runs_queue() {
+    let text = read(WORKFLOW);
+    assert!(
+        text.contains("\nconcurrency:\n  group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"),
+        "the workflow's concurrency"
+    );
 }
 
 #[test]

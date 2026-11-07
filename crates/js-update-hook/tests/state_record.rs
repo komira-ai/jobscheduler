@@ -3,14 +3,14 @@
 
 mod state_support;
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use js_update_hook::{Held, RECORD_FILE, RECORD_MAX, StateError, TEMP_FILE, peek};
 use state_support::{
-    Note, TestReason, Unwritable, as_root, cell, fifo, open, record_of, write_record,
+    Note, TestReason, Unwritable, as_root, cell, fifo, fifo_reader, open, record_of, write_record,
 };
 
 fn record_text(dir: &Path) -> String {
@@ -167,15 +167,10 @@ fn a_temporary_file_that_is_not_a_regular_file_fails_the_save() {
 /// regular file with that message.
 #[test]
 fn a_pipe_in_the_temporary_files_place_is_refused_as_not_a_regular_file() {
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = cell("record-temp-fifo-message");
     let temp = tmp.path().join(TEMP_FILE);
     fifo(&temp);
-    let _reader = File::options()
-        .read(true)
-        .custom_flags(0o4000)
-        .open(&temp)
-        .unwrap();
+    let _reader = fifo_reader(&temp);
     let held = open(tmp.path()).unwrap();
     let error = held.write_temp(&Note::new("n")).unwrap_err();
     assert_eq!(

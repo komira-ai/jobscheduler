@@ -5,7 +5,6 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use js_provider_lambdalabs::{ApiKey, KeyError};
-use rustix::fs::{CWD, FileType, Mode, mknodat};
 
 /// A directory of files for one test, removed when dropped.
 struct Dir(std::path::PathBuf);
@@ -134,7 +133,7 @@ fn a_directory_and_a_named_pipe_are_refused_without_waiting() {
     let err = ApiKey::from_file(&dir.0).unwrap_err();
     assert!(matches!(err, KeyError::Untrusted { .. }), "{err:?}");
     let pipe = dir.0.join("pipe");
-    mknodat(CWD, &pipe, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+    nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
     let err = ApiKey::from_file(&pipe).unwrap_err();
     assert!(matches!(err, KeyError::Untrusted { .. }), "{err:?}");
 }

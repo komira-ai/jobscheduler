@@ -275,6 +275,8 @@ fn the_unit_expands_with_a_flags_file_to_a_command_line_the_agent_parses() {
             Some(Path::new("/etc/js-agent/instance"))
         );
         assert_eq!(cli.host_id.as_deref(), Some("node-5"));
+        // The crun host's own reading of the flags; js-agent builds it on Linux only.
+        #[cfg(target_os = "linux")]
         assert!(js_agent::crun_host::flags(&cli).is_ok());
     }
 }

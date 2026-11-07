@@ -21,6 +21,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 js-testkit = { path = "../js-testkit" }
+# `mkfifo` for the named pipe of the state tests (tests/state_support): rustix has `mknodat`
+# on Linux only, and the tests run on macOS too.
+nix = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true

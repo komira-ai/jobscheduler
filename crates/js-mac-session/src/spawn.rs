@@ -597,6 +597,21 @@ mod tests {
     #[test]
     fn the_file_size_limit_stops_a_write_past_it() {
         let dir = js_testkit::dir::TestDir::under(std::env::temp_dir(), "kbf-mac-session-fsize");
+        let soft_process_limit = || {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `limit` is a writable rlimit for the call to fill.
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &raw mut limit) },
+                0
+            );
+            // An unlimited soft limit is above what `Limits` takes; its largest is as good.
+            u32::try_from(limit.rlim_cur)
+                .unwrap_or(u32::MAX)
+                .min(crate::limits::MAX_PROCESSES)
+        };
         let run = |blocks: u32| {
             let target = format!("of={}/file{blocks}", dir.display());
             let count = format!("count={blocks}");
@@ -608,7 +623,10 @@ mod tests {
                 count.as_str(),
             ];
             let (mut spawn, _out) = base(&argv, &dir);
-            spawn.limits = Some(Limits::new(4096, 4096).unwrap());
+            // The process count the test already runs under, which the unprivileged user
+            // may always set (a count above its hard limit is refused with `EPERM`) and
+            // which leaves `dd` able to start, so only the file limit is under test.
+            spawn.limits = Some(Limits::new(4096, soft_process_limit()).unwrap());
             let status = super::spawn(spawn).unwrap().wait().unwrap();
             let len = std::fs::metadata(dir.join(format!("file{blocks}")))
                 .unwrap()
@@ -624,8 +642,10 @@ mod tests {
     }
 
     /// The operating system's `setrlimit`, run in the test process (the child's own run
-    /// leaves no coverage record), with the value the process already has as its hard limit,
-    /// so that nothing in the test process changes but the soft limit rising to it: the
+    /// leaves no coverage record), with the value the process already has as its soft limit
+    /// (a value the kernel allows this user: macOS clamps a process count above
+    /// `kern.maxprocperuid`, which can be below the hard limit it reports), so that nothing
+    /// in the test process changes but the hard limit falling to it: the
     /// limit is set soft and hard to the value given, for each of the two resources. It
     /// catches a limit set only soft (which the program could raise) or not set at all.
     #[test]
@@ -643,12 +663,12 @@ mod tests {
             (Resource::FileSize, libc::RLIMIT_FSIZE),
             (Resource::Processes, libc::RLIMIT_NPROC),
         ] {
-            let hard = read(which).rlim_max;
-            Os.set_limit(resource, hard).unwrap();
+            let value = read(which).rlim_cur;
+            Os.set_limit(resource, value).unwrap();
             let after = read(which);
             assert_eq!(
                 (after.rlim_cur, after.rlim_max),
-                (hard, hard),
+                (value, value),
                 "{resource:?}"
             );
         }

@@ -92,10 +92,9 @@ fn failures_and_usage_errors_exit_non_zero_with_a_reason() {
     std::fs::write(&words, "a\n").expect("words");
     let missing = path(&dir, "missing");
     let no_dir = path(&dir, "no/such/out");
-    let cases: [(&[&str], i32, &str); 8] = [
+    let cases: [(&[&str], i32, &str); 7] = [
         (&["sort", &out, &missing], 1, "read "),
         (&["sort", &no_dir, &words], 1, "create "),
-        (&["sort", "/dev/full", &words], 1, "write "),
         (&["sort"], 2, "usage"),
         (&["hog", &out], 2, "bad arguments"),
         (&["pause", &out, "x", "salt"], 2, "not a whole number"),
@@ -108,4 +107,20 @@ fn failures_and_usage_errors_exit_non_zero_with_a_reason() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(said), "{args:?}: {stderr}");
     }
+}
+
+/// A destination that opens but cannot take a byte is reported as a failed write, not
+/// as a created output. Linux alone has such a path to name, `/dev/full` (every write
+/// fails with ENOSPC); macOS has no `/dev/full`, so `create` fails there before any
+/// write, and no other path opens for writing yet refuses the bytes on both systems.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_that_fails_after_the_output_opened_exits_non_zero_with_a_reason() {
+    let dir = dir("m2-act-full");
+    let words = path(&dir, "words");
+    std::fs::write(&words, "a\n").expect("words");
+    let output = act(&["sort", "/dev/full", &words]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("write "), "{stderr}");
 }
