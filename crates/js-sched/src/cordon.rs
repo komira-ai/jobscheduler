@@ -12,9 +12,7 @@
 //! A cordon names a worker, not a session: it holds across the worker's streams, so
 //! a node that reboots during its update comes back cordoned. The scheduler holds it
 //! in memory and has no log of its own; a server that must keep it across a restart
-//! writes it where it keeps its other rows (`js-store` has a `cordon/` row for a
-//! node, which `js-server-core` writes before it applies an action and feeds back at
-//! its start) and feeds it in again.
+//! writes it where it keeps its other rows and feeds it in again.
 
 use std::collections::BTreeMap;
 

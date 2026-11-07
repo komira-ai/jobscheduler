@@ -23,7 +23,6 @@ crates/js-mdm/src/
 crates/js-registry/src/
 crates/js-sched-placer/src/
 crates/js-sched/src/
-crates/js-server-core/src/
 crates/js-sizing/src/
 crates/js-types/src/
 crates/js-whole/src/

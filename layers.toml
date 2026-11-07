@@ -29,13 +29,12 @@ planned = ["js-sim", "js-sched"]
 [[layer]]
 name = "runtime"
 crates = ["js-alert", "js-api-gateway", "js-client", "js-contain", "js-elastic-fake", "js-host-step", "js-jobs", "js-lease", "js-logmint", "js-logstore", "js-oci", "js-proto", "js-provider-ec2", "js-provider-gce", "js-provider-lambdalabs", "js-registry", "js-sched-placer", "js-state", "js-testkit", "js-treestore", "js-update-hook", "js-usage", "js-vm-lease"]
-planned = ["js-store"]
 
 # Servers: what answers hosts and clients.
 [[layer]]
 name = "server"
 crates = ["js-lease-server"]
-planned = ["js-coordinator", "js-server-core"]
+planned = ["js-coordinator"]
 
 # Programs, their libraries and the repository's tools.
 [[layer]]
