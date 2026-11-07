@@ -426,9 +426,10 @@ impl Engine {
                 ..RequestRecord::default()
             });
         };
+        // Every worker the engine bars is one of the registry's hosts.
         let exclusions = record.bars.iter().filter_map(|(worker, bar)| {
-            let host = map::host_id(worker).ok()?;
-            Some((host, exclusion_of(*bar)))
+            let host = map::host_id(worker).ok();
+            host.map(|host| (host, exclusion_of(*bar)))
         });
         Some(RequestRecord {
             prepare_failures: record.failures,
