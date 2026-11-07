@@ -436,12 +436,13 @@ pub(super) fn crun_flags(host_id: &str, extra: &[&str]) -> Vec<String> {
 /// Ends the containers an earlier test's agent left on the shared node. A container outlives
 /// its agent (its supervisor holds it), and the next agent, of the same host id, would adopt it
 /// and hold its run, so a start for the same run id would run nothing. Each lease directory in
-/// the scratch root names its supervisor: it is ended, and waited for until it is gone, so the
-/// next agent finds a lease whose supervisor ended and removes it.
+/// the scratch root names its supervisor: it is ended (or, when it has written its exit
+/// record, left to exit), and waited for until it is gone, so the next agent finds a lease
+/// whose supervisor ended and removes it.
 fn end_leftovers(scratch: &Path) {
     for entry in fs::read_dir(scratch).into_iter().flatten().flatten() {
         if let Some(id) = recorded_supervisor(&entry.path()) {
-            end_supervisor(id);
+            end_supervisor(id, &entry.path());
             while id.alive() {
                 std::thread::yield_now();
             }

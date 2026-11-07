@@ -289,6 +289,7 @@ fn only_the_process_that_started_then_and_still_runs_is_alive() {
 /// signal nothing (this test would die with the group of its own pid otherwise).
 #[test]
 fn ending_a_supervisor_kills_its_group_and_only_when_it_is_the_same_process() {
+    let lease = dir("end-no-record");
     let me = SupervisorId::of(std::process::id()).expect("own entry");
     for other in [
         SupervisorId {
@@ -301,7 +302,7 @@ fn ending_a_supervisor_kills_its_group_and_only_when_it_is_the_same_process() {
             ..me
         },
     ] {
-        end_supervisor(other);
+        end_supervisor(other, &lease);
     }
 
     let mut child = Command::new("sh")
@@ -312,10 +313,65 @@ fn ending_a_supervisor_kills_its_group_and_only_when_it_is_the_same_process() {
         .expect("sh");
     let id = SupervisorId::of(child.id()).expect("entry");
     assert!(id.alive());
-    end_supervisor(id);
+    end_supervisor(id, &lease);
     assert_eq!(child.wait().expect("wait").signal(), Some(9));
     assert!(!id.alive());
-    end_supervisor(id);
+    end_supervisor(id, &lease);
+}
+
+/// A live process in a group of its own, standing in for a supervisor that is still exiting:
+/// `cat`, which exits 0 once its stdin (the returned child's) is closed.
+fn exiting_stand_in() -> (std::process::Child, SupervisorId) {
+    let child = Command::new("cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("cat");
+    let id = SupervisorId::of(child.id()).expect("entry");
+    (child, id)
+}
+
+/// How the stand-in ended once its stdin is closed: `Ok(code)` if it exited, `Err(signal)`
+/// if a signal ended it.
+fn close_and_reap(mut child: std::process::Child) -> Result<Option<i32>, i32> {
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait");
+    status.signal().map_or(Ok(status.code()), Err)
+}
+
+/// Catches a teardown that kills a supervisor that has finished its run: once the lease holds
+/// the exit record the supervisor is only exiting (in a coverage build, writing the profile a
+/// kill would cut short), so the live process is not signalled and exits by itself; the next
+/// call, once it is gone, signals nothing either.
+#[test]
+fn a_supervisor_that_wrote_its_exit_record_is_left_to_exit() {
+    let lease = dir("end-recorded");
+    write_record(&lease, &a_record()).expect("written");
+    let (child, id) = exiting_stand_in();
+    end_supervisor(id, &lease);
+    assert!(id.alive(), "signalled although its record is written");
+    assert_eq!(close_and_reap(child), Ok(Some(0)));
+    end_supervisor(id, &lease);
+}
+
+/// Catches an exit record that cannot be read sparing the supervisor: `exit.json` that is a
+/// directory, or a link to a good record, is not a record the reader accepts, so the live
+/// supervisor is ended as one with no record.
+#[test]
+fn an_exit_record_that_cannot_be_read_does_not_spare_the_supervisor() {
+    let good = dir("end-good-record");
+    write_record(&good, &a_record()).expect("written");
+    let as_dir = dir("end-record-dir");
+    std::fs::create_dir(exit_record_path(&as_dir)).expect("a directory");
+    let as_link = dir("end-record-link");
+    std::os::unix::fs::symlink(exit_record_path(&good), exit_record_path(&as_link))
+        .expect("a link");
+    for lease in [&as_dir, &as_link] {
+        let (child, id) = exiting_stand_in();
+        end_supervisor(id, lease);
+        assert_eq!(close_and_reap(child), Err(9), "{}", lease.display());
+    }
 }
 
 /// A supervisor stand-in: `sh` running `script`, with the fifo `hold` as its `$1`.

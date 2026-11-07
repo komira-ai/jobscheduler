@@ -522,10 +522,11 @@ impl CrunRuntime {
     }
 
     /// Removes everything the lease of `entry` made, the supervisor it names first (with its
-    /// `crun run`, by force) and then everything the lease made.
+    /// `crun run`, by force, unless it has written its exit record and is exiting) and then
+    /// everything the lease made.
     pub(super) fn tear_down(&self, entry: &Entry) -> Result<(), String> {
         if let Some(supervisor) = &entry.supervisor {
-            end_supervisor(supervisor.id());
+            end_supervisor(supervisor.id(), &self.oci.lease_dirs(&entry.name).dir);
         }
         self.tear_down_named(&entry.name)
     }
@@ -536,7 +537,8 @@ impl CrunRuntime {
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
         // The supervisor the lease's directory names, for a lease whose sidecar is gone: ended
-        // first, or it would write the container's end into the directory being removed. The
+        // first, or it would write the container's end into the directory being removed (one
+        // that has written it already is left to exit). The
         // directory is the job user's, so the file is trusted only as far as it can be checked:
         // the process must run as the job user and be this lease's supervisor by its command
         // line (another lease's names its own lease), or it is left alone.
@@ -544,7 +546,7 @@ impl CrunRuntime {
         let named = recorded_supervisor(&lease.dir)
             .filter(|id| id.runs_as(job_uid) && id.supervises(&lease.dir));
         if let Some(id) = named {
-            end_supervisor(id);
+            end_supervisor(id, &lease.dir);
         }
         // A lease an agent from before the leases were beside the runs left in the store.
         let legacy = self

@@ -34,8 +34,9 @@
 //! **The handle:** [`Supervised`] reads the record. A run is over when the record is there;
 //! a supervisor that is gone ([`SupervisorId::alive`]) and wrote none ended without one,
 //! which is a failure of the run. It signals nothing by itself: [`Supervised::force`] ends
-//! the supervisor's process group, and the container is ended, as for every run, by the
-//! kill of the lease's cgroup and [`Oci::remove`].
+//! the supervisor's process group (unless the supervisor has written its record, and so only
+//! exits), and the container is ended, as for every run, by the kill of the lease's cgroup
+//! and [`Oci::remove`].
 
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
@@ -196,9 +197,15 @@ fn parse_stat(text: &str) -> Option<(char, u64)> {
 }
 
 /// `SIGKILL`s the process group of the supervisor `id` (the supervisor and its `crun run`)
-/// when `id.alive()`; nothing otherwise. Never signals a pid whose start time differs (a
-/// reused pid).
-pub fn end_supervisor(id: SupervisorId) {
+/// when `id.alive()` and the lease directory `lease` holds no exit record; nothing otherwise.
+/// A supervisor that wrote its record has finished its run and only exits after it, so it is
+/// left to exit: a kill then would cut its exit short (in a coverage build, the profile it
+/// writes as it exits, which then cannot be read). A record that cannot be read does not
+/// count. Never signals a pid whose start time differs (a reused pid).
+pub fn end_supervisor(id: SupervisorId, lease: &Path) {
+    if matches!(read_exit_record(lease), Ok(Some(_))) {
+        return;
+    }
     // A pid that is not a positive `i32` names no process: `alive` is false for it too.
     let group = i32::try_from(id.pid)
         .ok()
@@ -496,10 +503,11 @@ impl Supervised {
         }
     }
 
-    /// Ends the supervisor by force ([`end_supervisor`]), then waits. The container itself
-    /// is ended by the caller's cgroup kill and [`Oci::remove`], as before.
+    /// Ends the supervisor by force ([`end_supervisor`], which leaves one that has written
+    /// its exit record to exit), then waits. The container itself is ended by the caller's
+    /// cgroup kill and [`Oci::remove`], as before.
     pub async fn force(&mut self) {
-        end_supervisor(self.id);
+        end_supervisor(self.id, &self.lease);
         self.wait().await;
     }
 
