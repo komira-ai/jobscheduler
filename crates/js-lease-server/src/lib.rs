@@ -340,7 +340,7 @@
 //! over the registered hosts and the pool's catalog, committed before it answers; its wall
 //! limit held to `--max-job-wall`), `CancelJob` and the reads, and the fleet calls (`ListHosts`,
 //! `CordonHost`, `UncordonHost`, `ListPools`, `ListProviders`, `GetUsage`) over the server's
-//! hosts, the status of its pools and its usage store. `docs/http-gateway.md` has the answers
+//! hosts, the status of its pools, and its usage and job stores. `docs/http-gateway.md` has the answers
 //! of each call. The port has the connection cap and the timeouts of the other listeners, and
 //! stops with them. The lease routes are not served on it, nor the job routes on `--listen`:
 //! the gateway's `/v1/hosts` and `/v1/pools` are other routes than the lease server's of those

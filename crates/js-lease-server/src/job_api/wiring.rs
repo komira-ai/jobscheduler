@@ -7,8 +7,8 @@
 //! needs exist. Today the read group's is (it reads host silence from the registry), the
 //! submit group's (the ceiling on a job's wall limit, and admission over the registry's hosts
 //! and the pool's launching providers), the fleet group's (the server's hosts and their
-//! cordons, the status of its pools, and the usage sink's ended bookings, none with
-//! `--usage-off`), and the logs group's (the log store of the `[logs]` table, built before
+//! cordons, the status of its pools, the usage sink's ended bookings, none with
+//! `--usage-off`, and the job store's records of jobs' allocations), and the logs group's (the log store of the `[logs]` table, built before
 //! the configuration is consumed). The cancel group needs nothing but the tables.
 //! [`SERVED_CALLS`] names the calls a service so built serves; every other call answers
 //! `UNIMPLEMENTED`, and a group task that adds a `with_<group>` line adds its calls there.
@@ -34,7 +34,7 @@ use js_proto::v1::job_service_server::JobServiceServer;
 use tower::Service;
 
 use super::auth::is_grpc;
-use super::fleet::{self, History, Hosts, Pools, SinkHistory};
+use super::fleet::{self, History, Hosts, Pools, SinkHistory, StoreHistory};
 use super::{Bearer, JobApi, gateway, grpc, logs, read, submit};
 use crate::admit::JobAdmission;
 use crate::api::Shared;
@@ -92,7 +92,12 @@ pub(crate) fn from_server(
     let history = state
         .usage()
         .map(|usage| Arc::new(SinkHistory(usage.sink())) as Arc<dyn History>);
-    let fleet = fleet::Ctx::served(hosts, pools, history);
+    // The job store's records of jobs' allocations, in the state store under its tables.
+    let job_history = agents
+        .job_state
+        .clone()
+        .map(|store| Arc::new(StoreHistory(store)) as Arc<dyn History>);
+    let fleet = fleet::Ctx::served(hosts, pools, history).with_job_history(job_history);
     let api = JobApi::new(jobs, agents.clock.clone());
     Some(
         api.with_read(read)
