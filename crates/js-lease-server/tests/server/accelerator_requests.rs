@@ -34,6 +34,7 @@ gpus = 8
 gpu_class = "{class}"
 
 [capabilities]
+arch = "x86_64"
 isa = "x86-64-v3"
 "#
     )
@@ -63,7 +64,7 @@ fn old_hello(class: &str, memory_gib: u64) -> Value {
             "gpu_class": class,
         },
         "gpu_devices": devices,
-        "capabilities": { "isa": "x86-64-v3" },
+        "capabilities": { "arch": "x86_64", "isa": "x86-64-v3" },
         "labels": {},
         "phase": "serving",
     })

@@ -27,7 +27,7 @@ use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{AgentSetup, Hosts};
+use crate::config::{AgentSetup, Hosts, placer, split};
 use crate::error::StartupError;
 use crate::fence::Fence;
 use crate::host_keys::Writes;
@@ -99,9 +99,9 @@ pub(crate) struct Agents {
     /// The job store's change feed, trimmed on each tick ([`Agents::job_pass`]); held with
     /// the job tables.
     pub(crate) job_feed: Option<FeedTrim>,
-    /// The registry's placer under `--placement js-sched`, which also places the queued jobs
-    /// when the job tables are held ([`Agents::place_jobs`]); `None` under the registry's
-    /// placement, which places no job.
+    /// The registry's placer, which also places the queued jobs when the job tables are
+    /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
+    /// one, which places no job.
     pub(crate) placer: Option<Arc<SchedPlacer>>,
     /// The hosts whose last job listing named a job they hold no live allocation for. Its lock
     /// is a leaf.
@@ -189,7 +189,7 @@ pub(crate) fn assemble_in(
     placed.map(|(assembled, _)| assembled)
 }
 
-/// [`assemble`], with the placer the registry was given under `--placement js-sched`.
+/// [`assemble`], with the placer the registry was given; none for static hosts only.
 #[cfg(test)]
 pub(crate) fn assemble_placed(
     hosts: Hosts,
@@ -226,7 +226,7 @@ fn open_hosts(
     Ok((joins, bindings, store))
 }
 
-/// [`assemble_in`], with the placer the registry was given under `--placement js-sched`.
+/// [`assemble_in`], with the placer the registry was given; none for static hosts only.
 fn placed_in(
     hosts: Hosts,
     usage: UsageSetup,
@@ -246,7 +246,6 @@ fn placed_in(
                 mint_provider,
                 hello_limit,
                 require_host_credential,
-                placement,
                 estimate_feed,
                 cpu_slack,
                 max_lease_wall,
@@ -258,15 +257,12 @@ fn placed_in(
             let joins = joins.requiring_credential(require_host_credential);
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
-            // `--placement js-sched`: the scheduler picks the host of a start, and books
-            // the share of each host's memory the pool's percent says; the registry books
-            // the whole shape. Under `registry` the registry cuts it, as it always did.
-            let (pool, memory) = placement.split(pool);
+            // The scheduler picks the host of a start, and books the share of each host's
+            // memory the pool's percent says; the registry books the whole shape.
+            let (pool, memory) = split(pool);
             let registry = Registry::new(pool, clock.clone());
-            let placer = placement.placer(max_lease_wall, cpu_slack, memory, clock);
-            placer
-                .iter()
-                .for_each(|placer| registry.set_placer(placer.clone()));
+            let placer = placer(max_lease_wall, cpu_slack, memory, clock);
+            registry.set_placer(placer.clone());
             let usage = usage.build(clock, limits, &registry)?;
             // Each lease booking that ends leaves its record in the usage store's history.
             usage
@@ -306,7 +302,7 @@ fn placed_in(
                 usage,
                 jobs,
                 job_feed,
-                placer: placer.clone(),
+                placer: Some(placer.clone()),
                 unclean: Mutex::default(),
                 logs,
                 job_limits,
@@ -314,7 +310,7 @@ fn placed_in(
                 meter: OnceLock::new(),
                 fence: Fence::new(),
             };
-            Ok(((Box::new(source), Some(Arc::new(agents))), placer))
+            Ok(((Box::new(source), Some(Arc::new(agents))), Some(placer)))
         }
     }
 }

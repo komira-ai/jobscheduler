@@ -172,7 +172,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
         ),
         (
             "placement = \"elsewhere\"",
-            "server.placement: must be registry or js-sched",
+            "server.placement: must be js-sched",
         ),
         ("placement = 3", "server.placement: must be a string"),
         (

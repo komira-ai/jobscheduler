@@ -339,13 +339,13 @@ fn with_the_flag_a_lost_host_loses_its_mark_at_the_next_pass() {
     assert_eq!(l.mark("q"), Some(("h2".to_owned(), Some(T0 + 902_000))));
 }
 
-/// Asserts that without the flag nothing shares a host, so no host a whole-node request
-/// sets aside is ever backfilled: a pool file with a `share_class` is refused at start,
-/// naming the flag, and a whole-node pool without one serves no class that shares a host,
-/// so a lease of class `share` books nothing and counts no backfill. With the flag the same
-/// file starts. It catches a share class served by the registry's own placement.
+/// Asserts that a pool file with a `share_class` starts with no `--placement` flag (once
+/// refused naming the flag, since the registry's own placement shared no host), and that a
+/// whole-node pool without one serves no class that shares a host, so a lease of class
+/// `share` books nothing and counts no backfill. It catches a share class still refused
+/// by default, and one served by a pool that does not name it.
 #[test]
-fn without_the_flag_no_lease_shares_a_host() {
+fn a_share_class_starts_with_no_flag_and_a_pool_without_one_shares_nothing() {
     let dir = scratch("backfill_off");
     let flags: Vec<OsString> = [
         "js-lease-server",
@@ -367,17 +367,8 @@ fn without_the_flag_no_lease_shares_a_host() {
         write(dir.path(), "agent-pool.toml", SHARED_POOL, 0o644),
     ])
     .collect();
-    let refused = Config::from_cli(Cli::try_parse_from(flags.clone()).unwrap())
-        .err()
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        refused,
-        "--placement: the pool's share_class needs js-sched: the registry places no lease that shares a host"
-    );
-    let mut sched = flags;
-    sched.extend(["--placement", "js-sched"].map(OsString::from));
-    assert!(Config::from_cli(Cli::try_parse_from(sched).unwrap()).is_ok());
+    let config = Config::from_cli(Cli::try_parse_from(flags).unwrap()).unwrap();
+    assert!(config.warnings().is_empty(), "{:?}", config.warnings());
 
     let whole_pool = SHARED_POOL.replace("share_class = \"share\"\n", "");
     let mut l = live_over("backfill_off_whole", &whole_pool, &["h1"], &[]);
@@ -430,7 +421,7 @@ fn with_the_flag_a_probe_on_a_marked_host_is_not_backfilled() {
     assert_eq!(l.agents.registry.tail_counters().backfilled, 0);
 }
 
-/// Asserts that the placer of `--placement js-sched` trusts a lease's wall time up to the
+/// Asserts that the placer trusts a lease's wall time up to the
 /// server's `max_lease_wall` and no further: with a ceiling of 300 s a lease of 300 s
 /// backfills a host set aside until 600 s, and one of 301 s, which would end in time, is
 /// not placed there. With no ceiling the 301 s lease is. It catches the ceiling not
@@ -448,19 +439,17 @@ fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
     }];
     let marked =
         js_registry::MarkedTails::from([(open[0].host.clone(), Some(Duration::from_secs(600)))]);
-    let placer = |wall: Option<Duration>, placement: crate::config::Placement| {
+    let placer = |wall: Option<Duration>| {
         let clock = SharedClock::new(ManualClock::new(Timestamp::from_millis(T0)));
         let slack = crate::config::CpuSlack::default();
-        placement.placer(wall, slack, js_sched::MemoryPercent::FULL, &clock)
+        crate::config::placer(wall, slack, js_sched::MemoryPercent::FULL, &clock)
     };
-    let js_sched = crate::config::Placement::JsSched;
-    let five = placer(Some(Duration::from_secs(300)), js_sched).unwrap();
+    let five = placer(Some(Duration::from_secs(300)));
     let wall = |s: u64| share_for(1, Duration::from_secs(s));
     assert_eq!(five.pick(&wall(300), &open, &marked), Some(0));
     assert_eq!(five.pick(&wall(301), &open, &marked), None);
-    let none = placer(None, js_sched).unwrap();
+    let none = placer(None);
     assert_eq!(none.pick(&wall(301), &open, &marked), Some(0));
-    assert!(placer(None, crate::config::Placement::Registry).is_none());
 }
 
 /// Asserts, through the server's lease table, that backfill ends at its enforced wall and

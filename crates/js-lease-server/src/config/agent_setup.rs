@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_lease::Settings;
 use js_registry::{PoolConfig, WholeNodeConfig};
 
-use super::{Config, CpuSlack, Hosts, Placement};
+use super::{Config, CpuSlack, Hosts};
 use crate::agent_tokens::AgentTokens;
 use crate::error::StartupError;
 use crate::job_expiry::JobLimits;
@@ -25,14 +25,12 @@ pub(crate) struct AgentSetup {
     pub(crate) hello_limit: HelloLimit,
     /// `--require-host-credential`.
     pub(crate) require_host_credential: bool,
-    /// `--placement`.
-    pub(crate) placement: Placement,
     /// `--estimate-feed`.
     pub(crate) estimate_feed: bool,
-    /// `--cpu-slack`, or the engine's default: read by `--placement js-sched` only.
+    /// `--cpu-slack`, or the engine's default.
     pub(crate) cpu_slack: CpuSlack,
     /// `server.max_lease_wall`: the ceiling the lease table holds a lease's wall time to,
-    /// and the one up to which `--placement js-sched` trusts it for backfill.
+    /// and the one up to which the placement engine trusts it for backfill.
     pub(crate) max_lease_wall: Option<Duration>,
     /// The pool's `max_queue_wait` and `start_timeout`, which the tick's job pass enforces
     /// (their defaults for a pool that does not set them, and for `--agent-pool-config`).

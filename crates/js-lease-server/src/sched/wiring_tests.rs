@@ -198,20 +198,23 @@ pub(super) fn host_of(ack: &StartAck) -> Option<&str> {
     }
 }
 
-/// Asserts the default: with no flag, and with `--placement registry`, a lease of a class
-/// that books part of a host is refused `UnsupportedClass`, as it always was, and nothing
-/// is booked. It catches a default that turns the scheduler on.
+/// Asserts the default: with no `--placement` flag the scheduler places, as with
+/// `--placement js-sched`: a lease of a class that books part of a host, once refused
+/// `UnsupportedClass` by the registry's own placement, is placed by the scheduler's tie
+/// break on `h2` (where the registry's first host by id was `h1`), and a second one
+/// beside it. It catches a default that leaves the registry placing alone.
 #[test]
-fn by_default_the_registry_places_and_a_sharing_class_is_refused() {
-    for (name, extra) in [
-        ("default", vec![]),
-        ("registry", vec!["--placement", "registry"]),
-    ] {
-        let mut served = serving(name, &extra);
-        let ack = served.provider.start(sharing_spec(1));
-        assert_eq!(ack, StartAck::Refused(RefusalCode::UnsupportedClass));
-        assert!(served.provider.booked().is_empty());
-    }
+fn with_no_flag_the_scheduler_places_a_sharing_class() {
+    let mut served = serving("default", &[]);
+    let first = served.provider.start(sharing_spec(1));
+    let second = served.provider.start(sharing_spec(2));
+    assert_eq!(
+        (host_of(&first), host_of(&second)),
+        (Some("h2"), Some("h2"))
+    );
+    let held = served.agents.registry.hosts();
+    let h2 = held.iter().find(|v| v.id.as_str() == "h2").unwrap();
+    assert_eq!(h2.leases, [LeaseId::new(1, 1), LeaseId::new(1, 2)]);
 }
 
 /// Asserts that with `--placement js-sched` a lease is placed by the scheduler and not by
@@ -410,19 +413,13 @@ fn with_the_flag_a_probe_is_held_to_the_memory_percent() {
     assert_eq!(host_of(&served.provider.start(sized(2, 6))), Some("h1"));
 }
 
-/// Asserts that with no `--placement` flag a probe is refused `probe-unsupported` for a
-/// class the registry places alone, though its host is cordoned and free: the registry has
-/// no probe rule. It catches a probe placed by the registry's first-host rule.
+/// Asserts that with no `--placement` flag a probe is placed on its cordoned host, as
+/// under `--placement js-sched`: the registry's own placement, which refused every probe
+/// `probe-unsupported`, is gone. It catches a default that still refuses probes.
 #[test]
-fn by_default_a_probe_is_refused_as_unsupported() {
-    let served = serving("probe_default", &[]);
+fn with_no_flag_a_probe_lands_on_its_cordoned_host() {
+    let mut served = serving("probe_default", &[]);
     cordon(&served, "h1");
-    let mut provider = served.agents.registry.provider();
-    let class = provider.classes()[0].clone();
-    let mut request = probe_spec(1, "h1").request().clone();
-    request.class = class.id().clone();
-    let spec = StartSpec::new(LeaseId::new(1, 1), request, &[class]).unwrap();
-    let ack = provider.start(spec);
-    assert_eq!(ack, StartAck::Refused(RefusalCode::ProbeUnsupported));
-    assert!(provider.booked().is_empty());
+    let ack = served.provider.start(probe_spec(1, "h1"));
+    assert_eq!(host_of(&ack), Some("h1"));
 }

@@ -30,7 +30,7 @@ use crate::adapt::SharedClock;
 use crate::agent_pool::shipped_class;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{LiveClients, Token};
+use crate::config::{LiveClients, Token, checked};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live};
 use crate::job_expiry::JobLimits;
@@ -413,7 +413,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
                     return Err(StartupError::at(pool, reason));
                 }
             }
-            Pool::Elastic(elastic) => registering.push((pool, elastic)),
+            Pool::Elastic(elastic) => registering.push((checked(pool, &elastic)?, elastic)),
             Pool::Hostless => {}
         }
     }

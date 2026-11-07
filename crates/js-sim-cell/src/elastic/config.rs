@@ -78,8 +78,7 @@ fn built(cloud: Cloud) -> Built {
 }
 
 /// The configuration file of a server whose one pool is `cloud`'s elastic pool: the lease
-/// file `state`, the client token in the file `token`, placing as `placement` (its
-/// `--placement` spelling), usage recording off, and booting `initialise` (which reads the
+/// file `state`, the client token in the file `token`, usage recording off, and booting `initialise` (which reads the
 /// lease file, the join tokens and the scaler's saved state when they are there, so a restart
 /// over the same files reads them too).
 ///
@@ -88,7 +87,7 @@ fn built(cloud: Cloud) -> Built {
 /// day, so they never refuse a launch the instance limit allows. It names no shared join
 /// token: only the one-time tokens of its launched machines register hosts.
 #[must_use]
-pub fn text(cloud: &Cloud, state: &Path, token: &Path, placement: &str) -> String {
+pub fn text(cloud: &Cloud, state: &Path, token: &Path) -> String {
     let pool = cloud.pool();
     let dearest = pool.offers().iter().map(|offer| offer.cents_per_hour).max();
     let hour = dearest
@@ -107,7 +106,6 @@ pub fn text(cloud: &Cloud, state: &Path, token: &Path, placement: &str) -> Strin
          max_lease_wall = \"2h\"\n\
          max_ttl = \"2h\"\n\
          usage_off = true\n\
-         placement = {placement}\n\
          \n\
          [[pool]]\n\
          name = {name}\n\
@@ -124,7 +122,6 @@ pub fn text(cloud: &Cloud, state: &Path, token: &Path, placement: &str) -> Strin
         state = quoted(&state.display().to_string()),
         token = quoted(&token.display().to_string()),
         advertise = quoted(ADVERTISE_URL),
-        placement = quoted(placement),
         name = quoted(pool.name()),
         max = pool.max_instances(),
         hour = dollars(hour),

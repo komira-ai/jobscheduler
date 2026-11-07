@@ -174,9 +174,9 @@ impl AgentKeys {
         self.require_host_credential.unwrap_or(false)
     }
 
-    /// Who places a lease on a registered host; the registry unless the file says so.
-    pub(crate) fn placement(&self) -> Placement {
-        self.placement.unwrap_or_default()
+    /// The deprecated `placement` key, as the file gave it.
+    pub(crate) fn placement(&self) -> Option<Placement> {
+        self.placement
     }
 
     /// Whether each lease's estimated end is fed to the drain cost; off unless the file
@@ -185,8 +185,7 @@ impl AgentKeys {
         self.estimate_feed.unwrap_or(false)
     }
 
-    /// The CPU slack the file gives, if it gives one; the placement decides what an
-    /// absent one means ([`Placement::slack`]).
+    /// The CPU slack the file gives, if it gives one; absent, the engine's default.
     pub(crate) fn cpu_slack(&self) -> Option<CpuSlack> {
         self.cpu_slack
     }
@@ -435,13 +434,14 @@ fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Setti
         .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
 }
 
-/// `placement`, the key of `--placement`: `registry` or `js-sched`.
+/// `placement`, the deprecated key of `--placement`: `js-sched`, or the removed `registry`
+/// (refused when the configuration is built, as the flag is).
 fn read_placement(s: &mut Section) -> Result<Option<Placement>, StartupError> {
     let text = s.string("placement")?;
     let named = |text: String| match text.as_str() {
         "registry" => Ok(Placement::Registry),
         "js-sched" => Ok(Placement::JsSched),
-        _ => Err(s.fail("placement", "must be registry or js-sched")),
+        _ => Err(s.fail("placement", "must be js-sched")),
     };
     text.map(named).transpose()
 }

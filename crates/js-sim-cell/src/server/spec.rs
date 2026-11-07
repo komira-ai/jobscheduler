@@ -10,10 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS};
 use js_lease::{Clock, ManualClock, Monotonic};
-use js_lease_server::{Cli, Config, Placement, SharedClock, StartupError};
+use js_lease_server::{Cli, Config, SharedClock, StartupError};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, SessionSource};
 use js_types::Resources;
 
@@ -35,7 +34,7 @@ pub const WHOLE_CLASS: &str = "whole-node";
 /// The capability key a host's architecture is given under.
 pub const ARCH_KEY: &str = "arch";
 
-/// The architecture [`ServerSpec::placement`] gives a shape that names none.
+/// The architecture a registered pool's shape is given when it names none.
 pub const ARCH: &str = "x86_64";
 
 /// The address `--job-listen` names for a server of [`ServerSpec::jobs`]: on the
@@ -100,14 +99,15 @@ impl Shape {
 /// [`ServerSpec::max_replace`] set; each other takes the server's default. Usage recording
 /// is off (`--usage-off`): its store reads the system's clock
 /// and commits on a thread of its own, so a run would depend on both. The pool's class is
-/// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]), and placement
-/// (`--placement`) is the default, `registry`, unless [`ServerSpec::placement`] says
-/// otherwise.
+/// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]). The server places
+/// with `js-sched`, its only placement, which takes a host by its `arch`: the shape of a
+/// registered pool is given the capability [`ARCH_KEY`] = [`ARCH`] when it names no
+/// architecture, and the agents announce, and the client's leases ask for, the shape's
+/// capabilities, this one too.
 #[derive(Clone, Debug)]
 pub struct ServerSpec {
     pool: String,
     class: &'static str,
-    placement: Placement,
     shape: Shape,
     hosts: usize,
     hello_burst: usize,
@@ -126,14 +126,17 @@ pub struct ServerSpec {
 }
 
 impl ServerSpec {
-    /// A server whose one pool, `pool_name`, books `shape` for each of `hosts` hosts that
-    /// register with [`JOIN_TOKEN`].
+    /// A server whose one pool, `pool_name`, books `shape` (given [`ARCH`] when it names no
+    /// architecture) for each of `hosts` hosts that register with [`JOIN_TOKEN`].
     #[must_use]
-    pub fn registered_pool(pool_name: &str, shape: Shape, hosts: usize) -> Self {
+    pub fn registered_pool(pool_name: &str, mut shape: Shape, hosts: usize) -> Self {
+        shape
+            .capabilities
+            .entry(ARCH_KEY.to_owned())
+            .or_insert_with(|| ARCH.to_owned());
         Self {
             pool: pool_name.to_owned(),
             class: POOL_CLASS,
-            placement: Placement::default(),
             shape,
             hosts,
             hello_burst: hosts,
@@ -151,18 +154,18 @@ impl ServerSpec {
     /// machines are launched by the server's scaler on the pool's cloud, which the server
     /// node makes and owns ([`crate::Cloud`]), and each is a host of `shape`. The node
     /// reads the server's configuration from a file ([`crate::elastic`]), not from the
-    /// command line; the spec's placement, and no job service, are what that file says of
-    /// the server. A host of an elastic pool beats at the registry's defaults (5 s, with a
-    /// grace of 15 s), which an elastic pool does not set: [`ServerSpec::heartbeat`] and
-    /// the whole-node keys do not apply to it. The client asks for `shape`'s capabilities,
-    /// and the pool's floor has none, so a scenario gives a shape without any. The pool's
-    /// shape names no architecture, so only the default placement (`registry`) starts:
-    /// `js-sched` refuses a pool without one.
+    /// command line; no job service is what that file says of the server. A host of an
+    /// elastic pool beats at the registry's defaults (5 s, with a grace of 15 s), which an
+    /// elastic pool does not set: [`ServerSpec::heartbeat`] and the whole-node keys do not
+    /// apply to it. The client asks for `shape`'s capabilities, and the pool's floor has
+    /// none, so a scenario gives a shape without any, and `shape` is kept as given (no
+    /// [`ARCH`] is added).
     #[must_use]
     pub fn elastic_pool(pool: ElasticPool, shape: Shape) -> Self {
         let name = pool.name().to_owned();
         Self {
             elastic: Some(pool),
+            shape: shape.clone(),
             ..Self::whole_node_pool(&name, shape, 0)
         }
     }
@@ -187,30 +190,14 @@ impl ServerSpec {
         }
     }
 
-    /// This server, placing leases as `placement` says (`--placement`). The pool's shape
-    /// is given the capability [`ARCH_KEY`] = [`ARCH`] when it names no architecture:
-    /// `js-sched` refuses a pool without one and `registry` reads none, so one scenario
-    /// runs the same pool under every placement. The agents announce, and the client's
-    /// leases ask for, the shape's capabilities, this one too.
-    #[must_use]
-    pub fn placement(mut self, placement: Placement) -> Self {
-        self.placement = placement;
-        let caps = &mut self.shape.capabilities;
-        caps.entry(ARCH_KEY.to_owned())
-            .or_insert_with(|| ARCH.to_owned());
-        self
-    }
-
     /// This server, serving the job service too (`--job-listen`, an address on the loopback
-    /// that is never bound: the cell reaches the service in process) and placing as
-    /// `js-sched` (`--placement js-sched`, [`ServerSpec::placement`]), the one placement
-    /// that places queued jobs. The cell's agents then speak the per-job messages (they
+    /// that is never bound: the cell reaches the service in process). The cell's agents then speak the per-job messages (they
     /// report [`js_agent_wire::PER_JOB_CAPABILITY`] in their hello), and a
     /// [`crate::JobFront`] submits jobs to it; the lease routes are served beside it.
     #[must_use]
     pub fn jobs(mut self) -> Self {
         self.jobs = true;
-        self.placement(Placement::JsSched)
+        self
     }
 
     /// Whether the server serves the job service ([`ServerSpec::jobs`]).
@@ -343,7 +330,7 @@ impl ServerSpec {
     /// Writes the pool file and the two token files into `dir` and returns the server's
     /// command line: the lease file in `dir`, a first boot (or a resumed one, for a
     /// server started again), registration into the pool with [`JOIN_TOKEN`], the hello
-    /// burst, the placement, the job service's address when it is on, and usage off.
+    /// burst, the job service's address when it is on, and usage off.
     ///
     /// # Errors
     ///
@@ -362,7 +349,6 @@ impl ServerSpec {
             &format!("{JOIN_TOKEN}\n"),
             "--agent-token-file",
         )?;
-        let placement = self.placement_spelled();
         let mut flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
             ("--boot", boot(self.resume).into()),
@@ -370,7 +356,6 @@ impl ServerSpec {
             ("--agent-token-file", joins),
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
-            ("--placement", placement.into()),
         ];
         let job = self
             .jobs
@@ -382,12 +367,6 @@ impl ServerSpec {
         let head = std::iter::once(OsString::from("js-lease-server"));
         let tail = std::iter::once(OsString::from("--usage-off"));
         Ok(head.chain(pairs).chain(tail).collect())
-    }
-
-    /// The `--placement` value, as the server spells it.
-    fn placement_spelled(&self) -> String {
-        let placement = self.placement.to_possible_value();
-        placement.map_or_else(String::new, |value| value.get_name().to_owned())
     }
 
     /// The server's configuration, read from [`ServerSpec::args`] by its own parser, with
@@ -413,8 +392,7 @@ impl ServerSpec {
 }
 
 impl ServerSpec {
-    /// The configuration of the server of `cloud`'s elastic pool, with this spec's
-    /// placement: the client token file and the configuration file written into `dir`
+    /// The configuration of the server of `cloud`'s elastic pool: the client token file and the configuration file written into `dir`
     /// ([`elastic::config::text`]), read by the server with the cell's `sim-cloud` kind
     /// over `cloud`, on `clock`, the lease table timing its saves on `clock`, and the
     /// scaler drawing its acquire ids from `entropy`.
@@ -431,8 +409,7 @@ impl ServerSpec {
     ) -> Result<Config, StartupError> {
         let token = write(dir, "token", CLIENT_TOKEN, "client_token_file")?;
         let state = dir.join("leases.toml");
-        let text =
-            elastic::config::text(cloud, &state, Path::new(&token), &self.placement_spelled());
+        let text = elastic::config::text(cloud, &state, Path::new(&token));
         let file = write(dir, "js.toml", &text, "--config")?;
         let shared = SharedClock::new(clock.clone());
         let config = elastic::config::read(Path::new(&file), cloud, shared)?;

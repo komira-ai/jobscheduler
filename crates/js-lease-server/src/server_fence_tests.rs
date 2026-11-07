@@ -142,7 +142,7 @@ async fn started(name: &str) -> (Running, Arc<crate::job_store::ServerJobs>, Job
         std::fs::set_permissions(&path, mode).unwrap();
         path
     };
-    let pool = "name = \"burst\"\nclass = \"gpu-host\"\nmax_machines = 2\n[shape]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 1\ngpu_class = \"nvidia-a100\"\n[capabilities]\nisa = \"x86-64-v3\"\n";
+    let pool = "name = \"burst\"\nclass = \"gpu-host\"\nmax_machines = 2\n[shape]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 1\ngpu_class = \"nvidia-a100\"\n[capabilities]\narch = \"x86_64\"\nisa = \"x86-64-v3\"\n";
     let token = write("token", "test-token-0123456789-abcdefghijkl", 0o600);
     let joins = write(
         "agent-tokens",
