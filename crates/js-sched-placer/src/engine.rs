@@ -344,7 +344,7 @@ impl Engine {
 
     /// Takes up `held`, a lease of the registry on `host` the engine did not place, as the
     /// next lease of term 0, and holds it there: the engine's lease and operation.
-    fn take_up(&mut self, host: &HostId, held: &js_provider::Held) -> Placed {
+    fn take_up(&mut self, host: &HostId, held: &js_types::Held) -> Placed {
         let placed = Placed {
             lease: SchedLeaseId::new(0, self.taken),
             operation: self.sched.next_operation(),
