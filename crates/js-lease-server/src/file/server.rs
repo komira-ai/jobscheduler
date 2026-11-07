@@ -209,21 +209,8 @@ impl AgentKeys {
     }
 }
 
-/// The keys that were removed with the lease's time to live; each is refused with
-/// [`REMOVED_REASON`].
-const REMOVED_KEYS: [&str; 2] = ["default_ttl", "max_ttl"];
-
-/// Why a removed key is refused.
-const REMOVED_REASON: &str = "was removed: a lease has no time to live (it ends when released or at its maximum wall time); remove the key";
-
 pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let mut s = Section::open(table, "server.".to_owned());
-    // Before the unknown-key check, so that these keys are not told as unknown.
-    for key in REMOVED_KEYS {
-        if s.map.contains_key(key) {
-            return Err(s.fail(key, REMOVED_REASON));
-        }
-    }
     s.only(SERVER_KEYS)?;
     let listen = s.address("listen")?;
     let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
@@ -539,29 +526,18 @@ mod tests {
         read_server(table).err().unwrap().to_string()
     }
 
-    /// Asserts that `server.default_ttl` and `server.max_ttl` are refused with their own
-    /// message (not the unknown-field one), whatever value they hold, before a missing
-    /// required key or another unknown key is reported, and that the list of known keys a
-    /// real unknown key is told no longer names them. It catches a key that is read and
-    /// ignored, one told as unknown, and a refusal hidden behind another one.
+    /// Asserts that `server.default_ttl` and `server.max_ttl` are told as unknown keys, as
+    /// any key the section does not read is, and that the list of known keys names neither.
     #[test]
-    fn a_removed_ttl_key_is_refused_by_name() {
+    fn a_ttl_key_is_an_unknown_key() {
+        let head = "known: ";
         for key in ["default_ttl", "max_ttl"] {
-            for value in ["\"60s\"", "7", "true"] {
-                let said = refusal(&format!("{key} = {value}"));
-                assert_eq!(
-                    said,
-                    format!(
-                        "server.{key}: was removed: a lease has no time to live (it ends when released or at its maximum wall time); remove the key"
-                    )
-                );
-            }
+            let said = refusal(&format!("{key} = \"60s\""));
+            assert!(
+                said.starts_with(&format!("server.{key}: unknown field; {head}")),
+                "{said}"
+            );
+            assert!(!said[said.find(head).unwrap()..].contains("ttl"), "{said}");
         }
-        let said = refusal("bogus = 1\nmax_ttl = \"1h\"");
-        assert!(said.starts_with("server.max_ttl: was removed:"), "{said}");
-        let unknown = refusal("bogus = 1");
-        let head = "server.bogus: unknown field; known: ";
-        assert!(unknown.starts_with(head), "{unknown}");
-        assert!(!unknown.contains("ttl"), "{unknown}");
     }
 }

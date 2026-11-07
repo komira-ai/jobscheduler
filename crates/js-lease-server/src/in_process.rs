@@ -104,9 +104,9 @@ impl InProcess {
         })
     }
 
-    /// The client, operator and run routes, behind the bearer token, with `/healthz` and the
-    /// status routes open, as the listen address serves them when the agent routes have a
-    /// port of their own. The agent routes answer 404 here; they are
+    /// The host listing, join, brake and usage routes, behind the bearer token, with
+    /// `/healthz` and the status routes open, as the listen address serves them when the
+    /// agent routes have a port of their own. The agent routes answer 404 here; they are
     /// [`InProcess::agent_router`]'s.
     pub fn client_router(&self) -> Router {
         router(self.shared.clone(), false)

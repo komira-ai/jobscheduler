@@ -248,7 +248,7 @@ impl Rig {
             agent = Some((welcome.epoch, welcome.session));
         }
         let served = status.then(|| {
-            let status = Status::new(None, None, None, Vec::new(), shared_clock.clone());
+            let status = Status::new(None, None, Vec::new(), shared_clock.clone());
             Arc::new(status.with_logs(logs))
         });
         let shared = Arc::new(shared.with_status(served));

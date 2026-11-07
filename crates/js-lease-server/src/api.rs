@@ -6,28 +6,25 @@ use std::sync::{Arc, PoisonError};
 
 use axum::Extension;
 use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
-use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport, Timings};
-use js_provider::RefusalCode;
+use axum::routing::get;
+use js_lease::{LeaseTable, TickReport, Timings};
 use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::adapt::{BoxedPool, PoolHosts, SharedClock};
-use crate::admit::{Admit, Decision};
+use crate::admit::Admit;
 use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::{Token, is_private_address};
 use crate::hosts::listing;
 use crate::join_api;
 use crate::reservations::{self, Handed};
-use crate::run_api;
 use crate::scaler::Scaler;
 use crate::status::{self, Status};
 use crate::store::{LockLost, ServerStore};
@@ -35,7 +32,7 @@ use crate::store_health::{StoreHealth, TickStore};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
-use crate::wire::{AcquireBody, ApiError, Granted, LeaseList, Pending, Released, parse, parse_id};
+use crate::wire::ApiError;
 
 /// The largest request body served.
 pub const BODY_LIMIT: usize = 64 * 1024;
@@ -43,14 +40,14 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 /// The lease table over the server's provider and clock.
 pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
 
-/// What every request handler and the tick loop share: the table behind its one lock,
-/// the token, the count of lease-file writes that failed, the health of the store paths, and
-/// the agent side when agents register hosts.
+/// What every request handler and the tick loop share: the lease table behind its one lock
+/// (the restored leases the tick still ends), the token, the count of lease-file writes that
+/// failed, the health of the store paths, and the agent side when agents register hosts.
 pub(crate) struct Shared {
     table: Mutex<Table>,
     /// The hosts of the table's pool, which the host listing reads without the table's lock.
     hosts: PoolHosts,
-    /// How long the table's saves and the handlers' waits for its lock took.
+    /// How long the table's saves took.
     timings: Timings,
     token: Token,
     agents: Option<Arc<Agents>>,
@@ -73,7 +70,7 @@ pub(crate) struct Shared {
     counted: std::sync::Mutex<WholeCounts>,
     /// The reservation ledger the last tick handed the table.
     handed: Handed,
-    /// Admission of a lease request: the pool's launching machine providers.
+    /// The pool's launching machine providers, which a submitted job is admitted over.
     admit: Admit,
     /// The store, under the writer lock the server holds for its life (`--store`).
     store: Option<ServerStore>,
@@ -104,16 +101,15 @@ impl Shared {
         }
     }
 
-    /// The same state admitting lease requests over `admit`'s launching providers as well
-    /// as the hosts; without it only the hosts can admit.
+    /// The same state admitting jobs over `admit`'s launching providers as well as the
+    /// hosts; without it only the hosts can admit.
     #[must_use]
     pub(crate) fn with_admit(mut self, admit: Admit) -> Self {
         self.admit = admit;
         self
     }
 
-    /// The admission of lease requests: the pool's launching providers, which a submitted
-    /// job is admitted over too.
+    /// The pool's launching providers, which a submitted job is admitted over.
     pub(crate) fn admit(&self) -> &Admit {
         &self.admit
     }
@@ -177,8 +173,9 @@ impl Shared {
         self.pools.as_ref()
     }
 
-    /// The lease table behind its lock. A handler that also needs the registry takes this
-    /// first and the registry's lock second, as every caller does.
+    /// The lease table behind its lock. A caller that also needs the registry takes this
+    /// first and the registry's lock second.
+    #[cfg(test)]
     pub(crate) fn table(&self) -> &Mutex<Table> {
         &self.table
     }
@@ -192,14 +189,6 @@ impl Shared {
     /// The record of the table's saves and of the lock waits.
     pub(crate) fn timings(&self) -> Timings {
         self.timings.clone()
-    }
-
-    /// The table's lock, with the wait for it timed under `operation`.
-    async fn lock(&self, operation: &'static str) -> MutexGuard<'_, Table> {
-        let waiting = self.timings.begin(operation);
-        let table = self.table.lock().await;
-        waiting.finish();
-        table
     }
 
     /// The agent side; `None` without agent flags.
@@ -349,14 +338,12 @@ impl Shared {
     }
 }
 
-/// The router of the client, operator and status routes: `/healthz` open, everything else
-/// behind the bearer token. With `with_agents` the agent routes are served too (one port
+/// The router of the host listing, join, brake, usage and status routes: `/healthz` open,
+/// everything else behind the bearer token. With `with_agents` the agent routes are served too (one port
 /// for everything, as without `server.agent_listen`); without it they are served by
 /// [`agent_router`] on a port of their own and answer 404 here.
 pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let guarded = Router::new()
-        .route("/v1/leases", post(acquire).get(list))
-        .route("/v1/leases/{id}", delete(release))
         .route("/v1/hosts", get(hosts))
         .fallback(no_route)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
@@ -370,9 +357,7 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let app = open.merge(guarded);
     let app = match &shared.agents {
         Some(agents) => {
-            let app = app
-                .merge(join_api::router(shared.clone(), agents.clone()))
-                .merge(run_api::router(shared.clone(), agents.clone()));
+            let app = app.merge(join_api::router(shared.clone(), agents.clone()));
             match with_agents {
                 true => app.merge(agent_api::router(agents.clone())),
                 false => app,
@@ -391,7 +376,7 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
 }
 
 /// The router of the agent routes alone, for the port `server.agent_listen` names. It
-/// serves nothing else: a client or operator route answers 404 here. Without agent
+/// serves nothing else: a host listing or operator route answers 404 here. Without agent
 /// registration it serves nothing at all.
 pub(crate) fn agent_router(shared: &Shared) -> Router {
     match &shared.agents {
@@ -502,74 +487,6 @@ fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-async fn acquire(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
-    let body = parse::<AcquireBody>(&body)?;
-    let request_id = body.request_id()?;
-    let request = body.into_parts()?;
-    let registry = shared.registry();
-    // Admission first, under the table lock: the hosts, and the catalogs as the cache holds
-    // them, which calls no provider (see `admit`).
-    let mut table = shared.lock("wait-acquire").await;
-    let decision = shared
-        .admit
-        .decide(&table, registry.as_ref(), request_id.as_ref(), &request);
-    let outcome = match decision {
-        Decision::Start => match request_id {
-            Some(id) => table.acquire_with_id(id, request),
-            None => table.acquire(request),
-        },
-        Decision::Refuse => Err(AcquireError::Refused(RefusalCode::NoCapableHost)),
-    };
-    drop(table);
-    match outcome {
-        Ok(lease) => {
-            let granted = Granted {
-                id: lease.id.to_string(),
-                host: lease.host.to_string(),
-                ends_at_ms: lease.ends_at.millis(),
-            };
-            Ok(json(StatusCode::CREATED, &granted))
-        }
-        Err(AcquireError::Unconfirmed(id)) => {
-            let pending = Pending {
-                id: id.to_string(),
-                state: "pending",
-            };
-            Ok(json(StatusCode::ACCEPTED, &pending))
-        }
-        Err(err) => Err(err.into()),
-    }
-}
-
-async fn release(
-    State(shared): State<Arc<Shared>>,
-    Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
-    let outcome = {
-        let mut table = shared.lock("wait-release").await;
-        // A release of a waiting lease cancels its request in the registry: the lease's
-        // end and the ledger the stop left are written in one replace, before the answer.
-        match &shared.agents {
-            Some(agents) => {
-                let handed = &shared.handed;
-                table.release_then(&id, || Some(handed.take(&agents.registry)))?
-            }
-            None => table.release(&id)?,
-        }
-    };
-    Ok(match outcome {
-        ReleaseOutcome::Freed => json(StatusCode::OK, &Released { state: "freed" }),
-        ReleaseOutcome::Releasing => json(StatusCode::ACCEPTED, &Released { state: "releasing" }),
-    })
-}
-
-async fn list(State(shared): State<Arc<Shared>>) -> Response {
-    let leases = shared.table.lock().await.list();
-    let leases = leases.into_iter().map(Into::into).collect();
-    json(StatusCode::OK, &LeaseList { leases })
-}
-
 /// Every host the server leases: the static pool's, and the registered ones with the
 /// state of their session. The table's lock is not taken: the pool's is taken first and
 /// dropped, then the registry's; the order of the two never reverses.
@@ -577,10 +494,6 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, &listing(&shared).await.0)
 }
 
-#[cfg(test)]
-mod probe_tests;
-#[cfg(test)]
-mod request_id_tests;
 #[cfg(test)]
 mod status_gate_tests;
 #[cfg(test)]
@@ -608,5 +521,44 @@ mod tests {
         assert_eq!(bearer("Basic abc"), None);
         assert_eq!(bearer("Bearerabc"), None);
         assert_eq!(bearer(""), None);
+    }
+
+    /// Asserts that `GET /v1/hosts`, a route behind the bearer token, answers 401 with no
+    /// header, with the pool's join token, with another token and with a header that is
+    /// no bearer, and 200 with the client token. It catches a guarded route that trusts an
+    /// agent credential.
+    #[tokio::test]
+    async fn a_guarded_route_takes_the_client_token_alone() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let rig = whole_view_tests::Rig::new("guarded_token").await;
+        let client = "c".repeat(40);
+        let other = "d".repeat(40);
+        let ask = |authorization: Option<String>| {
+            let rig = &rig;
+            async move {
+                let mut request = axum::http::Request::get("/v1/hosts");
+                if let Some(value) = authorization {
+                    request = request.header(header::AUTHORIZATION, value);
+                }
+                router(rig.shared.clone(), true)
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        for refused in [
+            None,
+            Some("Bearer t".to_owned()),
+            Some(format!("Bearer {other}")),
+            Some(format!("Basic {client}")),
+            Some(client.clone()),
+        ] {
+            let status = ask(refused.clone()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{refused:?}");
+        }
+        assert_eq!(ask(Some(format!("Bearer {client}"))).await, StatusCode::OK);
     }
 }

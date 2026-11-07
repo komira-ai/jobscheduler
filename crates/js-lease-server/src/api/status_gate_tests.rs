@@ -121,12 +121,10 @@ async fn a_status_route_answers_only_a_private_peer() {
     }
 }
 
-/// Asserts what a launch is planned for: the pool floor with no registry and with nothing
-/// waiting, and the first request on the wait list once one waits (a whole-node request
-/// that finds the only host taken), named by its id and with its own demand. It catches a
-/// plan made for the floor while a request waits.
-#[tokio::test]
-async fn a_launch_is_planned_for_the_head_of_the_wait_list_else_the_floor() {
+/// Asserts what a launch is planned for: the pool floor, named `floor` and with the floor's
+/// own demand. It catches a plan made for any other demand.
+#[test]
+fn a_launch_is_planned_for_the_floor() {
     use js_elastic::Demand;
     use js_types::Resources;
 
@@ -143,17 +141,9 @@ async fn a_launch_is_planned_for_the_head_of_the_wait_list_else_the_floor() {
         network: Default::default(),
         host_ports: Vec::new(),
     };
-    let mut rig = Rig::new("status_wanted").await;
-    for registry in [None, Some(&rig.registry)] {
-        let asked = wanted(registry, &floor);
-        assert_eq!(
-            (asked.request.as_str(), asked.demand),
-            ("floor", floor.clone())
-        );
-    }
-    rig.lease().await;
-    rig.ask("r1");
-    let asked = wanted(Some(&rig.registry), &floor);
-    assert_eq!(asked.request, "r1");
-    assert_ne!(asked.demand, floor);
+    let asked = wanted(&floor);
+    assert_eq!(
+        (asked.request.as_str(), asked.demand),
+        ("floor", floor.clone())
+    );
 }
