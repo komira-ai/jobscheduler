@@ -1,9 +1,10 @@
 //! What the in-process tests share: scratch directories, the flags of a server with agent
 //! registration, a clock the test moves, the two ways of reaching a server (its routers in
-//! process, or its listener over loopback) and the messages an agent sends.
+//! process, or its listeners over loopback) and the messages an agent sends.
 
 use std::ffi::OsString;
 use std::fs;
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
 pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
 
 /// The pool registering hosts join: room for two machines of the shape [`hello_body`]
-/// announces, which the shipped static pool's requests ([`lease_body`]) fit.
+/// announces.
 const POOL: &str = r#"
 name = "burst"
 class = "gpu-host"
@@ -247,8 +248,8 @@ impl Listening {
         }
     }
 
-    /// One HTTP/1.1 request over a new loopback connection, read to the end of the
-    /// connection.
+    /// One HTTP/1.1 request over a new loopback connection to the client listener, read to
+    /// the end of the connection.
     pub async fn request(
         &self,
         method: &str,
@@ -256,47 +257,39 @@ impl Listening {
         token: &str,
         body: Option<&Value>,
     ) -> Reply {
-        let mut stream = TcpStream::connect(self.running.addr()).await.unwrap();
-        let body = body.map(Value::to_string).unwrap_or_default();
-        let message = format!(
-            "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\
-             Authorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(message.as_bytes()).await.unwrap();
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).await.unwrap();
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        let (head, body) = text.split_once("\r\n\r\n").unwrap();
-        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        reply(status, body.as_bytes())
+        exchange(self.running.addr(), method, path, token, body).await
+    }
+
+    /// [`Self::request`] to the job service's listener, with the client token.
+    pub async fn job_request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
+        let addr = self.running.job_addr().expect("the job service is on");
+        exchange(addr, method, path, TOKEN, body).await
     }
 }
 
-/// A request body that asks for one whole host of the shipped pool.
-pub fn lease_body() -> Value {
-    lease_body_with_wall(7200)
-}
-
-/// [`lease_body`] asking for a maximum wall time of `seconds`.
-pub fn lease_body_with_wall(seconds: u64) -> Value {
-    json!({
-        "class": "gpu-host",
-        "resources": { "cpu_millis": 1000, "memory_bytes": 1024, "gpus": 1, "gpu_class": "nvidia-a100" },
-        "capabilities": { "isa": "x86-64-v3" },
-        "max_wall_seconds": seconds,
-        "labels": { "team": "infra" },
-    })
-}
-
-/// The ids of the leases in a list reply.
-pub fn ids(reply: &Reply) -> Vec<String> {
-    assert_eq!(reply.status, 200, "{:?}", reply.body);
-    let leases = reply.body["leases"].as_array().unwrap();
-    leases
-        .iter()
-        .map(|lease| lease["id"].as_str().unwrap().to_owned())
-        .collect()
+/// One HTTP/1.1 request over a new loopback connection to `addr`, read to the end of the
+/// connection.
+async fn exchange(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&Value>,
+) -> Reply {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let body = body.map(Value::to_string).unwrap_or_default();
+    let message = format!(
+        "{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\
+         Authorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(message.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    reply(status, body.as_bytes())
 }
 
 /// A hello a host of [`POOL`] sends: the pool's shape exactly.
