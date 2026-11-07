@@ -4,13 +4,17 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{Heartbeat, Phase, Taint};
+use js_lease::{ManualClock, Timestamp};
 use js_provider::Candidate;
 use js_provider::{Pool, RefusalCode, StartAck, StartSpec};
-use js_registry::{MarkedTails, Placer, ProbeHost};
+use js_registry::{
+    MarkedTails, Placer, PoolConfig, ProbeHost, RegisteredProvider, Registry, SequentialSessions,
+};
 use js_types::{HostId, Request, ResourceClass};
 use support::*;
 
@@ -63,12 +67,69 @@ impl Placer for Scripted {
     }
 }
 
-/// A placer that places as a registry with no placer does and says nothing of probes.
+/// A placer that books the first host and says nothing of probes.
 struct First;
 
 impl Placer for First {
     fn pick(&self, _: &StartSpec, _: &[Candidate], _: &MarkedTails) -> Option<usize> {
         Some(0)
+    }
+}
+
+/// A pool of up to `max_machines` hosts over `placer`, as [`Fixture`] builds one but with a
+/// placer of the test's own, on a clock that moves only when a test says.
+struct Rig {
+    registry: Registry,
+    provider: RegisteredProvider,
+    clock: ManualClock,
+    sessions: Mutex<BTreeMap<String, String>>,
+}
+
+fn rig(max_machines: usize, placer: Arc<dyn Placer>) -> Rig {
+    rig_of(config(max_machines), placer)
+}
+
+fn rig_of(config: PoolConfig, placer: Arc<dyn Placer>) -> Rig {
+    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+    let config = config.booking_whole_memory();
+    let registry =
+        Registry::with_sessions(config, clock.clone(), SequentialSessions::new(), placer);
+    let provider = registry.provider();
+    Rig {
+        registry,
+        provider,
+        clock,
+        sessions: Mutex::new(BTreeMap::new()),
+    }
+}
+
+impl Rig {
+    /// Admits `host` with `token`, expecting it to work, and remembers its session.
+    fn join(&self, host: &str, token: &str) -> u64 {
+        let welcome = self.registry.hello(&hello(host), &cred(token)).unwrap();
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.insert(host.to_owned(), welcome.session.clone());
+        welcome.epoch
+    }
+
+    /// A heartbeat for `host` in `epoch` carrying the session issued to it.
+    fn heartbeat(&self, host: &str, epoch: u64) -> Heartbeat {
+        let session = self.sessions.lock().unwrap()[host].clone();
+        Heartbeat {
+            session,
+            ..support::heartbeat(host, epoch)
+        }
+    }
+
+    fn beat(&self, host: &str, epoch: u64) {
+        let beat = self.heartbeat(host, epoch);
+        self.registry.heartbeat(&beat, &cred("t")).unwrap();
+    }
+
+    /// Moves the clock past the grace period, so every host not heard from since is lost.
+    fn pass_grace(&self) {
+        let grace = Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS + 1);
+        self.clock.advance(grace);
     }
 }
 
@@ -97,20 +158,17 @@ fn facts(cordoned: bool) -> ProbeHost {
     }
 }
 
-/// Asserts that a registry with no placer, or with a placer that judges no probe, places
-/// none (`ProbeUnsupported`) and books nothing, though the probe's host is free and
-/// cordoned. It catches a probe booked by a path that has no probe rule.
+/// Asserts that a placer that judges no probe places none (`ProbeUnsupported`) and books
+/// nothing, though the probe's host is free and cordoned; and that its own picks are
+/// unchanged. It catches a probe booked by a path that has no probe rule.
 #[test]
-fn without_a_placer_that_judges_probes_none_is_placed() {
-    let mut fx = fixture(2);
+fn a_placer_that_judges_no_probe_places_none() {
+    let mut fx = rig(2, Arc::new(First));
     fx.join("a", "t");
     fx.registry
         .cordon(&host("a"), Duration::from_secs(600))
         .unwrap();
     let refused = fx.provider.start(probe_spec(1, "a"));
-    assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
-    fx.registry.set_placer(Arc::new(First));
-    let refused = fx.provider.start(probe_spec(2, "a"));
     assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
     assert!(fx.provider.booked().is_empty());
     // The placer's own picks are unchanged.
@@ -125,11 +183,10 @@ fn without_a_placer_that_judges_probes_none_is_placed() {
 /// the probe booked on another host, and the cordon opened to ordinary work.
 #[test]
 fn an_admitted_probe_is_booked_past_its_hosts_cordon_and_nowhere_else() {
-    let mut fx = fixture(2);
+    let placer = Scripted::answering(Ok(()));
+    let mut fx = rig(2, placer.clone());
     fx.join("a", "t");
     fx.join("b", "t");
-    let placer = Scripted::answering(Ok(()));
-    fx.registry.set_placer(placer.clone());
     fx.registry
         .cordon(&host("b"), Duration::from_secs(600))
         .unwrap();
@@ -159,10 +216,9 @@ fn an_admitted_probe_is_booked_past_its_hosts_cordon_and_nowhere_else() {
 /// that is gone.
 #[test]
 fn a_refused_probe_is_answered_the_placers_code_and_books_nothing() {
-    let mut fx = fixture(2);
-    fx.join("a", "t");
     let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotCordoned));
-    fx.registry.set_placer(placer.clone());
+    let mut fx = rig(2, placer.clone());
+    fx.join("a", "t");
     let refused = fx.provider.start(probe_spec(1, "a"));
     assert_eq!(
         refused,
@@ -186,11 +242,10 @@ fn a_refused_probe_is_answered_the_placers_code_and_books_nothing() {
 /// spills to another.
 #[test]
 fn an_admitted_probe_on_a_full_host_has_no_capacity() {
-    let mut fx = fixture(2);
+    let placer = Scripted::answering(Ok(()));
+    let mut fx = rig(2, placer.clone());
     fx.join("a", "t");
     fx.join("b", "t");
-    let placer = Scripted::answering(Ok(()));
-    fx.registry.set_placer(placer.clone());
     // The class books the whole host: one lease fills `a`.
     assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
     fx.registry
@@ -205,10 +260,9 @@ fn an_admitted_probe_on_a_full_host_has_no_capacity() {
 /// It catches the probe answer put before the book's own.
 #[test]
 fn an_ended_probe_is_answered_lease_ended() {
-    let mut fx = fixture(2);
-    fx.join("a", "t");
     let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotCordoned));
-    fx.registry.set_placer(placer);
+    let mut fx = rig(2, placer);
+    fx.join("a", "t");
     fx.provider.stop(&lease(1));
     let ended = fx.provider.start(probe_spec(1, "a"));
     assert_eq!(ended, StartAck::Refused(RefusalCode::LeaseEnded));
@@ -219,12 +273,11 @@ fn an_ended_probe_is_answered_lease_ended() {
 /// at a default.
 #[test]
 fn the_placer_is_told_the_taint_phase_and_leaving_of_the_probes_host() {
-    let mut fx = fixture(3);
+    let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotServing));
+    let mut fx = rig(3, placer.clone());
     let a = fx.join("a", "t");
     let b = fx.join("b", "t");
     fx.join("c", "t");
-    let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotServing));
-    fx.registry.set_placer(placer.clone());
     let taint = Taint {
         reason: "residue".to_owned(),
         run_id: None,
@@ -271,19 +324,15 @@ fn the_placer_is_told_the_taint_phase_and_leaving_of_the_probes_host() {
 #[test]
 fn a_probe_of_a_whole_node_class_is_not_placed() {
     let whole = ResourceClass::whole_node();
-    let config = js_registry::PoolConfig::new(
+    let config = PoolConfig::new(
         js_types::ProviderId::new("builders").unwrap(),
         whole.clone(),
         pool_shape(),
         2,
     );
-    let mut fx = fixture_of(config);
-    fx.join("a", "t");
-    // With no placer, as with one.
-    let refused = fx.provider.start(probe_of(9, "a", &whole));
-    assert_eq!(refused, StartAck::Refused(RefusalCode::ProbeUnsupported));
     let placer = Scripted::answering(Ok(()));
-    fx.registry.set_placer(placer.clone());
+    let mut fx = rig_of(config, placer.clone());
+    fx.join("a", "t");
     fx.registry
         .cordon(&host("a"), Duration::from_secs(600))
         .unwrap();
@@ -307,10 +356,9 @@ fn a_probe_of_a_whole_node_class_is_not_placed() {
 /// over, onto a host open to ordinary work), and a cordon reported over early.
 #[test]
 fn the_placer_is_told_the_cordon_in_force_up_to_its_lapse() {
-    let mut fx = fixture(2);
-    let epoch = fx.join("a", "t");
     let placer = Scripted::answering(Err(RefusalCode::ProbeHostNotCordoned));
-    fx.registry.set_placer(placer.clone());
+    let mut fx = rig(2, placer.clone());
+    let epoch = fx.join("a", "t");
     fx.registry
         .cordon(&host("a"), Duration::from_secs(10))
         .unwrap();

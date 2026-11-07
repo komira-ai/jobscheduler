@@ -156,14 +156,22 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
     let dynamic: Arc<dyn Store> = store.clone();
     let jobs = JobStore::new(Arc::new(dynamic), ServerIds::random()).unwrap();
     let resources = Resources::new(8000, 17179869184, 0, None).unwrap();
-    let shape = Shape::new(resources, Default::default());
+    let shape = Shape::new(
+        resources,
+        BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+    );
     let pool = PoolConfig::new(
         ProviderId::new("burst").unwrap(),
         ResourceClass::gpu_host(),
         shape,
         4,
     );
-    let registry = Registry::with_sessions(pool, server_clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        pool,
+        server_clock.clone(),
+        SequentialSessions::new(),
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     let agents = Agents::over(registry, &server_clock, dir.path()).with_jobs(Arc::new(jobs));
     let settings = Settings::new();
     let table = LeaseTable::open(

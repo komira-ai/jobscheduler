@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use js_agent_wire::{ExclusiveRefusal, HeldRun, HeldState, RefusalReason};
 
-use js_provider::{Candidate, Observed, Pool, StartSpec, StopAck};
+use js_provider::{Observed, Pool, StartSpec, StopAck};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, ERROR_EDGES_MS, MAX_FINISHED_RUNS,
-    MarkedTails, Placer, ProfileLives, Registry, WholeNodeConfig,
+    ProfileLives, Registry, WholeNodeConfig,
 };
 use js_state::Store;
 use js_state::fake::{Fake, Flaw};
@@ -455,15 +455,6 @@ fn a_request_cancelled_past_its_mark_deadline_on_its_only_host(store: Stores<'_>
     assert_eq!(outcome, (DrainOutcome::MarkDropped, Some(0), Some(25_000)));
 }
 
-/// A placer that books the first host it is shown that no whole-node request has set aside.
-struct First;
-
-impl Placer for First {
-    fn pick(&self, _: &StartSpec, open: &[Candidate], marked: &MarkedTails) -> Option<usize> {
-        open.iter().position(|c| !marked.contains_key(&c.host))
-    }
-}
-
 /// A class whose leases share a host, each booking what it asks for.
 fn book() -> ResourceClass {
     ResourceClass::new(
@@ -477,7 +468,6 @@ fn book() -> ResourceClass {
 /// host's figures in place of its own share.
 fn a_shared_booking_records_its_own_share(store: Stores<'_>) {
     let mut w = World::of(config(4), &["a"]);
-    w.fx.registry.set_placer(Arc::new(First));
     w.provider = w.provider.clone().with_classes(vec![whole(), book()]);
     let mut l = Logged::new(w, store());
     let share = Resources::new(1000, 1 << 20, 0, None).unwrap();
@@ -737,11 +727,9 @@ fn the_profile_of_a_lease_outlives_its_runs() {
 /// presented within the regain grace) recorded as a cancellation, and a request put back
 /// from the ledger and cancelled before its consumer presented it again recorded with no
 /// wait, or not at all.
-///
-/// Runs under both placements: under `--placement js-sched` the engine's wait list says
-/// how the request waited.
-fn waiting_requests_dropped_or_put_back_before_the_stop(p: Placement) {
-    let mut l = Logged::new(World::new_in(p, &["a"], plain), fake());
+#[test]
+fn waiting_requests_dropped_or_put_back_before_the_stop() {
+    let mut l = Logged::new(World::new(&["a"], plain), fake());
     l.w.share(1, HOUR_S);
     l.w.ask(2, "q");
     l.w.asks.clear();
@@ -750,12 +738,12 @@ fn waiting_requests_dropped_or_put_back_before_the_stop(p: Placement) {
     l.w.stop(2);
     assert_eq!(l.hub.write_history(), None);
 
-    let mut first = World::new_in(p, &["a"], plain);
+    let mut first = World::new(&["a"], plain);
     first.share(1, HOUR_S);
     let asked = first.now().millis();
     first.ask(2, "q");
     let ledger = first.fx.registry.reservation_ledger();
-    let mut l = Logged::new(World::new_in(p, &["a"], plain), fake());
+    let mut l = Logged::new(World::new(&["a"], plain), fake());
     l.w.share(1, HOUR_S);
     l.w.step(10_000);
     assert_eq!(l.w.fx.registry.restore_reservations(&ledger).resumed, 1);
@@ -768,5 +756,3 @@ fn waiting_requests_dropped_or_put_back_before_the_stop(p: Placement) {
     let outcome = (row.drain_outcome, row.give_up_outcome);
     assert_eq!(outcome, (DrainOutcome::MarkDropped, Some(0)));
 }
-
-crate::both!(waiting_requests_dropped_or_put_back_before_the_stop);

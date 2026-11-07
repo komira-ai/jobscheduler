@@ -1,8 +1,6 @@
 //! Hosts held whole by whole-node leases that no request waits on (started without a request
-//! id), under both placements: `--placement registry` (`registry::NAME`) and `--placement
-//! js-sched` (`js_sched::NAME`), with the same assertions. A waiting whole-node request
-//! never sets such a host aside: it waits until one of them is free. Nothing sleeps; the
-//! clock is the test's.
+//! id). A waiting whole-node request never sets such a host aside: it waits until one of them
+//! is free. Nothing sleeps; the clock is the test's.
 
 mod support;
 
@@ -33,8 +31,9 @@ fn hold(w: &mut World, sequence: u64) -> String {
 /// request is on the wait list with no host, however long it waits; once one lease stops,
 /// that host, and only it, is set aside for the request. It catches a host held whole by a
 /// lease of no request taken for a host that may be drained.
-fn a_host_a_whole_node_lease_holds_is_not_set_aside(p: Placement) {
-    let mut w = World::new_in(p, &["a", "b"], |settings| settings);
+#[test]
+fn a_host_a_whole_node_lease_holds_is_not_set_aside() {
+    let mut w = World::new(&["a", "b"], |settings| settings);
     let first = hold(&mut w, 1);
     let second = hold(&mut w, 2);
     assert_ne!(first, second);
@@ -46,5 +45,3 @@ fn a_host_a_whole_node_lease_holds_is_not_set_aside(p: Placement) {
     w.step(POLL_MS);
     assert_eq!(w.reserved_host("q"), Some(first));
 }
-
-both!(a_host_a_whole_node_lease_holds_is_not_set_aside);

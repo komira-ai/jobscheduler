@@ -1,7 +1,7 @@
 //! The queued jobs placed by the engine, and the job allocations it books (design sections
 //! 5.3, steps 5 and 6, 5.4, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
 //!
-//! Under `--placement js-sched`, with the job tables, the server runs a **pass** over the
+//! With the job tables, the server runs a **pass** over the
 //! queue on each tick and after each heartbeat of a host that speaks the per-job messages
 //! (the server's `Agents::place_jobs`): a job end, a cancel, a confirmed container, a host that
 //! joins and a heartbeat that changes a host's load all come to the server as one of those. A

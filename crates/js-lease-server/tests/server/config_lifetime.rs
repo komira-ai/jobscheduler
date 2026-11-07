@@ -217,14 +217,19 @@ fn the_scaler_settings_carry_the_lifetime_figures_and_the_prepare_timeout() {
     let plan = config.elastic_pool().unwrap();
     let registry = |whole: Option<WholeNodeConfig>| {
         let resources = Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap();
-        let shape = Shape::new(resources, BTreeMap::new());
+        let arch = BTreeMap::from([("arch".to_owned(), "x86_64".to_owned())]);
+        let shape = Shape::new(resources, arch);
         let name = ProviderId::new("gpu").unwrap();
         let pool = PoolConfig::new(name, ResourceClass::whole_node(), shape, 4);
         let pool = match whole {
             Some(whole) => pool.with_whole_node(whole).unwrap(),
             None => pool,
         };
-        Registry::new(pool, clock())
+        Registry::new(
+            pool,
+            clock(),
+            std::sync::Arc::new(js_sched_placer::place::SchedPlacer::default()),
+        )
     };
     let twenty = WholeNodeConfig {
         prepare_timeout_ms: 20 * 60_000,

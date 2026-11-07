@@ -69,8 +69,8 @@ impl Registry {
 }
 
 impl Registry {
-    /// The wait list in `state`, longest waiting first: the registry's, or the placer's when
-    /// it keeps it ([`crate::Placer::whole_waiting`]), each with the host set aside for it.
+    /// The placer's wait list ([`crate::Placer::whole_waiting`]), longest waiting first, each
+    /// with the host set aside for it, read under the lock `state` stands for.
     pub(super) fn waiting_rows(&self, state: &State) -> Vec<Waiting> {
         let marks = self.marks_now(state);
         let reserved = |id: &RequestId| {
@@ -83,17 +83,7 @@ impl Registry {
             since,
             reserved: reserved(id),
         };
-        match self.keeper() {
-            Some(keeper) => {
-                let waiting = keeper.whole_waiting().into_iter();
-                waiting.map(|w| row(&w.id, &w.request, w.since)).collect()
-            }
-            None => {
-                let waiting = state.waiting.waiting();
-                waiting
-                    .map(|(id, request, since)| row(id, request, since))
-                    .collect()
-            }
-        }
+        let waiting = self.placer().whole_waiting().into_iter();
+        waiting.map(|w| row(&w.id, &w.request, w.since)).collect()
     }
 }

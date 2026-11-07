@@ -326,8 +326,8 @@ pub(crate) fn whole_over(
     rig_on(name, (true, true), kept, (clock, shared), extra)
 }
 
-/// A server named `name`, holding the job tables when `with_jobs`, placing with the
-/// registry's own placement (so no queued job is placed).
+/// A server named `name`, holding the job tables when `with_jobs`, whose queued jobs are not
+/// placed (its registry still places leases with `js-sched`).
 pub(crate) fn rig(name: &str, with_jobs: bool) -> Rig {
     rig_of(name, with_jobs, false)
 }
@@ -392,8 +392,8 @@ fn rig_on(
     };
     let gpu_class = (gpus > 0).then(|| "nvidia-a100".to_owned());
     let resources = Resources::new(8000, 17179869184, gpus, gpu_class).unwrap();
-    let arch = placing.then(|| ("arch".to_owned(), "x86_64".to_owned()));
-    let shape = Shape::new(resources, arch.into_iter().collect());
+    let arch = ("arch".to_owned(), "x86_64".to_owned());
+    let shape = Shape::new(resources, [arch].into_iter().collect());
     let pool = PoolConfig::new(ProviderId::new("burst").unwrap(), class, shape, 4);
     let pool = match &extra.whole {
         Some(whole) => pool.with_whole_node(whole.rules.clone()).unwrap(),
@@ -406,8 +406,7 @@ fn rig_on(
         }
         None => pool,
     };
-    let registry = Registry::with_sessions(pool, shared.clone(), SequentialSessions::new());
-    let placer = placing.then(|| {
+    let placer = {
         let backfill = extra.whole.as_ref().and_then(|whole| whole.backfill);
         let settings = crate::sched::engine::Settings {
             backfill: backfill.map_or_else(Backfill::default, Backfill::enforced),
@@ -417,10 +416,14 @@ fn rig_on(
             settings,
             shared.clone(),
         ))
-    });
-    placer
-        .iter()
-        .for_each(|placer| registry.set_placer(placer.clone()));
+    };
+    let registry = Registry::with_sessions(
+        pool,
+        shared.clone(),
+        SequentialSessions::new(),
+        placer.clone(),
+    );
+    let placer = placing.then_some(placer);
     let store_clock = extra.store_clock.unwrap_or_else(|| Arc::clone(&clock));
     let fresh = || {
         let (store, jobs) = tables_on(store_clock, retention);
@@ -484,7 +487,7 @@ impl Rig {
     /// Says hello for `host` through the route, as an agent that reports the `per-job`
     /// capability and, when `uploads`, the `log-upload` capability.
     pub(crate) async fn join(&mut self, host: &str, uploads: bool) {
-        let mut capabilities = json!({ "per-job": "true" });
+        let mut capabilities = json!({ "per-job": "true", "arch": "x86_64" });
         if uploads {
             capabilities["log-upload"] = json!("true");
         }

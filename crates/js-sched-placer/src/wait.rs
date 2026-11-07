@@ -1,9 +1,7 @@
-//! The wait list of whole-node requests the engine keeps for the registry under
-//! `--placement js-sched` ([`js_registry::Placer::keeps_wait_list`]): the registry keeps no
-//! list of its own then, and asks the engine for every presentation, place and cancel.
+//! The wait list of whole-node requests the engine keeps for the registry: the registry
+//! keeps no list, and asks the engine for every presentation, place and cancel.
 //!
-//! The rules are those the registry's own list keeps under `--placement registry`
-//! (`js-registry`'s `whole/queue.rs`, design `whole-node.md` sections 2 and 3):
+//! The rules are those of design `whole-node.md` sections 2 and 3:
 //!
 //! - **Order.** A request enters at the back at its first presentation that finds some host
 //!   capable of holding it whole, and keeps its place, whatever the number of presentations,
@@ -433,7 +431,7 @@ impl Engine {
 
 /// `settings` with the caps lowered by `held`, the hosts held outside the queue: each is one
 /// host whole less under `max_whole_node` and one more kept from the ceiling's share, and
-/// each that drains a busy host one less under `max_draining`, as the registry's own pass
+/// each that drains a busy host one less under `max_draining`, as the engine's pass
 /// counts them.
 fn outside_caps(settings: &WholeNodeConfig, held: &[Reservation]) -> WholeNodeConfig {
     let draining = held.iter().filter(|mark| !mark.assigned).count();

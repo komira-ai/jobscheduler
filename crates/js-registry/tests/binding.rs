@@ -372,7 +372,8 @@ fn a_new_hello_invalidates_the_old_session() {
 /// welcome check accepts it). It catches a constant or empty secret from the production source.
 #[test]
 fn the_os_source_issues_distinct_wire_valid_secrets() {
-    let registry = Registry::new(config(4), ManualClock::default());
+    let clock = ManualClock::default();
+    let registry = Registry::new(config(4), clock.clone(), sched_placer(100, &clock));
     let a = registry.hello(&hello("a"), &cred("t")).unwrap();
     let b = registry.hello(&hello("b"), &cred("t")).unwrap();
     assert_ne!(a.session, b.session);
@@ -396,7 +397,9 @@ impl SessionSource for NoRandomness {
 /// admitting a host with a guessable (zeroed or empty) secret on a failed random source.
 #[test]
 fn a_hello_is_refused_when_no_secret_can_be_made() {
-    let registry = Registry::with_sessions(config(4), ManualClock::default(), NoRandomness);
+    let clock = ManualClock::default();
+    let placer = sched_placer(100, &clock);
+    let registry = Registry::with_sessions(config(4), clock, NoRandomness, placer);
     let refused = registry.hello(&hello("a"), &cred("t")).unwrap_err();
     assert_eq!(refused, Refusal::SessionUnavailable);
     assert_eq!(refused.code(), refusal::SESSION_UNAVAILABLE);

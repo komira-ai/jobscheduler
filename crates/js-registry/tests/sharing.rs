@@ -1,7 +1,7 @@
-//! Leases that share a host, with a placer set: the class that books part of a host is
+//! Leases that share a host: the class that books part of a host is
 //! admitted, the placer picks among the hosts with room, a host that lists the runs of
 //! its first lease takes a second, a restored lease keeps what it booked, and every
-//! lease of a host counts toward its tail. Without a placer none of it changes.
+//! lease of a host counts toward its tail.
 
 mod support;
 
@@ -9,9 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent_wire::{Command, Heartbeat, HeldRun, HeldState, Hello};
+use js_lease::{ManualClock, Timestamp};
 use js_provider::Candidate;
 use js_provider::{Pool as _, RefusalCode, StartAck, StartSpec};
-use js_registry::{MarkedTails, Placer, PoolConfig, RunRefusal};
+use js_registry::{MarkedTails, Placer, PoolConfig, Registry, RunRefusal};
 use js_types::{Admission, ClassId, Dims, Request, ResourceClass, Resources};
 use support::world::*;
 use support::*;
@@ -99,23 +100,12 @@ fn on(ack: &StartAck) -> Option<&str> {
     started_on(ack)
 }
 
-/// Catches: the flag-off state changing. With no placer the class that books part of a
-/// host is refused `UnsupportedClass`, as it always was, and nothing is booked.
-#[test]
-fn without_a_placer_a_class_that_shares_is_refused() {
-    let mut p = pool(&["a"]);
-    let ack = p.provider.start(sharing_spec(1, 600));
-    assert_eq!(ack, StartAck::Refused(RefusalCode::UnsupportedClass));
-    assert!(p.provider.booked().is_empty());
-}
-
-/// Catches: a placer that does not open the class, or a second lease refused though the
-/// host has room: two leases start on the one host, the capacity listing shows both in the
+/// Catches: a class that books part of a host not opened, or a second lease refused though
+/// the host has room: two leases start on the one host, the capacity listing shows both in the
 /// order they were booked, and the fifth, past the host's four cores, is `NoCapacity`.
 #[test]
-fn with_a_placer_a_second_lease_starts_beside_the_first() {
+fn a_second_lease_starts_beside_the_first() {
     let mut p = pool(&["a"]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let first = p.provider.start(sharing_spec(1, 600));
     let second = p.provider.start(sharing_spec(2, 600));
     assert_eq!((on(&first), on(&second)), (Some("a"), Some("a")));
@@ -130,17 +120,30 @@ fn with_a_placer_a_second_lease_starts_beside_the_first() {
     assert_eq!(p.provider.capacity()[0].leases.len(), 4);
 }
 
+/// A registry of `book` leases (4 cores, 8 GiB per host) over `placer`, with the hosts
+/// `hosts` joined: for the tests about what the registry hands the placer, whose picks
+/// the production placer would not make.
+fn seamed(placer: Arc<dyn Placer>, hosts: &[&str]) -> js_registry::RegisteredProvider {
+    let name = js_types::ProviderId::new("builders").unwrap();
+    let config = PoolConfig::new(name, book(), pool_shape(), 4).booking_whole_memory();
+    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+    let registry = Registry::new(config, clock, placer);
+    for h in hosts {
+        registry.hello(&hello(h), &cred("t")).unwrap();
+    }
+    registry.provider()
+}
+
 /// Catches: the placer not consulted, shown a host that has no room, or the registry
 /// booking the first host by id: the placer takes the last candidate, so four leases fill
 /// `b`; it is shown both hosts until `b` is full and then `a` alone, and the fifth lease
 /// lands on `a`.
 #[test]
 fn the_placer_picks_among_the_hosts_with_room() {
-    let mut p = pool(&["a", "b"]);
     let last = Arc::new(Last::default());
-    p.fx.registry.set_placer(last.clone());
+    let mut provider = seamed(last.clone(), &["a", "b"]);
     let acks: Vec<StartAck> = (1..=5)
-        .map(|n| p.provider.start(sharing_spec(n, 600)))
+        .map(|n| provider.start(sharing_spec(n, 600)))
         .collect();
     let hosts: Vec<Option<&str>> = acks.iter().map(on).collect();
     assert_eq!(
@@ -157,14 +160,12 @@ fn the_placer_picks_among_the_hosts_with_room() {
 /// anyway: the start is `NoCapacity` and nothing is booked.
 #[test]
 fn a_placer_that_picks_none_books_none() {
-    let mut p = pool(&["a"]);
-    p.fx.registry
-        .set_placer(Arc::new(Named(vec![(1, "nowhere")])));
+    let mut provider = seamed(Arc::new(Named(vec![(1, "nowhere")])), &["a"]);
     assert_eq!(
-        p.provider.start(sharing_spec(1, 600)),
+        provider.start(sharing_spec(1, 600)),
         StartAck::Refused(RefusalCode::NoCapacity)
     );
-    assert!(p.provider.booked().is_empty());
+    assert!(provider.booked().is_empty());
 }
 
 /// Catches: the quiet rule applied to a lease that shares a host that is busy with its
@@ -173,7 +174,6 @@ fn a_placer_that_picks_none_books_none() {
 #[test]
 fn a_host_running_the_first_lease_takes_a_second() {
     let mut p = pool(&["a"]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     assert_eq!(on(&p.provider.start(sharing_spec(1, 600))), Some("a"));
     p.fx.registry
         .queue_run(&host("a"), &lease(1), job("r1"))
@@ -187,7 +187,6 @@ fn a_host_running_the_first_lease_takes_a_second() {
 #[test]
 fn a_restored_sharing_lease_keeps_its_resources() {
     let mut p = pool(&[]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = || Some(Resources::new(2000, 1, 0, None).unwrap());
     let seat = |n: u64| p.provider.seat_booked(&booking("a", n, two()), None);
     assert_eq!((seat(1), seat(2)), (Ok(()), Ok(())));
@@ -210,7 +209,6 @@ fn a_restored_sharing_lease_keeps_its_resources() {
 #[test]
 fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
     let mut p = pool(&[]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let one = Some(Resources::new(1000, 1 << 20, 0, None).unwrap());
     let seated = p.provider.seat_booked(&booking("a", 1, one), None);
     assert_eq!(seated, Ok(()));
@@ -257,7 +255,6 @@ fn a_share_is_kept_off_a_host_that_holds_runs_of_no_booked_lease() {
 #[test]
 fn a_run_is_held_to_the_share_its_lease_booked() {
     let mut p = pool(&["a"]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let share = Resources::new(2000, 1 << 30, 0, None).unwrap();
     for n in 1..=2 {
         let ack = p.provider.start(sharing_spec_of(n, 600, share.clone()));
@@ -294,7 +291,6 @@ fn assert_runs_held_to_share(p: &Pool) {
 #[test]
 fn a_restored_lease_runs_within_its_share() {
     let p = pool(&[]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let share = || Some(Resources::new(2000, 1 << 30, 0, None).unwrap());
     for n in 1..=2 {
         let seated = p.provider.seat_booked(&booking("a", n, share()), None);
@@ -313,7 +309,6 @@ fn a_restored_lease_runs_within_its_share() {
 #[test]
 fn an_unlisted_run_of_an_ended_lease_keeps_a_share_out_until_it_is_retired() {
     let mut p = pool(&[]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let epoch = p.fx.join("a", "t");
     for n in 1..=2 {
         assert_eq!(on(&p.provider.start(sharing_spec(n, 600))), Some("a"));
@@ -343,60 +338,71 @@ fn an_unlisted_run_of_an_ended_lease_keeps_a_share_out_until_it_is_retired() {
 }
 
 /// The world of the reservation tests with `book` leases beside its whole-node requests:
-/// hosts `a` and `b`, a placer that books each lease on the host named for it.
-fn tail_world(homes: Vec<(u64, &'static str)>) -> World {
+/// hosts `a` and `b`.
+fn tail_world() -> World {
     let mut w = World::new(&["a", "b"], plain);
-    w.fx.registry.set_placer(Arc::new(Named(homes)));
     w.provider = w.provider.clone().with_classes(vec![whole(), book()]);
     w
 }
 
-/// Starts the `book` lease `sequence` of `wall_s` seconds.
-fn lease_of(w: &mut World, sequence: u64, wall_s: u64) {
-    let ack = w.provider.start(sharing_spec(sequence, wall_s));
+/// Starts the `book` lease `sequence` of `cores` cores and `wall_s` seconds and returns the
+/// host the placer booked it on.
+fn lease_of(w: &mut World, sequence: u64, wall_s: u64, cores: u64) -> String {
+    let resources = Resources::new(cores * 1000, 1 << 20, 0, None).unwrap();
+    let ack = w
+        .provider
+        .start(sharing_spec_of(sequence, wall_s, resources));
     w.check();
-    assert!(on(&ack).is_some(), "{ack:?}");
+    on(&ack).unwrap_or_else(|| panic!("{ack:?}")).to_owned()
 }
 
-/// Catches: only the lease started last counted toward the host's tail. `a` carries a
-/// lease that may run 900 s and one started after it that may run 100 s; `b` one of 600 s.
-/// `a` ends last (900 s), so the whole-node request is set aside `b`. Counting the later
-/// lease alone puts `a` at 100 s and sets it aside.
+/// Starts three `book` leases in the order given by their `(wall_s, cores)`, which the
+/// placer (it books by load) puts two on one host and one on the other: the first and
+/// third on the host `shared`, the second on the host `alone`. Returns `(shared, alone)`.
+/// The second asks for three cores, so it cannot fit beside the first.
+fn three_leases(w: &mut World, walls: [u64; 3]) -> (String, String) {
+    let shared = lease_of(w, 1, walls[0], 2);
+    let alone = lease_of(w, 2, walls[1], 3);
+    assert_ne!(shared, alone);
+    assert_eq!(lease_of(w, 3, walls[2], 2), shared);
+    (shared, alone)
+}
+
+/// Catches: only the lease started last counted toward the host's tail. One host carries a
+/// lease that may run 900 s and one started after it that may run 100 s; the other one of
+/// 600 s. The first ends last (900 s), so the whole-node request is set aside the other.
+/// Counting the later lease alone puts the first at 100 s and sets it aside.
 #[test]
 fn every_lease_of_a_host_counts_toward_its_tail() {
-    let mut w = tail_world(vec![(1, "a"), (2, "a"), (3, "b")]);
-    lease_of(&mut w, 1, 900);
-    lease_of(&mut w, 2, 100);
-    lease_of(&mut w, 3, 600);
+    let mut w = tail_world();
+    let (_, alone) = three_leases(&mut w, [900, 600, 100]);
     w.ask(4, "q");
-    assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(w.reserved_host("q"), Some(alone));
 }
 
 /// Catches: the end of the lease started first lost when the lease started after it is
-/// stopped: `a` is left with its 900 s lease, so it ends after `b` (600 s) and the request
-/// is set aside `b`. With the end lost `a` reads as empty and is set aside.
+/// stopped: the host is left with its 900 s lease, so it ends after the other (600 s) and
+/// the request is set aside the other. With the end lost the host reads as empty and is
+/// set aside.
 #[test]
 fn stopping_the_later_lease_leaves_the_earlier_end_counted() {
-    let mut w = tail_world(vec![(1, "a"), (2, "a"), (3, "b")]);
-    lease_of(&mut w, 1, 900);
-    lease_of(&mut w, 2, 100);
-    lease_of(&mut w, 3, 600);
-    w.stop(2);
+    let mut w = tail_world();
+    let (_, alone) = three_leases(&mut w, [900, 600, 100]);
+    w.stop(3);
     w.ask(4, "q");
-    assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(w.reserved_host("q"), Some(alone));
 }
 
-/// Guard: stopping the lease started first leaves the later lease's end counted: `a` is
-/// left with its 900 s lease and ends after `b` (600 s), so the request is set aside `b`.
+/// Guard: stopping the lease started first leaves the later lease's end counted: the host
+/// is left with its 900 s lease and ends after the other (600 s), so the request is set
+/// aside the other.
 #[test]
 fn stopping_the_earlier_lease_leaves_the_later_end_counted() {
-    let mut w = tail_world(vec![(1, "a"), (2, "a"), (3, "b")]);
-    lease_of(&mut w, 1, 100);
-    lease_of(&mut w, 2, 900);
-    lease_of(&mut w, 3, 600);
+    let mut w = tail_world();
+    let (_, alone) = three_leases(&mut w, [100, 600, 900]);
     w.stop(1);
     w.ask(4, "q");
-    assert_eq!(w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(w.reserved_host("q"), Some(alone));
 }
 
 /// Catches: the stop of a lease other than the one started last counting nothing. Two
@@ -405,7 +411,6 @@ fn stopping_the_earlier_lease_leaves_the_later_end_counted() {
 #[test]
 fn stopping_an_earlier_lease_on_a_shared_host_is_counted() {
     let mut p = pool(&["a"]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     p.provider.start(sharing_spec(1, 600));
     p.provider.start(sharing_spec(2, 600));
     p.provider.stop(&lease(1));
@@ -419,7 +424,6 @@ fn stopping_an_earlier_lease_on_a_shared_host_is_counted() {
 #[test]
 fn stopping_a_restored_lease_counts_nothing() {
     let mut p = pool(&[]);
-    p.fx.registry.set_placer(Arc::new(Last::default()));
     let two = Some(Resources::new(2000, 1, 0, None).unwrap());
     p.provider.seat_booked(&booking("a", 1, two), None).unwrap();
     p.fx.join("a", "t");

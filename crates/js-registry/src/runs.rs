@@ -955,7 +955,7 @@ mod tests {
     /// from a start that is not the lease's.
     #[test]
     fn a_lease_is_fed_its_start_plus_the_p90() {
-        use crate::lives::{ProfileLives, est_ends};
+        use crate::lives::{ProfileLives, estimate_end};
         struct Known;
         impl ProfileLives for Known {
             fn wall_minutes_p90(&self, _: &ProfileKey) -> Option<u32> {
@@ -978,8 +978,8 @@ mod tests {
         .unwrap();
         let lives: &dyn ProfileLives = &Known;
         assert_eq!(
-            est_ends(Some(lives), &runs, &[(lease, 1_000)]),
-            [Some(1_000 + 120_000)]
+            estimate_end(1_000, &runs.profiles_of(&lease), lives),
+            Some(1_000 + 120_000)
         );
     }
 }
