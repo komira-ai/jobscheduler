@@ -1,5 +1,5 @@
 //! The queued jobs that need the whole host, queued, marked and committed by the engine
-//! under `--placement js-sched` (design sections 5.4, 6.2 and 6.7).
+//! (design sections 5.4, 6.2 and 6.7).
 //!
 //! A queued whole-host job is an ordinary row of the job table, and the job table is the one
 //! record of it: the engine keeps a scheduler operation for each, which is a cache of the
@@ -9,7 +9,7 @@
 //! tells the engine how the commit went ([`Engine::whole_job_placed`],
 //! [`Engine::whole_job_failed`]). The pass:
 //!
-//! 1. Takes the pool's whole-node settings when the registry's own round has not set them.
+//! 1. Takes the pool's whole-node settings when the whole-node round has not set them.
 //!    With none, only step 2 runs.
 //! 2. Unmarks every stored mark whose job is not a queued whole-host job (the table holds
 //!    none in normal operation: a cancel, a placement and a failed prepare delete the mark in
@@ -107,7 +107,7 @@ impl Engine {
     /// One pass of the whole-host jobs at `now` (see the module documentation): the writes it
     /// makes, in order.
     pub fn whole_jobs(&mut self, input: &WholeJobs<'_>, now: FarmTime) -> Vec<WholeJobStep> {
-        // The registry's own round, when it has run, set the settings.
+        // The whole-node round, when it has run, set the settings.
         let rounded = self.round.is_some();
         if let Some(settings) = input.settings.filter(|_| !rounded) {
             self.take_settings(settings);

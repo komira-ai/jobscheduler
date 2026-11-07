@@ -96,20 +96,26 @@
 //!   lease is granted at once and none of this applies; neither does it to a static
 //!   pool, which has no agent to wait for and holds a `Whole` lease at once. The state
 //!   is in memory only.
+//! - **Placement.** Every registry is made with its placer ([`Registry::new`], the engine
+//!   of `js-sched-placer` in the lease server). A start is shown every host that could take
+//!   it and books the one the placer picks ([`Placer::pick`]); the booking, the room and
+//!   every refusal stay the registry's. A class that books part of a host is leasable: its
+//!   leases share a host that has room.
 //! - **Reservation and drain.** A whole-node request that carries an id and finds no
-//!   host to commit waits ([`Registry::queue_position`]) and, on each tick
-//!   ([`Registry::advance`], run by every observe), is given a host in queue order
-//!   (design `whole-node.md` sections 3, 4 and 6): a quiet host at once, else after
-//!   `drain_after` the host that costs least to drain, which then takes no other
-//!   request's start and no new lease. The request's own next start commits the lease on
-//!   it ([`Registry::reservations`]). Nothing is stopped for a reservation; the
-//!   deadline is informational: a reservation that reaches it with the host still busy
-//!   is kept, gives nothing up and counts nothing. Cancelling the request or letting it
-//!   expire drops the reservation at once. The marks, the wait list's order, the
-//!   failed-prepare counts and the exclusions of requests that carry an id
-//!   are handed out as a ledger ([`Registry::reservation_ledger`]) for the caller to keep
-//!   and are put back at a start ([`Registry::restore_reservations`]); see the `ledger`
-//!   module of the registry for what is kept and what is dropped at a restore.
+//!   host to commit waits ([`Registry::queue_position`]) on the placer's wait list, and,
+//!   on each tick ([`Registry::advance`], run by every observe), the placer's pass gives it
+//!   a host in queue order ([`Placer::whole_round`], design `whole-node.md` sections 3, 4
+//!   and 6): a quiet host at once, else after `drain_after` the host that costs least to
+//!   drain, which then takes no other request's start and no new lease. The request's own
+//!   next start commits the lease on it ([`Registry::reservations`]). Nothing is stopped
+//!   for a reservation; the deadline is informational: a reservation that reaches it with
+//!   the host still busy is kept, gives nothing up and counts nothing. Cancelling the
+//!   request or letting it expire drops the reservation at once. The marks, the wait
+//!   list's order, the failed-prepare counts and the exclusions of requests that carry an
+//!   id are the placer's; they are handed out as a ledger
+//!   ([`Registry::reservation_ledger`]) for the caller to keep and are put back at a start
+//!   ([`Registry::restore_reservations`]); see the `ledger` module of the registry for what
+//!   is kept and what is dropped at a restore.
 //! - **Scale-down marks.** A scaler that gives hosts back marks them in two steps,
 //!   [`Registry::drain`] and then [`Registry::release_host`] ([`HostMark::Draining`],
 //!   [`HostMark::Releasing`]). A marked host takes no start of any kind: no lease, no
@@ -158,8 +164,8 @@ pub use js_whole::{
 pub use lives::ProfileLives;
 pub use load::{BadLease, node_load};
 pub use placer::{
-    LeaseTimes, MarkedTails, Placer, PrepareFailure, Presented, ProbeHost, SeatedLease, Standing,
-    Waiter, WaitingRequest, WaitingWhole, WholeHost, WholeKept, WholeRound,
+    LeaseTimes, MAX_WAITING_REQUESTS, MarkedTails, Placer, PrepareFailure, Presented, ProbeHost,
+    SeatedLease, Standing, Waiter, WaitingRequest, WaitingWhole, WholeHost, WholeKept, WholeRound,
 };
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
@@ -170,8 +176,5 @@ pub use registry::{
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
 pub use tail_counters::{ERROR_EDGES_MS, TailCounters};
-#[cfg(feature = "test-support")]
-pub use whole::calls::MachineCalls;
-pub use whole::queue::MAX_WAITING_REQUESTS;
 pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord, prepare_exclusion};
 pub use whole::reserve::Reservation;

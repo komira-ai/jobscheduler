@@ -1,5 +1,5 @@
-//! The prepare of a whole-node lease the engine commits from its queue under
-//! `--placement js-sched` ([`Engine::commit_whole`]), and what the engine keeps of a
+//! The prepare of a whole-node lease the engine commits from its queue
+//! ([`Engine::commit_whole`]), and what the engine keeps of a
 //! request whose prepare failed: the rules of `js-registry`'s `whole/exclusive.rs`,
 //! `whole/requests.rs` and `whole/ending.rs`, held here instead of in the registry (design
 //! 5.4, `whole-node.md` section 5). A whole-node lease the registry commits outside the

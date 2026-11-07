@@ -1,6 +1,5 @@
-//! The whole-node reservation ledger across a restart under `--placement js-sched`, over
-//! the rig of the mark tests set up as the server sets it up for that placement: js-sched's
-//! engine keeps the queue, and the ledger the tick hands the lease table is written from it.
+//! The whole-node reservation ledger across a restart, over the rig of the mark tests set
+//! up as the server sets it up: js-sched's engine keeps the queue, and the ledger the tick hands the lease table is written from it.
 //! A server is stopped and another started over the same lease file with `--boot resume`,
 //! on the same manual clock; the host beats every five seconds and the consumer polls as
 //! it does in the program. The lease file is also read and written with the previous
@@ -110,7 +109,7 @@ fn row(rig: &Rig, name: &str) -> ReservationRecord {
 }
 
 /// Asserts that the ledger the engine writes is read back by a second server over the same
-/// file under js-sched, and that the engine then keeps the restored mark. A server
+/// file, and that the engine then keeps the restored mark. A server
 /// comes up over a file in which `r1` has an older build's give-up count of one and its
 /// place; the count is ignored and the row is written back with zero. The host is busy,
 /// and `r1`, presented again, marks it with the thirty-second deadline. The tick writes the
@@ -123,7 +122,7 @@ fn row(rig: &Rig, name: &str) -> ReservationRecord {
 /// new one, a count carried over from an older row, and a mark dropped at its deadline.
 #[tokio::test]
 async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
-    let mut rig = Rig::over_file_in("sched_rebinds", WITH_OLD_GIVE_UP_COUNT, true).await;
+    let mut rig = Rig::over_file("sched_rebinds", WITH_OLD_GIVE_UP_COUNT).await;
     rig.lease().await;
     rig.ask("r1");
     let before = rig.registry.reservations();
@@ -162,15 +161,14 @@ async fn reservation_ledger_rebinds_after_restart_on_the_sched_path() {
     assert_eq!(back.registry.queue_position(&id("r1")), Some(0));
 }
 
-/// Asserts the host listing under js-sched on a host marked for twenty seconds: `mark`,
-/// `reserved_for` and `drain_deadline_ms` are the three values the golden listing of the
-/// registry's placement shows (the same pool, lease and request), and the deadline is the
-/// engine's. A host nobody reserved shows none of the three keys. It catches a listing that
+/// Asserts the host listing on a host marked for twenty seconds: `mark`, `reserved_for` and
+/// `drain_deadline_ms` are the three values the golden listing shows (the same pool, lease
+/// and request), and the deadline is the engine's. A host nobody reserved shows none of the three keys. It catches a listing that
 /// reads the registry's marks where the engine's moved, and a deadline that is not the
 /// mark's.
 #[tokio::test]
 async fn hosts_api_and_d55_goldens_unchanged() {
-    let mut rig = Rig::sched("sched_listing").await;
+    let mut rig = Rig::new("sched_listing").await;
     let plain = rig.hosts().await;
     for key in ["mark", "reserved_for", "drain_deadline_ms"] {
         assert!(!plain.contains(key), "{plain}");
@@ -187,17 +185,17 @@ async fn hosts_api_and_d55_goldens_unchanged() {
     assert_eq!(body["hosts"][0]["drain_deadline_ms"], deadline);
 }
 
-/// Asserts the lease file in both directions across releases under js-sched (rule B8).
+/// Asserts the lease file in both directions across releases (rule B8).
 /// This build's file, with a mark and a place the engine made, is read by the previous
 /// release's reader with no field it does not know, in the file or in the row, and every
 /// field it knows holds the mark; the file that release writes back resumes here with the
 /// same mark and place. A file the previous release wrote itself, with a mark, a place, a
-/// give-up count of one and an exclusion, resumes here under js-sched with the mark, the
+/// give-up count of one and an exclusion, resumes here with the mark, the
 /// place and the exclusion, the count read and ignored. It catches a field added, renamed
 /// or required by the ledger written from the engine, and an older row that no longer parses.
 #[tokio::test]
 async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
-    let mut rig = Rig::sched("sched_cross_out").await;
+    let mut rig = Rig::new("sched_cross_out").await;
     rig.lease().await;
     rig.ask("r1");
     rig.shared.tick().await;
@@ -225,7 +223,7 @@ async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
     drop(rig);
 
     let rewritten = previous::write(&document);
-    let back = Rig::over_file_in("sched_cross_back", &rewritten, true).await;
+    let back = Rig::over_file("sched_cross_back", &rewritten).await;
     let kept = back.registry.reservations();
     assert_eq!(kept.len(), 1);
     assert_eq!(
@@ -247,7 +245,7 @@ async fn the_previous_release_reads_the_new_ledger_and_the_reverse() {
         previous::row("r10", None, (1, T0), 0, None),
     ];
     let old = previous::write(&previous::file(rows));
-    let resumed = Rig::over_file_in("sched_cross_in", &old, true).await;
+    let resumed = Rig::over_file("sched_cross_in", &old).await;
     let marks = resumed.registry.reservations();
     assert_eq!(marks.len(), 1);
     assert_eq!(

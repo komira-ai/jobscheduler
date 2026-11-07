@@ -1,9 +1,7 @@
 //! The guards on the start path and the caps of the reservation state machine, one test
 //! each: what a repeated start leaves alone, which starts never wait, which reservation
 //! the ceiling drops, and the pool's `keep_for_ordinary` read through the registry. The
-//! registry is driven on a manual clock; no test asserts how long anything takes. Each test
-//! runs under both placements, `--placement registry` (`registry::NAME`) and `--placement
-//! js-sched` (`js_sched::NAME`), with the same assertions.
+//! registry is driven on a manual clock; no test asserts how long anything takes.
 
 mod support;
 
@@ -19,8 +17,9 @@ use support::*;
 /// where the first start put it. Lease 1 (300 s) is on `a` and lease 2 (400 s) on `b`;
 /// lease 1 is started again 200 s in. A bound moved by the repeat would read 500 s and make
 /// `b` the cheaper host to drain, so the request reserves `a` only if the bound stayed.
-fn a_repeated_start_does_not_move_the_end_bound_of_its_host(p: Placement) {
-    let mut w = World::new_in(p, &["a", "b"], plain);
+#[test]
+fn a_repeated_start_does_not_move_the_end_bound_of_its_host() {
+    let mut w = World::new(&["a", "b"], plain);
     w.share(1, 300);
     w.share(2, 400);
     w.step(200_000);
@@ -32,8 +31,9 @@ fn a_repeated_start_does_not_move_the_end_bound_of_its_host(p: Placement) {
 /// Asserts that a `BookAll` start carrying a request id is turned away like one without:
 /// the id is not put on the wait list and no host is set aside for it, however long it
 /// polls.
-fn a_share_start_with_a_request_id_never_waits_and_is_never_marked(p: Placement) {
-    let mut w = World::new_in(p, &["a"], plain);
+#[test]
+fn a_share_start_with_a_request_id_never_waits_and_is_never_marked() {
+    let mut w = World::new(&["a"], plain);
     w.share(1, HOUR_S);
     let waiting = StartSpec::new(
         lease(2),
@@ -55,8 +55,9 @@ fn a_share_start_with_a_request_id_never_waits_and_is_never_marked(p: Placement)
 /// Asserts that a repeated start of a whole-node lease that is on its host and ready does
 /// not put its request id on the wait list again: the request stays off the list and
 /// holds no mark.
-fn a_repeated_start_of_a_lease_on_its_host_is_not_queued(p: Placement) {
-    let mut w = World::new_in(p, &["a"], plain);
+#[test]
+fn a_repeated_start_of_a_lease_on_its_host_is_not_queued() {
+    let mut w = World::new(&["a"], plain);
     assert_eq!(w.poll(1, "r1", 600), StartAck::Unknown);
     let epoch = w.epochs["a"];
     let mut ready = w.fx.heartbeat("a", epoch);
@@ -71,8 +72,9 @@ fn a_repeated_start_of_a_lease_on_its_host_is_not_queued(p: Placement) {
 /// Asserts that a start the class gate refuses is not queued: a whole-node start of a
 /// class the provider does not list is refused `UnsupportedClass`, with the host busy,
 /// and its request id is neither on the list nor marked.
-fn a_start_refused_by_the_class_gate_is_not_queued(p: Placement) {
-    let mut w = World::new_in(p, &["a"], plain);
+#[test]
+fn a_start_refused_by_the_class_gate_is_not_queued() {
+    let mut w = World::new(&["a"], plain);
     w.share(1, HOUR_S);
     let mut unlisted = w.fx.registry.provider().with_classes(vec![share_class()]);
     let spec = World::whole_spec(2, Some("r1"), 600);
@@ -87,8 +89,9 @@ fn a_start_refused_by_the_class_gate_is_not_queued(p: Placement) {
 /// the held mark. `r1` is assigned host `c` at the first instant; `r2` commits on `d`
 /// later, so its held mark is the newer. Tainting `a` and `d` leaves one capable host, a
 /// ceiling of one under two whole marks: the reservation goes, the held lease stays.
-fn a_falling_ceiling_drops_a_reservation_older_than_the_held_lease(p: Placement) {
-    let mut w = World::new_in(p, &["a"], plain);
+#[test]
+fn a_falling_ceiling_drops_a_reservation_older_than_the_held_lease() {
+    let mut w = World::new(&["a"], plain);
     w.share(1, HOUR_S);
     w.poll(2, "r1", 600);
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
@@ -109,7 +112,7 @@ fn a_falling_ceiling_drops_a_reservation_older_than_the_held_lease(p: Placement)
 
 /// A mixed pool of up to four hosts that may hold three whole and keeps one for ordinary
 /// work.
-fn mixed_keeping_one(p: Placement, hosts: &[&str]) -> World {
+fn mixed_keeping_one(hosts: &[&str]) -> World {
     let name = ProviderId::new("builders").unwrap();
     let book = ResourceClass::new(
         ClassId::new("mixed").unwrap(),
@@ -122,17 +125,18 @@ fn mixed_keeping_one(p: Placement, hosts: &[&str]) -> World {
         keep_for_ordinary: 1,
         ..WholeNodeConfig::dedicated(4)
     };
-    let config = PoolConfig::new(name, book, world_shape(), 4)
+    let config = PoolConfig::new(name, book, pool_shape(), 4)
         .with_whole_node(settings)
         .unwrap();
-    World::of_in(p, config, hosts)
+    World::of(config, hosts)
 }
 
 /// Asserts that the pool's `keep_for_ordinary` limits the reservations the registry makes:
 /// with three busy hosts and one kept, the ceiling is two, so the third request gets no
 /// mark.
-fn keep_for_ordinary_limits_how_many_hosts_are_reserved(p: Placement) {
-    let mut w = mixed_keeping_one(p, &["a", "b", "c"]);
+#[test]
+fn keep_for_ordinary_limits_how_many_hosts_are_reserved() {
+    let mut w = mixed_keeping_one(&["a", "b", "c"]);
     for (sequence, wall) in [(1, 300), (2, 400), (3, 500)] {
         w.share(sequence, wall);
     }
@@ -147,8 +151,9 @@ fn keep_for_ordinary_limits_how_many_hosts_are_reserved(p: Placement) {
 /// Asserts that the pool's `keep_for_ordinary` is read when the ceiling falls: two
 /// reservations stand under a ceiling of two; tainting the third host leaves two capable
 /// hosts and one kept, a ceiling of one, so the newer reservation is dropped.
-fn keep_for_ordinary_lowers_the_ceiling_that_drops_reservations(p: Placement) {
-    let mut w = mixed_keeping_one(p, &["a", "b", "c"]);
+#[test]
+fn keep_for_ordinary_lowers_the_ceiling_that_drops_reservations() {
+    let mut w = mixed_keeping_one(&["a", "b", "c"]);
     for (sequence, wall) in [(1, 300), (2, 400), (3, 500)] {
         w.share(sequence, wall);
     }
@@ -164,15 +169,15 @@ fn keep_for_ordinary_lowers_the_ceiling_that_drops_reservations(p: Placement) {
 }
 
 /// A pool of one-GPU hosts, serving `gpu-host` next to the whole-node class.
-fn gpu_world(p: Placement) -> World {
+fn gpu_world() -> World {
     let floor = Resources::new(4000, 8 << 30, 1, Some("a100".into())).unwrap();
-    let shape = Shape::new(floor, map(&[("os", "macos"), ("arch", WORLD_ARCH)]));
+    let shape = Shape::new(floor, map(&[("os", "macos"), ("arch", ARCH)]));
     let name = ProviderId::new("builders").unwrap();
     let config = PoolConfig::new(name, whole(), shape, 4);
     let config = config
         .with_whole_node(WholeNodeConfig::dedicated(4))
         .unwrap();
-    let mut w = World::of_in(p, config, &[]);
+    let mut w = World::of(config, &[]);
     w.provider =
         w.fx.registry
             .provider()
@@ -181,7 +186,7 @@ fn gpu_world(p: Placement) -> World {
 }
 
 fn join_gpu(w: &mut World, name: &str) {
-    let mut message = world_hello(name);
+    let mut message = hello(name);
     message.shape.gpus = 1;
     message.shape.gpu_class = Some("a100".into());
     let epoch = w.fx.hello(&message, &cred("t")).unwrap().epoch;
@@ -206,8 +211,9 @@ fn gpu_host_start(w: &mut World, sequence: u64) -> StartAck {
 /// and is assigned to `r1`. A `gpu-host` start finds only the marked `c` free and is turned
 /// away; once an unmarked `d` joins, the same kind of start lands on `d`, and `c` stays
 /// marked for `r1`.
-fn a_gpu_host_start_is_refused_only_on_a_marked_host(p: Placement) {
-    let mut w = gpu_world(p);
+#[test]
+fn a_gpu_host_start_is_refused_only_on_a_marked_host() {
+    let mut w = gpu_world();
     join_gpu(&mut w, "a");
     assert_eq!(
         gpu_host_start(&mut w, 1),
@@ -226,14 +232,3 @@ fn a_gpu_host_start_is_refused_only_on_a_marked_host(p: Placement) {
     );
     assert_eq!(w.reserved_host("r1"), Some("c".to_string()));
 }
-
-crate::both!(
-    a_repeated_start_does_not_move_the_end_bound_of_its_host,
-    a_share_start_with_a_request_id_never_waits_and_is_never_marked,
-    a_repeated_start_of_a_lease_on_its_host_is_not_queued,
-    a_start_refused_by_the_class_gate_is_not_queued,
-    a_falling_ceiling_drops_a_reservation_older_than_the_held_lease,
-    keep_for_ordinary_limits_how_many_hosts_are_reserved,
-    keep_for_ordinary_lowers_the_ceiling_that_drops_reservations,
-    a_gpu_host_start_is_refused_only_on_a_marked_host,
-);

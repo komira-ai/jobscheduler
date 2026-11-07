@@ -190,8 +190,8 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
         // As the housekeeping, a host its placer holds work on is kept however long silent.
-        let placer = self.shared.placer.get();
-        let held = |host: &HostId| placer.is_some_and(|placer| placer.holds_work_on(host));
+        let placer = self.placer();
+        let held = |host: &HostId| placer.holds_work_on(host);
         let kept = state
             .records
             .get(&host)
@@ -208,6 +208,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use js_agent_wire::{DEFAULT_GRACE_MS, Hello, Phase, ProtocolRange, WireShape};
@@ -215,6 +216,7 @@ mod tests {
     use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 
     use super::*;
+    use crate::placer::Plain;
     use crate::{MIN_LOST_RETENTION_MS, SequentialSessions};
 
     fn macos() -> BTreeMap<String, String> {
@@ -294,7 +296,8 @@ mod tests {
     #[test]
     fn a_check_with_housekeeping_due_leaves_the_raw_state_as_it_was() {
         let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-        let registry = Registry::with_sessions(config(), clock.clone(), SequentialSessions::new());
+        let sessions = SequentialSessions::new();
+        let registry = Registry::with_sessions(config(), clock.clone(), sessions, Arc::new(Plain));
         let credential = Credential::of_token("t");
         let welcome = registry.hello(&hello(), &credential).unwrap();
         let beat = heartbeat(welcome.session);

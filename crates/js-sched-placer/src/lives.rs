@@ -8,7 +8,7 @@
 //! under the work key of the operation that stands for each lease. The scheduler reads
 //! them through [`CurveSource::wall_minutes_p90`] when it costs a host to drain (the
 //! lease's start plus that many minutes, cut to its bound), so the engine's drain order
-//! reads the same tails as the registry's own pass. They give no curve: every lease is
+//! reads the same tails the registry reports. They give no curve: every lease is
 //! still charged what it books.
 
 use std::collections::BTreeMap;

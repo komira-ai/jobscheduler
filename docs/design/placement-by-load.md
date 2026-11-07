@@ -3,6 +3,8 @@
 Companion to [placement.md](placement.md) (6.3, where memory does not gate admission) and [sizing.md](sizing.md). This document replaces the
 CPU and memory admission rule for actions; devices, whole-node reservation and the lease kinds are untouched.
 
+*History: the `--placement` modes this document names (`sched`, `lease-table`) are not in the lease server. `--placement js-sched` is a deprecated flag that does nothing, since `js-sched` is the only placement, and `--placement registry` is refused at start. Load placement is the only mode.*
+
 ## Problem
 Admission counts booked CPU: every action books one core whatever threads it runs, so a node takes about as many actions as it has cores
 (`Worker::has_room`, `free().fits(resources.without_memory())`), and memory is never summed. Measured mean parallelism per action is 1.4 to 2.1

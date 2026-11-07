@@ -203,8 +203,8 @@ impl PoolConfig {
     }
 
     /// The same pool, whose book takes the whole memory of `[shape]` though the pool keeps
-    /// its memory percent: for a placer that holds every host to the percent itself
-    /// (`--placement js-sched` of the lease server). The percent still decides what fits
+    /// its memory percent: for a placer that holds every host to the percent itself (the
+    /// engine the lease server places with). The percent still decides what fits
     /// the pool, so a request above the share is refused `NoFit`, and the host listing
     /// ([`crate::Registry::hosts`]) still shows each host's shape cut to it beside the
     /// memory headroom ([`PoolConfig::memory_headroom`]); only the room the book checks,
@@ -304,11 +304,10 @@ impl PoolConfig {
         Ok(self)
     }
 
-    /// The same pool, whose hosts also take leases of `class`, a class that books part of
-    /// a host (`Book`), beside its own class: leases of `class` share a host that has room,
-    /// placed by a placer ([`crate::Registry::set_placer`]; without one every such lease
-    /// is refused as an unsupported class). Its provider ([`crate::Registry::provider`])
-    /// serves both classes.
+    /// The same pool, whose hosts also take leases of `class`, a class that books part of a
+    /// host (`Book`), beside its own class: leases of `class` share a host that has room,
+    /// placed by the registry's placer ([`crate::Placer::pick`]). Its provider
+    /// ([`crate::Registry::provider`]) serves both classes.
     ///
     /// # Errors
     /// [`ConfigError::ShareClass`] when `class` books whole hosts or has the pool's own id.

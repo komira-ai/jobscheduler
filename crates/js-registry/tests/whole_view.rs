@@ -1,8 +1,6 @@
 //! What an operator and a lease holder can read of the marks: which hosts are set aside
 //! or held, for which request and until when, and the counts of both and of the wait
-//! list. The registry is driven directly on a manual clock. Each test runs under both
-//! placements, `--placement registry` (`registry::NAME`) and `--placement js-sched`
-//! (`js_sched::NAME`), with the same assertions: under js-sched the marks are the engine's.
+//! list. The registry is driven directly on a manual clock; the marks are the placer's.
 
 mod support;
 
@@ -28,21 +26,20 @@ fn id(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
 }
 
-/// Two hosts, `a` and `b`, joined to a dedicated pool that reserves at once, its queue
-/// decided under `p`.
-fn world(p: Placement) -> (Fixture, RegisteredProvider) {
+/// Two hosts, `a` and `b`, joined to a dedicated pool that reserves at once.
+fn world() -> (Fixture, RegisteredProvider) {
     let name = ProviderId::new("builders").unwrap();
-    let config = PoolConfig::new(name, whole(), world_shape(), 2);
+    let config = PoolConfig::new(name, whole(), pool_shape(), 2);
     let config = config
         .with_whole_node(WholeNodeConfig::dedicated(2))
         .unwrap();
-    let fx = fixture_in(config, p);
+    let fx = fixture_of(config);
     let provider = fx
         .registry
         .provider()
         .with_classes(vec![share_class(), whole()]);
-    fx.join_world("a");
-    fx.join_world("b");
+    fx.join("a", "t");
+    fx.join("b", "t");
     (fx, provider)
 }
 
@@ -78,8 +75,9 @@ fn marks(registry: &Registry) -> Vec<Option<HostMark>> {
 /// other host reads none of the three; `is_reserved` and the counts agree. Before the
 /// request every host reads none. It catches a view that shows no mark, a deadline that
 /// is not the reservation's, and a request named on a host that is not its.
-fn a_draining_host_shows_its_request_and_deadline(p: Placement) {
-    let (fx, mut provider) = world(p);
+#[test]
+fn a_draining_host_shows_its_request_and_deadline() {
+    let (fx, mut provider) = world();
     assert_eq!(marks(&fx.registry), vec![None, None]);
     assert_eq!(fx.registry.whole_counts(), WholeCounts::default());
 
@@ -123,8 +121,9 @@ fn a_draining_host_shows_its_request_and_deadline(p: Placement) {
 /// `held` with neither request nor deadline, and the counts move from reserved to held
 /// and from queued to none. It catches an assigned mark that shows a meaningless
 /// deadline, a held host that still names the request, and a held host with no mark.
-fn an_assigned_host_has_no_deadline_and_a_committed_one_reads_held(p: Placement) {
-    let (fx, mut provider) = world(p);
+#[test]
+fn an_assigned_host_has_no_deadline_and_a_committed_one_reads_held() {
+    let (fx, mut provider) = world();
     provider.start(share(1));
     provider.start(share(2));
     assert_eq!(provider.start(ask(3, "r1")), StartAck::Unknown);
@@ -162,17 +161,12 @@ fn an_assigned_host_has_no_deadline_and_a_committed_one_reads_held(p: Placement)
 /// Asserts that a lease reads the host it is booked on, and a lease that is booked
 /// nowhere reads none. It catches `host_of` answering a host for a lease the registry
 /// does not hold.
-fn a_lease_reads_its_host(p: Placement) {
-    let (fx, mut provider) = world(p);
+#[test]
+fn a_lease_reads_its_host() {
+    let (fx, mut provider) = world();
     provider.start(share(1));
     let booked = provider.booked();
     let (on, leased) = booked.iter().next().unwrap();
     assert_eq!(fx.registry.host_of(leased), Some(on.clone()));
     assert_eq!(fx.registry.host_of(&lease(9)), None);
 }
-
-crate::both!(
-    a_draining_host_shows_its_request_and_deadline,
-    an_assigned_host_has_no_deadline_and_a_committed_one_reads_held,
-    a_lease_reads_its_host,
-);

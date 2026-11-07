@@ -1,7 +1,7 @@
 //! The one `js-sched` scheduler a [`crate::place::SchedPlacer`] keeps for the life of the
 //! server, and the picture of the registry's books it keeps beside it.
 //!
-//! The engine learns the registry's books from the registry's own events, not from a
+//! The engine learns the registry's books from the registry's events, not from a
 //! snapshot per start: a host that says hello is a worker up ([`Engine::host_up`]), with
 //! the capacity and caps its pool's shape gives ([`map::host`]); an accepted heartbeat is
 //! a heartbeat, with the reading the registry vetted and converted ([`Engine::heard`]); a

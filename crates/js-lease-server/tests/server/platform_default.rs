@@ -65,7 +65,11 @@ fn table(hosts: &[&str]) -> Registry {
 fn table_on(hosts: &[&str], clock: ManualClock) -> Registry {
     let shape = Shape::new(Resources::new(4000, 8 << 30, 0, None).unwrap(), facts());
     let config = PoolConfig::new(ProviderId::new("rack").unwrap(), rack(), shape, 4);
-    let registry = Registry::new(config, clock);
+    let registry = Registry::new(
+        config,
+        clock,
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     for host in hosts {
         let hello = Hello {
             protocol: ProtocolRange { min: 1, max: 1 },

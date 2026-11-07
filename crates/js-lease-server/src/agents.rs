@@ -274,9 +274,8 @@ fn placed_in(
             // The scheduler picks the host of a start, and books the share of each host's
             // memory the pool's percent says; the registry books the whole shape.
             let (pool, memory) = split(pool);
-            let registry = Registry::new(pool, clock.clone());
             let placer = placer(max_lease_wall, cpu_slack, memory, clock);
-            registry.set_placer(placer.clone());
+            let registry = Registry::new(pool, clock.clone(), placer.clone());
             let usage = usage.build(clock, limits, &registry)?;
             // Each lease booking that ends leaves its record in the usage store's history.
             usage

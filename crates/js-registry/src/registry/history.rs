@@ -131,7 +131,7 @@ impl Registry {
                 };
                 self.hosted_row(state, lease, host, ending)
             }
-            None => waiting_row(state, self.keeper(), lease, ended_at)?,
+            None => waiting_row(state, self.placer(), lease, ended_at)?,
         };
         Some((log, row))
     }
@@ -226,27 +226,16 @@ impl Registry {
 }
 
 /// The record of `lease` whose whole-node request waits for a host and is cancelled by the
-/// stop at `ended_at`, read from `keeper`'s wait list when a placer keeps it; `None` when no
-/// request of the lease waits. Its mark was dropped if it held one at any time while it
+/// stop at `ended_at`, read from the placer's wait list; `None` when no request of the
+/// lease waits. Its mark was dropped if it held one at any time while it
 /// waited; it gave no host up.
 fn waiting_row(
     state: &State,
-    keeper: Option<&dyn crate::Placer>,
+    placer: &dyn crate::Placer,
     lease: &LeaseId,
     ended_at: u64,
 ) -> Option<EndedRow> {
-    let waiter = match keeper {
-        Some(keeper) => keeper.whole_waiter_of(lease)?,
-        None => {
-            let (id, since) = state.waiting.presented_by(lease)?;
-            crate::Waiter {
-                id: id.clone(),
-                since,
-                give_ups: 0,
-                marked: state.marks.ever_marked(id),
-            }
-        }
-    };
+    let waiter = placer.whole_waiter_of(lease)?;
     let since = waiter.since;
     let drain = match waiter.marked {
         true => DrainOutcome::MarkDropped,
