@@ -294,7 +294,7 @@ fn whole_host_leases_are_written_as_the_previous_release_wrote_them_but_for_the_
 /// Asserts that this release reads the file the previous release wrote: every lease is a
 /// booking of the whole host (`shares` absent reads as `None`), a restart seats both and
 /// lists both, and the file it writes back is the file it read but for the term, which
-/// a restart moves on.
+/// a restart moves on, and each lease's `expires_at_ms`, which becomes its `ends_at_ms`.
 #[test]
 fn this_release_reads_the_previous_release_file() {
     let scratch = Scratch::new("cross_release_from_previous");
@@ -308,7 +308,11 @@ fn this_release_reads_the_previous_release_file() {
     let (table, refused) = restarted(&scratch, &[]);
     assert_eq!(listed(&table), vec![LeaseId::new(1, 1), LeaseId::new(1, 2)]);
     assert!(refused.is_empty(), "{refused:?}");
-    let next_term = WRITTEN_BY_PREVIOUS.replacen("term = 1\n", "term = 2\n", 1);
+    let next_term = with_the_wall_end_as_the_expiry(WRITTEN_BY_PREVIOUS).replacen(
+        "term = 1\n",
+        "term = 2\n",
+        1,
+    );
     assert_eq!(fs::read_to_string(scratch.file()).unwrap(), next_term);
 }
 

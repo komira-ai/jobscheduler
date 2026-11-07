@@ -102,8 +102,8 @@ fn refused_flag(args: &[&str]) -> StartupError {
 
 /// Asserts that `--default-ttl` and `--max-ttl`, which still parse (hidden) so that they
 /// can be refused by name, are startup errors with the exact reason, whatever value they
-/// are given, and that the refusal comes before every other check: with no other flag at
-/// all, and beside `--config`. It catches a flag that is accepted and ignored (an
+/// are given, and that the refusal comes before every other check: beside only the flags
+/// the parser requires (whose files are never read), and beside `--config`. It catches a flag that is accepted and ignored (an
 /// operator would think a ttl is in force), one refused as unknown by the parser, and a
 /// refusal that is hidden behind another one.
 #[test]
@@ -111,8 +111,9 @@ fn a_removed_ttl_flag_is_refused_by_name_before_anything_else() {
     for flag in ["--default-ttl", "--max-ttl"] {
         for value in ["60s", "not-a-duration"] {
             let given = format!("{flag}={value}");
+            let required = ["--state-file=s", "--boot=initialise", "--token-file=t"];
             for args in [
-                vec![given.as_str()],
+                [required.as_slice(), &[given.as_str()]].concat(),
                 vec!["--config=x.toml", given.as_str()],
             ] {
                 let err = refused_flag(&args);

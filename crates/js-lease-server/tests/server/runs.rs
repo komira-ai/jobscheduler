@@ -42,8 +42,8 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
         "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
     assert_eq!(start["limits"]["cpu_millis"], 2000);
-    assert_eq!(start["limits"]["wall_ms"], 600_000);
-    assert_eq!(start["valid_for_ms"], 600_000);
+    assert_eq!(start["limits"]["wall_ms"], 7_200_000);
+    assert_eq!(start["valid_for_ms"], 7_200_000);
     assert_eq!(start["heartbeat_seq"], 1);
 
     let running = [held("run-1-1", "running")];

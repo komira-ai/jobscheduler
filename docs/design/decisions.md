@@ -224,7 +224,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
 - **D51. Host jobs only in a whole-node lease.** A lease may carry `host_jobs` only if it is whole-node, in addition to the three consents
   of 5.12. Options: (a) any class, as 5.12 said; (b) whole-node only. Recommend (b): a host job taints its host unconditionally, and in a
   share that would destroy other consumers' work for a taint they did not cause.
-- **D52. A whole-node lease's clock starts at the token.** The TTL and max wall time count from the minting of the token, not from the
+- **D52. A whole-node lease's clock starts at the token.** The max wall time counts from the minting of the token, not from the
   commit, so a consumer is not charged for the drain or the preparation; readiness is bounded by `prepare_timeout` and `max_replace`.
   Alternative: from the commit; rejected, since a consumer could lose its time before it could use the host.
 - **D53. Environment measurement and the rerun after a loss are the consumer's.** The scheduler's readiness is only that the host is quiet
@@ -266,8 +266,8 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   places VMs on hosts that cannot run them, and (b) cannot know before launch which option to buy. Facts stay unverified claims (K27).
 - **D59. Spot hosts: a reclaim notice taints, drains and reschedules, with the machinery that exists.** The provider's `events()` stream
   (or, without it, the agent's `draining` phase on the cloud's shutdown signal) gives the notice. In that tick the scheduler records the
-  host as tainted with the reason `reclaim` (so the cordon survives a restart, 5.12), asks consumers through a renewal flag `host_leaving`
-  with `leaves_at` (additive, the sibling of `host_reserved`) to place nothing new and release, lets running work finish until the
+  host as tainted with the reason `reclaim` (so the cordon survives a restart, 5.12), asks consumers through a flag `host_leaving`
+  with `leaves_at` on the host list (additive, beside `reserved_for`) to place nothing new and release, lets running work finish until the
   deadline, requeues what had not started, and at the deadline or on a read-back Absent gives up what is left and reruns it elsewhere
   against the platform-fault budget (8.1). The usual replacement acquire follows. A reclaim taint counts toward neither
   `max_taints_in_a_row` nor `max_boot_failures`. Options: (a) treat a notice as nothing and wait for the loss (orderly work lost for

@@ -356,7 +356,7 @@ client_token_file = "/run/credentials/js/client-token"   # the existing client t
 tls_cert       = "/run/credentials/js/tls-cert"
 tls_key        = "/run/credentials/js/tls-key"
 max_lease_wall = "2h"                                    # the longest max_wall a lease may ask for; required with an accelerator pool (6.4)
-# tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
+# tick, timeouts: same names and defaults as today's flags
 
 [[pool]]
 name     = "gpu-static"
@@ -1037,8 +1037,7 @@ Rules, each tied to a requirement or to existing behaviour:
   the machine's launch, the scaler retires the host: the registry marks it draining whether or not
   it is busy (`Registry::retire`), which takes no new lease and cuts none, and the release is asked
   only once the host is quiet. `max_lease_wall` is the ceiling on the `max_wall` a lease may ask
-  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`
-  whatever its renewals, so a retired host empties within the ceiling. Every launch also carries
+  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`, so a retired host empties within the ceiling. Every launch also carries
   `max_age + max_lease_wall + prepare_timeout + unknown_hold + 10 minutes` as the lifetime the cloud
   itself should enforce, in `AcquireRequest::lifetime` (the prepare timeout and `unknown_hold` are
   the two waits a retire can meet: a whole-node lease's wall time starts after the first, a silent
