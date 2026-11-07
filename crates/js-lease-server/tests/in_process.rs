@@ -15,6 +15,8 @@ mod elastic;
 mod feature;
 #[path = "in_process/jobs.rs"]
 mod jobs;
+#[path = "in_process/providers.rs"]
+mod providers;
 #[path = "in_process/support.rs"]
 mod support;
 

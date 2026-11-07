@@ -268,6 +268,7 @@ impl JobService for Stub {
                     price_cents_per_hour: Some(0),
                     provider_id: "instance-1".to_owned(),
                 }],
+                ..Provider::default()
             }],
         };
         self.answer("ListProviders", request, response)

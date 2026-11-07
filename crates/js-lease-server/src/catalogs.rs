@@ -113,6 +113,13 @@ impl Catalogs {
         }
     }
 
+    /// When the catalog of `provider` that is read now was fetched, and how many offers it
+    /// holds; `None` when none has been fetched (or the provider is not one of these). A
+    /// failed fetch moves neither. Calls no provider.
+    pub fn fetched(&self, provider: &ProviderId) -> Option<(Instant, usize)> {
+        self.providers.get(provider)?.cache().fetched()
+    }
+
     /// The offers of `provider` that pass 2 may pick from at `now`: those of the last
     /// catalog fetched, in its order, less each one cooling down. None when no catalog has
     /// been fetched. Calls no provider.

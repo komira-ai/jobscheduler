@@ -50,6 +50,8 @@ use crate::usage_js::{NodeUsage, no_names};
 mod hosts;
 #[path = "fleet_pools_tests.rs"]
 mod pools;
+#[path = "fleet_providers_tests.rs"]
+mod providers;
 #[path = "fleet_usage_tests.rs"]
 mod usage;
 

@@ -30,19 +30,24 @@
 use std::fmt::Write;
 use std::sync::{Arc, PoisonError};
 
-use js_elastic::Demand;
+use js_elastic::{Demand, Instant, OfferKey};
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{HelloDimension, LaunchMode, Millis, Phase, Record, Records};
-use js_types::ExecMode;
+use js_scaler::{
+    Brake, Cooldown, HelloDimension, LaunchMode, Millis, Phase, Record, Records,
+    State as ScalerState,
+};
+use js_sched::failover::PassedOver;
+use js_types::{ExecMode, RequestId};
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
+use crate::catalogs::Catalogs;
 use crate::checks::{Checked, State, Verdict};
 use crate::hosts::MemoryView;
 use crate::logs::{LogCounters, LogGrants};
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
-use crate::scaler::Scaler;
+use crate::scaler::{InFlight, Scaler};
 use crate::store_health::{self, StoreHealth, StoreView};
 
 /// What the status routes read.
@@ -54,6 +59,7 @@ pub(crate) struct Status {
     clock: SharedClock,
     logs: Option<Arc<LogGrants>>,
     store: Option<Arc<StoreHealth>>,
+    catalogs: Option<Arc<Catalogs>>,
 }
 
 /// The reply of `GET /v1/pools`.
@@ -104,6 +110,10 @@ pub(crate) struct PoolView {
     /// before the field.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) offer_cooldowns: Vec<OfferCooldownView>,
+    /// What `ListProviders` reads of the pool's provider besides its checks and machines.
+    /// Not written in the body of `GET /v1/pools`, which stays as it was.
+    #[serde(skip)]
+    pub(crate) provider_state: ProviderState,
     /// What an operator must act on, as the scaler's last tick left it: a stuck revoke or
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
@@ -170,6 +180,29 @@ pub(crate) struct OfferCooldownView {
     pub(crate) host: String,
     /// Every dimension that failed, such as `accelerator_model` or `memory`.
     pub(crate) failed: Vec<HelloDimension>,
+}
+
+/// What `ListProviders` reads of a pool's provider besides its checks and machines, at the
+/// status's time: why it launches nothing now or what it is waiting on. Each field is read
+/// through the part of the server that owns it, when the status is read; none is kept here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProviderState {
+    /// The status's time, in milliseconds since the epoch, which the ages are taken from.
+    pub(crate) now_ms: u64,
+    /// When the catalog read now was fetched, and how many offers it holds
+    /// ([`Catalogs::fetched`]); `None` before the first fetch.
+    pub(crate) catalog: Option<(Instant, usize)>,
+    /// The instance types passed over now after a `quota` answer, each until its end.
+    pub(crate) passed_over: Vec<(PassedOver, Instant)>,
+    /// The offers declined for capacity in the attempt in progress of a waiting request,
+    /// each with the request and the time of the answer.
+    pub(crate) declined: Vec<(RequestId, OfferKey, Instant)>,
+    /// The pool's failure brake, while the records hold one ([`Records::brake`]).
+    pub(crate) brake: Option<Brake>,
+    /// The pool's cool-down, while it runs ([`Records::cooldowns`]).
+    pub(crate) cooldown: Option<Cooldown>,
+    /// The launches whose provider call is out now ([`Scaler::in_flight`]).
+    pub(crate) in_flight: Vec<InFlight>,
 }
 
 /// One of the provider's own checks.
@@ -322,6 +355,16 @@ impl Status {
             clock,
             logs: None,
             store: None,
+            catalogs: None,
+        }
+    }
+
+    /// The same status, reading the cached catalogs of the providers from `catalogs`.
+    #[must_use]
+    pub(crate) fn with_catalogs(self, catalogs: Arc<Catalogs>) -> Self {
+        Self {
+            catalogs: Some(catalogs),
+            ..self
         }
     }
 
@@ -387,6 +430,7 @@ impl Status {
             State::Available => capped.and_then(|why| why.shown_name()),
             _ => Some("unavailable"),
         };
+        let provider_state = self.provider_state(pool, scaled.as_ref(), now);
         let records = scaled.map(|seen| seen.records).unwrap_or_default();
         let (machines, orphans, last_launch) = held(&records, &pool.name);
         let offer_cooldowns = cooled(&records, &pool.name);
@@ -419,6 +463,7 @@ impl Status {
             machines,
             orphans,
             offer_cooldowns,
+            provider_state,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
             scaler: self.scaler.is_some(),
             last_tick_ms: self
@@ -427,6 +472,40 @@ impl Status {
                 .and_then(Scaler::last_tick)
                 .map(Millis::as_millis),
             next_launch,
+        }
+    }
+
+    /// What `ListProviders` reads of the provider of `pool` at `now`: from the cached
+    /// catalogs, from what the scaler's last tick left (`scaled`: its failover memory, the
+    /// pool's brake and cool-down in its records) and from the scaler's calls out now. Only
+    /// the entries of the pool's own provider and pool are taken.
+    fn provider_state(
+        &self,
+        pool: &Pool,
+        scaled: Option<&ScalerState>,
+        now: Millis,
+    ) -> ProviderState {
+        let id = pool.provider_id();
+        let at = Instant::from_millis(now.as_millis());
+        let catalogs = self.catalogs.as_ref();
+        let memory = scaled.map(ScalerState::failover);
+        let passed = memory.into_iter().flat_map(|memory| memory.passed_over(at));
+        let passed = passed.filter(|(key, _)| key.provider == id);
+        let declined = memory.into_iter().flat_map(|memory| memory.declined());
+        let declined = declined.filter(|(_, key, _)| key.provider == id);
+        let records = scaled.map(|seen| &seen.records);
+        let cooldown = records.and_then(|records| records.cooldowns.get(&pool.name));
+        let out = self.scaler.iter().flat_map(Scaler::in_flight);
+        ProviderState {
+            now_ms: now.as_millis(),
+            catalog: catalogs.and_then(|catalogs| catalogs.fetched(&id)),
+            passed_over: passed.map(|(key, until)| (key.clone(), until)).collect(),
+            declined: declined
+                .map(|(request, key, when)| (request.clone(), key.clone(), when))
+                .collect(),
+            brake: records.and_then(|records| records.brake.get(&pool.name).copied()),
+            cooldown: cooldown.copied().filter(|cooldown| cooldown.until > now),
+            in_flight: out.filter(|flight| flight.pool == pool.name).collect(),
         }
     }
 

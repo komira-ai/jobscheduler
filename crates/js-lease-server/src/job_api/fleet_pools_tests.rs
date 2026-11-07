@@ -5,7 +5,7 @@ use super::*;
 
 /// A pool view with every field the routes write, its provider's checks failing with a
 /// reason when `failing`, and `state` as its state.
-fn pool_view(state: State, failing: bool) -> PoolView {
+pub(super) fn pool_view(state: State, failing: bool) -> PoolView {
     let failed = failing.then(|| "no ssh key named js".to_owned());
     PoolView {
         name: "burst".to_owned(),
@@ -72,6 +72,7 @@ fn pool_view(state: State, failing: bool) -> PoolView {
         ],
         orphans: Vec::new(),
         offer_cooldowns: Vec::new(),
+        provider_state: ProviderState::default(),
         alerts: Vec::new(),
         last_tick_ms: Some(T0 + 3),
         scaler: true,
@@ -140,6 +141,9 @@ fn told_pool(pool: &Value) -> (wire::Pool, wire::Provider) {
         state: i32::from(state(&pool["state"])),
         checks,
         machines: machines.collect(),
+        // The JSON carries none of what the status reads for `ListProviders` alone; the
+        // pool view of these tests holds none of it either.
+        ..wire::Provider::default()
     };
     (told, provider)
 }
