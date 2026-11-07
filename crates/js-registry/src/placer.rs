@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use js_agent_wire::Phase;
 use js_lease::Timestamp;
-use js_provider::Candidate;
+use js_provider::{Candidate, Held};
 use js_provider::{RefusalCode, StartSpec};
 use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, Request, RequestId, Shape};
@@ -51,6 +51,31 @@ pub enum Standing {
     Cordoned,
     /// It is live: it may hold a request.
     Live,
+}
+
+/// A lease the registry put back on its host at a start, as the lease file records it
+/// ([`Placer::seated`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatedLease {
+    /// The host it is booked on.
+    pub host: HostId,
+    /// What it books there.
+    pub held: Held,
+    /// When it started and the latest it can end, as the lease file records them; `None`
+    /// when the caller gave neither ([`crate::RegisteredProvider::seat`]).
+    pub times: Option<LeaseTimes>,
+    /// Whether it is a whole-node lease: the pool's class is the whole-node class and the
+    /// lease books the whole host.
+    pub whole_node: bool,
+}
+
+/// When a lease started and the latest it can end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseTimes {
+    /// When its maximum wall time started counting.
+    pub started_at: Timestamp,
+    /// Its start plus its maximum wall time.
+    pub ends_at: Timestamp,
 }
 
 /// A host the registry lists, as the whole-node queue reads it ([`WholeRound`]).
@@ -301,6 +326,14 @@ pub trait Placer: Send + Sync {
     /// default does nothing.
     fn ended(&self, lease: LeaseId) {
         let _ = lease;
+    }
+
+    /// `seated`'s lease was put back on its host at a start, without a start call
+    /// ([`crate::RegisteredProvider::seat_booked`]): the registry books it there from now on.
+    /// Told under the registry's lock, whether or not the host has said hello. The default
+    /// does nothing.
+    fn seated(&self, seated: &SeatedLease) {
+        let _ = seated;
     }
 
     /// Whether the placer books work on `host` that the registry's book does not hold (a

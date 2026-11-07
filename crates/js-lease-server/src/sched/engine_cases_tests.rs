@@ -99,10 +99,11 @@ fn an_unmappable_start_is_held_to_the_memory_percent() {
 }
 
 /// Asserts that a rebuild keeps the load the engine measured: the host carrying lease 1
-/// reports all its cores busy, the other is idle; a lease booked behind the engine's back
-/// on the busy host makes the next start rebuild the engine, and that start still goes to
-/// the idle host, where a rebuilt engine that forgot the readings would put it beside the
-/// two leases of the busy one. It catches a rebuild that drops measured load.
+/// reports all its cores busy, the other is idle; a lease the registry books on the busy
+/// host that the engine no longer holds (put back, then lost by the engine, as a lease it
+/// gives up is) makes the next start rebuild the engine, and that start still goes to the
+/// idle host, where a rebuilt engine that forgot the readings would put it beside the two
+/// leases of the busy one. It catches a rebuild that drops measured load.
 #[test]
 fn a_rebuild_keeps_the_load_it_measured() {
     let hosts = ["h1", "h2"];
@@ -128,6 +129,7 @@ fn a_rebuild_keeps_the_load_it_measured() {
         ends_at: Timestamp::from_millis(T0 + 600_000),
     };
     r.provider.seat_booked(&booking, None).unwrap();
+    r.placer().engine().ended(LeaseId::new(9, 1));
     assert_eq!(r.start(sharing_spec(2)).as_deref(), Some(idle.as_str()));
     assert_eq!(r.counted(), (NONE, 1, 2));
 }
@@ -135,8 +137,9 @@ fn a_rebuild_keeps_the_load_it_measured() {
 /// Asserts that a rebuild keeps both windows the engine reads a host's load from: the
 /// host carrying lease 1 is busy over one window (all 8 cores) and idle over the next, so
 /// the engine still charges it the busy window (the larger of the last two) and refuses a
-/// start there; a lease booked behind the engine's back on that host rebuilds the engine,
-/// and the next start is refused there just the same and goes to the idle host, with the
+/// start there; a lease the registry books on that host that the engine no longer holds
+/// (put back, then lost by the engine) rebuilds the engine, and the next start is refused
+/// there just the same and goes to the idle host, with the
 /// same measured load before and after. A rebuild that kept only the last window would
 /// read the host as idle and place the start beside its two leases.
 #[test]
@@ -170,6 +173,7 @@ fn a_rebuild_keeps_both_windows_of_a_host_that_just_fell_idle() {
         ends_at: Timestamp::from_millis(T0 + 600_000),
     };
     r.provider.seat_booked(&booking, None).unwrap();
+    r.placer().engine().ended(LeaseId::new(9, 1));
     assert_eq!(r.start(sharing_spec(3)).as_deref(), Some(idle.as_str()));
     assert_eq!(r.counted(), (NONE, 1, 2));
     assert_eq!(measured(&r), Some(8_000));
@@ -356,12 +360,12 @@ fn a_host_gone_while_the_engine_holds_a_lease_there_is_kept() {
 
 /// Asserts a restart from the lease file under nondefault settings (`--cpu-slack 1.5`, a
 /// memory percent of 90): the shared and whole-host leases the file records are put back
-/// before any host says hello, the first start meets them and rebuilds the engine once,
-/// and from then on starts and ends agree; the slack and the percent hold after the
-/// restart as before it. Restarted with no `--placement` flag, the same pool that shares
-/// hosts starts. It catches restored leases the engine never
-/// learns (it would place past them), settings lost on restart, and a rebuild at every
-/// start after one.
+/// before any host says hello, the engine is told of each as it is put back, so no start
+/// rebuilds it, and starts and ends agree from the first; the slack and the percent hold
+/// after the restart as before it. Restarted with no `--placement` flag, the same pool
+/// that shares hosts starts. It catches restored leases the engine never learns (it would
+/// place past them), settings lost on restart, and a put-back the engine learns only by
+/// rebuilding.
 #[test]
 fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
     let text = shared_pool(2, 8000, "memory_schedulable_percent = 90");
@@ -401,13 +405,13 @@ fn a_restart_puts_the_leases_back_and_the_engine_learns_them_once() {
             .acquire(share_of(1, 1_000, GIB).request().clone())
             .is_err()
     );
-    assert_eq!(r.counted(), (r.placer().fallbacks(), 1, 2));
+    assert_eq!(r.counted(), (r.placer().fallbacks(), 0, 1));
     table.release(&shared[0].id).unwrap();
     let again = table.acquire(share_of(1, 1_000, GIB).request().clone());
     assert_eq!(again.unwrap().host.as_str(), busy);
     let above = share_of(1, 1_000, NINETY + 1).request().clone();
     assert!(table.acquire(above).is_err());
-    assert_eq!(r.placer().resynced(), 1);
+    assert_eq!(r.placer().resynced(), 0);
     assert!(config_result(r.dir(), &text, &[], "resume").is_ok());
 }
 
