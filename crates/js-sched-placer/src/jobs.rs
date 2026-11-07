@@ -77,10 +77,10 @@ use js_jobs::{
     AllocationRecord, Booked, IdSource, Isolation, JobId, JobRecord, JobStore, JobStoreError,
     Needs, NetworkPolicy, Placement,
 };
-use js_lease::Timestamp;
 use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::{Event, Prediction, Request};
+use js_types::Timestamp;
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey};
 use js_types::{HostId, JobNetwork, Resources};
 use tracing::warn;

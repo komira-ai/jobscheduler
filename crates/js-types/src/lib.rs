@@ -11,6 +11,12 @@
 //! resolved through the alias table ([`ALIASES`], [`FAMILIES`]) that `js-caps` re-exports;
 //! a container's network is a [`JobNetwork`] level and the [`PortMap`]s it declares.
 //!
+//! Time is an input: a [`Timestamp`] read through a [`Clock`], elapsed time through a
+//! [`Monotonic`] clock, and [`ManualClock`] for code that moves time itself. A start is a
+//! [`StartSpec`], a request already checked against the start contract, or a
+//! [`RefusalCode`]; what a host holds is a list of [`Held`] leases, a host a start could
+//! take is a [`Candidate`], and a listed host with its leases is a [`HostCapacity`].
+//!
 //! The [`sched`] module holds the scheduler's own vocabulary (operations, leases,
 //! control-log records, QoS, farm time, the state-machine trait). It shares names with
 //! the provider slice above (`Resources`, `LeaseId`) and is not re-exported at the root,
@@ -19,7 +25,9 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod accel;
+mod booking;
 mod class;
+mod clock;
 mod digest;
 pub mod env;
 mod ids;
@@ -32,6 +40,7 @@ mod request;
 mod resources;
 pub mod sched;
 mod shape;
+mod start;
 
 pub use accel::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS,
@@ -40,7 +49,9 @@ pub use accel::{
     Interconnect, MAX_MEMORY_GIB, Model, NVIDIA_A10, NVIDIA_A100, NVIDIA_B200, NVIDIA_H100,
     NVIDIA_RTX_A6000, Resolved, Variant, Vendor, accelerator_of, vendor_of,
 };
+pub use booking::{Candidate, Held, HostCapacity};
 pub use class::{Admission, ClassError, ResourceClass};
+pub use clock::{Clock, ManualClock, Monotonic, Timestamp};
 pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use isa::{Arch, ArmVersion, IsaLevel, UnknownArch, UnknownIsaLevel, X86Level, normalise_arch};
@@ -54,3 +65,4 @@ pub use network::{JobNetwork, PortMap, UnknownJobNetwork};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
 pub use shape::{Capabilities, Shape};
+pub use start::{RefusalCode, StartSpec};

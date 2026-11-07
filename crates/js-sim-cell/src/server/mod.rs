@@ -364,6 +364,14 @@ impl ServerNode {
         reset
     }
 
+    /// Whether the scaler's brake of pool `pool` reads tripped now (the pool launches
+    /// nothing until an operator resets it); `false` while the server is down or has no
+    /// scaler.
+    pub(crate) fn brake_tripped(&self, pool: &str) -> bool {
+        let scaler = self.server().and_then(InProcess::scaler);
+        scaler.is_some_and(|scaler| scaler.state().records.tripped(pool))
+    }
+
     /// Sets the server's clock, and the cloud's, to virtual time `now`.
     fn set_clocks(&self, now: FarmTime) {
         self.clock.set(wall_time(now));

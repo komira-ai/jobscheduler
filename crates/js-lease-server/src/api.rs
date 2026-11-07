@@ -19,7 +19,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::{error, info};
 
-use crate::adapt::{BoxedPool, SharedClock};
+use crate::adapt::{BoxedPool, PoolHosts, SharedClock};
 use crate::admit::{Admit, Decision};
 use crate::agent_api;
 use crate::agents::Agents;
@@ -48,6 +48,8 @@ pub(crate) type Table = LeaseTable<BoxedPool, SharedClock>;
 /// the agent side when agents register hosts.
 pub(crate) struct Shared {
     table: Mutex<Table>,
+    /// The hosts of the table's pool, which the host listing reads without the table's lock.
+    hosts: PoolHosts,
     /// How long the table's saves and the handlers' waits for its lock took.
     timings: Timings,
     token: Token,
@@ -85,6 +87,7 @@ impl Shared {
         let handed = Handed::opened_with(&table);
         Self {
             timings: table.timings(),
+            hosts: table.provider().hosts(),
             table: Mutex::new(table),
             token,
             agents,
@@ -178,6 +181,12 @@ impl Shared {
     /// first and the registry's lock second, as every caller does.
     pub(crate) fn table(&self) -> &Mutex<Table> {
         &self.table
+    }
+
+    /// The hosts of the table's pool, read without the table's lock: what the host listing
+    /// reads ([`crate::hosts::listing`]).
+    pub(crate) fn hosts(&self) -> &PoolHosts {
+        &self.hosts
     }
 
     /// The record of the table's saves and of the lock waits.
@@ -562,8 +571,8 @@ async fn list(State(shared): State<Arc<Shared>>) -> Response {
 }
 
 /// Every host the server leases: the static pool's, and the registered ones with the
-/// state of their session. The table's lock is taken first and dropped, then the
-/// registry's; the order of the two never reverses.
+/// state of their session. The table's lock is not taken: the pool's is taken first and
+/// dropped, then the registry's; the order of the two never reverses.
 async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, &listing(&shared).await.0)
 }

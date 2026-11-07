@@ -7,12 +7,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use js_jobs::{Booked, Isolation, JobId, JobRecord, JobState, JobStoreError, Needs, NewJob};
-use js_lease::{ManualClock, Timestamp};
 use js_registry::{Placer, WholeNodeConfig};
 use js_sched::Backfill;
 use js_state::{Store, StoreError};
 use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, Resources};
+use js_types::{ManualClock, Timestamp};
 
 use super::{JobHosts, JobStarts, OpenHost, PassMetrics};
 use crate::engine::rig::{Tables, at, every, host, hosts, mark, run, settings, spec_of, store};

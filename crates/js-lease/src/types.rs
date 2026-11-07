@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use js_types::{HostId, Labels, LeaseId, Resources};
 
-use crate::clock::Timestamp;
+use crate::Timestamp;
 use crate::error::{SaveError, SettingsError};
 use crate::state::LeaseState;
 

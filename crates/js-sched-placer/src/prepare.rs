@@ -44,9 +44,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_lease::Timestamp;
 use js_registry::{Exclusion, NotReady, PrepareFailure, RequestKey, RequestRecord};
 use js_sched::Bar;
+use js_types::Timestamp;
 use js_types::sched::{FarmTime, OperationId, WorkerId};
 use js_types::{LeaseId, Request, RequestId};
 
