@@ -301,6 +301,16 @@ impl Requests {
         record.exclude(host, Exclusion::Until(backoff_end));
     }
 
+    /// Raises the drain give-ups counted for the request under `key` to `count` at `now`,
+    /// when that is more than are counted: the give-ups of a placer that keeps the
+    /// whole-node queue ([`crate::Placer::whole_give_ups`]). No host is excluded here: a
+    /// give-up's back-off stays the placer's.
+    pub(crate) fn raise_give_ups(&mut self, key: RequestKey, count: u32, now: Timestamp) {
+        if count > self.give_ups(&key) {
+            self.entry(key, now).give_ups = count;
+        }
+    }
+
     /// The drain give-ups counted for the request under `key`.
     pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
         self.record(key).map_or(0, |record| record.give_ups)

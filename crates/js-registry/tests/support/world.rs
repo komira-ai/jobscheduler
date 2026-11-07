@@ -91,29 +91,30 @@ pub struct World {
 
 impl World {
     pub fn new(hosts: &[&str], settings: impl FnOnce(WholeNodeConfig) -> WholeNodeConfig) -> Self {
-        Self::on(Engine::Registry, hosts, settings)
+        Self::new_in(Placement::Registry, hosts, settings)
     }
 
-    /// [`World::new`], its whole-node requests placed by `engine`.
-    pub fn on(
-        engine: Engine,
+    /// A dedicated pool of up to four hosts with `settings`, `hosts` joined, its queue
+    /// decided under `placement`.
+    pub fn new_in(
+        placement: Placement,
         hosts: &[&str],
         settings: impl FnOnce(WholeNodeConfig) -> WholeNodeConfig,
     ) -> Self {
         let name = ProviderId::new("builders").unwrap();
         let config = PoolConfig::new(name, whole(), world_shape(), 4);
         let settings = settings(WholeNodeConfig::dedicated(4));
-        Self::of_on(engine, config.with_whole_node(settings).unwrap(), hosts)
+        Self::of_in(placement, config.with_whole_node(settings).unwrap(), hosts)
     }
 
     pub fn of(config: PoolConfig, hosts: &[&str]) -> Self {
-        Self::of_on(Engine::Registry, config, hosts)
+        Self::of_in(Placement::Registry, config, hosts)
     }
 
-    /// [`World::of`], its whole-node requests placed by `engine`.
-    pub fn of_on(engine: Engine, config: PoolConfig, hosts: &[&str]) -> Self {
+    /// A world over `config`, `hosts` joined, its queue decided under `placement`.
+    pub fn of_in(placement: Placement, config: PoolConfig, hosts: &[&str]) -> Self {
         let max_draining = config.whole_node().map_or(1, |w| w.max_draining);
-        let fx = fixture_on(config, engine);
+        let fx = fixture_in(config, placement);
         let provider = fx
             .registry
             .provider()

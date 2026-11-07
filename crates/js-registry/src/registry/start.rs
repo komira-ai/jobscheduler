@@ -138,14 +138,24 @@ impl Registry {
         };
         let placer = self.shared.placer.get();
         let round = placer.map(|placer| (placer, self.round_of(state, &pass)));
-        let placed = round.and_then(|(placer, round)| Some((placer.whole_round(&round)?, round)));
-        if let Some((marks, round)) = placed {
+        let placed = round.and_then(|(placer, round)| {
+            let marks = placer.whole_round(&round)?;
+            Some((marks, round, placer.whole_give_ups()))
+        });
+        if let Some((marks, round, give_ups)) = placed {
             let presented = round.waiting.into_iter().map(|waiting| waiting.id);
             let presented: BTreeSet<RequestId> = presented.collect();
             // A mark put back from the ledger whose host never came back, or is tainted,
             // goes as it does in the registry's own pass.
             state.dropped += state.marks.stand(&pass);
             state.marks.adopt(marks, &presented);
+            // The placer's give-ups are counted in the requests' records, as the registry's
+            // own pass counts its own (the placer queues only the requests presented).
+            for (id, count) in give_ups {
+                state
+                    .requests
+                    .raise_give_ups(RequestKey::from(&id), count, now);
+            }
             return;
         }
         let State {

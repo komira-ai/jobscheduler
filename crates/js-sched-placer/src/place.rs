@@ -425,6 +425,12 @@ impl Placer for SchedPlacer {
         let now = self.now();
         self.engine().whole_sweep(horizon, now);
     }
+
+    /// The holds the engine's whole-node requests have given up at their deadline
+    /// ([`Engine::whole_give_ups`]).
+    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
+        self.engine().whole_give_ups()
+    }
 }
 
 #[cfg(test)]
@@ -842,6 +848,8 @@ mod tests {
             .map(|mark| (mark.host.to_string(), mark.assigned))
             .collect();
         assert_eq!(held, [("b".to_owned(), true)]);
+        // A grant gives nothing up: the registry is told of no give-up.
+        assert!(placer.whole_give_ups().is_empty());
         let start = spec_of(&ResourceClass::whole_node(), 7).with_request_id(id);
         assert_eq!(placer.pick(&start, &open[..1], &unmarked()), None);
         assert_eq!(placer.pick(&start, &open, &unmarked()), Some(1));
