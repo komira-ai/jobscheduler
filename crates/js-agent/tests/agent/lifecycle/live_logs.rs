@@ -40,6 +40,7 @@ fn start(job_id: &str, bucket: &str, prefix: &str) -> JobStartSpec {
             path_style: false,
         }),
         kind: Default::default(),
+        isolation: Default::default(),
     }
 }
 

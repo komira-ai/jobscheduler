@@ -32,6 +32,18 @@ enum NetworkLevel {
   NETWORK_LEVEL_OPEN = 3;
 }
 
+// How a job is confined on its host.
+enum Isolation {
+  // Not given: contained, the default.
+  ISOLATION_UNSPECIFIED = 0;
+  // In a container, or in the native runtime's sandbox.
+  ISOLATION_CONTAINED = 1;
+  // On the machine itself. The job is admitted only when a host reports that it runs host
+  // jobs, else it is refused as having no capable host. The host is tainted for good when
+  // the job is placed on it, and takes no other job.
+  ISOLATION_HOST = 2;
+}
+
 // The resources a job needs of its host. A host is capable when it has at least each of
 // them.
 message Needs {
@@ -73,6 +85,8 @@ message Constraints {
   // The accelerator the job needs, beyond what Needs.gpus and Needs.gpu_class say. Absent:
   // none.
   Accelerator accelerator = 5;
+  // How the job is confined. Unspecified: contained.
+  Isolation isolation = 6;
 }
 
 // One host port forwarded to a port of the job (design section 5.8). New traffic toward a

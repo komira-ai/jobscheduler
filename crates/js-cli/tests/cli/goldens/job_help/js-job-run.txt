@@ -53,6 +53,11 @@ Options:
       --spec.constraints.isa-level <TEXT>
           The least instruction-set level, in request syntax such as x86-64-v3 or armv8.2-a. A host is capable when it reports that level or a higher one of the same architecture. Empty: any.
 
+      --spec.constraints.isolation <NAME>
+          How the job is confined. Unspecified: contained.
+          
+          [possible values: unspecified, contained, host]
+
       --spec.constraints.os <TEXT>
           The operating system: linux or macos. Empty: any.
 

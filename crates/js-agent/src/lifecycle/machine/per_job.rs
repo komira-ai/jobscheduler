@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 
 use js_agent_wire::{
-    HeldJob, Isolation, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, LogReport,
-    RunResult, StartKind, limits,
+    HeldJob, JobResult, JobResultAck, JobSpec, JobStartSpec, Limits, LogReport, RunResult,
+    StartKind, limits,
 };
 
 use super::Lifecycle;
@@ -35,7 +35,8 @@ const _: () = assert!(
 const _: () = assert!(RETIRED_LISTED < RETIRED_CAP);
 const _: () = assert!(RETIRED_LISTED <= limits::MAX_HELD);
 
-/// The start a job start stands for: one contained job with no mounts and no labels of its
+/// The start a job start stands for: one job, confined as the start says (`isolation`, so a
+/// host start meets the same admission as a run start), with no mounts and no labels of its
 /// own, bounded by what its allocation booked and by its own wall limit, with the network
 /// and ports it asked for, which the shared admission holds to the runtime's ceiling.
 fn run_of(spec: &JobStartSpec) -> JobSpec {
@@ -58,7 +59,7 @@ fn run_of(spec: &JobStartSpec) -> JobSpec {
         gpu_indices: spec.booked.gpu_indices.clone(),
         mounts: Vec::new(),
         files: spec.files.clone(),
-        isolation: Isolation::Contained,
+        isolation: spec.isolation,
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         valid_for_ms: 0,

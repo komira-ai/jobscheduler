@@ -307,6 +307,7 @@ fn job_start(node: &Node, job_id: &str) -> JobStartSpec {
             path_style: true,
         }),
         kind: Default::default(),
+        isolation: Default::default(),
     }
 }
 
