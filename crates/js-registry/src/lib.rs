@@ -69,7 +69,8 @@
 //!   without a result: the work is lost, even though its lease may still hold the host.
 //!   A run is started from the lease time it has left at each reply, and not at all once
 //!   that is gone.
-//! - **Taint.** The first taint a host reports is kept with its binding
+//! - **Taint.** The first taint a host reports, or that the caller sets with
+//!   [`Registry::taint_host`] (the first one stands), is kept with its binding
 //!   ([`Binding::taint`], [`Registry::bindings`]), so that a caller that persists
 //!   bindings keeps it across a restart ([`Registry::restore_tainted`]). A tainted host
 //!   is sent no start, takes no new run and no new lease (a lease already on it is left

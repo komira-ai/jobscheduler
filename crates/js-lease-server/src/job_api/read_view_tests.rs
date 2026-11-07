@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_jobs::{
-    Constraints, DeclaredPort, JobEnd, JobId, JobSpec, JobState, Needs, NetworkPolicy, NewJob,
-    Output, StartFailure,
+    Constraints, DeclaredPort, Isolation, JobEnd, JobId, JobSpec, JobState, Needs, NetworkPolicy,
+    NewJob, Output, StartFailure,
 };
 use js_proto::v1::{self, ListJobsRequest};
 use js_types::{ExecMode, Resources};
@@ -21,7 +21,8 @@ use super::tests::scratch;
 use crate::job_store::ServerJobs;
 
 /// A spec with every field set: a command of two items, a GPU share with disk, constraints
-/// with a capability the message has no field for, a port, a file, the allow-list network.
+/// with a capability the message has no field for and host isolation, a port, a file, the
+/// allow-list network.
 fn full() -> JobSpec {
     let resources = Resources::new(2000, BIG, 2, Some("nvidia-a100".to_owned()))
         .expect("resources")
@@ -35,6 +36,7 @@ fn full() -> JobSpec {
             arch: Some("x86_64".to_owned()),
             exec: Some(ExecMode::Container),
             capabilities: BTreeMap::from([("kvm".to_owned(), "yes".to_owned())]),
+            isolation: Isolation::Host,
         },
         network: NetworkPolicy::AllowList,
         ports: vec![DeclaredPort {
@@ -71,6 +73,7 @@ fn full_shown() -> v1::JobSpec {
             exec: v1::ExecMode::Container.into(),
             isa_level: String::new(),
             accelerator: None,
+            isolation: v1::Isolation::Host.into(),
         }),
         wall_limit_seconds: Some(600),
         network: v1::NetworkLevel::AllowList.into(),
@@ -91,7 +94,8 @@ fn full_shown() -> v1::JobSpec {
 /// [`full_shown`] (the command's first item as the program and the rest before the
 /// arguments, a file named with empty contents, the priority); a whole-host job with no
 /// command and the sandbox-exec mode on the open network; a job with no disk, GPU class,
-/// exec mode or network as absent or unspecified; a placed job's host; and a running job
+/// exec mode, network or isolation as absent or unspecified (a contained job reads back as
+/// unspecified, a host job as host); a placed job's host; and a running job
 /// whose cancel was asked for. Catches a field dropped or mapped to the wrong value, and a
 /// file's contents shown.
 #[tokio::test]

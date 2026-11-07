@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use js_agent_wire::NetworkCeiling;
-use js_jobs::{Booked, JobId, JobState, JobStoreError, Needs};
+use js_jobs::{Booked, Isolation, JobId, JobRecord, JobState, JobStoreError, Needs, NewJob};
 use js_lease::{ManualClock, Timestamp};
 use js_registry::{Placer, WholeNodeConfig};
 use js_sched::Backfill;
@@ -15,8 +14,8 @@ use js_state::{Store, StoreError};
 use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, Resources};
 
-use super::{JobHosts, JobStarts, PassMetrics};
-use crate::engine::rig::{Tables, at, every, host, hosts, mark, run, settings, store};
+use super::{JobHosts, JobStarts, OpenHost, PassMetrics};
+use crate::engine::rig::{Tables, at, every, host, hosts, mark, run, settings, spec_of, store};
 use crate::engine::{Engine, Settings};
 use crate::place::SchedPlacer;
 
@@ -25,6 +24,7 @@ use crate::place::SchedPlacer;
 struct Recorder {
     placed: Mutex<Vec<Duration>>,
     started: Mutex<Vec<(JobId, HostId)>>,
+    tainted: Mutex<Vec<(HostId, JobId)>>,
     failed: Mutex<u32>,
 }
 
@@ -44,6 +44,13 @@ impl JobStarts for Recorder {
             .lock()
             .unwrap()
             .push((job.clone(), host.clone()));
+    }
+
+    fn tainted(&self, host: &HostId, job: &JobId) {
+        self.tainted
+            .lock()
+            .unwrap()
+            .push((host.clone(), job.clone()));
     }
 }
 
@@ -90,13 +97,30 @@ impl Rig {
         self.tables.set_ms(ms);
     }
 
-    /// The hosts that may take a job, each with the default ceiling.
-    fn open(&self) -> BTreeMap<HostId, NetworkCeiling> {
+    /// The hosts that may take a job, each with the default ceiling and running host jobs.
+    fn open(&self) -> BTreeMap<HostId, OpenHost> {
         let mut open = BTreeMap::new();
         for name in ["a", "b"] {
-            open.insert(host(name), NetworkCeiling::default());
+            let offer = OpenHost {
+                host_jobs: true,
+                ..OpenHost::default()
+            };
+            open.insert(host(name), offer);
         }
         open
+    }
+
+    /// Records the queued job `id` that asks for `needs` and runs on the host itself.
+    fn host_job(&self, id: &str, needs: Needs) -> JobRecord {
+        let mut spec = spec_of(needs, 600);
+        spec.constraints.isolation = Isolation::Host;
+        let new = NewJob {
+            id: Some(JobId::parse(id).unwrap()),
+            spec,
+            priority: 0,
+            client: None,
+        };
+        self.tables.jobs.insert_queued(new).unwrap().record
     }
 
     /// A pass with the pool's settings after both hosts said hello: the jobs it placed.
@@ -347,6 +371,32 @@ fn an_ordinary_job_is_still_placed_with_no_prepare_deadline_and_no_wall_cut() {
     assert_eq!(left.state, JobState::Queued);
 }
 
+/// Catches: a committed host-isolation placement that is not told as a taint of its host, and
+/// a whole-host job with host isolation marked or committed by the whole-host pass, which
+/// does not hold a job to the hosts that run host jobs. On quiet hosts that run host jobs, `h`
+/// (a share) is placed and told both as a start and as the taint of its host; `w`, which needs
+/// the whole host and runs on the host itself, stays queued with no mark.
+#[test]
+fn a_host_isolation_job_is_told_as_a_taint_and_a_whole_host_one_waits() {
+    let rig = Rig::quiet();
+    let w = rig.host_job("w", Needs::WholeHost);
+    let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
+    let h = rig.host_job("h", Needs::Shape(resources));
+    rig.at(1_000);
+    let recorder = Recorder::default();
+    assert_eq!(rig.go(&recorder), std::slice::from_ref(&h.id));
+    let placed = rig.tables.jobs.get_job(&h.id).unwrap().unwrap();
+    let on = placed.host.unwrap();
+    assert_eq!(
+        *recorder.tainted.lock().unwrap(),
+        [(on.clone(), h.id.clone())]
+    );
+    assert_eq!(*recorder.started.lock().unwrap(), [(h.id.clone(), on)]);
+    let waiting = rig.tables.jobs.get_job(&w.id).unwrap().unwrap();
+    assert_eq!(waiting.state, JobState::Queued);
+    assert_eq!(rig.tables.jobs.get_mark(&w.id).unwrap(), None);
+}
+
 /// Catches: an ordinary placement whose commit fails left booked in the engine (the job is
 /// queued in the table and its host room is held for ever), or not counted. The commit fails:
 /// the job stays queued, the engine holds nothing and one write is counted; the next pass
@@ -385,7 +435,7 @@ fn backfilled(wall_secs: u64) -> Option<u64> {
     e.lives.set(lives);
     let steps = run(&mut e, (&[whole], &[]), 20_000);
     assert_eq!(steps.len(), 1);
-    let open = BTreeMap::from([(host("b"), NetworkCeiling::default())]);
+    let open = BTreeMap::from([(host("b"), OpenHost::default())]);
     let decided = e.walk_jobs(&[share], &open, at(20_000));
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0].1, host("b"));

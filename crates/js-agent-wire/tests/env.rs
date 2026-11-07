@@ -39,6 +39,7 @@ fn start(env: BTreeMap<String, String>) -> JobStartSpec {
         ports: Vec::new(),
         log_sink: None,
         kind: Default::default(),
+        isolation: Default::default(),
     }
 }
 

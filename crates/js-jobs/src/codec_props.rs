@@ -9,13 +9,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use js_types::ExecMode;
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::record::{Exclusion, FileDigest, JobFiles};
+use crate::record::{Exclusion, FileDigest, Isolation, JobFiles};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
@@ -74,12 +75,14 @@ fn constraints() -> impl Strategy<Value = Constraints> {
             Just(ExecMode::SandboxExec)
         ]),
         text_pairs(),
+        prop_oneof![Just(Isolation::Contained), Just(Isolation::Host)],
     )
-        .prop_map(|(os, arch, exec, capabilities)| Constraints {
+        .prop_map(|(os, arch, exec, capabilities, isolation)| Constraints {
             os,
             arch,
             exec,
             capabilities,
+            isolation,
         })
 }
 
@@ -430,7 +433,7 @@ fn framed_row(fields: &[(u16, Vec<u8>)]) -> Vec<u8> {
 }
 
 fn field_soup() -> impl Strategy<Value = Vec<u8>> {
-    vec((1..=46u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
+    vec((1..=47u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
 }
 
 proptest! {

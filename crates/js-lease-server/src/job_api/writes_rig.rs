@@ -17,7 +17,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request as HttpRequest, StatusCode, header};
 use js_api_gateway::Answer;
 use js_jobs::interfere::Interfere;
-use js_jobs::{JobId, MAX_PAGE, Retention};
+use js_jobs::{Isolation, JobId, MAX_PAGE, Retention};
 use js_proto::v1::{
     self, CancelJobRequest, CancelJobResponse, SubmitJobRequest, SubmitJobResponse,
 };
@@ -92,7 +92,7 @@ impl Fixed {
 
 #[tonic::async_trait]
 impl Admission for Fixed {
-    async fn can_ever_serve(&self, _: &Requirements) -> bool {
+    async fn can_ever_serve(&self, _: &Requirements, _: Isolation) -> bool {
         self.asked.fetch_add(1, Ordering::SeqCst);
         self.answer
     }

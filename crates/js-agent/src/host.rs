@@ -9,7 +9,7 @@ use js_agent_wire::{
     WireShape,
 };
 
-use js_agent_wire::{PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
+use js_agent_wire::{HOST_JOBS_CAPABILITY, PER_JOB_CAPABILITY, START_FENCE_CAPABILITY};
 use js_caps::{DETECTED_KEYS, DISK_GIB, REPORT_ONLY_KEYS};
 use js_types::normalise_arch;
 
@@ -68,6 +68,7 @@ fn capabilities(
             *key,
             "os" | "arch"
                 | PER_JOB_CAPABILITY
+                | HOST_JOBS_CAPABILITY
                 | START_FENCE_CAPABILITY
                 | EGRESS_CAPABILITY
                 | EGRESS_PORTS_CAPABILITY

@@ -32,8 +32,10 @@
 //!    [`Admission::can_ever_serve`] asks whether a host, or a catalog of a provider that
 //!    launches, could ever serve the job; the server's source reads the registry's hosts and
 //!    the catalogs as the server's catalog cache holds them, calling no provider, and a
-//!    catalog the cache has not read may offer. A job nothing could serve is the refusal `no-capable-host`
-//!    (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row, no id.
+//!    catalog the cache has not read may offer. A job with host isolation is offered only the
+//!    hosts that reported they run host jobs, and no catalog. A job nothing could serve is the
+//!    refusal `no-capable-host` (`FAILED_PRECONDITION`, 422) and nothing is recorded: no row,
+//!    no id.
 //! 4. **Commit before the answer.** The job is inserted as queued in one transaction of the
 //!    store ([`js_jobs::JobStore::insert_queued`]), with the name of the client the bearer
 //!    layer named (never a value of the request); only after it returns is the answer
@@ -49,7 +51,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{JobStoreError, NewJob};
+use js_jobs::{Isolation, JobStoreError, NewJob};
 use js_proto::refusal::refusal_status;
 use js_proto::v1::{RefusalCode, SubmitJobRequest, SubmitJobResponse};
 use js_types::Requirements;
@@ -74,8 +76,10 @@ pub(super) const STATE_WRITE_FAILED: &str = "state-write-failed";
 pub(crate) trait Admission: Send + Sync {
     /// `false` only when no host and no catalog could ever serve `wanted`: a busy or silent
     /// host counts, a tainted or departing one does not, and a catalog not yet read may
-    /// offer.
-    async fn can_ever_serve(&self, wanted: &Requirements) -> bool;
+    /// offer. A job that asks for host `isolation` can only be served by a host that reported
+    /// it runs host jobs; a catalog is never offered it, as a machine not launched yet has
+    /// reported nothing.
+    async fn can_ever_serve(&self, wanted: &Requirements, isolation: Isolation) -> bool;
 }
 
 /// The state of the submit group: the ceiling and the admission source, once served.
@@ -212,7 +216,14 @@ pub(super) async fn submit_job(
         Some(id) => api.jobs.get_job(id).map_err(not_written(api))?.is_some(),
         None => false,
     };
-    if !held && !served.admission.0.can_ever_serve(&valid.wanted).await {
+    let isolation = valid.spec.constraints.isolation;
+    if !held
+        && !served
+            .admission
+            .0
+            .can_ever_serve(&valid.wanted, isolation)
+            .await
+    {
         return Err(no_capable_host());
     }
     let new = NewJob {

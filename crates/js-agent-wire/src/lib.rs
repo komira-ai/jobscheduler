@@ -86,6 +86,9 @@
 //! an action): a server sends `kind: vm` only to a host whose hello reports `vm.slots`, the
 //! capability an agent with the VM backend sends, and an unknown kind is a decode error
 //! like an unknown `Isolation`.
+//! `JobStartSpec::isolation` is one more ([`Isolation`]: an older agent would run a host start
+//! contained): a server sends `isolation: host` only to a host whose hello reports
+//! `host-jobs` ([`HOST_JOBS_CAPABILITY`]), and leaves the field out for a contained start.
 //!
 //! # Live logs
 //!
@@ -196,8 +199,8 @@ pub use native::{
 };
 pub use network::{EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, NetworkCeiling, PortRange};
 pub use per_job::{
-    BookedResources, HeldJob, JobResult, JobResultAck, JobStartSpec, PER_JOB_CAPABILITY,
-    START_FENCE_CAPABILITY,
+    BookedResources, HOST_JOBS_CAPABILITY, HeldJob, JobResult, JobResultAck, JobStartSpec,
+    PER_JOB_CAPABILITY, START_FENCE_CAPABILITY,
 };
 pub use platform::{ImagePlatform, check_platform};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
