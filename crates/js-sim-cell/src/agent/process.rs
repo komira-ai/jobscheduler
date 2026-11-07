@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use js_agent::{BASE, REQUEST_LIMIT};
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, JobSpec, Outcome,
     ProtocolRange, RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
@@ -41,6 +42,10 @@ use crate::observe::{
     Verdict,
 };
 
+/// The wait before the heartbeat that follows one that had no answer: the shortest wait of
+/// the real agent's backoff.
+const BACKOFF: Duration = BASE;
+
 /// The agent version every hello names.
 const AGENT_VERSION: &str = "0.0.0-sim";
 
@@ -60,19 +65,21 @@ struct Session {
     interval: Duration,
     /// The number of the last heartbeat sent.
     seq: u64,
-    /// The heartbeats not yet answered, each with whether it was already counted as
-    /// missed (it had no answer when the next one was due).
-    unanswered: BTreeMap<CallId, bool>,
+    /// The heartbeat sent and not yet answered. The agent has one call in flight at a time
+    /// and gives it [`REQUEST_LIMIT`]; an answer to any other call is dropped unread.
+    in_flight: Option<CallId>,
     /// Whether a heartbeat of the session was answered 200.
     accepted: bool,
 }
 
 impl Session {
-    /// Takes `id` off the unanswered heartbeats, when it is one, noting a 200.
+    /// Ends the call in flight when `id` is it, noting a 200.
     fn answer(&mut self, id: CallId, status: u16) -> Option<()> {
-        self.unanswered
-            .remove(&id)
-            .map(|_| self.accepted |= status == 200)
+        let open = self.in_flight.filter(|open| *open == id);
+        open.map(|_| {
+            self.in_flight = None;
+            self.accepted |= status == 200;
+        })
     }
 }
 
@@ -301,6 +308,13 @@ pub(super) struct Process {
     jobs: Option<PerJob>,
     /// The per-job half, for a real agent that speaks the per-job messages.
     real_jobs: Option<RealJobs>,
+    /// How long the worker takes to act on a reply ([`AgentSpec::worker_lag`]).
+    lag: Duration,
+    /// When the worker is done with the replies queued so far.
+    busy_until: FarmTime,
+    /// The replies read and not yet acted on, by the tag of the timer that ends their wait:
+    /// the call they answer and their body.
+    queued: BTreeMap<u64, (CallId, String)>,
 }
 
 impl Process {
@@ -317,6 +331,9 @@ impl Process {
             exclusive: Exclusive::default(),
             jobs: PerJob::of(spec),
             real_jobs: RealJobs::of(spec),
+            lag: spec.worker_lag,
+            busy_until: FarmTime::default(),
+            queued: BTreeMap::new(),
         })
     }
 
@@ -370,17 +387,27 @@ impl Process {
             self.hello(spec, io);
             return spec.hello_interval;
         };
-        self.miss(&mut session);
-        self.beat(&mut session, spec, io);
-        let interval = session.interval;
+        // A tick with the heartbeat still in flight is the end of its time: the exchange
+        // failed, and its answer, should it come, is dropped. The next heartbeat follows
+        // after the shortest wait of the agent's backoff.
+        let next = if session.in_flight.take().is_some() {
+            self.timed_out();
+            BACKOFF
+        } else {
+            self.beat(&mut session, spec, io);
+            REQUEST_LIMIT
+        };
         self.session = Some(session);
-        interval
+        next
     }
 
     /// A timer of the process fired: the end of a run, when the tag is one. The run
     /// completes unless it no longer runs (it was stopped, or this is the end of a second
     /// launch of a run that already ended).
-    pub(super) fn timer(&mut self, tag: u64, io: &mut Io) {
+    pub(super) fn timer(&mut self, tag: u64, capacity: &Resources, io: &mut Io) {
+        if let Some((id, body)) = self.queued.remove(&tag) {
+            return self.act(id, &body, capacity, io);
+        }
         let fake = self.jobs.as_mut().is_some_and(|jobs| jobs.timer(tag, io));
         let real = self.real_jobs.as_mut().zip(self.agent.real_mut());
         let real = real.is_some_and(|(jobs, real)| jobs.timer(tag, real, io));
@@ -413,6 +440,9 @@ impl Process {
         if beat.is_some() {
             self.reconnect();
             self.beat_answered(answer, spec, io);
+            // The next heartbeat is an interval after the answer, unless the session ended.
+            let interval = self.session.as_ref().map(|session| session.interval);
+            interval.into_iter().for_each(|wait| io.arm_tick(wait));
         }
     }
 
@@ -438,19 +468,15 @@ impl Process {
         self.hellos.insert(id, io.now);
     }
 
-    /// Tells the agent its connection dropped once for each heartbeat that is still not
-    /// answered now that the next one is due. The real lifecycle has no such call: it
-    /// learns nothing from a lost answer.
-    fn miss(&mut self, session: &mut Session) {
-        let missed = session.unanswered.values_mut().filter(|missed| !**missed);
-        for missed in missed {
-            *missed = true;
-            if let Some(agent) = self.agent.fake() {
-                agent.disconnect();
-            }
-            self.jobs.iter_mut().for_each(PerJob::disconnect);
-            self.disconnected = true;
+    /// Tells the agent its connection dropped: the heartbeat had no answer in
+    /// [`REQUEST_LIMIT`]. The real lifecycle has no such call: it learns nothing from a
+    /// lost answer.
+    fn timed_out(&mut self) {
+        if let Some(agent) = self.agent.fake() {
+            agent.disconnect();
         }
+        self.jobs.iter_mut().for_each(PerJob::disconnect);
+        self.disconnected = true;
     }
 
     /// Sends the next heartbeat. The real lifecycle takes a step first, as the real agent
@@ -496,7 +522,7 @@ impl Process {
         // A wire type always encodes; were it not to, the empty body would be refused.
         let body = serde_json::to_string(&beat).unwrap_or_default();
         let id = io.call(Route::Heartbeat, &spec.join_token, body);
-        session.unanswered.insert(id, false);
+        session.in_flight = Some(id);
         if let Some(jobs) = self.jobs.as_mut() {
             jobs.sent(id, listing.clone(), io);
         }
@@ -568,7 +594,7 @@ impl Process {
             secret: welcome.session,
             interval,
             seq: 0,
-            unanswered: BTreeMap::new(),
+            in_flight: None,
             accepted: false,
         });
         io.arm_tick(interval);
@@ -576,7 +602,7 @@ impl Process {
 
     fn beat_answered(&mut self, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
-            200 => self.act(answer.id, &answer.body, &spec.capacity, io),
+            200 => self.read(answer.id, answer.body, &spec.capacity, io),
             409 => {
                 if is_code(&answer.body, refusal::UNKNOWN_HOST) {
                     io.bump(Counter::UnknownHost);
@@ -596,6 +622,19 @@ impl Process {
             self.hello(spec, io);
         }
         io.arm_tick(spec.hello_interval);
+    }
+
+    /// Hands a 200 reply to the worker: it acts on it now when it has no lag, else once it
+    /// is done with the replies before this one and has taken its lag.
+    fn read(&mut self, id: CallId, body: String, capacity: &Resources, io: &mut Io) {
+        if self.lag.is_zero() {
+            return self.act(id, &body, capacity, io);
+        }
+        let start = self.busy_until.max(io.now);
+        self.busy_until = start.saturating_add(self.lag);
+        let wait = self.busy_until.as_millis() - io.now.as_millis();
+        let tag = io.timer(Duration::from_millis(wait));
+        self.queued.insert(tag, (id, body));
     }
 
     /// Acts on a heartbeat reply: its `exclusive` first, when it passes the wire's check,

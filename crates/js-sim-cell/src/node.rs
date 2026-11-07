@@ -73,10 +73,6 @@ impl Node for CellNode {
         bus::trace_msg(msg)
     }
 
-    fn may_overtake(msg: &Msg) -> bool {
-        bus::may_overtake(msg)
-    }
-
     fn take_outputs(&mut self) -> Vec<Output<Msg>> {
         match self {
             CellNode::Server(server) => server.take_outputs(),

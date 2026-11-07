@@ -1,14 +1,13 @@
 //! The fault family: what goes wrong between the server and its hosts. Agents that die
 //! and return, agents that never return, a partition longer than the grace that heals,
 //! a lossy wire, a host that goes silent holding a run the server never saw listed, a
-//! start that arrives after its stop, a restart of the server, and a host forgotten and
-//! seated again. Each runs over sixteen seeds (the 200-host scenario over four) under every invariant of `Invariant::ALL`
+//! restart of the server, and a host forgotten and seated again. Each runs over sixteen seeds (the 200-host scenario over four) under every invariant of `Invariant::ALL`
 //! (the step invariants after every step, the end invariants once it has settled), and
 //! states in its doc comment the row of the design (sections 7 and 8) it covers.
 //!
 //! Each states only what the server does today and the design also promises; none pins
 //! a behaviour that section 8 marks Open. A scenario about a situation shows with a
-//! witness that the situation happened in some seed, and three negative cases run a
+//! witness that the situation happened in some seed, and two negative cases run a
 //! scenario with agents that lack the behaviour it relies on and show it fails.
 //!
 //! Sizes, in agent requests a seed (heartbeats, with the hellos besides), each at most
@@ -22,7 +21,6 @@
 //! - the lossy wire: [`LOSSY_HOSTS`] beating every 5 s for [`LOSSY_FOR`] plus
 //!   [`LOSSY_SETTLE`], 900 s, make 3,600;
 //! - the silent host: [`SILENT_HOSTS`] beating every 5 s for about 340 s make 2,040;
-//! - the stale start: [`STALE_HOSTS`] beating every second for about 150 s make 1,200;
 //! - the restart: about 3,840 (`cell/server_restart.rs`);
 //! - the forgotten host: [`FORGET_HOSTS`] beating every 5 s for about 340 s make 680.
 
@@ -34,8 +32,8 @@ use std::time::Duration;
 use js_conformance::agent::Defect;
 use js_sim::{Chance, Faults};
 use js_sim_cell::actions::{
-    Agents, agents, cancel_work, drawn_agents, items, kill_agents, kill_agents_for_good,
-    partition_agents, replace_agents, set_bus_faults, submit_work,
+    Agents, agents, drawn_agents, kill_agents, kill_agents_for_good, partition_agents,
+    replace_agents, set_bus_faults, submit_work,
 };
 use js_sim_cell::{
     Counter, Expect, HostIs, HowEnded, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape,
@@ -95,8 +93,9 @@ const CUT_FOR: Duration = Duration::from_secs(30);
 const CUT_SETTLE: Duration = Duration::from_secs(300);
 
 /// The lossy wire: a fifth of the messages lost and the rest delayed by up to 3 s each
-/// way, so a reply can arrive after the next heartbeat left; runs shorter than the 5 s
-/// interval; a grace of 60 s, so loss alone never holds a host lost.
+/// way; a worker that takes 7 s to act on a reply, longer than the 5 s interval, so the
+/// next heartbeat leaves before it has acted on a start and does not list the job; runs
+/// shorter than the interval; a grace of 60 s, so loss alone never holds a host lost.
 const LOSSY_HOSTS: usize = 20;
 const LOSSY_RUNS: u32 = 200;
 const LOSSY_RUN: Duration = Duration::from_secs(2);
@@ -104,6 +103,7 @@ const LOSSY_INTERVAL: Duration = Duration::from_secs(5);
 const LOSSY_GRACE: Duration = Duration::from_secs(60);
 const LOSSY_DROP_PERCENT: u32 = 20;
 const LOSSY_MAX_DELAY: Duration = Duration::from_secs(3);
+const LOSSY_WORKER_LAG: Duration = Duration::from_secs(7);
 const LOSSY_FOR: Duration = Duration::from_secs(600);
 const LOSSY_SETTLE: Duration = Duration::from_secs(300);
 
@@ -117,24 +117,6 @@ const SILENT_CUT: usize = 10;
 const SILENT_CUT_AT: Duration = Duration::from_secs(7);
 const SILENT_CUT_FOR: Duration = Duration::from_secs(30);
 const SILENT_SETTLE: Duration = Duration::from_secs(300);
-
-/// The stale start: hosts beat every second; every item is cancelled while its start is
-/// on the way, on a bus that delays a message by more than the interval and lets a later
-/// one overtake it, so a start can arrive after the stop that follows it. The grace of
-/// 6 s keeps a delayed host from being held lost.
-const STALE_HOSTS: usize = 8;
-const STALE_INTERVAL: Duration = Duration::from_secs(1);
-const STALE_GRACE: Duration = Duration::from_secs(6);
-const STALE_RUNS: u32 = 16;
-const STALE_RUN: Duration = Duration::from_secs(30);
-const STALE_GIVE_UP: Duration = Duration::from_secs(300);
-const STALE_FAULTS_AT: Duration = Duration::from_secs(2);
-const STALE_MIN_DELAY: Duration = Duration::from_millis(1_000);
-const STALE_MAX_DELAY: Duration = Duration::from_millis(4_000);
-const STALE_REORDER_PERCENT: u32 = 100;
-const STALE_CANCEL_AT: Duration = Duration::from_millis(6_500);
-const STALE_QUIET_AT: Duration = Duration::from_secs(30);
-const STALE_SETTLE: Duration = Duration::from_secs(120);
 
 /// The forgotten host: three of ten agents cut, once their runs are done, for longer than
 /// the grace and the pool's `lost_retention` together, then healed; a second batch of one
@@ -194,6 +176,7 @@ fn lossy(defect: Option<Defect>) -> Scenario {
     let scenario = Scenario::new("a_lossy_wire_launches_every_run_once")
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
+        .worker_lag(LOSSY_WORKER_LAG)
         .bus(lossy);
     hosts(scenario, LOSSY_HOSTS, defect)
         .work(LOSSY_RUNS, one_per_host(LOSSY_RUN))
@@ -201,30 +184,6 @@ fn lossy(defect: Option<Defect>) -> Scenario {
         .expect(Expect::all_items_terminal())
         .witness("start_repeated", |c| c.get(Counter::StartRepeated) >= 1)
         .settle_within(LOSSY_SETTLE)
-}
-
-/// The stale-start scenario, with agents that lack `defect`, or correct ones.
-fn stale_start(defect: Option<Defect>) -> Scenario {
-    let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), STALE_HOSTS)
-        .heartbeat(STALE_INTERVAL, STALE_GRACE);
-    let late = Faults {
-        min_delay: STALE_MIN_DELAY,
-        max_delay: STALE_MAX_DELAY,
-        reorder: Chance::percent(STALE_REORDER_PERCENT),
-        ..Faults::default()
-    };
-    let work = one_per_host(STALE_RUN).give_up_after(STALE_GIVE_UP);
-    let scenario = Scenario::new("a_stale_start_after_a_stop_does_not_run")
-        .scratch(env!("CARGO_TARGET_TMPDIR"))
-        .server(spec);
-    hosts(scenario, STALE_HOSTS, defect)
-        .work(STALE_RUNS, work)
-        .at(STALE_FAULTS_AT, set_bus_faults(late))
-        .at(STALE_CANCEL_AT, cancel_work(items(0..STALE_RUNS)))
-        .at(STALE_QUIET_AT, set_bus_faults(Faults::default()))
-        .expect(Expect::all_items_terminal())
-        .witness("start_after_stop", |c| c.get(Counter::StartAfterStop) >= 1)
-        .settle_within(STALE_SETTLE)
 }
 
 /// Runs `scenario` over [`SEEDS`] and fails unless a seed breaks `invariant`: the
@@ -356,8 +315,8 @@ fn a_thirty_second_partition_of_twenty_agents_loses_no_result() {
 /// the agents and the server are lost and the rest delayed by up to 3 s each way for the
 /// first 600 s, with runs of 2 s, shorter than the 5 s heartbeat interval. Proves that
 /// every run is launched once (`at-most-one-launch`) and every item settles. The witness
-/// shows the server sent a start again to a host that already had it: a reply carrying a
-/// start arrived after the next heartbeat had left without the run. Red for an agent that
+/// shows the server sent a start again to a host that already had it: the heartbeat that
+/// left while the worker had not yet acted on a start did not list the run. Red for an agent that
 /// runs a repeated start (the negative case below), and for a server that starts a run
 /// again on a resent result or listing (`at-most-one-launch`).
 #[test]
@@ -393,19 +352,6 @@ fn a_silent_host_is_never_given_a_second_copy_of_its_run() {
         })
         .settle_within(SILENT_SETTLE)
         .run_seeds(SEEDS);
-}
-
-/// Covers section 7 ("Stop of an unknown job": its id is retired, so a later start does
-/// not run). Every item is cancelled while its start is still on the way, on a bus that
-/// delays a message past the 1 s heartbeat interval and lets a later message overtake
-/// an earlier one (a request retried over a second connection), so a start can reach
-/// its agent after the stop that follows it. Proves that the late start does not run
-/// (`at-most-one-launch`) and that every item settles. The witness shows a start arrived
-/// after its stop in some seed. Red for an agent that does not retire a stopped run's id
-/// (the negative case below).
-#[test]
-fn a_stale_start_after_a_stop_does_not_run() {
-    stale_start(None).run_seeds(SEEDS);
 }
 
 /// Covers section 8, row 3 and section 6.7 (restart recovery); the scenario and what it
@@ -453,18 +399,6 @@ fn a_forgotten_host_that_comes_back_is_seated_once() {
         .run_seeds(SEEDS);
 }
 
-/// Asserts that the stale-start scenario fails `at-most-one-launch` when its agents do not
-/// retire a stopped job's id (`ForgetsRetiredIds`): the start that arrives after its stop
-/// runs. With `a_stale_start_after_a_stop_does_not_run`, whose witness shows such a start
-/// arrived, it shows the scenario can fail.
-#[test]
-fn a_defective_agent_that_forgets_retired_ids_fails_scenario_six() {
-    should_fail(
-        &stale_start(Some(Defect::ForgetsRetiredIds)),
-        Invariant::AtMostOneLaunch,
-    );
-}
-
 /// Asserts that the partition scenario fails `result-kept-until-acknowledged` when the cut
 /// agents forget an unacknowledged result when their connection drops
 /// (`ForgetsUnackedResult`; the agent node tells its agent the connection dropped for every
@@ -480,7 +414,8 @@ fn a_defective_agent_that_forgets_unacked_results_fails_scenario_three() {
 
 /// Asserts that the lossy-wire scenario fails `at-most-one-launch` when its agents run a
 /// repeated start (`StartRunsTwice`): the start the server sends again, because the
-/// reply that carried it arrived after the next heartbeat had left, runs a second time.
+/// heartbeat that left before the worker acted on it did not list the run, runs a second
+/// time.
 /// With `a_lossy_wire_launches_every_run_once`, whose witness shows such a start arrived,
 /// it shows the scenario can fail.
 #[test]

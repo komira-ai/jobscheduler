@@ -23,7 +23,7 @@ fn phases(sim: &Sim<Cell>) -> Vec<(Phase, Option<String>)> {
 }
 
 /// An agent whose prepare takes 1.5 s is told of lease `1-1` by the answer to heartbeat
-/// 1 (at 1 020). Heartbeat 2 (2 010) says `preparing`; heartbeat 3 (3 010), past the
+/// 1 (at 1 020). Heartbeat 2 (2 020) says `preparing`; heartbeat 3 (3 030), past the
 /// delay and holding nothing, says `serving` with `exclusive_ready: "1-1"`, and so do
 /// heartbeats 4 and 5 while the answers name the lease. The lease's start in answer 3 is
 /// launched. Answer 5 names no lease and stops the run (and cancels a run the agent never
@@ -67,20 +67,20 @@ fn the_agent_node_prepares_reports_ready_and_restores_through_its_heartbeats() {
         .map(|r| (r.host.as_str().to_owned(), r.lease, r.at.as_millis()))
         .collect();
     let one = |at| ("h000".to_owned(), "1-1".to_owned(), at);
-    assert_eq!(reports, [one(3_010), one(4_010), one(5_010)]);
-    assert_eq!(launches(&ledger), [("r1".to_owned(), 3_020)]);
+    assert_eq!(reports, [one(3_030), one(4_040), one(5_050)]);
+    assert_eq!(launches(&ledger), [("r1".to_owned(), 3_040)]);
     let starts = ledger.starts();
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0].run, RunId::new("r1"));
     assert_eq!(starts[0].lease, LeaseId::new(1, 1));
-    assert_eq!((starts[0].at, starts[0].asked_at), (ms(3_020), ms(3_010)));
+    assert_eq!((starts[0].at, starts[0].asked_at), (ms(3_040), ms(3_030)));
     assert_eq!(starts[0].wall, Duration::from_millis(600_000));
     let stops = ledger.stops();
     assert_eq!(stops.len(), 1, "only the stop of the running run");
     assert_eq!(stops[0].run, RunId::new("r1"));
     assert_eq!(stops[0].command, StopCommand::Stop);
-    assert_eq!(stops[0].at, ms(5_020));
-    assert_eq!(stops[0].wall_ends_at, ms(3_020 + 600_000));
+    assert_eq!(stops[0].at, ms(5_060));
+    assert_eq!(stops[0].wall_ends_at, ms(3_040 + 600_000));
 }
 
 /// A silent agent is told of lease `1-1` by answer 1, which also carries a start of that

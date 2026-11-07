@@ -20,7 +20,7 @@
 //! | an acknowledgement of a result | [`AgentHarness::ack`]`(run)` |
 //! | the run's own time ran out | [`AgentHarness::complete`]`(run)` |
 //! | a heartbeat is sent | [`AgentHarness::heartbeat`] |
-//! | a heartbeat had no answer when the next one was due | [`AgentHarness::disconnect`] |
+//! | a heartbeat had no answer in [`js_agent::REQUEST_LIMIT`] | [`AgentHarness::disconnect`] |
 //! | the next answer to any call | [`AgentHarness::reconnect`] |
 //! | a heartbeat is answered 200 | [`AgentHarness::contact`] |
 //!
@@ -52,8 +52,13 @@
 //! A process says hello at once and then every [`AgentSpec::hello_interval`] until it is
 //! welcomed. A 429 answer is followed by a hello after the `Retry-After` it names (at most
 //! [`RETRY_AFTER_CAP`]); any other refusal by the next one an interval later. Once
-//! welcomed it sends a heartbeat every interval the welcome names, whether or not the
-//! previous one was answered, and acts on an answer whenever it comes. A 409 answer to a
+//! welcomed it has one heartbeat in flight at a time, as the real agent has: it sends the
+//! next an interval after the answer to the last, and gives a call [`js_agent::REQUEST_LIMIT`]
+//! (10 s). A call with no answer by then has failed: the agent is told its connection
+//! dropped, waits the shortest backoff of the real agent ([`js_agent::BASE`], 1 s) and sends
+//! the next, and an answer to the failed call that comes later is dropped unread. A 200
+//! reply is acted on when its worker has taken [`AgentSpec::worker_lag`] (zero: at once).
+//! A 409 answer to a
 //! heartbeat (`stale-epoch`, `unknown-host`, `host-lost`) or a 403 `session-mismatch`
 //! ends the session: the agent says hello again at once when a heartbeat of the session
 //! was answered 200, and an interval later otherwise, so a server that welcomes and at
@@ -127,8 +132,7 @@
 //! an answer acknowledges them, with a second [`FakeAgent`], keyed by job id, as the
 //! engine (module `per_job`). A real agent's node does too, with the lifecycle's own per-job
 //! half as the engine (module `real_jobs`); the cell writes down what it carries as it does
-//! for the fake. An agent's heartbeat request is never overtaken by a later one on the bus
-//! ([`crate::bus::may_overtake`]).
+//! for the fake.
 //!
 //! The node reads no clock and no random source: time arrives in each
 //! [`js_sim::NodeInput`].
@@ -206,6 +210,13 @@ pub struct AgentSpec {
     /// one-time join token is bound to; `None` for a host that joins with the pool's
     /// shared token.
     pub instance: Option<InstanceIdentity>,
+    /// How long the agent's worker takes to act on a reply it read. The real agent hands
+    /// each reply to a worker thread through a queue and does not wait for it: a worker held
+    /// in a slow runtime call has not yet acted on the start of a reply when the next
+    /// heartbeat leaves, so that heartbeat does not list the job and the server sends the
+    /// start again. The cell's agent reads a 200 reply, goes on with its session at once, and
+    /// acts on the reply this long after, after the replies read before it (zero: at once).
+    pub worker_lag: Duration,
 }
 
 /// One host of the cell with its agent process.
@@ -323,7 +334,7 @@ impl AgentNode {
         if self.io.tick == Some(tag) {
             self.on_tick();
         } else if let Some(process) = self.process.as_mut() {
-            process.timer(tag, &mut self.io);
+            process.timer(tag, &self.spec.capacity, &mut self.io);
         }
     }
 

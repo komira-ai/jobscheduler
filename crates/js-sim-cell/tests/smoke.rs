@@ -3,7 +3,7 @@
 //! invariant of `Invariant::ALL` (the step invariants after every step, the end
 //! invariants once each scenario has settled); and the two negative cases of the per-job
 //! agents, each with its correct twin, on the smoke shape of the broken-agent family (runs
-//! shorter than the heartbeat on a bus slower than it). The scenarios are in
+//! shorter than the heartbeat, workers slower than it, and a bus that loses messages). The scenarios are in
 //! `cell/burst.rs`, `cell/lossy_wire.rs` and `cell/partition.rs`, which the sweep
 //! (`tests/sweep.rs`) runs too over many more seeds.
 //!
@@ -29,7 +29,8 @@ mod partition;
 use std::time::Duration;
 
 use js_conformance::agent::Defect;
-use js_sim::Faults;
+use js_sim::{Chance, Faults};
+use js_sim_cell::actions::set_bus_faults;
 use js_sim_cell::{Counter, Expect, Invariant, Scenario, ScenarioFailure, ServerSpec, Shape, Work};
 
 /// The hundred hosts' seeds.
@@ -41,15 +42,19 @@ const LOSSY_SEEDS: u64 = 8;
 /// The partition's seeds.
 const CUT_SEEDS: u64 = 8;
 
-/// The broken-agent family's world: two hosts beating every second, a grace of 3 s, four
-/// runs of 200 ms, and a bus that delays every message 1.5 s, longer than the interval.
+/// The broken-agent family's world: two hosts beating every second, four runs of 200 ms,
+/// workers that take 1.5 s to act on a reply, longer than the interval, and a bus that loses
+/// 30% of the messages, so that a call is now and then given up after the request limit (a
+/// grace of 60 s keeps the host from being held lost meanwhile).
 const REPEAT_HOSTS: usize = 2;
 const REPEAT_RUNS: u32 = 4;
 const REPEAT_RUN: Duration = Duration::from_millis(200);
-const REPEAT_DELAY: Duration = Duration::from_millis(1_500);
+const REPEAT_WORKER_LAG: Duration = Duration::from_millis(1_500);
+const REPEAT_DROP_PERCENT: u32 = 30;
 const REPEAT_INTERVAL: Duration = Duration::from_secs(1);
-const REPEAT_GRACE: Duration = Duration::from_secs(3);
+const REPEAT_GRACE: Duration = Duration::from_secs(60);
 const REPEAT_SETTLE: Duration = Duration::from_secs(120);
+const REPEAT_QUIET_AT: Duration = Duration::from_secs(60);
 const REPEAT_SEEDS: u64 = 2;
 
 /// Proves the machine at size with no fault: 400 jobs of 300 s on a hundred hosts that
@@ -96,18 +101,19 @@ fn a_partition_of_ten_agents_that_heals_settles_every_run() {
 
 /// The broken-agent family's smoke shape: agents lacking `defect`, or
 /// correct ones, and every item expected terminal.
-fn slow_bus(name: &str, defect: Option<Defect>) -> Scenario {
+fn lagging_lossy(name: &str, defect: Option<Defect>) -> Scenario {
     let spec = ServerSpec::registered_pool("burst", Shape::gpu_host(), REPEAT_HOSTS)
         .heartbeat(REPEAT_INTERVAL, REPEAT_GRACE);
-    let slow = Faults {
-        min_delay: REPEAT_DELAY,
-        max_delay: REPEAT_DELAY,
+    let lossy = Faults {
+        drop: Chance::percent(REPEAT_DROP_PERCENT),
         ..Faults::default()
     };
     let scenario = Scenario::new(name)
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
-        .bus(slow)
+        .worker_lag(REPEAT_WORKER_LAG)
+        .bus(lossy)
+        .at(REPEAT_QUIET_AT, set_bus_faults(Faults::default()))
         .work(REPEAT_RUNS, Work::run_for(REPEAT_RUN))
         .expect(Expect::all_items_terminal())
         .settle_within(REPEAT_SETTLE);
@@ -138,24 +144,24 @@ fn violated(scenario: &Scenario) -> Invariant {
 #[test]
 fn a_defective_agent_that_drops_an_unacked_result_fails_result_kept_until_acknowledged() {
     let name = "a_defective_agent_that_drops_an_unacked_result";
-    let broken = slow_bus(name, Some(Defect::ForgetsUnackedResult));
+    let broken = lagging_lossy(name, Some(Defect::ForgetsUnackedResult));
     assert_eq!(violated(&broken), Invariant::ResultKeptUntilAcknowledged);
-    slow_bus(name, None)
+    lagging_lossy(name, None)
         .witness("result_resent", |c| c.get(Counter::ResultResent) >= 1)
         .run_seeds(REPEAT_SEEDS);
 }
 
 /// Proves the start half of the per-job agent: the server sends a job's start again while
-/// the agent's heartbeats that do not list the job are still on the slow bus; agents
+/// the agent's worker has not yet acted on it, so its heartbeats do not list the job; agents
 /// lacking `StartRunsTwice`'s fix launch the repeated start and fail `at-most-one-launch`,
 /// and correct agents pass with the witness `start_repeated` held. Catches an agent that
 /// relaunches a repeated job start, and a world in which no start is ever repeated.
 #[test]
 fn a_defective_agent_that_relaunches_a_repeated_jobstart_fails_at_most_one_launch() {
     let name = "a_defective_agent_that_relaunches_a_repeated_jobstart";
-    let broken = slow_bus(name, Some(Defect::StartRunsTwice));
+    let broken = lagging_lossy(name, Some(Defect::StartRunsTwice));
     assert_eq!(violated(&broken), Invariant::AtMostOneLaunch);
-    slow_bus(name, None)
+    lagging_lossy(name, None)
         .witness("start_repeated", |c| c.get(Counter::StartRepeated) >= 1)
         .run_seeds(REPEAT_SEEDS);
 }

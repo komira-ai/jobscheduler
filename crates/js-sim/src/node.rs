@@ -23,16 +23,6 @@ pub trait Node: StateMachine<Input = NodeInput<Self::Msg>> {
     /// same way in every process (no hashed collections inside) and hold no newline.
     fn trace_msg(msg: &Self::Msg) -> String;
 
-    /// Whether `msg` may overtake an earlier message on its link when the bus's
-    /// [`Faults::reorder`](crate::Faults::reorder) hits it. A message that may not arrives
-    /// after every earlier message of its link, whatever the chance: it models a call that
-    /// the node's own protocol keeps from being overtaken (one call in flight at a time).
-    /// The bus draws its random number for the message all the same, so the choice does not
-    /// move the draws of any other message. The default is that every message may.
-    fn may_overtake(_msg: &Self::Msg) -> bool {
-        true
-    }
-
     /// Takes the outputs queued by earlier `apply` calls, oldest first.
     fn take_outputs(&mut self) -> Vec<Output<Self::Msg>>;
 }

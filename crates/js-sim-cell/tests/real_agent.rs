@@ -4,9 +4,10 @@
 //!
 //! Every message takes the stand-in's `DELAY` (5 ms) and the welcome names [`INTERVAL`]
 //! (1 s), so the times below follow from the script: the hello leaves at 0 and is
-//! welcomed at 10, and heartbeat `n` of that session leaves at `10 + n * 1000`, reaches
-//! the stand-in 5 ms later, and its answer is back 5 ms after that. A start in the answer
-//! to heartbeat 1 is launched at 1 020.
+//! welcomed at 10, and the agent has one call in flight at a time and sends its next
+//! heartbeat an interval after the answer to the last, so heartbeat `n` of that session
+//! leaves at `n * 1010`, reaches the stand-in 5 ms later, and its answer is read 5 ms after
+//! that. A start in the answer to heartbeat 1 is launched at 1 020.
 //!
 //! Each test gives its agent a directory of its own, under which the agent makes its
 //! scratch and state roots.
@@ -71,6 +72,7 @@ fn spec(root: &TestDir) -> AgentSpec {
         hello_interval: INTERVAL,
         kind: AgentKind::Real(root.path().to_path_buf()),
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     }
 }
 
@@ -183,7 +185,7 @@ fn a_real_agent_registers_heartbeats_and_runs_a_start() {
     assert_eq!(hello.shape.cpu_millis, 8_000);
     assert_eq!(hello.shape.gpus, 1);
     assert!(server.received.iter().all(|call| call.bearer == JOIN));
-    assert_eq!(server.beat_times(), [1_015, 2_015, 3_015, 4_015, 5_015]);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 3_035, 4_045, 5_055]);
     let none = runs(&[]);
     let r1 = runs(&["r1"]);
     let carried = [&none, &none, &r1, &none, &none].map(Clone::clone);
@@ -224,7 +226,7 @@ fn a_real_agent_resends_an_unacknowledged_result_until_acknowledged() {
         .beat(3, BeatAnswer::Silent)
         .beat(4, acks(&[("r1", "SOMETHING_NEWER"), ("zz", "ACCEPTED")]))
         .beat(5, acks(&[("r1", "STALE")]));
-    let (sim, _) = run(&dir, script, 6_500);
+    let (sim, _) = run(&dir, script, 17_000);
     let none = runs(&[]);
     let r1 = runs(&["r1"]);
     let carried = [&none, &none, &r1, &r1, &r1, &none].map(Clone::clone);
@@ -269,7 +271,7 @@ fn a_real_agent_ignores_a_repeated_start_for_a_run_it_holds() {
 
 /// Two runs launch at 1 020. The process is killed at 2 012 and replaced at 4 500. The
 /// replacement has new roots (the killed process's are gone), holds nothing, says hello
-/// again at the node's next tick (5 010) with nothing held, is welcomed into a new session
+/// again at the node's next tick (5 020) with nothing held, is welcomed into a new session
 /// and beats with nothing to report; the end timers the dead process armed do nothing.
 /// The cell's ledger still shows both launches. Catches a real replacement that inherits
 /// its predecessor's runtime, roots or timers, and a ledger kept in the process.
@@ -300,12 +302,12 @@ fn a_real_agent_killed_and_replaced_lists_nothing_and_says_hello_again() {
     sim.run_until(ms(12_000));
 
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 5_015]);
+    assert_eq!(server.hello_times(), [5, 5_025]);
     assert!(server.hellos()[1].held.is_empty());
     let after: Vec<&js_agent_wire::Heartbeat> = server
         .beats()
         .into_iter()
-        .filter(|(at, _)| *at > 5_015)
+        .filter(|(at, _)| *at > 5_025)
         .map(|(_, beat)| beat)
         .collect();
     assert_eq!(after.len(), 6);
@@ -323,7 +325,7 @@ fn a_real_agent_killed_and_replaced_lists_nothing_and_says_hello_again() {
 }
 
 /// A 409 `unknown-host` to heartbeat 2, after heartbeat 1 was accepted, ends the session:
-/// the real agent says hello again at once (it reaches the stand-in at 2 025), listing the
+/// the real agent says hello again at once (it reaches the stand-in at 2 035), listing the
 /// run it holds, and beats in the new session one interval after its welcome. Catches a
 /// real node that keeps beating into a session the server lost, or a hello that does not
 /// list what the lifecycle holds.
@@ -339,8 +341,8 @@ fn a_real_agent_follows_unknown_host_with_a_hello() {
         .beat(2, refuse);
     let (sim, ledger) = run(&dir, script, 4_500);
     let server = stand_in(&sim);
-    assert_eq!(server.hello_times(), [5, 2_025]);
-    assert_eq!(server.beat_times(), [1_015, 2_015, 3_035, 4_035]);
+    assert_eq!(server.hello_times(), [5, 2_035]);
+    assert_eq!(server.beat_times(), [1_015, 2_025, 3_045, 4_055]);
     let sessions: Vec<(u64, String)> = server
         .beats()
         .iter()
@@ -423,11 +425,11 @@ fn a_real_agent_launches_no_start_while_it_prepares_and_its_stops_reach_the_ledg
     assert_eq!(phases, wanted);
     let started: Vec<RunId> = ledger.starts().into_iter().map(|s| s.run).collect();
     assert_eq!(started, [RunId::new("r1"), RunId::new("r2")]);
-    assert_eq!(launches(&ledger), [("r2".to_owned(), 3_020)]);
+    assert_eq!(launches(&ledger), [("r2".to_owned(), 3_040)]);
     assert_eq!(count(&sim, Counter::ReplyInvalid), 0);
     let stops = ledger.stops();
     assert_eq!(stops.len(), 1);
     assert_eq!(stops[0].run, RunId::new("r2"));
     assert_eq!(stops[0].command, StopCommand::Stop);
-    assert_eq!(stops[0].at, ms(4_020));
+    assert_eq!(stops[0].at, ms(4_050));
 }

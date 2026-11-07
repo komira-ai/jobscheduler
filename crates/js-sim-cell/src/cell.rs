@@ -183,6 +183,8 @@ pub struct Cell {
     /// The cell's directory, where each real agent makes its own.
     dir: PathBuf,
     agents: usize,
+    /// The worker lag of the agents added from now on.
+    worker_lag: Duration,
     script: BTreeMap<(FarmTime, u64), Action>,
     scripted: u64,
     client: Client,
@@ -250,6 +252,7 @@ impl Cell {
             spec,
             dir: path,
             agents: 0,
+            worker_lag: Duration::ZERO,
             script: BTreeMap::new(),
             scripted: 0,
             client,
@@ -268,6 +271,12 @@ impl Cell {
         };
         cell.set_faults(faults);
         Ok(cell)
+    }
+
+    /// Makes the agents added from now on take `lag` to act on a reply they read
+    /// ([`crate::AgentSpec::worker_lag`]).
+    pub fn set_worker_lag(&mut self, lag: Duration) {
+        self.worker_lag = lag;
     }
 
     /// Adds the next agent, `h000` first, with a correct agent process.
@@ -321,6 +330,7 @@ impl Cell {
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
+            worker_lag: self.worker_lag,
             kind,
             instance,
         };

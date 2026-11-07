@@ -60,7 +60,7 @@ const RUN_HORIZON_MS: u64 = 60_000;
 const RESEND_HOSTS: usize = 1;
 const RESEND_INTERVAL: Duration = Duration::from_secs(1);
 const RESEND_GRACE: Duration = Duration::from_secs(3);
-const RESEND_DELAY: Duration = Duration::from_millis(1_500);
+const RESEND_WORKER_LAG: Duration = Duration::from_millis(1_500);
 const RESEND_RUN_MS: u64 = 200;
 const RESEND_HORIZON_MS: u64 = 40_000;
 
@@ -239,7 +239,7 @@ fn a_job_made_through_the_job_router_is_started_once_and_its_result_is_acknowled
 
 /// Asserts that a job shorter than the heartbeat interval, on a bus slower than the
 /// interval, is started again by the real server (design section 8, row 31: the heartbeat
-/// that leaves before the start arrives does not list the run), that a correct agent
+/// that leaves before the worker acted on the start does not list the run), that a correct agent
 /// counts the repeated start and launches the run once, and that an agent that runs a
 /// repeated start fails `AtMostOneLaunch`. The first half is the witness that the second
 /// can fail. Catches a correct agent that launches a repeated start, and a cell that does
@@ -249,12 +249,9 @@ fn the_server_sends_a_start_again_to_a_host_that_already_ran_it_and_a_correct_ag
  {
     let outcome = |defect: Option<Defect>| {
         let spec = pool(RESEND_HOSTS).heartbeat(RESEND_INTERVAL, RESEND_GRACE);
-        let faults = Faults {
-            min_delay: RESEND_DELAY,
-            max_delay: RESEND_DELAY,
-            ..Faults::default()
-        };
+        let faults = Faults::default();
         let mut cell = Cell::new(Setup::new(11), spec, scratch("resend"), faults).expect("starts");
+        cell.set_worker_lag(RESEND_WORKER_LAG);
         let added = match defect {
             Some(defect) => cell.add_broken_agent(defect),
             None => cell.add_agent(),
@@ -402,6 +399,7 @@ fn the_server_node_ticks_on_its_period_and_answers_only_calls() {
         hello_interval: INTERVAL,
         kind: js_sim_cell::AgentKind::Fake(None),
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     };
     let mut agent = CellNode::Agent(Box::new(AgentNode::new(agent, Ledger::new())));
     assert!(agent.as_server().is_none() && agent.as_server_mut().is_none());

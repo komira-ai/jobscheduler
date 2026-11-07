@@ -41,6 +41,7 @@ fn spec(kind: AgentKind, per_job: Option<&str>) -> AgentSpec {
         hello_interval: Duration::from_secs(1),
         kind,
         instance: None,
+        worker_lag: std::time::Duration::ZERO,
     }
 }
 
