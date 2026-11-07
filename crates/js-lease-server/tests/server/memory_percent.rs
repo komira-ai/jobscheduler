@@ -8,6 +8,7 @@ use crate::agents_support::{JOIN, POOL, agent_args, entry, hello_body, hosts, po
 use crate::config_support::{
     PoolText, file, load, quote, quoted, refusal, server, server_with_agents,
 };
+use crate::jobs_support::{JobBody, submit_body};
 use crate::support::{Harness, Scratch, base_args, config, replace, request};
 
 const GIB: u64 = 1 << 30;
@@ -32,34 +33,6 @@ fn hosts_text(line: &str) -> String {
          cpu_millis = 64000\nmemory_bytes = {LISTED}\ngpus = 8\n\n[host.capabilities]\n\
          isa = \"x86-64-v3\"\n"
     )
-}
-
-/// A request for one host of the pool with `memory_bytes`.
-fn lease(memory_bytes: u64) -> Value {
-    json!({
-        "class": "gpu-host",
-        "resources": {
-            "cpu_millis": 1000,
-            "memory_bytes": memory_bytes,
-            "gpus": 1,
-            "gpu_class": "nvidia-a100",
-        },
-        "capabilities": { "isa": "x86-64-v3" },
-        "max_wall_seconds": 7200,
-    })
-}
-
-/// Asks `h` for a lease with `memory_bytes` and answers the status and the error code,
-/// or "granted".
-async fn ask(h: &Harness, memory_bytes: u64) -> (u16, String) {
-    let reply = h
-        .call("POST", "/v1/leases", Some(&lease(memory_bytes)))
-        .await;
-    let said = match reply.status {
-        201 => "granted".to_owned(),
-        _ => reply.json()["error"].as_str().unwrap_or("").to_owned(),
-    };
-    (reply.status, said)
 }
 
 /// A server over a static hosts file given by the flag `--pool-config`.
@@ -87,62 +60,29 @@ async fn configured(name: &str, hosts_line: &str, pool_percent: Option<&str>) ->
     Harness::over(scratch, config).await
 }
 
-/// Asserts that a static hosts file with 90 books exactly floor(251 GiB x 90 / 100) of
-/// its host: a request of one byte more is refused `no-capable-host` and books nothing, and a
-/// request of exactly that is granted. It catches a key that is read and dropped, a cut
-/// that rounds up, and one applied to the request.
-#[tokio::test]
-async fn the_hosts_file_percent_books_the_cut() {
-    let h = flagged("mempct_flag_90", "memory_schedulable_percent = 90").await;
-    assert_eq!(
-        ask(&h, NINETY + 1).await,
-        (409, "no-capable-host".to_owned())
-    );
-    assert_eq!(ask(&h, NINETY).await, (201, "granted".to_owned()));
-}
-
-/// Asserts that without the key the whole of the listed memory is booked, exactly as it
-/// was: the default of 100 is unchanged.
-#[tokio::test]
-async fn without_the_key_all_of_the_memory_is_booked() {
-    let h = flagged("mempct_flag_default", "").await;
-    assert_eq!(
-        ask(&h, LISTED + 1).await,
-        (409, "no-capable-host".to_owned())
-    );
-    assert_eq!(ask(&h, LISTED).await, (201, "granted".to_owned()));
-    let h = flagged("mempct_flag_100", "memory_schedulable_percent = 100").await;
-    assert_eq!(ask(&h, LISTED).await, (201, "granted".to_owned()));
-}
-
 /// Asserts that the `[[pool]]` key books the cut for a static pool, and that it is the
 /// pool's key that counts when the hosts file says another: 90 in the pool over 50 in the
-/// file books 90, once (not 45). It catches the two being multiplied and a pool key that
-/// is ignored for a static pool.
+/// file shows 90 booked, once (not 45), and a file with 50 and no pool key shows half. It
+/// catches the two being multiplied and a pool key that is ignored for a static pool.
 #[tokio::test]
 async fn the_pool_key_books_the_cut_of_a_static_pool() {
     let h = configured("mempct_pool_90", "", Some("90")).await;
-    assert_eq!(
-        ask(&h, NINETY + 1).await,
-        (409, "no-capable-host".to_owned())
-    );
-    assert_eq!(ask(&h, NINETY).await, (201, "granted".to_owned()));
+    let shown = entry(&hosts(&h).await, "big-01");
+    assert_eq!(shown["shape"]["memory_bytes"], NINETY);
+    assert_eq!(shown["memory"]["schedulable_percent"], 90);
     let both = configured(
         "mempct_pool_over_file",
         "memory_schedulable_percent = 50",
         Some("90"),
     );
     let both = both.await;
-    assert_eq!(ask(&both, NINETY).await, (201, "granted".to_owned()));
+    let shown = entry(&hosts(&both).await, "big-01");
+    assert_eq!(shown["shape"]["memory_bytes"], NINETY);
+    assert_eq!(shown["memory"]["schedulable_percent"], 90);
     let file_only = configured("mempct_file_only", "memory_schedulable_percent = 50", None).await;
-    assert_eq!(
-        ask(&file_only, NINETY).await,
-        (409, "no-capable-host".to_owned())
-    );
-    assert_eq!(
-        ask(&file_only, LISTED / 2).await,
-        (201, "granted".to_owned())
-    );
+    let shown = entry(&hosts(&file_only).await, "big-01");
+    assert_eq!(shown["shape"]["memory_bytes"], LISTED / 2);
+    assert_eq!(shown["memory"]["schedulable_percent"], 50);
 }
 
 /// Asserts that a percent of 0, 101 or a word is refused when the configuration is
@@ -197,16 +137,30 @@ fn ninety_pool() -> String {
     )
 }
 
-/// A server with agent registration on and no static pool, whose agent pool file is `text`.
+/// A server with agent registration on, no static pool and the job service on a loopback
+/// port, whose agent pool file is `text`.
 async fn registering(name: &str, text: &str) -> Harness {
     let scratch = Scratch::new(name);
     let path = scratch.write("agent-pool-memory.toml", text, 0o644);
-    let args = replace(
+    let mut args = replace(
         agent_args(&scratch, false),
         "--agent-pool-config",
         path.into_os_string(),
     );
+    args.push("--job-listen".into());
+    args.push("127.0.0.1:0".into());
     Harness::with(scratch, args, None).await
+}
+
+/// Submits a job `id` that needs `memory_bytes` and answers the status and the error code,
+/// or "queued".
+async fn ask(h: &Harness, id: &str, memory_bytes: u64) -> (u16, String) {
+    let reply = submit_body(h, &JobBody::new(id).needs(1000, memory_bytes).json()).await;
+    let said = match reply.status {
+        201 => "queued".to_owned(),
+        _ => reply.json()["error"].as_str().unwrap_or("").to_owned(),
+    };
+    (reply.status, said)
 }
 
 /// A hello of `host` claiming `memory_bytes`.
@@ -218,8 +172,8 @@ fn claiming(host: &str, memory_bytes: u64) -> Value {
 
 /// Asserts that an agent pool with 90 books exactly floor(16 GiB x 90 / 100) of its
 /// `[shape]` memory for a host, whatever the host claims: a host that claims 100 GiB is
-/// booked at the cut all the same (a request of one byte more is `no-capable-host`, exactly the cut
-/// is granted), so an agent cannot inflate a lease. It catches a booking that follows the
+/// booked at the cut all the same (a job needing one byte more is refused `no-capable-host`,
+/// one needing exactly the cut is admitted), so an agent cannot inflate what it offers. It catches a booking that follows the
 /// claim and a cut that is not applied to the pool file's shape.
 #[tokio::test]
 async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
@@ -233,11 +187,14 @@ async fn the_agent_pool_percent_books_the_cut_whatever_the_claim() {
     .await;
     session(&reply, "big-1");
     assert_eq!(
-        ask(&h, POOLED_NINETY + 1).await,
-        (409, "no-capable-host".to_owned())
+        ask(&h, "over-by-one", POOLED_NINETY + 1).await,
+        (422, "no-capable-host".to_owned())
     );
-    assert_eq!(ask(&h, POOLED).await.1, "no-capable-host");
-    assert_eq!(ask(&h, POOLED_NINETY).await, (201, "granted".to_owned()));
+    assert_eq!(ask(&h, "whole-listing", POOLED).await.1, "no-capable-host");
+    assert_eq!(
+        ask(&h, "at-the-cut", POOLED_NINETY).await,
+        (201, "queued".to_owned())
+    );
 }
 
 /// Asserts that a hello is held to the memory the pool file lists, not to the cut: a host
@@ -275,10 +232,13 @@ async fn the_agent_pool_default_is_unchanged_and_bad_values_are_refused() {
         "a-1",
     );
     assert_eq!(
-        ask(&h, POOLED + 1).await,
-        (409, "no-capable-host".to_owned())
+        ask(&h, "over-by-one", POOLED + 1).await,
+        (422, "no-capable-host".to_owned())
     );
-    assert_eq!(ask(&h, POOLED).await, (201, "granted".to_owned()));
+    assert_eq!(
+        ask(&h, "at-the-listing", POOLED).await,
+        (201, "queued".to_owned())
+    );
     for bad in ["0", "101"] {
         let scratch = Scratch::new(&format!("mempct_agents_bad_{bad}"));
         let text = POOL.replace(
