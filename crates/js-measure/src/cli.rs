@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use js_client::ClientError;
 
 use crate::clock::{Clock, SystemClock};
@@ -41,51 +41,60 @@ pub enum Command {
     },
     /// Runs a plan and appends its records to `records.jsonl`, `jobs.jsonl` and
     /// `minutes.jsonl` in `--out`.
-    Run {
-        /// The plan file (JSON).
-        #[arg(long)]
-        plan: PathBuf,
-        /// The workload file (JSON).
-        #[arg(long)]
-        workload: PathBuf,
-        /// The directory the three files go in; made if it is missing.
-        #[arg(long)]
-        out: PathBuf,
-        /// The code commit under test; written to every record.
-        #[arg(long)]
-        commit: String,
-        /// Milliseconds between polls of the farm.
-        #[arg(long, default_value_t = 1000)]
-        poll_ms: u64,
-        /// Seconds after which a run's open jobs are given up.
-        #[arg(long, default_value_t = 3600)]
-        deadline_secs: u64,
-        /// A program run as `<program> <parameter> <setting> <arm> control|treatment` before each run.
-        #[arg(long)]
-        apply_command: Option<String>,
-        /// Run against a lease server (needs `--server` and `--token-file`); without it
-        /// the run is against a simulated farm and measures nothing real.
-        #[arg(long, requires_all = ["server", "token_file"])]
-        live: bool,
-        /// The lease server, `https://host:port` (`http://` on the loopback only).
-        #[arg(long, requires = "live")]
-        server: Option<String>,
-        /// The owner-only file holding the client token.
-        #[arg(long, requires = "live")]
-        token_file: Option<PathBuf>,
-        /// A PEM file to trust for `https://`.
-        #[arg(long, requires = "live")]
-        ca_cert: Option<PathBuf>,
-        /// Hosts of the simulated farm.
-        #[arg(long, default_value_t = 2)]
-        fake_hosts: usize,
-    },
+    Run(Box<RunCommand>),
     /// Groups a records file by setting and arm and prints the groups.
     Summary {
         /// A `records.jsonl`.
         #[arg(long)]
         records: PathBuf,
     },
+}
+
+/// What `run` takes.
+#[derive(Debug, Args)]
+pub struct RunCommand {
+    /// The plan file (JSON).
+    #[arg(long)]
+    plan: PathBuf,
+    /// The workload file (JSON).
+    #[arg(long)]
+    workload: PathBuf,
+    /// The directory the three files go in; made if it is missing.
+    #[arg(long)]
+    out: PathBuf,
+    /// The code commit under test; written to every record.
+    #[arg(long)]
+    commit: String,
+    /// Milliseconds between polls of the farm.
+    #[arg(long, default_value_t = 1000)]
+    poll_ms: u64,
+    /// Seconds after which a run's open jobs are given up.
+    #[arg(long, default_value_t = 3600)]
+    deadline_secs: u64,
+    /// A program run as `<program> <parameter> <setting> <arm> control|treatment` before each run.
+    #[arg(long)]
+    apply_command: Option<String>,
+    /// Run against a server (needs `--server`, `--job-server` and `--token-file`);
+    /// without it the run is against a simulated farm and measures nothing real.
+    #[arg(long, requires_all = ["server", "job_server", "token_file"])]
+    live: bool,
+    /// The server's main address, `https://host:port` (`http://` on the loopback only):
+    /// the host list and the usage rows are read from it.
+    #[arg(long, requires = "live")]
+    server: Option<String>,
+    /// The server's job address (its `--job-listen`), in the same form: jobs are
+    /// submitted, read and cancelled there.
+    #[arg(long, requires = "live")]
+    job_server: Option<String>,
+    /// The owner-only file holding the client token.
+    #[arg(long, requires = "live")]
+    token_file: Option<PathBuf>,
+    /// A PEM file to trust for `https://`.
+    #[arg(long, requires = "live")]
+    ca_cert: Option<PathBuf>,
+    /// Hosts of the simulated farm.
+    #[arg(long, default_value_t = 2)]
+    fake_hosts: usize,
 }
 
 /// Why a command failed.
@@ -160,20 +169,22 @@ pub fn execute(command: Command, out: &mut dyn Write) -> Result<(), CliError> {
     match command {
         Command::Schedule { plan } => schedule(&plan, out),
         Command::Summary { records } => summary(&records, out),
-        Command::Run {
-            plan,
-            workload,
-            out: dir,
-            commit,
-            poll_ms,
-            deadline_secs,
-            apply_command,
-            live,
-            server,
-            token_file,
-            ca_cert,
-            fake_hosts,
-        } => {
+        Command::Run(run) => {
+            let RunCommand {
+                plan,
+                workload,
+                out: dir,
+                commit,
+                poll_ms,
+                deadline_secs,
+                apply_command,
+                live,
+                server,
+                job_server,
+                token_file,
+                ca_cert,
+                fake_hosts,
+            } = *run;
             let deadline_ms = deadline_secs.checked_mul(1000).ok_or_else(|| {
                 CliError::Usage(format!("--deadline-secs {deadline_secs} is too large"))
             })?;
@@ -189,9 +200,9 @@ pub fn execute(command: Command, out: &mut dyn Write) -> Result<(), CliError> {
                 Some(program) => Box::new(CommandSetter { program }),
                 None => Box::new(NoSetter),
             };
-            match (live, server, token_file) {
-                (true, Some(server), Some(token)) => {
-                    let farm = HttpFarm::connect(&server, &token, ca_cert.as_deref())?;
+            match (live, server, job_server, token_file) {
+                (true, Some(server), Some(job_server), Some(token)) => {
+                    let farm = HttpFarm::connect(&server, &job_server, &token, ca_cert.as_deref())?;
                     job.run(&farm, &SystemClock, setter.as_ref(), out)
                 }
                 _ => {

@@ -25,14 +25,15 @@ pub mod name {
     /// the run. 0 when there are none.
     pub const REPORTS_MISSING: &str = "reports_missing";
     /// Mean over jobs of the wait from the job's planned submit time to the first poll that
-    /// saw its run running (good to two poll intervals).
+    /// saw it running (good to two poll intervals).
     pub const QUEUE_WAIT_MS_MEAN: &str = "queue_wait_ms_mean";
     /// Largest of the same.
     pub const QUEUE_WAIT_MS_MAX: &str = "queue_wait_ms_max";
-    /// Mean over jobs of the time from sending the lease request to holding the lease.
-    pub const REQUEST_TO_TOKEN_MS_MEAN: &str = "request_to_token_ms_mean";
+    /// Mean over jobs of the time from the submit to the first poll that saw the job with a
+    /// host.
+    pub const SUBMIT_TO_PLACED_MS_MEAN: &str = "submit_to_placed_ms_mean";
     /// Largest of the same.
-    pub const REQUEST_TO_TOKEN_MS_MAX: &str = "request_to_token_ms_max";
+    pub const SUBMIT_TO_PLACED_MS_MAX: &str = "submit_to_placed_ms_max";
     /// Mean over the host-minutes of the run window of a host's CPU in use, as a share of
     /// the host's CPU shape.
     pub const HOST_CPU_SHARE_MEAN: &str = "host_cpu_share_mean";
@@ -42,11 +43,6 @@ pub mod name {
     pub const HOST_RAM_SHARE_MEAN: &str = "host_ram_share_mean";
     /// Largest of the same.
     pub const HOST_RAM_SHARE_MAX: &str = "host_ram_share_max";
-    /// Mean over jobs of observed run time over the run time the server's curve for the
-    /// job's profile predicts (the k of the paper).
-    pub const RUNTIME_ACTUAL_OVER_PREDICTED_MEAN: &str = "runtime_actual_over_predicted_mean";
-    /// Mean over jobs of the peak working set seen over the peak the curve predicts.
-    pub const MEMORY_ACTUAL_OVER_PREDICTED_MEAN: &str = "memory_actual_over_predicted_mean";
     /// CPU used over CPU booked, both summed over the jobs that have a reading.
     pub const CPU_USED_OVER_BOOKED: &str = "cpu_used_over_booked";
     /// Peak working set used over memory booked, summed over the jobs that have a reading.

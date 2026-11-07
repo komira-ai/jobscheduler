@@ -7,16 +7,16 @@ use std::fs;
 use std::io;
 
 use js_analysis::{Options, analyze, parse_jsonl};
-use js_client::LogTail;
-use js_measure::farm::{Phase, RunStanding, Standing};
+use js_measure::farm::Phase;
 use js_measure::measure::{HostReading, Identity, assemble};
 use js_measure::reported::{PREFIX, TAG, merge, parse, prefixed};
 use js_measure::{
-    Acquired, Clock, Curve, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, JobTiming,
-    LeaseAsk, NoSetter, Observation, Plan, RunAsk, RunOutput, UsageRow, Workload, drive, run_plan,
+    Clock, Experiment, FakeClock, FakeFarm, Farm, FarmError, HostShape, JobAsk, JobStanding,
+    JobTiming, LogTail, NoSetter, Observation, Plan, RunOutput, UsageRow, Workload, drive,
+    run_plan,
 };
 
-use crate::stub::Stub;
+use crate::stub::{Stub, standing};
 use crate::support::{GIB, T0, job};
 
 fn report(pairs: &[(&str, Option<f64>)]) -> BTreeMap<String, Option<f64>> {
@@ -170,48 +170,47 @@ fn a_mean_that_overflows_is_none() {
 
 // ---- the farm and the drive ------------------------------------------------------
 
-fn exited(log_tail: Option<LogTail>) -> RunStanding {
-    RunStanding {
-        state: "exited".to_owned(),
+fn exited(log_tail: Option<LogTail>) -> JobStanding {
+    JobStanding {
         outcome: Some("succeeded".to_owned()),
         log_tail,
+        ..standing("JOB_STATE_SUCCEEDED", Some("h1"))
     }
 }
 
-/// Asserts that the drive keeps the tail the poll that saw the run over returned, and none
+/// Asserts that the drive keeps the tail the poll that saw the job over returned, and none
 /// when the server had none.
 #[test]
-fn the_drive_keeps_the_tail_of_a_run_that_is_over() {
+fn the_drive_keeps_the_tail_of_a_job_that_is_over() {
     let clock = FakeClock::at(T0);
     let held = tail("js-measure-result {\"a\":1}\n", "", false);
     let farm = Stub {
-        run: Ok(exited(Some(held.clone()))),
-        ..Stub::held()
+        job: Ok(exited(Some(held.clone()))),
+        ..Stub::running()
     };
-    let obs = drive(&farm, &clock, &[job("a", 1, None)], 10, 1_000);
+    let obs = drive(&farm, &clock, &[job("a", 1)], 10, 1_000);
     assert_eq!(obs.jobs[0].log_tail, Some(held));
     let bare = Stub {
-        run: Ok(exited(None)),
-        ..Stub::held()
+        job: Ok(exited(None)),
+        ..Stub::running()
     };
-    let obs = drive(&bare, &clock, &[job("a", 1, None)], 10, 1_000);
+    let obs = drive(&bare, &clock, &[job("a", 1)], 10, 1_000);
     assert_eq!(obs.jobs[0].log_tail, None);
 }
 
-/// Asserts that a run still running has no tail in the observation, whatever the server
+/// Asserts that a job still running has no tail in the observation, whatever the server
 /// sent with it.
 #[test]
-fn a_run_still_running_keeps_no_tail() {
+fn a_job_still_running_keeps_no_tail() {
     let clock = FakeClock::at(T0);
     let farm = Stub {
-        run: Ok(RunStanding {
-            state: "running".to_owned(),
-            outcome: None,
+        job: Ok(JobStanding {
             log_tail: Some(tail("js-measure-result {\"a\":1}", "", false)),
+            ..standing("JOB_STATE_RUNNING", Some("h1"))
         }),
-        ..Stub::held()
+        ..Stub::running()
     };
-    let obs = drive(&farm, &clock, &[job("a", 1, None)], 10, 100);
+    let obs = drive(&farm, &clock, &[job("a", 1)], 10, 100);
     assert_eq!(obs.jobs[0].log_tail, None);
     assert_eq!(obs.jobs[0].failure.as_deref(), Some("deadline"));
 }
@@ -228,35 +227,33 @@ fn fake_with(clock: &FakeClock, tail: Option<LogTail>) -> FakeFarm<'_> {
     }
 }
 
-fn ask() -> RunAsk {
-    job("a", 5_000, None).run
+fn ask() -> JobAsk {
+    job("a", 5_000).ask
 }
 
-/// Asserts the fake farm's log: a run that is running holds none, an exited run holds the
-/// tail it was given, and a farm given none holds none.
+/// Asserts the fake farm's log: a job that is running holds none, an ended job holds the
+/// tail it was given, and a farm given none holds an empty tail.
 #[test]
-fn the_fake_farm_holds_a_log_only_for_an_exited_run() {
+fn the_fake_farm_holds_a_log_only_for_an_ended_job() {
     let clock = FakeClock::at(T0);
     let given = tail("out\n", "err\n", true);
     let farm = fake_with(&clock, Some(given.clone()));
-    let Acquired::Held { id, .. } = farm.acquire(&job("a", 1, None).lease).unwrap() else {
-        panic!("not held");
-    };
-    let run = farm.start_run(&id, &ask()).unwrap();
-    let live = farm.run(&id, &run).unwrap();
+    let id = farm.submit(&ask()).unwrap();
+    let live = farm.job(&id).unwrap();
     assert_eq!((live.phase(), live.log_tail), (Phase::Running, None));
     clock.sleep_ms(5_000);
-    let over = farm.run(&id, &run).unwrap();
+    let over = farm.job(&id).unwrap();
     assert_eq!((over.phase(), over.log_tail), (Phase::Over, Some(given)));
 
     let clock = FakeClock::at(T0);
     let farm = fake_with(&clock, None);
-    let Acquired::Held { id, .. } = farm.acquire(&job("a", 1, None).lease).unwrap() else {
-        panic!("not held");
-    };
-    let run = farm.start_run(&id, &ask()).unwrap();
+    let id = farm.submit(&ask()).unwrap();
     clock.sleep_ms(5_000);
-    assert_eq!(farm.run(&id, &run).unwrap().log_tail, None);
+    assert_eq!(
+        farm.job(&id).unwrap().log_tail,
+        Some(LogTail::default()),
+        "an ended job without output holds an empty tail"
+    );
 }
 
 // ---- the record ------------------------------------------------------------------
@@ -277,7 +274,7 @@ fn timing(name: &str, log_tail: Option<LogTail>, outcome: &str) -> JobTiming {
         name: name.to_owned(),
         submit_at_ms: T0,
         requested_ms: Some(T0),
-        granted_ms: Some(T0),
+        placed_ms: Some(T0),
         started_ms: Some(T0),
         finished_ms: Some(T0 + 60_000),
         host: Some("h1".to_owned()),
@@ -295,7 +292,7 @@ fn assembled_with(tails: Vec<(Option<LogTail>, &str)>) -> RunOutput {
     let jobs: Vec<_> = tails
         .iter()
         .enumerate()
-        .map(|(n, _)| job(&format!("j{n}"), 60_000, None))
+        .map(|(n, _)| job(&format!("j{n}"), 60_000))
         .collect();
     let obs = Observation {
         t0_ms: T0,
@@ -321,7 +318,7 @@ fn assembled_with(tails: Vec<(Option<LogTail>, &str)>) -> RunOutput {
             }]),
         },
     )]);
-    assemble(&who(), &obs, &jobs, &BTreeMap::new(), &hosts)
+    assemble(&who(), &obs, &jobs, &hosts)
 }
 
 fn reported_of(out: &RunOutput) -> BTreeMap<String, Option<f64>> {
@@ -357,15 +354,15 @@ fn the_reported_names_are_copied_into_the_record() {
 /// measured number stays, and the job's number is recorded under the prefix.
 #[test]
 fn a_reported_key_cannot_replace_a_measured_one() {
-    let line = "js-measure-result {\"makespan_ms\":1,\"jobs\":99,\"request_to_token_ms_mean\":2}\n";
+    let line = "js-measure-result {\"makespan_ms\":1,\"jobs\":99,\"submit_to_placed_ms_mean\":2}\n";
     let out = assembled(vec![Some(tail(line, "", false))]);
     assert_eq!(out.record.metrics["makespan_ms"], Some(60_000.0));
     assert_eq!(out.record.metrics["jobs"], Some(1.0));
-    assert_eq!(out.record.metrics["request_to_token_ms_mean"], Some(0.0));
+    assert_eq!(out.record.metrics["submit_to_placed_ms_mean"], Some(0.0));
     assert_eq!(out.record.metrics["reported_makespan_ms"], Some(1.0));
     assert_eq!(out.record.metrics["reported_jobs"], Some(99.0));
     assert_eq!(
-        out.record.metrics["reported_request_to_token_ms_mean"],
+        out.record.metrics["reported_submit_to_placed_ms_mean"],
         Some(2.0)
     );
 }
@@ -522,37 +519,29 @@ fn missing_counts_succeeded_jobs_without_a_line_and_not_failed_ones() {
 
 // ---- the plan ---------------------------------------------------------------------
 
-/// A farm that records the lease class of every request and otherwise is the fake.
+/// A farm that records whether every job it is asked for needs the whole host, and
+/// otherwise is the fake.
 struct Spy<'a> {
     inner: FakeFarm<'a>,
-    classes: RefCell<Vec<String>>,
+    whole_hosts: RefCell<Vec<bool>>,
 }
 
 impl Farm for Spy<'_> {
-    fn acquire(&self, ask: &LeaseAsk) -> Result<Acquired, FarmError> {
-        self.classes.borrow_mut().push(ask.class.clone());
-        self.inner.acquire(ask)
+    fn submit(&self, ask: &JobAsk) -> Result<String, FarmError> {
+        self.whole_hosts.borrow_mut().push(ask.whole_host);
+        self.inner.submit(ask)
     }
-    fn lease(&self, id: &str) -> Result<Standing, FarmError> {
-        self.inner.lease(id)
+    fn job(&self, id: &str) -> Result<JobStanding, FarmError> {
+        self.inner.job(id)
     }
-    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError> {
-        self.inner.start_run(lease, ask)
-    }
-    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
-        self.inner.run(lease, run)
-    }
-    fn release(&self, lease: &str) -> Result<(), FarmError> {
-        self.inner.release(lease)
+    fn cancel(&self, id: &str) -> Result<(), FarmError> {
+        self.inner.cancel(id)
     }
     fn host(&self, id: &str) -> Result<HostShape, FarmError> {
         self.inner.host(id)
     }
     fn usage_rows(&self, host: &str, from: u64, to: u64) -> Result<Vec<UsageRow>, FarmError> {
         self.inner.usage_rows(host, from, to)
-    }
-    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError> {
-        self.inner.curve(profile)
     }
 }
 
@@ -584,54 +573,52 @@ fn run_everything(
 
 fn two_arm_plan() -> Plan {
     serde_json::from_str(
-        r#"{"parameter":"sharing","settings":["s"],"arms":[{"label":"shared","control":true},{"label":"whole","lease_class":"whole-node"}],"runs_per_arm":3,"seed":2}"#,
+        r#"{"parameter":"sharing","settings":["s"],"arms":[{"label":"shared","control":true},{"label":"whole","whole_host":true}],"runs_per_arm":3,"seed":2}"#,
     )
     .unwrap()
 }
 
-fn one_job_workload(class: &str) -> Workload {
+fn one_job_workload(whole_host: bool) -> Workload {
     serde_json::from_str(&format!(
-        r#"{{"jobs":[{{"name":"w","count":1,"image":"img","cpu_millis":1000,"memory_bytes":1000,"wall_ms":30000,"class":"{class}"}}]}}"#
+        r#"{{"jobs":[{{"name":"w","count":1,"image":"img","cpu_millis":1000,"memory_bytes":1000,"wall_ms":30000,"whole_host":{whole_host}}}]}}"#
     ))
     .unwrap()
 }
 
-/// Asserts that an arm's `lease_class` replaces the class the workload names for every
-/// job of that arm and only that arm, and that an arm without one keeps the workload's.
+/// Asserts that an arm's `whole_host` replaces what the workload says for every job of
+/// that arm and only that arm, and that an arm without one keeps the workload's.
 #[test]
-fn an_arm_can_set_the_lease_class() {
+fn an_arm_can_set_whole_host() {
     let plan = two_arm_plan();
-    let workload = one_job_workload("pool-shared");
-    let clock = FakeClock::at(T0);
-    let spy = Spy {
-        inner: fake_with(&clock, None),
-        classes: RefCell::new(Vec::new()),
-    };
-    let outputs = run_everything(&plan, &workload, &spy, &clock);
-    let by_run: Vec<(String, String)> = outputs
-        .iter()
-        .map(|o| o.record.arm.clone())
-        .zip(spy.classes.borrow().iter().cloned())
-        .collect();
-    assert_eq!(by_run.len(), 6);
-    for (arm, class) in by_run {
-        let expected = if arm == "whole" {
-            "whole-node"
-        } else {
-            "pool-shared"
+    for workload_says in [false, true] {
+        let workload = one_job_workload(workload_says);
+        let clock = FakeClock::at(T0);
+        let spy = Spy {
+            inner: fake_with(&clock, None),
+            whole_hosts: RefCell::new(Vec::new()),
         };
-        assert_eq!(class, expected, "arm {arm}");
+        let outputs = run_everything(&plan, &workload, &spy, &clock);
+        let by_run: Vec<(String, bool)> = outputs
+            .iter()
+            .map(|o| o.record.arm.clone())
+            .zip(spy.whole_hosts.borrow().iter().copied())
+            .collect();
+        assert_eq!(by_run.len(), 6);
+        for (arm, whole_host) in by_run {
+            let expected = arm == "whole" || workload_says;
+            assert_eq!(whole_host, expected, "arm {arm}, workload {workload_says}");
+        }
     }
 }
 
-/// Asserts that an arm's `lease_class` is optional in the plan file and that an unknown
-/// key in an arm is still refused.
+/// Asserts that an arm's `whole_host` is optional in the plan file and that an unknown
+/// key in an arm, such as the old `lease_class`, is still refused.
 #[test]
-fn the_lease_class_is_optional_in_an_arm() {
+fn whole_host_is_optional_in_an_arm() {
     let plan = two_arm_plan();
-    assert_eq!(plan.arms[0].lease_class, None);
-    assert_eq!(plan.arms[1].lease_class.as_deref(), Some("whole-node"));
-    let bad = r#"{"label":"x","lease_clas":"y"}"#;
+    assert_eq!(plan.arms[0].whole_host, None);
+    assert_eq!(plan.arms[1].whole_host, Some(true));
+    let bad = r#"{"label":"x","lease_class":"whole-node"}"#;
     assert!(serde_json::from_str::<js_measure::Arm>(bad).is_err());
 }
 
@@ -641,23 +628,20 @@ fn read_shipped(name: &str) -> String {
 }
 
 /// Asserts the shipped whole-host noise plan: one setting (the bench cell), two arms
-/// `shared` (the control) and `whole-host` (asking for `whole-node`), 20 measured runs
+/// `shared` (the control) and `whole-host` (needing the whole host), 20 measured runs
 /// of each, and its schedule gives each arm exactly 20 runs.
 #[test]
 fn the_whole_host_noise_plan_has_two_arms_of_twenty() {
     let plan: Plan = serde_json::from_str(&read_shipped("whole-host-noise.plan.json")).unwrap();
     assert_eq!(plan.settings, vec!["tpch/q6-sf1".to_owned()]);
-    let arms: Vec<(&str, bool, Option<&str>)> = plan
+    let arms: Vec<(&str, bool, Option<bool>)> = plan
         .arms
         .iter()
-        .map(|a| (a.label.as_str(), a.control, a.lease_class.as_deref()))
+        .map(|a| (a.label.as_str(), a.control, a.whole_host))
         .collect();
     assert_eq!(
         arms,
-        vec![
-            ("shared", true, None),
-            ("whole-host", false, Some("whole-node"))
-        ]
+        vec![("shared", true, None), ("whole-host", false, Some(true))]
     );
     assert_eq!(plan.runs_per_arm, 20);
     let slots = plan.schedule().unwrap();
@@ -668,8 +652,8 @@ fn the_whole_host_noise_plan_has_two_arms_of_twenty() {
 }
 
 /// Asserts the shipped workload: one job that runs the bench runner with its real flags
-/// (query q6, scale 1, the result-line opt-in), asks for the `action` class, and that the
-/// plan's whole-host arm asks for a different one, `whole-node`.
+/// (query q6, scale 1, the result-line opt-in), asks for a share of a host, and that the
+/// plan's whole-host arm asks for the whole host.
 #[test]
 fn the_whole_host_noise_workload_runs_the_cell() {
     let workload: Workload =
@@ -677,7 +661,7 @@ fn the_whole_host_noise_workload_runs_the_cell() {
     let plan: Plan = serde_json::from_str(&read_shipped("whole-host-noise.plan.json")).unwrap();
     let jobs = workload.expand().unwrap();
     assert_eq!(jobs.len(), 1);
-    let args = &jobs[0].run.args;
+    let args = &jobs[0].ask.args;
     let value_of = |flag: &str| {
         let at = args
             .iter()
@@ -694,13 +678,13 @@ fn the_whole_host_noise_workload_runs_the_cell() {
         !args.iter().any(|a| a == "--cell" || a == "--result-line"),
         "{args:?}"
     );
-    assert_eq!(jobs[0].lease.class, "action");
+    assert!(!jobs[0].ask.whole_host);
     let whole = plan.arms.iter().find(|a| a.label == "whole-host").unwrap();
-    assert_eq!(whole.lease_class.as_deref(), Some("whole-node"));
+    assert_eq!(whole.whole_host, Some(true));
     assert!(
-        jobs[0].run.image.contains("@sha256:"),
+        jobs[0].ask.image.contains("@sha256:"),
         "{}",
-        jobs[0].run.image
+        jobs[0].ask.image
     );
 }
 

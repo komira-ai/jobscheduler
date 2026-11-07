@@ -1,34 +1,57 @@
-//! The live farm: the lease server's HTTP API through `js-client`.
+//! The live farm: the job service's JSON gateway and the server's host and usage reads,
+//! through `js-client`.
 
 use std::path::Path;
 
-use js_client::{Client, ClientError, LogTail, REQUEST_LIMIT, Reply};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use js_client::{Client, ClientError, REQUEST_LIMIT, Reply};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::farm::{
-    Acquired, Curve, Farm, FarmError, HostShape, LeaseAsk, RunAsk, RunStanding, Standing, UsageRow,
-};
+use crate::farm::{Farm, FarmError, HostShape, JobAsk, JobStanding, LogTail, Phase, UsageRow};
 
-/// The lease server, reached with a bearer token.
+/// The job server, reached with a bearer token: the jobs on its job port, the host list and
+/// the usage rows on its main port.
 pub struct HttpFarm {
+    jobs: Client,
     client: Client,
 }
 
 impl HttpFarm {
-    /// Checks the flags and builds the client (see [`Client::connect`]); sends nothing.
+    /// Checks the flags and builds the clients (see [`Client::connect`]), `job_server` for
+    /// the job service (`--job-listen`) and `server` for hosts and usage; sends nothing.
     ///
     /// # Errors
     ///
     /// [`ClientError`] naming the unusable flag.
     pub fn connect(
         server: &str,
+        job_server: &str,
         token_file: &Path,
         ca_cert: Option<&Path>,
     ) -> Result<Self, ClientError> {
         Ok(Self {
+            jobs: Client::connect(job_server, token_file, ca_cert, REQUEST_LIMIT)?,
             client: Client::connect(server, token_file, ca_cert, REQUEST_LIMIT)?,
         })
+    }
+
+    /// The outcome and the output of an ended job.
+    fn ended(&self, id: &str, state: &str) -> Result<(String, LogTail), FarmError> {
+        let reply = self
+            .jobs
+            .get(&format!("/v1/jobs/{id}/result"))
+            .map_err(transport)?;
+        let body = body_of(reply, &[200])?;
+        let result: ResultEnvelope = serde_json::from_value(body).map_err(malformed)?;
+        let result = result.result;
+        let tail = LogTail {
+            stdout: text_of(&result.stdout_tail)?,
+            stderr: text_of(&result.stderr_tail)?,
+            truncated: result.truncated,
+        };
+        Ok((outcome_of(state, &result.reason).to_owned(), tail))
     }
 }
 
@@ -56,34 +79,58 @@ fn body_of(reply: Reply, ok: &[u16]) -> Result<Value, FarmError> {
     }
 }
 
+/// How an ended job ended, as the records name it: from its state and the reason its result
+/// gives.
+fn outcome_of(state: &str, reason: &str) -> &'static str {
+    match (state, reason) {
+        ("JOB_STATE_SUCCEEDED", _) => "succeeded",
+        ("JOB_STATE_FAILED", "RESULT_REASON_MEMORY") => "out_of_memory",
+        ("JOB_STATE_FAILED", "RESULT_REASON_WALL_LIMIT") => "wall_limit",
+        ("JOB_STATE_FAILED", _) => "failed",
+        ("JOB_STATE_CANCELLED", _) => "cancelled",
+        ("JOB_STATE_LOST", _) => "lost",
+        _ => "failed_to_start",
+    }
+}
+
+/// The text of a base64 field of the gateway; bytes that are not UTF-8 read with the
+/// replacement character.
+fn text_of(field: &str) -> Result<String, FarmError> {
+    let bytes = STANDARD
+        .decode(field)
+        .map_err(|err| FarmError::Malformed(err.to_string()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[derive(Deserialize)]
-struct GrantedBody {
+struct JobEnvelope {
+    job: JobBody,
+}
+
+#[derive(Deserialize)]
+struct JobBody {
     id: String,
-    host: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LeasesBody {
-    leases: Vec<LeaseEntry>,
-}
-
-#[derive(Deserialize)]
-struct LeaseEntry {
-    id: String,
+    #[serde(default)]
     state: String,
-    host: Option<String>,
+    #[serde(default, rename = "hostId")]
+    host_id: String,
 }
 
 #[derive(Deserialize)]
-struct QueuedBody {
-    run_id: String,
+struct ResultEnvelope {
+    result: ResultBody,
 }
 
 #[derive(Deserialize)]
-struct RunBody {
-    state: String,
-    outcome: Option<String>,
-    log_tail: Option<LogTail>,
+struct ResultBody {
+    #[serde(default)]
+    reason: String,
+    #[serde(default, rename = "stdoutTail")]
+    stdout_tail: String,
+    #[serde(default, rename = "stderrTail")]
+    stderr_tail: String,
+    #[serde(default)]
+    truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -116,90 +163,55 @@ struct RowBody {
     leases: u64,
 }
 
-#[derive(Deserialize)]
-struct KeyBody {
-    runs: u64,
-    curve: Option<Vec<PointBody>>,
-}
-
-#[derive(Deserialize)]
-struct PointBody {
-    cores_milli: Option<u64>,
-    ws_bytes: u64,
-}
-
 impl Farm for HttpFarm {
-    fn acquire(&self, ask: &LeaseAsk) -> Result<Acquired, FarmError> {
-        let body = json!({
-            "class": ask.class,
-            "resources": { "cpu_millis": ask.cpu_millis, "memory_bytes": ask.memory_bytes },
-            "max_wall_seconds": ask.max_wall_seconds,
-        });
-        let reply = self.client.post("/v1/leases", &body).map_err(transport)?;
-        let status = reply.status;
-        let body = body_of(reply, &[201, 202])?;
-        let granted: GrantedBody = serde_json::from_value(body).map_err(malformed)?;
-        Ok(match (status, granted.host) {
-            (201, Some(host)) => Acquired::Held {
-                id: granted.id,
-                host,
-            },
-            _ => Acquired::Pending { id: granted.id },
-        })
-    }
-
-    fn lease(&self, id: &str) -> Result<Standing, FarmError> {
-        let reply = self.client.get("/v1/leases").map_err(transport)?;
-        let body = body_of(reply, &[200])?;
-        let list: LeasesBody = serde_json::from_value(body).map_err(malformed)?;
-        let entry = list.leases.into_iter().find(|lease| lease.id == id);
-        Ok(match entry {
-            Some(LeaseEntry {
-                state,
-                host: Some(host),
-                ..
-            }) if state == "held" => Standing::Held { host },
-            Some(entry) if entry.state == "pending" => Standing::Pending,
-            _ => Standing::Gone,
-        })
-    }
-
-    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError> {
-        let body = json!({
+    fn submit(&self, ask: &JobAsk) -> Result<String, FarmError> {
+        let needs = match ask.whole_host {
+            true => json!({ "wholeHost": true }),
+            false => json!({
+                "cpuMillis": ask.cpu_millis.to_string(),
+                "memoryBytes": ask.memory_bytes.to_string(),
+            }),
+        };
+        let body = json!({ "spec": {
             "image": ask.image,
             "args": ask.args,
-            "limits": {
-                "cpu_millis": ask.cpu_millis,
-                "memory_bytes": ask.memory_bytes,
-                "wall_ms": ask.wall_ms,
-            },
-            "profile": ask.profile,
-        });
-        let path = format!("/v1/leases/{lease}/runs");
-        let reply = self.client.post(&path, &body).map_err(transport)?;
-        let body = body_of(reply, &[202])?;
-        let queued: QueuedBody = serde_json::from_value(body).map_err(malformed)?;
-        Ok(queued.run_id)
+            "needs": needs,
+            "wallLimitSeconds": ask.wall_limit_seconds.to_string(),
+        }});
+        let reply = self.jobs.post("/v1/jobs", &body).map_err(transport)?;
+        let body = body_of(reply, &[201])?;
+        let made: JobEnvelope = serde_json::from_value(body).map_err(malformed)?;
+        Ok(made.job.id)
     }
 
-    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
-        let path = format!("/v1/leases/{lease}/runs/{run}");
-        let reply = self.client.get(&path).map_err(transport)?;
-        let body = body_of(reply, &[200])?;
-        let run: RunBody = serde_json::from_value(body).map_err(malformed)?;
-        Ok(RunStanding {
-            state: run.state,
-            outcome: run.outcome,
-            log_tail: run.log_tail,
-        })
-    }
-
-    fn release(&self, lease: &str) -> Result<(), FarmError> {
+    fn job(&self, id: &str) -> Result<JobStanding, FarmError> {
         let reply = self
-            .client
-            .delete(&format!("/v1/leases/{lease}"))
+            .jobs
+            .get(&format!("/v1/jobs/{id}"))
             .map_err(transport)?;
-        body_of(reply, &[200, 202]).map(drop)
+        let body = body_of(reply, &[200])?;
+        let job: JobEnvelope = serde_json::from_value(body).map_err(malformed)?;
+        let job = job.job;
+        let mut standing = JobStanding {
+            state: job.state,
+            host: Some(job.host_id).filter(|host| !host.is_empty()),
+            outcome: None,
+            log_tail: None,
+        };
+        if standing.phase() == Phase::Over {
+            let (outcome, tail) = self.ended(id, &standing.state)?;
+            standing.outcome = Some(outcome);
+            standing.log_tail = Some(tail);
+        }
+        Ok(standing)
+    }
+
+    fn cancel(&self, id: &str) -> Result<(), FarmError> {
+        let reply = self
+            .jobs
+            .post(&format!("/v1/jobs/{id}:cancel"), &json!({}))
+            .map_err(transport)?;
+        body_of(reply, &[200]).map(drop)
     }
 
     fn host(&self, id: &str) -> Result<HostShape, FarmError> {
@@ -230,22 +242,5 @@ impl Farm for HttpFarm {
                 leases: row.leases,
             })
             .collect())
-    }
-
-    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError> {
-        let reply = self
-            .client
-            .get(&format!("/v1/usage/keys/{profile}"))
-            .map_err(transport)?;
-        if reply.status == 404 {
-            return Ok(None);
-        }
-        let body = body_of(reply, &[200])?;
-        let key: KeyBody = serde_json::from_value(body).map_err(malformed)?;
-        Ok(key.curve.map(|points| Curve {
-            runs: key.runs,
-            ws_bytes: points.iter().map(|p| p.ws_bytes).collect(),
-            cores_milli: points.iter().filter_map(|p| p.cores_milli).collect(),
-        }))
     }
 }

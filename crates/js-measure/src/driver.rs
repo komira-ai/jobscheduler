@@ -2,36 +2,34 @@
 //! happened. Times are read from the injected clock at each poll, so a measurement is
 //! good to one poll interval.
 
-use js_client::LogTail;
-
 use crate::clock::Clock;
-use crate::farm::{Acquired, Farm, FarmError, Phase, Standing};
+use crate::farm::{Farm, FarmError, LogTail, Phase};
 use crate::workload::Job;
 
 /// When things happened to one job. Times are milliseconds on the clock's time base, each
 /// good to one poll interval (a job is submitted at the first poll at or after its planned
-/// time, and a lease or a run is seen at a later poll).
+/// time, and its placing, start and end are seen at later polls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobTiming {
     /// The job's name.
     pub name: String,
     /// When it was planned to be submitted.
     pub submit_at_ms: u64,
-    /// When the lease request was sent.
+    /// When the job was submitted.
     pub requested_ms: Option<u64>,
-    /// When the lease was seen held (the answer of the request, or the poll that saw it).
-    pub granted_ms: Option<u64>,
-    /// The first poll that saw the run running.
+    /// The first poll that saw the job placed on a host (or past that).
+    pub placed_ms: Option<u64>,
+    /// The first poll that saw the job running.
     pub started_ms: Option<u64>,
-    /// The poll that saw the run over.
+    /// The poll that saw the job over.
     pub finished_ms: Option<u64>,
-    /// The host the lease held.
+    /// The host the job was placed on.
     pub host: Option<String>,
-    /// How the run ended, as the server names it.
+    /// How the job ended, as the harness names it.
     pub outcome: Option<String>,
-    /// Why the job did not get through, when it did not; also a release the server refused.
+    /// Why the job did not get through, when it did not; also a cancel the server refused.
     pub failure: Option<String>,
-    /// The end of the job's output, read when the poll saw the run over.
+    /// The end of the job's output, read when the poll saw the job over.
     pub log_tail: Option<LogTail>,
 }
 
@@ -48,8 +46,7 @@ pub struct Observation {
 
 enum Stage {
     Waiting,
-    Pending(String),
-    Running { lease: String, run: String },
+    Live(String),
     Done,
 }
 
@@ -63,19 +60,18 @@ impl Live {
         self.timing.failure = Some(why);
         self.stage = Stage::Done;
     }
+}
 
-    /// Adds a word to the failure, keeping what was there.
-    fn note(&mut self, why: String) {
-        self.timing.failure = Some(match self.timing.failure.take() {
-            Some(before) => format!("{before}; {why}"),
-            None => why,
-        });
+/// `why` with the `note` of a cancel that failed, when there is one.
+fn with_note(why: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{why}; {note}"),
+        None => why,
     }
 }
 
 struct Driver<'a> {
     farm: &'a dyn Farm,
-    clock: &'a dyn Clock,
 }
 
 impl Driver<'_> {
@@ -83,95 +79,69 @@ impl Driver<'_> {
         match std::mem::replace(&mut live.stage, Stage::Done) {
             Stage::Waiting if now >= live.timing.submit_at_ms => self.submit(job, live, now),
             Stage::Waiting => live.stage = Stage::Waiting,
-            Stage::Pending(id) => self.poll_lease(job, live, id),
-            Stage::Running { lease, run } => self.poll_run(live, lease, &run, now),
+            Stage::Live(id) => self.poll(live, id, now),
             Stage::Done => {}
         }
     }
 
     fn submit(&self, job: &Job, live: &mut Live, now: u64) {
         live.timing.requested_ms = Some(now);
-        match self.farm.acquire(&job.lease) {
-            Ok(Acquired::Held { id, host }) => self.granted(job, live, id, host),
-            Ok(Acquired::Pending { id }) => live.stage = Stage::Pending(id),
+        match self.farm.submit(&job.ask) {
+            Ok(id) => live.stage = Stage::Live(id),
             Err(err) => live.fail(err.to_string()),
         }
     }
 
-    fn poll_lease(&self, job: &Job, live: &mut Live, id: String) {
-        match self.farm.lease(&id) {
-            Ok(Standing::Held { host }) => self.granted(job, live, id, host),
-            Ok(Standing::Pending) => live.stage = Stage::Pending(id),
-            Ok(Standing::Gone) => live.fail("lease-gone".to_owned()),
-            Err(err) => self.give_up(live, &id, &err),
-        }
-    }
-
-    fn granted(&self, job: &Job, live: &mut Live, id: String, host: String) {
-        live.timing.granted_ms = Some(self.clock.now_ms());
-        live.timing.host = Some(host);
-        match self.farm.start_run(&id, &job.run) {
-            Ok(run) => live.stage = Stage::Running { lease: id, run },
-            Err(err) => self.give_up(live, &id, &err),
-        }
-    }
-
-    fn poll_run(&self, live: &mut Live, lease: String, run: &str, now: u64) {
-        match self.farm.run(&lease, run) {
-            Ok(standing) => match standing.phase() {
-                Phase::Waiting => {
-                    live.stage = Stage::Running {
-                        lease,
-                        run: run.to_owned(),
+    fn poll(&self, live: &mut Live, id: String, now: u64) {
+        match self.farm.job(&id) {
+            Ok(standing) => {
+                if let Some(host) = &standing.host {
+                    live.timing.placed_ms.get_or_insert(now);
+                    live.timing.host.get_or_insert_with(|| host.clone());
+                }
+                match standing.phase() {
+                    Phase::Waiting => live.stage = Stage::Live(id),
+                    Phase::Running => {
+                        live.timing.started_ms.get_or_insert(now);
+                        live.stage = Stage::Live(id);
+                    }
+                    Phase::Over => {
+                        live.timing.finished_ms = Some(now);
+                        live.timing.outcome = standing.outcome;
+                        live.timing.log_tail = standing.log_tail;
                     }
                 }
-                Phase::Running => {
-                    live.timing.started_ms.get_or_insert(now);
-                    live.stage = Stage::Running {
-                        lease,
-                        run: run.to_owned(),
-                    };
-                }
-                Phase::Over => {
-                    live.timing.finished_ms = Some(now);
-                    live.timing.outcome = standing.outcome;
-                    live.timing.log_tail = standing.log_tail;
-                    self.release(live, &lease);
-                }
-            },
-            Err(err) => self.give_up(live, &lease, &err),
+            }
+            Err(err) => self.give_up(live, &id, &err),
         }
     }
 
-    /// Releases a lease; a release the server refuses is noted on the job, since the host
-    /// stays leased and the next run's minutes on it are shared.
-    fn release(&self, live: &mut Live, lease: &str) {
-        if let Err(err) = self.farm.release(lease) {
-            live.note(format!("release of {lease} failed: {err}"));
-        }
+    /// Cancels a job; a cancel the server refuses comes back as a note for the job's
+    /// failure, since the job may still hold its host and the next run's minutes on it
+    /// are shared.
+    fn cancel(&self, id: &str) -> Option<String> {
+        let refused = self.farm.cancel(id).err()?;
+        Some(format!("cancel of {id} failed: {refused}"))
     }
 
-    fn give_up(&self, live: &mut Live, lease: &str, err: &FarmError) {
-        live.fail(err.to_string());
-        self.release(live, lease);
+    fn give_up(&self, live: &mut Live, id: &str, err: &FarmError) {
+        let note = self.cancel(id);
+        live.fail(with_note(err.to_string(), note));
     }
 
     fn abandon(&self, live: &mut Live) {
-        let lease = match &live.stage {
-            Stage::Pending(lease) | Stage::Running { lease, .. } => Some(lease.clone()),
+        let note = match &live.stage {
+            Stage::Live(id) => self.cancel(id),
             Stage::Waiting | Stage::Done => None,
         };
         if !matches!(live.stage, Stage::Done) {
-            live.fail("deadline".to_owned());
-        }
-        if let Some(lease) = lease {
-            self.release(live, &lease);
+            live.fail(with_note("deadline".to_owned(), note));
         }
     }
 }
 
 /// Submits `jobs` at their planned times and polls every `poll_ms` until each is over, or
-/// `deadline_ms` after the start, when the jobs still open are released and marked
+/// `deadline_ms` after the start, when the jobs still open are cancelled and marked
 /// `deadline`. A job that fails does not stop the others: its `failure` says why.
 pub fn drive(
     farm: &dyn Farm,
@@ -180,7 +150,7 @@ pub fn drive(
     poll_ms: u64,
     deadline_ms: u64,
 ) -> Observation {
-    let driver = Driver { farm, clock };
+    let driver = Driver { farm };
     let t0_ms = clock.now_ms();
     let mut live: Vec<Live> = jobs
         .iter()
@@ -190,7 +160,7 @@ pub fn drive(
                 name: job.name.clone(),
                 submit_at_ms: t0_ms + job.submit_at_ms,
                 requested_ms: None,
-                granted_ms: None,
+                placed_ms: None,
                 started_ms: None,
                 finished_ms: None,
                 host: None,

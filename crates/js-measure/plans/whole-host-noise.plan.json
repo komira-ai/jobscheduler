@@ -3,7 +3,7 @@
   "settings": ["tpch/q6-sf1"],
   "arms": [
     { "label": "shared", "control": true },
-    { "label": "whole-host", "lease_class": "whole-node" }
+    { "label": "whole-host", "whole_host": true }
   ],
   "runs_per_arm": 20,
   "warmups_per_arm": 0,

@@ -1,19 +1,16 @@
 //! A simulated farm and its clock, for tests and for a dry run of a plan.
 //!
-//! The farm has whole-host leases only: a lease is placed on a host no other open lease
-//! holds, in request order. A run starts the moment it is queued and lasts its wall limit
-//! (the synthetic job does nothing but take that long); the usage store shows the host
-//! using `use_percent` of what the run was limited to.
+//! The farm gives every job a host to itself: a job is placed, in submission order, on a
+//! host no other live job holds, when it is submitted or at the first query after one is
+//! free. A placed job starts at once and lasts its wall limit (the synthetic job does
+//! nothing but take that long) or until it is cancelled; the usage store shows the host
+//! using `use_percent` of what the job asked for.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
-
-use js_client::LogTail;
+use std::collections::BTreeSet;
 
 use crate::clock::Clock;
-use crate::farm::{
-    Acquired, Curve, Farm, FarmError, HostShape, LeaseAsk, RunAsk, RunStanding, Standing, UsageRow,
-};
+use crate::farm::{Farm, FarmError, HostShape, JobAsk, JobStanding, LogTail, UsageRow};
 
 const MINUTE_MS: u64 = 60_000;
 
@@ -41,123 +38,104 @@ impl Clock for FakeClock {
     }
 }
 
-struct FakeLease {
+struct FakeJob {
     id: String,
     host: Option<String>,
-    open: bool,
-}
-
-struct FakeRun {
-    id: String,
-    lease: String,
-    host: String,
     start_ms: u64,
     end_ms: u64,
-    ask: RunAsk,
+    cancelled: bool,
+    ask: JobAsk,
+}
+
+impl FakeJob {
+    /// Whether the job holds its host at `now`.
+    fn holds(&self, now: u64) -> bool {
+        self.host.is_some() && !self.cancelled && now < self.end_ms
+    }
 }
 
 #[derive(Default)]
 struct State {
-    leases: Vec<FakeLease>,
-    runs: Vec<FakeRun>,
+    jobs: Vec<FakeJob>,
 }
 
 /// The simulated farm.
 pub struct FakeFarm<'a> {
     clock: &'a FakeClock,
     hosts: Vec<(String, HostShape)>,
-    curves: BTreeMap<String, Curve>,
     outcome: String,
     log_tail: Option<LogTail>,
     use_percent: u64,
-    acquire_latency_ms: u64,
+    submit_latency_ms: u64,
     state: RefCell<State>,
 }
 
 impl<'a> FakeFarm<'a> {
-    /// A farm of `hosts`, on `clock`. Runs end `succeeded`, use half of their limits, and
-    /// a lease request is answered at once.
+    /// A farm of `hosts`, on `clock`. Jobs end `succeeded`, use half of what they asked for,
+    /// and a submit is answered at once.
     #[must_use]
     pub fn new(clock: &'a FakeClock, hosts: Vec<(String, HostShape)>) -> Self {
         Self {
             clock,
             hosts,
-            curves: BTreeMap::new(),
             outcome: "succeeded".to_owned(),
             log_tail: None,
             use_percent: 50,
-            acquire_latency_ms: 0,
+            submit_latency_ms: 0,
             state: RefCell::new(State::default()),
         }
     }
 
-    /// The farm knows a curve for `profile`.
-    #[must_use]
-    pub fn with_curve(mut self, profile: &str, curve: Curve) -> Self {
-        self.curves.insert(profile.to_owned(), curve);
-        self
-    }
-
-    /// Every run ends with this outcome.
+    /// Every job that runs to its wall limit ends with this outcome (`succeeded` is a
+    /// succeeded job; any other is a failed one).
     #[must_use]
     pub fn with_outcome(mut self, outcome: &str) -> Self {
         outcome.clone_into(&mut self.outcome);
         self
     }
 
-    /// Every exited run holds this log tail. Without it a run holds none.
+    /// Every ended job holds this log tail. Without it a job holds an empty one.
     #[must_use]
     pub fn with_log_tail(mut self, tail: LogTail) -> Self {
         self.log_tail = Some(tail);
         self
     }
 
-    /// Runs use this percent of their limits.
+    /// Jobs use this percent of what they asked for.
     #[must_use]
     pub fn with_use_percent(mut self, percent: u64) -> Self {
         self.use_percent = percent;
         self
     }
 
-    /// A lease request takes this long to answer.
+    /// A submit takes this long to answer.
     #[must_use]
-    pub fn with_acquire_latency_ms(mut self, ms: u64) -> Self {
-        self.acquire_latency_ms = ms;
+    pub fn with_submit_latency_ms(mut self, ms: u64) -> Self {
+        self.submit_latency_ms = ms;
         self
     }
 
-    /// Places each unplaced open lease, in order, on a host no open lease holds.
+    /// Places each unplaced job, in order, on a host no live job holds.
     fn settle(&self) {
+        let now = self.clock.now_ms();
         let mut state = self.state.borrow_mut();
         let mut held: BTreeSet<String> = state
-            .leases
+            .jobs
             .iter()
-            .filter(|lease| lease.open)
-            .filter_map(|lease| lease.host.clone())
+            .filter(|job| job.holds(now))
+            .filter_map(|job| job.host.clone())
             .collect();
-        for lease in state
-            .leases
+        for job in state
+            .jobs
             .iter_mut()
-            .filter(|l| l.open && l.host.is_none())
+            .filter(|job| !job.cancelled && job.host.is_none())
         {
             if let Some((host, _)) = self.hosts.iter().find(|(id, _)| !held.contains(id)) {
                 held.insert(host.clone());
-                lease.host = Some(host.clone());
+                job.host = Some(host.clone());
+                job.start_ms = now;
+                job.end_ms = now + job.ask.wall_limit_seconds * 1000;
             }
-        }
-    }
-
-    /// Where a lease stands after placing whatever can be placed.
-    fn standing(&self, id: &str) -> Standing {
-        self.settle();
-        let state = self.state.borrow();
-        let lease = state.leases.iter().find(|l| l.id == id && l.open);
-        match lease {
-            None => Standing::Gone,
-            Some(FakeLease { host: None, .. }) => Standing::Pending,
-            Some(FakeLease {
-                host: Some(host), ..
-            }) => Standing::Held { host: host.clone() },
         }
     }
 
@@ -170,70 +148,68 @@ impl<'a> FakeFarm<'a> {
 }
 
 impl Farm for FakeFarm<'_> {
-    fn acquire(&self, _ask: &LeaseAsk) -> Result<Acquired, FarmError> {
-        self.clock.sleep_ms(self.acquire_latency_ms);
+    fn submit(&self, ask: &JobAsk) -> Result<String, FarmError> {
+        self.clock.sleep_ms(self.submit_latency_ms);
         let id = {
             let mut state = self.state.borrow_mut();
-            let id = format!("lease-{}", state.leases.len() + 1);
-            state.leases.push(FakeLease {
+            let id = format!("job-{}", state.jobs.len() + 1);
+            state.jobs.push(FakeJob {
                 id: id.clone(),
                 host: None,
-                open: true,
+                start_ms: 0,
+                end_ms: 0,
+                cancelled: false,
+                ask: ask.clone(),
             });
             id
         };
-        Ok(match self.standing(&id) {
-            Standing::Held { host } => Acquired::Held { id, host },
-            _ => Acquired::Pending { id },
-        })
-    }
-
-    fn lease(&self, id: &str) -> Result<Standing, FarmError> {
-        Ok(self.standing(id))
-    }
-
-    fn start_run(&self, lease: &str, ask: &RunAsk) -> Result<String, FarmError> {
-        let Standing::Held { host } = self.standing(lease) else {
-            return Err(Self::refused(409, "not-held"));
-        };
-        let mut state = self.state.borrow_mut();
-        let now = self.clock.now_ms();
-        let id = format!("run-{}", state.runs.len() + 1);
-        state.runs.push(FakeRun {
-            id: id.clone(),
-            lease: lease.to_owned(),
-            host,
-            start_ms: now,
-            end_ms: now + ask.wall_ms,
-            ask: ask.clone(),
-        });
+        self.settle();
         Ok(id)
     }
 
-    fn run(&self, lease: &str, run: &str) -> Result<RunStanding, FarmError> {
+    fn job(&self, id: &str) -> Result<JobStanding, FarmError> {
+        self.settle();
+        let now = self.clock.now_ms();
         let state = self.state.borrow();
-        let found = state.runs.iter().find(|r| r.lease == lease && r.id == run);
-        let found = found.ok_or_else(|| Self::refused(404, "unknown-run"))?;
-        Ok(match self.clock.now_ms() < found.end_ms {
-            true => RunStanding {
-                state: "running".to_owned(),
-                outcome: None,
-                log_tail: None,
+        let found = state.jobs.iter().find(|job| job.id == id);
+        let found = found.ok_or_else(|| Self::refused(404, "unknown-job"))?;
+        let standing = |state: &str, outcome: Option<&str>, tail: Option<LogTail>| JobStanding {
+            state: state.to_owned(),
+            host: found.host.clone(),
+            outcome: outcome.map(str::to_owned),
+            log_tail: tail,
+        };
+        Ok(
+            match (found.cancelled, found.host.is_some(), now < found.end_ms) {
+                (true, ..) => standing(
+                    "JOB_STATE_CANCELLED",
+                    Some("cancelled"),
+                    Some(LogTail::default()),
+                ),
+                (false, false, _) => standing("JOB_STATE_QUEUED", None, None),
+                (false, true, true) => standing("JOB_STATE_RUNNING", None, None),
+                (false, true, false) => {
+                    let tail = self.log_tail.clone().unwrap_or_default();
+                    let state = match self.outcome.as_str() {
+                        "succeeded" => "JOB_STATE_SUCCEEDED",
+                        _ => "JOB_STATE_FAILED",
+                    };
+                    standing(state, Some(&self.outcome), Some(tail))
+                }
             },
-            false => RunStanding {
-                state: "exited".to_owned(),
-                outcome: Some(self.outcome.clone()),
-                log_tail: self.log_tail.clone(),
-            },
-        })
+        )
     }
 
-    fn release(&self, lease: &str) -> Result<(), FarmError> {
+    fn cancel(&self, id: &str) -> Result<(), FarmError> {
+        let now = self.clock.now_ms();
         let mut state = self.state.borrow_mut();
-        let found = state.leases.iter_mut().find(|l| l.id == lease);
-        found
-            .map(|l| l.open = false)
-            .ok_or_else(|| Self::refused(404, "unknown-lease"))
+        let found = state.jobs.iter_mut().find(|job| job.id == id);
+        let found = found.ok_or_else(|| Self::refused(404, "unknown-job"))?;
+        if found.host.is_none() || now < found.end_ms {
+            found.cancelled = true;
+            found.end_ms = found.end_ms.min(now);
+        }
+        Ok(())
     }
 
     fn host(&self, id: &str) -> Result<HostShape, FarmError> {
@@ -254,27 +230,27 @@ impl Farm for FakeFarm<'_> {
                 ws_bytes: 0,
                 leases: 0,
             };
-            let mut leases = BTreeSet::new();
-            for run in state.runs.iter().filter(|r| r.host == host) {
-                let overlap = run.end_ms.min(end).saturating_sub(run.start_ms.max(begin));
+            let mut jobs = BTreeSet::new();
+            for job in state
+                .jobs
+                .iter()
+                .filter(|job| job.host.as_deref() == Some(host))
+            {
+                let overlap = job.end_ms.min(end).saturating_sub(job.start_ms.max(begin));
                 if overlap > 0 {
-                    leases.insert(&run.lease);
+                    jobs.insert(&job.id);
                     row.cpu_millis +=
-                        run.ask.cpu_millis * self.use_percent / 100 * overlap / MINUTE_MS;
+                        job.ask.cpu_millis * self.use_percent / 100 * overlap / MINUTE_MS;
                     row.ws_bytes = row
                         .ws_bytes
-                        .max(run.ask.memory_bytes * self.use_percent / 100);
+                        .max(job.ask.memory_bytes * self.use_percent / 100);
                 }
             }
-            row.leases = leases.len() as u64;
+            row.leases = jobs.len() as u64;
             if row.leases > 0 {
                 rows.push(row);
             }
         }
         Ok(rows)
-    }
-
-    fn curve(&self, profile: &str) -> Result<Option<Curve>, FarmError> {
-        Ok(self.curves.get(profile).cloned())
     }
 }

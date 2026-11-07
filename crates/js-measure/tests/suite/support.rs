@@ -1,6 +1,6 @@
 //! Values the tests share.
 
-use js_measure::{Arm, Job, LeaseAsk, Plan, RunAsk};
+use js_measure::{Arm, Job, JobAsk, Plan};
 
 /// A gibibyte.
 pub const GIB: u64 = 1 << 30;
@@ -29,7 +29,7 @@ pub fn plan_over(
             .map(|label| Arm {
                 label: (*label).to_owned(),
                 control: false,
-                lease_class: None,
+                whole_host: None,
             })
             .collect(),
         runs_per_arm,
@@ -38,23 +38,18 @@ pub fn plan_over(
     }
 }
 
-/// A job of 4 cores and 8 GiB that runs for `wall_ms`, submitted at the start.
-pub fn job(name: &str, wall_ms: u64, profile: Option<&str>) -> Job {
+/// A job of 4 cores and 8 GiB, sharing a host, that runs for `wall_ms` (rounded up to
+/// whole seconds), submitted at the start.
+pub fn job(name: &str, wall_ms: u64) -> Job {
     Job {
         name: name.to_owned(),
-        lease: LeaseAsk {
-            class: "whole-node".to_owned(),
-            cpu_millis: 4_000,
-            memory_bytes: 8 * GIB,
-            max_wall_seconds: 3_600,
-        },
-        run: RunAsk {
+        ask: JobAsk {
             image: "img".to_owned(),
             args: Vec::new(),
             cpu_millis: 4_000,
             memory_bytes: 8 * GIB,
-            wall_ms,
-            profile: profile.map(str::to_owned),
+            whole_host: false,
+            wall_limit_seconds: wall_ms.div_ceil(1000),
         },
         submit_at_ms: 0,
     }
