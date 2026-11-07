@@ -27,8 +27,9 @@
 //! The reads change nothing: they take no write lock, write no row, bump no counter and move
 //! no state on. A cordon follows the rules of the host's own route ([`cordon`]): 300 s when
 //! no length is given, cut to 3600 s, zero refused; a repeat renews and never shortens; the
-//! answer waits for the bindings to be written and is `UNAVAILABLE` `cordon-unsaved` when
-//! they cannot be, the cordon holding on this server all the same.
+//! answer waits for the cordon to be durable and is `UNAVAILABLE` `cordon-unsaved` when it
+//! cannot be: in file mode the cordon then holds on this server all the same; with a store
+//! setting it was not committed, and nothing changed.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -52,7 +53,7 @@ use tonic::{Request, Response, Status};
 
 use super::JobApi;
 use super::submit::unavailable_if_fenced;
-use crate::agents::Agents;
+use crate::agents::CordonFault;
 use crate::api::Shared;
 use crate::checks::State;
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
@@ -678,24 +679,23 @@ impl Hosts for Shared {
 
     async fn cordon(&self, host: &HostId, length: Duration) -> Result<bool, Refused> {
         let agents = self.agents().ok_or(Refused::UnknownHost)?;
-        let cordoned = agents.registry.cordon(host, length);
-        let placed = cordoned.map_err(|_| Refused::UnknownHost)?.placed;
-        saved(agents).await.map(|()| placed)
+        let cordoned = agents.cordon(host, length).await;
+        Ok(cordoned.map_err(refused_cordon)?.placed)
     }
 
     async fn uncordon(&self, host: &HostId) -> Result<bool, Refused> {
         let agents = self.agents().ok_or(Refused::UnknownHost)?;
-        let uncordoned = agents.registry.uncordon(host);
-        let lifted = uncordoned.map_err(|_| Refused::UnknownHost)?.lifted;
-        saved(agents).await.map(|()| lifted)
+        let uncordoned = agents.uncordon(host).await;
+        Ok(uncordoned.map_err(refused_cordon)?.lifted)
     }
 }
 
-/// Writes what the registry has bound, as the host's own route does before it answers.
-async fn saved(agents: &Arc<Agents>) -> Result<(), Refused> {
-    match agents.save_bindings().await {
-        true => Ok(()),
-        false => Err(Refused::Unsaved),
+/// A cordon or uncordon that was not done, or not made durable, as the host's own route
+/// answers it.
+fn refused_cordon(fault: CordonFault) -> Refused {
+    match fault {
+        CordonFault::NotHeld => Refused::UnknownHost,
+        CordonFault::Unsaved => Refused::Unsaved,
     }
 }
 

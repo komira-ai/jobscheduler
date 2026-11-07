@@ -339,6 +339,14 @@ pub struct JobRecord {
     /// answers the stored record, which keeps the first. `None` on a row written before
     /// clients were named, and for a job recorded with no client.
     pub client: Option<ClientName>,
+    /// How many whole-host prepares of this job failed (design section 5.4): counted by
+    /// [`crate::JobStore::fail_prepare_with`], and kept when the job goes back to queued, so
+    /// the count survives a restart. `0` on a row that never had one.
+    pub failed_prepares: u32,
+    /// The hosts the job's failed prepares keep it off, each with until when: written with the
+    /// count by [`crate::JobStore::fail_prepare_with`], and kept while the job is queued, so the
+    /// bars survive the deletion of its mark. Empty on a row that never had any.
+    pub prepare_bars: BTreeMap<HostId, Exclusion>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }
@@ -416,6 +424,15 @@ pub struct AllocationRecord {
     pub freed_at: Option<StoreTime>,
     /// Why it was freed.
     pub end_reason: Option<EndReason>,
+    /// For a placement that books the whole host: when the agent must have reported the host
+    /// ready (design section 5.4), as [`crate::Placement::prepare_timeout`] after the placement
+    /// and, after a hello, as [`crate::JobStore::restart_prepare`] sets it. `None`: no deadline
+    /// (a share of a host, and a row written before this field).
+    pub prepare_deadline: Option<StoreTime>,
+    /// The placement's wall limit in seconds when it is shorter than the job's own
+    /// ([`JobSpec::wall_limit_secs`]), as [`crate::Placement::wall_limit_secs`] gives it. `None`:
+    /// the job's own.
+    pub wall_limit_secs: Option<u64>,
     /// Fields a later build wrote, kept for the next write of the row.
     pub(crate) carried: Carried,
 }
@@ -468,8 +485,9 @@ impl HostBooking {
 /// kinds of js-sched's `Bar`, with its ends on the store's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exclusion {
-    /// The back-off after a hold the job gave up at its deadline, until the instant given
-    /// (exclusive).
+    /// A back-off until the instant given (exclusive): the job marks no host under it, and
+    /// takes it when quiet only if no other host could run it. No hold is given up any
+    /// more, so only a caller's bar or an older row sets one.
     Backoff(StoreTime),
     /// A hard exclusion until the instant given (exclusive).
     Until(StoreTime),
@@ -490,8 +508,8 @@ pub struct MarkRecord {
     pub host: HostId,
     /// When the mark was made.
     pub made: StoreTime,
-    /// When the hold is given up if the host is still busy; raised at boot to at least the
-    /// boot plus [`crate::BOOT_GRACE`] ([`crate::JobStore::raise_at_boot`]).
+    /// When the host is expected to be drained at the latest (reaching it gives nothing
+    /// up); raised at boot to at least the boot plus [`crate::BOOT_GRACE`] ([`crate::JobStore::raise_at_boot`]).
     pub deadline: StoreTime,
     /// The end of the host's tail when the mark was made: when the job is expected to start
     /// there. `None`: not known.
@@ -503,7 +521,7 @@ pub struct MarkRecord {
 }
 
 impl MarkRecord {
-    /// The mark of `job` on `host`, made at `made`, given up at `deadline`, with no tail end
+    /// The mark of `job` on `host`, made at `made`, with its deadline at `deadline`, no tail end
     /// known and no exclusions.
     #[must_use]
     pub fn new(job: JobId, host: HostId, made: StoreTime, deadline: StoreTime) -> MarkRecord {

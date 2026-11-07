@@ -4,10 +4,15 @@
 //! precondition, and [`JobStore::end_and_unmark`] ends a job and deletes its mark in one
 //! transaction, so a mark is never left behind by an end made that way, nor written after it.
 //!
-//! The other writes of a job ([`JobStore::end_job`], [`JobStore::request_cancel`],
-//! [`JobStore::place`]) do not touch its mark: the caller that keeps marks ends a marked job
-//! with [`JobStore::end_and_unmark`] and deletes the mark of one it places, or whose hold it
-//! gives up, with [`JobStore::delete_mark`].
+//! Three writes drop a job's mark in the transaction that writes the job: [`JobStore::place_with`]
+//! (the job is placed), [`JobStore::request_cancel`] of a queued job (the job is cancelled) and
+//! [`JobStore::fail_prepare_with`] (a mark left on a placed job does not outlive its failed
+//! prepare). Each deletes `mark/<id>` at the version it read, or makes the row's absence a
+//! precondition when there is none, so a mark written in between makes the write stale rather
+//! than leaving a mark on a job that is not queued. The other writes of a job
+//! ([`JobStore::end_job`], [`JobStore::place`]) do not touch its mark: the caller that keeps
+//! marks ends a marked job with [`JobStore::end_and_unmark`] and deletes the mark of one it
+//! places with `place`, or whose mark it drops, with [`JobStore::delete_mark`].
 //!
 //! The table is additive: a store written before it has no `mark/` rows and reads and writes
 //! its jobs and allocations as before; no `idx/` space names a mark, so the index backfill
@@ -165,6 +170,17 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         };
         self.commit(id, txn)?;
         Ok(job)
+    }
+
+    /// `txn` with the mark of the job `id` deleted, at the version read, whatever the row holds;
+    /// when there is none, with the row's absence a precondition of `txn`, so a mark written
+    /// between this read and the commit makes the commit fail.
+    pub(super) fn without_mark(&self, txn: Txn, id: &JobId) -> Result<Txn, JobStoreError> {
+        let key = keys::mark(id);
+        Ok(match self.store.get(&key)? {
+            Some(row) => txn.delete(key, Cond::Version(row.version)),
+            None => txn.check(key, Cond::Absent),
+        })
     }
 
     /// `txn` with every mark whose deadline is before `boot` plus [`BOOT_GRACE`] put with its

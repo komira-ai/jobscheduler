@@ -20,13 +20,16 @@
 //! server-side total cap: a caller that dies leaves its cordon to lapse within its last
 //! `lease_secs`, at most [`cordon::MAX_CORDON`].
 //!
-//! A cordon is written to the agent state file before it is acknowledged: when that fails
-//! the answer is 503 `cordon-unsaved`, the cordon holds on this server all the same, and
-//! the same call repeated is the retry. Until a save succeeds a server restart loses that
-//! cordon, or brings back one that an unsaved uncordon lifted (for at most the
-//! [`cordon::MAX_CORDON`] it was asked for). Every call, the read too, checks the credential
-//! with `JoinTokens::serves`, which renews the host credential and may write the join
-//! token file; a failed write is logged and does not fail the call.
+//! A cordon, and its lift, is made durable before it is acknowledged, and the answer is
+//! 503 `cordon-unsaved` when that fails; the same call repeated is the retry. Without a
+//! store setting it is written to the agent state file after the registry took it, so the
+//! cordon holds on this server all the same, and until a save succeeds a server restart
+//! loses that cordon, or brings back one that an unsaved uncordon lifted (for at most the
+//! [`cordon::MAX_CORDON`] it was asked for). With the store it is committed first, and a
+//! failed commit leaves the host as it was. Every call, the read too, checks the credential
+//! with `JoinTokens::serves`, which renews the host credential: in file mode it may write
+//! the join token file, and a failed write is logged and does not fail the call; with the
+//! store the renewal is left for the tick, and the call makes no store call.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +46,7 @@ use js_types::HostId;
 use serde::{Deserialize, Serialize};
 
 use super::{OneTime, Refused, decode, read};
-use crate::agents::Agents;
+use crate::agents::{Agents, CordonFault};
 use crate::cordon::{self, CORDON_UNSAVED, INVALID_CORDON, UNKNOWN_HOST};
 use crate::hosts::{mark_text, state_text};
 use crate::join_tokens::JoinRefusal;
@@ -174,14 +177,12 @@ fn authorize(
     Ok(id)
 }
 
-/// Makes the file hold what the registry has bound, or the 503 that says it does not.
-async fn saved(agents: &Arc<Agents>) -> Result<(), Refused> {
-    match agents.save_bindings().await {
-        true => Ok(()),
-        false => Err(Refused::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            CORDON_UNSAVED,
-        )),
+/// The answer to a cordon or uncordon that was not done (409 `unknown-host`) or not made
+/// durable (503 `cordon-unsaved`).
+fn refused(fault: CordonFault) -> Refused {
+    match fault {
+        CordonFault::NotHeld => unknown(NotHeld),
+        CordonFault::Unsaved => Refused::new(StatusCode::SERVICE_UNAVAILABLE, CORDON_UNSAVED),
     }
 }
 
@@ -226,14 +227,12 @@ pub(super) async fn act(
     match verb {
         Some("cordon") => {
             let lease = lease_of(&body)?;
-            let placed = agents.registry.cordon(&host, lease).map_err(unknown)?;
-            saved(&agents).await?;
+            let placed = agents.cordon(&host, lease).await.map_err(refused)?;
             let already = Some(!placed.placed);
             Ok(Json(Reading::of(placed.host, already, None)).into_response())
         }
         Some("uncordon") => {
-            let lifted = agents.registry.uncordon(&host).map_err(unknown)?;
-            saved(&agents).await?;
+            let lifted = agents.uncordon(&host).await.map_err(refused)?;
             Ok(Json(Reading::of(lifted.host, None, Some(lifted.lifted))).into_response())
         }
         _ => Err(not_found()),

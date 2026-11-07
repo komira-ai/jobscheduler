@@ -5,8 +5,11 @@
 //! ([`Freed::ProviderAbsent`]). A host that is only silent frees nothing: unknown is not
 //! absent. Every path that frees is in this module: [`free_allocation`], which records why
 //! in the allocation's row from the job's end, [`answer_retired`], which ends a cancelled
-//! job and frees its allocation in the same commit, and [`lose_on_absent`], which ends a job
-//! whose host the provider read absent as lost and frees its allocation in the same commit.
+//! job and frees its allocation in the same commit ([`cancel_and_free`] is that end, which a
+//! whole-host job whose host has left `preparing` takes too, [`crate::job_whole`]), and
+//! [`lose_on_absent`], which ends a job whose host the provider read absent as lost and frees
+//! its allocation in the same commit. A whole-host job whose prepare failed is freed by
+//! [`js_jobs::JobStore::fail_prepare_with`] with the same history row ([`history`]).
 //!
 //! Each free also records the allocation in the usage history ([`history`]): the row of
 //! `usage/ended/<ended-at>/<job id>` and its index entry, written by
@@ -98,13 +101,27 @@ pub(crate) fn answer_retired<S: Store, I: IdSource>(
     if job.state.is_ended() {
         free_allocation(store, id, Freed::HostConfirmed)?;
     } else if job.cancel_requested {
-        let cancelled = JobEnd::Cancelled {
-            exit_code: None,
-            output: Output::default(),
-        };
-        let beside = |freed: &AllocationRecord| history(Some(&job), freed);
-        store.end_and_free_with(id, cancelled, EndReason::Cancelled, &beside)?;
+        cancel_and_free(store, &job)?;
     }
+    Ok(())
+}
+
+/// Ends `job`, which has a cancel intent, as cancelled and frees its allocation in one commit,
+/// with the allocation's usage history row: the end of a job whose host holds no container for
+/// it (a start never delivered, a whole-host prepare that has ended).
+///
+/// # Errors
+/// As [`JobStore::end_and_free_with`].
+pub(crate) fn cancel_and_free<S: Store, I: IdSource>(
+    store: &JobStore<S, I>,
+    job: &JobRecord,
+) -> Result<(), JobStoreError> {
+    let cancelled = JobEnd::Cancelled {
+        exit_code: None,
+        output: Output::default(),
+    };
+    let beside = |freed: &AllocationRecord| history(Some(job), freed);
+    store.end_and_free_with(&job.id, cancelled, EndReason::Cancelled, &beside)?;
     Ok(())
 }
 
@@ -140,7 +157,7 @@ pub(crate) fn lose_on_absent<S: Store, I: IdSource>(
 /// id), on its host, with what it booked; queued from the job's submit to this placement,
 /// run from its start to its end (zero for a job that never ran, unknown for a job whose
 /// row is gone), ended at the free, for the reason it was freed.
-fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
+pub(crate) fn history(job: Option<&JobRecord>, freed: &AllocationRecord) -> Vec<Row> {
     let end = freed.freed_at.unwrap_or(freed.created_at);
     let ran = |job: &JobRecord| {
         let ended = job.ended_at.unwrap_or(end);

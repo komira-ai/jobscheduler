@@ -33,6 +33,7 @@ mod provider_side;
 mod record;
 mod records;
 mod start;
+mod taint;
 mod view;
 mod waiting;
 

@@ -11,8 +11,19 @@
 //! neither retention deletes. A **mark** is the host a queued whole-host job holds while
 //! that host drains, with the hosts it is kept off ([`MarkRecord`]): written only for a job
 //! that is queued and needs the whole host ([`JobStore::put_mark`]), and deleted with the job's
-//! end in one transaction ([`JobStore::end_and_unmark`]) or on its own
-//! ([`JobStore::delete_mark`]).
+//! end in one transaction ([`JobStore::end_and_unmark`]), with its cancel when it is queued
+//! ([`JobStore::request_cancel`]), with its placement ([`JobStore::place_with`]) or its failed
+//! prepare ([`JobStore::fail_prepare_with`]), or on its own ([`JobStore::delete_mark`]).
+//!
+//! A **whole-host job** that is placed books the whole host and waits for its agent to report
+//! the host ready. Its allocation row holds the instant the agent must have done so
+//! ([`AllocationRecord::prepare_deadline`], written by [`JobStore::place_with`] and moved by
+//! [`JobStore::restart_prepare`] when the agent says hello again) and, for a placement on a
+//! host a mark holds, its own wall limit ([`AllocationRecord::wall_limit_secs`]). Its job row
+//! holds how many of its prepares failed ([`JobRecord::failed_prepares`]) and the hosts they
+//! keep it off ([`JobRecord::prepare_bars`]), written by [`JobStore::fail_prepare_with`] in the
+//! transaction that frees the allocation and puts the job back to queued, or ends it failed to
+//! start when the placement engine says its prepares are used up.
 //!
 //! # Results and retention
 //!
@@ -37,8 +48,8 @@
 //! queued, placed or starting job a deadline floor ([`JobRecord::deadline_floor`]) of at least
 //! the boot plus [`BOOT_GRACE`]: the earliest instant the server's queue wait or start timeout
 //! may end it, so an outage longer than either fails no job at the first tick; and it raises
-//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so an outage longer than a
-//! hold gives up none at the first round.
+//! each mark's deadline to at least the boot plus [`BOOT_GRACE`], so a mark restored after an
+//! outage does not show a deadline already past (reaching a deadline gives nothing up).
 //!
 //! # Keys
 //!
@@ -87,10 +98,13 @@
 //! |---|---|
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
 //! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports) |
+//! | [`JobStore::place_with`] | as [`JobStore::place`], with the allocation's prepare deadline (the store's time now plus [`Placement::prepare_timeout`]) and wall limit, and delete `mark/<id>` at its version, or check it absent |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
-//! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it), or nothing for an ended job or a second cancel |
+//! | [`JobStore::request_cancel`] | put `job/<id>` at its version (for a queued job, its end as [`JobStore::end_job`] writes it, and delete `mark/<id>` at its version or check it absent), or nothing for an ended job or a second cancel |
+//! | [`JobStore::fail_prepare_with`] | put `job/<id>` at its version (placed to queued with the failed-prepare count and bars, or ended failed to start), put `alloc/<id>` at its version (to freed), put the caller's rows beside it, and delete `mark/<id>` at its version or check it absent |
+//! | [`JobStore::restart_prepare`] | put `alloc/<id>` at its version (the new prepare deadline), check `job/<id>` at its version |
 //! | [`JobStore::mark_releasing`] | put `alloc/<id>` at its version, or nothing when it is not booked |
 //! | [`JobStore::free`] | put `alloc/<id>` at its version, or nothing when it is freed |
 //! | [`JobStore::free_with`] | as [`JobStore::free`], with the caller's rows put beside it (the usage history row of the allocation) |
@@ -153,6 +167,6 @@ pub use result::{
     Retention, RetentionError, SWEEP_BATCH, sweep,
 };
 pub use store::{
-    Backfill, Beside, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob, Row,
-    SCHEMA_VERSION, queue_order,
+    Backfill, Beside, FailedPrepare, Inserted, JobPage, JobStore, MAX_PAGE, MINT_TRIES, NewJob,
+    Placement, Row, SCHEMA_VERSION, queue_order,
 };
