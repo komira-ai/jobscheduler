@@ -355,10 +355,12 @@ fn work_that_needs_its_own_resources_is_leased_and_run_with_them() {
 }
 
 /// Asserts that the lease front sends an item's own resources: the lease asks for the
-/// work's cpu, memory, GPUs and GPU class, with its give-up time as wall limit and ttl,
+/// work's cpu, memory, GPUs and GPU class, with its give-up time as wall limit,
 /// and the run is limited to the work's cpu and memory, holds GPU indices `0..gpus` and
-/// runs `sim-run` for the work's duration in milliseconds. Catches a front that sends the
-/// default share, or the default give-up time, in place of what the work asks for.
+/// runs `sim-run` for the work's duration in milliseconds, and the lease body carries no
+/// `ttl_seconds` (the server answers 400 `ttl-removed` to one). Catches a front that sends the
+/// default share, or the default give-up time, in place of what the work asks for, or still
+/// asks for a ttl.
 #[test]
 fn the_lease_front_sends_the_works_own_resources_in_the_lease_and_the_run() {
     let needs = Resources::new(500, 512, 2, Some("nvidia-h100".to_owned())).expect("resources");
@@ -377,7 +379,7 @@ fn the_lease_front_sends_the_works_own_resources_in_the_lease_and_the_run() {
     });
     assert_eq!(lease["resources"], resources, "{lease}");
     assert_eq!(lease["max_wall_seconds"], 900, "{lease}");
-    assert_eq!(lease["ttl_seconds"], 900, "{lease}");
+    assert!(lease.get("ttl_seconds").is_none(), "{lease}");
     assert_eq!(lease["class"], "gpu-host", "{lease}");
     let run = &port.bodies[1];
     assert_eq!(
@@ -527,7 +529,7 @@ fn one(work: Work, polls: Vec<Vec<(u16, Value)>>) -> (Vec<ClientEvent>, Vec<Stri
 }
 
 fn granted(id: &str) -> (u16, Value) {
-    (201, json!({ "id": id, "host": "h000", "expires_at_ms": 0 }))
+    (201, json!({ "id": id, "host": "h000", "ends_at_ms": 0 }))
 }
 
 fn queued(run: &str) -> (u16, Value) {

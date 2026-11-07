@@ -274,12 +274,12 @@ fn find(leases: Vec<LeaseInfo>, id: &LeaseId) -> Result<LeaseInfo, ApiError> {
 
 /// Queues a run on the host the lease holds.
 ///
-/// The lease must be held, with time left. The run is bounded by that time: its wall limit
-/// is the one asked for, cut to what the lease has left (that, when none is asked), and the
-/// agent may start it for no longer than the lease has left either. The registry keeps the
-/// instant the lease ends and cuts both again from the time left at each send, so a start
-/// delivered late carries less, and none is sent once that time is up. A later renewal does
-/// not stretch a run already queued. The table's lock is held across the registry's call,
+/// The lease must be held, with time left before its end (its maximum wall time). The run is
+/// bounded by that time: its wall limit is the one asked for, cut to what the lease has left
+/// (that, when none is asked), and the agent may start it for no longer than the lease has
+/// left either. The registry keeps the instant the lease ends and cuts both again from the
+/// time left at each send, so a start delivered late carries less, and none is sent once
+/// that time is up. The table's lock is held across the registry's call,
 /// so a release cannot slip in between the check and the queueing.
 async fn start(
     State(api): State<RunApi>,
@@ -301,8 +301,8 @@ async fn start(
     let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
-    let ends = lease.expires_at.millis().min(lease.ends_at.millis());
-    let left = ends.saturating_sub(api.agents.clock.now().millis());
+    let now = api.agents.clock.now().millis();
+    let left = lease.ends_at.millis().saturating_sub(now);
     let host = match (lease.state, lease.host) {
         (LeaseState::Held, Some(host)) if left > 0 => host,
         _ => return Err(RunRefusal::NotHeld.into()),

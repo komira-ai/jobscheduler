@@ -27,12 +27,7 @@ fn unexpected_statuses_are_server_failures() {
     let empty = canned(&reply("503 Service Unavailable", ""));
     let moved = canned(&reply("302 Found", "<a>moved</a>"));
     let acquire = acquire_words(&[]);
-    let routes: [&[&str]; 4] = [
-        &acquire,
-        &["lease", "renew", "1-1"],
-        &["lease", "release", "1-1"],
-        &["lease", "list"],
-    ];
+    let routes: [&[&str]; 3] = [&acquire, &["lease", "release", "1-1"], &["lease", "list"]];
     for words in routes {
         fails_with(
             &broken,
@@ -46,22 +41,22 @@ fn unexpected_statuses_are_server_failures() {
 }
 
 /// Asserts that a success whose body lacks a field is exit 1 naming the field: the id,
-/// the host and the expiry of a start, the id of a pending one, the expiry of a renewal,
-/// and the list, its entries and their fields.
+/// the host and the end of a start, the id of a pending one, and the list, its entries and
+/// their fields.
 #[test]
 fn malformed_answers_name_the_missing_field() {
     let scratch = Scratch::new("failures_malformed");
     let acquire = acquire_words(&[]);
-    let cases: [(&str, &str, &[&str], &str); 8] = [
+    let cases: [(&str, &str, &[&str], &str); 7] = [
         (
             "201 Created",
-            r#"{"host":"h","expires_at_ms":5}"#,
+            r#"{"host":"h","ends_at_ms":5}"#,
             &acquire,
             "\"id\"",
         ),
         (
             "201 Created",
-            r#"{"id":"1-1","expires_at_ms":5}"#,
+            r#"{"id":"1-1","ends_at_ms":5}"#,
             &acquire,
             "\"host\"",
         ),
@@ -69,19 +64,13 @@ fn malformed_answers_name_the_missing_field() {
             "201 Created",
             r#"{"id":"1-1","host":"h"}"#,
             &acquire,
-            "\"expires_at_ms\"",
+            "\"ends_at_ms\"",
         ),
         ("202 Accepted", "not json", &acquire, "\"id\""),
-        (
-            "200 OK",
-            "{}",
-            &["lease", "renew", "1-1"],
-            "\"expires_at_ms\"",
-        ),
         ("200 OK", "{}", &["lease", "list"], "\"leases\""),
         (
             "200 OK",
-            r#"{"leases":[{"state":"held","expires_at_ms":1}]}"#,
+            r#"{"leases":[{"state":"held","ends_at_ms":1}]}"#,
             &["lease", "list"],
             "\"id\"",
         ),
@@ -89,7 +78,7 @@ fn malformed_answers_name_the_missing_field() {
             "200 OK",
             r#"{"leases":[{"id":"1-1","state":"held"}]}"#,
             &["lease", "list"],
-            "\"expires_at_ms\"",
+            "\"ends_at_ms\"",
         ),
     ];
     for (status, body, words, field) in cases {
@@ -104,7 +93,7 @@ fn an_entry_without_a_state_is_malformed() {
     let scratch = Scratch::new("failures_state");
     let url = canned(&reply(
         "200 OK",
-        r#"{"leases":[{"id":"1-1","expires_at_ms":1}]}"#,
+        r#"{"leases":[{"id":"1-1","ends_at_ms":1}]}"#,
     ));
     fails_with(&url, &scratch, &["lease", "list"], "\"state\"");
 }
@@ -143,18 +132,18 @@ fn an_oversized_reply_is_a_failure() {
 #[test]
 fn control_characters_in_a_server_error_are_not_printed() {
     let scratch = Scratch::new("failures_control");
-    let renew: &[&str] = &["lease", "renew", "1-1"];
+    let release: &[&str] = &["lease", "release", "1-1"];
     let cases: [(&str, &str, &[&str], &str); 3] = [
         (
             "409 Conflict",
             r#"{"error":"no\u001b[2Jcap"}"#,
-            renew,
+            release,
             "js: refused: no[2Jcap\n",
         ),
         (
             "422 Unprocessable Entity",
             r#"{"error":"bad\u001b]0;x\u0007","reason":"a\nb\r\u007fc"}"#,
-            renew,
+            release,
             "js: rejected: bad]0;x: abc\n",
         ),
         (

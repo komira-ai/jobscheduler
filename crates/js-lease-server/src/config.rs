@@ -176,12 +176,12 @@ pub struct Cli {
     /// nothing to estimate from.
     #[arg(long, conflicts_with = "usage_off")]
     pub estimate_feed: bool,
-    /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
-    #[arg(long, default_value = "600s", value_parser = parse_duration)]
-    pub default_ttl: Duration,
-    /// The longest ttl granted at one time.
-    #[arg(long, default_value = "3600s", value_parser = parse_duration)]
-    pub max_ttl: Duration,
+    /// Removed: a lease has no time to live. Any use is a startup error.
+    #[arg(long, hide = true, value_name = "DURATION")]
+    pub default_ttl: Option<String>,
+    /// Removed: a lease has no time to live. Any use is a startup error.
+    #[arg(long, hide = true, value_name = "DURATION")]
+    pub max_ttl: Option<String>,
     /// How often the table is ticked (expiries, retries, pending starts).
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     pub tick: Duration,
@@ -494,11 +494,28 @@ pub(crate) enum Hosts {
     },
 }
 
+/// The refusal of a removed ttl flag: the lease's time to live is gone.
+fn removed_flag(flag: &'static str) -> StartupError {
+    StartupError::new(flag, REMOVED_FLAG)
+}
+
+/// The reason a removed ttl flag is refused; the error reads `--default-ttl: was removed: ...`.
+const REMOVED_FLAG: &str = "was removed: a lease has no time to live (it ends when released or at \
+     its maximum wall time); remove the flag";
+
 impl Config {
-    /// Checks `cli`: the ttls are consistent, a listen address that is not loopback has
+    /// Checks `cli`: no removed ttl flag is given, a listen address that is not loopback has
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
     /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        for (flag, value) in [
+            ("--default-ttl", &cli.default_ttl),
+            ("--max-ttl", &cli.max_ttl),
+        ] {
+            if value.is_some() {
+                return Err(removed_flag(flag));
+            }
+        }
         let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
             if let Some(flag) = given.first() {
@@ -508,8 +525,7 @@ impl Config {
             return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
         }
         flags::need_agent_pool(&cli)?;
-        let settings = Settings::new(cli.default_ttl, cli.max_ttl)
-            .map_err(|err| StartupError::new("--default-ttl", err))?;
+        let settings = Settings::new();
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
         let token = read_token(token_file)?;

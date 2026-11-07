@@ -7,12 +7,17 @@
 //! machine (design 5.6, pass 2): the scaler launches no offer outside them, and no machine
 //! past the provider's `max_machines`. `catalog_refresh` is how long the cached
 //! catalog of the provider is used before it is fetched again, and `offer_cooldown` how long
-//! one of its offers cools down once one is (nothing enters a cool-down yet); each defaults
-//! to one hour and must not be zero. A static
-//! machine provider launches nothing, so a limit for one is refused.
+//! one of its offers cools down once one is (the scaler cools an offer down when the hello of
+//! a machine acquired for it does not match it); each defaults to one hour and must not be
+//! zero. `size_tolerance_percent` (an integer from 0 to 50, 10 when not given) is how far
+//! below the offer's CPU, memory and disk that hello may measure and still match (design
+//! 5.6.1, step 6). A static machine provider launches nothing, so a limit for one is
+//! refused.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
+
+use js_scaler::SIZE_TOLERANCE_PERCENT;
 
 use super::Section;
 use crate::error::StartupError;
@@ -26,7 +31,12 @@ const KEYS: &[&str] = &[
     "acquire_retry",
     "catalog_refresh",
     "offer_cooldown",
+    "size_tolerance_percent",
 ];
+
+/// The largest `size_tolerance_percent` the file may give: a host half the size of its
+/// offer is a wrong machine, whatever an agent measures.
+const MOST_SIZE_TOLERANCE: u64 = 50;
 
 /// The `quota_backoff` of a provider whose table does not give it.
 const DEFAULT_QUOTA_BACKOFF: Duration = Duration::from_secs(3600);
@@ -79,6 +89,10 @@ pub struct ProviderLimits {
     /// How long one of the provider's offers cools down once it is cooled down
     /// (`offer_cooldown`); one hour when not given. Never zero.
     pub offer_cooldown: Duration,
+    /// How far below the offer's CPU, memory and disk, in percent, the shape a machine of
+    /// the provider announces in its hello may be and still match the offer it was acquired
+    /// for (`size_tolerance_percent`); 10 when not given, from 0 to 50.
+    pub size_tolerance_percent: u8,
 }
 
 impl ProviderLimits {
@@ -103,6 +117,7 @@ impl Default for ProviderLimits {
             acquire_retry: DEFAULT_ACQUIRE_RETRY,
             catalog_refresh: DEFAULT_CATALOG_REFRESH,
             offer_cooldown: DEFAULT_OFFER_COOLDOWN,
+            size_tolerance_percent: SIZE_TOLERANCE_PERCENT,
         }
     }
 }
@@ -153,6 +168,7 @@ pub(super) fn read(
             acquire_retry: s.duration_or("acquire_retry", DEFAULT_ACQUIRE_RETRY)?,
             catalog_refresh: s.duration_or("catalog_refresh", DEFAULT_CATALOG_REFRESH)?,
             offer_cooldown: s.duration_or("offer_cooldown", DEFAULT_OFFER_COOLDOWN)?,
+            size_tolerance_percent: size_tolerance(&mut s)?,
         };
         if let (Some(share), Some(cap)) = (read.max_machines, cap)
             && share > cap
@@ -169,6 +185,16 @@ pub(super) fn read(
         limits.insert(name, read);
     }
     Ok(limits)
+}
+
+/// `size_tolerance_percent`: an integer from 0 to [`MOST_SIZE_TOLERANCE`], or
+/// [`SIZE_TOLERANCE_PERCENT`] when the table does not give it. Anything else is refused
+/// naming the key: a value that is not an integer, a negative one, or one above 50.
+fn size_tolerance(s: &mut Section) -> Result<u8, StartupError> {
+    let default = u64::from(SIZE_TOLERANCE_PERCENT);
+    let percent = s.bounded("size_tolerance_percent", 0, MOST_SIZE_TOLERANCE, default)?;
+    // At most 50 here, so it always fits.
+    Ok(u8::try_from(percent).unwrap_or(u8::MAX))
 }
 
 /// The integer `key` when the table gives it, which must be 1 or more.

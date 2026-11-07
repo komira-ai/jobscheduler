@@ -160,12 +160,12 @@ fn a_static_pool_alone_and_the_defaults_of_the_server_table() {
 
 /// Asserts that every key of the server table is read and reaches the server: the
 /// limits and timeouts are the ones the file gives, and a server started on the file
-/// grants a lease for the default ttl the file gives and cuts a longer one to its maximum.
-/// It catches a key that is parsed and dropped.
+/// grants a lease that ends at the wall time the request asks for. It catches a key that
+/// is parsed and dropped.
 #[tokio::test]
 async fn every_key_of_the_server_table_is_read() {
     let scratch = Scratch::new("config_server_keys");
-    let extra = "listen = \"127.0.0.1:0\"\ntick = \"3s\"\ndefault_ttl = \"5m\"\nmax_ttl = \"2h\"\n\
+    let extra = "listen = \"127.0.0.1:0\"\ntick = \"3s\"\n\
                  max_connections = 7\nhandshake_timeout = \"3s\"\nheader_timeout = \"4s\"\n\
                  read_timeout = \"5s\"\nwrite_timeout = \"6s\"\nmax_requests = 9\n\
                  drain_timeout = \"7s\"\nadvertise_url = \"http://localhost:7300\"";
@@ -187,12 +187,7 @@ async fn every_key_of_the_server_table_is_read() {
     let h = Harness::over(scratch, config).await;
     assert_eq!(h.running.agent_addr(), None);
     let reply = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(reply.json()["expires_at_ms"], T0 + 300_000);
-    let long = serde_json::json!({ "ttl_seconds": 999_999 });
-    let mut body = lease_body();
-    body["ttl_seconds"] = long["ttl_seconds"].clone();
-    let reply = h.call("POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(reply.json()["expires_at_ms"], T0 + 7_200_000);
+    assert_eq!(reply.json()["ends_at_ms"], T0 + 7_200_000);
 }
 
 /// Asserts that `--config` alone is a command line, that without it the flags that were

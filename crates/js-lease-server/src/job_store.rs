@@ -104,12 +104,16 @@ pub(crate) struct JobStoreSetup {
 }
 
 /// The job store as [`open`] returns it: the tables, and the state store under them, which
-/// the tick trims the feed of ([`FeedTrim`]).
+/// the tick trims the feed of ([`FeedTrim`]) and `GetUsage` reads the usage rows of
+/// ([`crate::job_api::fleet::StoreHistory`]).
 pub(crate) struct Opened {
     /// The job and allocation tables.
     pub(crate) jobs: Arc<ServerJobs>,
     /// The tick's handle for trimming the store's feed.
     pub(crate) feed: FeedTrim,
+    /// The state store under the tables, which holds the `usage/ended/` row written beside
+    /// each free of an allocation.
+    pub(crate) store: Arc<dyn Store>,
 }
 
 /// The suffix of the job store's file, after the lease file's name.
@@ -139,7 +143,7 @@ pub(crate) fn open(
     let store: Arc<dyn Store> = Arc::new(store);
     let boot = store.now();
     let feed = FeedTrim::new(Arc::clone(&store), setup.feed_retention);
-    let jobs = JobStore::new(Arc::new(store), sources.ids.clone())
+    let jobs = JobStore::new(Arc::new(Arc::clone(&store)), sources.ids.clone())
         .map_err(StartupError::because(setup.flag))?;
     // Before the first tick: an outage longer than a queue wait, a start timeout or a
     // retention window fails, ends or deletes nothing at that tick (design 6.7, step 7). An
@@ -154,6 +158,7 @@ pub(crate) fn open(
                 .with_allocation_retention(setup.allocation_retention),
         ),
         feed,
+        store,
     })
 }
 

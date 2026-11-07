@@ -242,7 +242,7 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
     };
     let h = Harness::limited("limit_drain", limits).await;
     h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    h.clock.advance(Duration::from_secs(601));
+    h.clock.advance(Duration::from_secs(7201));
     let mut stalled = stall_in_body(h.addr()).await;
     let state = h.scratch.state();
 

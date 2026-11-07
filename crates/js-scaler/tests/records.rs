@@ -592,3 +592,62 @@ fn the_accelerator_facts_never_reach_the_records_file() {
     let read = Records::decode(&text(&table)).unwrap();
     assert_eq!(read.instances[0], table);
 }
+
+/// Asserts that the golden records files of both versions still load and are written back
+/// unchanged by the offer cool-downs: a file with none has no `cooled_offers` key, so the
+/// text of version 2 is the golden text itself and version 1 reads as before. Catches a
+/// change of the stored offer or of the records that breaks a file an earlier release wrote,
+/// and a new key written into files that hold nothing for it.
+#[test]
+fn existing_records_files_still_load() {
+    for golden in [GOLDEN, GOLDEN_V1] {
+        let read = Records::decode(golden).unwrap();
+        assert!(read.cooled_offers.is_empty());
+        let text = read.encode().unwrap();
+        assert!(!text.contains("cooled_offers"), "{text}");
+        assert_eq!(Records::decode(&text).unwrap(), read);
+    }
+    let v2 = Records::decode(GOLDEN).unwrap();
+    assert_eq!(v2.encode().unwrap(), GOLDEN.trim_end());
+    for record in &v2.instances {
+        assert!(record.offer.is_recorded());
+    }
+}
+
+/// Asserts that an offer cool-down is written with its provider, instance type, zone, end,
+/// pool, host and failed dimensions in their spellings, reads back whole, and that an entry
+/// a newer release wrote with a field this one does not know still reads; and that the
+/// cool-down store the records give holds the entry, and leaves out one whose provider is not
+/// a provider id (a file edited by hand). Catches a field lost on the way to the file, a
+/// renamed spelling, a reader that refuses a newer entry, and a bad entry that panics.
+#[test]
+fn an_offer_cooldown_round_trips_through_the_records_file() {
+    let mut records = Records::decode(GOLDEN).unwrap();
+    records.cooled_offers.push(js_scaler::OfferCooldown {
+        provider: "cloud".to_owned(),
+        offer: "gpu_8x_h100".to_owned(),
+        zone: Some("z1".to_owned()),
+        until: at(HOUR),
+        pool: "gpu".to_owned(),
+        host: "js-made-0-60".to_owned(),
+        failed: vec![
+            js_scaler::HelloDimension::AcceleratorModel,
+            js_scaler::HelloDimension::Disk,
+        ],
+    });
+    let text = records.encode().unwrap();
+    let entry = "\"cooled_offers\": [\n    {\n      \"provider\": \"cloud\",\n      \"offer\": \"gpu_8x_h100\",\n      \"zone\": \"z1\",\n      \"until\": 1000003600000,\n      \"pool\": \"gpu\",\n      \"host\": \"js-made-0-60\",\n      \"failed\": [\n        \"accelerator_model\",\n        \"disk\"\n      ]\n    }\n  ]";
+    assert!(text.contains(entry), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), records);
+    assert_eq!(records.offer_cooldowns().len(), 1);
+    let newer = text.replace(
+        "\"host\": \"js-made-0-60\",",
+        "\"host\": \"js-made-0-60\", \"reason\": \"later\",",
+    );
+    assert_ne!(newer, text);
+    assert_eq!(Records::decode(&newer).unwrap(), records);
+
+    records.cooled_offers[0].provider = "Not An Id".to_owned();
+    assert_eq!(records.cooled_offers[0].key(), None);
+    assert!(records.offer_cooldowns().is_empty());
+}

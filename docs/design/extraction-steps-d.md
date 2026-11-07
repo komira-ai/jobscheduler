@@ -60,10 +60,10 @@ numbers refer to design.md.
     credential; a container that reads the executor's credential path, the metadata endpoint or a mount outside the roots fails, and
     the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
 34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a pool of kbf's own hosts, which register
-    through `js-agent` into a `default` provider; a node lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
+    through `js-agent` into a `default` provider; a node lease at first), and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
     floor of node leases, more on queue depth, drained before release; node leases are shares of a host's size, not the whole-node class of 46); each frontend leases only for the hosts it owns, as
-    today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside the TTL
-    changes no placement; the cross-version matrix with a frontend pair.
+    today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside a lease's
+    maximum wall time changes no placement; the cross-version matrix with a frontend pair.
 35. The first real aws pool, disabled by default; enabling it needs the go in R7.
 
 **Phase F. Capabilities as data and the VM backend.** Steps 36 to 40 need no VM. Steps 41 to 47 need step 30b (reuse and integrity in the
@@ -124,9 +124,8 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     the lock and the tick loop has run once; not ready while the process drains on `SIGTERM`. Liveness stays `/healthz`. *Proves:* not
     ready before the load and after the drain begins, ready between; a second process over the same lease file fails at the lock and is
     never ready; `/healthz` is unchanged for the merged callers.
-49. The restart grace (D34): after a boot no held lease expires before `--boot-grace` has passed on the table's clock, so a client has a
-    window to renew after an outage. *Proves:* with an injected clock, a lease whose expiry fell inside the outage survives the first ticks
-    after a boot and is renewable; it expires once the grace passes unrenewed; an `absent` observation still drops a lease at once and
+49. The restart grace (D34): after a boot no held lease ends before `--boot-grace` has passed on the table's clock. *Proves:* with an
+    injected clock, a lease whose end fell inside the outage survives the first ticks after a boot; it ends once the grace has passed; an `absent` observation still drops a lease at once and
     `unknown` still keeps it; a lease file written before the change loads; the flag is optional and unset means today's behaviour.
 50. Verifying and moving state: a read-only `--verify-state` mode of `js-lease-server` that loads the lease file and the binding file,
     checks them against each other (every held lease on a registered host has a binding) and prints the term, the lease count and the
@@ -141,7 +140,8 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     secret in `env`, configuration from a mounted file, both probes, resource requests, a `PodDisruptionBudget`, TLS flags set); no
     manifest names a host or an address. Publishing the image to a registry is an upload and needs the go of R7.
 52. The client side. kbf's frontend and `js-cli` reach the service by its cluster name over TLS, retry an outage with back-off inside the
-    lease TTL, and re-read the lease on a new term. *Proves:* against a fake server that restarts, no placement changes inside the TTL; a
+    lease's maximum wall time, and re-read the lease on a new term. *Proves:* against a fake server that restarts, no placement changes
+    while the lease lasts; a
     request that fails during the outage is repeated once and not duplicated (the acquire id); the client refuses a plain-HTTP address
     that is not loopback.
 53. The first in-cluster deployment and the move from the single host, on a disposable cluster, disabled until the go (R7): the cut-over
@@ -172,7 +172,7 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
 (the hierarchy).
 
 56. Reservation and drain. A queued whole-node request takes a quiet host, else reserves exactly one (the cost order: latest end bound,
-    fewest leases, lowest host id); the `reserved` mark places nothing new; the `host_reserved` flag on a renewal answer; the drain deadline (kept past, never given up)
+    fewest leases, lowest host id); the `reserved` mark places nothing new; the reservation shown as `reserved_for` on the host list; the drain deadline (kept past, never given up)
     and `reserve_backoff` for the failed-prepare exclusion; cancel drops the reservation; the reservation records in the lease file, bound again to a request
     presented after a restart. *Proves:* a restart mid-drain keeps the host, the deadline and the failed-prepare count; with a stream of share requests a queued whole-node request is
     committed within its bound on the injected clock; a reserved host takes no new lease or placed run (backfill that ends by its tail came later, whole-node.md section 4); nothing is stopped by a reservation
@@ -202,7 +202,7 @@ need the hierarchy (steps 30c and 31c).
 61. Launch options, price and capacity as data. `launch_options` and the optional `option` on `AcquireSpec`; the choice by price, capacity
     signal, id; a refusal cools the option down. *Proves:* H7 (price never refuses); the dearer option is taken only when the cheaper is
     refused; a provider without `launch_options` behaves as before.
-62. Spot hosts. The `Interruption` event from `events()`, the `reclaim` taint, `host_leaving` and `leaves_at` on the renewal answer, the
+62. Spot hosts. The `Interruption` event from `events()`, the `reclaim` taint, `host_leaving` and `leaves_at` on the host list, the
     requeue of unstarted runs, the give-up at the deadline, the brake exclusion. *Proves:* H5 on the fake aws and the fake agent, including
     a restart between the notice and the deadline, a reservation dropped without a give-up, and a storm of notices that does not trip the
     taint brake.

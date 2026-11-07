@@ -123,9 +123,16 @@ impl Effects for Live {
         self.launcher.catalog_fetches()
     }
 
+    /// Writes the records, then hands the offer cool-downs they hold to the catalog's
+    /// cool-down store ([`Launcher::hold`]), so a cool-down a mismatched hello started is in
+    /// memory only once it is on disk. Nothing is handed over when the write fails: the step
+    /// is dropped and decided again.
     fn save(&self, records: &Records) -> Result<(), String> {
         match self.kept.save(records) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.launcher.hold(&records.offer_cooldowns());
+                Ok(())
+            }
             Err(err) => Err(err.to_string()),
         }
     }

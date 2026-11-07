@@ -24,7 +24,7 @@ fn accepted(resources: &str, capabilities: &str) -> Request {
         r#"{{"class":"c","resources":{resources},"capabilities":{capabilities},"max_wall_seconds":60}}"#
     );
     let body = parse::<AcquireBody>(text.as_bytes()).unwrap();
-    body.into_parts().unwrap().0
+    body.into_parts().unwrap()
 }
 
 /// Asserts that an `accelerator` object that names another model than `gpu_class`, or

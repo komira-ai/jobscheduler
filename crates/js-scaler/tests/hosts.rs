@@ -1,12 +1,12 @@
 //! What the scaler does with a host by what the registry shows of it: one it does not hear
 //! from, one it no longer shows, one marked releasing, one still marked draining after
-//! the scaler took it back, one that said hello below its offer, and the boot clock.
+//! the scaler took it back, one whose hello did not match its offer, and the boot clock.
 
 mod common;
 
 use common::*;
 use js_elastic::HostStatus;
-use js_scaler::{Action, CooldownReason, HostState, Mark, Phase, Records};
+use js_scaler::{CooldownReason, HostState, Mark, Phase, Records};
 
 /// Asserts that the boot clock runs from the launch, as the token's does, and not from
 /// the answer: a machine accepted ten minutes after its launch is given up on at
@@ -43,31 +43,28 @@ fn a_silent_busy_host_is_not_released_by_the_boot_timeout() {
     assert!(rig.state.silent.contains_key(&plan.name));
 }
 
-/// Asserts that a host that announced less than its offer and is quiet is drained and
-/// marked for release in the same step, and that one with work is not touched until it
-/// is quiet, then drained and marked at once: no work is cut.
+/// Asserts that a host that announced less than its offer has its machine released in the
+/// step that judged its hello, whether it is quiet or busy: its token is revoked and the
+/// release asked at once, and neither is drained first. The shell holds the release call
+/// itself while the host holds work (`Effects::holds_work`), so no work is cut. Catches a
+/// mismatched machine left registered while it is busy, where the registry could book more
+/// on it.
 #[test]
-fn a_short_hello_releases_a_quiet_host_at_once_and_waits_for_a_busy_one() {
-    let marks = |actions: &[Action]| -> Vec<String> {
-        kinds(actions)
-            .into_iter()
-            .filter(|name| name == "Drain" || name == "ReleaseHost")
-            .collect()
-    };
-    let (mut quiet, plan, _) = booting(settings("gpu"), "i-1");
-    let mut announced = host(&plan.name, "gpu");
-    shape(&mut announced).cpu_millis = 7999;
-    quiet.input.hosts = vec![announced.clone()];
-    assert_eq!(marks(&quiet.tick(at(2 * SECOND))), ["Drain", "ReleaseHost"]);
-
-    let (mut busy, plan, _) = booting(settings("gpu"), "i-1");
-    announced.id = js_types::HostId::new(&plan.name).unwrap();
-    announced.busy = true;
-    busy.input.hosts = vec![announced];
-    assert!(marks(&busy.tick(at(2 * SECOND))).is_empty());
-    assert_eq!(busy.phase(0), Phase::Registered);
-    busy.input.hosts[0].busy = false;
-    assert_eq!(marks(&busy.tick(at(3 * SECOND))), ["Drain", "ReleaseHost"]);
+fn a_short_hello_releases_the_machine_at_once_quiet_or_busy() {
+    for busy in [false, true] {
+        let (mut rig, plan, _) = booting(settings("gpu"), "i-1");
+        let mut announced = host(&plan.name, "gpu");
+        shape(&mut announced).cpu_millis = 4000;
+        announced.busy = busy;
+        rig.input.hosts = vec![announced];
+        let actions = rig.tick(at(2 * SECOND));
+        assert_eq!(
+            kinds(&actions),
+            ["Save", "Revoke", "Release"],
+            "busy {busy}"
+        );
+        assert_eq!(rig.phase(0), Phase::Releasing);
+    }
 }
 
 /// Asserts that a registered or draining machine the registry no longer shows is revoked

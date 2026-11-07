@@ -5,14 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_elastic::{Acquired, Extra, Held, HostStatus, Instant, RefusalCode, Released};
 use js_sched::failover::{AcquireMemory, Refused};
-use js_types::{AcceleratorNeed, Model, RequestId};
+use js_types::RequestId;
 
 use crate::block;
 use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
-use crate::record::{CooldownReason, Phase, Record, Records, StoredOffer};
+use crate::record::{CooldownReason, OfferCooldown, Phase, Record, Records, StoredOffer};
 use crate::settings::Blocked;
 use crate::state::{Action, PlanLine, State};
 use crate::time::Millis;
+use crate::verify::{HelloDimension, Verdict, verify_hello};
 
 /// The records a step reads and writes, the actions it has decided so far, and the
 /// facts it has recorded for a status page.
@@ -59,6 +60,10 @@ pub(crate) struct Pass<'a> {
     pub(crate) memory: AcquireMemory,
     /// The refusals this step took in ([`State::refusals`]).
     pub(crate) refusals: Vec<Refused>,
+    /// The hellos this step found not to match their offer ([`State::mismatched`]).
+    pub(crate) mismatched: Vec<OfferCooldown>,
+    /// The hellos this step registered with no offer to compare ([`State::unverified`]).
+    pub(crate) unverified: Vec<String>,
 }
 
 /// The host named `name`, if the registry knows it.
@@ -85,34 +90,6 @@ fn listed(record: &Record, held: &Held) -> bool {
     .all(|same| same);
     let by_cloud = record.cloud_id.as_deref() == Some(held.id.as_str());
     [by_acquire, by_name, by_cloud].into_iter().any(|same| same)
-}
-
-/// Whether a host's announced shape is below the offer its machine was launched from, in
-/// cpu, memory, accelerator count or accelerator model: the offer's class is read as a
-/// model through the alias table, so a family offer is met by any variant and a variant
-/// offer only by that variant (a 40 GB host of an 80 GB offer is below it). A host whose
-/// shape is not known is not below anything.
-fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
-    host.is_some_and(|host| {
-        let count = host.accelerator.as_ref().map_or(0, |own| own.count);
-        let holds = [
-            host.cpu_millis >= offer.cpu_millis,
-            host.memory_bytes >= offer.memory_bytes,
-            count >= offer.gpus,
-            offer
-                .gpu_class
-                .as_deref()
-                .and_then(|class| Model::parse(class).ok())
-                .is_none_or(|model| {
-                    let wanted = AcceleratorNeed {
-                        model: Some(model),
-                        ..AcceleratorNeed::default()
-                    };
-                    wanted.met_by(host.accelerator.as_ref()).is_ok()
-                }),
-        ];
-        !holds.into_iter().all(|ok| ok)
-    })
 }
 
 impl<'a> Pass<'a> {
@@ -209,6 +186,8 @@ impl<'a> Pass<'a> {
             actions: Vec::new(),
             memory: state.acquire,
             refusals: Vec::new(),
+            mismatched: Vec::new(),
+            unverified: Vec::new(),
         }
     }
 
@@ -591,19 +570,68 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// The first hello of a booting machine: it is registered, and condemned if it
-    /// announced less than its offer. A host the registry shows has said hello whatever it
-    /// has done since, so one that is silent now is registered too; if it was never heard from
-    /// after its hello and books nothing, [`Pass::on_silent`] then releases it at `boot_timeout`.
+    /// The first hello of a booting machine, judged against the offer stored for its
+    /// acquire (design 5.6.1, step 6, [`verify_hello`]). A host the registry shows has said
+    /// hello whatever it has done since, so one that is silent now is judged too; if it was
+    /// never heard from after its hello and books nothing, [`Pass::on_silent`] then releases
+    /// it at `boot_timeout`.
+    ///
+    /// Three cases are kept apart:
+    ///
+    /// * the host's shape is not known (`HostFacts::shape` is `None`: the registry has not
+    ///   heard it since a restart): the machine is registered and nothing is judged;
+    /// * the record holds no offer ([`StoredOffer::nothing`]): the registry already held the
+    ///   hello to the pool's shape floor, so the machine is registered, nothing more is
+    ///   judged, and the record is named in [`State::unverified`] for the shell to log;
+    /// * otherwise the hello is compared with the offer: a match registers the machine, a
+    ///   mismatch is [`Pass::on_mismatch`].
     fn on_hello(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
-        let record = &mut self.records.instances[i];
-        let short = below(&record.offer, host.shape.as_ref());
-        record.registered = true;
-        record.condemned = short;
-        self.go(i, Phase::Registered);
-        if short {
-            self.cool(&pool.settings, CooldownReason::BootFailed);
+        let record = &self.records.instances[i];
+        let tolerance = pool.settings.size_tolerance_percent;
+        let verdict = match (host.shape.as_ref(), record.offer.is_recorded()) {
+            (None, _) => Verdict::Match,
+            (Some(_), false) => {
+                self.unverified.push(record.name.clone());
+                Verdict::Match
+            }
+            (Some(shape), true) => verify_hello(&record.offer, shape, tolerance),
+        };
+        self.records.instances[i].registered = true;
+        match verdict {
+            Verdict::Match => {
+                self.go(i, Phase::Registered);
+            }
+            Verdict::Mismatch(failed) => self.on_mismatch(pool, i, failed),
         }
+    }
+
+    /// A hello that did not match its offer in the dimensions `failed`, in one step: the
+    /// record is condemned and its release started (the token is revoked now; the shell marks
+    /// the host ending once the records are saved, so the registry books nothing more on it;
+    /// the provider is told to terminate the machine at every step until it is gone, and the
+    /// shell holds that call while the host still holds work); the offer is cooled down for
+    /// `offer_cooldown` from now, keyed by (provider, instance type, zone), in the records
+    /// saved with the release; and the pool is cooled as for a failed boot, which counts
+    /// toward its brake.
+    fn on_mismatch(&mut self, pool: &PoolInput, i: usize, failed: Vec<HelloDimension>) {
+        let settings = &pool.settings;
+        self.records.instances[i].condemned = true;
+        // Only a booting record is judged, and `Booting -> Releasing` is a transition of the
+        // state machine, so the release always starts.
+        self.start_release(i);
+        let record = &self.records.instances[i];
+        let entry = OfferCooldown {
+            provider: settings.provider.as_str().to_owned(),
+            offer: record.offer.id.clone(),
+            zone: record.offer.zone.clone(),
+            until: self.now.plus(settings.offer_cooldown),
+            pool: record.pool.clone(),
+            host: record.name.clone(),
+            failed,
+        };
+        self.records.cool_offer(entry.clone());
+        self.mismatched.push(entry);
+        self.cool(settings, CooldownReason::BootFailed);
     }
 
     /// The instant a count of complete views that miss something began, given the instant
@@ -799,54 +827,5 @@ impl<'a> Pass<'a> {
                 self.silent_now.insert(name, since);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use js_elastic::{Offer, PriceUnit};
-    use js_types::{ExecMode, accelerator_of};
-
-    use super::*;
-
-    /// An offer of eight devices spelt `class`, with ample CPU and memory.
-    fn offer(class: &str) -> Offer {
-        let model = Model::parse(class).unwrap();
-        Offer {
-            id: "gpu_8x".to_owned(),
-            zone: None,
-            cpu_millis: 8000,
-            memory_bytes: 64 << 30,
-            disk_bytes: 0,
-            accelerator: Some(accelerator_of(&model, 8, None)),
-            os: "linux".to_owned(),
-            arch: "x86_64".to_owned(),
-            isa_level: None,
-            exec: ExecMode::Container,
-            price_cents_per_hour: Some(1),
-            price_unit: PriceUnit::UsCents,
-            available: true,
-            purchase: None,
-            quota: None,
-            block: None,
-        }
-    }
-
-    /// Asserts that a host is below a variant offer when it reports another variant of the
-    /// same family (a 40 GB host of an 80 GB offer, and the reverse), and is not when it
-    /// reports that variant; that a host of any variant meets a family offer; and that a
-    /// host of another family is below either. Catches a check that compares families only,
-    /// which keeps a machine that came up smaller than what was paid for.
-    #[test]
-    fn a_host_of_another_variant_is_below_a_variant_offer() {
-        let (a80, a40) = ("nvidia-a100-sxm4-80gb", "nvidia-a100-sxm4-40gb");
-        let stored = |class| StoredOffer::from_offer(&offer(class));
-        assert!(below(&stored(a80), Some(&offer(a40))));
-        assert!(below(&stored(a40), Some(&offer(a80))));
-        assert!(!below(&stored(a80), Some(&offer(a80))));
-        assert!(!below(&stored("nvidia-a100"), Some(&offer(a40))));
-        assert!(!below(&stored("nvidia-a100"), Some(&offer(a80))));
-        assert!(below(&stored("nvidia-a100"), Some(&offer("nvidia-h100"))));
-        assert!(!below(&stored(a80), None));
     }
 }

@@ -42,7 +42,7 @@ fn shared_over(rig: &Rig, dir: &TestDir) -> Arc<Shared> {
 
 /// [`shared_over`] holding `agents`, which may be none.
 fn shared_with(rig: &Rig, dir: &TestDir, agents: Option<Arc<Agents>>) -> Arc<Shared> {
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool(Box::new(rig.agents.registry.provider())),
         rig.shared.clone(),

@@ -1,12 +1,7 @@
 //! The cases. Each behaviour of the v1 path runs against both stores, and each that a client
 //! drives runs through both clients; the case's name says which (`sqlite::cli::...`).
 
-use std::num::NonZeroUsize;
-use std::sync::Arc;
-
-use js_state::SystemClock;
-use js_state::sqlite::{Options, SqliteStore};
-use js_usage::{Booked, EndedHistory, EndedReason};
+use serde_json::{Value, json};
 
 use crate::agent::Agent;
 use crate::rig::{Kind, Rig, Spec, Via, text};
@@ -244,19 +239,34 @@ fn get_job_answers_after_the_server_restarts(kind: Kind) {
     }
 }
 
-/// Asserts that a finished job leaves its usage row: once the agent no longer lists the job,
-/// the server has freed its allocation and written the ended row in the same commit, which
-/// the job store beside the lease file holds after the server stops: one row, the job's id,
-/// the agent's host, the CPU and memory it booked and the reason `released`.
-///
-/// `GetUsage` reads the usage store's ended bookings of leases (docs/http-gateway.md), not the
-/// job store, so the row of a job is not listed there yet; when it is, this case reads it
-/// through `GetUsage` too.
+/// Asserts that a finished job's usage is where an operator looks for it: once the agent no
+/// longer lists the job, the server has freed its allocation and written its usage record in
+/// the same commit, and `GetUsage` of the job lists that one record, through both clients:
+/// the job's id, the agent's host, the CPU and memory it booked, the end the record is keyed
+/// by, and no further page. A new server process over the same files, started with
+/// `--boot resume`, lists the same record. It catches a job's record left out of `GetUsage`
+/// (read from the usage store alone), and one that does not outlive the server.
 fn a_finished_job_has_a_usage_row(kind: Kind) {
     let rig = Rig::new(&name("usage", kind, None), kind, &[]);
     rig.submit(Via::Http, &Spec::new("u1"));
     rig.until_state("u1", "JOB_STATE_SUCCEEDED");
     rig.until_freed();
+    let before = usage_of(&rig.http, &rig.js, "u1");
+    let record = &before["records"][0];
+    assert_eq!(record["jobId"], "u1", "{before}");
+    assert_eq!(record["hostId"], "h1", "{before}");
+    let booked = json!({ "jobId": "u1", "cpuMillis": "1000", "memoryBytes": "268435456" });
+    assert_eq!(record["booked"], booked, "{before}");
+    assert!(
+        record["endedAtMs"].as_str().is_some_and(|ms| ms != "0"),
+        "{before}"
+    );
+    assert_eq!(
+        before["records"].as_array().map(Vec::len),
+        Some(1),
+        "{before}"
+    );
+    assert_eq!(before.get("nextPageToken"), None, "{before}");
     let Rig {
         node: _node,
         files,
@@ -266,28 +276,24 @@ fn a_finished_job_has_a_usage_row(kind: Kind) {
     } = rig;
     agent.stop();
     assert!(server.stop().success());
-    let store = SqliteStore::open(
-        &files.job_store(),
-        Arc::new(SystemClock::default()),
-        Options::default(),
-    )
-    .expect("the job store");
-    let limit = NonZeroUsize::new(10).expect("a limit");
-    let read = EndedHistory::new(&store)
-        .range(0, u64::MAX, limit)
-        .expect("the usage rows");
-    assert_eq!(read.skipped, 0);
-    assert_eq!(read.rows.len(), 1, "{:?}", read.rows);
-    let row = &read.rows[0];
-    assert_eq!(row.id.as_str(), "u1");
-    assert_eq!(row.host.as_ref().map(|host| host.as_str()), Some("h1"));
-    assert_eq!(row.ended_reason, EndedReason::Released);
-    let booked = Booked {
-        whole_host: false,
-        cpu_milli: 1000,
-        memory_bytes: 268_435_456,
-    };
-    assert_eq!(row.booked, Some(booked));
+    let server = Server::start(&files, "resume");
+    let http = crate::http::Gateway::new(server.job);
+    let js = crate::cli::Js::new(server.job, &files.token_file());
+    assert_eq!(
+        usage_of(&http, &js, "u1"),
+        before,
+        "GetUsage after the restart"
+    );
+}
+
+/// The answer of `GetUsage` of the job `id`, which the gateway and the command line give
+/// alike.
+fn usage_of(http: &crate::http::Gateway, js: &crate::cli::Js, id: &str) -> Value {
+    let got = http.get(&format!("/v1/usage?jobId={id}"));
+    assert_eq!(got.status, 200, "GetUsage {id}: {:?}", got.body);
+    let listed = js.run(&["usage", "--job-id", id]).json();
+    assert_eq!(listed, got.body, "the command line and the gateway");
+    got.body
 }
 
 /// Asserts the default runtime (ported from the lease path of the agent's crun tests): an

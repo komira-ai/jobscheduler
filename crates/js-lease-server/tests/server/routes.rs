@@ -10,8 +10,8 @@ fn with(mut body: Value, key: &str, value: Value) -> Value {
 }
 
 /// Asserts that a lease request is granted with 201, an id of (term, sequence), the
-/// first free host and an expiry of now plus the default ttl, and that the lease then
-/// shows in the list with its labels.
+/// first free host and its wall end (`ends_at_ms`) of now plus the wall time asked for,
+/// and that the lease then shows in the list with its labels and no `expires_at_ms`.
 #[tokio::test]
 async fn create_grants_a_lease() {
     let h = Harness::new("create").await;
@@ -20,7 +20,8 @@ async fn create_grants_a_lease() {
     let body = reply.json();
     assert_eq!(body["id"], "1-1");
     assert_eq!(body["host"], "gpu-01");
-    assert_eq!(body["expires_at_ms"], T0 + 600_000);
+    assert_eq!(body["ends_at_ms"], T0 + 7_200_000);
+    assert_eq!(body.as_object().unwrap().len(), 3, "{body}");
 
     let listed = h.call("GET", "/v1/leases", None).await;
     assert_eq!(listed.status, 200);
@@ -30,25 +31,20 @@ async fn create_grants_a_lease() {
     assert_eq!(lease["host"], "gpu-01");
     assert_eq!(lease["acquired_at_ms"], T0);
     assert_eq!(lease["ends_at_ms"], T0 + 7_200_000);
+    assert!(lease.get("expires_at_ms").is_none(), "{lease}");
     assert_eq!(first_labels(&listed)["team"], "infra");
 }
 
-/// Asserts that a ttl the client names is used, a validation run becomes a label, and a
-/// ttl above the maximum is cut to it.
+/// Asserts that a validation run becomes a label on the lease.
 #[tokio::test]
-async fn create_honours_ttl_and_validation_run() {
-    let h = Harness::new("create_ttl").await;
-    let body = with(lease_body(), "ttl_seconds", json!(30));
-    let body = with(body, "validation_run", json!("val-7"));
+async fn create_records_a_validation_run() {
+    let h = Harness::new("create_validation").await;
+    let body = with(lease_body(), "validation_run", json!("val-7"));
     let reply = h.call("POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(reply.json()["expires_at_ms"], T0 + 30_000);
+    assert_eq!(reply.status, 201, "{}", reply.body);
     let listed = h.call("GET", "/v1/leases", None).await;
     let labels = first_labels(&listed);
     assert!(labels.values().any(|value| value == "val-7"), "{labels:?}");
-
-    let long = with(lease_body(), "ttl_seconds", json!(999_999));
-    let reply = h.call("POST", "/v1/leases", Some(&long)).await;
-    assert_eq!(reply.json()["expires_at_ms"], T0 + 3_600_000);
 }
 
 /// Asserts that a request the provider cannot place is a 409 naming the code: no host
@@ -116,7 +112,6 @@ async fn create_bad_bodies_are_400() {
     let mut cases = vec![
         with(lease_body(), "class", json!("Not A Class")),
         with(lease_body(), "resources", json!({ "gpus": 1 })),
-        with(lease_body(), "ttl_seconds", json!(0)),
         with(lease_body(), "surprise", json!(1)),
         with(lease_body(), "max_wall_seconds", json!("long")),
     ];
@@ -156,55 +151,65 @@ async fn oversized_bodies_are_refused() {
     assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
 }
 
-/// Asserts that a renew extends from now, never shortens, takes an empty body as the
-/// default ttl, and refuses a bad ttl, an unknown or malformed id and an expired lease.
+/// Asserts that the renew route is gone: with a lease held, `POST /v1/leases/{id}/renew`
+/// is the router's ordinary answer to a path it does not have (404 `not-found`, the same
+/// status and body as `/v1/nothing`), whatever the id, with or without a body, and the
+/// lease is as it was (still held, the same `ends_at_ms`). It catches a renew route that
+/// still answers, and one that changes the lease while refusing.
 #[tokio::test]
-async fn renew_codes() {
-    let h = Harness::new("renew").await;
+async fn the_renew_route_is_gone() {
+    let h = Harness::new("renew_gone").await;
     h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let before = h.call("GET", "/v1/leases", None).await.json();
+    let unknown = h.call("GET", "/v1/nothing", None).await;
     h.clock.advance(std::time::Duration::from_secs(100));
 
-    let reply = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(
-        reply.json(),
-        json!({ "expires_at_ms": T0 + 100_000 + 600_000 })
-    );
-
-    let short = h
-        .call(
-            "POST",
-            "/v1/leases/1-1/renew",
-            Some(&json!({ "ttl_seconds": 5 })),
-        )
-        .await;
-    assert_eq!(short.json(), json!({ "expires_at_ms": T0 + 700_000 }));
-
-    let zero = h
-        .call(
-            "POST",
-            "/v1/leases/1-1/renew",
-            Some(&json!({ "ttl_seconds": 0 })),
-        )
-        .await;
-    assert_eq!(zero.status, 400);
-    let junk = h
-        .call("POST", "/v1/leases/1-1/renew", Some(&json!({ "other": 1 })))
-        .await;
-    assert_eq!(junk.status, 400);
-
-    for id in ["9-9", "abc", "1-01", "+1-1", "1-", "-1"] {
-        let reply = h
-            .call("POST", &format!("/v1/leases/{id}/renew"), None)
-            .await;
-        assert_eq!(reply.status, 404, "{id}");
-        assert_eq!(reply.json(), json!({ "error": "unknown-lease" }));
+    for id in ["1-1", "9-9", "abc"] {
+        let path = format!("/v1/leases/{id}/renew");
+        for body in [None, Some(json!({ "ttl_seconds": 60 }))] {
+            let reply = h.call("POST", &path, body.as_ref()).await;
+            assert_eq!(reply.status, 404, "{id}: {}", reply.body);
+            assert_eq!(reply.json(), json!({ "error": "not-found" }));
+            assert_eq!(
+                (reply.status, reply.body),
+                (unknown.status, unknown.body.clone())
+            );
+        }
     }
+    let after = h.call("GET", "/v1/leases", None).await.json();
+    assert_eq!(after, before);
+    assert_eq!(after["leases"][0]["state"], "held");
+    assert_eq!(after["leases"][0]["ends_at_ms"], T0 + 7_200_000);
+}
 
-    h.clock.advance(std::time::Duration::from_secs(1000));
-    let late = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(late.status, 409);
-    assert_eq!(late.json(), json!({ "error": "expired" }));
+/// The message of the 400 for a `ttl_seconds` that is a number.
+const TTL_REMOVED: &str = "ttl_seconds was removed: a lease has no time to live; it ends when released or at max_wall_seconds";
+
+/// Asserts that an acquire naming a number in `ttl_seconds` (60, and 0) is the 400
+/// `ttl-removed` with the exact message, that nothing is recorded and no lease id is used
+/// (the list is empty, and the next acquire that succeeds gets the first id), and that
+/// `"ttl_seconds": null`, which the previous release's client sends on every acquire, is
+/// accepted as absent. It catches a ttl that is read and ignored (a client would think it
+/// set one), a refusal that books a lease or burns an id, and an older client that is
+/// refused for a field it never set.
+#[tokio::test]
+async fn acquire_with_ttl_seconds_is_a_400_ttl_removed() {
+    let h = Harness::new("ttl_removed").await;
+    for ttl in [60, 0] {
+        let body = with(lease_body(), "ttl_seconds", json!(ttl));
+        let reply = h.call("POST", "/v1/leases", Some(&body)).await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert_eq!(
+            reply.json(),
+            json!({ "error": "ttl-removed", "reason": TTL_REMOVED })
+        );
+    }
+    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
+
+    let null = with(lease_body(), "ttl_seconds", json!(null));
+    let reply = h.call("POST", "/v1/leases", Some(&null)).await;
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(reply.json()["id"], "1-1");
 }
 
 /// Asserts that a release frees the lease with a 200, a second release of it is a 404,
@@ -252,15 +257,11 @@ async fn routing_codes() {
     assert_eq!(h.call("GET", "/elsewhere", None).await.status, 404);
     assert_eq!(h.call("PUT", "/v1/leases", None).await.status, 405);
     assert_eq!(h.call("GET", "/v1/leases/1-1", None).await.status, 405);
-    assert_eq!(
-        h.call("GET", "/v1/leases/1-1/renew", None).await.status,
-        405
-    );
 }
 
 /// Asserts that a lease file that cannot be written fails the request with a 500 that
-/// does not name the path: before the start (create), and after a change (renew,
-/// release). The write is made to fail by putting a directory where the temporary file
+/// does not name the path: before the start (create), and after a change
+/// (release). The write is made to fail by putting a directory where the temporary file
 /// goes.
 #[tokio::test]
 async fn unwritable_state_is_500() {
@@ -270,7 +271,6 @@ async fn unwritable_state_is_500() {
 
     let cases = [
         ("POST", "/v1/leases", Some(lease_body())),
-        ("POST", "/v1/leases/1-1/renew", None),
         ("DELETE", "/v1/leases/1-1", None),
     ];
     for (method, path, body) in cases {

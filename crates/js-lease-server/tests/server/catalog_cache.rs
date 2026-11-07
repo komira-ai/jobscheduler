@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, Artifact, BootStep, Capacity, CapacityProvider,
-    CatalogFuture, Held, Hello, HostName, HostRef, Instant, Observed, Offer, OfferKey, PriceUnit,
-    ProviderCaps, ProviderError, Reason, Refusal, RefusalCode, Released, SchedulerId, Secret,
+    CatalogFuture, Cooldowns, Held, Hello, HostName, HostRef, Instant, Observed, Offer, OfferKey,
+    PriceUnit, ProviderCaps, ProviderError, Reason, Refusal, RefusalCode, Released, SchedulerId,
+    Secret,
 };
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
 use js_lease_server::{
@@ -867,4 +868,33 @@ async fn a_catalog_call_that_panics_is_a_failed_fetch() {
     catalogs.refresh_due(after(due, 1)).await;
     assert_eq!(cloud.calls(), 3);
     assert_eq!(catalogs.view(&cloud.id(), after(due, 1)), offers(&list_b()));
+}
+
+/// Asserts that cool-downs read back from the scaler's records and held by the catalogs
+/// leave each offer out of pass 2's offers up to its own end and not past it, whatever the
+/// provider's `offer_cooldown`; that a later hold with an earlier end does not bring the end
+/// forward; and that a cool-down of a provider the catalogs do not hold hides none of the
+/// held provider's offers. Catches a cool-down read back after a restart that is dropped,
+/// moved to a fresh `offer_cooldown` from the restart, or shortened.
+#[tokio::test]
+async fn cooldowns_held_from_the_records_last_to_their_ends() {
+    let cloud = Counting::new("held-cloud");
+    let (one, two) = (offer("type-1", Some("z1")), offer("type-2", Some("z1")));
+    cloud.set(Ok(vec![one.clone(), two.clone()]));
+    let catalogs = cloud.catalogs(DAY, HOUR);
+    let id = cloud.id();
+    catalogs.refresh_due(t0()).await;
+    let end = after(t0(), 3 * HOUR_MS);
+    let stranger = ProviderId::known("stranger-cloud");
+    let mut read = Cooldowns::new();
+    read.hold_until(OfferKey::of(&id, &one), end);
+    read.hold_until(OfferKey::of(&stranger, &two), end);
+    catalogs.hold(&read);
+    let mut earlier = Cooldowns::new();
+    earlier.hold_until(OfferKey::of(&id, &one), after(t0(), 10));
+    catalogs.hold(&earlier);
+    for at in [t0(), after(t0(), 3 * HOUR_MS - 1)] {
+        assert_eq!(catalogs.offers_for_pass2(&id, at), vec![two.clone()]);
+    }
+    assert_eq!(catalogs.offers_for_pass2(&id, end), vec![one, two]);
 }

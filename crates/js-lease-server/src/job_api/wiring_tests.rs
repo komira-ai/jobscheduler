@@ -3,7 +3,6 @@
 //! own, and requests sent to the router as a `tower::Service`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
@@ -62,7 +61,7 @@ fn bare_state(
         2,
     );
     let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
-    let settings = Settings::new(Duration::from_secs(300), Duration::from_secs(3600)).unwrap();
+    let settings = Settings::new();
     let table = LeaseTable::open(
         BoxedPool(Box::new(registry.provider())),
         clock.clone(),

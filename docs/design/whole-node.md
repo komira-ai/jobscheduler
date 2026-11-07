@@ -77,8 +77,7 @@ host:
 holds at most one reservation and a host carries at most one. The host is chosen by the **drain cost**, smallest first:
 
 1. the latest end bound of the work on the host: for each lease and each run the scheduler placed, its start plus its max wall time
-   (12.1), minus now, and zero for a host with none. This is a worst case: every lease ends by its max wall time, and a renewal never
-   extends it past that;
+   (12.1), minus now, and zero for a host with none. This is a worst case: every lease ends by its max wall time;
 2. then the fewest leases on the host;
 3. then the lowest host id (the order of the table), so the choice is deterministic on the injected clock.
 
@@ -116,10 +115,9 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
   under `--placement js-sched`, to a lease of the pool's `share_class` that is not a probe, with `server.max_lease_wall` as the
   ceiling (the lease table ends every lease at its wall); without it, and for every other start, a reserved host takes nothing new.
 
-- A lease ends by release, by TTL, or by its max wall time, whichever is first. The renewal answer of a lease on a reserved host carries
-  `host_reserved: true` (an additive field, R3): it asks the consumer to place no more work there and to release when its work is done
-  (a consumer drains before it releases, 9.1). A consumer that ignores it keeps the lease to its TTL or max wall time; a renewal is not
-  refused for it. The agent does not refuse a `Start` for a lease that already existed, since that would end the consumer's work without its
+- A lease ends by release or by its max wall time, whichever is first. The host list (`GET /v1/hosts`) carries `reserved_for` on a reserved
+  host: it asks the consumer to place no more work there and to release when its work is done
+  (a consumer drains before it releases, 9.1). A consumer that ignores it keeps the lease to its max wall time. The agent does not refuse a `Start` for a lease that already existed, since that would end the consumer's work without its
   say; keeping to the request is the consumer's side of the bargain.
 - The scheduler never stops a lease or a run because of a reservation (D48). The only work released early is the requesting consumer's
   own, if it chooses to release it.
@@ -189,9 +187,9 @@ kills is a silent loss for a tenant who did nothing wrong, and it would let one 
    succeeds, or `exclusive_refused` with `noise-over-bound`, `not-quiet` or `setup-failed` when it does not. For kbf this is the noise
    probe and the cpuset setup. The hook is the consumer's code on the host, under the consumer's consents (5.12); the scheduler sees only
    its outcome.
-6. **The clock starts at the token (D52).** The lease's TTL and its max wall time are counted from the moment the token is minted, not from
+6. **The clock starts at the token (D52).** The lease's max wall time is counted from the moment the token is minted, not from
    the commit: the consumer is not charged for the drain or for `prepare_timeout`, and a lease that never becomes ready never held the
-   consumer's time. Renewal and the reaper are as for any lease (12.1): a renewal never extends it past the token time plus the max wall
+   consumer's time. The reaper is as for any lease (12.1): the lease ends at the token time plus the max wall
    time.
 7. **A whole-host job (the job path).** A job that needs the whole host takes these steps without a lease, in the job store
    (`js-lease-server`, `job_whole`; `js-sched-placer`, `engine::whole_jobs`; both under `--placement js-sched`, with the pool's whole-node
@@ -316,7 +314,7 @@ type launched may serve it (D50).
 leasee. A lost or silent agent is Unknown, never Absent (5.6): the host stays `held` and is given to nobody until the lease is released or
 observed gone.
 
-**End.** On release, TTL, max wall time or loss of the lease, the scheduler retains a `Stop` until the lease leaves the heartbeat (9.1).
+**End.** On release, max wall time or loss of the lease, the scheduler retains a `Stop` until the lease leaves the heartbeat (9.1).
 The agent removes what remains (containers, scratch, VMs), runs the checks, announces `restoring` and returns to `serving`. **Only then**
 does the scheduler clear the `held` mark and make the host bookable; the next reservation or share may take it after that. A host with a
 finding is tainted instead and is not bookable (5.12). The host counts against the ceiling until the mark is cleared.
@@ -347,7 +345,7 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
   kbf holds the node and has two ways to use it, and the scheduler is indifferent between them. (a) *kbf places*: its own loop runs the
   harness's actions on the node one at a time, through `kbf-executor`, as it places actions in any lease; this is the default. (b) *A runner
   owns the node*: kbf starts one runner job in the lease with a limit of the whole node and the runner orchestrates the measurement and
-  reports to kbf. In both, kbf keeps the lease, renews it, and releases it when the run ends.
+  reports to kbf. In both, kbf keeps the lease and releases it when the run ends.
 - **GPU testing on the Mac Studio machines.** kbf requests `whole-node` with `gpu_class eq apple-m` (or `gpus > 0`), which matches only the
   GPU pool (D32), and runs GPU tests as jobs of the lease, `contained` where the macOS runtime allows it. A host job there would taint a
   registered machine (D51, K37).
@@ -355,8 +353,8 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
   kbf reruns the action inside it. This is the same class; it is not a node lease.
 - **kbf's own node leases** are shares and are the work a reservation drains. A kbf that needs a whole node on a host where it holds node
   leases should release them first; the scheduler does not stop them. kbf counts a whole-node lease in its `max_leased_machines` (its own
-  cap) and answers `host_reserved` on a node lease by placing nothing new there and releasing when idle.
-- **Loss.** A whole-node lease that ends mid-run (host lost, tainted, instance reclaimed, fenced, or the lease ended by TTL or max wall
+  cap) and, on a node lease whose host is reserved, places nothing new there and releasing when idle.
+- **Loss.** A whole-node lease that ends mid-run (host lost, tainted, instance reclaimed, fenced, or the lease ended by its max wall
   time) loses the run: the platform fault is recorded (8.1) and the scheduler tells the consumer the lease is gone. **The consumer repeats
   the measurement**, in a new whole-node lease it requests itself. The scheduler cannot rerun an action (it never sees one, 9.1) and does
   not try; it keeps no partial result. The consumer discards the partial measurement and never uses it.
@@ -367,8 +365,7 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
 ## 10. Wire and configuration, in one place
 
 Additive fields (R3), none new on the agent beyond the merged design: `HeartbeatReply.exclusive` (lease id) and `Heartbeat.exclusive_ready`
-(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail cut by the receiver to at most 256 bytes; section 5, item 4); a renewal answer's
-`host_reserved`; the reservation records in the lease file (section 3). All are additive: an old reader skips and keeps them, and an old
+(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail cut by the receiver to at most 256 bytes; section 5, item 4); the reservation records in the lease file (section 3). All are additive: an old reader skips and keeps them, and an old
 agent never sends a refusal and so only ever times out. Refusal constants: `exclusive-not-ready` (after `max_replace`, with the last code
 and detail), with `no-capable-host` and `no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
 retained alias of section 1 (id `gpu-host`, `min_gpus` 1, whole-node admission), and `max_draining_fraction` of earlier drafts is replaced by `max_draining`.

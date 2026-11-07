@@ -3,8 +3,7 @@
 use std::fs;
 
 use js_lease::{
-    AcquireError, Booking, Boot, LeaseState, LeaseTable, OpenError, ReleaseError, RenewError,
-    read_bookings,
+    AcquireError, Booking, Boot, LeaseState, LeaseTable, OpenError, ReleaseError, read_bookings,
 };
 use js_provider::{Call, HostCapacity, Observed, Pool, StartAck, StartSpec, StopAck};
 use js_provider_fake::FakePool;
@@ -20,10 +19,10 @@ use crate::support::{
 #[test]
 fn restart_keeps_leases_and_never_reuses_an_id() {
     let (mut table, clock, scratch) = fresh("restart");
-    let held = table.acquire(request(3600), None).unwrap();
+    let held = table.acquire(request(3600)).unwrap();
     table.provider_mut().script_unknown(Call::Start, false);
-    table.acquire(request(3600), None).unwrap_err();
-    let doomed = table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap_err();
+    let doomed = table.acquire(request(3600)).unwrap();
     table.provider_mut().script_unknown(Call::Stop, false);
     table.release(&doomed.id).unwrap();
     let before = table.list();
@@ -34,11 +33,12 @@ fn restart_keeps_leases_and_never_reuses_an_id() {
     assert_eq!(table.list(), before);
     let report = table.tick();
     assert_eq!((report.freed.len(), report.dropped.len()), (1, 1));
-    let next = table.acquire(request(3600), None).unwrap();
+    let next = table.acquire(request(3600)).unwrap();
     assert_eq!(next.id, LeaseId::new(2, 4));
     assert!(before.iter().all(|info| info.id != next.id));
     assert_eq!(table.list().len(), 2);
-    assert_eq!(table.renew(&held.id, None).unwrap(), at(T0 + 60_000));
+    let kept = table.list().into_iter().find(|info| info.id == held.id);
+    assert_eq!(kept.map(|info| info.ends_at), Some(held.ends_at));
 }
 
 /// Asserts that a lease loaded as held is observed once at open: present stays held,
@@ -46,8 +46,8 @@ fn restart_keeps_leases_and_never_reuses_an_id() {
 #[test]
 fn held_leases_are_observed_once_at_load() {
     let (mut table, clock, scratch) = fresh("load_observe");
-    let a = table.acquire(request(3600), None).unwrap();
-    let b = table.acquire(request(3600), None).unwrap();
+    let a = table.acquire(request(3600)).unwrap();
+    let b = table.acquire(request(3600)).unwrap();
     let mut provider = table.into_provider();
 
     provider.stop(&b.id);
@@ -74,7 +74,7 @@ fn the_file_has_the_documented_shape() {
     let mut asked = request(3600);
     asked.labels.insert("team".into(), "infra".into());
     asked.validation_run = Some("val-7".into());
-    let lease = table.acquire(asked, None).unwrap();
+    let lease = table.acquire(asked).unwrap();
     assert_eq!(lease.labels.get("team"), Some("infra"));
     assert_eq!(
         lease.labels.get("jobscheduler.dev/validation-run"),
@@ -83,7 +83,7 @@ fn the_file_has_the_documented_shape() {
     let text = fs::read_to_string(scratch.file()).unwrap();
     let expected = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n[[lease]]\nterm = 1\n\
         sequence = 1\nstate = \"held\"\nhost = \"h1\"\nacquired_at_ms = 1000000\n\
-        expires_at_ms = 1060000\nends_at_ms = 4600000\nvalidation_run = \"val-7\"\nwhole = true\n\n\
+        expires_at_ms = 4600000\nends_at_ms = 4600000\nvalidation_run = \"val-7\"\nwhole = true\n\n\
         [lease.labels]\nteam = \"infra\"\n";
     assert_eq!(text, expected);
     assert!(!scratch.dir.join("leases.toml.tmp").exists());
@@ -109,7 +109,7 @@ fn a_newer_file_with_unknown_fields_loads_and_keeps_them() {
     provider.start(spec.unwrap());
     let mut table = open(provider, &clock(), &scratch);
     assert_eq!(states(&table), vec![(LeaseId::new(4, 9), LeaseState::Held)]);
-    let next = table.acquire(request(3600), None).unwrap();
+    let next = table.acquire(request(3600)).unwrap();
     assert_eq!(next.id, LeaseId::new(5, 10));
     let rewritten = fs::read_to_string(scratch.file()).unwrap();
     assert!(rewritten.starts_with("version = 9\nterm = 5\nnext_sequence = 11\nlease_count = 2\n"));
@@ -168,7 +168,7 @@ fn corrupt_files_are_errors_naming_the_path() {
 
 /// Asserts that a file that cannot be written is an error at open and that, after the
 /// directory vanishes, every change reports the failed save while the table keeps
-/// its in-memory state (a failed renew keeps its extended expiry) and heals when the
+/// its in-memory state (a failed acquire keeps its pending lease) and heals when the
 /// file can be written again.
 #[test]
 fn save_failures_are_reported_and_heal() {
@@ -181,16 +181,10 @@ fn save_failures_are_reported_and_heal() {
 
     let clock = clock();
     let mut table = open(fake(), &clock, &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     break_dir(&scratch);
-    clock.advance(secs(10));
     assert!(matches!(
-        table.renew(&lease.id, None),
-        Err(RenewError::Save(_))
-    ));
-    assert_eq!(table.list()[0].expires_at, at(T0 + 70_000));
-    assert!(matches!(
-        table.acquire(request(3600), None),
+        table.acquire(request(3600)),
         Err(AcquireError::Save(_))
     ));
     assert_eq!(table.list().len(), 2);
@@ -212,25 +206,24 @@ fn save_failures_are_reported_and_heal() {
     assert!(failed.to_string().contains("cannot write"));
 
     fs::create_dir_all(&scratch.dir).unwrap();
-    table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap();
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert_eq!(text.matches("[[lease]]").count(), 1);
 }
 
-/// Asserts that a save that failed in renew is retried by the next tick even when the
-/// tick changes nothing, so the file gets the renewed expiry without waiting for some
-/// other change, and that a tick after that does not report an error.
+/// Asserts that a save that failed in a tick is retried by the next tick even when the
+/// tick changes nothing, so the file gets the held lease without waiting for some other
+/// change, and that a tick after that does not report an error.
 #[test]
 fn a_failed_save_is_retried_by_a_tick_that_changes_nothing() {
-    let (mut table, clock, scratch) = fresh("retry_save");
-    let lease = table.acquire(request(3600), None).unwrap();
+    let (mut table, _clock, scratch) = fresh("retry_save");
+    table.provider_mut().script_unknown(Call::Start, true);
+    table.acquire(request(3600)).unwrap_err();
+    let lease = LeaseId::new(1, 1);
     break_dir(&scratch);
-    clock.advance(secs(10));
-    assert!(matches!(
-        table.renew(&lease.id, None),
-        Err(RenewError::Save(_))
-    ));
-    assert!(table.tick().save_error.is_some());
+    let report = table.tick();
+    assert_eq!(report.confirmed, vec![lease]);
+    assert!(report.save_error.is_some());
     assert!(table.tick().save_error.is_some());
 
     fs::create_dir_all(&scratch.dir).unwrap();
@@ -238,7 +231,7 @@ fn a_failed_save_is_retried_by_a_tick_that_changes_nothing() {
     assert!(!report.changed());
     assert!(report.save_error.is_none());
     let text = fs::read_to_string(scratch.file()).unwrap();
-    assert!(text.contains("expires_at_ms = 1070000"));
+    assert!(text.contains("state = \"held\""), "{text}");
     assert!(table.tick().save_error.is_none());
 }
 
@@ -265,7 +258,7 @@ fn a_missing_file_is_an_error_unless_initialising() {
     assert!(!path.exists());
 
     let mut table = open(fake(), &clock(), &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     let provider = table.into_provider();
     let resumed = LeaseTable::open(provider, clock(), settings(), &path, boot).unwrap();
     assert_eq!(states(&resumed), vec![(lease.id, LeaseState::Held)]);
@@ -278,7 +271,7 @@ fn a_missing_file_is_an_error_unless_initialising() {
 #[test]
 fn a_second_table_over_the_same_file_is_refused() {
     let (mut table, clock, scratch) = fresh("locked");
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     let before = fs::read_to_string(scratch.file()).unwrap();
     let err = open_err(&scratch.file());
     let lock = scratch.dir.join("leases.toml.lock");
@@ -344,7 +337,7 @@ impl Pool for Moved {
 #[test]
 fn a_held_lease_takes_the_host_the_provider_names_at_open() {
     let (mut table, _clock, scratch) = fresh("rehost");
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(lease.host, host("h1"));
     let provider = table.into_provider();
     let table = open_with(Moved(provider), &scratch);
@@ -356,7 +349,7 @@ fn a_held_lease_takes_the_host_the_provider_names_at_open() {
 /// boot and the scratch directory.
 fn reopen_over_stale_temp(name: &str, stale: &str) -> (Table, LeaseId, Scratch) {
     let (mut table, clock, scratch) = fresh(name);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     let provider = table.into_provider();
     let temp = scratch.dir.join("leases.toml.tmp");
     fs::write(&temp, stale).unwrap();
@@ -381,7 +374,7 @@ fn a_complete_stale_temp_file_is_ignored_and_replaced() {
     assert_eq!(states(&table), vec![(id, LeaseState::Held)]);
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(text.starts_with("version = 1\nterm = 2\nnext_sequence = 2\nlease_count = 1\n"));
-    let next = table.acquire(request(3600), None).unwrap();
+    let next = table.acquire(request(3600)).unwrap();
     assert_eq!(next.id, LeaseId::new(2, 2));
     assert!(!scratch.dir.join("leases.toml.tmp").exists());
 }
@@ -394,7 +387,7 @@ fn a_cut_off_stale_temp_file_is_ignored_and_replaced() {
     let stale = "version = 1\nterm = 50\nnext_sequence = 9";
     let (mut table, id, scratch) = reopen_over_stale_temp("stale_cut", stale);
     assert_eq!(states(&table), vec![(id, LeaseState::Held)]);
-    let next = table.acquire(request(3600), None).unwrap();
+    let next = table.acquire(request(3600)).unwrap();
     assert_eq!(next.id, LeaseId::new(2, 2));
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(text.contains("lease_count = 2\n"));
@@ -407,10 +400,10 @@ fn a_cut_off_stale_temp_file_is_ignored_and_replaced() {
 #[test]
 fn bookings_are_the_hosts_the_file_names() {
     let (mut table, _clock, scratch) = fresh("bookings");
-    let held = table.acquire(request(3600), None).unwrap();
+    let held = table.acquire(request(3600)).unwrap();
     table.provider_mut().script_unknown(Call::Start, false);
-    table.acquire(request(3600), None).unwrap_err();
-    let doomed = table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap_err();
+    let doomed = table.acquire(request(3600)).unwrap();
     table.provider_mut().script_unknown(Call::Stop, false);
     table.release(&doomed.id).unwrap();
     let before = fs::read_to_string(scratch.file()).unwrap();
@@ -471,4 +464,98 @@ fn bookings_of_a_missing_file_are_none_and_of_a_bad_file_an_error() {
     let err = read_bookings(&path).unwrap_err();
     assert!(matches!(err, OpenError::Read { .. }), "{err}");
     fs::remove_dir(&path).unwrap();
+}
+
+/// A lease file as the previous release wrote it: a held lease with a ten-minute expiry
+/// that is long past at `clock` 1 100 000 ms but a wall end well ahead, and a pending
+/// whole-node lease holding the `ttl_ms` that release kept beside `wall_ms`.
+const PREVIOUS_RELEASE_FILE: &str = "version = 1\nterm = 1\nnext_sequence = 3\nlease_count = 2\n\n\
+    [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"h1\"\n\
+    acquired_at_ms = 1000000\nexpires_at_ms = 1060000\nends_at_ms = 4600000\nwhole = true\n\n\
+    [[lease]]\nterm = 1\nsequence = 2\nstate = \"pending\"\n\
+    acquired_at_ms = 1000000\nexpires_at_ms = 1600000\nends_at_ms = 4600000\nwhole = true\n\
+    ttl_ms = 60000\nwall_ms = 3600000\n";
+
+/// Asserts that a file the previous release wrote loads and that its lease expiry is no
+/// longer a clock: both rows (a held lease whose old `expires_at_ms` is long past, and a
+/// pending whole-node lease with a `ttl_ms`) are listed after the open, a tick at a time
+/// past the old expiry expires nothing and keeps the held lease held, the pending one is
+/// confirmed from its prepare deadline row, `lease_count` still counts both rows, and the
+/// file written afterwards has no `ttl_ms` anywhere and the held lease's wall end as its
+/// expiry. It fails if the old row is refused, if a stale `expires_at_ms` ends the held
+/// lease, if a row is lost, or if `ttl_ms` is written back.
+#[test]
+fn an_old_lease_file_loads_and_a_held_lease_is_not_expired_by_its_old_expiry() {
+    let scratch = Scratch::new("old_file_held");
+    fs::write(scratch.file(), PREVIOUS_RELEASE_FILE).unwrap();
+    let mut provider = fake();
+    for sequence in [1, 2] {
+        let spec = StartSpec::new(
+            LeaseId::new(1, sequence),
+            request(3600),
+            &provider_classes(),
+        );
+        provider.start(spec.unwrap());
+    }
+    let clock = clock();
+    clock.advance(secs(100));
+    let mut table = open(provider, &clock, &scratch);
+    let (first, second) = (LeaseId::new(1, 1), LeaseId::new(1, 2));
+    assert_eq!(
+        states(&table),
+        vec![(first, LeaseState::Held), (second, LeaseState::Pending)]
+    );
+
+    let report = table.tick();
+    assert!(report.expired.is_empty(), "{report:?}");
+    assert!(report.freed.is_empty(), "{report:?}");
+    assert_eq!(report.confirmed, vec![second]);
+    assert_eq!(
+        states(&table),
+        vec![(first, LeaseState::Held), (second, LeaseState::Held)]
+    );
+    assert_eq!(table.list()[0].ends_at, at(4_600_000));
+    assert_eq!(table.provider().booked().len(), 2);
+
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert!(text.contains("lease_count = 2\n"), "{text}");
+    assert_eq!(text.matches("[[lease]]").count(), 2, "{text}");
+    assert!(!text.contains("ttl_ms"), "{text}");
+    assert!(
+        text.contains("expires_at_ms = 4600000\nends_at_ms = 4600000\n"),
+        "{text}"
+    );
+}
+
+/// Asserts that a held lease is written with its wall end as its expiry row and no
+/// `ttl_ms`, which is how a rollback to the previous release ends it at the same moment,
+/// and that a pending whole-node lease writes its prepare deadline (acquire plus the 600 s
+/// prepare timeout) there instead, beside its own wall end. It fails if the held row keeps
+/// a time-to-live expiry, if a `ttl_ms` row is written, or if the pending row loses its
+/// deadline.
+#[test]
+fn a_held_lease_is_written_with_its_wall_end_as_its_expiry_row() {
+    let (mut table, _clock, scratch) = fresh("expiry_row");
+    let held = table.acquire(request(3600)).unwrap();
+    assert_eq!(held.ends_at, at(T0 + 3_600_000));
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    let row = format!(
+        "expires_at_ms = {end}\nends_at_ms = {end}\n",
+        end = held.ends_at.millis()
+    );
+    assert!(text.contains(&row), "{text}");
+    assert!(!text.contains("ttl_ms"), "{text}");
+
+    table.provider_mut().script_unknown(Call::Start, true);
+    table.acquire(request(1800)).unwrap_err();
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    let row = format!(
+        "expires_at_ms = {}\nends_at_ms = {}\n",
+        T0 + 600_000,
+        T0 + 1_800_000
+    );
+    assert!(text.contains(&row), "{text}");
+    assert!(text.contains(&format!("expires_at_ms = {}\n", T0 + 3_600_000)));
+    assert!(text.contains("wall_ms = 1800000\n"), "{text}");
+    assert!(!text.contains("ttl_ms"), "{text}");
 }

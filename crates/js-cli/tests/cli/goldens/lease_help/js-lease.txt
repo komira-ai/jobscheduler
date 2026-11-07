@@ -4,10 +4,8 @@ Usage: js lease [OPTIONS] <COMMAND>
 
 Commands:
   acquire  Ask for a lease and print it
-  renew    Extend a held lease
   release  Give a lease back
   list     List the leases the server holds
-  run      Acquire a lease, run a command while renewing it, then release it
   native   Queue a native job (a program run on the host, no image) on a held lease
   help     Print this message or the help of the given subcommand(s)
 

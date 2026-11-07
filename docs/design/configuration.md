@@ -12,7 +12,8 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 
 | flag | in the file |
 |---|---|
-| `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--listen`, `--state-file`, `--boot`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--default-ttl`, `--max-ttl` | removed: a lease has no time to live (it ends when released or at its maximum wall time). Either flag, and the keys `server.default_ttl` and `server.max_ttl`, are refused at start naming the flag or the key |
 | `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`, `--placement`, `--estimate-feed`, `--cpu-slack` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, `server.placement`, `server.estimate_feed`, `server.cpu_slack`, same defaults (`placement` is `"registry"` unless the file says `"js-sched"`; `estimate_feed` is `false`, and `true` is refused beside `usage_off = true`, as the flags conflict; `cpu_slack` is a number from `1.0` to `2.0`, js-sched's default `1.1` when absent, and is refused unless `placement` is `"js-sched"`); refused unless a pool registers agents |
 | `--usage-db`, `--usage-off`, `--profile-store-bytes`, `--history-retention-days` | `server.usage_db`, `server.usage_off`, `server.profile_store_bytes`, `server.history_retention_days`, same defaults and rules (`usage_db` is refused beside `usage_off = true`, as the flags conflict; the budget is at least 1; the retention is a whole number of days, `90` by default, at least 1) |
@@ -267,6 +268,7 @@ quota_backoff = "1h"                    # default 1h; a positive duration, zero 
 acquire_retry = "60s"                   # default 60s; a positive duration, zero is refused
 catalog_refresh = "1h"                  # default 1h; a positive duration, zero is refused
 offer_cooldown = "1h"                   # default 1h; a positive duration, zero is refused
+size_tolerance_percent = 10             # default 10; an integer from 0 to 50
 ```
 
 A pool written with `provider = { kind = "lambdalabs", ... }` is read as exactly these tables: a machine provider made from its provider
@@ -287,8 +289,13 @@ tick. A joined pool has neither key and takes the defaults. Nothing acts on the 
 machine (design 5.6, pass 2) will read them. `catalog_refresh` is how long the provider's cached catalog is used before the tick fetches
 it again; admission reads the cache and never calls the provider, a fetch that fails keeps the last catalog and is tried again at the
 next tick, and a refusal to launch for capacity or quota makes a fetch due at once. `offer_cooldown` is how long an offer (an instance
-type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it; it is read and checked,
-and nothing enters a cool-down yet (the check of a host's hello against its offer will). `quota_backoff` is how long, after the provider refuses a launch for quota, pass 2 passes over that
+type in a zone) that was cooled down is passed over by the pick of an offer, while admission still counts it. The check of a launched
+machine's hello against the offer recorded for its acquire (design 5.6.1, step 6) cools an offer down: a hello whose accelerator model
+(by canonical name after alias resolution), accelerator count (at least the offer's), architecture, CPU, memory or disk does not match
+releases the machine, cools the offer down for `offer_cooldown` keyed by (provider, instance type, zone), and counts a failed boot
+toward the pool's failure brake. `size_tolerance_percent` is how far below the offer's CPU, memory and disk the hello may measure and
+still match, because an agent measures less than the nominal size; it is an integer from 0 to 50, 10 when absent, and any other value
+(above 50, negative, or not an integer) is refused at start naming the key. `quota_backoff` is how long, after the provider refuses a launch for quota, pass 2 passes over that
 instance type in that region (in that zone, for providers whose zones are regions); the provider as a whole is not braked.
 `acquire_retry` is how long a request waits when every offer was refused or passed over: it stays waiting and pass 2 asks again after
 this long, or at once after a completed catalog refresh. Zero for any of the four is refused, naming the key: a

@@ -30,8 +30,9 @@
 //!
 //! The cell writes a trace of its own, family `js-sim-cell`, beside the kernel's: what
 //! the kernel does not see (a process killed, killed for good or replaced, the server
-//! restarted or its restart refused, the bus's faults changed, a
-//! client call and its status, an item submitted or cancelled and each event the client
+//! restarted or its restart refused, the server stopped and what a read of its store then
+//! found, a second server started or refused on its store, a host joined with a minted
+//! token (module `store`), the bus's faults changed, a client call and its status, an item submitted or cancelled and each event the client
 //! heard, with the item's number and never the ids it learned), what the server's listing says of each host when it
 //! changes, each launch in the ledger, what the cloud of an elastic pool did to each
 //! machine by its number (module `elastic`), and the violation that stopped the run. A line
@@ -47,7 +48,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, Response};
-use js_agent_wire::PER_JOB_CAPABILITY;
+use js_agent_wire::{InstanceIdentity, PER_JOB_CAPABILITY};
 use js_conformance::agent::Defect;
 use js_lease_server::StartupError;
 use js_sim::{Chance, Faults, NodeId, Partition, Sim, SimRng, Trace, TraceHash};
@@ -69,6 +70,9 @@ use crate::text;
 use crate::work::Work;
 
 mod elastic;
+mod store;
+
+pub use store::{SecondServer, StoreRead};
 
 /// How long an agent waits between two hellos that were not welcomed (design section
 /// 5.1: a one second base).
@@ -198,6 +202,8 @@ pub struct Cell {
     tables: Reader,
     /// What the cell knows of the machines of its elastic pool's cloud.
     machines: elastic::Machines,
+    /// The join tokens the cell minted, and what it saw of the server's store.
+    kept: store::Kept,
 }
 
 impl Cell {
@@ -260,6 +266,7 @@ impl Cell {
             kernel_lines: 0,
             tables: Reader::default(),
             machines: elastic::Machines::default(),
+            kept: store::Kept::default(),
         };
         cell.set_faults(faults);
         Ok(cell)
@@ -294,6 +301,16 @@ impl Cell {
     }
 
     fn add(&mut self, kind: AgentKind) -> Result<HostId, IdError> {
+        self.add_as(kind, JOIN_TOKEN.to_owned(), None)
+    }
+
+    /// Adds the next agent, of `kind`, saying hello with `join_token` and naming `instance`.
+    fn add_as(
+        &mut self,
+        kind: AgentKind,
+        join_token: String,
+        instance: Option<InstanceIdentity>,
+    ) -> Result<HostId, IdError> {
         let name = agent_name(self.agents);
         let host = HostId::new(name.as_str())?;
         let mut capabilities = self.spec.shape().capabilities.clone();
@@ -304,13 +321,13 @@ impl Cell {
         let spec = AgentSpec {
             host: host.clone(),
             pool: self.spec.pool().to_owned(),
-            join_token: JOIN_TOKEN.to_owned(),
+            join_token,
             capacity: self.capacity.clone(),
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
             kind,
-            instance: None,
+            instance,
         };
         let mut agent = AgentNode::new(spec, self.ledger.clone());
         agent.report_to(self.applied.clone());

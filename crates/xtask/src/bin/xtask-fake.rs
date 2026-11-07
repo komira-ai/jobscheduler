@@ -204,11 +204,11 @@ fn lease_client(args: &[String]) -> ExitCode {
         Some("acquire") if defect() == "js-no-lease" => println!("nothing for you"),
         Some("acquire") => {
             std::fs::write(lease, "1-1").expect("write the lease");
-            println!("lease 1-1 host gpu-01 expires 1793614960284");
+            println!("lease 1-1 host gpu-01 ends 1793617960284");
         }
         Some("list") => {
             if lease.exists() {
-                println!("1-1 held host gpu-01 expires 1793614960284");
+                println!("1-1 held host gpu-01 ends 1793617960284");
             }
         }
         Some("release") => {

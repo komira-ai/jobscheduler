@@ -271,7 +271,7 @@ fn commands(port: u16, id: &str) -> Vec<String> {
     ]
 }
 
-/// The lease id `js lease acquire` printed (`lease <id> host <host> expires <ms>`), if it did.
+/// The lease id `js lease acquire` printed (`lease <id> host <host> ends <ms>`), if it did.
 fn lease_id(acquired: &str) -> Option<String> {
     acquired.lines().find_map(|line| {
         let mut words = line.split(' ');

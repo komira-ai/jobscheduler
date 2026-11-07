@@ -309,7 +309,7 @@ On fail:
 ## 5. On the live host, while it runs
 
 You cannot ssh in: that is the point. Run each of these as a container job on the leased host (the
-run routes, or `js lease run`), or from outside, as stated. Do them in order,
+run routes), or from outside, as stated. Do them in order,
 while the lease is held. Keep the `max_wall` short.
 
 ### 5.1 Containers cannot reach the metadata address (D§7.3 step 8, F12b)
@@ -387,7 +387,7 @@ Pass: both time out or are refused. **LIVE.** This supports 3.1; it does not rep
 
 ### 5.6 The lease ran
 
-Run a short job on the lease (`js lease run ... -- nvidia-smi` or a container job as the pool allows).
+Run a short job on the lease (a run of `nvidia-smi` on the lease through the run routes, or a container job as the pool allows).
 
 Pass: exit status 0 and the GPU listed; the host in `/v1/hosts` shows the lease and `state: live`.
 **LIVE** (the GPU, the state root, the loop-mounted device the agent needs; Q5). **CI** covers the

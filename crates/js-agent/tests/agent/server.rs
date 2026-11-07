@@ -204,11 +204,6 @@ impl Server {
         self.client().delete(path).unwrap()
     }
 
-    /// `POST path` with the lease token and no body.
-    pub fn post(&self, path: &str) -> Reply {
-        self.client().post(path, &json!({})).unwrap()
-    }
-
     /// `POST path` with the lease token and `body`.
     pub fn post_body(&self, path: &str, body: &Value) -> Reply {
         self.client().post(path, body).unwrap()

@@ -10,7 +10,7 @@ use js_agent_wire::limits;
 use js_caps::{AcceleratorRequest, check_stated, request_need};
 
 use self::accel::AcceleratorBody;
-use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
+use js_lease::{AcquireError, LeaseInfo, ReleaseError};
 use js_provider::RefusalCode;
 use js_types::{
     ClassId, HostId, LeaseId, Request, RequestId, Requirements, RequirementsError, Resources,
@@ -35,8 +35,11 @@ pub(crate) struct AcquireBody {
     labels: BTreeMap<String, String>,
     #[serde(default)]
     validation_run: Option<String>,
+    /// Removed: a lease has no time to live. A `null` or a missing key is read as absent
+    /// (a client of the previous release sends `null` on every acquire); any other value
+    /// is refused by [`AcquireBody::into_parts`] with [`TTL_REMOVED`].
     #[serde(default)]
-    ttl_seconds: Option<u64>,
+    ttl_seconds: Option<serde_json::Value>,
     /// A probe: the one host the lease may be placed on, past that host's cordon. Left out
     /// (or null), the lease is placed as before.
     #[serde(default)]
@@ -47,6 +50,9 @@ pub(crate) struct AcquireBody {
     #[serde(default)]
     request_id: Option<String>,
 }
+
+/// The reason of the 400 for a `ttl_seconds` that is a value.
+const TTL_REMOVED: &str = "ttl_seconds was removed: a lease has no time to live; it ends when released or at max_wall_seconds";
 
 /// The reason of the 400 for a `probe_host` that is not a host id.
 const PROBE_HOST_INVALID: &str = "probe_host is not a valid host id";
@@ -86,10 +92,11 @@ impl AcquireBody {
         id.map_err(|_| ApiError::bad_request(REQUEST_ID_INVALID))
     }
 
-    /// The request and the ttl asked for, or the 400 for a body that names an id, a
-    /// GPU class, an accelerator or a `disk_bytes` the types refuse, or a `disk-gib`, `exec`,
-    /// `isa_level` or `accelerator.*` capability that is not a requirement (the registry and
-    /// the scaler read them as the job's disk, mode, least ISA level and accelerator).
+    /// The request, or the 400 for a `ttl_seconds` that is a value (code `ttl-removed`) or
+    /// a body that names an id, a GPU class, an accelerator or a `disk_bytes` the types
+    /// refuse, or a `disk-gib`, `exec`, `isa_level` or `accelerator.*` capability that is
+    /// not a requirement (the registry and the scaler read them as the job's disk, mode,
+    /// least ISA level and accelerator).
     ///
     /// `resources.gpus` and `resources.gpu_class` are what they were: the devices the lease
     /// books and their class, and a body with only them parses to the request it parsed to
@@ -98,7 +105,10 @@ impl AcquireBody {
     /// capabilities merged into the request's own ([`request_need`]); it, and any
     /// `accelerator.*` capability the body names itself, must agree with the pair
     /// ([`check_stated`]).
-    pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
+    pub(crate) fn into_parts(self) -> Result<Request, ApiError> {
+        if self.ttl_seconds.is_some() {
+            return Err(ApiError::ttl_removed());
+        }
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
         let probe_host = self.probe_host.as_deref().map(HostId::new).transpose();
@@ -168,16 +178,8 @@ impl AcquireBody {
                 other => other.to_string(),
             })
         })?;
-        Ok((request, self.ttl_seconds.map(Duration::from_secs)))
+        Ok(request)
     }
-}
-
-/// The body of `POST /v1/leases/{id}/renew`; the body itself may be left out.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RenewBody {
-    #[serde(default)]
-    pub(crate) ttl_seconds: Option<u64>,
 }
 
 /// Parses a request body as `T`. The 400 says which kind of fault it is and where the
@@ -202,7 +204,7 @@ pub(crate) fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
 pub(crate) struct Granted {
     pub(crate) id: String,
     pub(crate) host: String,
-    pub(crate) expires_at_ms: u64,
+    pub(crate) ends_at_ms: u64,
 }
 
 /// A lease whose start the provider has not confirmed: the 202 body.
@@ -210,16 +212,6 @@ pub(crate) struct Granted {
 pub(crate) struct Pending {
     pub(crate) id: String,
     pub(crate) state: &'static str,
-}
-
-/// The 200 body of a renew.
-#[derive(Debug, Serialize)]
-pub(crate) struct Renewed {
-    pub(crate) expires_at_ms: u64,
-    /// Whether the host the lease holds is set aside for a waiting whole-node request.
-    /// Left out when false, so a body from a host that is not reserved reads as before.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) host_reserved: bool,
 }
 
 /// The body of a release: `freed` or `releasing`.
@@ -236,7 +228,6 @@ pub(crate) struct LeaseView {
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
     acquired_at_ms: u64,
-    expires_at_ms: u64,
     ends_at_ms: u64,
     labels: BTreeMap<String, String>,
 }
@@ -248,7 +239,6 @@ impl From<LeaseInfo> for LeaseView {
             state: info.state.to_string(),
             host: info.host.map(|host| host.to_string()),
             acquired_at_ms: info.acquired_at.millis(),
-            expires_at_ms: info.expires_at.millis(),
             ends_at_ms: info.ends_at.millis(),
             labels: info
                 .labels
@@ -288,6 +278,15 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "bad-request",
             reason: Some(reason.to_string()),
+        }
+    }
+
+    /// The 400 of an acquire that names a `ttl_seconds`.
+    pub(crate) fn ttl_removed() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "ttl-removed",
+            reason: Some(TTL_REMOVED.to_owned()),
         }
     }
 
@@ -337,7 +336,6 @@ pub(crate) fn refusal_status(code: RefusalCode) -> StatusCode {
 impl From<AcquireError> for ApiError {
     fn from(err: AcquireError) -> Self {
         match err {
-            AcquireError::TtlNotPositive => Self::bad_request("ttl_seconds must be positive"),
             AcquireError::Refused(code) => Self::coded(refusal_status(code), code.as_str()),
             // The server's ceiling on `max_wall_seconds`: the request broke a rule of the
             // server, as a start-contract refusal does.
@@ -357,18 +355,6 @@ impl From<AcquireError> for ApiError {
             // A pending start is answered by the caller before this conversion; the arm
             // is shared so that no path invents an answer for it.
             AcquireError::Unconfirmed(_) | AcquireError::Save(_) => Self::state_write(&err),
-        }
-    }
-}
-
-impl From<RenewError> for ApiError {
-    fn from(err: RenewError) -> Self {
-        match err {
-            RenewError::TtlNotPositive => Self::bad_request("ttl_seconds must be positive"),
-            RenewError::Unknown(_) => Self::unknown_lease(),
-            RenewError::NotHeld { .. } => Self::coded(StatusCode::CONFLICT, "not-held"),
-            RenewError::Expired(_) => Self::coded(StatusCode::CONFLICT, "expired"),
-            RenewError::Save(_) => Self::state_write(&err),
         }
     }
 }
@@ -418,14 +404,14 @@ mod tests {
     /// for any disk and either mode.
     #[test]
     fn disk_and_exec_reach_the_requirements() {
-        let (request, _) = body(r#"{"disk-gib":"40","exec":"sandbox-exec","os":"macos"}"#)
+        let request = body(r#"{"disk-gib":"40","exec":"sandbox-exec","os":"macos"}"#)
             .into_parts()
             .unwrap();
         let wanted = Requirements::from_request(&request);
         assert_eq!(wanted.disk_bytes, Some(40 << 30));
         assert_eq!(wanted.exec, Some(ExecMode::SandboxExec));
         assert_eq!(wanted.os.as_deref(), Some("macos"));
-        let (request, _) = body(r#"{"os":"macos"}"#).into_parts().unwrap();
+        let request = body(r#"{"os":"macos"}"#).into_parts().unwrap();
         let wanted = Requirements::from_request(&request);
         assert_eq!((wanted.disk_bytes, wanted.exec), (None, None));
     }
@@ -444,14 +430,14 @@ mod tests {
             );
             parse::<AcquireBody>(text.as_bytes()).unwrap().into_parts()
         };
-        let (request, _) = probe(r#","probe_host":"mac-07""#).unwrap();
+        let request = probe(r#","probe_host":"mac-07""#).unwrap();
         assert_eq!(request.probe_host, Some(HostId::new("mac-07").unwrap()));
-        assert_eq!(probe("").unwrap().0.probe_host, None);
-        assert_eq!(probe(r#","probe_host":null"#).unwrap().0.probe_host, None);
+        assert_eq!(probe("").unwrap().probe_host, None);
+        assert_eq!(probe(r#","probe_host":null"#).unwrap().probe_host, None);
         // The longest host id is 63 characters; one more, an empty name and a name out
         // of the alphabet are each the 400 that names the field.
         let longest = "h".repeat(63);
-        let (request, _) = probe(&format!(r#","probe_host":"{longest}""#)).unwrap();
+        let request = probe(&format!(r#","probe_host":"{longest}""#)).unwrap();
         assert_eq!(request.probe_host, Some(HostId::new(&longest).unwrap()));
         let expected = ApiError::bad_request("probe_host is not a valid host id");
         let too_long = format!(r#","probe_host":"{}""#, "h".repeat(64));
@@ -525,7 +511,7 @@ mod tests {
             r#"{},"probe_host":"mac-07"}}"#,
             &unpinned[..unpinned.len() - 1]
         );
-        let (request, _) = parse::<AcquireBody>(unpinned.as_bytes())
+        let request = parse::<AcquireBody>(unpinned.as_bytes())
             .unwrap()
             .into_parts()
             .unwrap();
@@ -538,7 +524,7 @@ mod tests {
             (refused.status, refused.code),
             (StatusCode::BAD_REQUEST, "bad-request")
         );
-        let (request, _) = parse::<AcquireBody>(pinned.as_bytes())
+        let request = parse::<AcquireBody>(pinned.as_bytes())
             .unwrap()
             .into_parts()
             .unwrap();
@@ -558,7 +544,7 @@ mod tests {
     #[test]
     fn disk_bytes_reaches_the_resources_and_is_optional() {
         let sized = |text: &str| {
-            let (request, _) = body_with_resources(text).into_parts().unwrap();
+            let request = body_with_resources(text).into_parts().unwrap();
             request.resources.disk_bytes()
         };
         assert_eq!(sized(r#"{"cpu_millis":1000}"#), 0);
@@ -643,7 +629,7 @@ mod tests {
     fn previous_request_bodies_parse_unchanged() {
         use js_types::{ArmVersion, IsaLevel, X86Level};
         let wanted = |caps: &str| {
-            let (request, _) = body(caps).into_parts().unwrap();
+            let request = body(caps).into_parts().unwrap();
             Requirements::from_request(&request)
         };
         let any = wanted("{}");
@@ -671,33 +657,94 @@ mod tests {
         assert_eq!(arm.isa_level, Some(IsaLevel::Arm64(ArmVersion::V8_2)));
     }
 
-    /// Asserts the renewal body: without a reservation it is the old body byte for byte,
-    /// with one it adds `host_reserved`, and a client that reads only `expires_at_ms`
-    /// parses both. It catches a field that is sent when false, and one renamed.
+    /// Asserts the bodies of `POST /v1/leases` and `GET /v1/leases` by exact string
+    /// equality: the 201 body is `{id, host, ends_at_ms}`, the 202 body is
+    /// `{id, state}`, and a list row is `{id, state, host?, acquired_at_ms, ends_at_ms,
+    /// labels}`; none has `expires_at_ms`. It catches a lease time that is still written
+    /// under its old name, and a wall end that is left out.
     #[test]
-    fn the_renewal_body_adds_host_reserved_only_when_true() {
-        let plain = Renewed {
-            expires_at_ms: 5,
-            host_reserved: false,
+    fn the_acquire_and_list_bodies_have_no_expires_at_ms() {
+        let granted = Granted {
+            id: "3-12".to_owned(),
+            host: "h1".to_owned(),
+            ends_at_ms: 4000,
         };
-        let marked = Renewed {
-            expires_at_ms: 5,
-            host_reserved: true,
+        let pending = Pending {
+            id: "3-13".to_owned(),
+            state: "pending",
         };
-        let (plain, marked) = (
-            serde_json::to_string(&plain).unwrap(),
-            serde_json::to_string(&marked).unwrap(),
+        let row = LeaseView {
+            id: "3-12".to_owned(),
+            state: "held".to_owned(),
+            host: Some("h1".to_owned()),
+            acquired_at_ms: 1000,
+            ends_at_ms: 4000,
+            labels: BTreeMap::from([("team".to_owned(), "x".to_owned())]),
+        };
+        let bare = LeaseView {
+            id: "3-13".to_owned(),
+            state: "pending".to_owned(),
+            host: None,
+            acquired_at_ms: 1000,
+            ends_at_ms: 5000,
+            labels: BTreeMap::new(),
+        };
+        let list = LeaseList {
+            leases: vec![row, bare],
+        };
+        assert_eq!(
+            serde_json::to_string(&granted).unwrap(),
+            r#"{"id":"3-12","host":"h1","ends_at_ms":4000}"#
         );
-        assert_eq!(plain, r#"{"expires_at_ms":5}"#);
-        assert_eq!(marked, r#"{"expires_at_ms":5,"host_reserved":true}"#);
-        #[derive(serde::Deserialize)]
-        struct OldClient {
-            expires_at_ms: u64,
-        }
-        for body in [plain, marked] {
-            let read: OldClient = serde_json::from_str(&body).unwrap();
-            assert_eq!(read.expires_at_ms, 5);
-        }
+        assert_eq!(
+            serde_json::to_string(&pending).unwrap(),
+            r#"{"id":"3-13","state":"pending"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&list).unwrap(),
+            concat!(
+                r#"{"leases":[{"id":"3-12","state":"held","host":"h1","acquired_at_ms":1000,"#,
+                r#""ends_at_ms":4000,"labels":{"team":"x"}},"#,
+                r#"{"id":"3-13","state":"pending","acquired_at_ms":1000,"ends_at_ms":5000,"labels":{}}]}"#
+            )
+        );
+    }
+
+    /// Asserts that an acquire body with a number in `ttl_seconds` is the 400 `ttl-removed`
+    /// with the exact message, and that `"ttl_seconds": null` (what the previous release's
+    /// client sends on every acquire) and a body without the key both parse as absent and
+    /// give the same request. It catches a ttl that is read and ignored (a client would
+    /// think it set one), and an older client that is refused for a field it never set.
+    #[test]
+    fn a_ttl_seconds_number_is_refused_and_null_is_absent() {
+        let text = |ttl: &str| {
+            format!(
+                r#"{{"class":"c","resources":{{"cpu_millis":1000}},"max_wall_seconds":60{ttl}}}"#
+            )
+        };
+        let refused = parse::<AcquireBody>(text(r#","ttl_seconds":60"#).as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (StatusCode::BAD_REQUEST, "ttl-removed")
+        );
+        assert_eq!(
+            refused.reason.as_deref(),
+            Some(
+                "ttl_seconds was removed: a lease has no time to live; it ends when released or at max_wall_seconds"
+            )
+        );
+        let absent = parse::<AcquireBody>(text("").as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        let null = parse::<AcquireBody>(text(r#","ttl_seconds":null"#).as_bytes())
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        assert_eq!(null, absent);
     }
 
     /// Asserts that a lease id in a path is read only in the exact form the table

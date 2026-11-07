@@ -491,3 +491,66 @@ fn a_restarted_server_keeps_its_cloud_and_launches_under_new_acquire_ids() {
     assert_eq!(joined.count(), 2, "both machines joined");
     assert!(cell.machine(1).is_some(), "the second machine booted");
 }
+
+/// How many acquires the cloud's recording wrapper holds for `cell`.
+fn acquires(cell: &Cell) -> usize {
+    let calls = cell.cloud().expect("an elastic pool").calls();
+    let acquire = |call: &&js_sim_cell::CloudCall| matches!(call.event, CloudEvent::Acquire { .. });
+    calls.iter().filter(acquire).count()
+}
+
+/// Whether the cell's server runs.
+fn server_up(cell: &Cell) -> bool {
+    cell.server().is_some_and(js_sim_cell::ServerNode::is_up)
+}
+
+/// Asserts that an acquire armed to crash the server stops it in the tick the acquire is
+/// made in, and that it stays down until it is restarted. The cell is stepped one server
+/// tick at a time. At every tick before the acquire the server is up. At the tick of the
+/// acquire the call has reached the cloud (one machine launched), the wrapper has recorded
+/// the crash after it, and the server is down. Six ticks later it is still down and has
+/// made no other acquire. `restart_server` brings it up again over its store, and the
+/// restarted scaler finds the machine and makes no second acquire. Catches a crash that is
+/// recorded but not acted on (the server still up and ticking), one that stops the server
+/// before the call reaches the cloud, a server that comes back up by itself, and a restart
+/// that cannot reopen its store.
+#[test]
+fn an_acquire_armed_to_crash_stops_the_server_until_it_is_restarted() {
+    let mut cell = cell_of("an_acquire_armed_to_crash", 1, small_pool());
+    cell.cloud()
+        .expect("an elastic pool")
+        .crash_at_next_acquire();
+    let mut at = 0;
+    while acquires(&cell) == 0 {
+        assert!(server_up(&cell), "up before the acquire, at {at} ms");
+        assert!(at < LOOK_AT.as_millis(), "no acquire by {at} ms");
+        at += TICK_MS;
+        cell.run_until(FarmTime::from_millis(at))
+            .expect("no invariant fails");
+    }
+    assert!(
+        !server_up(&cell),
+        "down in the tick of the acquire, at {at} ms"
+    );
+    let cloud = cell.cloud().expect("an elastic pool").clone();
+    assert_eq!(cloud.fake().launched(), 1, "the call reached the cloud");
+    let events: Vec<CloudEvent> = cloud.calls().into_iter().map(|call| call.event).collect();
+    let crash = events.iter().position(|event| *event == CloudEvent::Crash);
+    let acquire = events
+        .iter()
+        .position(|event| matches!(event, CloudEvent::Acquire { .. }));
+    assert_eq!(crash, acquire.map(|acquire| acquire + 1), "{events:?}");
+    let later = at + 6 * TICK_MS;
+    cell.run_until(FarmTime::from_millis(later))
+        .expect("no invariant fails");
+    assert!(!server_up(&cell), "still down at {later} ms");
+    assert_eq!(acquires(&cell), 1, "a down server makes no call");
+    cell.restart_server();
+    assert!(cell.take_refused().is_none(), "the server starts again");
+    assert!(server_up(&cell));
+    cell.run_until(FarmTime::from_millis(later + LOOK_AT.as_millis()))
+        .expect("no invariant fails");
+    assert!(server_up(&cell));
+    assert_eq!(acquires(&cell), 1, "the restarted scaler finds its machine");
+    assert_eq!(cloud.fake().launched(), 1);
+}

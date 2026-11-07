@@ -5,9 +5,8 @@
 //! [`SIM_RUN_IMAGE`] whose first argument is the work's duration in milliseconds, reads
 //! the run at every poll until it is terminal, and releases the lease. The lease asks for
 //! the work's resources, with the pool's class and the server shape's capabilities, and
-//! for a wall limit and a ttl of the work's give-up time in whole seconds (at least one),
-//! so the lease outlives the item and is never renewed (the server cuts a ttl above its
-//! `--max-ttl`, an hour by default). The run asks for the work's cpu and memory as its
+//! for a wall limit of the work's give-up time in whole seconds (at least one), so the
+//! lease outlives the item and nothing keeps it alive. The run asks for the work's cpu and memory as its
 //! limits and the GPU indices `0..gpus`. An item not terminal by its give-up time is
 //! given up: the client reports [`HowEnded::GaveUp`] and releases what it holds.
 //!
@@ -312,7 +311,6 @@ impl Item {
             },
             "capabilities": poll.capabilities,
             "max_wall_seconds": wall,
-            "ttl_seconds": wall,
             "labels": { "team": "infra" },
         });
         if self.whole {
