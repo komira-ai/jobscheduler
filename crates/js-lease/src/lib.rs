@@ -260,7 +260,6 @@
 //! edited past the limit is refused the same way.
 
 mod book;
-mod clock;
 mod error;
 mod reservations;
 mod state;
@@ -269,8 +268,12 @@ mod table;
 mod timings;
 mod types;
 
-pub use clock::{Clock, ManualClock, Monotonic, SystemClock, SystemMonotonic, Timestamp};
+// The clocks moved to `js-types` (the traits, the timestamp and the manual clock) and
+// `js-system-clock` (the system's clocks); they are re-exported here so every `js_lease::`
+// path still names them.
 pub use error::{AcquireError, OpenError, ReleaseError, SaveError, SettingsError};
+pub use js_system_clock::{SystemClock, SystemMonotonic};
+pub use js_types::{Clock, ManualClock, Monotonic, Timestamp};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
 pub use timings::{Timer, Timings};

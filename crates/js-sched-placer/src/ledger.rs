@@ -29,10 +29,10 @@
 
 use std::collections::BTreeMap;
 
-use js_lease::Timestamp;
 use js_registry::{Exclusion, WholeKept};
 use js_sched::Bar;
 use js_types::RequestId;
+use js_types::Timestamp;
 use js_types::sched::{FarmTime, WorkerId};
 
 use super::Engine;

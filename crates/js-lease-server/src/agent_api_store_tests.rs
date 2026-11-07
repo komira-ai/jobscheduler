@@ -215,7 +215,7 @@ fn shared_over(rig: &Rig) -> Shared {
     let settings = Settings::new();
     let file = rig.dir.path().join("leases.toml");
     let clock = SharedClock::new(rig.clock.clone());
-    let pool = BoxedPool(Box::new(provider));
+    let pool = BoxedPool::new(Box::new(provider));
     let table = LeaseTable::open(pool, clock, settings, file, Boot::Initialise).unwrap();
     let token = parse_token(&[b'q'; 40]).unwrap();
     Shared::new(table, token, Some(Arc::clone(&rig.agents)))

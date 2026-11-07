@@ -509,7 +509,7 @@ pub(crate) fn open(
         scaler.listening(Some(2 * tick), &bookings);
     }
     let mut table = LeaseTable::open(
-        BoxedPool(provider),
+        BoxedPool::new(provider),
         clock.clone(),
         settings,
         &state_file,

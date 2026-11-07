@@ -95,7 +95,7 @@ fn server(name: &str, agents: bool) -> Server {
     let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
     let settings = Settings::new();
     let table = LeaseTable::open(
-        BoxedPool(Box::new(registry.provider())),
+        BoxedPool::new(Box::new(registry.provider())),
         shared_clock.clone(),
         settings,
         dir.path().join("leases.toml"),
