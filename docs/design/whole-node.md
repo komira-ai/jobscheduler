@@ -100,7 +100,7 @@ again after a restart, as it re-presents any request, and the registry binds it 
 original deadline (raised to at least boot plus the boot grace, `RESERVATION_BOOT_GRACE`, two minutes in the lease server; never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
-defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
+defeat `max_reserve_attempts`. *The marks of queued whole-host jobs (section 5, item 7) are not in the lease file: they are rows of the job store. After a restart the engine reads them at its first pass. The store has already raised each deadline to at least the boot plus two minutes, so a restart loop does not stretch a drain. A mark whose host has said hello to this server is restored as stored; one whose host has not stands untouched until the server's start plus `regain_grace` and is then deleted (the job stays queued and is marked again). A mark whose job is no longer a queued whole-host job is deleted. The failed prepares and bars of a job are on its row.* A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
 exists is dropped at boot, and counted (a request id listed twice, a host being given back, a host two records name, and a mark with no place on the wait list are dropped at once; a request not presented again, and a mark whose host does not say hello, within `regain_grace`). The file is one tick behind the registry at most, and the final tick of a shutdown brings it level. Estimates are not persisted: they are recomputed. The file format is additive; a build that does not know the keys reads past them. Cost: a few small rows, written with the same rewrite as the leases.
 
 ## 4. Draining
@@ -202,6 +202,30 @@ request destroy another's results; re-queueing wastes only the drain already spe
    the commit: the consumer is not charged for the drain or for `prepare_timeout`, and a lease that never becomes ready never held the
    consumer's time. Renewal and the reaper are as for any lease (12.1): a renewal never extends it past the token time plus the max wall
    time.
+7. **A whole-host job (the job path).** A job that needs the whole host takes these steps without a lease, in the job store
+   (`js-lease-server`, `job_whole`; `js-sched-placer`, `engine::whole_jobs`; both under `--placement js-sched`, with the pool's whole-node
+   settings). It waits as a queued job, with no presentation and no wait list: its row is its place in the queue. The engine marks a
+   host for it as in section 4, and the mark is a row of the job store, `mark/<job id>`, written when the mark is made or moved or its
+   deadline, tail or exclusions change, and left alone while unchanged. The mark is deleted in the commit that places the job, in the
+   commit that cancels it while it is queued, and in the commit that ends it at its maximum queue wait. When the host is quiet one
+   transaction places the job with an allocation that books the whole host and a **prepare deadline**, the placement's time plus
+   `prepare_timeout`; the reply to the host's next heartbeat names that allocation in `exclusive`, and goes on naming it until the job
+   ends. The heartbeat then decides the job, before its listing is read: a ready report naming the allocation, from a host the registry
+   does not hold tainted, moves the job to starting, and its start (the host's CPU, memory and disk as the registry books them, and the
+   wall limit the allocation records, else the job's) rides on that reply and each one after until the host lists the job; a typed
+   refusal fails the prepare at once, with the effects of the table in item 4. The first job listing after a hello restarts the prepare:
+   the prepare deadline becomes the store's now plus `prepare_timeout`. A hello changes nothing about a job that is starting or
+   running: the host's listing decides it, a job it lists keeps its state and allocation and a job it does not list is lost, as after
+   any agent restart. The deadline is checked only at the tick, before the start timeouts and never at a heartbeat, so a ready report
+   that reaches the server before the tick wins. A failed prepare, for a refusal or the deadline, is the one free of an allocation that
+   needs no confirmation from the host, because no container was made: in one commit the job goes back to queued keeping its place in the
+   queue, its allocation is freed, its mark is deleted, and its row records the failed prepares and the hosts barred for it, so a
+   restart keeps them; at `max_replace` of them the job fails to start `exclusive-not-ready` in that commit. A `host-unsafe` refusal also
+   taints the host in the registry. A start timeout counts a starting whole-host job from its allocation's prepare deadline, and a
+   placed one has none. A cancel of a placed whole-host job is an intent: no stop is sent, the allocation stays booked and is not named,
+   and when the agent has left `preparing` (or reports the allocation ready or refused) the job is cancelled and the allocation freed in
+   one commit, so the host serves again. A job backfilled on a marked host has the wall limit of its allocation cut to the time left in
+   the tail less the backfill margin, and its start carries that limit.
 
 ## 6. Caps: whole-node requests cannot starve a pool
 

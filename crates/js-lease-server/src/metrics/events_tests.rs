@@ -7,13 +7,14 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent_wire::{HeldState, Outcome};
+use js_agent_wire::{HeldState, Outcome, RefusalReason};
 use js_jobs::{JobId, JobState, NewJob, StartFailure};
 use js_lease::Monotonic;
+use js_registry::WholeNodeConfig;
 use js_types::HostId;
 
 use super::*;
-use crate::agent_api::job_rig::{FakeAgent, Rig, clocked_rig, spec};
+use crate::agent_api::job_rig::{FakeAgent, Rig, clocked_rig, spec, whole_rig};
 use crate::job_expiry::JobLimits;
 
 /// The meter's clock: each reading is 7 ms after the one before it.
@@ -184,6 +185,41 @@ async fn a_heartbeat_counts_a_refused_start_a_lost_job_and_a_listing_that_does_n
     rig.store.fail_next();
     assert!(rig.beat(&fresh).await.is_err());
     assert_eq!(counted(&recorder), ([0, 0, 0, 1], 2, 1));
+}
+
+/// Asserts that a whole-host job whose prepare fails for the last time the pool allows ends
+/// failed to start, and that the heartbeat that refused it counts it once, as
+/// `exclusive-not-ready` (the third code). It catches a terminal failed prepare that is not
+/// counted and one counted as another code.
+#[tokio::test]
+async fn a_terminal_failed_prepare_counts_exclusive_not_ready() {
+    let rules = WholeNodeConfig {
+        max_replace: 1,
+        ..WholeNodeConfig::dedicated(2)
+    };
+    let mut rig = whole_rig("metrics_prepare", rules, None);
+    rig.register("host-a", true);
+    let recorder = metered(&rig);
+    let mut agent = FakeAgent::new("host-a");
+    let new = NewJob {
+        id: Some(JobId::parse("whole").unwrap()),
+        spec: js_jobs::JobSpec {
+            needs: js_jobs::Needs::WholeHost,
+            ..spec()
+        },
+        priority: 0,
+        client: None,
+    };
+    let job = rig.jobs.insert_queued(new).unwrap().record.id;
+    rig.tick();
+    rig.tick();
+    agent.take(&rig.beat(&agent).await.unwrap());
+    assert_eq!(counted(&recorder), ([0; 4], 0, 0));
+    agent.refuse(RefusalReason::NotQuiet);
+    agent.take(&rig.beat(&agent).await.unwrap());
+    let ended = JobState::FailedToStart(StartFailure::ExclusiveNotReady);
+    assert_eq!(rig.job(&job).state, ended);
+    assert_eq!(counted(&recorder), ([0, 0, 1, 0], 0, 0));
 }
 
 /// Asserts that a meter set once stays: a second one given to the agent side is ignored, so

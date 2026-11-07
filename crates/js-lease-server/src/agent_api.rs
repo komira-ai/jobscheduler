@@ -19,12 +19,21 @@
 //!   it; then a `job_start` for each job placed on the host that it does not list yet, with
 //!   the allocation's booked resources, the wall limit, the network level and the declared
 //!   ports, keyed by the job id and the allocation id. Each is resent until the listing
-//!   shows it taken; all of them together stay within `MAX_COMMANDS`.
+//!   shows it taken; all of them together stay within `MAX_COMMANDS`. A job that books the
+//!   whole host is neither stopped nor started while it is placed (the host prepares), and is
+//!   started once it is starting;
+//! - `exclusive`: the allocation id of the whole-host job the host is to prepare for or
+//!   keep, until its job ends;
 //! - `job_acks`: a verdict on each listed job result (`ACCEPTED` when this beat committed
 //!   the end, `DUPLICATE` when the job had already ended, `STALE` for a job the store holds
 //!   no live allocation of here, or an end its state cannot take).
 //! - `retired_acks`: every retired id the heartbeat listed, once its job is cancelled and
 //!   its allocation freed (or there was nothing to change).
+//!
+//! Before the listing, the heartbeat's `phase`, `exclusive_ready` and `exclusive_refused`
+//! move the placed whole-host job of the host ([`crate::job_whole`]): a ready report starts
+//! it, a refusal fails its prepare, the first listing after a hello restarts it, and a cancel
+//! ends it once the agent has left `preparing`.
 //!
 //! The listing's changes (a job starting, running or ended, an allocation freed once the
 //! host no longer lists an ended job) are committed before the reply is built. A commit that
@@ -69,17 +78,20 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, ProtocolRange, Welcome, refusal};
+use js_lease::Clock;
 use js_registry::{Credential, Refusal};
-use js_types::HostId;
+use js_types::{HostId, Resources, Shape};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use crate::agents::Agents;
+use crate::agents::{Agents, Session};
 use crate::api::{BODY_LIMIT, bearer};
 use crate::fence::STATE_FENCED;
 use crate::job_loss;
+use crate::job_pass::store_time;
 use crate::job_store::ServerJobs;
+use crate::job_whole;
 use crate::join_tokens::{Admission, JoinRefusal};
 use crate::logs::{self, LogGrants};
 use crate::per_job::{self, JobReply};
@@ -371,15 +383,32 @@ async fn add_jobs(
         reply.commands.extend(served.commands);
         reply.job_acks = served.job_acks;
         reply.retired_acks = served.retired_acks;
+        reply.exclusive = reply.exclusive.take().or(served.exclusive);
     }
     Ok(())
 }
 
+/// What the registry holds of a host that reported the `per-job` capability, as
+/// [`serve_jobs`] reads it.
+struct PerJobHost {
+    id: HostId,
+    session: Session,
+    /// The shape the host announced at its hello.
+    claim: Shape,
+    /// What the registry books for the host: what a start of the whole host books.
+    booked: Resources,
+    /// Whether the registry holds the host tainted.
+    tainted: bool,
+}
+
 /// The per-job half of the heartbeat of a host that reported [`PER_JOB_CAPABILITY`], with
 /// room for `room` commands, its starts carrying the sinks of `logs`; `None` for any other
-/// host. The store is read and written on the pool for blocking calls. A failed read or
-/// commit is a 500 `state-write-failed`, except a store that says it has a newer writer, which
-/// is a 503 `state-fenced` and trips the fence.
+/// host. The whole-host jobs placed on the host are served first ([`job_whole::serve`]: a
+/// ready report, a refusal, a cancel, a hello), then the listing is committed and the reply
+/// built ([`per_job::serve`]). The store is read and written on the pool for blocking calls.
+/// A failed read or commit is a 500 `state-write-failed`, except a store that says it has a
+/// newer writer, which is a 503 `state-fenced` and trips the fence. A host a refused prepare
+/// tainted is written to the state file before the reply.
 ///
 /// [`PER_JOB_CAPABILITY`]: js_agent_wire::PER_JOB_CAPABILITY
 async fn serve_jobs(
@@ -394,13 +423,29 @@ async fn serve_jobs(
         .and_then(|host| agents.registry.own_host(&host))
         .and_then(|own| {
             let session = (own.host.epoch, own.session_started.map(|at| at.millis()));
-            own.host.claim.map(|claim| (own.host.id, session, claim))
+            let tainted = own.host.taint.is_some();
+            let booked = own.host.shape.resources().clone();
+            own.host.claim.map(|claim| PerJobHost {
+                id: own.host.id,
+                session,
+                claim,
+                booked,
+                tainted,
+            })
         })
-        .filter(|(_, _, claim)| {
-            let reported = claim.capabilities().get(js_agent_wire::PER_JOB_CAPABILITY);
+        .filter(|host| {
+            let capabilities = host.claim.capabilities();
+            let reported = capabilities.get(js_agent_wire::PER_JOB_CAPABILITY);
             reported.map(String::as_str) == Some("true")
         });
-    let Some((host, session, claim)) = per_job else {
+    let Some(PerJobHost {
+        id: host,
+        session,
+        claim,
+        booked,
+        tainted,
+    }) = per_job
+    else {
         return Ok(None);
     };
     let first = agents.first_listing(&host, session);
@@ -409,12 +454,15 @@ async fn serve_jobs(
     let jobs = Arc::clone(jobs);
     let listed = heartbeat.jobs.clone();
     let retired = heartbeat.retired_jobs.clone();
+    let (phase, ready) = (heartbeat.phase, heartbeat.exclusive_ready.clone());
+    let refused = heartbeat.exclusive_refused.clone();
     let placing = Arc::clone(agents);
     let served = blocking(move || {
         let metrics = placing.meter().sink();
         let context = per_job::BeatContext {
             host: &host,
             ceiling: &ceiling,
+            shape: Some(&booked),
             logs: logs.as_deref(),
             metrics,
         };
@@ -430,11 +478,30 @@ async fn serve_jobs(
             true => job_loss::lose_unlisted(&jobs, &host, &held, metrics).map(drop),
             false => Ok(()),
         };
-        let served = lost.and_then(|()| per_job::serve(&jobs, &context, &listed, &retired, room));
+        // A whole-host job the host prepares for is moved before the listing is committed
+        // (design section 5.4): ready starts it, a refusal fails the prepare, a hello
+        // restarts it, and a cancel ends it once the agent has left `preparing`.
+        let beat = job_whole::Beat {
+            host: &host,
+            phase,
+            ready: ready.as_deref(),
+            refused: refused.as_ref(),
+            first,
+            tainted,
+        };
+        let now = store_time(placing.clock.now().millis());
+        let rules = placing.whole_rules();
+        let taint = |host: &HostId| placing.registry.taint_after_prepare(host);
+        let serve = |()| job_whole::serve(&jobs, &beat, (&rules, now), (metrics, &taint));
+        let whole = lost.and_then(serve);
+        let served = whole.and_then(|taint_changed| {
+            let served = per_job::serve(&jobs, &context, &listed, &retired, room);
+            served.map(|served| (served, taint_changed))
+        });
         // Whether the listing was clean is noted before the pass, so a host that lists a job
         // it holds no live allocation for takes no start until it lists only its own (design
         // section 8, row 37).
-        if let Ok(served) = &served {
+        if let Ok((served, _)) = &served {
             placing.note_listing(&host, served.clean);
         }
         // What the listing ended or freed, and the load the beat brought, can make room
@@ -444,8 +511,11 @@ async fn serve_jobs(
     })
     .await;
     match served {
-        (host, Ok(served)) => {
+        (host, Ok((served, taint_changed))) => {
             agents.listed(&host, session);
+            if taint_changed {
+                agents.save_bindings().await;
+            }
             Ok(Some(served))
         }
         (host, Err(error)) => {
@@ -716,3 +786,11 @@ mod log_tests;
 #[cfg(test)]
 #[path = "agent_api_log_life_tests.rs"]
 mod log_life_tests;
+
+#[cfg(test)]
+#[path = "agent_api_whole_tests.rs"]
+mod whole_tests;
+
+#[cfg(test)]
+#[path = "agent_api_whole_restart_tests.rs"]
+mod whole_restart_tests;

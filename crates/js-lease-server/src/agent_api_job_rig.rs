@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use js_agent_wire::{
-    Command, DEFAULT_HEARTBEAT_INTERVAL_MS, HeldJob, HeldState, JobResult, JobStartSpec, LogGrant,
-    LogGrantState, LogTail, Outcome, Phase,
+    Command, DEFAULT_HEARTBEAT_INTERVAL_MS, ExclusiveRefusal, HeldJob, HeldState, JobResult,
+    JobStartSpec, LogGrant, LogGrantState, LogTail, Outcome, Phase, RefusalReason,
 };
 use js_jobs::interfere::Interfere;
 use js_jobs::{
@@ -27,7 +27,8 @@ use js_logmint::fake::FakeMinter;
 use js_logmint::{Bucket, LogPrefix};
 use js_logstore::fake::FakeStore;
 use js_logstore::{Endpoint, Store as LogStore};
-use js_registry::{PoolConfig, Registry, SequentialSessions};
+use js_registry::{PoolConfig, Registry, SequentialSessions, WholeNodeConfig};
+use js_sched::Backfill;
 use js_state::fake::{Fake, Flaw};
 use js_state::{ManualClock as StoreClock, Store};
 use js_testkit::dir::TestDir;
@@ -136,6 +137,8 @@ pub(crate) struct Rig {
     pub(crate) store: Arc<Interfere<Fake>>,
     who: Credential,
     sessions: BTreeMap<String, (u64, String)>,
+    /// The GPUs of each host the rig's hosts announce.
+    gpus: u64,
     _dir: TestDir,
 }
 
@@ -173,7 +176,8 @@ pub(crate) fn logging_over(
 ) -> (Rig, Logs) {
     let clock = tables.map_or_else(Arc::default, |rig| Arc::clone(&rig.clock));
     let since = js_state::Clock::now(&*clock).as_duration();
-    clock.advance(std::time::Duration::from_millis(now_ms).saturating_sub(since));
+    let target = std::time::Duration::from_millis(now_ms);
+    clock.advance(target.saturating_sub(since));
     let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
     let endpoint = Endpoint::parse(LOG_ENDPOINT, LOG_REGION, LOG_BUCKET, true).unwrap();
     let store = FakeStore::new(endpoint.clone(), Arc::new(LogClock(shared.clone())));
@@ -269,6 +273,56 @@ struct Extra {
     logs: Option<Arc<LogGrants>>,
     tables: Option<Tables>,
     store_clock: Option<Arc<StoreClock>>,
+    whole: Option<WholePool>,
+}
+
+/// What makes a rig's pool a whole-node pool of hosts without GPUs ([`whole_rig`]): its
+/// settings, and the longest wall time its scheduler trusts for backfill, when it backfills.
+#[derive(Clone)]
+struct WholePool {
+    rules: WholeNodeConfig,
+    backfill: Option<std::time::Duration>,
+}
+
+/// The silence after which a host of a [`whole_rig`] is lost.
+pub(crate) const WHOLE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A server named `name` for the tests of whole-host jobs: it holds the job tables and places
+/// with `js-sched`, its registry, server and store read one manual clock (at [`START_MS`]
+/// until the test moves it), and its pool is a whole-node pool of up to four hosts with the
+/// settings `rules`, whose hosts have no GPU and are lost after [`WHOLE_GRACE`] of silence. A
+/// scheduler that backfills (a marked host takes work that ends before it is free) trusts a
+/// wall time up to `backfill`, when given.
+pub(crate) fn whole_rig(
+    name: &str,
+    rules: WholeNodeConfig,
+    backfill: Option<std::time::Duration>,
+) -> Rig {
+    whole_over(name, (rules, backfill), None, START_MS)
+}
+
+/// [`whole_rig`] over the job tables of `before` (a server that ran on them) when given, on
+/// its clock moved to `now_ms`: a server started again, with a new registry and a new
+/// scheduler, whose hosts have not said hello.
+pub(crate) fn whole_over(
+    name: &str,
+    (rules, backfill): (WholeNodeConfig, Option<std::time::Duration>),
+    before: Option<&Rig>,
+    now_ms: u64,
+) -> Rig {
+    let clock = before.map_or_else(Arc::default, |rig| Arc::clone(&rig.clock));
+    let since = js_state::Clock::now(&*clock).as_duration();
+    let target = std::time::Duration::from_millis(now_ms);
+    clock.advance(target.saturating_sub(since));
+    let shared = SharedClock::new(OneClock(Arc::clone(&clock)));
+    let extra = Extra {
+        grace_ms: Some(u64::try_from(WHOLE_GRACE.as_millis()).unwrap()),
+        tables: before.map(|rig| (Arc::clone(&rig.store), Arc::clone(&rig.jobs))),
+        whole: Some(WholePool { rules, backfill }),
+        ..Extra::default()
+    };
+    let kept = (JobLimits::default(), Retention::DEFAULT);
+    rig_on(name, (true, true), kept, (clock, shared), extra)
 }
 
 /// A server named `name`, holding the job tables when `with_jobs`, placing with the
@@ -331,15 +385,19 @@ fn rig_on(
 ) -> Rig {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_api_jobs");
     let dir = TestDir::under(root, name);
-    let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_owned())).unwrap();
+    let (class, gpus) = match extra.whole.is_some() {
+        true => (ResourceClass::whole_node(), 0),
+        false => (ResourceClass::gpu_host(), 1),
+    };
+    let gpu_class = (gpus > 0).then(|| "nvidia-a100".to_owned());
+    let resources = Resources::new(8000, 17179869184, gpus, gpu_class).unwrap();
     let arch = placing.then(|| ("arch".to_owned(), "x86_64".to_owned()));
     let shape = Shape::new(resources, arch.into_iter().collect());
-    let pool = PoolConfig::new(
-        ProviderId::new("burst").unwrap(),
-        ResourceClass::gpu_host(),
-        shape,
-        4,
-    );
+    let pool = PoolConfig::new(ProviderId::new("burst").unwrap(), class, shape, 4);
+    let pool = match &extra.whole {
+        Some(whole) => pool.with_whole_node(whole.rules.clone()).unwrap(),
+        None => pool,
+    };
     let pool = match extra.grace_ms {
         Some(grace_ms) => {
             let timed = pool.with_timing(DEFAULT_HEARTBEAT_INTERVAL_MS, grace_ms);
@@ -349,7 +407,11 @@ fn rig_on(
     };
     let registry = Registry::with_sessions(pool, shared.clone(), SequentialSessions::new());
     let placer = placing.then(|| {
-        let settings = crate::sched::engine::Settings::default();
+        let backfill = extra.whole.as_ref().and_then(|whole| whole.backfill);
+        let settings = crate::sched::engine::Settings {
+            backfill: backfill.map_or_else(Backfill::default, Backfill::enforced),
+            ..crate::sched::engine::Settings::default()
+        };
         Arc::new(crate::sched::place::SchedPlacer::new(
             settings,
             shared.clone(),
@@ -386,6 +448,7 @@ fn rig_on(
         store,
         who,
         sessions: BTreeMap::new(),
+        gpus,
         _dir: dir,
     }
 }
@@ -409,12 +472,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
-            "shape": {
-                "cpu_millis": 8000,
-                "memory_bytes": 17179869184u64,
-                "gpus": 1,
-                "gpu_class": "nvidia-a100",
-            },
+            "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",
         });
@@ -431,6 +489,19 @@ impl Rig {
     pub(crate) fn register_uploading(&mut self, host: &str) {
         let capabilities = json!({ "per-job": "true", "log-upload": "true", "arch": "x86_64" });
         self.register_with(host, capabilities);
+    }
+
+    /// The shape the rig's hosts announce: eight cores, 16 GiB and the pool's GPUs.
+    fn shape(&self) -> serde_json::Value {
+        let mut shape = json!({
+            "cpu_millis": 8000,
+            "memory_bytes": 17179869184u64,
+            "gpus": self.gpus,
+        });
+        if self.gpus > 0 {
+            shape["gpu_class"] = json!("nvidia-a100");
+        }
+        shape
     }
 
     /// The directory the server's files are kept in.
@@ -453,12 +524,7 @@ impl Rig {
             "host_id": host,
             "pool": "burst",
             "agent_version": "0.1.0",
-            "shape": {
-                "cpu_millis": 8000,
-                "memory_bytes": 17179869184u64,
-                "gpus": 1,
-                "gpu_class": "nvidia-a100",
-            },
+            "shape": self.shape(),
             "capabilities": capabilities,
             "phase": "serving",
         }))
@@ -475,12 +541,12 @@ impl Rig {
             host_id: agent.host.clone(),
             epoch,
             session,
-            phase: Phase::Serving,
+            phase: agent.phase,
             held: Vec::new(),
             results: Vec::new(),
             taint: None,
-            exclusive_ready: None,
-            exclusive_refused: None,
+            exclusive_ready: agent.ready.clone(),
+            exclusive_refused: agent.refused.clone(),
             load: None,
             disk_gib: None,
             jobs: agent.listing(),
@@ -545,6 +611,12 @@ struct Held {
 /// result is dropped with its container at once, and the id is fenced, so a start that
 /// arrives later is not run. It makes a container only when told to run a job.
 ///
+/// A reply that names an allocation (`exclusive`) makes it prepare: its phase is `preparing`
+/// until a test has it report the host ready ([`FakeAgent::report_ready`]) or refused
+/// ([`FakeAgent::refuse`]), and the report is repeated in every heartbeat until a reply stops
+/// naming the allocation; the agent is then `restoring` until the test has it serve again
+/// ([`FakeAgent::serve_again`]).
+///
 /// An agent that uploads ([`FakeAgent::uploading`]) reports in each heartbeat the expiry of
 /// the log credential it holds and whether it asks for a new one, takes the `log_grant` of a
 /// reply it takes, and starts out holding none and asking.
@@ -561,6 +633,14 @@ pub(crate) struct FakeAgent {
     pub(crate) grant: Option<LogGrant>,
     /// Whether it asks for a new credential.
     pub(crate) stale: bool,
+    /// The phase its heartbeats report.
+    pub(crate) phase: Phase,
+    /// The allocation the last reply named for it to prepare for or keep.
+    pub(crate) exclusive: Option<String>,
+    /// The allocation it reports ready.
+    pub(crate) ready: Option<String>,
+    /// The refusal it reports.
+    pub(crate) refused: Option<ExclusiveRefusal>,
 }
 
 impl FakeAgent {
@@ -575,6 +655,10 @@ impl FakeAgent {
             uploads: false,
             grant: None,
             stale: false,
+            phase: Phase::Serving,
+            exclusive: None,
+            ready: None,
+            refused: None,
         }
     }
 
@@ -612,8 +696,49 @@ impl FakeAgent {
         self.held.contains_key(id)
     }
 
-    /// Acts on `reply`: its starts, its stops and its acknowledgements.
+    /// Reports the host ready for the allocation the last reply named, and serving.
+    pub(crate) fn report_ready(&mut self) {
+        assert!(self.exclusive.is_some(), "no reply named an allocation");
+        self.ready.clone_from(&self.exclusive);
+        self.phase = Phase::Serving;
+    }
+
+    /// Refuses the allocation the last reply named with `code`, still preparing.
+    pub(crate) fn refuse(&mut self, code: RefusalReason) {
+        let lease_id = self
+            .exclusive
+            .clone()
+            .expect("no reply named an allocation");
+        self.refused = Some(ExclusiveRefusal {
+            lease_id,
+            code,
+            detail: String::new(),
+        });
+        self.phase = Phase::Preparing;
+    }
+
+    /// Serves again, as an agent does once it has restored the host.
+    pub(crate) fn serve_again(&mut self) {
+        self.phase = Phase::Serving;
+    }
+
+    /// Acts on `reply`: its starts, its stops and its acknowledgements, and the allocation it
+    /// names for the host to prepare for (the phase `preparing`) or no longer names (the phase
+    /// `restoring`, with what it reported dropped).
     pub(crate) fn take(&mut self, reply: &HeartbeatReply) {
+        match (reply.exclusive.clone(), self.exclusive.clone()) {
+            (Some(named), kept) if kept.as_ref() != Some(&named) => {
+                self.exclusive = Some(named);
+                self.phase = Phase::Preparing;
+            }
+            (None, Some(_)) => {
+                self.exclusive = None;
+                self.ready = None;
+                self.refused = None;
+                self.phase = Phase::Restoring;
+            }
+            _ => {}
+        }
         for spec in starts(reply) {
             if !self.fenced.contains(&spec.job_id) {
                 self.held.entry(spec.job_id.clone()).or_insert(Held {

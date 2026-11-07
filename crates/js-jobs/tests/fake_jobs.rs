@@ -78,3 +78,57 @@ fn a_partial_transaction_breaks_an_atomic_requeue() {
 fn a_partial_transaction_breaks_an_atomic_end_and_unmark() {
     suite::end_and_unmark_deletes_both_or_neither(&FakeBackend::new(Flaw::PartialTxn));
 }
+
+// Catches a placement and its mark's delete written in separate steps: the job is placed while
+// the mark it held stays.
+#[test]
+#[should_panic(
+    expected = "a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark: the job was placed without its mark's delete"
+)]
+fn a_partial_transaction_breaks_an_atomic_placement_that_drops_a_mark() {
+    suite::a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(&FakeBackend::new(
+        Flaw::PartialTxn,
+    ));
+}
+
+// Catches a failed prepare whose job and allocation are written in separate steps: the job goes
+// back to queued while its allocation stays booked.
+#[test]
+#[should_panic(
+    expected = "a_failed_prepare_loses_to_a_change_of_either_row: the job was requeued without its allocation"
+)]
+fn a_partial_transaction_breaks_an_atomic_failed_prepare() {
+    suite::a_failed_prepare_loses_to_a_change_of_either_row(&FakeBackend::new(Flaw::PartialTxn));
+}
+
+// Catches a failed prepare and its mark's delete written in separate steps: the job goes back to
+// queued while the mark it had stays.
+#[test]
+#[should_panic(
+    expected = "a_failed_prepare_drops_its_mark_or_writes_nothing: the job was requeued without its mark's delete"
+)]
+fn a_partial_transaction_breaks_a_failed_prepare_that_drops_a_mark() {
+    suite::a_failed_prepare_drops_its_mark_or_writes_nothing(&FakeBackend::new(Flaw::PartialTxn));
+}
+
+// Catches a restart whose allocation and job check are applied in separate steps: the deadline
+// moves though the job changed.
+#[test]
+#[should_panic(
+    expected = "a_restarted_prepare_loses_to_a_change_of_either_row: the deadline moved though the job changed"
+)]
+fn a_partial_transaction_breaks_an_atomic_restart_of_a_prepare() {
+    suite::a_restarted_prepare_loses_to_a_change_of_either_row(&FakeBackend::new(Flaw::PartialTxn));
+}
+
+// Catches a cancel and its mark's delete written in separate steps: the queued job is cancelled
+// while the mark it held stays.
+#[test]
+#[should_panic(
+    expected = "a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit: the job was cancelled without its mark's delete"
+)]
+fn a_partial_transaction_breaks_the_cancel_of_a_marked_job() {
+    suite::a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit(&FakeBackend::new(
+        Flaw::PartialTxn,
+    ));
+}

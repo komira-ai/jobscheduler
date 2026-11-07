@@ -22,7 +22,10 @@
 //!    with a cancel intent that has not ended, every listed job the store has no live
 //!    allocation of on this host, and every listed job that ended without the host reporting
 //!    it ([`stops_for`]); then a start for every placed job the host does not list yet
-//!    ([`starts_for`]).
+//!    ([`starts_for`]). A job that books the whole host is the exception on both sides: no
+//!    container exists while it is placed (the host prepares), so it is sent no stop, and it
+//!    is sent its start only once the host reported ready and the job is starting. The reply
+//!    also names the allocation of such a job ([`JobReply::exclusive`]).
 //!
 //! Every change is committed before the reply that depends on it is built: a failed commit is
 //! an error, the heartbeat is answered 500 `state-write-failed` with no start or stop, and the
@@ -35,10 +38,10 @@ use js_agent_wire::{
     Outcome,
 };
 use js_jobs::{
-    AllocationRecord, AllocationStep, JobEnd, JobId, JobRecord, JobState, JobStoreError,
+    AllocationRecord, AllocationStep, Booked, JobEnd, JobId, JobRecord, JobState, JobStoreError,
     LogLengths, Output, StartFailure,
 };
-use js_types::HostId;
+use js_types::{HostId, Resources};
 use tracing::warn;
 
 use crate::job_alloc::{self, Freed};
@@ -63,6 +66,9 @@ pub(crate) struct JobReply {
     /// Whether every listed job is one the host holds a live allocation for; a host whose
     /// listing is not clean is told to stop the others.
     pub(crate) clean: bool,
+    /// The allocation id of the whole-host job the host is to be prepared for or to hold,
+    /// when it has one ([`exclusive_of`]): the reply's `exclusive`.
+    pub(crate) exclusive: Option<String>,
 }
 
 /// What [`commit_listing`] found.
@@ -82,6 +88,9 @@ pub(crate) struct BeatContext<'a> {
     pub(crate) host: &'a HostId,
     /// The most network the host's agent reported it gives a job.
     pub(crate) ceiling: &'a NetworkCeiling,
+    /// What the registry books for the host, which a start of the whole host books; `None`
+    /// when it is not known.
+    pub(crate) shape: Option<&'a Resources>,
     /// The sinks of live logs a start carries, when the server has one and the host's agent
     /// reported that it uploads ([`crate::logs`]); `None` otherwise.
     pub(crate) logs: Option<&'a LogGrants>,
@@ -123,6 +132,7 @@ pub(crate) fn serve(
         }
     }
     let live = jobs.live_on(host)?;
+    let exclusive = exclusive_of(&live);
     let stops = stops_for(&live, listed, &reported.unknown)
         .into_iter()
         .map(|job_id| Command::JobStop { job_id });
@@ -136,6 +146,7 @@ pub(crate) fn serve(
         job_acks: reported.acks,
         retired_acks: retired.to_vec(),
         clean: reported.unknown.is_empty(),
+        exclusive,
     })
 }
 
@@ -327,12 +338,20 @@ pub(crate) fn end_of(job: &JobRecord, result: &JobResult) -> Option<JobEnd> {
     Some(end)
 }
 
+/// Whether `job`, placed on `allocation`, is a whole-host job still preparing: the host holds
+/// no container for it, so it is sent no stop and no start, and a cancel of it waits for the
+/// host to leave `preparing` ([`crate::job_whole`]).
+fn preparing(allocation: &AllocationRecord, job: &JobRecord) -> bool {
+    matches!(allocation.booked, Booked::WholeHost) & (job.state == JobState::Placed)
+}
+
 /// The jobs a host is told to stop, in id order: every job of `live` (the host's live
-/// allocations) with a cancel intent that has not ended, every listed job that has ended
-/// without the host listing its result, and every id of `unknown` (listed jobs the store holds
-/// no live allocation of on this host). It is resent on every heartbeat until the host stops
-/// listing the job or answers with its retired id. This is the one stop rule: a cancel, a
-/// start timeout or a wall limit that the store records reaches the host through it.
+/// allocations) with a cancel intent that has not ended (a whole-host job that is still
+/// preparing excepted), every listed job that has ended without the host listing its result,
+/// and every id of `unknown` (listed jobs the store holds no live allocation of on this
+/// host). It is resent on every heartbeat until the host stops listing the job or answers
+/// with its retired id. This is the one stop rule: a cancel, a start timeout or a wall limit
+/// that the store records reaches the host through it.
 pub(crate) fn stops_for(
     live: &[(AllocationRecord, Option<JobRecord>)],
     listed: &[HeldJob],
@@ -342,23 +361,27 @@ pub(crate) fn stops_for(
         .iter()
         .map(|held| (held.job_id.as_str(), held))
         .collect();
-    let jobs = live.iter().filter_map(|(_, job)| job.as_ref());
-    let stopped = jobs.filter(|job| {
+    let jobs = live
+        .iter()
+        .filter_map(|(allocation, job)| job.as_ref().map(|job| (allocation, job)));
+    let stopped = jobs.filter(|(allocation, job)| {
         let ended = job.state.is_ended();
         let unreported = listing
             .get(job.id.as_str())
             .is_some_and(|held| held.result.is_none());
-        (job.cancel_requested & !ended) | (ended & unreported)
+        (job.cancel_requested & !ended & !preparing(allocation, job)) | (ended & unreported)
     });
-    let mut stops: BTreeSet<String> = stopped.map(|job| job.id.to_string()).collect();
+    let mut stops: BTreeSet<String> = stopped.map(|(_, job)| job.id.to_string()).collect();
     stops.extend(unknown.iter().cloned());
     stops
 }
 
-/// The starts a host is sent: one for each job of `live` that is placed with a booked
-/// allocation, has no cancel intent and is not in `held` (listed or retired by the host),
-/// resent on every heartbeat until the host lists it. A start the wire cannot carry is logged
-/// and not sent; the start timeout ends its job.
+/// The starts a host is sent: one for each job of `live` with a booked allocation and no
+/// cancel intent that is not in `held` (listed or retired by the host), resent on every
+/// heartbeat until the host lists it. A job that shares the host is sent its start while it is
+/// placed; a job that books the whole host, once the host reported ready and moved it to
+/// starting. A start the wire cannot carry is logged and not sent; the start timeout ends its
+/// job.
 fn starts_for(
     live: &[(AllocationRecord, Option<JobRecord>)],
     held: &BTreeSet<&str>,
@@ -366,8 +389,13 @@ fn starts_for(
 ) -> Vec<JobStartSpec> {
     let placed = live.iter().filter_map(|(allocation, job)| {
         let job = job.as_ref()?;
+        let whole = matches!(allocation.booked, Booked::WholeHost);
+        let due = match whole {
+            true => JobState::Starting,
+            false => JobState::Placed,
+        };
         let wanted = (allocation.step == AllocationStep::Booked)
-            & (job.state == JobState::Placed)
+            & (job.state == due)
             & !job.cancel_requested
             & !held.contains(job.id.as_str());
         wanted.then_some((allocation, job))
@@ -379,6 +407,25 @@ fn starts_for(
                 .ok()
         })
         .collect()
+}
+
+/// The allocation id of the whole-host job `live` holds a host for, which the host is to
+/// prepare for or keep: a booked allocation of the whole host whose job is placed (and has no
+/// cancel intent: a cancelled job's host is let go), starting or running. `None` for a host
+/// with no such job. A host holds at most one.
+pub(crate) fn exclusive_of(live: &[(AllocationRecord, Option<JobRecord>)]) -> Option<String> {
+    let jobs = live
+        .iter()
+        .filter_map(|(allocation, job)| job.as_ref().map(|job| (allocation, job)));
+    let mut named = jobs.filter(|(allocation, job)| {
+        let whole = matches!(allocation.booked, Booked::WholeHost);
+        let waiting = (job.state == JobState::Placed) & !job.cancel_requested;
+        let held = matches!(job.state, JobState::Starting | JobState::Running);
+        whole & (waiting | held) & (allocation.step == AllocationStep::Booked)
+    });
+    named
+        .next()
+        .map(|(allocation, _)| allocation.allocation_id.to_string())
 }
 
 #[cfg(test)]

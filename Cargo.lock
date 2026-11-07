@@ -1820,6 +1820,7 @@ dependencies = [
  "js-sched",
  "js-state",
  "js-types",
+ "js-whole",
  "thiserror",
  "tracing",
 ]

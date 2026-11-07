@@ -748,6 +748,8 @@
 //! of failed prepares and give-ups is kept, so a restart does not reset
 //! `max_reserve_attempts` or `max_replace`. Estimates are not kept. The format is
 //! additive: the rows and their keys are read past by a build that does not know them.
+//! A queued whole-host job's mark is not in this file: it is a row of the job store, which
+//! the engine puts back after a restart (`docs/design/whole-node.md`, section 5, item 7).
 //! A reservation is made through `POST /v1/leases` with a `request_id` (see "Request ids"
 //! above). The lease file keeps that lease's request with it, so after a `--boot resume`
 //! the first tick presents the pending lease's request again under its id: that is the
@@ -858,6 +860,7 @@ mod job_loss;
 mod job_pass;
 mod job_start;
 mod job_store;
+mod job_whole;
 mod join_api;
 mod join_tokens;
 mod kinds;

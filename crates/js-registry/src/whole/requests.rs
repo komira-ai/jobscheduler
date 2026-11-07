@@ -35,6 +35,7 @@
 
 use std::collections::BTreeMap;
 
+use js_agent_wire::RefusalReason;
 use js_lease::Timestamp;
 use js_provider::StartSpec;
 use js_types::{HostId, LeaseId, Request, RequestId};
@@ -351,6 +352,21 @@ pub(crate) fn exclusion(cause: Cause, backoff_end: Timestamp) -> Option<Exclusio
         HostEffect::ExcludeForLife => Some(Exclusion::ForLife),
         HostEffect::Taint => None,
     }
+}
+
+/// The exclusion the table of reasons gives the host of a failed prepare, for the placement
+/// engine to apply to a whole-host job: `refused` is the code the agent refused the prepare
+/// with, or `None` when no ready report came by the deadline (which acts as `setup-failed`).
+/// The answer is the same as the one a whole-node lease gets: a back-off ending at
+/// `backoff_end` ([`Exclusion::Until`]) for a reason that leaves the host out for a while,
+/// [`Exclusion::ForLife`] for one that leaves it out for good, and `None` for one that
+/// taints the host (`host-unsafe`), which [`crate::Registry::taint_after_prepare`] records.
+#[must_use]
+pub fn prepare_exclusion(
+    refused: Option<RefusalReason>,
+    backoff_end: Timestamp,
+) -> Option<Exclusion> {
+    exclusion(refused.map_or(Cause::Timeout, Cause::Refused), backoff_end)
 }
 
 /// Where and how a prepare failed, for [`Requests::fail`].

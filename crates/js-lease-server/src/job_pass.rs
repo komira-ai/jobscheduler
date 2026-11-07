@@ -3,13 +3,18 @@
 //!
 //! [`run`] is one pass over the job and allocation tables, in the order of section 6.1:
 //!
-//! 1. **End what ran out of time** ([`job_expiry::expire`]): a queued job past its pool's
-//!    `max_queue_wait` fails to start with `no-capacity`; a placed or starting job past its
-//!    pool's `start_timeout` fails to start with `start-timeout`, its allocation moving to
-//!    releasing in the same commit (the stop rides on each heartbeat reply while the host
-//!    lists the job, [`crate::per_job::stops_for`]). Then the retention sweep deletes each
-//!    ended job past its retention end with its result ([`js_jobs::JobStore::tick`]); a job
-//!    that has not ended is never deleted, and no log object is touched.
+//! 1. **End what ran out of time.** First the prepares ([`job_whole::expire_prepares`]): a
+//!    placed whole-host job whose host did not report ready by the allocation's prepare
+//!    deadline fails its prepare, going back to queued or, after `max_replace` of them,
+//!    failing to start with `exclusive-not-ready`, its allocation freed in the same commit
+//!    (no container exists to confirm). Then ([`job_expiry::expire`]): a queued job past its
+//!    pool's `max_queue_wait` fails to start with `no-capacity`; a placed or starting job
+//!    past its pool's `start_timeout` fails to start with `start-timeout`, its allocation
+//!    moving to releasing in the same commit (the stop rides on each heartbeat reply while
+//!    the host lists the job, [`crate::per_job::stops_for`]). Then the retention sweep
+//!    deletes each ended job past its retention end with its result
+//!    ([`js_jobs::JobStore::tick`]); a job that has not ended is never deleted, and no log
+//!    object is touched.
 //! 2. **Settle allocations** ([`job_loss::lose_absent`]): each host that holds a live
 //!    allocation is read once; a host the provider reads absent has its allocations freed and
 //!    its jobs lost.
@@ -39,7 +44,7 @@ use std::time::Duration;
 
 use js_jobs::{JobId, JobStoreError, StartFailure};
 use js_lease::Clock;
-use js_registry::Registry;
+use js_registry::{Registry, WholeNodeConfig};
 use js_state::StoreTime;
 use js_types::HostId;
 use tracing::{info, warn};
@@ -48,6 +53,7 @@ use crate::agents::Agents;
 use crate::job_expiry::{self, JobLimits};
 use crate::job_loss::{self, Observe, Seen};
 use crate::job_store::ServerJobs;
+use crate::job_whole;
 use crate::metrics::MetricsSink;
 use crate::sched::place::SchedPlacer;
 use crate::store_health::{FailureKind, Pass};
@@ -55,6 +61,9 @@ use crate::store_health::{FailureKind, Pass};
 /// What one pass changed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Passed {
+    /// The whole-host jobs whose prepare ran out of time: each went back to queued, failed to
+    /// start with `exclusive-not-ready`, or, with a cancel intent, was cancelled.
+    pub(crate) unprepared: Vec<JobId>,
     /// The jobs that ran out of time, with how each failed to start.
     pub(crate) expired: Vec<(JobId, StartFailure)>,
     /// The ended jobs deleted at their retention end.
@@ -66,27 +75,32 @@ pub(crate) struct Passed {
 impl Passed {
     /// Whether the pass changed nothing.
     fn is_empty(&self) -> bool {
-        self.expired.is_empty() & self.deleted.is_empty() & self.lost.is_empty()
+        self.unprepared.is_empty()
+            & self.expired.is_empty()
+            & self.deleted.is_empty()
+            & self.lost.is_empty()
     }
 }
 
-/// One pass over `jobs` at `now`, under `limits`, reading each host's presence through
-/// `observer` (the steps of the module docs), and what it changed. Each start failure and loss
-/// is told to `metrics` as its commit lands.
+/// One pass over `jobs` at `now`, under `limits` and the whole-node `rules`, reading each
+/// host's presence through `observer` (the steps of the module docs), and what it changed.
+/// Each start failure and loss is told to `metrics` as its commit lands.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read or a commit; what was committed before it stays, and
 /// the next pass reads the tables again.
 pub(crate) fn run(
     jobs: &ServerJobs,
-    limits: JobLimits,
+    (limits, rules): (JobLimits, &WholeNodeConfig),
     (observer, metrics): (&dyn Observe, &dyn MetricsSink),
     now: StoreTime,
 ) -> Result<Passed, JobStoreError> {
+    let unprepared = job_whole::expire_prepares(jobs, rules, now, metrics)?;
     let expired = job_expiry::expire(jobs, limits, now, metrics)?;
     let deleted = jobs.tick()?;
     let lost = job_loss::lose_absent(jobs, observer, metrics)?;
     Ok(Passed {
+        unprepared,
         expired,
         deleted,
         lost,
@@ -150,16 +164,21 @@ impl Agents {
         let now = store_time(began.millis());
         let meter = self.meter();
         let sink = meter.sink();
-        let limits = self.job_limits;
+        let rules = self.whole_rules();
+        let limits = (self.job_limits, &rules);
         let (passed, took) = meter.timed(|| run(jobs, limits, (&observer, sink), now));
         sink.job_pass_took(took);
         let ran = Duration::from_millis(self.clock.now().millis().saturating_sub(began.millis()));
         let seen = match passed {
             Ok(passed) => {
                 if !passed.is_empty() {
-                    let expired = passed.expired.len();
-                    let (deleted, lost) = (passed.deleted.len(), passed.lost.len());
-                    info!(expired, deleted, lost, "the job pass ended or deleted jobs");
+                    info!(
+                        unprepared = passed.unprepared.len(),
+                        expired = passed.expired.len(),
+                        deleted = passed.deleted.len(),
+                        lost = passed.lost.len(),
+                        "the job pass ended or deleted jobs"
+                    );
                 }
                 let settle = |placer: &Arc<SchedPlacer>| placer.settle_gone(&gone);
                 self.placer.iter().for_each(settle);

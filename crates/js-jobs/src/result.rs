@@ -396,6 +396,8 @@ mod tests {
             retention_ends,
             deadline_floor: None,
             client: None,
+            failed_prepares: 0,
+            prepare_bars: std::collections::BTreeMap::new(),
             carried: crate::codec::Carried::default(),
         }
     }

@@ -14,6 +14,15 @@
 //! |---|---|
 //! | queued | `max(queued_at + max_queue_wait, deadline_floor)` |
 //! | placed, starting | `max(placed_at + start_timeout, deadline_floor)` |
+//! | placed, whole host | none: its prepare deadline governs it ([`crate::job_whole`]) |
+//! | starting, whole host | `max(prepare_deadline + start_timeout, deadline_floor)` |
+//!
+//! A whole-host job has no start to time until its host is prepared: it is placed while the
+//! agent prepares, and the prepare deadline of its allocation ends that wait (the tick's
+//! [`crate::job_whole::expire_prepares`]). Once the host reports ready the job is starting,
+//! and its start counts from that deadline, the latest instant the report could have come
+//! (the placement's time when its allocation records none). A queued whole-host job that
+//! waits past its queue wait ends with its mark deleted in the same commit.
 //!
 //! A job ends at its deadline, not after it. A running job is never touched here: its wall
 //! limit is counted by its agent (design section 5.7). The end of a placed or starting job
@@ -24,7 +33,7 @@
 
 use std::time::Duration;
 
-use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, StartFailure};
+use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, Needs, StartFailure};
 use js_state::StoreTime;
 
 use crate::file::PoolSettings;
@@ -67,18 +76,26 @@ impl Default for JobLimits {
 /// When `job` runs out of time under `limits`, and how it then fails to start: for a queued
 /// job its queue-wait deadline, for a placed or starting one its start deadline (see the
 /// module docs), each held to at least its deadline floor; `None` for a job in any other
-/// state, which no limit here ends.
-pub(crate) fn deadline(job: &JobRecord, limits: JobLimits) -> Option<(StoreTime, StartFailure)> {
+/// state, which no limit here ends, and for a placed whole-host job, which the prepare
+/// deadline governs. `prepared` is the prepare deadline of the job's allocation, when it
+/// records one: a starting job's start counts from it.
+pub(crate) fn deadline(
+    job: &JobRecord,
+    prepared: Option<StoreTime>,
+    limits: JobLimits,
+) -> Option<(StoreTime, StartFailure)> {
+    let whole = matches!(job.spec.needs, Needs::WholeHost);
     let (from, limit, failure) = match job.state {
         JobState::Queued => (
             job.submitted_at,
             limits.max_queue_wait,
             StartFailure::NoCapacity,
         ),
+        JobState::Placed if whole => return None,
         // A placed job always has its placement time; a record without one counts from its
         // submit, the earlier instant.
         JobState::Placed | JobState::Starting => (
-            job.placed_at.unwrap_or(job.submitted_at),
+            prepared.or(job.placed_at).unwrap_or(job.submitted_at),
             limits.start_timeout,
             StartFailure::StartTimeout,
         ),
@@ -91,21 +108,28 @@ pub(crate) fn deadline(job: &JobRecord, limits: JobLimits) -> Option<(StoreTime,
     Some((at, failure))
 }
 
-/// How `job` fails to start at `now` under `limits`, when its deadline is at or before `now`;
-/// `None` while it is not out of time, or when no limit here ends it.
-pub(crate) fn due(job: &JobRecord, limits: JobLimits, now: StoreTime) -> Option<StartFailure> {
-    deadline(job, limits)
+/// How `job` (whose allocation records the prepare deadline `prepared`, if any) fails to start
+/// at `now` under `limits`, when its deadline is at or before `now`; `None` while it is not
+/// out of time, or when no limit here ends it.
+pub(crate) fn due(
+    job: &JobRecord,
+    prepared: Option<StoreTime>,
+    limits: JobLimits,
+    now: StoreTime,
+) -> Option<StartFailure> {
+    deadline(job, prepared, limits)
         .filter(|(at, _)| now >= *at)
         .map(|(_, failure)| failure)
 }
 
 /// Ends each job of `jobs` that is out of time at `now` under `limits`, each in one commit
-/// with its allocation's move to releasing, and returns those it ended with how. The jobs read
-/// are the queued ones and those of every live allocation (a placed or starting job always has
-/// one). A job that moved on between the read and its commit (placed, started, ended, or
-/// changed by a heartbeat) is left for the next pass, which reads it again; a job that another
-/// writer ended in between keeps that end and is not returned. Each job it ends is told to
-/// `metrics` as its commit lands, so a pass that fails later still counts it.
+/// with its allocation's move to releasing (a queued whole-host job's with its mark's delete),
+/// and returns those it ended with how. The jobs read are the queued ones and those of every
+/// live allocation (a placed or starting job always has one), each with its allocation's
+/// prepare deadline. A job that moved on between the read and its commit (placed, started,
+/// ended, or changed by a heartbeat) is left for the next pass, which reads it again; a job
+/// that another writer ended in between keeps that end and is not returned. Each job it ends
+/// is told to `metrics` as its commit lands, so a pass that fails later still counts it.
 ///
 /// # Errors
 /// The first [`JobStoreError`] of a read, or of a commit that failed for another reason than a
@@ -116,16 +140,25 @@ pub(crate) fn expire(
     now: StoreTime,
     metrics: &dyn MetricsSink,
 ) -> Result<Vec<(JobId, StartFailure)>, JobStoreError> {
-    let mut waiting = jobs.queued()?;
+    let mut waiting: Vec<(JobRecord, Option<StoreTime>)> =
+        jobs.queued()?.into_iter().map(|job| (job, None)).collect();
     for allocation in jobs.live_allocations()? {
-        waiting.extend(jobs.get_job(&allocation.job)?);
+        let prepared = allocation.prepare_deadline;
+        let job = jobs.get_job(&allocation.job)?;
+        waiting.extend(job.map(|job| (job, prepared)));
     }
     let mut ended = Vec::new();
-    for job in waiting {
-        let Some(failure) = due(&job, limits, now) else {
+    for (job, prepared) in waiting {
+        let Some(failure) = due(&job, prepared, limits, now) else {
             continue;
         };
-        match jobs.end_job(&job.id, JobEnd::FailedToStart(failure)) {
+        let end = JobEnd::FailedToStart(failure);
+        let unmark = (job.state == JobState::Queued) & matches!(job.spec.needs, Needs::WholeHost);
+        let result = match unmark {
+            true => jobs.end_and_unmark(&job.id, end),
+            false => jobs.end_job(&job.id, end),
+        };
+        match result {
             Ok(record) => {
                 let by_this = record.state == JobState::FailedToStart(failure);
                 ended.extend(by_this.then(|| {
