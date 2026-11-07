@@ -40,10 +40,10 @@ fn an_installed_script_runs_with_the_mode_asked_for() {
 #[test]
 fn an_installed_copy_has_the_source_bytes_and_the_mode_asked_for() {
     let from = dir("install-copy").join("from");
-    std::fs::write(&from, b"#!/bin/true\n").expect("source");
+    std::fs::write(&from, b"#!/bin/sh\n").expect("source");
     let to = from.with_file_name("to");
     install_copy(&from, &to, "4755");
-    assert_eq!(std::fs::read(&to).expect("copy"), b"#!/bin/true\n");
+    assert_eq!(std::fs::read(&to).expect("copy"), b"#!/bin/sh\n");
     assert_eq!(mode(&to), 0o4755);
     assert!(Command::new(&to).status().expect("runs").success());
 }

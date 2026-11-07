@@ -228,7 +228,9 @@ jobs:
     concurrency:
       group: ${{ github.event_name == 'pull_request' && format('ci-macos-{0}', github.run_id) || 'ci-macos-main' }}
       cancel-in-progress: false
-    timeout-minutes: 90
+    # The workspace's tests take about an hour on the hosted runner (the first full run: the
+    # build 10 minutes, the tests 47 minutes before one test hung).
+    timeout-minutes: 120
     env:
       # The oldest macOS the binaries must run on; a newer image must not raise it
       # (the step after the build reads each binary's minos and fails above this).
@@ -249,6 +251,25 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      # The tests' host, prepared as the Linux jobs prepare theirs. A second loopback address:
+      # Linux routes all of 127.0.0.0/8 to the loopback interface, macOS answers on 127.0.0.1
+      # alone, and the lease server's tests put a second listener on 127.0.0.2. And a Postgres
+      # server for the tests that need one (macOS runners have no service containers), from
+      # Homebrew as the Linux jobs take theirs from the distribution: a data directory of this
+      # job, local connections trusted and the socket in the job's temporary directory, as the
+      # `test` job's service container; its URL is the one that job sets. A test that needs
+      # the server fails, and does not skip, when it is not there.
+      - name: Add the loopback address 127.0.0.2
+        run: sudo ifconfig lo0 alias 127.0.0.2 up
+      - name: Start a Postgres server for the tests that need one
+        run: |
+          set -euo pipefail
+          brew install --quiet postgresql@17
+          bin="$(brew --prefix postgresql@17)/bin"
+          "$bin/initdb" --username postgres --auth trust --encoding UTF8 -D "$RUNNER_TEMP/pg" > /dev/null
+          "$bin/pg_ctl" -D "$RUNNER_TEMP/pg" -l "$RUNNER_TEMP/pg.log" -o "-h 127.0.0.1 -p 5432 -k $RUNNER_TEMP" -w start
+          "$bin/pg_isready" -h 127.0.0.1 -p 5432
+          echo "KBF_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/postgres" >> "$GITHUB_ENV"
       - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
       - name: Check the minimum macOS of the built binaries
         run: |

@@ -175,8 +175,11 @@ fn lock_errors_never_contain_the_url_or_password() {
     assert!(!debug.contains(&url), "{debug}");
 
     // No server at all: the client's own words, with no address in them.
-    let dir = TestDir::under(std::env::temp_dir(), "js-state-writer-lock-no-server");
-    let socket = dir.path().join("absent");
+    // The directory is an empty one, so no socket is in it. Its path is kept short, and it
+    // is the host itself: the client appends `/.s.PGSQL.5432`, and a Unix socket path over
+    // 104 bytes on macOS (108 on Linux) would fail with another message before connecting.
+    let dir = TestDir::under(std::env::temp_dir(), "jsw");
+    let socket = dir.path();
     let url = format!(
         "postgres:///state?host={}&user=writer&password={password}",
         socket.display()
