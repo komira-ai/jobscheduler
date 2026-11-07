@@ -6,6 +6,13 @@
 //! and the test looks for it between heartbeats (a bounded number of them, so a stand-in
 //! that died fails the test at once) and creates the file that lets it end. Whether a real `crun` honours the bundle is the
 //! `crun_runtime` target's.
+//!
+//! The jobs here are queued through the lease API (`/v1/leases`). The path these cases walk
+//! with `--runtime crun` (a job through `crun run`, the default runtime, the host-id and
+//! scratch-root claims while a job runs) is also walked over the v1 job API, with the server's
+//! own binary, in js-lease-server's `v1_acceptance` target, which submits through `js` and
+//! `/v1/jobs`. The rest (the stop grace, the store and quota layouts, the cgroups) is the
+//! agent's own and needs a vehicle of its own once the lease API is gone.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
