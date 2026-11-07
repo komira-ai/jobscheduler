@@ -161,7 +161,7 @@ fn tls(
 
 /// The roots to trust: the certificates of the `--ca-cert` PEM file when it is given, and
 /// only those; otherwise the public roots bundled in `webpki-roots` (a Mozilla set, pinned
-/// by `Cargo.lock`). The platform's own store is never read, as for the lease client.
+/// by `Cargo.lock`). The platform's own store is never read, as for the HTTP client.
 fn roots(ca_cert: Option<&Path>) -> Result<RootCertStore, JobError> {
     let mut store = RootCertStore::empty();
     match ca_cert {

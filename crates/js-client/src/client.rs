@@ -45,7 +45,7 @@ impl fmt::Debug for Reply {
     }
 }
 
-/// A connection to one lease server. It holds the token and never prints it: it has no
+/// A connection to one server. It holds the token and never prints it: it has no
 /// `Debug`.
 #[derive(Clone)]
 pub struct Client {

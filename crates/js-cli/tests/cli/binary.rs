@@ -1,9 +1,9 @@
-//! The program itself, run as a child process against the server of the test: the real
-//! waiter and the process's own exit status.
+//! The program itself, run as a child process against the server of the test: the
+//! process's own exit status.
 
 use std::process::{Command, Output};
 
-use crate::support::Harness;
+use crate::support::{Harness, REVOKE};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js");
 
@@ -17,11 +17,12 @@ fn program(h: &Harness, words: &[&str]) -> Output {
         .unwrap()
 }
 
-/// Asserts that the program prints its usage on `--help` with status 0, and lists the
-/// leases of the server with the status 0.
+/// Asserts that the program prints its usage on `--help` with status 0, revokes a join
+/// token on a server that admits agents with status 0 and its line on stdout, and exits 3
+/// with the refusal on stderr against a server that admits none. It catches an exit status
+/// that is not the process's own (a status the library returns but `main` drops).
 #[test]
-fn the_program_prints_help_and_lists() {
-    let h = Harness::new("binary_list");
+fn the_program_prints_help_and_revokes() {
     let help = Command::new(PROGRAM).arg("--help").output().unwrap();
     assert_eq!(help.status.code(), Some(0));
     assert!(
@@ -30,51 +31,50 @@ fn the_program_prints_help_and_lists() {
             .contains("Usage: js")
     );
 
-    let listed = program(&h, &["--json", "lease", "list"]);
-    assert_eq!(listed.status.code(), Some(0));
+    let h = Harness::agents("binary_revoke");
+    let revoked = program(&h, &REVOKE);
+    assert_eq!(revoked.status.code(), Some(0));
     assert_eq!(
-        String::from_utf8(listed.stdout).unwrap(),
-        "{\"leases\":[]}\n"
+        String::from_utf8(revoked.stdout).unwrap(),
+        "join tokens for lambdalabs:i-1 revoked\n"
     );
-    let refused = program(&h, &["lease", "release", "9-9"]);
+
+    let h = Harness::new("binary_refused");
+    let refused = program(&h, &REVOKE);
     assert_eq!(refused.status.code(), Some(3));
+    assert_eq!(refused.stdout, b"");
     assert_eq!(
         String::from_utf8(refused.stderr).unwrap(),
-        "js: refused: unknown-lease\n"
+        "js: refused: join-tokens-unsupported\n"
     );
 }
 
-/// Asserts that the program, as a process, exits 2 with the message that `lease run` was
-/// removed and that `lease acquire --ttl` was, prints nothing on stdout, and leaves the
-/// server with no lease. It catches an exit status that is not the process's own (a status
-/// the library returns but `main` drops) and a removed command that still takes a lease.
+/// Asserts that the program, as a process, exits 2 for the removed `lease` commands with
+/// clap's message naming the unrecognized subcommand and nothing on stdout. It catches an
+/// exit status that is not the process's own and a removed command that still parses.
 #[test]
 fn the_program_refuses_the_removed_commands() {
     let h = Harness::new("binary_removed");
-    let run = program(&h, &["lease", "run", "--class", "gpu-host", "--", "true"]);
-    assert_eq!(run.status.code(), Some(2));
-    assert_eq!(run.stdout, b"");
-    assert_eq!(
-        String::from_utf8(run.stderr).unwrap(),
-        "js: js lease run was removed: leases are no longer renewed; submit a job\n"
-    );
-    let words = [
-        "lease",
-        "acquire",
-        "--class",
-        "gpu-host",
-        "--max-wall",
-        "1h",
-        "--ttl",
-        "60s",
-    ];
-    let ttl = program(&h, &words);
-    assert_eq!(ttl.status.code(), Some(2));
-    assert_eq!(ttl.stdout, b"");
-    assert!(
-        String::from_utf8(ttl.stderr)
-            .unwrap()
-            .starts_with("js: --ttl was removed: a lease has no time to live")
-    );
-    assert!(h.listed().is_empty());
+    for words in [
+        &["lease", "list"][..],
+        &[
+            "lease",
+            "acquire",
+            "--class",
+            "gpu-host",
+            "--max-wall",
+            "1h",
+        ],
+        &["lease", "run", "--class", "gpu-host", "--", "true"],
+    ] {
+        let got = program(&h, words);
+        assert_eq!(got.status.code(), Some(2), "{words:?}");
+        assert_eq!(got.stdout, b"");
+        assert!(
+            String::from_utf8(got.stderr)
+                .unwrap()
+                .starts_with("error: unrecognized subcommand 'lease'\n"),
+            "{words:?}"
+        );
+    }
 }

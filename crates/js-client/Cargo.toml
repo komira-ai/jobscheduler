@@ -11,9 +11,7 @@ publish.workspace = true
 js-agent-wire = { path = "../js-agent-wire" }
 rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-serde_path_to_error.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 # The job client (src/jobs), behind the `jobs` feature: the job service's messages and
@@ -28,7 +26,7 @@ webpki-roots = { workspace = true, optional = true }
 
 [features]
 # The client of the job service, `jobs::JobClient`. Off by default: js-agent and the macOS
-# helper use the lease client only and link none of it; js-cli turns it on.
+# helper use the HTTP client only and link none of it; js-cli turns it on.
 jobs = ["dep:hyper-util", "dep:js-proto", "dep:tokio", "dep:tokio-rustls", "dep:tonic", "dep:webpki-roots"]
 
 [dev-dependencies]

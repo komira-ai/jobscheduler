@@ -28,24 +28,24 @@ fn talk(client: &Client, path: &str) -> Reply {
 fn requests_carry_the_token_and_replies_are_parsed() {
     let dir = Scratch::new("client_calls");
     let fake = Fake::plain(vec![
-        json_reply(200, r#"{"leases":[]}"#),
+        json_reply(200, r#"{"things":[]}"#),
         json_reply(201, r#"{"id":"1-1"}"#),
         json_reply(202, r#"{"ok":true}"#),
         json_reply(409, r#"{"error":"not-held"}"#),
     ]);
     let client = Client::connect(&fake.url("http"), &token_file(&dir), None, LIMIT).unwrap();
 
-    let got = client.get("/v1/leases").unwrap();
-    assert_eq!((got.status, got.body), (200, json!({ "leases": [] })));
-    let got = client.post("/v1/leases", &json!({ "a": 1 })).unwrap();
+    let got = client.get("/v1/things").unwrap();
+    assert_eq!((got.status, got.body), (200, json!({ "things": [] })));
+    let got = client.post("/v1/things", &json!({ "a": 1 })).unwrap();
     assert_eq!((got.status, got.body), (201, json!({ "id": "1-1" })));
     let body = json!({ "wall_ms": 5 });
     let got = client
         .clone()
-        .post_within("/v1/leases/1-1/runs", &body, Duration::from_secs(5))
+        .post_within("/v1/things/1-1/parts", &body, Duration::from_secs(5))
         .unwrap();
     assert_eq!((got.status, got.body), (202, json!({ "ok": true })));
-    let got = client.delete("/v1/leases/1-1").unwrap();
+    let got = client.delete("/v1/things/1-1").unwrap();
     assert_eq!(
         (got.status, got.body),
         (409, json!({ "error": "not-held" }))
@@ -55,10 +55,10 @@ fn requests_carry_the_token_and_replies_are_parsed() {
     assert_eq!(seen.len(), 4);
     let heads: Vec<_> = seen.iter().map(|r| r.to_ascii_lowercase()).collect();
     for (head, first) in heads.iter().zip([
-        "get /v1/leases http/1.1",
-        "post /v1/leases http/1.1",
-        "post /v1/leases/1-1/runs http/1.1",
-        "delete /v1/leases/1-1 http/1.1",
+        "get /v1/things http/1.1",
+        "post /v1/things http/1.1",
+        "post /v1/things/1-1/parts http/1.1",
+        "delete /v1/things/1-1 http/1.1",
     ]) {
         assert!(head.starts_with(first), "{head}");
         assert!(head.contains("authorization: bearer tok-123\r\n"), "{head}");
@@ -147,7 +147,7 @@ fn an_unreachable_server_is_a_server_failure() {
     let dir = Scratch::new("client_down");
     let url = hangup_url();
     let client = Client::connect(&url, &token_file(&dir), None, REQUEST_LIMIT).unwrap();
-    let err = client.get("/v1/leases").err().unwrap();
+    let err = client.get("/v1/things").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
     let said = err.to_string();
     assert!(
@@ -239,7 +239,7 @@ fn tls_trusts_only_the_given_certificate() {
 
     let fake = Fake::tls(vec![json_reply(200, r#"{"secure":true}"#)], &cert);
     let client = Client::connect(&fake.url("https"), &token, Some(&ca), LIMIT).unwrap();
-    let got = talk(&client, "/v1/leases");
+    let got = talk(&client, "/v1/things");
     assert_eq!((got.status, got.body), (200, json!({ "secure": true })));
     assert!(
         fake.requests()[0]
@@ -249,7 +249,7 @@ fn tls_trusts_only_the_given_certificate() {
 
     let fake = Fake::tls(vec![json_reply(200, "{}")], &cert);
     let client = Client::connect(&fake.url("https"), &token, Some(&other_ca), LIMIT).unwrap();
-    let err = client.get("/v1/leases").err().unwrap();
+    let err = client.get("/v1/things").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
     // The handshake failed, so the server read no request and never saw the token.
     assert_eq!(fake.requests(), vec![String::new()]);
@@ -265,7 +265,7 @@ fn without_a_ca_cert_a_private_certificate_is_refused() {
     let cert = Cert::new();
     let fake = Fake::tls(vec![json_reply(200, "{}")], &cert);
     let client = Client::connect(&fake.url("https"), &token, None, LIMIT).unwrap();
-    let err = client.get("/v1/leases").err().unwrap();
+    let err = client.get("/v1/things").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
     assert_eq!(fake.requests(), vec![String::new()]);
 }
