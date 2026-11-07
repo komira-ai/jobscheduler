@@ -125,7 +125,9 @@ impl World {
         self.lock().containers.len()
     }
 
-    /// The run id and isolation of each create, in order.
+    /// The run id and isolation of each create, in order. Read by the crun tests alone
+    /// (crun_gpu_hello.rs), which are Linux only.
+    #[cfg(target_os = "linux")]
     pub fn isolations(&self) -> Vec<(String, js_agent_wire::Isolation)> {
         self.lock().isolations.clone()
     }
