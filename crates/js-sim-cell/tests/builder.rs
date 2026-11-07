@@ -194,18 +194,13 @@ fn an_action_runs_at_its_virtual_time_and_not_before() {
 fn a_scenario_failure_prints_the_name_the_seed_the_hash_the_violated_invariant_and_forty_trace_lines()
  {
     let name = "a_scenario_failure_prints";
-    let slow = Faults {
-        min_delay: Duration::from_millis(1_500),
-        max_delay: Duration::from_millis(1_500),
-        ..Faults::default()
-    };
     let failure = Scenario::new(name)
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(
             ServerSpec::registered_pool("burst", Shape::gpu_host(), 1).heartbeat(secs(1), secs(3)),
         )
         .broken_hosts("burst", 1, Defect::StartRunsTwice)
-        .bus(slow)
+        .worker_lag(Duration::from_millis(1_500))
         .work(2, Work::run_for(Duration::from_millis(200)))
         .settle_within(SETTLE)
         .try_run_seeds(3)

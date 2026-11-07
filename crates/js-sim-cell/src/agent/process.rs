@@ -19,24 +19,32 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use js_agent::{BASE, REQUEST_LIMIT};
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, Hello, JobSpec, Outcome,
     ProtocolRange, RETRY_AFTER_CAP, ResultAck, RunResult, Welcome, WireShape, refusal,
 };
 use js_conformance::agent::{AgentHarness, FakeAgent};
+use js_jobs::JobId;
 use js_types::sched::FarmTime;
 use js_types::{LeaseId, Resources};
 
 use super::exclusive::Exclusive;
-use super::per_job::{Acks, PerJob};
+use super::per_job::{Acks, Listing, PerJob};
 use super::real::RealAgent;
+use super::real_jobs::RealJobs;
 use super::{AgentKind, AgentSpec, Io, SIM_RUN_IMAGE};
 use crate::bus::{CallId, Route};
 use crate::counters::Counter;
 use crate::ledger::{Acked, Completion};
 use crate::observe::{
-    AgentTruth, Launch, ReadyReport, RunId, Running, StartSeen, StopCommand, StopSeen, Verdict,
+    AgentTruth, Launch, ReadyReport, RunId, Running, RunningJob, StartSeen, StopCommand, StopSeen,
+    Verdict,
 };
+
+/// The wait before the heartbeat that follows one that had no answer: the shortest wait of
+/// the real agent's backoff.
+const BACKOFF: Duration = BASE;
 
 /// The agent version every hello names.
 const AGENT_VERSION: &str = "0.0.0-sim";
@@ -57,19 +65,21 @@ struct Session {
     interval: Duration,
     /// The number of the last heartbeat sent.
     seq: u64,
-    /// The heartbeats not yet answered, each with whether it was already counted as
-    /// missed (it had no answer when the next one was due).
-    unanswered: BTreeMap<CallId, bool>,
+    /// The heartbeat sent and not yet answered. The agent has one call in flight at a time
+    /// and gives it [`REQUEST_LIMIT`]; an answer to any other call is dropped unread.
+    in_flight: Option<CallId>,
     /// Whether a heartbeat of the session was answered 200.
     accepted: bool,
 }
 
 impl Session {
-    /// Takes `id` off the unanswered heartbeats, when it is one, noting a 200.
+    /// Ends the call in flight when `id` is it, noting a 200.
     fn answer(&mut self, id: CallId, status: u16) -> Option<()> {
-        self.unanswered
-            .remove(&id)
-            .map(|_| self.accepted |= status == 200)
+        let open = self.in_flight.filter(|open| *open == id);
+        open.map(|_| {
+            self.in_flight = None;
+            self.accepted |= status == 200;
+        })
     }
 }
 
@@ -168,6 +178,22 @@ impl Behind {
         match self {
             Behind::Fake(agent) => Some(agent.as_mut()),
             Behind::Real(_) => None,
+        }
+    }
+
+    /// The real agent, when this is it.
+    fn real(&self) -> Option<&RealAgent> {
+        match self {
+            Behind::Fake(_) => None,
+            Behind::Real(real) => Some(real),
+        }
+    }
+
+    /// The real agent, when this is it.
+    fn real_mut(&mut self) -> Option<&mut RealAgent> {
+        match self {
+            Behind::Fake(_) => None,
+            Behind::Real(real) => Some(real),
         }
     }
 
@@ -280,6 +306,15 @@ pub(super) struct Process {
     exclusive: Exclusive,
     /// The per-job half, for a fake agent that speaks the per-job messages.
     jobs: Option<PerJob>,
+    /// The per-job half, for a real agent that speaks the per-job messages.
+    real_jobs: Option<RealJobs>,
+    /// How long the worker takes to act on a reply ([`AgentSpec::worker_lag`]).
+    lag: Duration,
+    /// When the worker is done with the replies queued so far.
+    busy_until: FarmTime,
+    /// The replies read and not yet acted on, by the tag of the timer that ends their wait:
+    /// the call they answer and their body.
+    queued: BTreeMap<u64, (CallId, String)>,
 }
 
 impl Process {
@@ -295,6 +330,10 @@ impl Process {
             disconnected: false,
             exclusive: Exclusive::default(),
             jobs: PerJob::of(spec),
+            real_jobs: RealJobs::of(spec),
+            lag: spec.worker_lag,
+            busy_until: FarmTime::default(),
+            queued: BTreeMap::new(),
         })
     }
 
@@ -321,8 +360,24 @@ impl Process {
             running: running.collect(),
             completed: self.book.completed.clone(),
             acknowledged: self.book.acknowledged.clone(),
-            jobs: self.jobs.as_ref().map(PerJob::truth).unwrap_or_default(),
+            jobs: self.jobs_truth(),
         }
+    }
+
+    /// The jobs the agent runs now, whichever agent is behind the per-job half.
+    fn jobs_truth(&self) -> BTreeMap<JobId, RunningJob> {
+        let fake = self.jobs.as_ref().map(PerJob::truth);
+        let jobs = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = jobs.map(|(jobs, real)| jobs.truth(real));
+        fake.or(real).unwrap_or_default()
+    }
+
+    /// What the next heartbeat lists as jobs, whichever agent is behind the per-job half.
+    fn jobs_listing(&self) -> Listing {
+        let fake = self.jobs.as_ref().map(PerJob::listing);
+        let real = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = real.map(|(_, real)| RealJobs::listing(real));
+        fake.or(real).unwrap_or_default()
     }
 
     /// The process's tick: a hello while not welcomed, else a heartbeat. Returns when the
@@ -332,19 +387,31 @@ impl Process {
             self.hello(spec, io);
             return spec.hello_interval;
         };
-        self.miss(&mut session);
-        self.beat(&mut session, spec, io);
-        let interval = session.interval;
+        // A tick with the heartbeat still in flight is the end of its time: the exchange
+        // failed, and its answer, should it come, is dropped. The next heartbeat follows
+        // after the shortest wait of the agent's backoff.
+        let next = if session.in_flight.take().is_some() {
+            self.timed_out();
+            BACKOFF
+        } else {
+            self.beat(&mut session, spec, io);
+            REQUEST_LIMIT
+        };
         self.session = Some(session);
-        interval
+        next
     }
 
     /// A timer of the process fired: the end of a run, when the tag is one. The run
     /// completes unless it no longer runs (it was stopped, or this is the end of a second
     /// launch of a run that already ended).
-    pub(super) fn timer(&mut self, tag: u64, io: &mut Io) {
-        let per_job = self.jobs.as_mut();
-        if per_job.is_some_and(|jobs| jobs.timer(tag, io)) {
+    pub(super) fn timer(&mut self, tag: u64, capacity: &Resources, io: &mut Io) {
+        if let Some((id, body)) = self.queued.remove(&tag) {
+            return self.act(id, &body, capacity, io);
+        }
+        let fake = self.jobs.as_mut().is_some_and(|jobs| jobs.timer(tag, io));
+        let real = self.real_jobs.as_mut().zip(self.agent.real_mut());
+        let real = real.is_some_and(|(jobs, real)| jobs.timer(tag, real, io));
+        if fake || real {
             return;
         }
         let Some(run) = self.book.run_timers.remove(&tag) else {
@@ -373,6 +440,9 @@ impl Process {
         if beat.is_some() {
             self.reconnect();
             self.beat_answered(answer, spec, io);
+            // The next heartbeat is an interval after the answer, unless the session ended.
+            let interval = self.session.as_ref().map(|session| session.interval);
+            interval.into_iter().for_each(|wait| io.arm_tick(wait));
         }
     }
 
@@ -398,19 +468,15 @@ impl Process {
         self.hellos.insert(id, io.now);
     }
 
-    /// Tells the agent its connection dropped once for each heartbeat that is still not
-    /// answered now that the next one is due. The real lifecycle has no such call: it
-    /// learns nothing from a lost answer.
-    fn miss(&mut self, session: &mut Session) {
-        let missed = session.unanswered.values_mut().filter(|missed| !**missed);
-        for missed in missed {
-            *missed = true;
-            if let Some(agent) = self.agent.fake() {
-                agent.disconnect();
-            }
-            self.jobs.iter_mut().for_each(PerJob::disconnect);
-            self.disconnected = true;
+    /// Tells the agent its connection dropped: the heartbeat had no answer in
+    /// [`REQUEST_LIMIT`]. The real lifecycle has no such call: it learns nothing from a
+    /// lost answer.
+    fn timed_out(&mut self) {
+        if let Some(agent) = self.agent.fake() {
+            agent.disconnect();
         }
+        self.jobs.iter_mut().for_each(PerJob::disconnect);
+        self.disconnected = true;
     }
 
     /// Sends the next heartbeat. The real lifecycle takes a step first, as the real agent
@@ -419,12 +485,13 @@ impl Process {
         if let Behind::Real(real) = &mut self.agent {
             real.step();
         }
+        self.settle(io);
         session.seq += 1;
         self.beats_sent.insert(session.seq, io.now);
         let results = self.agent.results(&self.book.runs);
         self.book.count_resent(&results, io);
         let held = self.list();
-        let listing = self.jobs.as_ref().map(PerJob::listing).unwrap_or_default();
+        let listing = self.jobs_listing();
         let (ready, refused) = self.exclusive.report(io.prepare, held.is_empty(), io.now);
         if let Some(lease) = &ready {
             io.ledger.reported_ready(ReadyReport {
@@ -455,10 +522,21 @@ impl Process {
         // A wire type always encodes; were it not to, the empty body would be refused.
         let body = serde_json::to_string(&beat).unwrap_or_default();
         let id = io.call(Route::Heartbeat, &spec.join_token, body);
-        session.unanswered.insert(id, false);
+        session.in_flight = Some(id);
         if let Some(jobs) = self.jobs.as_mut() {
+            jobs.sent(id, listing.clone(), io);
+        }
+        if let Some(jobs) = self.real_jobs.as_mut() {
             jobs.sent(id, listing, io);
         }
+    }
+
+    /// Writes down the results the real lifecycle holds now, when it speaks the per-job
+    /// messages.
+    fn settle(&mut self, io: &mut Io) {
+        let jobs = self.real_jobs.as_mut().zip(self.agent.real());
+        jobs.into_iter()
+            .for_each(|(jobs, real)| jobs.settle(real, io));
     }
 
     /// What a hello or heartbeat lists as held ([`Behind::held`]), noted as listed.
@@ -474,7 +552,10 @@ impl Process {
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.agent.running();
         let runs = running.iter().any(|run| !self.book.listed.contains(run));
-        runs || self.jobs.as_ref().is_some_and(PerJob::runs_unlisted)
+        let fake = self.jobs.as_ref().is_some_and(PerJob::runs_unlisted);
+        let real = self.real_jobs.as_ref().zip(self.agent.real());
+        let real = real.is_some_and(|(jobs, real)| jobs.runs_unlisted(real));
+        runs || fake || real
     }
 
     fn reconnect(&mut self) {
@@ -513,7 +594,7 @@ impl Process {
             secret: welcome.session,
             interval,
             seq: 0,
-            unanswered: BTreeMap::new(),
+            in_flight: None,
             accepted: false,
         });
         io.arm_tick(interval);
@@ -521,7 +602,7 @@ impl Process {
 
     fn beat_answered(&mut self, answer: Answer, spec: &AgentSpec, io: &mut Io) {
         match answer.status {
-            200 => self.act(answer.id, &answer.body, &spec.capacity, io),
+            200 => self.read(answer.id, answer.body, &spec.capacity, io),
             409 => {
                 if is_code(&answer.body, refusal::UNKNOWN_HOST) {
                     io.bump(Counter::UnknownHost);
@@ -541,6 +622,19 @@ impl Process {
             self.hello(spec, io);
         }
         io.arm_tick(spec.hello_interval);
+    }
+
+    /// Hands a 200 reply to the worker: it acts on it now when it has no lag, else once it
+    /// is done with the replies before this one and has taken its lag.
+    fn read(&mut self, id: CallId, body: String, capacity: &Resources, io: &mut Io) {
+        if self.lag.is_zero() {
+            return self.act(id, &body, capacity, io);
+        }
+        let start = self.busy_until.max(io.now);
+        self.busy_until = start.saturating_add(self.lag);
+        let wait = self.busy_until.as_millis() - io.now.as_millis();
+        let tag = io.timer(Duration::from_millis(wait));
+        self.queued.insert(tag, (id, body));
     }
 
     /// Acts on a heartbeat reply: its `exclusive` first, when it passes the wire's check,
@@ -589,8 +683,16 @@ impl Process {
                     _ => None,
                 });
                 starts.unaccounted.extend(withheld);
+                let acks = Acks::of(&reply, &check);
+                let jobs = self.real_jobs.as_mut();
+                let noted = jobs.map(|jobs| jobs.noted(id, &check.commands, &acks, capacity, io));
+                let skipped = noted.iter().flat_map(|noted| noted.unaccounted.iter());
+                starts.unaccounted.extend(skipped.cloned());
                 drop(check);
-                hand_over(real, &mut self.book, &mut reply, starts, io);
+                let created = hand_over(real, &mut self.book, &mut reply, starts, io);
+                let jobs = self.real_jobs.as_mut().zip(noted);
+                jobs.into_iter()
+                    .for_each(|(jobs, noted)| jobs.landed(noted, &created, real, io));
                 return;
             }
         }
@@ -700,21 +802,25 @@ impl Book {
 
 /// Hands `reply` to the real lifecycle, less the starts the cell cannot account for, and
 /// lets it take a step. Each container it created is a launch of the start that names it;
-/// each result the reply's acknowledgements ended is acknowledged with its verdict.
+/// each result the reply's acknowledgements ended is acknowledged with its verdict. Returns
+/// the run id of each container created, jobs' included.
 fn hand_over(
     real: &mut RealAgent,
     book: &mut Book,
     reply: &mut HeartbeatReply,
     starts: Starts,
     io: &mut Io,
-) {
+) -> Vec<String> {
     let Starts {
         mut accounted,
         unaccounted,
     } = starts;
-    reply.commands.retain(
-        |command| !matches!(command, Command::Start(job) if unaccounted.contains(&job.run_id)),
-    );
+    reply.commands.retain(|command| match command {
+        Command::Start(job) => !unaccounted.contains(&job.run_id),
+        Command::JobStart(job) => !unaccounted.contains(&job.job_id),
+        Command::JobStop { job_id } => !unaccounted.contains(job_id),
+        _ => true,
+    });
     let owed = real.owed();
     let launched = real.apply(reply);
     let kept = real.owed();
@@ -734,6 +840,7 @@ fn hand_over(
     for (job, info) in launches {
         book.launched(&job, info, io);
     }
+    launched
 }
 
 /// The runs the fake holds: those it runs, and those whose result is not yet

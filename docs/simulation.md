@@ -95,7 +95,8 @@ What is simulated:
   by job id, as their engine: a start of a job it holds is a repeat, a stop of a job it
   does not hold retires the id, each result rides in every heartbeat until an answer
   acknowledges it, and each retired id until an answer acknowledges it. A real agent's
-  node does not speak them.
+  node speaks them too, with the lifecycle of `js-agent` as the engine (`held_jobs`,
+  `retired_jobs`, `JobStart`, `JobStop`), and writes the same ledger entries and counters.
 - an elastic pool's cloud: the elastic fake (`js-elastic-fake`), its clock advanced to the
   virtual time of every input of the server, behind a recording wrapper the scaler is
   handed, which forwards every call and writes down each acquire, release and list with
@@ -580,12 +581,30 @@ model:
 - **Duplicated or reordered HTTP messages.** HTTP carries a request and its answer once
   each, in order, on one connection, so the default bus (`Faults::default()`) never
   duplicates or reorders. A scenario that models a request retried over a second
-  connection turns `reorder` or `duplicate` on for itself, with `.bus(...)` or
-  `set_bus_faults`. Today two scenarios do: `an_agent_that_never_retires_a_stopped_run`
-  in `tests/broken_agent.rs` and `a_stale_start_after_a_stop_does_not_run` in
-  `tests/faults.rs` turn `reorder` on for every message from 2 s to 30 s. None
-  turns `duplicate` on. A result or a stop sent again is covered by the server's HTTP
-  tests (`crates/js-lease-server/tests/server/runs.rs`).
+  connection could turn `reorder` or `duplicate` on for itself, with `.bus(...)` or
+  `set_bus_faults`; none does today. A result or a stop sent again is covered by the
+  server's HTTP tests (`crates/js-lease-server/tests/server/runs.rs`).
+- **Heartbeats in flight together, and answers read after their request timed out.** The
+  real agent has one call in flight at a time: it sends its next heartbeat an interval after
+  it read the answer to the last, gives a call `REQUEST_LIMIT` (10 s), and drops the answer
+  to a call it gave up. The cell's agent does the same (`agent/process.rs`): after a call
+  with no answer in 10 s it waits the shortest backoff (1 s) and sends the next, and an
+  answer that comes later is ignored. A heartbeat is therefore never sent before the reply
+  to the last was read. What the cell leaves out is a heartbeat request that the server
+  processes after a newer one, which needs a request delayed past the limit; the server's
+  step 3 of the per-job heartbeat would take such a stale omission as the host's word (an
+  open issue, not asserted).
+- **A start that arrives after the stop of its job.** With one call in flight and the reply
+  to a timed-out call dropped, the replies an agent reads reach it in the order the server
+  built them, and the server sends a start only for a placed job with no cancel intent. No
+  path delivers a start after a stop (`stops_for` and `starts_for` in
+  `crates/js-lease-server/src/per_job.rs`), so no scenario produces one; the agent's
+  retired-id fence is covered by the lifecycle's tests (`crates/js-agent`), the stand-in
+  tests of `tests/agent.rs` and the unit tests of `agent/real_jobs.rs` and `agent/per_job.rs`.
+  A start sent again to a host that already holds the job is reachable: the worker of the
+  real agent acts on a reply through a queue, and a worker held in a runtime call has not yet
+  acted on a start when the next heartbeat leaves. `AgentSpec::worker_lag` models it, and the
+  scenarios that need a repeated start set it.
 - **Lost client answers.** The client's calls are never dropped, delayed or reordered;
   only the agent wire is faulty. A submit sent again is the same job (the job front's id
   is its own), and row 1 of section 8 is Open.
@@ -642,13 +661,11 @@ and how much of each. A row not listed has no scenario.
 | 3 | `a_restart_of_the_server_with_runs_in_flight_double_books_nothing` | `tests/cell/server_restart.rs` | The server is stopped and started again over its files (`--boot resume`) with jobs in flight; nothing is launched twice, no job moves host, no host takes a new job while it runs a job of before the restart, and everything settles. What becomes of the jobs in flight (the row's subject) is not asserted. |
 | 4 | `ten_of_two_hundred_agents_die_mid_run` | `tests/faults.rs` | Ten of two hundred agents die with their state, after the heartbeat that first listed their jobs, and new processes say hello holding nothing; every item is terminal, nothing runs twice, and the replaced hosts take work again (`launched_on`). That the jobs become lost with no result is not asserted. |
 | 25 | `a_whole_host_job_whose_agent_restarts_after_it_is_placed` | `tests/cell/whole_host_faults.rs` | A placed whole-host job's agent is started again with empty state and says hello once its host reads lost; the hello ends the job's run, and a waiting job is then placed on the host and launches its run there. The scenario shows no double booking along this path and does not assert the job's end state. |
-| 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
-| 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval on a bus slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
+| 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with workers that take 7 s to act on a reply and runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
+| 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval, workers slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
 | 33 | `a_hello_that_consumes_a_join_token_commits_the_binding_with_it` | `tests/cell/store.rs` | Twelve hosts with join tokens of their own say hello at once and the server is stopped between two of their hellos; the store, read while the server is down, holds a binding for every used token and a used token for every binding to one, and after the restart every host is seated and serving, over SQLite and Postgres. The row's failed bindings save is not run: the cell cannot fail a commit, and the hosts take no host credential. |
 | 34 | `the_scaler_records_survive_a_restart_and_launch_nothing_twice` | `tests/cell/store.rs` | The server crashes at the scaler's first acquire, after the call reached the cloud and before its answer was read; the restarted scaler finds the machine its stored record names, makes no second acquire, and the machine's agent joins with the token minted before the launch, over SQLite and Postgres. That a retried launch's token is the one the machine booted with is not asserted: the scaler retries nothing here. |
 | 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a job no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the job is never run on another host. The start timeout of the row is not built and not asserted. |
-| 38 | `a_stale_start_after_a_stop_does_not_run` | `tests/faults.rs` | The stale-start situation of the row below (the same settings), over sixteen seeds with every invariant of the fault family on. |
-| 38 | `an_agent_that_never_retires_a_stopped_run` | `tests/broken_agent.rs` | Every item is cancelled while its start is still on the bus, and a start arrives after the stop that follows it; agents that do not retire the stopped job fail `at-most-one-launch`, correct agents pass with the witness `start_after_stop` held. That the allocation is freed in the same commit is not asserted. |
 | 39 | `a_cancelled_whole_host_request_drops_its_place_and_the_host_serves_again` | `tests/cell/whole_host_cancel.rs` | Queued: one whole-host job cancelled while queued behind a held host ends cancelled, and a later whole-host job is placed on the host and launches its run. A cancel while the server has set a host aside for the job, and one while preparing, are not run. |
 | 41 | `agents_killed_for_good_leave_no_booking_once_clients_release` | `tests/faults.rs` | Five of fifty agents die for good; their hosts read lost and take no new job, and once the clients give up and cancel, nothing stays booked on them. |
 
@@ -663,18 +680,15 @@ checks every invariant of `Invariant::ALL` on both sides of each comparison, and
 them that each item's terminal is the same with fake and with real agents. It runs five
 situations over eight seeds: no fault, a lossy wire (15% of messages dropped for 300 s,
 witness `result_resent`), two of six agents cut off for 30 s, two agents killed and
-replaced mid-run, and the stale start of `tests/broken_agent.rs` (witness
-`start_after_stop`). It covers no row by itself: it shows that the fake answers as the
+replaced mid-run, and a start sent again to a slow worker (witness `start_repeated`). It covers no row by itself: it shows that the fake answers as the
 real agent does in the situations of section 7 ("Result lost", "Duplicate start", "Stop
 of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
 
-The real side cannot run today: the cell's real agent node (`js_sim_cell::agent::real`) speaks
-the per-run messages only and does not report the per-job capability, so the job service
-places nothing on a real host and the real runs of the family (and the `real_agent` golden
-family) end in `settles-when-quiet`. They stay in the family until the node speaks the
-per-job messages of the lifecycle of `js-agent`.
+The real side runs the job front: the cell's real agent node (`js_sim_cell::agent::real`)
+reports the per-job capability and speaks the per-job messages of the lifecycle of
+`js-agent` (`agent/real_jobs.rs`).
 
 The store family (`tests/store.rs`, its scenarios in `tests/cell/store.rs`) runs every
 invariant of `Invariant::ALL` over SQLite and, with the `postgres` feature, over

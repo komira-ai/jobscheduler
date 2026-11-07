@@ -217,6 +217,7 @@ impl Cell {
             capabilities,
             labels: BTreeMap::new(),
             hello_interval: HELLO_INTERVAL,
+            worker_lag: std::time::Duration::ZERO,
             kind: AgentKind::Fake(None),
             instance: Some(instance),
         };

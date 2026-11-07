@@ -109,6 +109,7 @@ pub struct Scenario {
     server: ServerSpec,
     hosts: Vec<Hosts>,
     bus: Faults,
+    worker_lag: Duration,
     actions: Vec<(FarmTime, Rc<dyn Action>)>,
     expects: Vec<Expect>,
     timed: Vec<(FarmTime, Expect)>,
@@ -219,6 +220,7 @@ impl Scenario {
             server: ServerSpec::registered_pool("pool", Shape::gpu_host(), 0),
             hosts: Vec::new(),
             bus: Faults::default(),
+            worker_lag: Duration::ZERO,
             actions: Vec::new(),
             expects: Vec::new(),
             timed: Vec::new(),
@@ -279,6 +281,14 @@ impl Scenario {
     fn add_hosts(mut self, pool: &str, count: usize, kind: Kind) -> Self {
         let pool = pool.to_owned();
         self.hosts.push(Hosts { pool, count, kind });
+        self
+    }
+
+    /// This scenario, with agents whose worker takes `lag` to act on a reply they read
+    /// ([`crate::AgentSpec::worker_lag`]).
+    #[must_use]
+    pub fn worker_lag(mut self, lag: Duration) -> Self {
+        self.worker_lag = lag;
         self
     }
 
@@ -496,6 +506,7 @@ impl Scenario {
         let mut cell = Cell::new(setup, self.server.clone(), dir, self.bus.clone())?;
         cell.set_front(self.front.make(&self.server));
         for hosts in &self.hosts {
+            cell.set_worker_lag(self.worker_lag);
             self.add(&mut cell, hosts)?;
         }
         for (at, action) in &self.actions {

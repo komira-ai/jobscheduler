@@ -273,10 +273,22 @@ fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(first.ledger().launches().len(), 1);
     let listed = &first.observations().server.hosts;
     assert_eq!(listed.len(), HOSTS);
-    assert!(
-        listed.values().all(|host| !host.lost),
-        "every host is live at the end"
-    );
+    // The agent gives a call 10 s, longer than the server's grace, so on a wire that loses
+    // 10% of its messages a host whose last calls were lost can read lost at the horizon.
+    // Every such host lost a message in the last 30 s of the run.
+    let lately = |line: &String, host: &str| {
+        let at = line.split(' ').next().and_then(|t| t.parse::<u64>().ok());
+        let late = at.is_some_and(|at| at >= HORIZON_MS - 30_000);
+        line.contains("dropped") && line.contains(host) && late
+    };
+    for (host, state) in listed.iter().filter(|(_, host)| host.lost) {
+        let name = host.to_string();
+        let explained = lines.iter().any(|line| lately(line, &name));
+        assert!(
+            explained,
+            "{host} is lost at the end and lost no message lately: {state:?}"
+        );
+    }
     let scenario = whole_host::fifty_whole_host_requests();
     let once = scenario.run_seeds(1).runs[0].hash;
     assert_eq!(once, scenario.run_seeds(1).runs[0].hash);
