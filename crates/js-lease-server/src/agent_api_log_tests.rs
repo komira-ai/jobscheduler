@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::job_rig::{
     FakeAgent, LOG_BUCKET, LOG_ENDPOINT, LOG_REGION, Rig, logging_rig, rig, starts,
 };
-use crate::api::whole_view_tests::Lines;
+use crate::api::whole_view_tests::{Lines, process_sink};
 
 /// A grace no test outlives, so that a host is never lost while a test moves the clock.
 pub(crate) const LONG_GRACE: u64 = js_agent_wire::limits::MAX_GRACE_MS;
@@ -53,17 +53,15 @@ pub(crate) fn normalised(reply: &HeartbeatReply) -> String {
 }
 
 /// Log lines go to `lines`, from this thread and from the mints it starts, until the guard
-/// drops. The interest cache is rebuilt once the subscriber is installed: a callsite another
-/// test registered first, while no subscriber of this thread existed, would otherwise stay
-/// disabled and its line would never reach `lines`.
+/// drops. The process-wide sink is installed first, so that a line another thread reached
+/// first, with no subscriber of its own, still reaches `lines` ([`process_sink`]).
 pub(crate) fn capture(lines: &Lines) -> tracing::subscriber::DefaultGuard {
+    process_sink();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(lines.clone())
         .with_ansi(false)
         .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-    tracing::callsite::rebuild_interest_cache();
-    guard
+    tracing::subscriber::set_default(subscriber)
 }
 
 /// A placed job's start holds the configured store, region, bucket and style and the job's
@@ -382,4 +380,50 @@ async fn a_mint_failure_costs_the_host_its_live_upload_until_a_later_mint_succee
             assert!(!text.contains(&secret), "{text}");
         }
     }
+}
+
+/// The test the one below runs in a process of its own.
+const ALONE: &str = "agent_api::log_tests::alone_a_line_another_thread_reached_first_is_captured";
+
+/// The line the two tests below log.
+fn say_first_reached_elsewhere() {
+    tracing::warn!("a line first reached on a thread with no subscriber");
+}
+
+/// Runs [`alone_a_line_another_thread_reached_first_is_captured`] in a new process of this
+/// test binary, where no other test has installed a subscriber or reached a line before it,
+/// and asserts that it ran and passed. Catches a capture that loses a line another thread
+/// reached first, which in this binary's shared process shows only in some orders of the
+/// tests (the log line the no-secret test waits for is reached on a mint's blocking thread).
+#[test]
+fn a_line_another_thread_reached_first_is_captured_in_a_fresh_process() {
+    let exe = std::env::current_exe().expect("the test binary");
+    let out = std::process::Command::new(exe)
+        .args(["--exact", ALONE, "--ignored", "--test-threads=1"])
+        .output()
+        .expect("the test binary runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("test result: ok. 1 passed"), "{said}");
+}
+
+/// While a capture is in place, a thread with no subscriber reaches a line first, then this
+/// thread reaches the same line: it is in the capture, exactly once. Meaningful only as the
+/// first test of its process.
+#[test]
+#[ignore = "run in a fresh process by a_line_another_thread_reached_first_is_captured_in_a_fresh_process"]
+fn alone_a_line_another_thread_reached_first_is_captured() {
+    let lines = Lines::default();
+    let _capture = capture(&lines);
+    std::thread::spawn(say_first_reached_elsewhere)
+        .join()
+        .expect("the other thread logs");
+    say_first_reached_elsewhere();
+    let text = lines.take();
+    let said = "a line first reached on a thread with no subscriber";
+    assert_eq!(text.matches(said).count(), 1, "{text}");
 }
