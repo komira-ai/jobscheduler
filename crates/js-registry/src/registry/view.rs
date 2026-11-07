@@ -18,10 +18,12 @@ impl HostView {
     /// The shape the registry places the host on: the pool's booked [`Self::shape`], with
     /// the `accelerator.*` capabilities of the host's validated [`Self::claim`] in place of
     /// the pool's, so its real family, variant facts and measured memory are matched while
-    /// the pool's numbers stay the booking limits. Admission reads a host's facts from it.
+    /// the pool's numbers stay the booking limits; with [`Self::by_hello`], also with the
+    /// claim's other capabilities that [`Self::shape`] does not name. Admission reads a
+    /// host's facts from it.
     #[must_use]
     pub fn placement_shape(&self) -> Shape {
-        placement_shape(&self.shape, self.claim.as_ref())
+        placement_shape(&self.shape, self.claim.as_ref(), self.by_hello)
     }
 }
 
@@ -109,6 +111,7 @@ impl Registry {
         let every = book.leases();
         let shape = self.shared.config.fit();
         let memory = self.shared.config.memory_headroom();
+        let by_hello = self.shared.config.places_by_hello();
         move |id, record| {
             let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
             HostView {
@@ -125,6 +128,7 @@ impl Registry {
                 shape: shape.clone(),
                 memory,
                 claim: record.claim.clone(),
+                by_hello,
                 labels: record.labels.clone(),
                 agent_version: record.agent_version.clone(),
                 epoch: record.epoch,

@@ -28,9 +28,11 @@ pub enum Placement {
 impl Placement {
     /// Refuses `js-sched` for a pool whose shape the scheduler cannot take as a node (a
     /// shape with no `arch`): every start would fall back to the first host, and the flag
-    /// would do nothing it says. Refuses `registry` for a pool with a `share_class`: the
-    /// registry places no lease of a class that books part of a host, so every one would
-    /// be refused. `place` names the flag or key for the message.
+    /// would do nothing it says. A pool that places each host by what its hello reported
+    /// ([`PoolConfig::placing_by_hello`], an elastic pool) is not refused for its shape: its
+    /// hosts are nodes by the `arch` they report. Refuses `registry` for a pool with a
+    /// `share_class`: the registry places no lease of a class that books part of a host, so
+    /// every one would be refused. `place` names the flag or key for the message.
     pub(crate) fn check(self, pool: &PoolConfig, place: &str) -> Result<(), StartupError> {
         match self {
             Self::Registry if pool.share_class().is_some() => Err(StartupError::at(
@@ -38,6 +40,7 @@ impl Placement {
                 "the pool's share_class needs js-sched: the registry places no lease that shares a host",
             )),
             Self::Registry => Ok(()),
+            Self::JsSched if pool.places_by_hello() => Ok(()),
             Self::JsSched => map::host(pool.shape()).map(|_| ()).map_err(|err| {
                 let reason = format!(
                     "the pool's shape cannot be taken as a node by the scheduler ({err}); \

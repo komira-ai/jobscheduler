@@ -156,8 +156,9 @@ impl ServerSpec {
     /// grace of 15 s), which an elastic pool does not set: [`ServerSpec::heartbeat`] and
     /// the whole-node keys do not apply to it. The client asks for `shape`'s capabilities,
     /// and the pool's floor has none, so a scenario gives a shape without any. The pool's
-    /// shape names no architecture, so only the default placement (`registry`) starts:
-    /// `js-sched` refuses a pool without one.
+    /// floor names no architecture either: under `js-sched` ([`ServerSpec::placement`],
+    /// which gives the shape one) each machine is placed by the `arch` its agent reports at
+    /// hello.
     #[must_use]
     pub fn elastic_pool(pool: ElasticPool, shape: Shape) -> Self {
         let name = pool.name().to_owned();
@@ -189,7 +190,8 @@ impl ServerSpec {
 
     /// This server, placing leases as `placement` says (`--placement`). The pool's shape
     /// is given the capability [`ARCH_KEY`] = [`ARCH`] when it names no architecture:
-    /// `js-sched` refuses a pool without one and `registry` reads none, so one scenario
+    /// `js-sched` refuses an agent or joined pool without one, places an elastic pool's
+    /// machines by the one their agents report, and `registry` reads none, so one scenario
     /// runs the same pool under every placement. The agents announce, and the client's
     /// leases ask for, the shape's capabilities, this one too.
     #[must_use]
