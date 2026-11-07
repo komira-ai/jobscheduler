@@ -344,10 +344,11 @@ impl Registry {
         // The pool's shape fits the request or no host ever will: the book answers
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
         // so that happens for a request the pool's shape fits only when no host is listed
-        // yet. A host could still join, which is capacity, not fit.
-        let floor = self.shared.config.fit();
+        // yet. A host could still join, which is capacity, not fit. In a pool that places
+        // by hello the pool's shape is only a floor: a capability it does not name is the
+        // hosts' to meet, so the book answers for those (`PoolConfig::fits`).
         let wanted = spec.request();
-        let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
+        let fits_pool = self.shared.config.fits(wanted);
         // A whole-node request that fits the pool is refused for lack of a host only when
         // no host could ever be given whole; otherwise it waits, if it has an id.
         let listed = state.book.hosts();

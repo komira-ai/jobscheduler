@@ -852,13 +852,9 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(
-            s,
-            (id.clone(), &class, shape, max),
-            exec,
-            memory_percent,
-            path_grace,
-        )?;
+        // Offers may differ (in `arch` too): each machine is placed by its agent's hello.
+        let at = (id.clone(), &class, shape, max);
+        let pool = registry_pool(s, at, exec, memory_percent, path_grace)?.placing_by_hello();
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),

@@ -2,7 +2,9 @@
 //! `gpu_class` bodies of today, resolved through the alias table, the optional
 //! `resources.accelerator` object, and a host whose hello predates the accelerator.
 //!
-//! These run on the default placement (the registry). The scheduler's mapping of the same
+//! The tests that place a lease run under each placement: the default (the registry) and
+//! `--placement js-sched`, whose scheduler places the host by the shape the registry lists
+//! for it, the accelerator facts of its hello included. The scheduler's mapping of the same
 //! need is covered in process, in `crates/js-sched-placer/src/map.rs`.
 
 use serde_json::{Value, json};
@@ -19,8 +21,41 @@ const A100_40: &str = "nvidia-a100-sxm4-40gb";
 /// Bytes in a GiB.
 const GIB: u64 = 1 << 30;
 
-/// The pool a host registers into: eight GPUs of `class` and a floor of the same.
-fn pool(class: &str) -> String {
+/// Who places the lease (`--placement`).
+#[derive(Debug, Clone, Copy)]
+enum Placed {
+    /// The default, the registry.
+    Registry,
+    /// `--placement js-sched`. Its pool and its host name an `arch`, which the scheduler
+    /// describes a host by.
+    JsSched,
+}
+
+/// Both placements.
+const PLACEMENTS: [Placed; 2] = [Placed::Registry, Placed::JsSched];
+
+impl Placed {
+    /// `name`, with the placement after it for js-sched, so each run has its own scratch.
+    fn named(self, name: &str) -> String {
+        match self {
+            Self::Registry => name.to_owned(),
+            Self::JsSched => format!("{name}_js_sched"),
+        }
+    }
+
+    /// The pool file's capabilities: `isa`, and an `arch` under js-sched.
+    fn capabilities(self) -> &'static str {
+        match self {
+            Self::Registry => "isa = \"x86-64-v3\"",
+            Self::JsSched => "isa = \"x86-64-v3\"\narch = \"x86_64\"",
+        }
+    }
+}
+
+/// The pool a host registers into under `placed`: eight GPUs of `class` and a floor of the
+/// same.
+fn pool(class: &str, placed: Placed) -> String {
+    let capabilities = placed.capabilities();
     format!(
         r#"
 name = "burst"
@@ -34,7 +69,7 @@ gpus = 8
 gpu_class = "{class}"
 
 [capabilities]
-isa = "x86-64-v3"
+{capabilities}
 "#
     )
 }
@@ -69,14 +104,19 @@ fn old_hello(class: &str, memory_gib: u64) -> Value {
     })
 }
 
-/// A server whose only host is `burst-1`, registered with `hello`, in a pool of
-/// `pool_class`.
-async fn serve(name: &str, pool_class: &str, hello: &Value) -> Harness {
-    let scratch = Scratch::new(name);
-    let args = agent_args(&scratch, false);
-    scratch.write("agent-pool.toml", &pool(pool_class), 0o644);
+/// A server placing as `placed`, whose only host is `burst-1`, registered with `hello`
+/// (with `arch` under js-sched), in a pool of `pool_class`.
+async fn serve(name: &str, pool_class: &str, hello: &Value, placed: Placed) -> Harness {
+    let scratch = Scratch::new(&placed.named(name));
+    let mut args = agent_args(&scratch, false);
+    let mut hello = hello.clone();
+    if let Placed::JsSched = placed {
+        args.extend(["--placement", "js-sched"].map(Into::into));
+        hello["capabilities"]["arch"] = json!("x86_64");
+    }
+    scratch.write("agent-pool.toml", &pool(pool_class, placed), 0o644);
     let h = Harness::with(scratch, args, None).await;
-    let reply = post(&h, "/v1/agent/hello", Some(JOIN), hello).await;
+    let reply = post(&h, "/v1/agent/hello", Some(JOIN), &hello).await;
     session(&reply, "burst-1");
     h
 }
@@ -113,33 +153,39 @@ fn assert_placed(reply: &Reply, why: &str) {
 /// another family, the 40 GiB variant on that host of 80 GiB devices, or the 80 GiB
 /// variant on a host of 40 GiB devices. Catches a class compared as text, which would
 /// leave a family request unplaceable, and one compared as a family only, or by memory at
-/// least, which would place a full spelling on another variant.
+/// least, which would place a full spelling on another variant. Under each placement.
 #[tokio::test]
 async fn todays_full_spelling_requests_still_match() {
+    for placed in PLACEMENTS {
+        todays_full_spelling_requests_match_under(placed).await;
+    }
+}
+
+async fn todays_full_spelling_requests_match_under(placed: Placed) {
     let hello = old_hello(A100_80, 80);
     for (name, class) in [("accel_full", A100_80), ("accel_family", "nvidia-a100")] {
-        let h = serve(name, A100_80, &hello).await;
+        let h = serve(name, A100_80, &hello, placed).await;
         let body = lease(json!({ "gpus": 4, "gpu_class": class }));
-        assert_placed(&acquire(&h, &body).await, class);
+        assert_placed(&acquire(&h, &body).await, &format!("{class} {placed:?}"));
         let listing = hosts(&h).await;
         let host = entry(&listing, "burst-1");
         assert_eq!(host["shape"]["gpus"], 8, "{class}");
         assert_eq!(host["shape"]["gpu_class"], A100_80, "{class}");
     }
-    let h = serve("accel_other_family", A100_80, &hello).await;
+    let h = serve("accel_other_family", A100_80, &hello, placed).await;
     for class in ["nvidia-h100", A100_40] {
         let body = lease(json!({ "gpus": 4, "gpu_class": class }));
         let refused = acquire(&h, &body).await;
-        assert_eq!(refused.status, 409, "{class}: {}", refused.body);
+        assert_eq!(refused.status, 409, "{class} {placed:?}: {}", refused.body);
     }
     let held = h.call("GET", "/v1/leases", None).await;
     assert_eq!(held.json()["leases"], json!([]));
 
     let small = old_hello(A100_40, 40);
-    let h = serve("accel_smaller_variant", A100_40, &small).await;
+    let h = serve("accel_smaller_variant", A100_40, &small, placed).await;
     let body = lease(json!({ "gpus": 4, "gpu_class": A100_80 }));
     let refused = acquire(&h, &body).await;
-    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.status, 409, "{placed:?}: {}", refused.body);
     let held = h.call("GET", "/v1/leases", None).await;
     assert_eq!(held.json()["leases"], json!([]));
 }
@@ -148,10 +194,16 @@ async fn todays_full_spelling_requests_still_match() {
 /// registers the host, that the host is listed with the shape it sent, and that a lease
 /// whose `resources.accelerator` names the family `nvidia-a100`, 80 GiB per device and a
 /// count is placed on it. Catches a hello that is refused for lacking the new field, and
-/// a host whose accelerator is not derived from its class.
+/// a host whose accelerator is not derived from its class. Under each placement.
 #[tokio::test]
 async fn old_hello_with_gpu_class_still_registers() {
-    let h = serve("accel_old_hello", A100_80, &old_hello(A100_80, 80)).await;
+    for placed in PLACEMENTS {
+        old_hello_registers_under(placed).await;
+    }
+}
+
+async fn old_hello_registers_under(placed: Placed) {
+    let h = serve("accel_old_hello", A100_80, &old_hello(A100_80, 80), placed).await;
     let listing = hosts(&h).await;
     let host = entry(&listing, "burst-1");
     assert_eq!(host["source"], "registered");
@@ -168,7 +220,10 @@ async fn old_hello_with_gpu_class_still_registers() {
     let body = lease(json!({
         "accelerator": { "model": "nvidia-a100", "memory_per_device_gib": 80, "count": 4 },
     }));
-    assert_placed(&acquire(&h, &body).await, "accelerator object");
+    assert_placed(
+        &acquire(&h, &body).await,
+        &format!("accelerator object {placed:?}"),
+    );
 }
 
 /// Asserts that a count with no model is refused through the route as a 400 whose reason
@@ -201,37 +256,52 @@ async fn a_count_only_accelerator_is_a_400_naming_accelerator_model() {
 /// (`nvidia-zz9000`, eight devices of 40 GiB) is placed for a `resources.accelerator` of
 /// that model with 40 GiB per device and refused for 41 GiB with a 409, and that a
 /// `nvidia-zz9000` request through `gpus` and `gpu_class` is placed too. Catches the
-/// measured memory of the devices being lost between the hello and placement.
+/// measured memory of the devices being lost between the hello and placement. Under each
+/// placement.
 #[tokio::test]
 async fn the_measured_memory_of_an_unknown_model_decides_placement() {
+    for placed in PLACEMENTS {
+        the_measured_memory_decides_under(placed).await;
+    }
+}
+
+async fn the_measured_memory_decides_under(placed: Placed) {
     let hello = old_hello("nvidia-zz9000", 40);
     let ask = |gib: u64| {
         lease(json!({
             "accelerator": { "model": "nvidia-zz9000", "memory_per_device_gib": gib, "count": 4 },
         }))
     };
-    let h = serve("accel_zz_fits", "nvidia-zz9000", &hello).await;
-    assert_placed(&acquire(&h, &ask(40)).await, "40 GiB");
-    let h = serve("accel_zz_over", "nvidia-zz9000", &hello).await;
+    let h = serve("accel_zz_fits", "nvidia-zz9000", &hello, placed).await;
+    assert_placed(&acquire(&h, &ask(40)).await, &format!("40 GiB {placed:?}"));
+    let h = serve("accel_zz_over", "nvidia-zz9000", &hello, placed).await;
     let refused = acquire(&h, &ask(41)).await;
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    let h = serve("accel_zz_class", "nvidia-zz9000", &hello).await;
+    assert_eq!(refused.status, 409, "{placed:?}: {}", refused.body);
+    let h = serve("accel_zz_class", "nvidia-zz9000", &hello, placed).await;
     let body = lease(json!({ "gpus": 4, "gpu_class": "nvidia-zz9000" }));
-    assert_placed(&acquire(&h, &body).await, "class only");
+    assert_placed(&acquire(&h, &body).await, &format!("class only {placed:?}"));
 }
 
 /// Asserts that a pool whose floor names the family `nvidia-a100` registers a host of
 /// `nvidia-a100-sxm4-80gb`, and that a `gpus` and `gpu_class` request for exactly that
 /// spelling is placed on it while one for `nvidia-a100-sxm4-40gb` is a 409. Catches a
-/// host placed as the pool floor's family, which would take either variant.
+/// host placed as the pool floor's family, which would take either variant: under
+/// js-sched, a scheduler told the pool's floor at the hello in place of the shape the
+/// registry lists for the host. Under each placement.
 #[tokio::test]
 async fn a_host_is_placed_as_its_variant_and_not_as_the_pool_floors_family() {
+    for placed in PLACEMENTS {
+        placed_as_its_variant_under(placed).await;
+    }
+}
+
+async fn placed_as_its_variant_under(placed: Placed) {
     let hello = old_hello(A100_80, 80);
-    let h = serve("accel_floor_family_80", "nvidia-a100", &hello).await;
+    let h = serve("accel_floor_family_80", "nvidia-a100", &hello, placed).await;
     let body = lease(json!({ "gpus": 4, "gpu_class": A100_80 }));
-    assert_placed(&acquire(&h, &body).await, A100_80);
-    let h = serve("accel_floor_family_40", "nvidia-a100", &hello).await;
+    assert_placed(&acquire(&h, &body).await, &format!("{A100_80} {placed:?}"));
+    let h = serve("accel_floor_family_40", "nvidia-a100", &hello, placed).await;
     let body = lease(json!({ "gpus": 4, "gpu_class": A100_40 }));
     let refused = acquire(&h, &body).await;
-    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.status, 409, "{placed:?}: {}", refused.body);
 }

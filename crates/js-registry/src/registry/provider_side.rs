@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use js_provider::SeatError;
 use js_provider::{HostCapacity, Observed};
 use js_types::sched::usage::NodeLoad;
-use js_types::{Admission, HostId, LeaseId, RequestId, Resources};
+use js_types::{Admission, HostId, LeaseId, RequestId, Resources, Shape};
 
 use js_lease::Timestamp;
 
@@ -217,11 +217,12 @@ impl Registry {
         seated
     }
 
-    /// Tells the placer, if there is one, that `host` said hello, booked as the pool's
-    /// shape.
-    pub(super) fn tell_up(&self, host: &HostId) {
+    /// Tells the placer, if there is one, that `host` said hello, listed in the book as
+    /// `shape`: the pool's booked shape with what of the host's claim the pool places by
+    /// (`PoolConfig::list_claimed`).
+    pub(super) fn tell_up(&self, host: &HostId, shape: &Shape) {
         if let Some(placer) = self.shared.placer.get() {
-            placer.host_up(host, self.shared.config.booked());
+            placer.host_up(host, shape);
         }
     }
 

@@ -84,6 +84,7 @@ fn h1() -> HostView {
         shape,
         memory: MemoryHeadroom::full(1 << 20),
         claim: None,
+        by_hello: false,
         labels: BTreeMap::new(),
         agent_version: None,
         epoch: 1,
