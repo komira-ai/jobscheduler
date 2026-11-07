@@ -30,7 +30,7 @@ Rules:
   agent's stream is down, no new leases are placed on its host and its leases keep their resources booked. This is the store-outage rule
   of `crates/kbf-sched/src/scheduler/outage.rs` applied per provider: expiry timers restart with a grace window on recovery.
 - **Cordon and drain.** Operator `Cordon` and `Drain` apply to a host and are scheduler state: the scheduler holds them in memory, and a
-  core over a state store writes each as the host's `cordon/` row and puts it back at its start (`crates/js-store/src/cordon.rs`). The lease
+  core over a state store writes each as the host's `cordon/` row and puts it back at its start (`crates/js-store/src/cordon.rs` (removed from this repository)). The lease
   server's own-host cordon (`POST /v1/hosts/{id}:cordon`, called by a host for itself) is a lease that lapses by itself; it is kept in the
   binding file (`<state file>.agents`) and survives a restart for as long as it has left. A wait caused
   only by a cordon is never refused as unservable, and a cordoned host is not released on idle. Agent-announced draining is a phase (5.3).

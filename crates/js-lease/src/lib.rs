@@ -1,5 +1,8 @@
-//! The lease table a lease service serves: leases a client acquires on a pool,
-//! keeps alive by renewing, and gives back by releasing or letting them lapse.
+//! The lease table a lease service serves: leases a client acquires on a pool and gives
+//! back by releasing them. A lease has no time to live: nothing a client does keeps it
+//! alive or pushes its end back. It ends in one of three ways: it is released, its
+//! maximum wall time ends, or, while it is a pending whole-node lease, its prepare
+//! deadline passes.
 //!
 //! This is design section 3 (a lease is the scheduler's grant of resources on a
 //! provider), 5.2 and 5.6 (start, stop, observe and what Unknown means) and 12.1 (the
@@ -16,14 +19,13 @@
 //!   a stop that answers Unknown leaves it `releasing`. Only a stop that read back
 //!   `Absent`, or an observation of `Absent`, removes a lease. [`LeaseTable::tick`]
 //!   retries both.
-//! - **Time acts in one place.** Only [`LeaseTable::tick`] expires a lease. Between
-//!   ticks a lapsed lease is still listed, and a renew of it is refused as expired.
-//!   The server's tick (`js-lease-server`) ticks the table first and then advances the
+//! - **Time acts in one place.** Only [`LeaseTable::tick`] ends a lease by time (its
+//!   maximum wall time, or a pending whole-node lease's prepare deadline). Between ticks a
+//!   lease past its end is still listed. The server's tick (`js-lease-server`) ticks the table first and then advances the
 //!   agent registry, so a registry that reaches its own deadline (a reservation's drain
 //!   deadline, a prepare deadline) acts on the same tick and not at the next poll.
-//! - **Wall time bounds a lease's life, as the clock reads it.** A lease is never
-//!   renewed past its acquisition plus the request's maximum wall time. The bound is a
-//!   wall-clock instant, so a system clock stepped back (a time sync, a resumed VM)
+//! - **Wall time bounds a lease's life, as the clock reads it.** A lease ends at its
+//!   start plus the request's maximum wall time. The bound is a wall-clock instant, so a system clock stepped back (a time sync, a resumed VM)
 //!   stretches a lease by the step, and one stepped forwards cuts it short. It is not
 //!   a guarantee against a clock that moves: keep the host's clock from stepping back
 //!   under a server, or rely on the provider's own limits.
@@ -32,7 +34,7 @@
 //!   missing file is an error unless the caller says it is a first boot ([`Boot`]), and
 //!   an exclusive lock beside the file keeps a second table from taking the same term.
 //! - **Time is wall time.** [`Clock::now`] is a [`Timestamp`], milliseconds since the
-//!   Unix epoch, because an expiry written to the file has to mean the same moment
+//!   Unix epoch, because an end written to the file has to mean the same moment
 //!   after a restart. Tests drive a [`ManualClock`]; nothing here sleeps.
 //!
 //! # The file
@@ -58,14 +60,14 @@
 //! state = "held"            # pending | held | releasing
 //! host = "gpu-01"           # absent until the provider names it
 //! acquired_at_ms = 1000000
-//! started_at_ms = 1000500   # optional: when the ttl and wall time started counting, if not
+//! started_at_ms = 1000500   # optional: when the wall time started counting, if not
 //!                           # acquired_at (a whole lease ready after its acquire)
-//! expires_at_ms = 1060000
+//! expires_at_ms = 4600500   # ends_at_ms, or a pending whole lease's prepare deadline
 //! ends_at_ms = 4600500      # the start plus the request's maximum wall time
 //! validation_run = "val-7"  # optional
 //! whole = true              # optional: a whole-node class; absent means not whole
-//! ttl_ms = 60000            # a pending whole lease only: the granted ttl ...
-//! wall_ms = 3600000         # ... and maximum wall time, both counted from ready
+//! wall_ms = 3600000         # a pending whole lease only: the maximum wall time, counted
+//!                           # from ready
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
@@ -107,11 +109,19 @@
 //! `cross_release` (in `tests/lease`) pins each of these against files the previous release
 //! wrote and against its reader.
 //!
-//! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
-//! expiry is the settings' prepare timeout, not its ttl, and when the provider is first
-//! seen to have it ready (a start answered `Started`, or an observation of `Present`)
-//! its expiry becomes that moment plus the ttl and its end that moment plus the maximum
-//! wall time. A file without these fields loads as not whole.
+//! `expires_at_ms` is read only for a pending whole lease, as its prepare deadline. For
+//! every other lease it is written equal to `ends_at_ms` and ignored on load: a lease has
+//! no time to live, and the row stays so that a release that renewed leases, which reads
+//! it as the lease's expiry, still loads the file and ends each lease at the same moment.
+//! A `ttl_ms` row, which such a release wrote for a pending whole lease, is read and
+//! ignored and is not written back. That release refuses a pending whole lease without
+//! `ttl_ms`, so going back to it needs a file with no pending whole lease.
+//!
+//! A lease of a whole-node class (admission `Whole`) waits differently while pending: it
+//! ends at the settings' prepare timeout after its acquire, and when the provider is first
+//! seen to have it ready (a start answered `Started`, or an observation of `Present`) its
+//! end becomes that moment plus the maximum wall time. A file without these fields loads
+//! as not whole.
 //!
 //! The prepare timeout is also the provider's own deadline for a failed prepare, and the
 //! provider decides what a missed one means (it counts the failure and holds it against
@@ -127,7 +137,7 @@
 //!
 //! A lease acquired with [`LeaseTable::acquire_with_id`] keeps the consumer's request id,
 //! and what the request asked for, in its `request` row for as long as the lease is in the
-//! file; nothing else remembers an id, so a lease that is gone (released, expired, dropped)
+//! file; nothing else remembers an id, so a lease that is gone (released, ended, dropped)
 //! takes its id with it. A repeat of the acquire under the id is answered from that lease,
 //! without calling the provider, and one that asks for another request is refused
 //! [`AcquireError::RequestIdConflict`]. The two are compared as the row records them: the
@@ -135,8 +145,7 @@
 //! and the wall time (`max_wall_ms`, whole milliseconds up to `i64::MAX`, the largest
 //! integer the file holds, and `max_wall_nanos`, the nanoseconds below a millisecond, left
 //! out when zero), so a repeat that matched before a restart matches after it, and a wall
-//! time below a millisecond reads back as the positive wall time it was. The ttl is not
-//! compared. A row's fields of a later version are kept and written back, and a file in
+//! time below a millisecond reads back as the positive wall time it was. A row's fields of a later version are kept and written back, and a file in
 //! which two leases keep one request id is an [`OpenError::Corrupt`]. A pool that queues the request
 //! ([`js_provider::Pool::waits`]) leaves the lease pending, and each tick presents it
 //! again under the same lease and request id, which keeps its place and lets the start
@@ -180,7 +189,7 @@
 //! Every save writes, fsyncs and renames the file, and a caller holds the table's lock
 //! meanwhile, so a slow disk stalls every call on the table. [`Timings`] times each save
 //! on a monotonic clock ([`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
-//! another) under the step that made it (`open`, `acquire`, `acquire-settled`, `renew`,
+//! another) under the step that made it (`open`, `acquire`, `acquire-settled`,
 //! `release`, `release-settled`, `tick`, `reservations`), and the server's handlers time their wait for
 //! the table's lock under `wait-` and the call's name. A step that takes over one second
 //! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
@@ -261,7 +270,7 @@ mod timings;
 mod types;
 
 pub use clock::{Clock, ManualClock, Monotonic, SystemClock, SystemMonotonic, Timestamp};
-pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
+pub use error::{AcquireError, OpenError, ReleaseError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
 pub use timings::{Timer, Timings};

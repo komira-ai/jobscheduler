@@ -78,13 +78,6 @@ function documentedShapes(docs: string): Shape[] {
       flags: new Set(flagsOf(head)),
     };
   });
-  // `run` takes the flags of `acquire`.
-  const acquire = shapes.find((s) => s.words.join(' ') === 'js lease acquire');
-  const run = shapes.find((s) => s.words.join(' ') === 'js lease run');
-  if (acquire && run) {
-    for (const f of acquire.flags) run.flags.add(f);
-    for (const f of acquire.required) run.required.add(f);
-  }
   return shapes;
 }
 
@@ -169,9 +162,9 @@ test('the recording shows the server start, the host file, a lease acquired, lis
     clientCommands.map((c) => c.replace(/^js --server \S+ --token-file \S+ lease /, '').replace(/ .*/, '')),
     ['acquire', 'list', 'release', 'list'],
   );
-  const acquired = /^lease (\S+) host (\S+) expires (\d+)$/m.exec(transcript);
-  assert.ok(acquired, 'acquire printed lease <id> host <host> expires <ms>');
-  assert.match(transcript, new RegExp(`^${acquired[1]} held host ${acquired[2]} expires ${acquired[3]}$`, 'm'));
+  const acquired = /^lease (\S+) host (\S+) ends (\d+)$/m.exec(transcript);
+  assert.ok(acquired, 'acquire printed lease <id> host <host> ends <ms>');
+  assert.match(transcript, new RegExp(`^${acquired[1]} held host ${acquired[2]} ends ${acquired[3]}$`, 'm'));
   assert.match(transcript, new RegExp(`^lease ${acquired[1]} freed$`, 'm'));
   assert.ok(clientCommands.some((c) => c.endsWith(`lease release ${acquired[1]}`)));
 });
@@ -190,7 +183,8 @@ test('a client command with an unknown verb, an unknown flag, a missing required
   assert.match(clientProblems(`${base} lease list extra`, cliDocs).join('\n'), /takes 0 argument\(s\), given 1/);
   assert.match(clientProblems('js --token-file client-token lease list', cliDocs).join('\n'), /--server is required/);
   assert.match(clientProblems('js --server http://127.0.0.1:7300 lease list', cliDocs).join('\n'), /--token-file is required/);
-  assert.deepEqual(clientProblems(`${base} lease run --class gpu-host --max-wall 1h`, cliDocs), []);
+  assert.match(clientProblems(`${base} lease run --class gpu-host --max-wall 1h`, cliDocs).join('\n'), /no documented command "js lease run"/);
+  assert.match(clientProblems(`${base} lease renew 1-1`, cliDocs).join('\n'), /no documented command "js lease renew"/);
   assert.deepEqual(clientProblems(`${base} lease release 1-1`, cliDocs), []);
 });
 

@@ -123,20 +123,16 @@ async fn listed(h: &Harness, id: &str) -> Option<Value> {
     leases.iter().find(|lease| lease["id"] == id).cloned()
 }
 
-/// Asserts the clock of a whole-node lease over HTTP. The request asks for a 60 s ttl
-/// and the agent reports ready 100 s after the commit: the lease stays pending, and is
-/// not expired by its ttl, until then; once ready it is held with its expiry one ttl
-/// after the report and its end one maximum wall time after the report. An older client
-/// that only polls the list sees `pending` and then `held`. It catches a ttl counted
-/// from the commit (the lease would be gone), a held lease before the report, and times
-/// counted from the commit.
+/// Asserts the clock of a whole-node lease over HTTP. The agent reports ready 100 s after
+/// the commit: the lease stays pending until then, and once ready it is held with its end
+/// one maximum wall time after the report (no other time bounds it). An older client that
+/// only polls the list sees `pending` and then `held`. It catches a wall time counted from
+/// the commit, and a held lease before the report.
 #[tokio::test]
-async fn a_whole_node_lease_counts_its_ttl_from_the_ready_report() {
+async fn a_whole_node_lease_counts_its_wall_from_the_ready_report() {
     let h = start_with("whole_clock", "").await;
     let me = join(&h, "burst-1").await;
-    let mut body = whole_body();
-    body["ttl_seconds"] = json!(60);
-    let asked = h.call("POST", "/v1/leases", Some(&body)).await;
+    let asked = h.call("POST", "/v1/leases", Some(&whole_body())).await;
     assert_eq!(asked.status, 202, "{}", asked.body);
     let id = asked.json()["id"].as_str().unwrap().to_string();
 
@@ -153,7 +149,6 @@ async fn a_whole_node_lease_counts_its_ttl_from_the_ready_report() {
     let lease = listed(&h, &id).await.unwrap();
     assert_eq!(lease["state"], "held", "{lease}");
     assert_eq!(lease["host"], "burst-1");
-    assert_eq!(lease["expires_at_ms"], ready + 60_000, "{lease}");
     assert_eq!(lease["ends_at_ms"], ready + 7_200_000, "{lease}");
 }
 

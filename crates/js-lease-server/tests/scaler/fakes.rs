@@ -656,6 +656,7 @@ pub fn view(name: &str) -> HostView {
         shape: Shape::new(resources, BTreeMap::new()),
         memory: MemoryHeadroom::full(1 << 30),
         claim: Some(Shape::new(announced, BTreeMap::new())),
+        by_hello: false,
         labels: BTreeMap::new(),
         agent_version: None,
         epoch: 1,

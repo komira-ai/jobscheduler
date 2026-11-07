@@ -394,6 +394,7 @@ pub fn spec() -> JobSpec {
                 interconnect: Some("nvlink-domain>=8".to_owned()),
                 form_factor: Some("sxm".to_owned()),
             }),
+            isolation: js_proto::v1::Isolation::Unspecified.into(),
         }),
         wall_limit_seconds: Some(3600),
         network: NetworkLevel::AllowList.into(),

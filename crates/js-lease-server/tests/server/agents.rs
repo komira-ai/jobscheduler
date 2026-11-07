@@ -25,7 +25,7 @@ fn empty_reply() -> Value {
 /// has registered a request is refused `no-capable-host` at admission (no host could serve
 /// it, and the pool launches nothing);
 /// after hello and heartbeat the host takes a lease through `POST /v1/leases`, the
-/// listing shows the lease on it, a second request has no capacity, and renew, release
+/// listing shows the lease on it, a second request has no capacity, and release
 /// and a new lease on the freed host work as on a static host. It catches a registry that
 /// is not wired into the lease table, and a layer that loses the host after a release.
 #[tokio::test]
@@ -50,10 +50,6 @@ async fn registered_host_is_leasable_through_post_leases() {
 
     let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
     assert_eq!(full.json(), json!({ "error": "no-capacity" }));
-    let renewed = h
-        .call("POST", &format!("/v1/leases/{id}/renew"), None)
-        .await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
     let released = h.call("DELETE", &format!("/v1/leases/{id}"), None).await;
     assert_eq!(released.json(), json!({ "state": "freed" }));
     assert!(entry(&hosts(&h).await, "burst-1").get("lease").is_none());
@@ -103,8 +99,8 @@ async fn layered_stop_reaches_owning_child() {
     assert!(entry(&listing, "burst-1").get("lease").is_none());
     assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
     assert_eq!(entry(&listing, "gpu-02")["lease"], "1-2");
-    let renewed = h.call("POST", "/v1/leases/1-3/renew", None).await;
-    assert_eq!(renewed.status, 404, "{}", renewed.body);
+    let again = h.call("DELETE", "/v1/leases/1-3", None).await;
+    assert_eq!(again.status, 404, "{}", again.body);
 }
 
 /// Asserts that an id the static pool lists cannot be registered: a hello for it is
@@ -132,7 +128,6 @@ async fn join_token_does_not_open_lease_routes() {
     let routes = [
         ("GET", "/v1/leases"),
         ("POST", "/v1/leases"),
-        ("POST", "/v1/leases/1-1/renew"),
         ("DELETE", "/v1/leases/1-1"),
         ("GET", "/v1/hosts"),
         ("GET", "/v1/unknown"),
@@ -434,27 +429,27 @@ async fn hosts_lists_registered_hosts_with_their_state() {
 }
 
 /// Asserts that a lease on a host that went silent stays held (the table sees `Unknown`,
-/// not `Absent`) through ticks, a request cannot book the lost host, and the lease then
-/// ends by its ttl at a tick, after which the host, once it says hello again, takes a
-/// new lease. It catches a lost host whose lease is freed early, or never.
+/// not `Absent`) through ticks, however long the silence, a request cannot book the lost
+/// host, and the lease then ends at its wall end at a tick, after which the host, once it
+/// says hello again, takes a new lease. It catches a lost host whose lease is freed early
+/// (before its wall end), or never.
 #[tokio::test]
-async fn lost_registered_host_lease_expires_by_ttl() {
+async fn lost_registered_host_lease_ends_at_its_wall() {
     let h = start_agents("agents_lost", false).await;
     join(&h, "burst-1").await;
     let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(
-        granted.json()["expires_at_ms"],
-        crate::support::T0 + 600_000
-    );
+    assert_eq!(granted.json()["ends_at_ms"], crate::support::T0 + 7_200_000);
 
     h.clock.advance(secs(30));
     h.ticks.step().await;
     assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "lost");
-    let renewed = h.call("POST", "/v1/leases/1-1/renew", None).await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
 
-    h.clock.advance(secs(601));
+    h.clock.advance(secs(3600));
+    h.ticks.step().await;
+    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
+
+    h.clock.advance(secs(3570));
     h.ticks.step().await;
     assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
     assert!(entry(&hosts(&h).await, "burst-1").get("lease").is_none());
@@ -500,9 +495,6 @@ async fn heartbeats_hammered_during_lease_calls_complete() {
                 let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
                 assert_eq!(made.status, 201, "{}", made.body);
                 let id = made.json()["id"].as_str().unwrap().to_string();
-                let renew = format!("/v1/leases/{id}/renew");
-                let renewed = request(addr, "POST", &renew, Some(TOKEN), None).await;
-                assert_eq!(renewed.status, 200);
                 let path = format!("/v1/leases/{id}");
                 let freed = request(addr, "DELETE", &path, Some(TOKEN), None).await;
                 assert_eq!(freed.status, 200);

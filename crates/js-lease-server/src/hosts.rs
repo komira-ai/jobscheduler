@@ -418,6 +418,7 @@ mod tests {
             shape: Shape::new(resources, BTreeMap::new()),
             memory: MemoryHeadroom::full(1 << 20),
             claim: None,
+            by_hello: false,
             labels: BTreeMap::new(),
             agent_version: None,
             epoch: 1,
@@ -471,6 +472,41 @@ mod tests {
             assert_eq!(by_id(id)["lease"], "1-1");
             assert!(by_id(id).get("leases").is_none());
         }
+    }
+
+    /// Asserts the whole `GET /v1/hosts` body for a static host with a lease and a
+    /// registered host that is reserved, has a drain deadline and is cordoned, by exact
+    /// string equality: the keys, their order, and the absence of any lease expiry. It
+    /// catches a field added, renamed or reordered in the hosts listing, and a lease time
+    /// that leaks into it.
+    #[test]
+    fn the_hosts_body_is_pinned_byte_for_byte() {
+        let mut reserved = view(Some(HostMark::Reserved));
+        reserved.reserved_for = Some(js_types::RequestId::new("req-1").unwrap());
+        reserved.drain_deadline = Some(js_lease::Timestamp::from_millis(7000));
+        reserved.cordon_until = Some(js_lease::Timestamp::from_millis(9000));
+        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
+        let leased = HostCapacity {
+            host: HostId::new("s").unwrap(),
+            shape: Shape::new(resources, BTreeMap::new()),
+            memory: MemoryHeadroom::full(1 << 20),
+            leased_to: Some(LeaseId::new(1, 1)),
+            leases: vec![LeaseId::new(1, 1)],
+        };
+        let list = HostList::of(vec![leased], vec![reserved], None);
+        let shape = r#"{"cpu_millis":1000,"memory_bytes":1048576,"gpus":0}"#;
+        let memory =
+            r#"{"configured_bytes":1048576,"schedulable_percent":100,"bookable_bytes":1048576}"#;
+        let registered = format!(
+            r#"{{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}},"releasing":false,"mark":"reserved","reserved_for":"req-1","drain_deadline_ms":7000,"cordon":{{"expires_at_ms":9000}}}}"#
+        );
+        let fixed = format!(
+            r#"{{"id":"s","source":"static","lease":"1-1","shape":{shape},"memory":{memory},"capabilities":{{}},"labels":{{}}}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&list).unwrap(),
+            format!(r#"{{"hosts":[{registered},{fixed}]}}"#)
+        );
     }
 
     /// Each mark a registered host can carry is listed under its own name, and a host with

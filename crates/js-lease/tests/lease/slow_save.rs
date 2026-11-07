@@ -84,35 +84,40 @@ fn millis(n: u64) -> Duration {
 }
 
 fn held(table: &mut Table) -> LeaseId {
-    table.acquire(request(3600), None).unwrap().id
+    table.acquire(request(3600)).unwrap().id
 }
 
-/// Asserts that a renew whose save the clock measures at 1.5 s logs one warning that
-/// names the operation (`renew`) and the duration (1500 ms). It catches a save that is
-/// never timed and a warning that does not say which step was slow.
+/// Asserts that an acquire whose two saves the clock measures at 1.5 s each logs one
+/// warning per save that names the operation (`acquire`, then `acquire-settled`) and the
+/// duration (1500 ms). It catches a save that is never timed and a warning that does not
+/// say which step was slow.
 #[test]
 fn a_save_over_a_second_warns_with_the_operation_and_the_duration() {
     let (mut table, _clock, _scratch) = fresh("slow_save_warns");
-    let id = held(&mut table);
     table.watch_saves(Stepping::of(millis(1500)));
     let log = Log::start();
-    table.renew(&id, None).unwrap();
+    held(&mut table);
     let lines = log.slow_saves();
-    assert_eq!(lines.len(), 1, "{}", log.text());
+    assert_eq!(lines.len(), 2, "{}", log.text());
     assert!(lines[0].contains("WARN"), "{}", lines[0]);
-    assert!(lines[0].contains("operation=renew"), "{}", lines[0]);
+    assert!(lines[0].contains("operation=acquire "), "{}", lines[0]);
     assert!(lines[0].contains("took_ms=1500"), "{}", lines[0]);
+    assert!(
+        lines[1].contains("operation=acquire-settled "),
+        "{}",
+        lines[1]
+    );
+    assert!(lines[1].contains("took_ms=1500"), "{}", lines[1]);
 }
 
-/// Asserts that a save measured at 0.5 s logs nothing, so the warning is not a line per
+/// Asserts that saves measured at 0.5 s log nothing, so the warning is not a line per
 /// save.
 #[test]
 fn a_save_under_a_second_logs_nothing() {
     let (mut table, _clock, _scratch) = fresh("slow_save_quiet");
-    let id = held(&mut table);
     table.watch_saves(Stepping::of(millis(500)));
     let log = Log::start();
-    table.renew(&id, None).unwrap();
+    held(&mut table);
     assert_eq!(log.text(), "");
 }
 
@@ -121,15 +126,14 @@ fn a_save_under_a_second_logs_nothing() {
 #[test]
 fn a_save_of_exactly_a_second_is_not_slow_and_a_millisecond_more_is() {
     let (mut table, _clock, _scratch) = fresh("slow_save_edge");
-    let id = held(&mut table);
     let log = Log::start();
     table.watch_saves(Stepping::of(millis(1000)));
-    table.renew(&id, None).unwrap();
+    held(&mut table);
     assert_eq!(log.text(), "");
     table.watch_saves(Stepping::of(millis(1001)));
-    table.renew(&id, None).unwrap();
+    held(&mut table);
     let lines = log.slow_saves();
-    assert_eq!(lines.len(), 1, "{}", log.text());
+    assert_eq!(lines.len(), 2, "{}", log.text());
     assert!(lines[0].contains("took_ms=1001"), "{}", lines[0]);
 }
 

@@ -115,19 +115,19 @@ mod tests {
 
     /// Asserts how the pool's settings reach the table's restart grace: the boot grace is
     /// the constant whatever the pool says, the regain grace is the pool's when it has
-    /// whole-node settings and the default when it has none, and the ttls are untouched.
+    /// whole-node settings and the default when it has none, and the ceiling on the wall time is untouched.
     /// It catches a grace that never reaches the table (a restored deadline would then be
     /// the stored one) and a pool key that is dropped on the way.
     #[test]
     fn the_restart_grace_is_the_constant_and_the_pools_regain_grace() {
         let secs = Duration::from_secs;
-        let flags = Settings::new(secs(60), secs(3600)).unwrap();
+        let flags = Settings::new().with_max_wall(secs(3600)).unwrap();
         let mut whole = WholeNodeConfig::dedicated(2);
         whole.regain_grace_ms = 45_000;
         let set = with_restart_grace(flags, Some(&whole));
         assert_eq!(set.boot_grace(), RESERVATION_BOOT_GRACE);
         assert_eq!(set.regain_grace(), secs(45));
-        assert_eq!((set.default_ttl(), set.max_ttl()), (secs(60), secs(3600)));
+        assert_eq!(set.max_wall(), Some(secs(3600)));
         let plain = with_restart_grace(flags, None);
         assert_eq!(plain.boot_grace(), RESERVATION_BOOT_GRACE);
         let default = Duration::from_millis(DEFAULT_REGAIN_GRACE_MS);

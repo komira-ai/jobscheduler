@@ -21,8 +21,8 @@
 use std::time::Duration;
 
 use js_jobs::{
-    JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy, ResourceUsage, ResultReason,
-    StartFailure,
+    Isolation, JobRecord, JobResult, JobSpec, JobState, Needs, NetworkPolicy, ResourceUsage,
+    ResultReason, StartFailure,
 };
 use js_proto::v1;
 use js_state::StoreTime;
@@ -100,6 +100,15 @@ fn exec(exec: Option<ExecMode>) -> v1::ExecMode {
     }
 }
 
+/// The isolation of the job service that `isolation` is shown as: contained is unspecified,
+/// the default, so the read-back of a job that never asked for host isolation is unchanged.
+fn isolation(isolation: Isolation) -> v1::Isolation {
+    match isolation {
+        Isolation::Contained => v1::Isolation::Unspecified,
+        Isolation::Host => v1::Isolation::Host,
+    }
+}
+
 /// What a job needs, as the job service shows it: a whole-host job has `whole_host` set and
 /// no other need; a disk of 0 is absent.
 fn needs(needs: &Needs) -> v1::Needs {
@@ -157,6 +166,7 @@ fn spec(id: &str, spec: &JobSpec, priority: i32) -> v1::JobSpec {
             exec: exec(spec.constraints.exec).into(),
             isa_level: capability(spec, ISA_LEVEL_KEY).unwrap_or_default(),
             accelerator: accelerator(spec),
+            isolation: isolation(spec.constraints.isolation).into(),
         }),
         wall_limit_seconds: Some(spec.wall_limit_secs),
         network: network(spec.network).into(),

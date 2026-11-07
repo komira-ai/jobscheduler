@@ -464,15 +464,14 @@ fn the_placer_trusts_a_wall_time_up_to_max_lease_wall() {
 fn with_the_flag_the_table_ends_backfill_at_its_wall_and_the_request_starts_at_the_tail() {
     let mut l = live("backfill_table", &["h1"], &["--placement", "js-sched"]);
     let mut table = l.table();
-    let ttl = Some(Duration::from_secs(3_600));
     let wall = |s: u64| share_for(1, Duration::from_secs(s)).request().clone();
-    let a = table.acquire(wall(600), ttl).unwrap();
+    let a = table.acquire(wall(600)).unwrap();
     assert_eq!(a.host.as_str(), "h1");
     // The table numbers its leases from 1; the request's lease is far past them.
     assert!(host_of(&l.whole(1_000, "q")).is_none());
     assert_eq!(l.mark("q"), Some(("h1".to_owned(), Some(T0 + 600_000))));
     l.at(10_000);
-    let b = table.acquire(wall(300), ttl).unwrap();
+    let b = table.acquire(wall(300)).unwrap();
     assert_eq!(b.host.as_str(), "h1");
     assert_eq!(l.agents.registry.tail_counters().backfilled, 1);
     let mut ended_b = None;

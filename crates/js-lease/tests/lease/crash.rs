@@ -60,7 +60,7 @@ fn a_save_that_fails_after_the_start_keeps_the_lease() {
         dir: scratch.dir.clone(),
     };
     let mut table = open_with(provider, &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(lease.host, host("h1"));
     assert_eq!(states(&table), vec![(lease.id, LeaseState::Held)]);
 
@@ -73,8 +73,8 @@ fn a_save_that_fails_after_the_start_keeps_the_lease() {
     assert!(table.tick().save_error.is_none());
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(text.contains("state = \"held\"\nhost = \"h1\""));
-    let renewed = table.renew(&lease.id, None).unwrap();
-    assert_eq!(renewed, at(T0 + 60_000));
+    assert_eq!(table.list()[0].ends_at, lease.ends_at);
+    assert_eq!(lease.ends_at, at(T0 + 3_600_000));
 }
 
 /// Asserts that a lease still pending when the process stopped (saved before the
@@ -85,7 +85,7 @@ fn a_lease_saved_pending_before_the_start_is_resolved_after_reopen() {
     let scratch = Scratch::new("crash_window");
     let text = "version = 1\nterm = 2\nnext_sequence = 4\nlease_count = 1\n\n[[lease]]\n\
         term = 2\nsequence = 3\nstate = \"pending\"\nacquired_at_ms = 1000000\n\
-        expires_at_ms = 1060000\nends_at_ms = 4600000\n";
+        expires_at_ms = 4600000\nends_at_ms = 4600000\n";
     let id = LeaseId::new(2, 3);
 
     fs::write(scratch.file(), text).unwrap();
@@ -183,7 +183,7 @@ fn read(scratch: &Scratch) -> String {
 fn the_lease_is_on_disk_as_pending_before_the_provider_is_asked() {
     let scratch = Scratch::new("order_pending");
     let mut table = open_with(Watched::new(&scratch, false), &scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
 
     let seen = &table.provider().seen;
     assert_eq!(seen.len(), 1);
@@ -215,7 +215,7 @@ fn a_refused_start_leaves_no_record_in_the_file() {
 
     let mut unknown = request(3600);
     unknown.class = ClassId::new("other").unwrap();
-    let err = table.acquire(unknown, None).unwrap_err();
+    let err = table.acquire(unknown).unwrap_err();
     assert!(matches!(
         err,
         AcquireError::Refused(RefusalCode::UnknownClass)
@@ -225,7 +225,7 @@ fn a_refused_start_leaves_no_record_in_the_file() {
 
     let mut wide = request(3600);
     wide.resources = Resources::new(99_000, 1, 1, Some("g".into())).unwrap();
-    let err = table.acquire(wide, None).unwrap_err();
+    let err = table.acquire(wide).unwrap_err();
     assert!(matches!(err, AcquireError::Refused(RefusalCode::NoFit)));
     let seen = &table.provider().seen;
     assert_eq!(seen.len(), 1);
@@ -254,7 +254,7 @@ fn a_refused_start_leaves_no_record_in_the_file() {
 /// and the table is gone. Returns the provider as it was at that moment.
 fn crash_after_the_start(scratch: &Scratch) -> (Watched, LeaseId) {
     let mut table = open_with(Watched::new(scratch, true), scratch);
-    let lease = table.acquire(request(3600), None).unwrap();
+    let lease = table.acquire(request(3600)).unwrap();
     assert_eq!(states(&table), vec![(lease.id, LeaseState::Held)]);
     let on_disk = read(scratch);
     assert!(
@@ -290,8 +290,8 @@ fn a_crash_after_the_start_resolves_to_held_when_the_provider_has_it() {
     assert!(report.save_error.is_none());
     assert_eq!(table.list()[0].host, Some(host("h1")));
     assert!(read(&scratch).contains("sequence = 1\nstate = \"held\"\nhost = \"h1\"\n"));
-    assert_eq!(table.renew(&id, None).unwrap(), at(T0 + 60_000));
-    let next = table.acquire(request(3600), None).unwrap();
+    assert_eq!(table.list()[0].ends_at, at(T0 + 3_600_000));
+    let next = table.acquire(request(3600)).unwrap();
     assert_eq!(next.id, LeaseId::new(2, 2));
 }
 

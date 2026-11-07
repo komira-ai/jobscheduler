@@ -25,7 +25,8 @@ js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server", features = ["in-process"] }
 js-registry = { path = "../js-registry" }
 js-sim = { path = "../js-sim" }
-# The clock the job store stamps its rows with, read from the cell's (src/server/ids.rs).
+# The clock the job store stamps its rows with, read from the cell's (src/server/ids.rs), and
+# the SQLite store the cell reads while its server is down (src/server/store.rs).
 js-state = { path = "../js-state" }
 js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
@@ -48,6 +49,15 @@ tower = { workspace = true, features = ["util"] }
 name = "sweep"
 path = "tests/sweep.rs"
 harness = false
+
+[features]
+# The Postgres store of the cell's server (`Store::Postgres`, src/server/store.rs): a database
+# of its own on the test server for each server node, made by `js_state::postgres::test_database`
+# (feature `test-database`, which brings js-state's `postgres` and js-testkit's `postgres`).
+# The server's own Postgres store is always built (js-lease-server). Off by default, as
+# js-jobs's `postgres` feature is: the `state-postgres` CI job turns it on, and the tests it
+# adds need the server `KBF_TEST_POSTGRES_URL` names and fail, never skip, without it.
+postgres = ["js-state/test-database", "js-testkit/postgres"]
 
 [lints]
 workspace = true

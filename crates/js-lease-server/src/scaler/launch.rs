@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootPlan, CapacityProvider, HostName, Reason, Refusal,
-    RefusalCode, SchedulerId, Secret,
+    AcquireRequest, Acquired, Artifact, BootPlan, CapacityProvider, Cooldowns, HostName, Reason,
+    Refusal, RefusalCode, SchedulerId, Secret,
 };
 use js_scaler::AcquirePlan;
 use js_types::normalise_arch;
@@ -67,6 +67,11 @@ impl Launcher {
     pub fn with_catalogs(mut self, catalogs: Arc<Catalogs>) -> Self {
         self.catalogs = catalogs;
         self
+    }
+
+    /// Takes the offer cool-downs `cooled` into its catalogs ([`Catalogs::hold`]).
+    pub(crate) fn hold(&self, cooled: &Cooldowns) {
+        self.catalogs.hold(cooled);
     }
 
     /// How many fetches of its provider's catalog completed ([`Catalogs::fetches`]).

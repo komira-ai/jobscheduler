@@ -52,7 +52,7 @@ The decisions, in one place:
    `DefaultProvider` is the hosts that registered and never creates or destroys compute; an elastic provider boots a machine whose agent
    then registers like any other. A pool lists providers in order and takes capacity from the first that can satisfy; it specifies only
    `max_machines`, and nothing is kept warm (5.8, [design/providers.md](design/providers.md)). Scaling reverses the former non-goal (D14).
-5. **Two-level leasing.** The scheduler leases machines to a consumer for a TTL; the consumer places its work inside its leases and makes
+5. **Two-level leasing.** The scheduler leases machines to a consumer until it releases them or their max wall time ends; the consumer places its work inside its leases and makes
    no scheduler call per action (9.1).
 6. **Absence has three answers, not two.** A thing is present, absent (observed gone) or unknown (could not be observed). Only "absent"
    frees a booking. Unknown never does. The rule covers a lease on an agent and a machine at a capacity provider (5.6).
@@ -67,7 +67,7 @@ The decisions, in one place:
 11. **ucdk Jobs may use jobscheduler as a second realization.** ucdk 1.0 launches directly against the cloud; jobscheduler is an
     optional realization of Job, bound to one (app, environment) (11).
 12. **Lease correctness is always on; quotas belong to the platform.** Every request passes the start-contract checks (a required wall
-    time, a stated fence, reserved label keys). A held lease has a TTL its client renews, and the reaper frees a lease whose TTL has
+    time, a stated fence, reserved label keys). A held lease has no time to live and is never renewed, and the reaper frees a lease whose max wall time has
     passed and a machine nothing holds (12.1). jobscheduler has no tenant caps, budgets or spend limits: Kubernetes and cloud-provider
     quotas already enforce them, and a pool's `max_machines` is the overload brake it adds. The usage record and the labels stay because
     sizing, cleanup and attribution need them (12).
@@ -133,7 +133,7 @@ Non-goals:
 - **Request.** One submission of a job, with a request id. It enters the queue and ends in one outcome. In kbf it is
   `kbf_sched::input::Request` (`crates/kbf-sched/src/input.rs`) and the scheduler calls it an operation.
 - **Attempt.** One try at a request on one host. Retries and reruns create attempts. Exactly one attempt's result is accepted.
-- **Lease.** Two levels (9.1). A *machine lease* is the scheduler's grant of a host, or a share of one, to a consumer for a TTL
+- **Lease.** Two levels (9.1). A *machine lease* is the scheduler's grant of a host, or a share of one, to a consumer until it is released or its max wall time ends
   (`js-lease`). A *placement* is a consumer's grant of resources inside its lease to one attempt, identified by (term, sequence)
   (`LeaseId`, `crates/kbf-types/src/lease.rs`). Per R1, a machine lease covers a node or half a node. A lease is recorded durably before
   anything is told to start (commit before start, `Scheduler::lease_committed` in `crates/kbf-sched/src/scheduler.rs`).
@@ -301,7 +301,7 @@ granted the lease (5.1):
   runs twice. The first heartbeat after re-adoption must be complete.
 - Self-fence is per session. Silence on a work session fences that leasee's placements at 40 s against 60 s of grace; the compile-time
   assertions in `crates/kbf-sched/src/fence.rs` keep the relation. Silence on the control stream stops new leases and starts the
-  machine-lease TTL clock; it kills a placement only once that TTL has also passed, so a consumer that keeps renewing keeps its work
+  machine-lease clock; it kills a placement only once the lease's max wall time has also passed, so work placed inside a lease keeps running
   through a scheduler outage. This is also how a terminated or partitioned instance stops its work. A run-on lease is allowed only when
   the request says it is safe (D6).
 - `ResultAck` values ACCEPTED, DUPLICATE, STALE, UNKNOWN_LEASE and MISMATCH are kept. One result is accepted per request, and only while
@@ -468,7 +468,7 @@ tainted-set check, join credentials and the deny file, instance identity, lifecy
 
 ### 5.9 The merged code and what it becomes
 The merged slice is a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
-on a TTL, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
+until released or its max wall time, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
 on `main` launches or terminates a machine, and there is no agent wire. The GPU-host service keeps working through every follow-up; each
 change below is additive and leaves the `--pool-config` file, the routes and the lease file readable. The operator-listed pool behind that
 file is a stepping stone: `js-pool-static` stays as the `static` test provider, and the GPU machines move to running `js-agent` and
@@ -514,7 +514,7 @@ lease API and the agent API in one process. The kbf frontend is a client that as
 kbf daemons, registers with it from every machine. Today's single-host `js-lease-server` is the stepping stone and the same binary. It
 runs as a `Deployment` of one replica under `Recreate`, with the lease file and the binding file on a volume that only one pod can use
 (D33), secrets and configuration as mounted files and TLS end to end. Durable, not highly available: a restart or a node loss is a bounded
-outage, leases survive in the file, agents re-hello, and a boot grace keeps leases from expiring unrenewed (D34). Servers upgrade first.
+outage, leases survive in the file, agents re-hello, and a boot grace keeps leases from ending during an outage (D34). Servers upgrade first.
 
 ### 5.17 The whole-node lease
 Text in [design/whole-node.md](design/whole-node.md) (D46 to D55). **Giving a whole node is a lease class of its own, `whole-node`, admitted
@@ -660,15 +660,15 @@ and its fields are in [design/retries-and-runs.md](design/retries-and-runs.md)).
 
 ### 9.1 Two-level leasing
 - **Level 1.** A consumer (kbf, the ucdk adapter, a person with `js-cli`) leases capacity from the scheduler: a machine, or a share of
-  one. The request names a class, label selectors that pick pools (6.2), the shape it needs, and a TTL. The lease service of `js-lease`
-  and `js-lease-server` is this level: acquire, renew, release, a TTL, a max wall time, a reaper. The answer carries the lease id, the host
+  one. The request names a class, label selectors that pick pools (6.2), the shape it needs, and a max wall time. The lease service of `js-lease`
+  and `js-lease-server` is this level: acquire, release, a max wall time, a reaper. The answer carries the lease id, the host
   and pool, and what the consumer needs to reach the agent.
 - **Level 2.** The consumer sends `Start` and `Stop` to the agent on its host (5.2). It makes no scheduler call per action.
 
 Consequences:
 
 - `Request`, `Fit` and `Rank` (6.1) apply at level 1: a machine lease queues, is fitted to a pool and a host, and is ranked. Queue, fit,
-  rank, fence, TTL and the start contract are level 1. The sizing history, the memory ladder and the per-attempt retry budgets (7, 8.1) act
+  rank, fence, max wall time and the start contract are level 1. The sizing history, the memory ladder and the per-attempt retry budgets (7, 8.1) act
   on individual requests, so they are level 2: kbf keeps them in `kbf-sched` until a per-request placement consumer is extracted (D15).
 - R1's "a lease is a node or half a node" has its home: it is a level-1 lease. A whole host is `Whole` (5.17); half a node, or any smaller share, is a
   share under `Book` admission, as is a ucdk Job (D56). The merged table books whole hosts only; a share needs `Book` on the pool and an accounting of the booked
@@ -746,7 +746,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
-| `js-lease` (merged) | new | the lease table: states, TTL, reaper, lease file; gains `acquiring` and the pool name (5.9) |
+| `js-lease` (merged) | new | the lease table: states, max wall time, reaper, lease file; gains `acquiring` and the pool name (5.9) |
 | `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md), and `StaticCapacity` is the `static` `CapacityProvider` over them |
 | `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; `LayeredProvider` (static, then registered) becomes the configured hierarchy; gains the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
@@ -765,7 +765,6 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-guest` (in review) | the rest of `crates/kbf-guest` | the program inside a macOS VM guest: it serves the run protocol on a Unix socket, runs one command per boot, and carries the guest's setup and probe verbs. The executable keeps the name `kbf-guest` |
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
-| `js-store` | generic rows of `farm/durable/*` | the scheduler's rows over `js-state`: the keys of the rows and the id blocks, the epoch, the owner, session and cordon rows, the `RowCodec` trait (the embedding server supplies the bytes of the request, lease and session values), the `Ext` trait (the rows only the embedding server has, which the crate calls inside the transactions it builds and at a load, and sees only as bytes), the submission of an operation (its `op/`, `queue/`, `inflight/`, `opkey/` and, when it has a longest run, `opwall/` rows in one transaction), the load of the unfinished operations with the floors and key floors, the grant, the result, the refusal and the `done/` row, the give-up of a lease with its loss count and fate, the memory floors and key floors, and the orphan sweep. `ACK_WINDOW` is a js-store constant. The size-summary rows (`est/`), the action-usage subjects (`subject/`) and the done-of rows (`doneof/`) stay the embedding server's `Ext` rows |
 | `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend (5.14) |
 | `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs`, `subids.rs`, `container.rs`, `keeper.rs`, `remove.rs`, `running.rs` and `oci/*` (with the container init) of `kbf-driver-container` | node-local containment; `js-agent` depends on it. In review, not merged yet (mark it (merged) in the pull request that merges it). The move keeps no REAPI types: a lease's booking is `js_types::Resources`; the cgroup's OOM outcome (`OomOutcome`), the usage counters (`CgroupUsage`) and the node's capacity (`Capacity`) are its own types; `memory_max` is the one function for a lease's memory cap under the build-host policy, and `hard_memory_max` under `LeasePolicy::Hard` (the booking itself, swap 0, `cpu.max` from the booked CPUs: the limits of the engine the OCI runner replaces). The OCI runner takes what it cannot own as plain data or a trait: the registry client (`ImageSource`), the arguments of the helper modes of the host binary (`HelperModes`), the environment scrub and the keeper launcher (`KeeperLauncher`). The helper modes of the host binary live here too: `unpack.rs` (the hostile-tar unpacker of `kbf-image`), `unpack_layers.rs`, `give.rs` (`chown_dirs.rs` of kbf, on this crate's `walk`) and `modes.rs` (`dispatch`, which `js-agent`'s `main` calls first with the default `HelperModes`); the mode names kbf called `__chown-dirs` are `HelperModes::give`, `__give-dirs`. The modules that name the CAS, the output tree or the program lookup (`logs`, `outputs`, `tree`, `program`, `hashing`, `cas`, `credential`, `input_phases`) are not moved. |
 | `js-mac-session` | `crates/kbf-mac-session` | the Mac node's root helper: a user of its pool per lease (reset between leases, replaced when a reset is not clean), the standing VM user's session, `role-run` of the configured VMM only, image verbs, the whole-machine session switch, and its client; macOS-gated as it is in kbf; the move changed neither its socket protocol nor its files (the pool added the `pool-create` and `pool-status` verbs and the `pool` file since) |
@@ -830,7 +829,7 @@ places or runs work, and none of it is behind a flag.
 
 ### 12.1 to 12.3 Lease limits, usage and labels
 Text in [design/lease-limits.md](design/lease-limits.md). 12.1: a required max wall time, max attempts and sizes, checked at submit with a
-plain constant code; a held lease has a TTL its client renews, and the reaper (the only place time acts) frees expired leases, retries
+plain constant code; a held lease ends when released or at its max wall time, and the reaper (the only place time acts) frees ended leases, retries
 unknown outcomes, and releases idle, tainted and leaked machines. 12.2: a usage record per machine lease, for sizing and attribution.
 12.3: the reserved `jobscheduler.dev/` label keys, which flow from request to agent and tag every instance a provider launches.
 

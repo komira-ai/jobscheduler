@@ -12,7 +12,7 @@
 //! it records one (a job backfilled on a marked host is cut to the time left in the tail),
 //! else the job's.
 
-use js_agent_wire::{BookedResources, JobStartSpec, RunFile};
+use js_agent_wire::{BookedResources, Isolation, JobStartSpec, RunFile};
 use js_jobs::{AllocationRecord, Booked, JobRecord};
 use js_types::{PortMap, Resources};
 
@@ -40,6 +40,10 @@ pub(crate) enum Unsendable {
     /// contents were dropped with the end.
     #[error("the job's files hold digests, not contents")]
     FilesDigested,
+    /// The job runs on the machine itself and the host's hello did not report `host-jobs`; an
+    /// agent that does not report it is never sent a host job.
+    #[error("the job runs on the machine itself and the host does not report host-jobs")]
+    HostJobsNotReported,
     /// The wall limit in milliseconds overflows.
     #[error("the wall limit overflows")]
     WallLimit,
@@ -54,18 +58,30 @@ pub(crate) enum Unsendable {
     },
 }
 
+/// The wire's isolation of a job: `host` for a job that runs on the machine itself.
+fn isolation_of(job: &JobRecord) -> Isolation {
+    match job.spec.constraints.isolation {
+        js_jobs::Isolation::Contained => Isolation::Contained,
+        js_jobs::Isolation::Host => Isolation::Host,
+    }
+}
+
 /// The network level a job's policy asks for, as the placer reads it.
 pub(crate) use js_sched_placer::engine::jobs::job_network;
 
 /// The start of the job `job` for its allocation `allocation`, to the host of `context`
 /// (whose agent reports the ceiling `context` holds), and the one place a start is built: the
 /// image, the command then its arguments, the environment, the files, what the
-/// allocation booked, the wall limit, the network level and the declared ports, keyed by the
-/// job id and the allocation id, and the job's log sink when `context` has sinks (the host
-/// uploads live logs). The start is checked as the agent checks it
-/// ([`JobStartSpec::validate`] and [`JobStartSpec::require_pinned`]) before it is returned; a
-/// sink that fails the agent's check ([`JobStartSpec::log_sink_checked`]) is left out and the
-/// start is sent without it, since a sink never refuses a start.
+/// allocation booked, the wall limit, the network level, the declared ports and the isolation
+/// (left out of the wire for a contained job), keyed by the job id and the allocation id, and
+/// the job's log sink when `context` has sinks (the host uploads live logs). The start is
+/// checked as the agent checks it ([`JobStartSpec::validate`] and
+/// [`JobStartSpec::require_pinned`]) before it is returned; a sink that fails the agent's check
+/// ([`JobStartSpec::log_sink_checked`]) is left out and the start is sent without it, since a
+/// sink never refuses a start.
+///
+/// A job that runs on the machine itself is sent only to a host whose agent reported
+/// `host-jobs` ([`BeatContext::host_jobs`]).
 ///
 /// # Errors
 /// [`Unsendable`] says why it cannot be sent.
@@ -76,6 +92,10 @@ pub(crate) fn start_of(
 ) -> Result<JobStartSpec, Unsendable> {
     let ceiling = context.ceiling;
     let spec = &job.spec;
+    let isolation = isolation_of(job);
+    if !isolation.is_contained() & !context.host_jobs {
+        return Err(Unsendable::HostJobsNotReported);
+    }
     let booked = match allocation.booked {
         Booked::WholeHost => whole_host(context.shape)?,
         Booked::Shape {
@@ -145,6 +165,7 @@ pub(crate) fn start_of(
         ports,
         log_sink,
         kind: Default::default(),
+        isolation,
     };
     let sink_ok = start.log_sink_checked().is_ok();
     start.log_sink = start.log_sink.filter(|_| sink_ok);

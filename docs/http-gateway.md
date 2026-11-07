@@ -404,9 +404,12 @@ answer from what the commit returned; neither holds anything of its own outside 
    GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
    table resolves (an unknown model passes through). The constraints are in the capability
    vocabulary a lease request speaks: `os` `linux` or `macos`, any `arch` (`aarch64` is
-   recorded as `arm64`), an execution mode, an ISA level, and an accelerator that does not
-   contradict the class; the ISA level and the accelerator are recorded among the job's
-   capabilities, where placement reads them. The wall limit is present, above 0 and at most
+   recorded as `arm64`), an execution mode, an ISA level, an accelerator that does not
+   contradict the class, and an isolation (`contained`, or unspecified, which reads as
+   contained, and `host`, which is refused as `no-capable-host` unless a registered host
+   reported that it runs host jobs; an unknown value is refused naming
+   `spec.constraints.isolation`); the ISA level and the accelerator are recorded among the
+   job's capabilities, where placement reads them. The wall limit is present, above 0 and at most
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
    `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's run
@@ -470,13 +473,16 @@ generated paragraph above.
   pool answers empty lists. Both are served whatever the listen address: unlike
   `GET /v1/pools`, which takes no token and is served only on a private address, they take a
   client's token.
-- `GetUsage` reads the ended bookings of the usage store (see `usage-store.md`), oldest end
-  first, from `from_ms` included to `to_ms` excluded, of one host or one job when asked. A page
-  holds `page_size` records (100 when 0, at most 1000); the filters apply before the page is
-  cut. `next_page_token` is the key of the page's last record: the next page starts right after
-  it, so no record is read twice or skipped while records are written; it is empty on the last
-  page. A token no answer gave is `INVALID_ARGUMENT` `invalid-page-token`. A server started
-  with `--usage-off` answers an empty page.
+- `GetUsage` reads the ended bookings of leases in the usage store and of jobs in the job
+  store (see `usage-store.md`) as one listing, oldest end first (then by id, a lease's record
+  before a job's with the same end and id), from `from_ms` included to `to_ms` excluded, of one
+  host or one job when asked; a job's record carries the job id in `job_id`. A page holds
+  `page_size` records (100 when 0, at most 1000); the filters apply before the page is cut.
+  `next_page_token` names the page's last record, its key and which store it came from: the
+  next page starts right after it, so no record is read twice or skipped while records are
+  written; it is empty on the last page. A token no answer gave is `INVALID_ARGUMENT`
+  `invalid-page-token`. A server started with `--usage-off` lists the job store's records
+  alone. When either store cannot be read the call is `UNAVAILABLE` `usage-unavailable`.
 
 Over the gateway, a fleet call's `INVALID_ARGUMENT` is 400 `invalid-argument` as for any call,
 but the gateway's error table does not name the fleet calls' other refusals yet: `unknown-host`

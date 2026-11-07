@@ -7,6 +7,13 @@
 //! ([`Agents::host_writes`]), from its commit to the registry's taking it: a hello, the
 //! taint a heartbeat brings, a cordon or its lift, and the save of each tick. With the store
 //! the commit comes first and the registry takes the change only once it succeeded.
+//!
+//! The taint of a host job is the exception: the placement commit writes it in the job store,
+//! the registry takes it next, and the binding is written after ([`Agents::keep_taints`]). At
+//! start a taint row of the job store that its host's binding lacks is put on the binding,
+//! the bindings are written and the rows deleted before the registry is given the bindings
+//! back, so a crash between the two writes loses nothing; once the binding holds the taint
+//! the row is deleted, after a pass too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -23,6 +30,7 @@ use js_types::{HostId, ProviderId};
 use js_usage::{ProfileCurves, ProfileKey};
 use tracing::{error, info, warn};
 
+use self::taints::restore_job_taints;
 use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore, Change};
 use crate::agent_tokens::AgentTokens;
@@ -99,6 +107,9 @@ pub(crate) struct Agents {
     /// The job store's change feed, trimmed on each tick ([`Agents::job_pass`]); held with
     /// the job tables.
     pub(crate) job_feed: Option<FeedTrim>,
+    /// The state store under the job tables, held with them: `GetUsage` reads the
+    /// `usage/ended/` row each free of a job's allocation writes there.
+    pub(crate) job_state: Option<Arc<dyn js_state::Store>>,
     /// The registry's placer, which also places the queued jobs when the job tables are
     /// held ([`Agents::place_jobs`]); `None` only for a test's agent side built without
     /// one, which places no job.
@@ -122,6 +133,9 @@ pub(crate) struct Agents {
     /// Trips when the state store says this process is no longer its writer
     /// ([`crate::fence`]): the tick ends, heartbeats are refused and the process exits.
     pub(crate) fence: Fence,
+    /// The gate of the server's pass over the queued jobs ([`Agents::place_jobs`]): one pass
+    /// at a time, from its read of the open hosts to its last taint.
+    pub(crate) placing: Mutex<()>,
 }
 
 /// Why a cordon or its lift was not done, or not saved.
@@ -253,7 +267,7 @@ fn placed_in(
                 jobs,
                 job_sources,
             } = *agents;
-            let (joins, bindings, store) = open_hosts(clock, (state_file, kept))?;
+            let (joins, mut bindings, store) = open_hosts(clock, (state_file, kept))?;
             let joins = joins.requiring_credential(require_host_credential);
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
@@ -276,18 +290,23 @@ fn placed_in(
             // passed and every lease is costed at its bound.
             let lives = lives_of(usage.iter().find_map(|usage| usage.curves()));
             estimate_feed.then(|| registry.set_lives(lives));
+            // The one job store of the server, when the job service is on. It is opened
+            // before the bindings are put back: a host a host job tainted whose binding lost
+            // the taint (a crash between the placement and the binding's write) gets it from
+            // the job store's row first. Its commit failing refuses the start, as a store
+            // that cannot be read does.
+            let (jobs, job_feed, job_state) = match jobs {
+                Some(setup) => {
+                    let opened = job_store::open(state_file, setup, &job_sources)?;
+                    restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
+                    (Some(opened.jobs), Some(opened.feed), Some(opened.store))
+                }
+                None => (None, None, None),
+            };
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
             }
             let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
-            // The one job store of the server, when the job service is on.
-            let (jobs, job_feed) = match jobs {
-                Some(setup) => {
-                    let opened = job_store::open(state_file, setup, &job_sources)?;
-                    (Some(opened.jobs), Some(opened.feed))
-                }
-                None => (None, None),
-            };
             let agents = Agents {
                 registry,
                 tokens,
@@ -302,6 +321,7 @@ fn placed_in(
                 usage,
                 jobs,
                 job_feed,
+                job_state,
                 placer: Some(placer.clone()),
                 unclean: Mutex::default(),
                 logs,
@@ -309,6 +329,7 @@ fn placed_in(
                 listed_sessions: Mutex::default(),
                 meter: OnceLock::new(),
                 fence: Fence::new(),
+                placing: Mutex::default(),
             };
             Ok(((Box::new(source), Some(Arc::new(agents))), Some(placer)))
         }
@@ -352,6 +373,7 @@ impl Agents {
             usage: None,
             jobs: None,
             job_feed: None,
+            job_state: None,
             placer: None,
             unclean: Mutex::default(),
             logs: None,
@@ -359,6 +381,7 @@ impl Agents {
             listed_sessions: Mutex::default(),
             meter: OnceLock::new(),
             fence: Fence::new(),
+            placing: Mutex::default(),
         }
     }
 
@@ -805,6 +828,9 @@ impl Agents {
         saved.is_ok()
     }
 }
+
+#[path = "agents_taints.rs"]
+mod taints;
 
 #[cfg(test)]
 #[path = "agents_mint_tests.rs"]

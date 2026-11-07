@@ -57,8 +57,14 @@ impl Placement {
 }
 
 /// Refuses a pool whose shape the placement engine cannot take as a node (a shape with no
-/// `arch`): no lease could be placed on it. `place` names the pool's flag or file.
+/// `arch`): no lease could be placed on it. A pool that places each host by what its hello
+/// reported ([`PoolConfig::placing_by_hello`], an elastic pool) is not refused for its
+/// shape: its hosts are nodes by the `arch` they report. `place` names the pool's flag or
+/// file.
 pub(crate) fn check_pool(pool: &PoolConfig, place: &str) -> Result<(), StartupError> {
+    if pool.places_by_hello() {
+        return Ok(());
+    }
     map::host(pool.shape()).map(|_| ()).map_err(|err| {
         let reason = format!(
             "the pool's shape cannot be taken as a node by the scheduler ({err}); \
@@ -100,12 +106,70 @@ pub(crate) fn placer(
 }
 
 /// `head` (`pool "<name>"`), once the pool it names is one the engine can place on
-/// ([`check_pool`]); the refusal names the pool. A joined pool's shape is what every host
-/// of it offers, so it must name an `arch`. An elastic pool's shape is the floor its
-/// launches meet, which names no capability: it is not checked.
+/// ([`check_pool`]); the refusal names the pool.
 pub(crate) fn checked(head: String, pool: &Registering) -> Result<String, StartupError> {
-    match pool.plan {
-        Some(_) => Ok(head),
-        None => check_pool(&pool.pool, &head).map(|()| head),
+    check_pool(&pool.pool, &head).map(|()| head)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use js_types::{ProviderId, ResourceClass, Resources, Shape};
+
+    use super::*;
+
+    /// A pool of `capabilities`, of a class that books whole hosts.
+    fn pool(capabilities: &[(&str, &str)]) -> PoolConfig {
+        let caps: BTreeMap<String, String> = capabilities
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let shape = Shape::new(Resources::new(4000, 8 << 30, 0, None).unwrap(), caps);
+        let id = ProviderId::new("burst").unwrap();
+        PoolConfig::new(id, ResourceClass::gpu_host(), shape, 2)
+    }
+
+    /// Asserts each answer of the check, by the whole message where it refuses: a pool
+    /// whose shape names an `arch` is taken, one that names none is refused naming `arch`,
+    /// and the same arch-less shape is taken when the pool places each host by its hello
+    /// (an elastic pool, whose hosts report their `arch`). Catches an elastic pool refused
+    /// for the floor its hosts are not placed by, and an agent or joined pool with no
+    /// `arch` let through.
+    #[test]
+    fn the_check_takes_or_refuses_the_pools_it_should() {
+        let place = "--agent-pool-config";
+        assert!(check_pool(&pool(&[("arch", "x86_64")]), place).is_ok());
+        let refused = check_pool(&pool(&[]), place).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "--agent-pool-config: the pool's shape cannot be taken as a node by the scheduler \
+             (shape does not describe a node: the node report has no \"arch\" entry); \
+             give the pool capabilities with an arch"
+        );
+        assert!(check_pool(&pool(&[]).placing_by_hello(), place).is_ok());
+    }
+
+    /// Asserts the three answers of a given value, each message in full: none leaves
+    /// nothing, `js-sched` leaves the warning naming the flag or key to drop, and
+    /// `registry` is refused naming the flag or key. Catches a warning or refusal that
+    /// names the wrong thing to drop.
+    #[test]
+    fn a_given_value_leaves_nothing_a_warning_or_a_refusal() {
+        assert_eq!(Placement::given(None, "--placement").unwrap(), None);
+        assert_eq!(
+            Placement::given(Some(Placement::JsSched), "server.placement").unwrap(),
+            Some(
+                "server.placement is deprecated and does nothing: js-sched is the only \
+                 placement (drop the key)"
+                    .to_owned()
+            )
+        );
+        let refused = Placement::given(Some(Placement::Registry), "--placement");
+        assert_eq!(
+            refused.err().unwrap().to_string(),
+            "--placement: the registry placement mode was removed; js-sched is the only \
+             placement (drop the flag)"
+        );
     }
 }

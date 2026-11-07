@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::agents_support::{JOIN, entry, hello_body, hosts, join, post, restarted, start_agents};
+use crate::agents_support::{
+    JOIN, entry, hello_body, hosts, join, post, restarted, session, start_agents,
+};
 use crate::runs_support::{
     beat, held, idle, lease, queue, queued, result, run_body, runs, state, stop, verdicts, words,
 };
@@ -42,8 +44,8 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
         "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
     assert_eq!(start["limits"]["cpu_millis"], 2000);
-    assert_eq!(start["limits"]["wall_ms"], 600_000);
-    assert_eq!(start["valid_for_ms"], 600_000);
+    assert_eq!(start["limits"]["wall_ms"], 7_200_000);
+    assert_eq!(start["valid_for_ms"], 7_200_000);
     assert_eq!(start["heartbeat_seq"], 1);
 
     let running = [held("run-1-1", "running")];
@@ -459,8 +461,8 @@ async fn result_for_other_host_is_mismatch() {
 
 /// Asserts that a run never outlives its lease. The wall limit is the one asked for, cut
 /// to the time the lease has left, and the time the agent may still start it for is that
-/// too; a run asked for after the lease has lapsed (before a tick expires it) is refused
-/// 409 `not-held`; and when the tick expires the lease the host is told to stop both runs
+/// too; a run asked for after the lease has lapsed (before a tick ends it) is refused
+/// 409 `not-held`; and when the tick ends the lease the host is told to stop both runs
 /// and is not bookable until it lists none. It catches a run with a bound longer than the
 /// lease and a lease that ends with its work left running.
 #[tokio::test]
@@ -468,7 +470,7 @@ async fn a_run_never_outlives_its_lease() {
     let h = start_agents("runs_lease_bound", false).await;
     let me = join(&h, "burst-1").await;
     let mut ask = lease_body();
-    ask["ttl_seconds"] = json!(100);
+    ask["max_wall_seconds"] = json!(100);
     let granted = h.call("POST", "/v1/leases", Some(&ask)).await;
     let lease = granted.json()["id"].as_str().unwrap().to_string();
 
@@ -514,4 +516,32 @@ async fn a_run_never_outlives_its_lease() {
     beat(&h, &me, &[], &[]).await;
     let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
     assert_eq!(again.status, 201, "{}", again.body);
+}
+
+/// Asserts that the run API refuses host isolation also on a host whose agent reported that it
+/// runs host jobs (`host-jobs` in its hello): the run is 422 `host-jobs-not-allowed`, nothing
+/// is queued or sent to the agent, and the host is not tainted. Host jobs are jobs of the job
+/// service; a run in a lease is still contained. It catches a run API that places a host-isolation
+/// run because the host says it could run one, or that taints the host for a run it refuses.
+#[tokio::test]
+async fn the_run_api_still_refuses_host_isolation() {
+    let h = start_agents("runs_host_isolation", false).await;
+    let mut hello = hello_body("burst-1");
+    hello["capabilities"]["host-jobs"] = json!("true");
+    let me = session(
+        &post(&h, "/v1/agent/hello", Some(JOIN), &hello).await,
+        "burst-1",
+    );
+    beat(&h, &me, &[], &[]).await;
+    let lease = lease(&h).await;
+
+    let mut body = run_body(1000);
+    body["isolation"] = json!("host");
+    let refused = queue(&h, &lease, &body).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(refused.json()["error"], "host-jobs-not-allowed");
+    assert!(runs(&h, &lease).await.is_empty());
+    let reply = beat(&h, &me, &[], &[]).await;
+    assert_eq!(words(&reply), Vec::<String>::new());
+    assert_eq!(entry(&hosts(&h).await, "burst-1").get("taint"), None);
 }

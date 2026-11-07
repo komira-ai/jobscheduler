@@ -121,6 +121,10 @@ fn settings(plan: &ElasticPlan, whole: &WholeNodeConfig) -> Settings {
     settings.max_price_cents_per_hour = plan.limits.max_price_cents_per_hour;
     settings.quota_backoff = plan.failover.quota_backoff;
     settings.acquire_retry = plan.failover.acquire_retry;
+    // The check of a machine's hello against its offer (design 5.6.1, step 6): how far below
+    // the offer its sizes may be, and how long a mismatched offer cools down.
+    settings.size_tolerance_percent = plan.size_tolerance_percent;
+    settings.offer_cooldown = plan.offer_cooldown;
     settings
 }
 
@@ -161,6 +165,9 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
             (ScalerKeeper::Store(store), records, unremoved)
         }
     };
+    // The offer cool-downs the records hold (a hello that did not match its offer, before
+    // the restart) are in the catalogs before the scaler or anything else reads them.
+    parts.catalogs.hold(&records.offer_cooldowns());
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
     let launcher = Launcher::new(

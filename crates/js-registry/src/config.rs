@@ -3,8 +3,9 @@ use js_agent_wire::{
 };
 use js_provider::HostBook;
 use js_types::{
-    ACCEL_KEYS, Admission, ExecMode, HostId, MemoryHeadroom, MemoryPercent, ProviderId,
-    ResourceClass, Shape,
+    ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_KEYS, ACCEL_MEMORY_GIB_KEY,
+    ACCEL_MODEL_KEY, Admission, Capabilities, ExecMode, HostId, MemoryHeadroom, MemoryPercent,
+    Model, ProviderId, ResourceClass, Resources, Shape,
 };
 
 use crate::WholeNodeConfig;
@@ -69,6 +70,9 @@ pub struct PoolConfig {
     whole_node: Option<WholeNodeConfig>,
     exec: Option<ExecMode>,
     share_class: Option<ResourceClass>,
+    /// Each host is placed by the capabilities its hello reported on top of the pool's
+    /// (see [`PoolConfig::placing_by_hello`]).
+    by_hello: bool,
 }
 
 impl PoolConfig {
@@ -98,6 +102,7 @@ impl PoolConfig {
             whole_node: None,
             exec: None,
             share_class: None,
+            by_hello: false,
         }
     }
 
@@ -209,6 +214,29 @@ impl PoolConfig {
         self.whole_memory = true;
         self.rebook();
         self
+    }
+
+    /// The same pool, whose shape is a floor every host meets rather than what each host
+    /// is: each host is placed on the pool's booked shape with the capabilities its last
+    /// hello reported added, `arch` included, where the pool's shape does not name them
+    /// (the pool's value stays where both name a key), and with the hello's
+    /// `accelerator.*` facts as for any pool. A request then fits the pool when the pool's
+    /// shape fits its resources and the capabilities the pool's shape names
+    /// (`accelerator.*` included); the capabilities it does not name are the hosts' to
+    /// meet. For a pool whose hosts are launched from offers that may differ, such as in
+    /// `arch` (an elastic pool of the lease server). The numbers booked are still the
+    /// pool's. Without it a host is placed on the pool's shape with only the hello's
+    /// `accelerator.*` facts, and a request must fit the pool's shape whole.
+    #[must_use]
+    pub fn placing_by_hello(mut self) -> Self {
+        self.by_hello = true;
+        self
+    }
+
+    /// Whether each host is placed by the capabilities its hello reported
+    /// ([`PoolConfig::placing_by_hello`]).
+    pub fn places_by_hello(&self) -> bool {
+        self.by_hello
     }
 
     /// The booked shape and the fit shape from the shape, the execution mode and the
@@ -346,12 +374,49 @@ impl PoolConfig {
     /// as [`Self::booked`] does (the pool's numbers are the booking limits), but its
     /// `accelerator.*` capabilities are those of the claim, which a hello validated, and
     /// not the pool floor's, so placement sees the host's real family, variant facts and
-    /// measured memory. A host already listed and free is listed again with that shape; one
-    /// holding a lease keeps the shape it was booked with.
+    /// measured memory; in a pool that places by hello ([`Self::placing_by_hello`]) the
+    /// claim's other capabilities the pool's shape does not name are added too. A host
+    /// already listed and free is listed again with that shape. One holding a lease keeps
+    /// the shape it was booked with, except in a pool that places by hello, where it takes
+    /// the new shape with its leases (the numbers are the pool's either way): a host put
+    /// back with a lease after a restart, listed with the pool's shape alone, is then
+    /// placed by its hello as soon as it says one.
     pub(crate) fn list_claimed(&self, book: &mut HostBook, host: HostId, claim: Option<&Shape>) {
-        let shape = placement_shape(&self.booked, claim);
+        let shape = placement_shape(&self.booked, claim, self.by_hello);
         book.remove_free(&host);
+        if self.by_hello {
+            book.reshape(&host, shape.clone());
+        }
         book.insert_host_with(host, shape, self.memory_headroom());
+    }
+
+    /// Whether `request` fits the pool: [`Self::fit`] fits its resources and capabilities.
+    /// In a pool that places by hello ([`Self::placing_by_hello`]) only the capabilities
+    /// the fit shape names count, with the `accelerator.*` ones: the others are the hosts'
+    /// to meet, by what their hellos reported.
+    ///
+    /// Every hello is held to the fit shape, so its accelerator is a floor, not each host's:
+    /// unless it pins a variant, a host may be any variant of its family, with its own
+    /// memory per device, form factor and interconnect, and is placed by those
+    /// (`placement_shape`). Such a floor answers only for the vendor, the family and the
+    /// count, so a request it fits on those ([`floor_terms`]) fits the pool, and the hosts
+    /// answer for the rest. A floor that pins a variant answers for all of it.
+    pub(crate) fn fits(&self, request: &js_types::Request) -> bool {
+        let fit = &self.fit;
+        let named = |key: &String| {
+            ACCEL_KEYS.contains(&key.as_str()) || fit.capabilities().contains_key(key)
+        };
+        let mut wanted = request.capabilities.clone();
+        if self.by_hello {
+            wanted.retain(|key, _| named(key));
+        }
+        let pins = fit
+            .accelerator()
+            .is_some_and(|floor| floor.variant.is_some());
+        let whole = fit.satisfies(&request.resources, &wanted);
+        let terms = floor_terms(&request.resources, &wanted).filter(|_| !pins);
+        let vouched = terms.is_some_and(|(resources, wanted)| fit.satisfies(&resources, &wanted));
+        [whole, vouched].into_iter().any(|fits| fits)
     }
 
     pub(crate) fn max_machines(&self) -> usize {
@@ -370,19 +435,61 @@ impl PoolConfig {
         self.lost_retention_ms
     }
 }
+/// The accelerator keys whose facts only a host states: a floor that pins no variant
+/// cannot answer for them.
+const HOST_STATED: [&str; 3] = [
+    ACCEL_MEMORY_GIB_KEY,
+    ACCEL_FORM_FACTOR_KEY,
+    ACCEL_INTERCONNECT_KEY,
+];
+
+/// What of a request for `resources` and `capabilities` a floor that pins no accelerator
+/// variant answers for: its GPU class and `accelerator.model` read as their family (a name
+/// that is not a model name as written), and none of [`HOST_STATED`]. `None` when the
+/// resources cannot be built again, which a valid request never is.
+fn floor_terms(
+    resources: &Resources,
+    capabilities: &Capabilities,
+) -> Option<(Resources, Capabilities)> {
+    let family = |text: &str| {
+        let parsed = Model::parse(text).map(|model| model.canonical().model.to_string());
+        parsed.unwrap_or(text.to_owned())
+    };
+    let class = resources.gpu_class().map(family);
+    let (cpu, memory, gpus) = (
+        resources.cpu_millis(),
+        resources.memory_bytes(),
+        resources.gpus(),
+    );
+    let disk = resources.disk_bytes();
+    let resources = Resources::new(cpu, memory, gpus, class)
+        .ok()?
+        .with_disk_bytes(disk);
+    let mut capabilities = capabilities.clone();
+    capabilities.retain(|key, _| !HOST_STATED.contains(&key.as_str()));
+    let model = capabilities.get_mut(ACCEL_MODEL_KEY);
+    model.into_iter().for_each(|model| *model = family(model));
+    Some((resources, capabilities))
+}
+
 /// The shape a registered host is placed on: the resources and capabilities the pool books
 /// (`booked`), with its `accelerator.*` capabilities replaced by those of the host's
 /// validated claim, so its real family, variant facts and measured memory are matched while
-/// the pool's numbers stay the booking limits. A host without a claim keeps the pool's.
-pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>) -> Shape {
+/// the pool's numbers stay the booking limits. With `by_hello`
+/// ([`PoolConfig::placing_by_hello`]) the claim's other capabilities are added where
+/// `booked` does not name them; where both name one, the pool's value stays. A host without
+/// a claim keeps the pool's.
+pub(crate) fn placement_shape(booked: &Shape, claim: Option<&Shape>, by_hello: bool) -> Shape {
     let is_accel = |key: &String| ACCEL_KEYS.contains(&key.as_str());
     let mut capabilities = booked.capabilities().clone();
     capabilities.retain(|key, _| !is_accel(key));
-    let stated = claim.into_iter().flat_map(|claim| claim.capabilities());
-    capabilities.extend(
-        stated
-            .filter(|(key, _)| is_accel(key))
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
+    // Read against the pool's capabilities before any of the claim's is added.
+    let added: Vec<(String, String)> = claim
+        .into_iter()
+        .flat_map(|claim| claim.capabilities())
+        .filter(|(key, _)| is_accel(key) || (by_hello && !capabilities.contains_key(*key)))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    capabilities.extend(added);
     Shape::new(booked.resources().clone(), capabilities)
 }

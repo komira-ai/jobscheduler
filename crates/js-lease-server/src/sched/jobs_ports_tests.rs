@@ -14,7 +14,7 @@ use js_registry::Credential;
 use js_sched::Prediction;
 use js_sched::ceiling::{BeyondCeiling, within_ceiling};
 use js_sched_placer::engine::Placed;
-use js_sched_placer::engine::jobs::{JOB_TERM, JobStarts, NoStarts, job_request};
+use js_sched_placer::engine::jobs::{JOB_TERM, JobStarts, NoStarts, OpenHost, job_request};
 use js_sched_placer::map;
 use js_sched_placer::place::SchedPlacer;
 // The job's network level, named `Level` here as in `job_start.rs`: the server's own
@@ -23,8 +23,8 @@ use js_types::JobNetwork as Level;
 use js_types::{HostId, JobNetwork, Resources};
 
 use super::tests::{
-    NONE, booked, clock, finish, host, pass, placer_on, queue, queue_spec, run_to_exit, sized,
-    state,
+    NONE, booked, clock, finish, host, on_the_machine, pass, placer_on, queue, queue_spec,
+    run_to_exit, sized, state,
 };
 use crate::agent_api::job_rig::{placed, spec, tables};
 use crate::agents::{Agents, assemble_placed};
@@ -44,13 +44,17 @@ fn ceiling(level: JobNetwork, ports: &[u16]) -> NetworkCeiling {
 }
 
 /// The hosts `names`, each advertising `ceiling`.
-fn open_with(names: &[&str], ceiling: &NetworkCeiling) -> BTreeMap<HostId, NetworkCeiling> {
+fn open_with(names: &[&str], ceiling: &NetworkCeiling) -> BTreeMap<HostId, OpenHost> {
+    let offer = OpenHost {
+        ceiling: ceiling.clone(),
+        host_jobs: false,
+    };
     let hosts = names.iter().map(|name| host(name));
-    hosts.map(|host| (host, ceiling.clone())).collect()
+    hosts.map(|host| (host, offer.clone())).collect()
 }
 
 /// The hosts `names`, each at the level allow-list and forwarding the host port `port`.
-fn forwarding(names: &[&str], port: u16) -> BTreeMap<HostId, NetworkCeiling> {
+fn forwarding(names: &[&str], port: u16) -> BTreeMap<HostId, OpenHost> {
     open_with(names, &ceiling(Level::AllowList, &[port]))
 }
 
@@ -58,7 +62,7 @@ fn forwarding(names: &[&str], port: u16) -> BTreeMap<HostId, NetworkCeiling> {
 fn pass_with(
     placer: &SchedPlacer,
     jobs: &ServerJobs,
-    open: &BTreeMap<HostId, NetworkCeiling>,
+    open: &BTreeMap<HostId, OpenHost>,
 ) -> Vec<String> {
     let placed = placer
         .place_jobs(jobs, open, (&NoStarts, &NoMetrics))
@@ -248,6 +252,8 @@ impl JobStarts for PortsAtStart<'_> {
         let allocation = self.jobs.get_allocation(job).unwrap().unwrap();
         self.seen.lock().unwrap().push(allocation.host_ports);
     }
+
+    fn tainted(&self, _: &HostId, _: &JobId) {}
 }
 
 /// Asserts that the allocation row already holds the job's host ports when the start is
@@ -283,6 +289,33 @@ fn ports_commit_with_the_placement() {
     queue_spec(&jobs, "job-c", ported(&[8080]), 5);
     assert_eq!(pass_with(&placer, &jobs, &open), ["job-c"]);
     assert_eq!(starts.seen.lock().unwrap().len(), 1);
+}
+
+/// Asserts that a host-isolation job declaring a host port is placed like any other job on a
+/// host that runs host jobs and forwards the port: its allocation holds the port when the
+/// start is handed on, and a second job declaring it then waits. It catches a host job that
+/// skips the port checks.
+#[test]
+fn a_host_isolation_job_books_its_ports_like_any_other() {
+    let placer = placer_on(&clock(), &["host-a"]);
+    let (_store, jobs) = tables();
+    let mut open = forwarding(&["host-a"], 8080);
+    open.values_mut().for_each(|offer| offer.host_jobs = true);
+    let starts = PortsAtStart {
+        jobs: &jobs,
+        seen: Mutex::new(Vec::new()),
+    };
+    let host_job = JobSpec {
+        constraints: on_the_machine(1).constraints,
+        ..ported(&[8080])
+    };
+    queue_spec(&jobs, "job-a", host_job, 0);
+    placer
+        .place_jobs(&jobs, &open, (&starts, &NoMetrics))
+        .unwrap();
+    assert_eq!(*starts.seen.lock().unwrap(), [[8080]]);
+    queue_spec(&jobs, "job-b", ported(&[8080]), 0);
+    assert_eq!(pass_with(&placer, &jobs, &open), NONE);
 }
 
 /// Asserts that a placer built again over the same tables takes up the ports an allocation

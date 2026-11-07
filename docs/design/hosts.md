@@ -172,8 +172,8 @@ effect):
    never reused. A reclaim taint counts toward neither `max_taints_in_a_row` nor `max_boot_failures` (a flapping spot market is not a bad
    job class, K42).
 2. **Drain, as the existing drain does.** Work on the host runs until its end or the deadline, whichever is first; nothing is requeued
-   early for a run that can finish. The renewal answer of every lease on the host carries `host_leaving: true` and `leaves_at` (additive,
-   R3; the sibling of `host_reserved`, whole-node.md), asking the consumer to place nothing new there and to release when its work is
+   early for a run that can finish. The host's entry in `GET /v1/hosts` carries `host_leaving: true` and `leaves_at` (additive,
+   R3; beside `reserved_for`, whole-node.md), asking the consumer to place nothing new there and to release when its work is
    done; a consumer drains before it releases (9.1). A scheduler-placed run (ucdk) that has not started is requeued at once; one that is
    running is left to finish.
 3. **Reschedule at the deadline.** Whatever is still on the host when the deadline passes, or when the provider reads the instance

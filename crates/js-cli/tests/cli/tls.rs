@@ -20,7 +20,7 @@ fn https_works_with_the_certificate_trusted() {
     assert_eq!(got.code, 0, "{}", got.err);
     assert_eq!(
         got.out,
-        format!("lease 1-1 host gpu-01 expires {}\n", T0 + 600_000)
+        format!("lease 1-1 host gpu-01 ends {}\n", T0 + 7_200_000)
     );
     let listed = h.js.go(&["--ca-cert", ca, "lease", "list"]);
     assert!(
@@ -58,7 +58,6 @@ fn another_certificate_is_not_trusted_and_http_ignores_it() {
     let js = Js {
         server: plain.js.server.clone(),
         token_file: plain.js.token_file.clone(),
-        ..plain.js.clone()
     };
     let ignored = js.go(&["--ca-cert", ca.to_str().unwrap(), "lease", "list"]);
     assert_eq!(ignored.code, 0, "{}", ignored.err);

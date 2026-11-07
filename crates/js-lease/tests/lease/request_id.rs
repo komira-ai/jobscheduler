@@ -132,7 +132,7 @@ fn queued(scratch: &Scratch, clock: &ManualClock, boot: Boot) -> Queued {
 
 /// The pending lease the first acquire of `request` under `r1` makes over `table`.
 fn waiting_lease(table: &mut Queued, request: Request) -> LeaseId {
-    match table.acquire_with_id(id("r1"), request, None) {
+    match table.acquire_with_id(id("r1"), request) {
         Err(AcquireError::Unconfirmed(lease)) => lease,
         other => panic!("not pending: {other:?}"),
     }
@@ -142,7 +142,7 @@ fn waiting_lease(table: &mut Queued, request: Request) -> LeaseId {
 /// provider, which queues it; a repeat of the acquire then asks the provider nothing and
 /// answers the same pending lease. Past the prepare timeout (600 s) the lease is still
 /// pending, because each tick presented it again, under the same lease and request id, and
-/// its expiry is the prepare timeout from the last tick. When the provider places it, the
+/// its end is still the acquire plus its wall time. When the provider places it, the
 /// tick makes it held on the fake's host. It catches a waiting lease expired at the
 /// prepare timeout, a tick that observes it instead (the fake would answer absent and drop
 /// it), a presentation under a new lease or without the id, and a repeat that starts a
@@ -155,7 +155,7 @@ fn a_waiting_lease_is_presented_again_each_tick_until_placed() {
     let lease = waiting_lease(&mut table, asked());
     let carried = (lease, Some(id("r1")));
     assert_eq!(table.provider().starts, std::slice::from_ref(&carried));
-    let repeat = table.acquire_with_id(id("r1"), asked(), None);
+    let repeat = table.acquire_with_id(id("r1"), asked());
     assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
     assert_eq!(table.provider().starts.len(), 1, "a repeat calls nothing");
 
@@ -166,7 +166,7 @@ fn a_waiting_lease_is_presented_again_each_tick_until_placed() {
     assert_eq!(table.provider().starts, [carried.clone(), carried.clone()]);
     let listed = table.list();
     assert_eq!(listed[0].state, LeaseState::Pending);
-    assert_eq!(listed[0].expires_at, at(T0 + 700_000 + 600_000));
+    assert_eq!(listed[0].ends_at, at(T0 + 600_000));
 
     table.provider_mut().answer = Answer::Place;
     clock.advance(secs(5));
@@ -197,8 +197,8 @@ fn a_refused_presentation_drops_the_waiting_lease() {
 }
 
 /// Asserts what a repeat under a request id answers over the life of a lease the provider
-/// started at once: the lease as it stands while it is held (its expiry after a renewal
-/// included), with nothing booked a second time; a conflict naming the lease for the same
+/// started at once: the lease as it stands while it is held (its end as
+/// it was granted), with nothing booked a second time; a conflict naming the lease for the same
 /// id with another request, which leaves the lease alone; `lease-ended` while the lease is
 /// releasing; and, once the lease is gone, a new lease under the same id. It catches a
 /// retry that takes a second host, a conflict answered with the lease, a releasing lease
@@ -206,33 +206,32 @@ fn a_refused_presentation_drops_the_waiting_lease() {
 #[test]
 fn a_repeat_answers_the_lease_as_it_stands() {
     let (mut table, clock, _scratch) = fresh("request_id_repeat");
-    let first = table.acquire_with_id(id("r1"), asked(), None).unwrap();
-    let again = table.acquire_with_id(id("r1"), asked(), None).unwrap();
+    let first = table.acquire_with_id(id("r1"), asked()).unwrap();
+    let again = table.acquire_with_id(id("r1"), asked()).unwrap();
     assert_eq!(again, first);
     clock.advance(secs(10));
-    let renewed = table.renew(&first.id, None).unwrap();
-    let again = table.acquire_with_id(id("r1"), asked(), None).unwrap();
-    assert_eq!((again.id, again.expires_at), (first.id, renewed));
+    let again = table.acquire_with_id(id("r1"), asked()).unwrap();
+    assert_eq!((again.id, again.ends_at), (first.id, first.ends_at));
     assert_eq!(table.provider().booked().len(), 1);
 
     let other = Request {
         max_wall: secs(601),
         ..asked()
     };
-    let conflict = table.acquire_with_id(id("r1"), other, None);
+    let conflict = table.acquire_with_id(id("r1"), other);
     assert!(matches!(conflict, Err(AcquireError::RequestIdConflict(named)) if named == first.id));
     assert_eq!(states(&table), [(first.id, LeaseState::Held)]);
 
     table.provider_mut().script_unknown(Call::Stop, false);
     table.release(&first.id).unwrap();
-    let ended = table.acquire_with_id(id("r1"), asked(), None);
+    let ended = table.acquire_with_id(id("r1"), asked());
     assert!(matches!(
         ended,
         Err(AcquireError::Refused(RefusalCode::LeaseEnded))
     ));
     table.tick();
     assert!(table.list().is_empty());
-    let new = table.acquire_with_id(id("r1"), asked(), None).unwrap();
+    let new = table.acquire_with_id(id("r1"), asked()).unwrap();
     assert_ne!(new.id, first.id);
 }
 
@@ -257,9 +256,9 @@ fn the_request_id_and_the_request_survive_a_restart() {
     assert!(text.contains(row), "{text}");
 
     let mut table = queued(&scratch, &clock, Boot::Resume);
-    let repeat = table.acquire_with_id(id("r1"), probed(), None);
+    let repeat = table.acquire_with_id(id("r1"), probed());
     assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
-    let conflict = table.acquire_with_id(id("r1"), asked(), None);
+    let conflict = table.acquire_with_id(id("r1"), asked());
     assert!(matches!(conflict, Err(AcquireError::RequestIdConflict(named)) if named == lease));
     assert!(table.provider().starts.is_empty());
     table.tick();
@@ -273,7 +272,7 @@ fn the_request_id_and_the_request_survive_a_restart() {
 #[test]
 fn a_lease_without_a_request_id_has_no_request_row() {
     let (mut table, _clock, scratch) = fresh("request_id_none");
-    table.acquire(asked(), None).unwrap();
+    table.acquire(asked()).unwrap();
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(!text.contains("request"), "{text}");
 }
@@ -285,7 +284,7 @@ fn refused_after(name: &str, requests: &[(&str, Request)], good: &str, bad: &str
     let clock = clock();
     let mut table = queued(&scratch, &clock, Boot::Initialise);
     for (named, request) in requests {
-        let answer = table.acquire_with_id(id(named), request.clone(), None);
+        let answer = table.acquire_with_id(id(named), request.clone());
         assert!(
             matches!(answer, Err(AcquireError::Unconfirmed(_))),
             "{answer:?}"
@@ -356,14 +355,13 @@ fn two_leases_under_one_request_id_refuse_the_open() {
 /// Asserts which fields make the request: under one id, a request that differs from the
 /// first in the class, any resource dimension, a capability, the probe host, the
 /// validation run, a label or the wall time is a conflict naming the lease, each alone;
-/// one that differs only in the ttl is the same request and is answered with the lease, its
-/// expiry the first acquire's. It catches a field left out of the comparison (a changed
-/// request would be taken for the same) and a ttl taken into it (a retry with another
-/// ttl would be refused).
+/// the same request again is answered with the lease, its
+/// end the first acquire's. It catches a field left out of the comparison (a changed
+/// request would be taken for the same) and a repeat of the same request refused.
 #[test]
-fn each_field_of_the_request_counts_and_the_ttl_does_not() {
+fn each_field_of_the_request_counts() {
     let (mut table, _clock, _scratch) = fresh("request_id_fields");
-    let first = table.acquire_with_id(id("r1"), asked(), None).unwrap();
+    let first = table.acquire_with_id(id("r1"), asked()).unwrap();
     let base = asked;
     let with = |resources: Resources| Request {
         resources,
@@ -401,15 +399,13 @@ fn each_field_of_the_request_counts_and_the_ttl_does_not() {
         },
     ];
     for variant in variants {
-        let answer = table.acquire_with_id(id("r1"), variant.clone(), None);
+        let answer = table.acquire_with_id(id("r1"), variant.clone());
         let named =
             matches!(answer, Err(AcquireError::RequestIdConflict(lease)) if lease == first.id);
         assert!(named, "{variant:?}: {answer:?}");
     }
-    let other_ttl = table
-        .acquire_with_id(id("r1"), asked(), Some(secs(30)))
-        .unwrap();
-    assert_eq!(other_ttl, first);
+    let same = table.acquire_with_id(id("r1"), asked()).unwrap();
+    assert_eq!(same, first);
 }
 
 /// Asserts that a wall time with a part below a millisecond is kept exactly: the row holds
@@ -438,20 +434,20 @@ fn a_wall_time_below_the_millisecond_is_kept_exactly_across_a_restart() {
         };
         let mut table = queued(&scratch, &clock, Boot::Initialise);
         let lease = waiting_lease(&mut table, fine.clone());
-        let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
+        let repeat = table.acquire_with_id(id("r1"), fine.clone());
         assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
         drop(table);
         let text = fs::read_to_string(scratch.file()).unwrap();
         assert!(text.contains(row), "{text}");
 
         let mut table = queued(&scratch, &clock, Boot::Resume);
-        let repeat = table.acquire_with_id(id("r1"), fine.clone(), None);
+        let repeat = table.acquire_with_id(id("r1"), fine.clone());
         assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
         let off = Request {
             max_wall: Duration::from_micros(micros + 1),
             ..asked()
         };
-        let conflict = table.acquire_with_id(id("r1"), off, None);
+        let conflict = table.acquire_with_id(id("r1"), off);
         assert!(matches!(conflict, Err(AcquireError::RequestIdConflict(named)) if named == lease));
         table.tick();
         assert_eq!(table.provider().starts, [(lease, Some(id("r1")))]);
@@ -476,9 +472,9 @@ fn unknown_fields_of_the_request_row_survive_a_rewrite() {
 
     let mut table = queued(&scratch, &clock, Boot::Resume);
     assert_eq!(table.request_ids(), [(lease, id("r1"))]);
-    let repeat = table.acquire_with_id(id("r1"), asked(), None);
+    let repeat = table.acquire_with_id(id("r1"), asked());
     assert!(matches!(repeat, Err(AcquireError::Unconfirmed(same)) if same == lease));
-    let other = table.acquire_with_id(id("r2"), asked(), None);
+    let other = table.acquire_with_id(id("r2"), asked());
     assert!(
         matches!(other, Err(AcquireError::Unconfirmed(_))),
         "{other:?}"
@@ -502,26 +498,26 @@ fn an_id_names_nothing_once_its_lease_is_refused_or_gone() {
         resources: Resources::new(1000, 1, 9, Some("g".into())).unwrap(),
         ..asked()
     };
-    let refused = table.acquire_with_id(id("r1"), too_big, None);
+    let refused = table.acquire_with_id(id("r1"), too_big);
     assert!(
         matches!(refused, Err(AcquireError::Refused(_))),
         "{refused:?}"
     );
-    let held = table.acquire_with_id(id("r1"), asked(), None).unwrap();
-    clock.advance(secs(61));
+    let held = table.acquire_with_id(id("r1"), asked()).unwrap();
+    clock.advance(secs(600));
     assert_eq!(table.tick().freed, [held.id]);
     let other = Request {
         max_wall: secs(601),
         ..asked()
     };
-    let again = table.acquire_with_id(id("r1"), other, None).unwrap();
+    let again = table.acquire_with_id(id("r1"), other).unwrap();
     assert_ne!(again.id, held.id);
 
     let booked = table.provider().booked().len();
     break_dir(&scratch);
-    let unsaved = table.acquire_with_id(id("r2"), asked(), None);
+    let unsaved = table.acquire_with_id(id("r2"), asked());
     assert!(matches!(unsaved, Err(AcquireError::Save(_))), "{unsaved:?}");
-    let repeat = table.acquire_with_id(id("r2"), asked(), None);
+    let repeat = table.acquire_with_id(id("r2"), asked());
     assert!(
         matches!(repeat, Err(AcquireError::Unconfirmed(_))),
         "{repeat:?}"

@@ -15,9 +15,11 @@
 //!   registry's), and the registry's cordon of a host, saved before it is acknowledged.
 //! - [`Pools`], over the status of the pools ([`PoolStatus`]): what `GET /v1/pools` writes,
 //!   mapped here field by field, so nothing but the fields named below leaves the server.
-//! - [`History`], over the usage sink ([`SinkHistory`]): the ended bookings under
-//!   `usage/ended/`. It is absent when the server runs with `--usage-off`, and `GetUsage`
-//!   then answers an empty page.
+//! - [`History`], twice: over the usage sink ([`SinkHistory`]), the ended bookings of leases
+//!   under `usage/ended/`, absent when the server runs with `--usage-off`; and over the state
+//!   store under the job tables ([`StoreHistory`]), the rows under the same keys that each
+//!   free of a job's allocation writes. `GetUsage` lists both as one listing (`fleet_usage.rs`),
+//!   and answers an empty page when the server holds neither.
 //!
 //! The booked resources of a host are its live (booked or releasing) allocations in the job
 //! tables, in the order they were booked, then the leases still held on it through the lease
@@ -46,9 +48,7 @@ use js_proto::v1::{
 use js_provider::Held;
 use js_registry::{HostMark, HostState};
 use js_types::HostId;
-use js_usage::{
-    AllocationId, DrainOutcome, EndedKey, EndedPage, EndedQuery, EndedReason, EndedRow,
-};
+use js_usage::{AllocationId, DrainOutcome, EndedPage, EndedQuery, EndedReason, EndedRow};
 use tonic::{Request, Response, Status};
 
 use super::JobApi;
@@ -66,6 +66,11 @@ use crate::util::blocking;
 #[cfg(test)]
 #[path = "fleet_tests.rs"]
 mod tests;
+
+#[path = "fleet_usage.rs"]
+mod usage;
+
+pub(crate) use usage::StoreHistory;
 
 /// The page of `GetUsage` asked for with no size.
 const DEFAULT_PAGE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(99);
@@ -150,8 +155,10 @@ impl<T: ?Sized> fmt::Debug for Handle<T> {
 struct Served {
     hosts: Handle<dyn Hosts>,
     pools: Handle<dyn Pools>,
-    /// `None` with `--usage-off`.
+    /// The records of leases; `None` with `--usage-off`.
     history: Option<Handle<dyn History>>,
+    /// The records of jobs; `None` for a group served without the job store's.
+    jobs: Option<Handle<dyn History>>,
 }
 
 /// The state of the fleet group: nothing until it is served ([`Ctx::served`]).
@@ -184,8 +191,19 @@ impl Ctx {
                 hosts: Handle(hosts),
                 pools: Handle(pools),
                 history: history.map(Handle),
+                jobs: None,
             }),
         }
+    }
+
+    /// The same context listing the records of jobs' allocations in `jobs` too (`None`: no
+    /// job's record); a context not served yet is kept as it is.
+    pub(crate) fn with_job_history(mut self, jobs: Option<Arc<dyn History>>) -> Ctx {
+        self.served = self.served.map(|served| Served {
+            jobs: jobs.map(Handle),
+            ..served
+        });
+        self
     }
 }
 
@@ -276,7 +294,7 @@ pub(super) async fn list_providers(
     Ok(Response::new(ListProvidersResponse { providers }))
 }
 
-/// `GetUsage`: the ended bookings, oldest end first, a page at a time.
+/// `GetUsage`: the ended bookings of leases and of jobs, oldest end first, a page at a time.
 pub(super) async fn get_usage(
     api: &JobApi,
     request: Request<GetUsageRequest>,
@@ -285,12 +303,16 @@ pub(super) async fn get_usage(
     let request = request.into_inner();
     let after = match request.page_token.as_str() {
         "" => None,
-        token => Some(EndedKey::parse(token).ok_or_else(invalid_token)?),
+        token => Some(usage::Cursor::parse(token).ok_or_else(invalid_token)?),
     };
     let empty = Ok(Response::new(GetUsageResponse::default()));
-    let Some(history) = &served.history else {
-        return empty;
+    let sources = usage::Sources {
+        leases: served.history.as_ref().map(|history| &*history.0),
+        jobs: served.jobs.as_ref().map(|jobs| &*jobs.0),
     };
+    if sources.leases.is_none() & sources.jobs.is_none() {
+        return empty;
+    }
     // A filter no record can match (an id no allocation has) matches none.
     let host = filter(&request.host_id, |text| HostId::new(text).ok());
     let id = filter(&request.job_id, |text| AllocationId::parse(text).ok());
@@ -298,14 +320,14 @@ pub(super) async fn get_usage(
         return empty;
     };
     let query = EndedQuery {
-        after,
+        after: None,
         from_ms: request.from_ms.unwrap_or(0),
         before_ms: request.to_ms,
         host,
         id,
         limit: page_size(request.page_size),
     };
-    let page = history.0.page(query).await;
+    let page = usage::page(&sources, query, after).await;
     let page = page.map_err(|_| Status::unavailable(USAGE_UNAVAILABLE))?;
     Ok(Response::new(GetUsageResponse {
         records: page.rows.into_iter().map(record).collect(),

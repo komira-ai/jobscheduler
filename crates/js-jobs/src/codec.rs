@@ -1,4 +1,4 @@
-//! The bytes of the job, allocation and mark rows (the mark row's tags are in `mark_fields`).
+//! The bytes of the job, allocation, mark and taint rows (see `mark_fields`, `host_fields`).
 //!
 //! A row is a format byte ([`FORMAT`]) and then fields, each a tag (two bytes, big-endian),
 //! a length (four bytes, big-endian) and that many bytes of value:
@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
+use js_types::{HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
 
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, JobId};
@@ -40,16 +40,21 @@ use crate::record::{
 };
 
 mod file_fields;
+mod host_fields;
 mod mark_fields;
 mod result_fields;
 mod whole_fields;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use host_fields::job_host_tag;
+pub(crate) use host_fields::{decode_taint, encode_taint};
 pub(crate) use mark_fields::{decode_mark, encode_mark};
 
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`).
+/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation
+/// tag 47 in `host_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -327,8 +332,14 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     let constraints = &spec.constraints;
     row.put_opt(t::OS, constraints.os.as_deref().map(text));
     row.put_opt(t::ARCH, constraints.arch.as_deref().map(text));
-    row.put_opt(t::EXEC, constraints.exec.map(|exec| vec![exec_code(exec)]));
+    row.put_opt(
+        t::EXEC,
+        constraints
+            .exec
+            .map(|exec| vec![host_fields::exec_code(exec)]),
+    );
     row.put(t::CAPABILITIES, text_map(&constraints.capabilities));
+    host_fields::put_isolation(row, constraints.isolation);
     row.put(t::WALL_LIMIT_SECS, spec.wall_limit_secs.to_be_bytes());
     row.put(t::NETWORK, [network_code(spec.network)]);
     let ports: Vec<u8> = spec
@@ -740,21 +751,6 @@ fn state_of(tag: u16, value: Vec<u8>) -> Result<JobState, DecodeError> {
     }
 }
 
-fn exec_code(exec: ExecMode) -> u8 {
-    match exec {
-        ExecMode::Container => 0,
-        ExecMode::SandboxExec => 1,
-    }
-}
-
-fn exec_of(tag: u16, value: Vec<u8>) -> Result<ExecMode, DecodeError> {
-    match byte_of(tag, &value)? {
-        0 => Ok(ExecMode::Container),
-        1 => Ok(ExecMode::SandboxExec),
-        _ => Err(DecodeError::Newer),
-    }
-}
-
 fn network_code(network: NetworkPolicy) -> u8 {
     match network {
         NetworkPolicy::None => 0,
@@ -844,10 +840,11 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let constraints = Constraints {
         os: fields.opt(t::OS, text_of)?,
         arch: fields.opt(t::ARCH, text_of)?,
-        exec: fields.opt(t::EXEC, exec_of)?,
+        exec: fields.opt(t::EXEC, host_fields::exec_of)?,
         capabilities: fields
             .opt(t::CAPABILITIES, text_map_of)?
             .unwrap_or_default(),
+        isolation: host_fields::take_isolation(fields)?,
     };
     let wall_limit_secs = fields.need(t::WALL_LIMIT_SECS, u64_of)?;
     let network = fields.opt(t::NETWORK, network_of)?.unwrap_or_default();

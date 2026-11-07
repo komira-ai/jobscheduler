@@ -77,17 +77,30 @@ fn built(cloud: Cloud) -> Built {
     })
 }
 
+/// The files the configuration file of an elastic pool's server names.
+pub(crate) struct Files<'a> {
+    /// The lease file.
+    pub(crate) state: &'a Path,
+    /// The file that holds the client token.
+    pub(crate) token: &'a Path,
+    /// The store file (`server.store`): the line of the store the server keeps its state in.
+    pub(crate) store: &'a Path,
+    /// Whether that store is SQLite, which needs `server.allow_sqlite_store = true`.
+    pub(crate) allow_sqlite: bool,
+}
+
 /// The configuration file of a server whose one pool is `cloud`'s elastic pool: the lease
-/// file `state`, the client token in the file `token`, usage recording off, and booting `initialise` (which reads the
-/// lease file, the join tokens and the scaler's saved state when they are there, so a restart
-/// over the same files reads them too).
+/// file, the client token's file and the store's file of `files`,
+/// usage recording off, and booting `initialise` (which reads
+/// the lease file, and the join tokens and the scaler's saved state from the store, when
+/// they are there, so a restart over the same files and store reads them too).
 ///
 /// The pool is of class `whole-node` and launches for real (`launch = "live"`); its
 /// spending caps are what `max_instances` machines of its dearest offer cost, an hour and a
 /// day, so they never refuse a launch the instance limit allows. It names no shared join
 /// token: only the one-time tokens of its launched machines register hosts.
 #[must_use]
-pub fn text(cloud: &Cloud, state: &Path, token: &Path) -> String {
+pub(crate) fn text(cloud: &Cloud, files: &Files<'_>) -> String {
     let pool = cloud.pool();
     let dearest = pool.offers().iter().map(|offer| offer.cents_per_hour).max();
     let hour = dearest
@@ -100,11 +113,12 @@ pub fn text(cloud: &Cloud, state: &Path, token: &Path) -> String {
          state_file = {state}\n\
          boot = \"initialise\"\n\
          client_token_file = {token}\n\
+         store = {store}\n\
+         allow_sqlite_store = {allow_sqlite}\n\
          listen = \"127.0.0.1:0\"\n\
          agent_listen = \"127.0.0.2:0\"\n\
          advertise_url = {advertise}\n\
          max_lease_wall = \"2h\"\n\
-         max_ttl = \"2h\"\n\
          usage_off = true\n\
          \n\
          [[pool]]\n\
@@ -119,8 +133,10 @@ pub fn text(cloud: &Cloud, state: &Path, token: &Path) -> String {
          launch = \"live\"\n\
          agent = {{ x86_64 = {{ url = {url}, sha256 = {sha} }} }}\n\
          provider = {{ kind = {kind} }}\n",
-        state = quoted(&state.display().to_string()),
-        token = quoted(&token.display().to_string()),
+        state = quoted(&files.state.display().to_string()),
+        token = quoted(&files.token.display().to_string()),
+        store = quoted(&files.store.display().to_string()),
+        allow_sqlite = files.allow_sqlite,
         advertise = quoted(ADVERTISE_URL),
         name = quoted(pool.name()),
         max = pool.max_instances(),

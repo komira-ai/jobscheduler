@@ -100,7 +100,7 @@ fn leases_and_reservations_are_one_write() {
             .unwrap()
             .contains("req-a")
     );
-    table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap();
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(
         text.contains("[[lease]]") && text.contains("req-a"),
@@ -157,7 +157,7 @@ fn corrupt_reservation_rows_are_refused() {
 #[test]
 fn a_file_without_rows_loads_empty() {
     let (mut table, clock, scratch) = fresh("res_old");
-    table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap();
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(!text.contains("reservation"), "{text}");
     let table = reopen(table, &clock, &scratch);

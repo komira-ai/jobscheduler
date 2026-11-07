@@ -71,7 +71,7 @@ memory_bytes = 17179869184</pre></div>
     <p>With the agent heard by the server, a client leases the host:</p>
     <div class="code"><pre><span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h
 <span class="p">$</span> js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list</pre></div>
-    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; expires &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
+    <p><code>acquire</code> prints <code>lease &lt;id&gt; host &lt;host&gt; ends &lt;ms&gt;</code>. A whole-node lease is answered <code>pending</code> until the host's agent reports it ready, and the client looks at the list every two seconds for at most <code>--wait-pending</code>, 60 seconds by default, then releases a lease that is still pending. The token file is a regular file owned by you, mode 0600 or 0400.</p>
     <p class="source-note">From the module documentation of <code>crates/js-cli/src/lib.rs</code>.</p>
   </li>
 </ol>
@@ -82,6 +82,6 @@ memory_bytes = 17179869184</pre></div>
   <li><span class="tag tag-planned">none</span> A lease server for macOS.</li>
   <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.</li>
   <li><span class="tag tag-planned">none</span> A Debian package of the agent for arm64: the package is built for x86_64 only.</li>
-  <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start.</li>
+  <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start in every configuration, because no runtime launches a host job yet (crun and docker run contained jobs only).</li>
 </ul>
 <p class="source-note">Sources: <code>docs/release.md</code> ("What is released", "Assets" and the note on the macOS archives), the headers of <code>.github/workflows/js-agent-deb.yml</code> and <code>.github/workflows/js-agent-macos-pkg.yml</code> (the packages are not published), <code>crates/js-mdm/src/lib.rs</code> (what <code>js-mdm</code> is) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>

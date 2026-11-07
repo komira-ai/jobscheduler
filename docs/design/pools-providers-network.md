@@ -356,7 +356,7 @@ client_token_file = "/run/credentials/js/client-token"   # the existing client t
 tls_cert       = "/run/credentials/js/tls-cert"
 tls_key        = "/run/credentials/js/tls-key"
 max_lease_wall = "2h"                                    # the longest max_wall a lease may ask for; required with an accelerator pool (6.4)
-# tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
+# tick, timeouts: same names and defaults as today's flags
 
 [[pool]]
 name     = "gpu-static"
@@ -715,8 +715,8 @@ What the shell owes the host facts, because the step cannot tell otherwise:
 - `shape` is `Some` only for a host that announced one (the registry's `claim`), and `None`
   for a host that has not since the registry was put back after a restart (`Awaiting`). The
   shell never fills it with a stand-in such as the pool floor or the shape a record stored:
-  the first hello is compared with the offer, and a floor below the offer would condemn a
-  healthy machine and start the boot cooldown. A host with no shape covers no request.
+  the first hello is compared with the offer, and a floor below the offer would release a
+  healthy machine, cool its offer down and start the boot cooldown. A host with no shape covers no request.
 - `busy` is a live (booked or releasing) job allocation on the host, a whole-host one
   included, a lease the registry books on it, or runs the registry still has the host
   finish (`releasing`). For a silent host `busy` and `lease_given_up` never hold together:
@@ -860,13 +860,19 @@ Rules, each tied to a requirement or to existing behaviour:
   call; dropping the record while it does would leave the machine to turn up as an orphan,
   which is never released (6.4).
 - Booting to Registered: the first hello whose `instance.instance_id` equals the name is
-  admitted by the registry. The hello's shape is compared with the offer. A host that
-  reports less than its offer (cpu, memory, gpus, gpu class) is admitted but condemned: the
-  boot-failure cooldown below starts at once, and the host is drained and then released as soon as it is
-  quiet (`drain` and `release_host` are each checked under the registry's lock, so no work is
-  cut; a host that already has work is left until it is quiet; it is never taken back for a
-  request). Otherwise the real shape is the capacity, and the pending request
-  is placed by the registry's normal path on the consumer's next poll.
+  admitted by the registry (held to the pool's shape floor). At the scaler's next step the
+  hello's shape is compared with the offer recorded for the acquire (`js_scaler::verify_hello`,
+  design 5.6.1, step 6): accelerator model by canonical name after alias resolution,
+  accelerator count at least the offer's, the same architecture, and CPU, memory and disk
+  each at least the offer's less `size_tolerance_percent` (an architecture or a disk the
+  hello does not state is not judged). A match registers the machine, and the pending request
+  is placed by the registry's normal path on the consumer's next poll. A mismatch condemns it
+  and, in that step, goes Booting to Releasing (the token is revoked and the host marked
+  ending once the records are written, so nothing more is booked on it; a host that already
+  has work keeps it, as the release call waits while it holds work), cools the offer down for
+  `offer_cooldown` keyed by (provider, instance type, zone), kept in the records, and starts
+  the boot-failure cooldown below, which counts toward the brake. A record with no offer
+  (`StoredOffer::nothing`) or a host whose shape is not known is registered unjudged.
 - Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
   token's life is): the agent never said hello (or was refused `host-contract`). A host the
   registry shows has said hello, so a silent one is not released by this, with one exception: a registered host
@@ -1037,8 +1043,7 @@ Rules, each tied to a requirement or to existing behaviour:
   the machine's launch, the scaler retires the host: the registry marks it draining whether or not
   it is busy (`Registry::retire`), which takes no new lease and cuts none, and the release is asked
   only once the host is quiet. `max_lease_wall` is the ceiling on the `max_wall` a lease may ask
-  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`
-  whatever its renewals, so a retired host empties within the ceiling. Every launch also carries
+  for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`, so a retired host empties within the ceiling. Every launch also carries
   `max_age + max_lease_wall + prepare_timeout + unknown_hold + 10 minutes` as the lifetime the cloud
   itself should enforce, in `AcquireRequest::lifetime` (the prepare timeout and `unknown_hold` are
   the two waits a retire can meet: a whole-node lease's wall time starts after the first, a silent

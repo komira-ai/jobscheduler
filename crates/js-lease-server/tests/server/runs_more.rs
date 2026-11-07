@@ -1,11 +1,12 @@
 //! More of the run routes: a run id the server no longer holds, one lease reaching for
-//! another's run, what bounds a run in time while its lease is renewed, and a host that
+//! another's run, what bounds a run in time, and a host that
 //! reports a taint.
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use js_lease::Clock;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
@@ -108,18 +109,17 @@ async fn one_lease_cannot_reach_another_leases_run() {
     assert_eq!(stop(&h, &first, &run).await.status, 202);
 }
 
-/// Asserts that a run is bounded by the lease it was queued under even when the lease is
-/// renewed: the start carries the time left at each send (100 s, then 60 s after 40 s), a
-/// renewal does not stretch it, and once that time is up the reply carries a stop and no
-/// start, and the run is given up as never started while the lease lives on. It catches
-/// a start that never goes stale while the host is connected and a run that holds its
-/// budget for as long as its lease is renewed.
+/// Asserts that a run is bounded by the lease it was queued under: the start carries the
+/// time left to the lease's wall end at each send (100 s, then 60 s after 40 s), and once
+/// that time is up the reply carries a stop and no start, and the run is given up as never
+/// started; a run asked for after the wall end is refused `not-held`. It catches a start
+/// that never goes stale while the host is connected.
 #[tokio::test]
 async fn a_run_is_bounded_by_the_lease_time_it_was_queued_with() {
-    let h = start_agents("runs_bound_renewed", false).await;
+    let h = start_agents("runs_bound_wall", false).await;
     let me = join(&h, "burst-1").await;
     let mut ask = lease_body();
-    ask["ttl_seconds"] = json!(100);
+    ask["max_wall_seconds"] = json!(100);
     let granted = h.call("POST", "/v1/leases", Some(&ask)).await;
     let lease = granted.json()["id"].as_str().unwrap().to_string();
     let run = queued(&h, &lease, 8000).await;
@@ -133,10 +133,6 @@ async fn a_run_is_bounded_by_the_lease_time_it_was_queued_with() {
     assert_eq!(reply["commands"][0]["valid_for_ms"], 60_000);
     assert_eq!(reply["commands"][0]["limits"]["wall_ms"], 60_000);
 
-    let renewed = h
-        .call("POST", &format!("/v1/leases/{lease}/renew"), None)
-        .await;
-    assert_eq!(renewed.status, 200, "{}", renewed.body);
     for _ in 0..6 {
         h.clock.advance(Duration::from_secs(10));
         reply = beat(&h, &me, &[], &[]).await;
@@ -146,7 +142,35 @@ async fn a_run_is_bounded_by_the_lease_time_it_was_queued_with() {
     reply = beat(&h, &me, &[], &[]).await;
     assert!(words(&reply).is_empty());
     assert_eq!(state(&h, &lease, &run).await, "never-started");
-    assert_eq!(queue(&h, &lease, &run_body(8000)).await.status, 202);
+    let lapsed = queue(&h, &lease, &run_body(8000)).await;
+    assert_eq!(lapsed.json(), json!({ "error": "not-held" }));
+}
+
+/// Asserts that nothing but the lease's wall end bounds the time a run is given: the lease
+/// (wall time 7200 s) has been held for 700 s, well past the 600 s that used to be its
+/// time to live, and a run queued then is sent with `valid_for_ms` and a wall limit of
+/// exactly the time left, `ends_at_ms - now` (6 500 s). It catches a bound that is still
+/// taken from some other expiry, which would differ from the wall end by hundreds of
+/// seconds.
+#[tokio::test]
+async fn a_run_is_bounded_by_the_wall_end_alone() {
+    let h = start_agents("runs_wall_alone", false).await;
+    let me = join(&h, "burst-1").await;
+    let lease = lease(&h).await;
+    let listed = h.call("GET", "/v1/leases", None).await.json();
+    let ends = listed["leases"][0]["ends_at_ms"].as_u64().unwrap();
+    for _ in 0..7 {
+        h.clock.advance(Duration::from_secs(100));
+        beat(&h, &me, &[], &[]).await;
+    }
+    let now = h.clock.now().millis();
+    assert_eq!(ends - now, 6_500_000);
+
+    let run = queued(&h, &lease, 1000).await;
+    let reply = beat(&h, &me, &[], &[]).await;
+    assert_eq!(words(&reply), [format!("start {run}")]);
+    assert_eq!(reply["commands"][0]["valid_for_ms"], ends - now);
+    assert_eq!(reply["commands"][0]["limits"]["wall_ms"], ends - now);
 }
 
 /// Asserts what a taint report does end to end: the reply acknowledges it, `GET /v1/hosts`

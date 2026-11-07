@@ -62,6 +62,22 @@
 //!   The acquire id is the pool and 128 random bits the caller gives in [`Input::entropy`].
 //!   A launch the provider told to wait is retried when its time comes, if the pool is
 //!   `Live` and every cap still holds.
+//! * Hellos. The first hello of a booting machine is judged against the offer stored for
+//!   its acquire by [`verify_hello`] (design 5.6.1, step 6): accelerator model by canonical
+//!   name after alias resolution, accelerator count at least the offer's, the same
+//!   architecture, and CPU, memory and disk each at least the offer's less
+//!   [`Settings::size_tolerance_percent`]. A match registers the machine. A mismatch, in
+//!   the one step that judged it, condemns the record and starts its release (the token is
+//!   revoked, the shell marks the host ending after the save, and the provider is told to
+//!   terminate it every step until it is gone), cools the offer down for
+//!   [`Settings::offer_cooldown`] keyed by (provider, instance type, zone)
+//!   ([`Records::cooled_offers`], saved with the release, so a restart keeps it), and
+//!   counts a failed boot toward the pool's brake, so a wrong alias or a wrong catalog row
+//!   cannot loop acquire, release, acquire. A record with no offer to compare
+//!   ([`StoredOffer::nothing`]) is registered unjudged and named in [`State::unverified`];
+//!   a host whose shape is not known since a restart ([`HostFacts::shape`] `None`) is
+//!   registered unjudged too. A host the scaler did not launch has no booting record and
+//!   is never judged.
 //! * Answers. An acquire's answer is matched to its record by acquire id. `Unknown`
 //!   leaves the record unresolved until a list shows the machine or `unknown_hold` has
 //!   passed; a machine found after that is released and never uncounted.
@@ -114,7 +130,7 @@
 //!   machine runs in (`Held::ends_unix_seconds`, in its answer to an acquire and in each
 //!   list), the scaler keeps it in [`Record::ends_at`]. Until that instant the machine is
 //!   not drained as idle and not retired at `max_age`: the block is paid for to its end. A
-//!   machine that cannot serve (its hello was below its offer) is still drained. From the
+//!   machine whose hello did not match its offer is still released at once. From the
 //!   instant on, the rules above apply as for any machine, and a machine of the block that
 //!   the list shows terminated or preempted, or that a notice names, is released with no
 //!   strike on the brake and no cooldown, whatever phase it was in: the cloud took it back
@@ -153,6 +169,7 @@ mod scale;
 mod settings;
 mod state;
 mod time;
+mod verify;
 
 use std::collections::BTreeSet;
 
@@ -168,15 +185,17 @@ pub use input::{
     AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
-    Brake, Cooldown, CooldownReason, Go, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
-    StoredOffer, VERSION,
+    Brake, Cooldown, CooldownReason, Go, OLDEST, OfferCooldown, Phase, Record, Records,
+    RecordsError, StoredExec, StoredOffer, VERSION,
 };
 pub use settings::{
     ACQUIRE_RETRY, BOOT_FAIL_COOLDOWN_MAX, BOOT_FAIL_RESET_AFTER, BOOT_FAIL_TRIP_AFTER, Blocked,
-    Health, LaunchMode, QUOTA_BACKOFF, Settings, UNNAMED_PROVIDER,
+    Health, LaunchMode, OFFER_COOLDOWN, QUOTA_BACKOFF, SIZE_TOLERANCE_PERCENT, Settings,
+    UNNAMED_PROVIDER,
 };
 pub use state::{AcquirePlan, Action, PlanLine, State};
 pub use time::Millis;
+pub use verify::{HelloDimension, Verdict, verify_hello};
 
 /// One step of the scaler at `now`: applies the provider's answers, the lists and the
 /// hosts' hellos to `state`, then decides what to drain, release and launch.
@@ -186,6 +205,7 @@ pub use time::Millis;
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     let before = state.records.clone();
     let mut pass = Pass::new(state, input, now);
+    pass.records.forget_cooled_offers(now);
     pass.reset_brakes();
     pass.end_go();
     for pool in &input.pools {

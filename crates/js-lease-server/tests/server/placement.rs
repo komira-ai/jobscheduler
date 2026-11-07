@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use js_lease_server::{Cli, Config};
 
 use crate::agents_support::JOIN;
-use crate::config_support::{PoolText, file, load, refusal, server};
+use crate::config_support::{PoolText, file, load, quote, quoted, refusal, server};
 use crate::support::{Scratch, base_args, config};
 
 /// A pool of up to two machines with a node report: the scheduler describes a host by
@@ -56,6 +56,16 @@ fn args_over(scratch: &Scratch, pool: &str, extra: &[&str]) -> Vec<OsString> {
 /// The flags of a server with agent registration over [`POOL`], and `extra` after them.
 fn args(scratch: &Scratch, extra: &[&str]) -> Vec<OsString> {
     args_over(scratch, POOL, extra)
+}
+
+/// An elastic pool whose hosts register agents; its floor names no capability.
+fn elastic_pool(scratch: &Scratch) -> PoolText {
+    let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
+    PoolText::elastic(scratch)
+        .set("name", &quote("burst"))
+        .set("class", &quote("gpu-host"))
+        .set("exec", &quote("none"))
+        .set("join_token_file", &quoted(&joins))
 }
 
 fn parsed(args: Vec<OsString>) -> Result<Config, String> {
@@ -157,13 +167,16 @@ fn placement_registry_is_refused_with_a_clear_message() {
     );
 }
 
-/// Asserts that a pool whose shape the scheduler cannot take as a node (no `arch`) is
-/// refused with no flag and no key, naming the pool's flag (`--agent-pool-config`) or the
-/// pool of the file, and the missing `arch`: with `js-sched` the only placement, no lease
-/// could be placed on its hosts. Giving `--placement js-sched` does not change the
-/// refusal.
+/// Asserts that an agent or joined pool whose shape the scheduler cannot take as a node
+/// (no `arch`) is refused with no flag and no key, naming the pool's flag
+/// (`--agent-pool-config`) or the pool of the file, and the missing `arch`: with `js-sched`
+/// the only placement, no lease could be placed on its hosts. Giving `--placement
+/// js-sched` does not change the refusal. An elastic pool, whose floor names no `arch`
+/// either, starts with no warning: its hosts are placed by the `arch` their agents report
+/// at hello. It catches an arch-less agent or joined pool let through, and an elastic pool
+/// refused for the floor its hosts are not placed by.
 #[test]
-fn a_pool_with_no_arch_is_refused_with_no_flag() {
+fn a_pool_with_no_arch_is_refused_with_no_flag_but_not_an_elastic_one() {
     let scratch = Scratch::new("placement_no_arch");
     let bare = POOL.replace("arch = \"x86_64\"", "isa = \"x86-64-v3\"");
     let expected = "--agent-pool-config: the pool's shape cannot be taken as a node by the scheduler (shape does not describe a node: the node report has no \"arch\" entry); give the pool capabilities with an arch";
@@ -178,4 +191,8 @@ fn a_pool_with_no_arch_is_refused_with_no_flag() {
         said,
         "pool \"burst\": the pool's shape cannot be taken as a node by the scheduler (shape does not describe a node: the node report has no \"arch\" entry); give the pool capabilities with an arch"
     );
+    let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
+    let table = server(&scratch, listeners);
+    let elastic = load(&scratch, &file(&table, &[&elastic_pool(&scratch)])).unwrap();
+    assert!(elastic.warnings().is_empty(), "{:?}", elastic.warnings());
 }

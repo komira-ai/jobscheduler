@@ -47,6 +47,13 @@ What is real, the production code as it runs in the server:
 - the registry (`js-registry`): registration through the real hello and its limiter, loss
   after the grace, forgetting after the lost retention;
 - the lease table (`js-lease`), which times its saves on the cell's clock;
+- the store the server keeps its host bindings, join tokens and scaler's records in
+  (`--store`, `server.store` for an elastic pool's server): by default a SQLite file in
+  the server's directory, with `--allow-sqlite-store`, or a Postgres database of its own
+  for each server node with the crate's `postgres` feature (`Store`,
+  `ServerSpec::store`, `Scenario::over_store`), opened by the server from the store file
+  and nothing else. A restart opens the same store; the cell reads it only while the
+  server is down (`ServerNode::stored`), to check what a stop left in it;
 - the scaler and placement, as the server's tick runs them every 5 s of virtual time. The
   cell's pool is one whose hosts register themselves, unless it is an elastic pool
   (`ServerSpec::elastic_pool`): then the server reads a configuration file whose one pool
@@ -107,8 +114,12 @@ length; the kernel itself is described in the crate doc of `js-sim`, and
 ## Run one
 
 CI runs every test binary of the cell on each pull request, in the `test` job
-(`cargo test --workspace --locked --no-fail-fast`) and again under coverage. Where you
-build, one family runs with:
+(`cargo test --workspace --locked --no-fail-fast`) and again under coverage, every store
+scenario over SQLite. The Postgres cases are built only with the crate's `postgres`
+feature, and the `state-postgres` job runs them against its Postgres service
+(`cargo test -p js-sim-cell --features js-sim-cell/postgres --locked --test store --test server`);
+they need the server `KBF_TEST_POSTGRES_URL` names and fail, never skip, without it. Where
+you build, one family runs with:
 
 ```sh
 cargo test -p js-sim-cell --test smoke
@@ -141,7 +152,7 @@ with `#[path = ...]`; they are not binaries of their own.
 | `faults` | `tests/faults.rs` | The fault family: agents that die and return, agents killed for good, a 30 s partition that heals, a lossy wire, a silent host holding a run it never listed, a start after its stop, a restart of the server, and a forgotten host seated again, each over sixteen seeds; three negative cases with defective agents. |
 | `fault_actions` | `tests/fault_actions.rs` | The machinery the fault family added: a restart of the server (refused, down, and up again), an agent killed for good, the count of a cut agent's unlisted run, and `Expect::launched_on`. |
 | `builder` | `tests/builder.rs` | The scenario builder and the lease front, each shown to fail when it should. |
-| `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire. |
+| `server` | `tests/server.rs` | The real server with real agents in the cell, driven through the `Cell` API directly: registration, loss and forgetting, a lease and a run on the real wire; and the store: the `--store` file the cell writes and the server takes, a host joined with a minted token, a read of the store while the server is down, a second server refused on the store of a running one, and, with the `postgres` feature, a run's database dropped when the run ends. |
 | `agent` | `tests/agent.rs` | The agent node against a scripted stand-in for the server, its side of the whole-host handshake included. |
 | `real_agent` | `tests/real_agent.rs` | The real agent node (the lifecycle of `js-agent` over the in-memory runtime) against the same scripted stand-in. |
 | `agreement` | `tests/agreement.rs` | The agreement family: each scenario run with every agent fake and again with every agent real, and the client's outcome of every item compared seed by seed. |
@@ -150,7 +161,8 @@ with `#[path = ...]`; they are not binaries of their own.
 | `whole_host_faults` | `tests/whole_host_faults.rs` | The whole-host fault family: hosts silent on a prepare, a refused prepare for each refusal reason, a drain behind busy hosts, a ready report racing the prepare deadline (a scenario per second of the sweep), an agent that restarts while its host is committed, a cancelled request (queued and marked), and a held lease whose agent restarts, each over sixteen seeds. The scenarios are in `tests/cell/whole_host_faults.rs` and `tests/cell/whole_host_cancel.rs`. |
 | `whole_host_parts` | `tests/whole_host_parts.rs` | The parts of the whole-host machinery, each shown to work and to fail: the lease front's whole-host path (under its own request id, a given one or none) and the answers it keeps, the actions that set how agents answer a prepare, request whole hosts and cancel a marked request, the whole-host expectations (on a raw answer, on the server as it stands when judged, at the end or at a virtual time, and over a request's tries), the list of refusal reasons, and the server spec's class, whole-node keys and architecture. |
 | `migrated_whole_host` | `tests/migrated_whole_host.rs` | The whole-host placement and failover tests of the lease server's HTTP suite, moved onto the cell: one scenario per moved test, named by it, each assertion an `Expect` at the same virtual time, run in the old test's world and at fifty hosts over sixteen seeds; and a negative case per scenario, its old world with agents that answer the prepare the wrong way. |
-| `elastic` | `tests/elastic.rs` | The elastic family: a hundred whole-host runs scale an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over sixteen seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, and the operator's brake reset. The scenarios are in `tests/cell/elastic.rs`. |
+| `elastic` | `tests/elastic.rs` | The elastic family: a hundred whole-host runs scale an empty pool of at most forty machines up and back to none, billed as EC2 bills and as Lambda bills, each over sixteen seeds; and cells driven by hand: a machine that boots with the token of its launch payload, the recording wrapper's times, a pool that does not join, machines the cloud drops or preempts, a foreign machine, the operator's brake reset, and an acquire armed to crash the server (down from the tick of that acquire until a restart, after which no second acquire is made). The scenarios are in `tests/cell/elastic.rs`. |
+| `store` | `tests/store.rs` | The store family: a restart over the store, a stop of the server in a burst of hellos that consume join tokens, a second server on the store of a running one, and a crash of the server at the scaler's acquire, each over sixteen seeds over SQLite and, with the `postgres` feature, over eight seeds over Postgres; and with the feature, the same seeds' trace hashes compared between the two stores. The scenarios are in `tests/cell/store.rs`. |
 | `replay` | `tests/replay.rs` | Whether a seed replays, the failure report, and the golden trace hashes. |
 | `docs` | `tests/docs.rs` | The check that holds this page to the crate. |
 
@@ -321,7 +333,9 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `ServerSpec::whole_node_pool(pool, shape, count)`, with `.prepare_timeout(d)`,
   `.reserve_backoff(d)` and `.max_replace(n)` for the pool's whole-node keys (a
   registered pool's shape is given `arch = x86_64` when it names none, since the
-  server's one placement, `js-sched`, takes a host by its `arch`);
+  server's one placement, `js-sched`, takes a host by its `arch`); `.over_store(store)` after `.server(...)` to keep
+  the server's state in `Store::Sqlite` (the default) or, with the `postgres` feature,
+  `Store::Postgres` (the scenario's name gains the store);
 - the work: `.work(count, Work::run_for(d))`, with `.give_up_after(d)` and `.needs(r)`;
   a whole host with `Work::whole_host(d)`, asked for under a request id of the item's own,
   under a given one with `.with_request_id(id)`, or under none with
@@ -331,7 +345,14 @@ What a scenario can say, all of it in `crates/js-sim-cell/src/scenario/`,
   `submit_work`, `cancel_work(items(range))`, `kill_agents`, `replace_agents`,
   `kill_agents_for_good` (a host gone, not a fault), `partition_agents(agents, lasting)`,
   `set_bus_faults(faults)` and `restart_server()` (the server started again over its
-  files with `--boot resume`); for whole hosts, `request_whole_host`,
+  files and store with `--boot resume`); for the store, `stop_server()` (the server
+  stopped between two inputs, its store read while it is down, until a `restart_server`),
+  `start_second_server()` (a second server on the store, stopped again at once if it
+  starts), `mint_join_token(count)` (one-time tokens through the operator route) and
+  `join_agents(tokens)` (a host for each minted token, saying hello with it); for an
+  elastic pool, `crash_at_next_acquire()` (the server stopped at the end of the tick in
+  which the scaler's next acquire reached the cloud, answered as for a lost answer); for
+  whole hosts, `request_whole_host`,
   `agent_prepare_delay`, `agent_refuses_prepare`, `agent_silent_on_prepare` and
   `cancel_when_set_aside(item, within)` (the item cancelled at the first read of the
   listing that shows a host set aside for it). Agents are named by
@@ -533,9 +554,12 @@ family `faults` the first four seeds of the restart of the server with runs in f
 whole-host requests, and family `whole_host_faults` the
 first two seeds of the cancelled whole-host request (`tests/cell/whole_host_cancel.rs`),
 family `jobs` the first seed of jobs over
-the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts), and family
+the job front on a lossy agent wire (`tests/cell/jobs.rs`, eight hosts), family
 `elastic` the first seed of the EC2-like elastic pool scaled up to forty machines and back
-to none (`tests/cell/elastic.rs`). A trace hash covers the
+to none (`tests/cell/elastic.rs`), and family `store` the first two seeds of the restart
+over a SQLite store (`tests/cell/store.rs`). With the `postgres` feature,
+`tests/store.rs` holds the same seeds over Postgres to the `store` lines, so one file pins
+both stores. A trace hash covers the
 cell's trace and the kernel's, so it moves when a decision of the server, the agents, the
 client driver or the scenario builder changes, or when the text of a trace line changes.
 It must not move for a change that only moves code. (The kernel has a golden file of its
@@ -546,8 +570,9 @@ own, `crates/js-sim/tests/golden/trace-hashes.txt`.)
 `the_real_agent_scenario_matches_the_golden_file`,
 `the_whole_host_scenario_matches_the_golden_file`,
 `the_whole_host_fault_scenario_matches_the_golden_file`,
-`the_job_scenario_matches_the_golden_file` and
-`the_elastic_scenario_matches_the_golden_file` fail on a moved
+`the_job_scenario_matches_the_golden_file`,
+`the_elastic_scenario_matches_the_golden_file` and
+`the_store_scenario_matches_the_golden_file` fail on a moved
 hash and print the command
 that regenerates the lines:
 
@@ -597,6 +622,17 @@ model:
   (`crates/js-elastic-fake/tests/conformance.rs`) and the server's end-to-end test over it
   (`crates/js-lease-server/tests/server/elastic_fake_e2e.rs`).
 - **Usage recording.** Its store reads the system's clock, so the cell turns it off.
+- **A failed commit of the server's store.** The server opens its store from the store
+  file and takes no store from its caller, so the cell cannot make one of its commits
+  fail (design section 7, "State write fails when a job is placed", and section 8, row
+  27, have no scenario). The server's own tests fail a commit through a wrapper over the
+  in-memory fake (`crates/js-lease-server/src/agent_api_store_tests.rs`). A stop of the
+  server falls between two inputs, never inside one, so a commit cut in half is not
+  modelled either.
+- **The store's clock.** The server opens a SQLite store on the system's clock, which it
+  takes from no seam. It writes no key with a time to live, so no decision reads that
+  clock; the cell's own read of the store, while the server is down, uses the cell's
+  clock.
 - **Jobs that book GPUs, and whole-host jobs.** The server sends no start for a job that
   books GPUs (it records no device indices), so the job front asks for a work's cpu and
   memory only and submits no whole-host job; a whole-host item is asked for as a lease. The job
@@ -612,9 +648,11 @@ and how much of each. A row not listed has no scenario.
 |---|---|---|---|
 | 3 | `a_restart_of_the_server_with_runs_in_flight_double_books_nothing` | `tests/cell/server_restart.rs` | The server is stopped and started again over its lease file (`--boot resume`) with runs in flight; nothing is launched twice, no lease moves host, no host takes a new lease while it runs a run of before the restart, and everything settles. What becomes of the runs in flight (the row's subject) is not asserted: as built they are forgotten. |
 | 4 | `ten_of_two_hundred_agents_die_mid_run` | `tests/faults.rs` | Ten of two hundred agents die with their state and new processes say hello holding nothing; every item is terminal, nothing runs twice, and the replaced hosts take work again (`launched_on`). That the runs become lost with no result is not asserted. |
-| 25 | `a_whole_host_lease_whose_agent_restarts_after_it_is_held` | `tests/cell/whole_host_faults.rs` | A held whole-host lease's agent is started again with empty state and says hello once its host reads lost; the hello ends the lease's run, the client releases the lease, and a waiting request is then held on the host. The row's hazard (the registry ending a held booking the lease table keeps) needs a client that keeps the lease past the hello's prepare deadline, which the lease front does not: the scenario shows no double booking along this path and does not assert the table's state, renew or a run call. |
+| 25 | `a_whole_host_lease_whose_agent_restarts_after_it_is_held` | `tests/cell/whole_host_faults.rs` | A held whole-host lease's agent is started again with empty state and says hello once its host reads lost; the hello ends the lease's run, the client releases the lease, and a waiting request is then held on the host. The row's hazard (the registry ending a held booking the lease table keeps) needs a client that keeps the lease past the hello's prepare deadline, which the lease front does not: the scenario shows no double booking along this path and does not assert the table's state or a run call. |
 | 31 | `a_lossy_wire_launches_every_run_once` | `tests/faults.rs` | A fifth of the agent wire's messages lost and the rest delayed up to 3 s each way, with runs shorter than the heartbeat interval; the server sends starts again (witness `start_repeated`) and every run is launched once. Agents that run a repeated start fail `at-most-one-launch`. |
 | 31 | `an_agent_that_relaunches_a_repeated_start` | `tests/broken_agent.rs` | The server sends a start again (runs shorter than the heartbeat interval on a bus slower than it); agents that run the repeated start fail `at-most-one-launch`, correct agents pass with the witness `start_repeated` held. The other half of the row, an agent restart that empties the retired list, has no scenario. |
+| 33 | `a_hello_that_consumes_a_join_token_commits_the_binding_with_it` | `tests/cell/store.rs` | Twelve hosts with join tokens of their own say hello at once and the server is stopped between two of their hellos; the store, read while the server is down, holds a binding for every used token and a used token for every binding to one, and after the restart every host is seated and serving, over SQLite and Postgres. The row's failed bindings save is not run: the cell cannot fail a commit, and the hosts take no host credential. |
+| 34 | `the_scaler_records_survive_a_restart_and_launch_nothing_twice` | `tests/cell/store.rs` | The server crashes at the scaler's first acquire, after the call reached the cloud and before its answer was read; the restarted scaler finds the machine its stored record names, makes no second acquire, and the machine's agent joins with the token minted before the launch, over SQLite and Postgres. That a retried launch's token is the one the machine booted with is not asserted: the scaler retries nothing here. |
 | 35 | `a_silent_host_is_never_given_a_second_copy_of_its_run` | `tests/faults.rs` | Agents are cut off longer than the grace while they run a run no heartbeat of theirs had listed (witness `cut_with_unlisted_run`); the run is never run on another host. The start timeout of the row is not built and not asserted. |
 | 38 | `a_stale_start_after_a_stop_does_not_run` | `tests/faults.rs` | The stale-start situation of the row below (the same settings), over sixteen seeds with every invariant of the fault family on. |
 | 38 | `an_agent_that_never_retires_a_stopped_run` | `tests/broken_agent.rs` | Every item is cancelled while its start is still on the bus, and a start arrives after the stop that follows it; agents that do not retire the stopped run fail `at-most-one-launch`, correct agents pass with the witness `start_after_stop` held. That the allocation is freed in the same commit is not asserted. |
@@ -639,9 +677,23 @@ of an unknown job"), and its replacement is that of rows 4 and 31 (a host whose
 containers and retired list died with the agent), so a scenario that pins either row
 with fake agents is held to the real one there.
 
+The store family (`tests/store.rs`, its scenarios in `tests/cell/store.rs`) runs every
+invariant of `Invariant::ALL` over SQLite and, with the `postgres` feature, over
+Postgres. Beside rows 33 and 34 above it covers section 6.7's restart recovery over the
+store (`a_restart_over_the_store_keeps_every_host_binding_and_lease`: every host seated
+once again under its id, a token used before the restart refused as used after it, an
+unused one still admitting its host, nothing launched twice) and its first step, the
+writer lock
+(`a_second_server_over_the_same_store_is_refused_while_the_first_holds_the_lock`: a
+second server refused with the line that names the lock while the first runs
+undisturbed, and started once the first is stopped). What becomes of the runs in flight
+at the restart is not asserted (row 3 is Open). With the feature it also holds the stand-in
+to Postgres: `the_sqlite_and_postgres_stores_give_the_same_trace_hash` compares the trace
+hashes of a fixed list of scenarios and seeds over the two stores.
+
 The elastic family (`tests/elastic.rs`) covers no row of section 8 yet: row 16 (a scaler
-tick skipped while the last is busy) needs a slow provider, and row 34 (the token of a
-retried launch) a crash after a launch, which the family does not script. It covers section
+tick skipped while the last is busy) needs a slow provider; the crash after a launch of row
+34 is the store family's (above), not this family's. It covers section
 7's "Scaler double launch" (each acquire id launched one machine, and the cloud never ran
 more of the scheduler's machines than `max_instances`) and section 6.5's idle release (every
 machine released once quiet), under every invariant of `Invariant::ALL`; its bill check

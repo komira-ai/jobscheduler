@@ -1,4 +1,4 @@
-//! When a lease started: the moment its ttl and maximum wall time started counting, which
+//! When a lease started: the moment its maximum wall time started counting, which
 //! the file keeps so that a provider restored from it ([`read_bookings`]) can count a
 //! lease's expected end from its start. A lease started at its acquire writes nothing new;
 //! a whole-node lease observed ready later writes `started_at_ms`.
@@ -29,7 +29,7 @@ pub(crate) const READY_AFTER_MS: u64 = 300_000;
 pub(crate) fn ready_later(scratch: &Scratch, clock: &ManualClock) -> PlainTable {
     let mut table = table(scratch, clock, Boot::Initialise);
     table.provider_mut().script_unknown(Call::Start, true);
-    table.acquire(request(3600), None).unwrap_err();
+    table.acquire(request(3600)).unwrap_err();
     clock.advance(secs(READY_AFTER_MS / 1000));
     assert_eq!(table.tick().confirmed, vec![LeaseId::new(1, 1)]);
     table
@@ -57,20 +57,20 @@ fn a_lease_ready_after_its_acquire_keeps_its_start_through_the_file() {
     assert_eq!(bookings[0].started_at, at(ready));
     assert_eq!(bookings[0].ends_at, at(ready + 3_600_000));
 
-    // Within the lease's 60 s ttl, so the restart finds it held and a renewal saves.
+    // Within the lease's wall time, so the restart finds it held; a second acquire saves.
     let provider = first.into_provider();
     clock.advance(secs(30));
     let boot = Boot::Resume;
     let mut second = LeaseTable::open(provider, clock.clone(), settings(), scratch.file(), boot);
     let second = second.as_mut().unwrap();
     assert_eq!(states(second), vec![(LeaseId::new(1, 1), LeaseState::Held)]);
-    second.renew(&LeaseId::new(1, 1), Some(secs(60))).unwrap();
+    second.acquire(request(60)).unwrap();
     let again = fs::read_to_string(scratch.file()).unwrap();
     assert!(
         again.contains(&format!("started_at_ms = {ready}\n")),
         "{again}"
     );
-    assert_eq!(read_bookings(scratch.file()).unwrap(), bookings);
+    assert_eq!(read_bookings(scratch.file()).unwrap()[0], bookings[0]);
 }
 
 /// Asserts that a lease whose start answers at once started at its acquire: the file gains
@@ -82,7 +82,7 @@ fn a_lease_started_at_its_acquire_writes_no_start_and_reads_its_acquire() {
     let scratch = Scratch::new("started_at_acquire");
     let clock = clock();
     let mut table = table(&scratch, &clock, Boot::Initialise);
-    table.acquire(request(3600), None).unwrap();
+    table.acquire(request(3600)).unwrap();
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(!text.contains("started_at_ms"), "{text}");
     let bookings = read_bookings(scratch.file()).unwrap();
@@ -95,7 +95,7 @@ fn held_file(extra: &str) -> String {
     format!(
         "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n\
          [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"h1\"\n\
-         acquired_at_ms = 1000000\nexpires_at_ms = 1060000\nends_at_ms = 4600000\n{extra}"
+         acquired_at_ms = 1000000\nexpires_at_ms = 4600000\nends_at_ms = 4600000\n{extra}"
     )
 }
 
@@ -164,7 +164,7 @@ fn a_failed_save_at_readiness_keeps_the_ready_time_for_the_next_save() {
     let clock = clock();
     let mut table = table(&scratch, &clock, Boot::Initialise);
     table.provider_mut().script_unknown(Call::Start, true);
-    table.acquire(request(3600), None).unwrap_err();
+    table.acquire(request(3600)).unwrap_err();
     clock.advance(secs(READY_AFTER_MS / 1000));
     break_dir(&scratch);
     let report = table.tick();
@@ -191,7 +191,7 @@ fn the_start_survives_restarts_while_pending_and_while_releasing() {
     let clock = clock();
     let mut first = table(&scratch, &clock, Boot::Initialise);
     first.provider_mut().script_unknown(Call::Start, true);
-    first.acquire(request(3600), None).unwrap_err();
+    first.acquire(request(3600)).unwrap_err();
     let provider = first.into_provider();
     clock.advance(secs(100));
     let resume = |provider, clock: &ManualClock| {
@@ -248,7 +248,7 @@ fn the_start_at_the_edges_of_the_clock() {
         let clock = clock();
         let mut table = table(&scratch, &clock, Boot::Initialise);
         table.provider_mut().script_unknown(Call::Start, true);
-        table.acquire(request(wall_secs), None).unwrap_err();
+        table.acquire(request(wall_secs)).unwrap_err();
         step(&clock);
         assert_eq!(table.tick().confirmed, vec![LeaseId::new(1, 1)]);
         let text = fs::read_to_string(scratch.file()).unwrap();

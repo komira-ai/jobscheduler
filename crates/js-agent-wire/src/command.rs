@@ -33,6 +33,14 @@ pub enum Isolation {
     Host,
 }
 
+impl Isolation {
+    /// Whether this is [`Isolation::Contained`], the value a start leaves out.
+    #[must_use]
+    pub fn is_contained(&self) -> bool {
+        *self == Self::Contained
+    }
+}
+
 /// What the agent must enforce on a job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {

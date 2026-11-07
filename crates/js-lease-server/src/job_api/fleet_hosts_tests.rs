@@ -21,6 +21,7 @@ fn view(id: &str, state: HostState, mark: Option<HostMark>) -> HostView {
         shape: small(),
         memory: MemoryHeadroom::full(1 << 20),
         claim: None,
+        by_hello: false,
         labels: BTreeMap::from([("rack".to_owned(), "r2".to_owned())]),
         agent_version: Some("0.1.0".to_owned()),
         epoch: 1,

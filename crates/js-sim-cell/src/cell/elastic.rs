@@ -8,8 +8,9 @@
 //! (`cloud boot m<n> silent` for a pool that does not join, and nothing for a machine the
 //! cloud no longer runs by then), and `cloud release m<n>`, `cloud preempt m<n>` or `cloud
 //! drop m<n>` in the step the cloud stops running it, by the cloud's release, its
-//! preemption, or the machine's disappearance; and `cloud brake reset <bool>` for the
-//! operator's reset of the pool's brake. No line holds a payload, a token, a host's name or
+//! preemption, or the machine's disappearance; `cloud brake reset <bool>` for the
+//! operator's reset of the pool's brake; and `cloud crash server` when an acquire crashed the
+//! server ([`Cloud::crash_at_next_acquire`]). No line holds a payload, a token, a host's name or
 //! an id the server or the cloud generated.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +22,7 @@ use js_types::HostId;
 
 use super::{Cell, HELLO_INTERVAL};
 use crate::agent::{AgentKind, AgentNode, AgentSpec};
-use crate::elastic::{Cloud, CloudFacts, Machine, Payload};
+use crate::elastic::{Cloud, CloudEvent, CloudFacts, Machine, Payload};
 use crate::invariant::Touched;
 use crate::node::CellNode;
 use crate::observe::Killed;
@@ -249,6 +250,8 @@ impl Cell {
     fn refresh(&mut self, cloud: &Cloud, running: BTreeSet<String>) {
         let calls = cloud.calls_after(self.machines.calls);
         self.machines.calls += calls.len();
+        let crashes = calls.iter().filter(|call| call.event == CloudEvent::Crash);
+        crashes.for_each(|_| self.record("cloud crash server".to_owned()));
         let pool = cloud.pool();
         let facts = self
             .observations

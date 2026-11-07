@@ -117,9 +117,9 @@ fn the_recording_is_the_host_file_then_each_command_with_what_it_printed() {
 $ printf 'a-local-token-of-at-least-32-bytes\\n' > client-token && chmod 600 client-token\n\
 $ js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml --listen 127.0.0.1:{port} &\n\
 $ {base} acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h\n\
-lease 1-1 host gpu-01 expires 1793614960284\n\
+lease 1-1 host gpu-01 ends 1793617960284\n\
 $ {base} list\n\
-1-1 held host gpu-01 expires 1793614960284\n\
+1-1 held host gpu-01 ends 1793617960284\n\
 $ {base} release 1-1\n\
 lease 1-1 freed\n\
 $ {base} list\n"
@@ -566,7 +566,7 @@ fn a_new_recording_differs_from_the_committed_one_only_in_ids_and_times() {
     let mask = |text: String| {
         text.lines()
             .map(|l| {
-                let l = l.split(" expires ").next().expect("a line");
+                let l = l.split(" ends ").next().expect("a line");
                 l.split(' ')
                     .map(|w| {
                         if w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.contains('-') {

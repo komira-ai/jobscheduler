@@ -1,5 +1,5 @@
-//! The job table, the allocation table and the mark table, as typed records over the
-//! `js-state` [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
+//! The job, allocation, mark and taint tables, as typed records over the `js-state`
+//! [`Store`](js_state::Store) (design sections 3.2, 5.3, 5.4, 6.2 and 10).
 //!
 //! A **job** is what a client submitted and where it is now ([`JobRecord`]); an
 //! **allocation** is the scheduler's private record that resources on one host are booked
@@ -24,6 +24,11 @@
 //! keep it off ([`JobRecord::prepare_bars`]), written by [`JobStore::fail_prepare_with`] in the
 //! transaction that frees the allocation and puts the job back to queued, or ends it failed to
 //! start when the placement engine says its prepares are used up.
+//!
+//! A **taint** is the mark a host-isolation job's placement puts on its host ([`HostTaint`],
+//! reason [`HOST_JOB_TAINT`]): [`JobStore::place`] and [`JobStore::place_with`] write it in the
+//! transaction that places the job, and the caller deletes it once it holds the taint where it
+//! keeps every host's taint ([`JobStore::drop_taints`]); nothing else in this crate deletes one.
 //!
 //! # Results and retention
 //!
@@ -58,6 +63,7 @@
 //! | `job/<id>` | the job's [`JobRecord`] |
 //! | `alloc/<id>` | the [`AllocationRecord`] of the job `<id>`: one allocation per job at a time, found from its job without a scan |
 //! | `mark/<id>` | the [`MarkRecord`] of the queued whole-host job `<id>`: one mark per job at a time, found from its job without a scan; a store written before marks has none and opens unchanged |
+//! | `taint/<host>` | the [`HostTaint`] a host-isolation job's placement put on `<host>` (reason [`HOST_JOB_TAINT`]): the job that placed there; written in the placement's transaction, deleted by [`JobStore::drop_taints`] once the caller holds the taint elsewhere and by nothing else (the retention tick does not read it), listed whole by [`JobStore::host_taints`]; a store written before taints has none and opens unchanged |
 //! | `meta/jobs/schema` | the schema version, four bytes big-endian, written once with `Cond::Absent` by the first store to open; a higher one is accepted |
 //! | `idx/job/active/<id>` | empty: the job has not ended |
 //! | `idx/job/due/<end>/<id>` | empty: the job has ended, `<end>` its retention end's nanoseconds on the store's clock as twenty digits (zero for an ended row without one) |
@@ -97,8 +103,9 @@
 //! | operation | transaction |
 //! |---|---|
 //! | [`JobStore::insert_queued`] | put `job/<id>` if absent |
-//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports) |
+//! | [`JobStore::place`] | put `job/<id>` at its version (queued to placed), put `alloc/<id>` if absent or at the version of a freed one (booked, with the job's declared host ports); for a host-isolation job ([`Isolation::Host`]) also put `taint/<host>` if absent, so a host already tainted makes the placement [`JobStoreError::Stale`] |
 //! | [`JobStore::place_with`] | as [`JobStore::place`], with the allocation's prepare deadline (the store's time now plus [`Placement::prepare_timeout`]) and wall limit, and delete `mark/<id>` at its version, or check it absent |
+//! | [`JobStore::drop_taints`] | delete each `taint/<host>` it is given, whatever it holds, in one transaction; nothing for no hosts |
 //! | [`JobStore::transition`] | put `job/<id>` at its version (a move that does not end the job) |
 //! | [`JobStore::end_job`] | put `job/<id>` at its version, with its result and retention end; also put a booked `alloc/<id>` at its version (to releasing); nothing for an ended job |
 //! | [`JobStore::requeue_failed_prepare`] | put `job/<id>` at its version (placed to queued), put `alloc/<id>` at its version (to freed) |
@@ -159,8 +166,8 @@ pub use ids::{
 };
 pub use record::{
     AllocationRecord, AllocationStep, Booked, Constraints, DeclaredPort, EndReason, Exclusion,
-    FileDigest, HostBooking, JobFiles, JobRecord, JobSpec, JobState, MarkRecord, Needs,
-    NetworkPolicy, StartFailure,
+    FileDigest, HOST_JOB_TAINT, HostBooking, HostTaint, Isolation, JobFiles, JobRecord, JobSpec,
+    JobState, MarkRecord, Needs, NetworkPolicy, StartFailure,
 };
 pub use result::{
     BOOT_GRACE, JobEnd, JobResult, JobTiming, LogLengths, Output, ResourceUsage, ResultReason,

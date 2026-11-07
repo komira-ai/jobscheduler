@@ -73,7 +73,14 @@
 //!   provider has an unresolved call for are the provider's own.
 //! - It says what an operator must act on, once while it holds: an orphan, a record of a
 //!   pool the server no longer has, a silent host that books nothing and is still not
-//!   marked long past `unknown_hold`; and it logs each machine released on a host's silence.
+//!   marked long past `unknown_hold`, an offer cooled down because a machine's hello did not
+//!   match it; and it logs each machine released on a host's silence, each hello that did
+//!   not match its offer (with the dimensions that failed), and each hello of a machine with
+//!   no offer record.
+//! - The offer cool-downs the records hold are handed to the catalog's cool-down store
+//!   ([`crate::Catalogs::hold`]) when the scaler is built and by the write of the records
+//!   (the live [`Effects::save`]), so the cool-down a mismatched hello starts is in memory
+//!   only once it is on disk, and a restart reads it back.
 //! - Nothing here reads a clock or draws a random value directly: the clock is the
 //!   server's and the random values for acquire ids come from a [`SessionSource`].
 
@@ -101,8 +108,8 @@ use js_jobs::JobId;
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
-    AcquireResult, Action, Budgets, HostFacts, Input, Millis, Phase, PoolInput, Records,
-    ReleaseResult, Settings, State, Waiting, launchable, step,
+    AcquireResult, Action, Budgets, HostFacts, Input, Millis, OfferCooldown, Phase, PoolInput,
+    Records, ReleaseResult, Settings, State, Waiting, launchable, step,
 };
 use js_sched::failover::Refused;
 use js_types::{ExecMode, HostId, RequestId};
@@ -566,7 +573,7 @@ impl Core {
 
     /// Asks the registry to remove the host, and drops it from the set when it did. The
     /// refusal is a warning the first time only (`added`): the same refusal at each later
-    /// tick (a lease its holder keeps renewing can last a long while) is a debug line, and
+    /// tick (a lease can last until its maximum wall time) is a debug line, and
     /// the alert says it once for as long as it holds.
     fn ask_removal(&self, memory: &mut Memory, host: &str, added: bool) {
         match self.effects.remove(host) {
@@ -581,13 +588,21 @@ impl Core {
     }
 
     /// Says what the step did that an operator should see: each machine released because
-    /// its host was silent, and each alert that was not already said.
+    /// its host was silent, each refused acquire, each hello that did not match its offer,
+    /// each hello of a machine with no offer record, and each alert that was not already
+    /// said.
     fn report(&self, memory: &mut Memory, (next, input): (&State, &Input), now: Millis) {
         for name in &next.silent_released {
             warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
         for refused in &next.refusals {
             log_refusal(refused);
+        }
+        for cooled in &next.mismatched {
+            log_mismatch(cooled);
+        }
+        for name in &next.unverified {
+            warn!(host = %name, "no offer record was found for the machine; its hello was checked against the pool's shape floor only");
         }
         let pending = (&memory.unrevoked, &memory.unremoved);
         let found = alert::alerts((next, input), now, &self.settings, pending);
@@ -813,6 +828,22 @@ fn tail(bytes: &[u8; 32]) -> [u8; 16] {
     let mut out = [0; 16];
     out.copy_from_slice(&bytes[16..]);
     out
+}
+
+/// The log line of a hello that did not match its offer: the host, the provider, offer and
+/// zone that are cooled down and until when (milliseconds since the epoch, as the scaler's
+/// clock reads them), and every dimension that failed. It holds no credential.
+fn log_mismatch(cooled: &OfferCooldown) {
+    let failed: Vec<&str> = cooled.failed.iter().map(|each| each.name()).collect();
+    warn!(
+        host = %cooled.host,
+        provider = %cooled.provider,
+        offer = %cooled.offer,
+        zone = %cooled.zone.as_deref().unwrap_or("-"),
+        until_ms = cooled.until.as_millis(),
+        failed = %failed.join(", "),
+        "the machine's hello does not match the offer it was acquired for: the machine is released, the offer is cooled down and a failed boot is counted toward the pool's brake"
+    );
 }
 
 /// The log line of one refused acquire: the provider, offer and zone and the code, and for
