@@ -11,6 +11,7 @@ use flate2::Compression;
 use flate2::write::{DeflateEncoder, GzEncoder};
 use js_host_step::fake::FakeHost;
 use js_host_step::{GETENT, SYSTEMCTL};
+use js_mdm::api::{Api, Call, Reply, Service};
 use js_mdm::{Download, Env};
 use js_mdm_core::acme::Acme;
 use js_mdm_core::config::MdmConfig;
@@ -246,11 +247,114 @@ pub fn fill(buf: &mut [u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Runs `f` with an [`Env`] over `host` and `net`.
+/// An API that is never reached: every call fails.
+pub struct NoApi;
+
+impl Api for NoApi {
+    fn send(&self, _: &Service, _: &Call) -> Result<Reply, String> {
+        Err("no API in this test".to_owned())
+    }
+}
+
+/// What the fake API was asked. `Debug` leaves out the `Authorization` value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sent {
+    pub service: String,
+    pub addr: String,
+    pub call: Call,
+}
+
+type Answer = Box<dyn Fn(&Call) -> Result<Reply, String>>;
+
+/// An API that records every call and answers with `answer(call)`.
+pub struct FakeApi {
+    pub sent: RefCell<Vec<Sent>>,
+    /// The `Authorization` header values, one per call (kept apart so no `Debug` shows them).
+    pub authorizations: RefCell<Vec<String>>,
+    answer: Answer,
+}
+
+impl FakeApi {
+    pub fn new(answer: impl Fn(&Call) -> Result<Reply, String> + 'static) -> FakeApi {
+        FakeApi {
+            sent: RefCell::new(Vec::new()),
+            authorizations: RefCell::new(Vec::new()),
+            answer: Box::new(answer),
+        }
+    }
+
+    /// Apple defines a profile (uuid [`UUID`]), takes the assigner, and assigns every device.
+    pub fn apple() -> FakeApi {
+        FakeApi::new(|call| match call.path.as_str() {
+            p if p.ends_with("/profile") => ok(&format!("{{\"profile_uuid\":\"{UUID}\"}}")),
+            p if p.ends_with("/devices") => {
+                let asked: serde_json::Value = serde_json::from_slice(&call.body).unwrap();
+                let devices: serde_json::Map<String, serde_json::Value> = asked["devices"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| (d.as_str().unwrap().to_owned(), "SUCCESS".into()))
+                    .collect();
+                ok(&serde_json::json!({ "devices": devices }).to_string())
+            }
+            _ => ok("{}"),
+        })
+    }
+
+    pub fn paths(&self) -> Vec<String> {
+        self.sent
+            .borrow()
+            .iter()
+            .map(|s| format!("{} {}", s.call.method, s.call.path))
+            .collect()
+    }
+}
+
+impl Api for FakeApi {
+    fn send(&self, service: &Service, call: &Call) -> Result<Reply, String> {
+        self.authorizations
+            .borrow_mut()
+            .push(service.authorization());
+        self.sent.borrow_mut().push(Sent {
+            service: service.name().to_owned(),
+            addr: service.addr().to_string(),
+            call: call.clone(),
+        });
+        (self.answer)(call)
+    }
+}
+
+/// A profile uuid Apple answers.
+pub const UUID: &str = "0123456789ABCDEF0123456789abcdef";
+
+/// A 200 answer with `body`.
+pub fn ok(body: &str) -> Result<Reply, String> {
+    answer(200, body)
+}
+
+pub fn answer(status: u16, body: &str) -> Result<Reply, String> {
+    Ok(Reply {
+        status,
+        body: body.as_bytes().to_vec(),
+    })
+}
+
+/// Runs `f` with an [`Env`] over `host`, `net` and no API.
 pub fn with_env<T>(host: &FakeHost, net: &FakeNet, f: impl FnOnce(&Env<'_>) -> T) -> T {
+    with_api(host, net, &NoApi, f)
+}
+
+/// Runs `f` with an [`Env`] over `host`, `net` and `api`.
+pub fn with_api<T>(
+    host: &FakeHost,
+    net: &FakeNet,
+    api: &dyn Api,
+    f: impl FnOnce(&Env<'_>) -> T,
+) -> T {
     let env = Env {
         host,
         net,
+        api,
         random: &fill,
         now: 1_700_000_000,
     };
