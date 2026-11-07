@@ -125,6 +125,7 @@ impl Node {
             overlay_work: lease.join("work"),
             dir: lease,
             cgroup_parent: format!("/js.slice/actions/{name}"),
+            isolation: js_contain::Isolation::Contained,
             exec_root: "/job/root".to_owned(),
             working_directory: String::new(),
             env: Vec::new(),

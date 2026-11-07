@@ -224,6 +224,9 @@ pub struct CrunPlan {
     /// The most bytes the unpacked images may take (`--image-budget-gib`), none for no
     /// budget, set by [`Settings::with_image_budget`].
     pub image_budget: Option<u64>,
+    /// Whether the runtime launches host jobs (`--allow-host-jobs`), set by
+    /// [`Settings::with_host_jobs`].
+    pub host_jobs: bool,
     actions: Arc<OnceLock<String>>,
 }
 
@@ -348,6 +351,7 @@ impl Settings {
                 gpus: None,
                 logs: crate::logs::LogPlan::new(crate::logs::DEFAULT_FILE_CAP),
                 image_budget: None,
+                host_jobs: false,
                 actions: Arc::new(OnceLock::new()),
             })),
         }
@@ -403,6 +407,16 @@ impl Settings {
         self.crun_mut()
             .into_iter()
             .for_each(|plan| plan.image_budget = budget);
+        self
+    }
+
+    /// These settings with `allowed` as whether the crun runtime launches host jobs
+    /// (`--allow-host-jobs`); the settings of another runtime are as they were.
+    #[must_use]
+    pub fn with_host_jobs(mut self, allowed: bool) -> Self {
+        self.crun_mut()
+            .into_iter()
+            .for_each(|plan| plan.host_jobs = allowed);
         self
     }
 

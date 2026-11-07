@@ -224,6 +224,7 @@ pub fn open(
             read: read_node,
         }),
         image_budget: plan.image_budget,
+        host_jobs: plan.host_jobs,
     };
     let runtime = CrunRuntime::open_with(settings, Arc::new(images), seams.hooks)?
         .with_live_logs(plan.logs.live());

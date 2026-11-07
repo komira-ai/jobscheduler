@@ -1,13 +1,14 @@
-//! The job flags: `--allow-host-jobs`, `--mount-root` and `--scratch-root` are checked
-//! when the agent starts, before it says hello.
+//! The job flags: `--allow-host-jobs` (taken by a crun agent only; its hello is in
+//! `jobs::crun_gpu_hello`), `--mount-root` and `--scratch-root` are checked when the agent
+//! starts, before it says hello.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, MAX_SILENCE_STOP_SECS, SILENCE_STOP_GRACE_RATIO,
-    fits_grace, silence_stop,
+    DEFAULT_SILENCE_STOP, DEFAULT_STOP_GRACE, HOST_JOBS_NEED_CRUN, MAX_SILENCE_STOP_SECS,
+    SILENCE_STOP_GRACE_RATIO, fits_grace, silence_stop,
 };
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, RETRY_AFTER_CAP};
 use js_oci::Allow;
@@ -50,25 +51,59 @@ fn good_job_flags_start_the_agent() {
     assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
 }
 
-/// Asserts that `--allow-host-jobs` ends the agent with status 2 before anything is sent,
-/// on a Linux host and on a Mac, and says why: no runtime launches a host job yet. Also
-/// asserts that an agent started without the flag sends a hello with no `host-jobs`
-/// capability. Catches an agent that accepts host jobs, or reports it runs them, while no
-/// runtime can launch one (the server would taint the host for a job that cannot start).
+/// Asserts that `--allow-host-jobs` ends the agent with status 2, before anything is sent
+/// and with the words of `HOST_JOBS_NEED_CRUN`, on every runtime but crun: a Mac (native
+/// jobs), `--runtime none`, and the container engine (`--runtime docker`). Catches an agent
+/// that reports `host-jobs` while its runtime cannot launch one, so the server would taint
+/// the host for a job that never starts.
 #[test]
-fn the_agent_refuses_allow_host_jobs_until_a_runtime_launches_host_jobs() {
-    let said = "--allow-host-jobs: no runtime of this agent launches a host job yet: crun and \
-                docker run contained jobs only";
-    for host in [linux_host(), crate::support::mac_host()] {
-        let (ran, sent, _) = run_scripted(&["--allow-host-jobs"], &host, vec![welcome(1)], 1);
-        assert_eq!(ran.status(), code(2), "{}", ran.err);
-        assert!(ran.err.contains(said), "{}", ran.err);
-        assert!(sent.borrow().is_empty());
+fn allow_host_jobs_is_refused_on_every_runtime_but_crun() {
+    let dir = Scratch::new("life-flags-host-jobs");
+    let (state, scratch) = (dir.path("state"), dir.path("scratch"));
+    for path in [&state, &scratch] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let (ran, sent, _) = run_scripted(&[], &linux_host(), vec![welcome(1)], 1);
-    assert_eq!(ran.status(), code(0), "{}", ran.err);
-    let hello = sent.borrow()[0].1.clone();
-    assert!(hello["capabilities"].get("host-jobs").is_none(), "{hello}");
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let user = container_user();
+    let s = |path: &std::path::Path| path.display().to_string();
+    let (exec, state, scratch) = (s(&exec), s(&state), s(&scratch));
+    let docker = [
+        "--allow-host-jobs",
+        "--runtime",
+        "docker",
+        "--allow-container-engine",
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--container-subuid",
+        "jobmap",
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let cases: [(&[&str], crate::support::Host); 3] = [
+        (&["--allow-host-jobs"], crate::support::mac_host()),
+        (&["--allow-host-jobs", "--runtime", "none"], linux_host()),
+        (&docker, linux_host()),
+    ];
+    for (extra, host) in cases {
+        let (ran, sent, _) = run_scripted(extra, &host, vec![welcome(1)], 1);
+        assert_eq!(ran.status(), code(2), "{extra:?}: {}", ran.err);
+        assert!(
+            ran.err.contains(HOST_JOBS_NEED_CRUN),
+            "{extra:?}: {}",
+            ran.err
+        );
+        assert!(sent.borrow().is_empty(), "{extra:?}");
+    }
+    assert_eq!(
+        HOST_JOBS_NEED_CRUN,
+        "--allow-host-jobs: only --runtime crun launches a host job; the container engine \
+         (--container-bin) and native runtimes run contained jobs only"
+    );
 }
 
 /// Asserts that an operator cannot give `host-jobs` with `--capability`: the agent ends with

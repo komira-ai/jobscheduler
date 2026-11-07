@@ -1,5 +1,6 @@
 //! The crun container runtime: [`CrunRuntime`], a [`Runtime`] over js-contain's `crun`
-//! backend, for a root agent that starts every container as a dedicated non-root job user.
+//! backend, for a root agent that starts every contained job's container as a dedicated
+//! non-root job user (a host job's runs as the agent: see "Host jobs" below).
 //!
 //! # What a run becomes
 //!
@@ -35,8 +36,9 @@
 //!   after the entrypoint, and its environment with the job's ([`RunSpec::env`]) over it.
 //!
 //! `crun run` is run by a *supervisor*, a process of its own (the agent's binary in its
-//! `__supervise-run` helper mode, started as the job user in its own process group with
-//! SIGHUP, SIGINT and SIGTERM blocked), not by a thread of the agent. The supervisor owns
+//! `__supervise-run` helper mode, started as the job user (as the agent for a host job) in
+//! its own process group with SIGHUP, SIGINT and SIGTERM blocked), not by a thread of the
+//! agent. The supervisor owns
 //! the container's pipes and log ring, and writes the container's end (its exit, and the
 //! tail of what it wrote) to an exit record in the lease directory when the run is over. An
 //! agent that exits, gracefully or not, leaves its supervisors and containers running (the
@@ -136,9 +138,29 @@
 //! when it starts, so such a lease an earlier agent left is removed. A run that ended while no
 //! agent ran has no network left, and is taken over so that its result is reported.
 //!
+//! # Host jobs
+//!
+//! A runtime opened with [`CrunSettings::host_jobs`] (`--allow-host-jobs`) launches a run
+//! whose isolation is host as an OCI container that shares the host: js-contain's host config
+//! (`Isolation::Host`), from the same spec as a contained run's with the namespaces, the
+//! root and the privileges the only differences. It runs as root in the host's pid, network,
+//! mount, IPC, UTS and cgroup namespaces (no user namespace), with the host's `/` as its root,
+//! every capability and no seccomp filter, in the run's scratch directory; the image's config
+//! still gives its program and environment. Its cgroup is `ctr` below the lease's, which the
+//! booking limits, so it is accounted as a contained run is, and a stop's or a removal's write
+//! to the lease's `cgroup.kill` ends it whole. It has no PID namespace whose end takes its
+//! other processes with its first, so its init kills what its program left once the program
+//! has ended (`js-init --end-descendants`): the run ends when its program does. Its lease directory and cgroup are the agent's
+//! own, the bundle writes a host-lease marker of the agent's into the directory, and `crun`
+//! and its supervisor run as the agent for a lease whose directory and marker are both the
+//! agent's (`Oci::lease_user`): every other lease's are the job user's, whoever made its
+//! directory. It is not wired (it has the host's network), and a
+//! host run that names a mount, run files or a GPU is refused, as is every host run of a
+//! runtime opened without host jobs.
+//!
 //! # Not here
 //!
-//! No host jobs and no read-back of the container's mounts.
+//! No read-back of the container's mounts.
 
 mod adopt;
 #[cfg(test)]
@@ -155,6 +177,7 @@ mod ledger;
 mod ledger_tests;
 mod net;
 mod pull;
+mod settings;
 mod spec;
 #[cfg(test)]
 mod tests;
@@ -165,6 +188,7 @@ use dirs::{cgroup_dir, legacy_lease, make_dir, make_helper_cgroup, owned, projec
 use fault::Fault;
 pub(crate) use net::port_of;
 pub use net::{EgressPort, Wired, start_egress};
+pub use settings::{CgroupSettings, CrunError, CrunSettings, Hooks};
 
 pub use claim::{ClaimError, HostClaim, prepare_store, require_trusted_ancestors};
 pub use gpu::{
@@ -188,13 +212,12 @@ use js_agent_wire::{LogReport, LogTail, NetworkCeiling};
 use js_contain::cgroup::{JOB_OWNED_FILES, LeaseCgroup, LeasePolicy, ROOT_OWNED_FILES};
 use js_contain::container::ContainerSpec;
 use js_contain::oci::image::{ImageSource, PinnedImage};
-use js_contain::oci::{
-    GcReport, LeaseDirs, Oci, OciConfig, OciError, Owner, Supervised, stderr_path, stdout_path,
-};
+use js_contain::oci::{GcReport, LeaseDirs, Oci, Owner, Supervised, stderr_path, stdout_path};
+use js_types::JobNetwork;
 use js_types::Resources;
 use tokio::runtime::{Builder, Runtime as TokioRuntime};
 
-use crate::cli_runtime::{Chown, container_name};
+use crate::cli_runtime::container_name;
 use crate::image::{ImageConfig, config_path};
 use crate::lifecycle::{
     Body, Exit, FilesRoot, Found, Prefetcher, Prepared, RunHandle, RunSpec, Runtime, RuntimeError,
@@ -204,7 +227,7 @@ use crate::logs::{LiveLogs, RunLogs};
 use ledger::{Entry, Ledger, Supervisor};
 pub use ledger::{Failed, LedgerError, Left, Reason, Removed, SweepReport};
 use pull::Images;
-use spec::{concluded, container_spec, ctr_of, job_env, log_tail_of, pinned};
+use spec::{concluded, container_spec, ctr_of, host_spec, job_env, log_tail_of, pinned};
 
 /// How long a pull and unpack of one image may take before it counts as failed.
 pub const PULL_LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -226,125 +249,6 @@ const FORCE_FLOOR: Duration = Duration::from_millis(500);
 #[must_use]
 pub fn config_dir(scratch: &Path) -> PathBuf {
     scratch.join("oci-configs")
-}
-
-/// Where the agent's cgroups are.
-#[derive(Debug, Clone)]
-pub struct CgroupSettings {
-    /// The cgroup version 2 mount.
-    pub mount: PathBuf,
-    /// The agent's delegated cgroup, relative to the mount, starting with `/`.
-    pub root: String,
-    /// The cgroup the leases' cgroups are made in, in the same form.
-    pub actions: String,
-}
-
-/// What a [`CrunRuntime`] is opened with.
-#[derive(Debug, Clone)]
-pub struct CrunSettings {
-    /// The backend's configuration: the `crun` program, the agent's own binary for the
-    /// helper modes and the job user, which must be set (the agent is root).
-    pub oci: OciConfig,
-    /// The directory of the backend's image store and leases.
-    pub scratch: PathBuf,
-    /// The cgroups.
-    pub cgroups: CgroupSettings,
-    /// The id the agent registered under: the value of the agent label of every container.
-    pub host_id: String,
-    /// The threads that pull images.
-    pub pull_threads: usize,
-    /// The root of the runs' files, when the agent has one.
-    pub files: Option<FilesRoot>,
-    /// The host's egress, which wires each container's network: none in mode none, where a
-    /// job has loopback only ([`start_egress`]).
-    pub egress: Option<Arc<dyn EgressPort>>,
-    /// The GPUs a run is given, when the agent passes them (`--gpu-device`).
-    pub gpus: Option<GpuSettings>,
-    /// The most bytes the unpacked images may take (`--image-budget-gib`); none for no budget.
-    pub image_budget: Option<u64>,
-}
-
-/// What a runtime does that a test replaces: giving a file away and reading the clock.
-#[derive(Clone, Copy, Debug)]
-pub struct Hooks {
-    /// Gives a path to a user and group.
-    pub chown: Chown,
-    /// Milliseconds since the Unix epoch.
-    pub now_ms: fn() -> u64,
-    /// How long a run is waited for after its cgroup was killed ([`KILL_WAIT`]).
-    pub kill_wait: Duration,
-    /// How long a pull and unpack of one image may take ([`PULL_LIMIT`]).
-    pub pull_limit: Duration,
-    /// How long a `crun kill` may take before it is given up ([`CALL_LIMIT`]).
-    pub call_limit: Duration,
-}
-
-impl Default for Hooks {
-    fn default() -> Self {
-        Self {
-            chown: hand_over_no_follow,
-            now_ms: system_now_ms,
-            kill_wait: KILL_WAIT,
-            pull_limit: PULL_LIMIT,
-            call_limit: CALL_LIMIT,
-        }
-    }
-}
-
-fn system_now_ms() -> u64 {
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-    let ms = since.map_or(0, |since| since.as_millis());
-    u64::try_from(ms).unwrap_or(u64::MAX)
-}
-
-/// Why a [`CrunRuntime`] could not be opened.
-#[derive(Debug, thiserror::Error)]
-pub enum CrunError {
-    /// The settings name no job user: the agent is root and a container runs as another.
-    #[error("the crun runtime needs the job user the containers run as")]
-    NoJobUser,
-    /// The cgroup the leases are made in is not named `actions`, the name the post-job checks
-    /// know the leases' group by: a job's leftover process under another name would be
-    /// judged the host's.
-    #[error("the cgroup of the leases must be named `actions`, not {actions}")]
-    ActionsName {
-        /// The cgroup given.
-        actions: String,
-    },
-    /// The backend cannot start on this node.
-    #[error(transparent)]
-    Oci(#[from] OciError),
-    /// A file of the agent's cgroup could not be given to the job user.
-    #[error("give {path} to the job user: {why}")]
-    Delegation {
-        /// The file.
-        path: PathBuf,
-        /// The reason.
-        why: io::Error,
-    },
-    /// The cgroup of the helper containers could not be made or given to the job user.
-    #[error("the cgroup of the helper containers {path}: {why}")]
-    Helpers {
-        /// The cgroup.
-        path: PathBuf,
-        /// The reason.
-        why: io::Error,
-    },
-    /// The directory of the image configs could not be made.
-    #[error("the directory of the image configs {path}: {why}")]
-    Configs {
-        /// The directory.
-        path: PathBuf,
-        /// The reason.
-        why: io::Error,
-    },
-    /// The runtime of the calls, or the threads that pull images, could not be made (no
-    /// thread, or no descriptor, or no pull thread asked for).
-    #[error("the threads of the crun runtime: {0}")]
-    Threads(#[from] io::Error),
-    /// The directory of the leases' labels could not be made or listed.
-    #[error("the directory of the leases' labels {0}")]
-    Ledger(#[from] LedgerError),
 }
 
 /// How far a container is.
@@ -389,8 +293,10 @@ pub struct CrunRuntime {
     configs: PathBuf,
     files: Option<FilesRoot>,
     gpus: Option<GpuSettings>,
+    /// Whether host jobs are launched ([`CrunSettings::host_jobs`]).
+    host_jobs: bool,
     /// Whether the leases' directories are made beside the runs' own
-    /// ([`OciConfig::leases_in`]), where [`Runtime::lease_dir`] names them.
+    /// ([`OciConfig::leases_in`](js_contain::OciConfig::leases_in)), where [`Runtime::lease_dir`] names them.
     leases_beside: bool,
     /// The image store, where an agent from before the leases were beside the runs kept them.
     store: PathBuf,
@@ -491,6 +397,7 @@ impl CrunRuntime {
             configs,
             files: settings.files,
             gpus: settings.gpus,
+            host_jobs: settings.host_jobs,
             leases_beside,
             store: settings.scratch.clone(),
             egress: settings.egress,
@@ -605,11 +512,25 @@ impl CrunRuntime {
     /// start-up pass that removes the rest of what an earlier agent left (P12b) having run
     /// before the first run is made. The removal and a fetch of the same image never overlap
     /// (the image store holds one gate for each digest).
+    ///
+    /// A host job is refused unless the runtime launches them ([`CrunSettings::host_jobs`]),
+    /// and when it names a mount, run files or a GPU; it is not wired, since it has the
+    /// host's network.
     fn make(&mut self, spec: &RunSpec) -> Result<String, Fault> {
-        if spec.isolation != js_agent_wire::Isolation::Contained {
-            return Err(Fault::NotContained);
+        let host = spec.isolation == js_agent_wire::Isolation::Host;
+        if host {
+            if !self.host_jobs {
+                return Err(Fault::NotContained);
+            }
+            if !spec.mounts.is_empty() || spec.files.is_some() {
+                return Err(Fault::HostMounts);
+            }
+            if !spec.gpu_indices.is_empty() {
+                return Err(Fault::HostGpus);
+            }
+        } else {
+            net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
         }
-        net::port_for(self.egress.as_deref(), spec.network).map_err(Fault::Network)?;
         // Before anything is made: a run's nodes are read now, and one that is gone refuses it.
         let gpu = gpu::wiring(self.gpus.as_ref(), &spec.gpu_indices).map_err(Fault::Gpu)?;
         let Body::Container { image: given, args } = &spec.body else {
@@ -653,7 +574,11 @@ impl CrunRuntime {
                 cap: js_contain::hard_memory_max(spec.memory_bytes),
                 backstop: None,
                 state: State::Created,
-                net: net::Net::asked(spec.network, spec.ports.clone()),
+                net: match host {
+                    // The host's own network: nothing to wire, nothing to forward.
+                    true => net::Net::asked(JobNetwork::None, Vec::new()),
+                    false => net::Net::asked(spec.network, spec.ports.clone()),
+                },
                 entry,
                 logs: RunLogs::asked(self.logs.as_ref(), spec.log_sink.as_ref()),
             },
@@ -693,7 +618,12 @@ impl CrunRuntime {
         let config = ImageConfig::kept(&self.configs, &image.digest)?;
         let cgroup = LeaseCgroup::at(&self.cgroups.mount, &self.cgroups.actions, name);
         let lease = self.oci.lease_dirs(name);
-        let mut container = container_spec(name, spec, image, &lease, cgroup.name());
+        let mut container = match spec.isolation {
+            js_agent_wire::Isolation::Contained => {
+                container_spec(name, spec, image, &lease, cgroup.name())
+            }
+            js_agent_wire::Isolation::Host => host_spec(name, spec, image, &lease, cgroup.name()),
+        };
         config.apply(args, &mut container)?;
         job_env(&mut container, &spec.env);
         gpu.apply(&mut container);
@@ -702,6 +632,12 @@ impl CrunRuntime {
     }
 
     /// The directories, hand-overs, cgroup and bundle of one lease.
+    ///
+    /// A host lease ([`Isolation::Host`](js_contain::Isolation::Host)) is the agent's own:
+    /// only its directory is made (no overlay, home or input root), and it, the run's scratch
+    /// directory and the cgroup's files are given to the agent itself, not to the job user or
+    /// the job's ids; its bundle adds the host-lease marker, so `crun` runs as the agent for
+    /// it ([`Oci::lease_user`]). Its bundle is the loopback one: a host job is never wired.
     fn make_resources(
         &self,
         spec: &RunSpec,
@@ -710,8 +646,19 @@ impl CrunRuntime {
         cgroup: &LeaseCgroup,
     ) -> Result<(), Fault> {
         let chown = self.hooks.chown;
-        let (job, job_id) = (self.oci.job_ids(), self.oci.container_ids());
-        for (dir, owner) in lease.to_make() {
+        let host = container.isolation == js_contain::Isolation::Host;
+        let ((job, job_id), dirs, network) = match host {
+            true => {
+                let own = self.oci.own_ids();
+                let dirs = vec![(lease.dir.clone(), Owner::Job)];
+                ((own, own), dirs, JobNetwork::None)
+            }
+            false => {
+                let ids = (self.oci.job_ids(), self.oci.container_ids());
+                (ids, lease.to_make(), spec.network)
+            }
+        };
+        for (dir, owner) in dirs {
             let (uid, gid) = match owner {
                 Owner::Job => job,
                 Owner::Container => job_id,
@@ -742,7 +689,7 @@ impl CrunRuntime {
                 .map_err(|why| Fault::step("give the lease's cgroup to the job user", &why))?;
         }
         self.rt
-            .block_on(net::create(&self.oci, container, spec.network))
+            .block_on(net::create(&self.oci, container, network))
             .map_err(|why| Fault::step("write the bundle", &why))
     }
 

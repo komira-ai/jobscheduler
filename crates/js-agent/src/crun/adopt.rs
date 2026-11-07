@@ -539,12 +539,13 @@ impl CrunRuntime {
         // The supervisor the lease's directory names, for a lease whose sidecar is gone: ended
         // first, or it would write the container's end into the directory being removed (one
         // that has written it already is left to exit). The
-        // directory is the job user's, so the file is trusted only as far as it can be checked:
-        // the process must run as the job user and be this lease's supervisor by its command
-        // line (another lease's names its own lease), or it is left alone.
-        let job_uid = self.oci.job_ids().0;
+        // directory is the job user's (a host lease's is the agent's), so the file is trusted
+        // only as far as it can be checked: the process must run as the user `crun` runs as
+        // for the lease (`Oci::lease_user`) and be this lease's supervisor by its command line
+        // (another lease's names its own lease), or it is left alone.
+        let runs_as = self.oci.lease_user(&lease.dir);
         let named = recorded_supervisor(&lease.dir)
-            .filter(|id| id.runs_as(job_uid) && id.supervises(&lease.dir));
+            .filter(|id| id.runs_as(runs_as) && id.supervises(&lease.dir));
         if let Some(id) = named {
             end_supervisor(id, &lease.dir);
         }

@@ -115,4 +115,57 @@ mod tests {
         let empty = install_bytes(&scratch, b"", &mut nothing_while_open).expect_err("empty");
         assert!(empty.to_string().contains("no container init"), "{empty}");
     }
+
+    /// Whether the process `pid` is still the `sleep 100000` the script below started (a pid
+    /// that is gone, or reused by another program, is not).
+    fn sleeping(pid: &str) -> bool {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|line| line == b"sleep\x00100000\x00")
+    }
+
+    /// Runs the installed init with `options`, over a shell that leaves a child and a
+    /// grandchild whose parent has gone, writing their pids to `dir`, and exits 3. Returns the
+    /// init's exit code and the two pids.
+    fn run_leaving_two(init: &Path, dir: &Path, options: &[&str]) -> (Option<i32>, [String; 2]) {
+        let script = format!(
+            "sleep 100000 & echo $! > {d}/child; (sleep 100000 & echo $! > {d}/grandchild); exit 3",
+            d = dir.display()
+        );
+        let status = std::process::Command::new(init)
+            .args(options)
+            .args(["--", "/bin/sh", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .expect("the init runs");
+        let read = |name: &str| {
+            let text = std::fs::read_to_string(dir.join(name)).expect("a pid");
+            text.trim().to_owned()
+        };
+        (status.code(), [read("child"), read("grandchild")])
+    }
+
+    /// Proves the init of a host container (`--end-descendants`) ends with its program's
+    /// code only once everything the program left is gone: a background child and a
+    /// grandchild whose parent had exited are both killed and reaped by the time it exits.
+    /// Without the option (a contained job's init, whose PID namespace the kernel ends) they
+    /// are left running. Catches a host job whose leftover processes keep `crun run`, and the
+    /// job, from ever ending.
+    #[test]
+    fn a_host_init_ends_what_its_program_left_before_it_exits() {
+        let dir = scratch("end-descendants");
+        let init = install(&dir).expect("install");
+        let (code, left) = run_leaving_two(&init, &dir, &["--end-descendants"]);
+        assert_eq!(code, Some(3));
+        for pid in &left {
+            assert!(!sleeping(pid), "process {pid} outlived the init");
+        }
+        let (code, left) = run_leaving_two(&init, &dir, &[]);
+        assert_eq!(code, Some(3));
+        for pid in &left {
+            assert!(sleeping(pid), "process {pid} was ended without the option");
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid])
+                .status();
+        }
+    }
 }
