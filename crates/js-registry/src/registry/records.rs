@@ -35,8 +35,9 @@ impl Registry {
     /// `exclusive-not-ready` refusal (wire 409). Under the registry's own placement a restart
     /// puts the counts back from the ledger ([`Registry::restore_reservations`]) but not this
     /// text, so `max_replace` holds across restarts and a restored terminal request reads
-    /// `None` here; a placer that keeps the request (`--placement js-sched`) keeps its counts
-    /// in memory only, and a restart forgets them. Ask as [`Registry::request_record`] does.
+    /// `None` here; a placer that keeps the request (`--placement js-sched`) writes its counts
+    /// to the same ledger and takes them back, without the text, so the same holds there.
+    /// Ask as [`Registry::request_record`] does.
     pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
         let record = self.request_record(key);
         record

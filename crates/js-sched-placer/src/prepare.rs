@@ -69,6 +69,9 @@ pub(super) struct Preparing {
     bars: BTreeMap<WorkerId, Bar>,
 }
 
+/// One request as [`Prepare::ledger`] gives it: its id, failed prepares, give-ups and bars.
+pub(super) type LedgerRow<'a> = (&'a RequestId, u32, u32, &'a BTreeMap<WorkerId, Bar>);
+
 /// What the engine keeps of a request whose prepare failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
@@ -78,8 +81,9 @@ pub(super) struct Record {
     give_ups: u32,
     /// The workers barred to the request, and how.
     bars: BTreeMap<WorkerId, Bar>,
-    /// The last failure: what a terminal refusal names.
-    last: NotReady,
+    /// The last failure: what a terminal refusal names. `None` for a record put back from
+    /// the reservation ledger, which keeps no text ([`Prepare::restore`]).
+    last: Option<NotReady>,
     /// Whether the request has used up `max_replace`.
     terminal: bool,
     /// When the request was first queued.
@@ -135,6 +139,39 @@ impl Prepare {
     /// Request `id` left the engine's queue without a commit.
     pub(super) fn dequeue(&mut self, id: &RequestId) {
         self.queued_at.remove(id);
+    }
+
+    /// Puts back the record of request `id` a restart's ledger kept: `failures` failed
+    /// prepares (one at least), its give-ups and bars, whether it is terminal, and when it
+    /// was first queued, touched at `now`. The ledger keeps no text of the last failure.
+    pub(super) fn restore(
+        &mut self,
+        id: &RequestId,
+        (failures, give_ups, bars): (u32, u32, BTreeMap<WorkerId, Bar>),
+        (terminal, queued_at): (bool, FarmTime),
+        now: FarmTime,
+    ) {
+        let record = Record {
+            failures,
+            give_ups,
+            bars,
+            last: None,
+            terminal,
+            queued_at,
+            touched: now,
+        };
+        self.records.insert(id.clone(), record);
+    }
+
+    /// What the records and the committed leases keep of each request for the reservation
+    /// ledger: its failed prepares, its give-ups and the bars of its failures.
+    pub(super) fn ledger(&self) -> Vec<LedgerRow<'_>> {
+        let held = self.preparing.values();
+        let held = held.map(|held| (&held.id, 0, held.give_ups, &held.bars));
+        let failed = self.records.iter();
+        let failed =
+            failed.map(|(id, record)| (id, record.failures, record.give_ups, &record.bars));
+        held.chain(failed).collect()
     }
 
     /// Lease `lease` ended: its deadline goes, and it counts nothing.
@@ -213,7 +250,7 @@ impl Engine {
             failures: 0,
             give_ups: 0,
             bars: BTreeMap::new(),
-            last: failure.not_ready.clone(),
+            last: None,
             terminal: false,
             queued_at: preparing.queued_at,
             touched: now,
@@ -228,7 +265,7 @@ impl Engine {
             record.bars.insert(worker, stronger(kept, bar));
         }
         record.terminal = record.failures >= max_replace;
-        record.last = failure.not_ready.clone();
+        record.last = Some(failure.not_ready.clone());
         record.queued_at = preparing.queued_at;
         record.touched = now;
         self.ended(*lease);
@@ -262,7 +299,7 @@ impl Engine {
             prepare_failures: record.failures,
             give_ups: record.give_ups,
             exclusions: exclusions.collect(),
-            last: Some(record.last.clone()),
+            last: record.last.clone(),
             terminal: record.terminal,
         })
     }
@@ -272,6 +309,8 @@ impl Engine {
     pub fn whole_forget(&mut self, id: &RequestId) {
         self.prepare.records.remove(id);
         self.prepare.dequeue(id);
+        self.carried.remove(id);
+        self.restored.remove(id);
         // The request leaves the queue at once, with the bars its record set there.
         if let Some(operation) = self.whole.remove(id) {
             let _ = self.sched.cancel_whole(operation);
@@ -279,8 +318,20 @@ impl Engine {
     }
 
     /// Drops at `now` the records of the requests with no committed lease that have had no
-    /// start and no failure for `horizon`, bars for life and all.
+    /// start and no failure for `horizon`, bars for life and all, and the give-ups and bars a
+    /// restart put back for requests not queued within `horizon` of it.
     pub fn whole_sweep(&mut self, horizon: Duration, now: FarmTime) {
+        let lapsed = |at: &FarmTime| now.saturating_duration_since(*at) >= horizon;
+        let gone: Vec<RequestId> = self
+            .restored
+            .iter()
+            .filter(|(_, at)| lapsed(at))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            self.restored.remove(&id);
+            self.carried.remove(&id);
+        }
         let Prepare {
             preparing, records, ..
         } = &mut self.prepare;
@@ -312,7 +363,7 @@ pub(super) fn bar_of(exclusion: Exclusion) -> Bar {
 }
 
 /// How the registry shows `bar`: until its end, or for life.
-fn exclusion_of(bar: Bar) -> Exclusion {
+pub(super) fn exclusion_of(bar: Bar) -> Exclusion {
     match bar {
         Bar::Backoff(end) | Bar::Until(end) => {
             Exclusion::Until(Timestamp::from_millis(end.as_millis()))

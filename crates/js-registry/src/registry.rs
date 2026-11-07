@@ -415,9 +415,10 @@ impl Registry {
 
     /// The hosts set aside for waiting whole-node requests, in host order. A host is set
     /// aside for one request and a request holds one host. A request's next start commits
-    /// its lease on the host it holds; until then the host takes no other start.
+    /// its lease on the host it holds; until then the host takes no other start. Under a
+    /// placer that keeps the queue each mark is read from it ([`crate::Placer::whole_reservations`]).
     pub fn reservations(&self) -> Vec<Reservation> {
-        self.lock().marks.reservations()
+        self.marks_now(&self.lock())
     }
 
     /// Whether `host` is set aside for a waiting request.

@@ -28,6 +28,27 @@
 //! holds, a place past the wait list's size cap ([`MAX_WAITING_REQUESTS`], the live path's
 //! own), and exclusions past the pool's machine limit (the first hosts by id are kept).
 //! Nothing it drops counts as a give-up.
+//!
+//! # Under a placer that keeps the queue
+//!
+//! Under `--placement js-sched` the engine keeps the marks of the requests it queues, their
+//! give-ups and back-offs, and the failed prepares and bars of requests it committed
+//! ([`crate::Placer::whole_round`] and its siblings). The ledger is then written from the
+//! engine: a request's mark is the engine's ([`crate::Placer::whole_reservations`]) and its
+//! counts and exclusions are the engine's ([`crate::Placer::whole_ledger`]), each count the
+//! larger of the engine's and the registry's. The place and the first-presentation instant
+//! are still the registry's wait list's. The format does not change: a file written under
+//! one placement is read under the other.
+//!
+//! A restore checks the records as above and hands what stands of each request's counts and
+//! exclusions to the engine ([`crate::Placer::whole_restore`]), which queues the request with
+//! them when it is presented again (`js_sched::Scheduler::restore_whole`) and answers a
+//! terminal request at its next start; the registry keeps only the give-up count. A timed
+//! exclusion of a record with no failed prepare can only be a give-up's back-off, and is put
+//! back as one; any other is a failed prepare's bar. A mark is put back on the registry's
+//! side as above, and is handed to the engine with its request when the request is presented
+//! again and its host has said hello: until then, or until it is dropped, the engine holds
+//! the host for it outside its queue ([`crate::WholeRound::outside`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -36,8 +57,10 @@ use js_lease::{Exclusion as Barred, ExclusionEnd, Held, Queued, ReservationRecor
 use js_types::{HostId, RequestId};
 
 use super::{Registry, State};
+use crate::placer::{Placer, WholeKept};
 use crate::whole::queue::MAX_WAITING_REQUESTS;
 use crate::whole::requests::{Exclusion, RequestKey, RequestRecord, whole_settings};
+use crate::whole::reserve::Reservation;
 use crate::whole::reserve::Revived;
 
 /// What [`Registry::restore_reservations`] did with the records it was given.
@@ -54,7 +77,11 @@ impl Registry {
     /// in request id order. The lease server hands it to the lease table at each tick, to
     /// be written with the leases.
     pub fn reservation_ledger(&self) -> Vec<ReservationRecord> {
-        export(&self.lock())
+        let state = self.lock();
+        let placer = self.shared.placer.get().map(|placer| &**placer);
+        let marks = self.marks_now(&state);
+        let kept = placer.map(Placer::whole_ledger).unwrap_or_default();
+        export(&state, &marks, kept)
     }
 
     /// Puts back the state `records` hold, as the module documentation says. Called once
@@ -71,6 +98,7 @@ impl Registry {
             max_replace: whole.max_replace,
             max_reserve_attempts: whole.max_reserve_attempts,
             max_exclusions: self.shared.config.max_machines(),
+            placer: self.shared.placer.get().map(|placer| &**placer),
         };
         let mut ordered: Vec<&ReservationRecord> = records.iter().collect();
         ordered.sort_by(|a, b| order(a).cmp(&order(b)));
@@ -100,9 +128,14 @@ fn order(record: &ReservationRecord) -> (bool, Option<(u32, Timestamp)>, &str) {
     (record.queued.is_none(), place, record.request_id.as_str())
 }
 
-/// The registry's side of the ledger, as records.
-fn export(state: &State) -> Vec<ReservationRecord> {
-    let marks = state.marks.reservations();
+/// The ledger as records: the wait list's places, the hosts set aside (`marks`), and the
+/// counts and exclusions of the registry's records and of what a placer that keeps the
+/// queue keeps (`kept`), the larger of each count and the longer of each exclusion.
+fn export(
+    state: &State,
+    marks: &[Reservation],
+    kept: BTreeMap<RequestId, WholeKept>,
+) -> Vec<ReservationRecord> {
     let mut rows: BTreeMap<RequestId, ReservationRecord> = BTreeMap::new();
     for (place, (id, since)) in state.waiting.queue().enumerate() {
         let mark = marks.iter().find(|mark| mark.request == *id);
@@ -124,11 +157,26 @@ fn export(state: &State) -> Vec<ReservationRecord> {
         };
         rows.insert(id.clone(), row);
     }
-    for (id, record) in state.requests.recorded() {
-        let row = rows.entry(id.clone()).or_insert_with(|| empty(id));
-        row.give_ups = record.give_ups;
-        row.prepare_failures = record.prepare_failures;
-        row.exclusions = record.exclusions.iter().map(barred).collect();
+    let recorded = state.requests.recorded().map(|(id, record)| {
+        let kept = WholeKept {
+            give_ups: record.give_ups,
+            prepare_failures: record.prepare_failures,
+            exclusions: record.exclusions.clone(),
+        };
+        (id.clone(), kept)
+    });
+    for (id, kept) in recorded.chain(kept) {
+        let row = rows.entry(id.clone()).or_insert_with(|| empty(&id));
+        row.give_ups = row.give_ups.max(kept.give_ups);
+        row.prepare_failures = row.prepare_failures.max(kept.prepare_failures);
+        let mut exclusions: BTreeMap<HostId, Exclusion> =
+            row.exclusions.iter().map(exclusion).collect();
+        for (host, until) in kept.exclusions {
+            // The longer of the two: `None` is less than any exclusion.
+            let had = exclusions.get(&host).copied();
+            exclusions.insert(host, had.max(Some(until)).unwrap_or(until));
+        }
+        row.exclusions = exclusions.iter().map(barred).collect();
     }
     rows.into_values().collect()
 }
@@ -165,7 +213,7 @@ fn exclusion(barred: &Barred) -> (HostId, Exclusion) {
 }
 
 /// What a restore reads besides the records.
-struct Standing {
+struct Standing<'a> {
     now: Timestamp,
     claim_by: Timestamp,
     max_replace: u32,
@@ -173,6 +221,9 @@ struct Standing {
     /// The most hosts one request is kept off: a request is kept off a host at most once,
     /// so the pool's machine limit bounds it.
     max_exclusions: usize,
+    /// The placer, which keeps the counts and exclusions when it keeps the queue
+    /// ([`Placer::whole_restore`]).
+    placer: Option<&'a dyn Placer>,
 }
 
 /// Puts back one record, if it can stand; what came of it. `seen` holds the request ids
@@ -180,7 +231,7 @@ struct Standing {
 fn revive(
     state: &mut State,
     record: &ReservationRecord,
-    ctx: &Standing,
+    ctx: &Standing<'_>,
     seen: &mut BTreeSet<RequestId>,
 ) -> Restored {
     let id = RequestId::new(&record.request_id).ok();
@@ -208,15 +259,35 @@ fn revive(
             exclusions.pop_last();
         }
         dropped += usize::from(over);
-        let kept = RequestRecord {
-            prepare_failures: failures,
+        let terminal = used_up.into_iter().all(|used| used);
+        let since = record.queued.map_or(ctx.now, |queued| queued.since);
+        let counts = WholeKept {
             give_ups: record.give_ups,
+            prepare_failures: failures,
             exclusions,
-            last: None,
-            terminal: used_up.into_iter().all(|used| used),
+        };
+        let engine = ctx
+            .placer
+            .is_some_and(|placer| placer.whole_restore(&id, &counts, terminal, since));
+        // A placer that keeps the request keeps all of it; the registry keeps the give-up
+        // count it shows and hands the placer at each pass.
+        let kept = match engine {
+            true => RequestRecord {
+                give_ups: record.give_ups,
+                ..RequestRecord::default()
+            },
+            false => RequestRecord {
+                prepare_failures: failures,
+                give_ups: record.give_ups,
+                exclusions: counts.exclusions,
+                last: None,
+                terminal,
+            },
         };
         let key = RequestKey::Id(id.clone());
-        state.requests.restore(key, kept, ctx.now);
+        if [kept.give_ups > 0, !engine].into_iter().any(|keep| keep) {
+            state.requests.restore(key, kept, ctx.now);
+        }
     }
     let room = state.waiting.len() < MAX_WAITING_REQUESTS;
     let wants_place = record.queued;

@@ -1,6 +1,8 @@
 //! How the scale-down marks meet whole-node requests, and the two things the registry
 //! tells a scaler about demand: `waiting` and `Launchable`. The registry is driven
-//! directly on a manual clock with the reservation tests' world.
+//! directly on a manual clock with the reservation tests' world. Each test of a world runs
+//! under both placements, `--placement registry` (`registry::NAME`) and `--placement
+//! js-sched` (`js_sched::NAME`), with the same assertions.
 
 mod support;
 
@@ -25,9 +27,8 @@ fn slow_drain(w: WholeNodeConfig) -> WholeNodeConfig {
 /// hands it over: the request waits (the start answers `Unknown`, no lease is committed, no
 /// host is set aside), and after `undrain` the next poll commits it. It catches a
 /// whole-node placement that does not read the mark.
-#[test]
-fn a_draining_host_is_not_committed_to_a_waiting_request() {
-    let mut w = World::new(&["a"], plain);
+fn a_draining_host_is_not_committed_to_a_waiting_request(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     w.fx.registry.drain(&host("a")).unwrap();
     assert_eq!(w.ask(1, "r1"), StartAck::Unknown);
     w.step(3 * POLL_MS);
@@ -44,10 +45,9 @@ fn a_draining_host_is_not_committed_to_a_waiting_request() {
 /// even though the marked host is idle and so the cheapest to empty: with `a` busy and `b`
 /// draining, the request's reservation is `a`'s; once `b` is releasing it is still `a`'s.
 /// It catches a reservation pass that counts a host being scaled away as a candidate.
-#[test]
-fn a_marked_host_is_not_reserved_for_a_request() {
+fn a_marked_host_is_not_reserved_for_a_request(p: Placement) {
     for release in [false, true] {
-        let mut w = World::new(&["a", "b"], plain);
+        let mut w = World::new_in(p, &["a", "b"], plain);
         w.share(1, HOUR_S);
         assert_eq!(w.lease_on("a"), Some(lease(1)));
         w.fx.registry.drain(&host("b")).unwrap();
@@ -65,9 +65,8 @@ fn a_marked_host_is_not_reserved_for_a_request() {
 /// `r1` waits and is assigned to it, and the drain answers `Busy::Whole` and leaves the
 /// reservation. It catches a drain that takes a host out from under the request it was set
 /// aside for.
-#[test]
-fn drain_refuses_a_host_set_aside_for_a_request() {
-    let mut w = World::new(&["a"], slow_drain);
+fn drain_refuses_a_host_set_aside_for_a_request(p: Placement) {
+    let mut w = World::new_in(p, &["a"], slow_drain);
     w.share(1, HOUR_S);
     w.ask(2, "r1");
     w.stop(1);
@@ -81,9 +80,8 @@ fn drain_refuses_a_host_set_aside_for_a_request() {
 /// Asserts that `drain` refuses a host that is restoring after a whole-node lease, though
 /// no lease is booked and the host lists no run, and takes it after the second heartbeat
 /// that ends the restore. It catches a quiet check that reads only leases and runs.
-#[test]
-fn drain_refuses_a_host_restoring_from_a_whole_node_lease() {
-    let mut w = World::new(&["a"], plain);
+fn drain_refuses_a_host_restoring_from_a_whole_node_lease(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     assert_eq!(w.ask(1, "r1"), StartAck::Unknown);
     w.cancel("r1");
     w.stop(1);
@@ -101,9 +99,8 @@ fn drain_refuses_a_host_restoring_from_a_whole_node_lease() {
 /// has `None`; a cancelled request is gone. It catches a list in the wrong order, a demand
 /// that loses the capabilities, a `since` that moves with each poll, and a `reserved`
 /// that names a host another request holds.
-#[test]
-fn waiting_lists_requests_with_their_demand_and_host() {
-    let mut w = World::new(&["a"], plain);
+fn waiting_lists_requests_with_their_demand_and_host(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     w.share(1, HOUR_S);
     let first = w.now();
     w.ask(2, "r1");
@@ -134,9 +131,8 @@ fn waiting_lists_requests_with_their_demand_and_host() {
 
 /// Asserts that a quiet host assigned to a waiting request is reported as the request's
 /// `reserved` host: the mark of a free host counts, not only one that drains a busy host.
-#[test]
-fn an_assigned_host_is_reported_as_reserved() {
-    let mut w = World::new(&["a"], slow_drain);
+fn an_assigned_host_is_reported_as_reserved(p: Placement) {
+    let mut w = World::new_in(p, &["a"], slow_drain);
     w.share(1, HOUR_S);
     w.ask(2, "r1");
     w.stop(1);
@@ -163,9 +159,8 @@ fn launchable(answer: bool) -> (Launchable, Arc<Mutex<Vec<Demand>>>) {
 /// shows it); with one that says no, or after the launchable is removed, it is refused
 /// again. The launchable is asked about the request's own demand. It catches a pool that
 /// cannot wait for a machine it could launch, and one that waits on a dead cloud.
-#[test]
-fn a_launchable_decides_whether_a_request_with_no_host_waits() {
-    let mut w = World::new(&[], plain);
+fn a_launchable_decides_whether_a_request_with_no_host_waits(p: Placement) {
+    let mut w = World::new_in(p, &[], plain);
     let none = StartAck::Refused(RefusalCode::NoCapableHost);
     assert_eq!(w.ask(1, "r1"), none);
     assert_eq!(w.fx.registry.queue_position(&id("r1")), None);
@@ -192,9 +187,8 @@ fn a_launchable_decides_whether_a_request_with_no_host_waits() {
 /// Asserts that a start with no request id, which cannot wait, meets the launchable too:
 /// it is answered `no-capacity` (a host could come) and not `no-capable-host`, and nothing
 /// is kept for it. It catches a launchable that is read only for requests that queue.
-#[test]
-fn a_launchable_changes_the_refusal_of_a_request_that_cannot_wait() {
-    let mut w = World::new(&[], plain);
+fn a_launchable_changes_the_refusal_of_a_request_that_cannot_wait(p: Placement) {
+    let mut w = World::new_in(p, &[], plain);
     assert_eq!(
         w.provider.start(World::whole_spec(1, None, 600)),
         StartAck::Refused(RefusalCode::NoCapableHost)
@@ -220,9 +214,8 @@ fn a_launchable_prints_as_a_name() {
 /// waiting on a host that is leaving; a later pass does not set the request aside the
 /// retired host again; and the lease booked on the host runs on. It pins the bound: the
 /// reservation lingers for no time at all, not until its deadline.
-#[test]
-fn a_request_reserved_on_a_retired_host_is_let_go() {
-    let mut w = World::new(&["a"], plain);
+fn a_request_reserved_on_a_retired_host_is_let_go(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     w.share(1, HOUR_S);
     w.ask(2, "r1");
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
@@ -239,9 +232,8 @@ fn a_request_reserved_on_a_retired_host_is_let_go() {
 /// (`Busy::Lease`) and, once the lease is stopped, while the host restores from it
 /// (`Busy::Whole`), and works after the restore. It catches a retire that cuts a whole-node
 /// lease and a release that does not wait for the host to be quiet.
-#[test]
-fn a_held_whole_node_host_is_retired_and_released_only_when_quiet() {
-    let mut w = World::new(&["a"], plain);
+fn a_held_whole_node_host_is_retired_and_released_only_when_quiet(p: Placement) {
+    let mut w = World::new_in(p, &["a"], plain);
     w.ask(1, "r1");
     w.step(POLL_MS);
     assert_eq!(w.lease_on("a"), Some(lease(1)));
@@ -257,3 +249,16 @@ fn a_held_whole_node_host_is_retired_and_released_only_when_quiet() {
     }
     assert_eq!(w.fx.registry.release_host(&a), Ok(()));
 }
+
+crate::both!(
+    a_draining_host_is_not_committed_to_a_waiting_request,
+    a_marked_host_is_not_reserved_for_a_request,
+    drain_refuses_a_host_set_aside_for_a_request,
+    drain_refuses_a_host_restoring_from_a_whole_node_lease,
+    waiting_lists_requests_with_their_demand_and_host,
+    an_assigned_host_is_reported_as_reserved,
+    a_launchable_decides_whether_a_request_with_no_host_waits,
+    a_launchable_changes_the_refusal_of_a_request_that_cannot_wait,
+    a_request_reserved_on_a_retired_host_is_let_go,
+    a_held_whole_node_host_is_retired_and_released_only_when_quiet,
+);
