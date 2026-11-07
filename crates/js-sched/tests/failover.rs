@@ -677,3 +677,59 @@ fn a_followed_offer_that_left_the_catalog_falls_back_to_the_full_pick() {
         Some(("Y".to_owned(), Some("z1".to_owned())))
     );
 }
+
+/// Asserts what the read accessors give: before any answer, nothing passed over and nothing
+/// declined; after a capacity answer for X/z1 at 10 ms and a quota answer for Y/z2 at 20 ms
+/// for request `r1`, the declined list holds X/z1 for `r1` at 10 ms and the passed-over list
+/// holds Y in region z2 until 20 ms plus the backoff; at the pass-over's end it is left out
+/// although not yet forgotten; and once the request's attempt ends (every offer refused) its
+/// declines are gone. Catches a decline without its request or time, a pass-over shown past
+/// its end, and declines of an ended attempt still shown.
+#[test]
+fn the_read_accessors_show_declines_and_pass_overs() {
+    let offers = [
+        offer("X", Some("z1"), Some(100)),
+        offer("Y", Some("z2"), Some(200)),
+    ];
+    let providers = [provider("alpha", &offers)];
+    let alpha = id("alpha");
+    let r1 = request("r1");
+    let mut memory = AcquireMemory::new();
+    assert_eq!(memory.passed_over(ms(0)).count(), 0);
+    assert_eq!(memory.declined().count(), 0);
+
+    memory.launched(&r1, &acquire_id(1));
+    memory.answered(
+        &acquire_id(1),
+        (&alpha, &offers[0]),
+        &capacity(),
+        ms(10),
+        BACKOFF,
+    );
+    memory.launched(&r1, &acquire_id(2));
+    memory.answered(
+        &acquire_id(2),
+        (&alpha, &offers[1]),
+        &quota(),
+        ms(20),
+        BACKOFF,
+    );
+
+    let declined: Vec<_> = memory.declined().collect();
+    let x_z1 = js_elastic::OfferKey::of(&alpha, &offers[0]);
+    assert_eq!(declined, [(&r1, &x_z1, ms(10))]);
+    let until = ms(20).saturating_add(BACKOFF);
+    let y_z2 = PassedOver {
+        provider: alpha.clone(),
+        instance_type: "Y".to_owned(),
+        region: Some("z2".to_owned()),
+    };
+    let passed: Vec<_> = memory.passed_over(ms(20)).collect();
+    assert_eq!(passed, [(&y_z2, until)]);
+    assert_eq!(memory.passed_over(until).count(), 0);
+    assert_eq!(memory.passed_over_len(), 1);
+
+    let next = next_offer(&mut memory, &r1, &providers, ms(30));
+    assert_eq!(next, None);
+    assert_eq!(memory.declined().count(), 0);
+}

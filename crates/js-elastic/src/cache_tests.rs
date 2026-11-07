@@ -397,3 +397,22 @@ fn a_merge_keeps_every_key_and_the_later_end() {
     assert_eq!(read.len(), 3);
     assert!(!read.is_cooled_down(&a10, at(50)));
 }
+
+/// Asserts that a cache reports no fetch before a catalog comes, then the instant and the
+/// offer count of the catalog that came; that a failed fetch after it moves neither; and
+/// that the next catalog replaces both, an empty one included. Catches a fetch time taken
+/// from the failed attempt, a count of the wrong catalog, and an empty catalog read as none.
+#[test]
+fn the_fetch_time_and_offer_count_are_those_of_the_catalog_read() {
+    let mut cache = CatalogCache::new(HOUR);
+    assert_eq!(cache.fetched(), None);
+    cache.record(at(5), failure());
+    assert_eq!(cache.fetched(), None);
+    let two = vec![offer("a", Some("z1")), offer("b", None)];
+    cache.record(at(10), Ok(two));
+    assert_eq!(cache.fetched(), Some((at(10), 2)));
+    cache.record(at(20), failure());
+    assert_eq!(cache.fetched(), Some((at(10), 2)));
+    cache.record(at(30), Ok(Vec::new()));
+    assert_eq!(cache.fetched(), Some((at(30), 0)));
+}

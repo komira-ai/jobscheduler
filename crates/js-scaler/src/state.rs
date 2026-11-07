@@ -198,4 +198,13 @@ impl State {
             ..Self::default()
         }
     }
+
+    /// What pass 2 remembers of refused acquires, for a reader outside the step (an
+    /// operator's listing of the providers): the offers declined for capacity in each waiting
+    /// request's attempt, and the instance types passed over after a `quota` answer. The
+    /// step alone changes it.
+    #[must_use]
+    pub fn failover(&self) -> &AcquireMemory {
+        &self.acquire
+    }
 }

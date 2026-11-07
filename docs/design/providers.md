@@ -105,6 +105,24 @@ a launch answers the packed demand of the queue, never one job (hosts.md, sectio
    registered `default` host. The only difference is that it carries an instance id, so the scheduler may release it: the idle rule of 5.10
    terminates it (`release`, then read-back), and a taint replaces it (5.12).
 
+### Reading why a provider launches nothing
+
+`ListProviders` (`GET /v1/providers`, operator only) tells, for the provider of each elastic pool, what the service holds that keeps a
+queued job waiting, besides its checks and machines. Each field is read when the call is answered from the part of the server that owns it;
+none is a copy kept for the call. A field that is empty or absent means the service holds nothing of that kind.
+
+| Field | What it says | Read from |
+|---|---|---|
+| `catalog` | when the catalog in use was fetched (`fetched_at_ms`) and how many offers it holds (`offer_count`); absent before the first fetch. A failed fetch keeps the last good catalog, so the time does not move | the catalog cache |
+| `passed_over` | each instance type not asked for in a region after a `quota` refusal, until `until_ms` (`quota_backoff` after the refusal), for every waiting job | pass 2's failover memory |
+| `declined` | each offer refused for `capacity` in the attempt in progress of a waiting request, with the request and when. An attempt that ran out of offers drops its list, and its next one asks every offer again | pass 2's failover memory |
+| `brake` | the failure brake of the pool: the failures counted in a row, and `engaged` with `engaged_at_ms` once the count tripped the pool. Only `POST /v1/pools/{pool}/brake/reset` disengages it | the scaler's records |
+| `cooldown_until_ms`, `cooldown_reason` | the pool's cool-down while it runs, and why (`boot_failed`, `denied`, `shape`, or `quota` from a records file of an earlier release) | the scaler's records |
+| `launching` | each acquire whose call to the provider is out, with the machine's name, the offer, `started_at_ms` and `age_ms` at the time of the answer | the scaler, while the call is out |
+
+The scaler's records and its failover memory are read as the last finished tick left them; the launches out are read live, so a call that
+hangs shows with a growing age while its tick waits. Nothing here changes how a provider is chosen; it only shows what the choice read.
+
 ## The provider hierarchy
 
 **Configuration.** A pool has `providers`, an ordered list of provider names, and optionally `provider_max_machines`, a table of per-provider

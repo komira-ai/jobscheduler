@@ -18,9 +18,9 @@ use js_proto::v1::{
     GetResultResponse, GetUsageRequest, GetUsageResponse, Host, HostBooking, HostMark, HostSource,
     HostState, Job, JobResult, JobState, JobTimes, ListHostsRequest, ListHostsResponse,
     ListJobsRequest, ListJobsResponse, ListPoolsRequest, ListPoolsResponse, ListProvidersRequest,
-    ListProvidersResponse, Machine, Memory, Pool, Provider, ProviderCheck, Refusal, RefusalCode,
-    ResourceUsage, ResultReason, Shape, SubmitJobRequest, SubmitJobResponse, UncordonHostRequest,
-    UncordonHostResponse, UsageRecord, WholeHostOutcome,
+    ListProvidersResponse, Machine, Memory, Pool, Provider, ProviderCatalog, ProviderCheck,
+    Refusal, RefusalCode, ResourceUsage, ResultReason, Shape, SubmitJobRequest, SubmitJobResponse,
+    UncordonHostRequest, UncordonHostResponse, UsageRecord, WholeHostOutcome,
 };
 use tokio::io::DuplexStream;
 use tonic::codegen::Service;
@@ -456,6 +456,13 @@ mod answers {
                     price_cents_per_hour: Some(129),
                     provider_id: "instance-1".to_owned(),
                 }],
+                catalog: Some(ProviderCatalog {
+                    fetched_at_ms: T0 + 5000,
+                    offer_count: 4,
+                }),
+                cooldown_until_ms: Some(T0 + 600_000),
+                cooldown_reason: "boot_failed".to_owned(),
+                ..Provider::default()
             }],
         }
     }
