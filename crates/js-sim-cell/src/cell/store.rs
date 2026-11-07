@@ -225,7 +225,6 @@ impl Cell {
 
     /// Every read of the store at a stop of the server, in order: what it held, or why it
     /// could not be read.
-    #[must_use]
     pub fn store_reads(&self) -> &[Result<StoreRead, String>] {
         &self.kept.reads
     }
