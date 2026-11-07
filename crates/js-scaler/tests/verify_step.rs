@@ -158,8 +158,8 @@ fn a_mismatch_releases_cools_down_and_counts_toward_the_brake() {
         host: name.clone(),
         failed: vec![HelloDimension::AcceleratorModel],
     };
-    assert_eq!(rig.state.records.cooled_offers, [cooled.clone()]);
-    assert_eq!(saved.cooled_offers, [cooled.clone()]);
+    assert_eq!(rig.state.records.cooled_offers, vec![cooled.clone()]);
+    assert_eq!(saved.cooled_offers, vec![cooled.clone()]);
     assert_eq!(rig.state.mismatched, [cooled]);
     let store = rig.state.records.offer_cooldowns();
     assert!(store.is_cooled_down(&key("gpu_8x_h100", "z1"), instant(SECOND)));
