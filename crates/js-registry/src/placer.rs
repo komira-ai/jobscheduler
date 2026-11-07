@@ -76,7 +76,7 @@ pub struct WaitingWhole {
     /// When it was first presented: its place on the wait list and the start of its
     /// `drain_after`.
     pub since: Timestamp,
-    /// The drain give-ups the registry holds for it (put back from the ledger).
+    /// Deprecated, always zero: no request gives a host up.
     pub give_ups: u32,
     /// The hosts left out of its placements after failed prepares, and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
@@ -114,21 +114,22 @@ pub struct WholeRound {
 
 /// What a placer that keeps the whole-node queue keeps of one request between its
 /// placements, as the reservation ledger writes it ([`Placer::whole_ledger`]) and puts it
-/// back ([`Placer::whole_restore`]): the drain give-ups, the failed prepares and the hosts
-/// left out of its placements.
+/// back ([`Placer::whole_restore`]): the failed prepares and the hosts left out of its
+/// placements, with a give-up count that is always zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WholeKept {
-    /// The holds the request gave up at their deadline.
+    /// Deprecated, always zero when written: no hold is given up. A ledger written before
+    /// may hold a count, which is read and ignored.
     pub give_ups: u32,
     /// The prepares of its leases that failed.
     pub prepare_failures: u32,
-    /// The hosts it is kept off, each until when: the back-off of a give-up and the bars
-    /// of failed prepares, those that have not ended.
+    /// The hosts it is kept off, each until when: the bars of failed prepares (and a
+    /// back-off an older ledger kept), those that have not ended.
     pub exclusions: BTreeMap<HostId, Exclusion>,
 }
 
 impl WholeKept {
-    /// Whether nothing is kept: no give-up, no failed prepare, no host left out.
+    /// Whether nothing is kept: no give-up counted, no failed prepare, no host left out.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         [
@@ -190,7 +191,7 @@ pub struct Waiter {
     pub id: RequestId,
     /// When it was first presented.
     pub since: Timestamp,
-    /// The holds it gave up at their deadline.
+    /// Deprecated, always zero: no hold is given up.
     pub give_ups: u32,
     /// Whether a host was set aside for it at any time while it waited.
     pub marked: bool,
@@ -343,7 +344,7 @@ pub trait Placer: Send + Sync {
     }
 
     /// The agent reported `lease` ready on a clean host committed to it: the lease's
-    /// request is placed, so its failed prepares, bars and give-ups are let go. Told under
+    /// request is placed, so its failed prepares and bars are let go. Told under
     /// the registry's lock, at every heartbeat that carries the report. The default does
     /// nothing.
     fn prepare_ready(&self, lease: &LeaseId) {
@@ -385,7 +386,7 @@ pub trait Placer: Send + Sync {
     }
 
     /// What the placer keeps of the request under `key` between its placements: its failed
-    /// prepares, give-ups, the hosts left out of its placements, the last failure and
+    /// prepares, the hosts left out of its placements, the last failure and
     /// whether it is terminal. `None` for a request it keeps no record of. A request told
     /// apart by its content is asked of a placer that keeps the wait list only. The default
     /// keeps none.
@@ -407,20 +408,6 @@ pub trait Placer: Send + Sync {
     /// default does nothing.
     fn whole_sweep(&self, horizon: Duration) {
         let _ = horizon;
-    }
-
-    /// How many holds each request of the whole-node queue this placer keeps
-    /// ([`Placer::whole_round`]) has given up at their deadline; a request that gave none
-    /// up may be left out. The registry raises its record of each request to that count
-    /// (what [`crate::Registry::request_record`], the history of the request and the
-    /// reservation ledger read), as its own pass counts the give-ups it makes. The hosts a
-    /// give-up backs the request off stay the placer's. Asked under the registry's lock,
-    /// right after [`Placer::whole_round`] answered, of a placer that does not keep the wait
-    /// list (one that does keeps the counts itself, [`Placer::whole_record`]).
-    ///
-    /// The default, empty, is a placer that gives nothing up.
-    fn whole_give_ups(&self) -> BTreeMap<RequestId, u32> {
-        BTreeMap::new()
     }
 
     /// The hosts the requests this placer queues ([`Placer::whole_round`]) hold now, as the
@@ -450,10 +437,10 @@ pub trait Placer: Send + Sync {
     /// Puts back what a restart's ledger kept of request `id`
     /// ([`crate::Registry::restore_reservations`]): `kept`, the request first presented at
     /// `since`, and `terminal` when its failed prepares reached `max_replace`. `true` when
-    /// the placer keeps it: it queues the request with its give-ups and bars when it is
+    /// the placer keeps it: it queues the request with its bars when it is
     /// presented again, and answers its failed prepares and terminal start at once
-    /// ([`Placer::whole_record`], [`Placer::whole_start`]); the registry then keeps only
-    /// the give-up count, or nothing of a placer that keeps the wait list. Told under the
+    /// ([`Placer::whole_record`], [`Placer::whole_start`]); the registry then keeps
+    /// nothing of it. Told under the
     /// registry's lock, before any host says hello.
     ///
     /// The default, `false`, keeps nothing: the registry puts the record back itself.

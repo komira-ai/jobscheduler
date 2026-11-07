@@ -1,5 +1,6 @@
-//! What keeps a whole-machine request off a worker ([`Bar`]): the back-off of a hold it
-//! gave up, and the hard bars a caller sets from outside ([`Scheduler::bar_whole`]).
+//! What keeps a whole-machine request off a worker ([`Bar`]): the back-offs and the hard
+//! bars a caller sets from outside ([`Scheduler::bar_whole`]) or puts back
+//! ([`crate::Scheduler::restore_whole`]).
 //!
 //! [`Scheduler::bar_whole`]: crate::Scheduler::bar_whole
 
@@ -11,10 +12,11 @@ use js_types::sched::{FarmTime, WorkerId};
 /// ([`crate::Scheduler::whole_barred`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bar {
-    /// The back-off after a hold given up at its deadline, until the instant given
-    /// (exclusive): the request makes no mark on the worker, and takes it when it is
-    /// quiet only if no other worker could run the request (as [`crate::Fate::avoid`]
-    /// is). This is the bar a give-up sets.
+    /// A back-off until the instant given (exclusive): the request makes no mark on the
+    /// worker, and takes it when it is quiet only if no other worker could run the
+    /// request (as [`crate::Fate::avoid`] is). The scheduler sets none itself: a caller
+    /// sets it ([`crate::Scheduler::bar_whole`]) or puts it back from a ledger written
+    /// when a hold could still be given up.
     Backoff(FarmTime),
     /// A hard bar until the instant given (exclusive): the worker is neither marked for
     /// the request nor granted to it, quiet or not, whatever the other workers.

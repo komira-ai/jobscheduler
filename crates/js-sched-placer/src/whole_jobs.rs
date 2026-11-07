@@ -208,7 +208,7 @@ impl Engine {
     }
 
     /// Queues `job`, a whole-host job, at the back of the scheduler's queue as a whole-machine
-    /// request held to the time it was submitted, with no give-up, the bars its failed
+    /// request held to the time it was submitted, with the bars its failed
     /// prepares set and those of `mark`, and `mark` itself: its operation.
     fn submit_job(
         &mut self,
@@ -242,7 +242,6 @@ impl Engine {
         let restored = |mark| RestoredWhole {
             operation,
             queued_at,
-            give_ups: 0,
             bars: bars.clone(),
             mark,
         };

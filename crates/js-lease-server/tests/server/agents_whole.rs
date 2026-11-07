@@ -233,7 +233,8 @@ async fn a_gpu_host_lease_on_a_registered_host_is_held_at_once() {
 /// reading, is resumed with `--boot resume`, and once the agent says hello the host
 /// lists as reserved for `r9`, with its deadline raised to the boot plus
 /// `RESERVATION_BOOT_GRACE` (not the stored deadline, which is earlier, and not the
-/// stored plus the grace). It catches a server that opens the table and never gives the
+/// stored plus the grace). The row carries an older build's give-up count of one, which
+/// is read and ignored. It catches a server that opens the table and never gives the
 /// ledger to the registry, and a restart grace that never reaches the table's settings.
 #[tokio::test]
 async fn a_resumed_lease_file_marks_the_host_with_the_deadline_floored() {

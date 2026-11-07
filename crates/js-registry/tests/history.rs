@@ -252,11 +252,12 @@ fn an_ended_lease_booking_writes_one_history_row() {
     });
 }
 
-/// Catches, for a whole-node request that waited 40 s, gave one host up and was then served
-/// on the host its second mark set aside: a queue wait counted from anything but its first
-/// presentation to its start, the give-up lost, the mark's outcome not set, a whole host not
-/// recorded as booked whole, and the run counted from the presentation.
-fn a_whole_node_request_that_waited_and_gave_a_host_up(store: Stores<'_>) {
+/// Catches, for a whole-node request that waited 40 s on the host it was marked on, ten
+/// seconds past the mark's 30 s deadline, and was then served there: a queue wait counted
+/// from anything but its first presentation to its start, a give-up count other than 0, the
+/// mark's outcome not set, a whole host not recorded as booked whole, and the run counted
+/// from the presentation.
+fn a_whole_node_request_that_waited_past_its_deadline_on_one_host(store: Stores<'_>) {
     let w = World::new(&["a", "b"], drain_deadline(30_000));
     let mut l = Logged::new(w, store());
     l.w.share(1, HOUR_S);
@@ -264,11 +265,11 @@ fn a_whole_node_request_that_waited_and_gave_a_host_up(store: Stores<'_>) {
     l.w.ask(3, "q");
     assert_eq!(l.w.reserved_host("q"), Some("a".to_string()));
     l.w.step(30_000);
-    assert_eq!(l.w.reserved_host("q"), Some("b".to_string()));
+    assert_eq!(l.w.reserved_host("q"), Some("a".to_string()));
     l.w.step(5_000);
-    l.w.stop(2);
+    l.w.stop(1);
     l.w.step(5_000);
-    assert_eq!(l.w.lease_on("b"), Some(lease(3)));
+    assert_eq!(l.w.lease_on("a"), Some(lease(3)));
     l.w.step(10_000);
     l.w.stop(3);
     let rows = l.rows();
@@ -277,8 +278,8 @@ fn a_whole_node_request_that_waited_and_gave_a_host_up(store: Stores<'_>) {
     let expected = EndedRow {
         queued_ms: Some(40_000),
         drain_outcome: DrainOutcome::MarkHeld,
-        give_up_outcome: Some(1),
-        ..ordinary(&l, 3, "b", l.w.now().millis(), 10_000)
+        give_up_outcome: Some(0),
+        ..ordinary(&l, 3, "a", l.w.now().millis(), 10_000)
     };
     assert_eq!(*row, expected);
 }
@@ -433,9 +434,10 @@ fn leases_put_back_after_a_restart(store: Stores<'_>) {
     }
 }
 
-/// Catches: a whole-node request cancelled after it gave its only marked host up, and so
-/// holding no mark when it was cancelled, recorded as one that never held a mark.
-fn a_request_cancelled_after_it_gave_its_only_host_up(store: Stores<'_>) {
+/// Catches: a whole-node request cancelled five seconds past its mark's deadline, with the
+/// mark still held on its only host, recorded as one that never held a mark or with a
+/// give-up count other than 0.
+fn a_request_cancelled_past_its_mark_deadline_on_its_only_host(store: Stores<'_>) {
     let settings = |w: WholeNodeConfig| WholeNodeConfig {
         drain_deadline_ms: Some(20_000),
         reserve_backoff_ms: 600_000,
@@ -446,11 +448,11 @@ fn a_request_cancelled_after_it_gave_its_only_host_up(store: Stores<'_>) {
     l.w.ask(2, "q");
     assert_eq!(l.w.reserved_host("q"), Some("a".to_string()));
     l.w.step(25_000);
-    assert_eq!(l.w.reservation("q"), None);
+    assert!(l.w.reservation("q").is_some());
     l.w.stop(2);
     let row = l.row();
     let outcome = (row.drain_outcome, row.give_up_outcome, row.queued_ms);
-    assert_eq!(outcome, (DrainOutcome::MarkDropped, Some(1), Some(25_000)));
+    assert_eq!(outcome, (DrainOutcome::MarkDropped, Some(0), Some(25_000)));
 }
 
 /// A placer that books the first host it is shown that no whole-node request has set aside.
@@ -538,11 +540,11 @@ fn an_ordinary_lease_put_back_with_the_feed_keeps_its_start_and_estimate(store: 
 #[test]
 fn history_row_fields_match_section_10_1() {
     each_store("fields", |store| {
-        a_whole_node_request_that_waited_and_gave_a_host_up(store);
+        a_whole_node_request_that_waited_past_its_deadline_on_one_host(store);
         an_estimated_lease_and_one_without_an_estimate(store);
         a_lost_host_and_a_wall_limit(store);
         requests_cancelled_while_they_waited(store);
-        a_request_cancelled_after_it_gave_its_only_host_up(store);
+        a_request_cancelled_past_its_mark_deadline_on_its_only_host(store);
         a_whole_node_lease_without_a_request_id(store);
         a_shared_booking_records_its_own_share(store);
         leases_put_back_after_a_restart(store);

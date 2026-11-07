@@ -123,7 +123,9 @@ pub(crate) struct HostEntry {
     /// The request a reserved host is set aside for.
     #[serde(skip_serializing_if = "Option::is_none")]
     reserved_for: Option<String>,
-    /// When a reservation that is draining a busy host is given up, in milliseconds.
+    /// When the host a reservation is draining is expected to be drained at the latest, in
+    /// milliseconds. Reaching it gives nothing up: the mark stays until its request is placed
+    /// or cancelled, or the host goes.
     #[serde(skip_serializing_if = "Option::is_none")]
     drain_deadline_ms: Option<u64>,
     /// Set for a registered host that is cordoned: when the cordon lapses. The host cordoned

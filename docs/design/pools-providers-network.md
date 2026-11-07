@@ -774,8 +774,7 @@ Rules, each tied to a requirement or to existing behaviour:
   (requirement 14). PROPOSAL (Open questions 21): a reservation counts as covering however long
   its `drain_deadline` is. The cost of that choice is a request waiting on a long drain while a
   launch would have served it sooner; the benefit is that no paid machine is bought for a
-  request that has a host. The reservation's own give-up (`reserve.rs`, step 4) drops the mark,
-  and the request is uncovered again on the next tick.
+  request that has a host. A mark is never given up at its deadline; it is dropped only when the request is placed or cancelled, the host is tainted or gone, or the ceiling falls, and the request is uncovered again on the next tick.
 - Draining hosts do not cover. Before any `Acquire`, if an uncovered request fits a Draining
   host that is not yet Releasing, the scaler emits `Undrain` for it instead (see Registered to
   Draining).
@@ -1618,7 +1617,7 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
 - One waiting request: one `Acquire`; the same input plus the record: still one. 100 waiting
   requests with `max_instances = 3`: never more than 3 records and acquires over any ticks.
 - Reserved demand: one busy host and one waiting request holding a reservation on it
-  (`reserved = Some(host)`): zero `Acquire`; after the reservation is given up: one. Two waiting
+  (`reserved = Some(host)`): zero `Acquire`; after the reservation is dropped (the request placed elsewhere or cancelled): one. Two waiting
   requests and one reserved host: one. A free host assigned to a request covers it. Catches buying
   a machine for a request that has one.
 - Restart between record and call: a `list` showing the instance gives no second `Acquire` and no

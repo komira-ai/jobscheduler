@@ -1,5 +1,5 @@
 //! The reservation and drain state machine of a dedicated pool: which waiting request is
-//! given which host and when, what a marked host refuses, when a reservation is given up,
+//! given which host and when, what a marked host refuses, when a mark outlives its deadline,
 //! and what the caps drop. The registry is driven directly on a manual clock, with
 //! hand-built heartbeats and a consumer that polls its start every five seconds; nothing
 //! sleeps and no test asserts how long anything takes on a wall clock. Each test runs under
@@ -13,7 +13,7 @@ use std::time::Duration;
 use js_agent_wire::Command;
 use js_lease::Timestamp;
 use js_provider::{Pool, RefusalCode, StartAck};
-use js_registry::{Exclusion, PoolConfig, RunState, WholeNodeConfig};
+use js_registry::{PoolConfig, RunState, WholeNodeConfig};
 use js_types::{LeaseId, ProviderId};
 use support::world::*;
 use support::*;
@@ -148,9 +148,9 @@ fn a_reserved_request_moves_to_a_host_that_turns_quiet(p: Placement) {
     assert_eq!(w.share(4, 60), StartAck::Started { host: host("a") });
 }
 
-/// Asserts the no-thrash rule: a request given up on the cheaper host and reserved on the
-/// dearer one stays on it when the back-off ends, until its own deadline.
-fn a_reserved_request_does_not_switch_to_a_cheaper_host_later(p: Placement) {
+/// Asserts the no-thrash rule: a request reserved on a host stays on it, with no other host
+/// quiet, at its deadline and long after, and its record shows nothing given up.
+fn a_reserved_request_stays_on_its_host_past_its_deadline(p: Placement) {
     let mut w = World::new_in(p, &["a", "b"], |w| WholeNodeConfig {
         drain_deadline_ms: Some(100_000),
         reserve_backoff_ms: 30_000,
@@ -161,16 +161,17 @@ fn a_reserved_request_does_not_switch_to_a_cheaper_host_later(p: Placement) {
     w.ask(3, "r1");
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
     w.step(100_000);
-    assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
-    // Host a is out of the back-off at 130 seconds and is the cheaper of the two.
+    assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
+    // Host b is the dearer of the two and stays unreserved well past the deadline.
     w.step(40_000);
-    assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
+    assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
 }
 
 /// Asserts the default deadline: with no `drain_deadline` it is the wall time. The
 /// registry's pass takes the longer of the request's and the time the host's lease has
-/// left, so a request with a short wall time does not give up on a host whose lease is
-/// longer; js-sched's engine takes the request's wall time alone (the deadline rule).
+/// left, so the deadline of a request with a short wall time covers the longest lease on
+/// the host; js-sched's engine takes the request's wall time alone (the deadline rule).
 fn the_default_deadline_covers_the_longest_lease_on_the_host(p: Placement) {
     let mut w = World::new_in(p, &["a"], plain);
     w.share(1, 600);
@@ -185,8 +186,9 @@ fn the_default_deadline_covers_the_longest_lease_on_the_host(p: Placement) {
 }
 
 /// Asserts that an assigned mark drains nothing and so does not count toward
-/// `max_draining`: one request holds the only draining slot on a host it gave up and
-/// is excluded from another that turns quiet, and a second request is given that host.
+/// `max_draining`: one request holds the only draining slot on a host and moves to another that
+/// turns quiet, where its mark is assigned, and a second request is given the host it left
+/// to drain.
 fn an_assigned_mark_is_not_held_to_max_draining(p: Placement) {
     let mut w = World::new_in(p, &["a", "b"], |w| WholeNodeConfig {
         drain_deadline_ms: Some(100_000),
@@ -200,16 +202,18 @@ fn an_assigned_mark_is_not_held_to_max_draining(p: Placement) {
     w.step(100_000);
     assert_eq!(
         names(&w.reservations()),
-        [("r1".to_string(), "b".to_string())]
+        [("r1".to_string(), "a".to_string())]
     );
-    w.stop(1);
-    w.provider.observe(&lease(1));
+    w.stop(2);
+    w.provider.observe(&lease(2));
+    w.fx.registry.advance();
+    let first = w.reservation("r1").unwrap();
+    assert_eq!((first.host.to_string(), first.assigned), ("b".into(), true));
     let second = w.reservation("r2").unwrap();
     assert_eq!(
         (second.host.to_string(), second.assigned),
-        ("a".into(), true)
+        ("a".into(), false)
     );
-    assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
 }
 
 /// Asserts that a mark that moves to a quiet host keeps its age, which orders the marks
@@ -269,12 +273,11 @@ fn a_new_session_keeps_the_end_bound_of_the_booking(p: Placement) {
     assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
 }
 
-/// Asserts the give-up at the deadline: kept one millisecond before, given up exactly at
-/// it, counted once, the host excluded for `reserve_backoff` from then, and the request
-/// on the next cheapest host in the same tick. Under js-sched the back-off is the engine's
-/// soft bar (a quiet host may still be granted when no other could be), not the registry's
-/// exclusion, which keeps a request off a host whatever it is.
-fn a_reservation_is_given_up_exactly_at_its_deadline(p: Placement) {
+/// Asserts that a whole-node request waits past the old deadline without giving up: its
+/// mark on the cheapest host is kept one millisecond before the deadline, at it and long
+/// after it, never moves to the other busy host, leaves the host unexcluded and the
+/// request's record empty, and the request is given the host when it empties.
+fn a_whole_request_waits_past_the_old_deadline_without_giving_up(p: Placement) {
     let mut w = World::new_in(p, &["a", "b"], drain_deadline(120_000));
     w.share(1, HOUR_S);
     w.share(2, HOUR_S);
@@ -286,25 +289,21 @@ fn a_reservation_is_given_up_exactly_at_its_deadline(p: Placement) {
         w.now().plus(Duration::from_millis(120_000))
     );
     w.step(119_999);
-    assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
-    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
+    assert_eq!(w.reservation("r1"), Some(reserved.clone()));
     w.step(1);
-    assert_eq!(w.reserved_host("r1"), Some("b".to_string()));
-    let record = w.fx.registry.request_record(&id("r1")).unwrap();
-    assert_eq!(record.give_ups, 1);
-    let until = w.now().plus(Duration::from_millis(300_000));
-    // The back-off of a give-up is a soft bar the engine keeps under js-sched (design
-    // whole-node.md D55), so the registry records no exclusion for it.
-    let excluded = match p {
-        Placement::Registry => Some(&Exclusion::Until(until)),
-        Placement::JsSched => None,
-    };
-    assert_eq!(record.exclusions.get(&host("a")), excluded);
+    assert_eq!(w.reservation("r1"), Some(reserved.clone()));
+    w.step(1_000_000);
+    assert_eq!(w.reservation("r1"), Some(reserved));
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
+    w.stop(1);
+    w.step(POLL_MS);
+    assert_eq!(w.lease_on("a"), Some(lease(3)));
 }
 
-/// Asserts that a request with no other host waits unreserved after a give-up and
-/// reserves again exactly when the back-off ends: not one millisecond before.
-fn with_no_other_host_the_request_waits_out_the_backoff_and_reserves_again(p: Placement) {
+/// Asserts that a request with no other host keeps its mark on the one host past the
+/// deadline and the back-off's length, with its queue place and a record that shows no
+/// exclusion and no give-up.
+fn with_no_other_host_the_request_keeps_its_mark_past_the_deadline(p: Placement) {
     let mut w = World::new_in(p, &["a"], |w| WholeNodeConfig {
         drain_deadline_ms: Some(100_000),
         reserve_backoff_ms: 50_000,
@@ -312,22 +311,20 @@ fn with_no_other_host_the_request_waits_out_the_backoff_and_reserves_again(p: Pl
     });
     w.share(1, HOUR_S);
     w.ask(2, "r1");
+    let mark = w.reservation("r1").unwrap();
     w.step(100_000);
-    assert_eq!(w.reservation("r1"), None);
+    assert_eq!(w.reservation("r1"), Some(mark.clone()));
+    w.step(50_000);
+    assert_eq!(w.reservation("r1"), Some(mark));
     assert_eq!(w.fx.registry.queue_position(&id("r1")), Some(0));
-    w.step(49_999);
-    assert_eq!(w.reservation("r1"), None);
-    w.step(1);
-    let again = w.reservation("r1").unwrap();
-    assert_eq!(again.deadline, w.now().plus(Duration::from_millis(100_000)));
-    assert_eq!(w.fx.registry.request_record(&id("r1")).unwrap().give_ups, 1);
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
 }
 
-/// Asserts W6: with a drain deadline of 100 seconds, a wall time of 600 and two attempts,
-/// the request gives up exactly twice, its third reservation has the wall time as its
-/// deadline and is not given up at that deadline while the host is busy, and it commits
-/// when the host empties. The give-up count stays at two.
-fn after_max_reserve_attempts_the_reservation_waits_for_the_host_and_commits(p: Placement) {
+/// Asserts that `max_reserve_attempts` no longer limits anything: with a limit of two, a
+/// drain deadline of 100 seconds and a wall time of 600, the request keeps its one mark on
+/// the busy host for longer than three deadlines, with a deadline that never moves and a
+/// give-up count of 0, and commits when the host empties.
+fn max_reserve_attempts_does_not_limit_a_waiting_request(p: Placement) {
     let mut w = World::new_in(p, &["a"], |w| WholeNodeConfig {
         drain_deadline_ms: Some(100_000),
         reserve_backoff_ms: 10_000,
@@ -336,27 +333,18 @@ fn after_max_reserve_attempts_the_reservation_waits_for_the_host_and_commits(p: 
     });
     w.share(1, 600);
     w.ask(2, "r1");
-    w.step(220_000);
-    let capped = w.reservation("r1").unwrap();
-    let record = w.fx.registry.request_record(&id("r1")).unwrap();
-    assert_eq!(record.give_ups, 2);
-    // The host's lease still has 380 seconds; the request's wall time is 600.
-    assert_eq!(
-        capped.deadline,
-        w.now().plus(Duration::from_millis(600_000))
-    );
-    w.step(610_000);
-    assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
-    assert_eq!(w.fx.registry.request_record(&id("r1")).unwrap().give_ups, 2);
+    let mark = w.reservation("r1").unwrap();
+    w.step(830_000);
+    assert_eq!(w.reservation("r1"), Some(mark));
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
     w.stop(1);
     w.step(POLL_MS);
     assert_eq!(w.lease_on("a"), Some(lease(2)));
-    assert_eq!(w.fx.registry.request_record(&id("r1")).unwrap().give_ups, 2);
 }
 
-/// Asserts W7: a give-up changes no lease and no run on the host and sends the host no
-/// stop or cancel, in any heartbeat reply of the whole drain.
-fn a_give_up_touches_no_lease_and_no_run(p: Placement) {
+/// Asserts W7: a mark kept past its deadline changes no lease and no run on the host and
+/// sends the host no stop or cancel, in any heartbeat reply of the whole drain.
+fn a_mark_past_its_deadline_touches_no_lease_and_no_run(p: Placement) {
     let mut w = World::new_in(p, &["a"], drain_deadline(100_000));
     w.share(1, HOUR_S);
     w.fx.registry
@@ -374,7 +362,7 @@ fn a_give_up_touches_no_lease_and_no_run(p: Placement) {
     assert_eq!(before.1, [("run-1".to_string(), RunState::Queued)]);
     w.ask(2, "r1");
     w.step(100_000);
-    assert_eq!(w.fx.registry.request_record(&id("r1")).unwrap().give_ups, 1);
+    assert!(w.reservation("r1").is_some());
     assert_eq!((w.provider.booked(), runs(&w)), before);
     let touched = w
         .commands
@@ -511,12 +499,12 @@ fn held_leases_over_the_ceiling_drop_every_reservation(p: Placement) {
     assert!(w.reservations().is_empty());
 }
 
-/// Asserts that a mark on a host that turns tainted is dropped without counting a give-up
-/// or excluding the host, and that a lost host is not reserved. A host that goes lost
-/// while it carries the mark keeps it under the registry's pass (it may come back); under
-/// js-sched a lost host can no longer hold the request, and with the other host tainted
-/// the request holds none.
-fn a_tainted_host_loses_its_mark_and_a_lost_one_is_not_reserved(p: Placement) {
+/// Asserts that a mark kept for ever on its host is still dropped when the host turns
+/// tainted, without excluding the host or leaving a record, and that a lost host is not
+/// reserved. A host that goes lost while it carries the mark keeps it under the registry's
+/// pass (it may come back); under js-sched a lost host can no longer hold the request, and
+/// with the other host tainted the request holds none.
+fn a_mark_on_a_tainted_host_is_still_dropped(p: Placement) {
     let mut w = World::new_in(p, &["a", "b"], plain);
     w.share(1, HOUR_S);
     w.share(2, HOUR_S);
@@ -710,16 +698,16 @@ crate::both!(
     a_marked_host_takes_only_the_start_of_its_request,
     a_later_request_cannot_take_the_host_assigned_to_an_earlier_one,
     a_reserved_request_moves_to_a_host_that_turns_quiet,
-    a_reserved_request_does_not_switch_to_a_cheaper_host_later,
+    a_reserved_request_stays_on_its_host_past_its_deadline,
     the_default_deadline_covers_the_longest_lease_on_the_host,
     an_assigned_mark_is_not_held_to_max_draining,
     a_mark_that_moves_keeps_its_age_when_the_ceiling_falls,
     a_lease_put_back_has_no_bound_and_the_old_one_is_not_used,
     a_new_session_keeps_the_end_bound_of_the_booking,
-    a_reservation_is_given_up_exactly_at_its_deadline,
-    with_no_other_host_the_request_waits_out_the_backoff_and_reserves_again,
-    after_max_reserve_attempts_the_reservation_waits_for_the_host_and_commits,
-    a_give_up_touches_no_lease_and_no_run,
+    a_whole_request_waits_past_the_old_deadline_without_giving_up,
+    with_no_other_host_the_request_keeps_its_mark_past_the_deadline,
+    max_reserve_attempts_does_not_limit_a_waiting_request,
+    a_mark_past_its_deadline_touches_no_lease_and_no_run,
     a_cancel_drops_the_mark_at_once,
     an_unpolled_request_loses_its_mark_when_its_entry_expires,
     max_draining_makes_the_second_request_wait_for_the_first_to_commit,
@@ -727,7 +715,7 @@ crate::both!(
     a_start_without_an_id_still_books_a_quiet_host,
     a_falling_ceiling_drops_the_newest_reservation_and_never_a_held_lease,
     held_leases_over_the_ceiling_drop_every_reservation,
-    a_tainted_host_loses_its_mark_and_a_lost_one_is_not_reserved,
+    a_mark_on_a_tainted_host_is_still_dropped,
     a_mark_on_a_forgotten_host_is_dropped,
     a_start_of_an_ended_lease_is_refused_and_not_kept,
     a_stream_of_shares_cannot_starve_a_whole_request,

@@ -1,6 +1,6 @@
 //! Whole-node reservations across a restart. The registry owns the wait list, and the marks
 //! and the counts with it (under `--placement js-sched` the engine keeps the marks of the
-//! requests it queues, their give-ups, back-offs, failed prepares and bars, and the registry
+//! requests it queues, their back-offs, failed prepares and bars, and the registry
 //! writes the ledger from it); the lease file keeps them beside the leases, as the table's
 //! reservation ledger (`js-lease`), so a restart over the same file with `--boot resume`
 //! gets them back, under either placement (design `whole-node.md`, D55).

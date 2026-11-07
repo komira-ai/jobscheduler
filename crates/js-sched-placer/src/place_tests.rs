@@ -410,8 +410,6 @@ fn a_whole_node_start_books_the_host_of_its_pending_grant() {
         .map(|mark| (mark.host.to_string(), mark.assigned))
         .collect();
     assert_eq!(held, [("b".to_owned(), true)]);
-    // A grant gives nothing up: the registry is told of no give-up.
-    assert!(placer.whole_give_ups().is_empty());
     assert_eq!(placer.pick(&start, &open[..1], &unmarked()), None);
     assert_eq!(placer.pick(&start, &open, &unmarked()), Some(1));
     let none = Fallbacks {

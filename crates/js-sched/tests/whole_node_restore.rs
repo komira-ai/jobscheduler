@@ -1,7 +1,7 @@
 //! Restored whole-node state and bars at their edges ([`Scheduler::restore_whole`],
 //! [`Scheduler::bar_whole`], [`Scheduler::unplace_keeping_queued_at`]): bars restored for
 //! workers that register later, a hard bar next to a soft preference, a restore that
-//! replaces what the operation had, counts at the attempt cap, a deadline already passed,
+//! replaces what the operation had, a deadline already passed,
 //! restored marks over the ceiling, the history a requeue keeps, bars on a probe, a held
 //! operation and an action, and the backfill start of a mark whose tail is unknown or
 //! restored. Every time is farm time fed to the scheduler; nothing waits.
@@ -101,7 +101,7 @@ fn restored_bars_hold_and_apply_to_workers_that_register_later() {
 
 /// Catches: a restore that adds to what the operation had instead of replacing it, one
 /// that is not the same when repeated, and a refused restore that changes a populated
-/// state. The request marks `a`; a restore gives it a count, a bar and a mark; a refused
+/// state. The request marks `a`; a restore gives it a bar and a mark; a refused
 /// one leaves all of it; a restore with nothing clears all of it, and again changes
 /// nothing more.
 #[test]
@@ -113,12 +113,10 @@ fn a_restore_replaces_what_the_operation_had() {
     f.lease_on("c", secs(2 * MAX_WALL));
     let op = ask(&mut f);
     let full = RestoredWhole {
-        give_ups: 1,
         bars: BTreeMap::from([(w("c"), Bar::ForLife)]),
         ..restored(op, Some(mark_on("a")))
     };
     assert_eq!(f.s.restore_whole(full), Ok(()));
-    assert_eq!(f.s.whole_give_ups(op), 1);
     assert_eq!(f.s.whole_mark(op).map(|m| m.deadline), Some(t(600_000)));
     let before = snapshot(&f);
     let refused = f.s.restore_whole(restored(op, Some(mark_on("z"))));
@@ -129,7 +127,6 @@ fn a_restore_replaces_what_the_operation_had() {
     assert_eq!(refused, Err(unknown));
     assert_eq!(snapshot(&f), before);
     assert_eq!(f.s.restore_whole(restored(op, None)), Ok(()));
-    assert_eq!(f.s.whole_give_ups(op), 0);
     assert_eq!(f.s.whole_mark(op), None);
     assert_eq!(f.s.whole_barred(op, t(0)), BTreeMap::new());
     let cleared = snapshot(&f);
@@ -147,50 +144,45 @@ fn marked(config: WholeNodeConfig) -> (Farm, LeaseGrant, OperationId) {
     (f, lease, op)
 }
 
-/// Catches: a restored count at the attempt cap given up again, a restored deadline that
-/// has passed kept, and restored marks over the ceiling all kept. At the cap (two), the
-/// hold past its restored deadline of 30 s is kept with no deadline shown, and the request
-/// is granted `a` when its lease ends. A restored deadline already passed is given up in
-/// the next round, counted, and barred for the back-off. With a ceiling of one, two
+/// Catches: a restored deadline that has passed acted on, and restored marks over the
+/// ceiling all kept. A hold restored with a deadline of 30 s is kept at 40 s, showing that
+/// deadline, and the request is granted `a` when its lease ends. A restored deadline of
+/// zero is kept in the next round with nothing barred. With a ceiling of one, two
 /// restored marks lose the newer one, and that request is stopped by a cap.
 #[test]
-fn restored_counts_deadlines_and_marks_meet_the_caps() {
+fn restored_deadlines_and_marks_meet_the_caps() {
     let (mut f, lease, op) = marked(cfg(0, 2));
-    let capped = RestoredWhole {
-        give_ups: 2,
+    let passed = RestoredWhole {
         mark: Some(RestoredMark {
             deadline: t(30_000),
             ..mark_on("a")
         }),
         ..restored(op, None)
     };
-    assert_eq!(f.s.restore_whole(capped), Ok(()));
+    assert_eq!(f.s.restore_whole(passed), Ok(()));
     assert!(f.advance(40_000).is_empty());
-    assert_eq!(f.s.whole_give_ups(op), 2);
     let Some(WholeState::Holding {
         worker, deadline, ..
     }) = f.s.whole_state(op)
     else {
         panic!("holds");
     };
-    assert_eq!((worker, deadline), (w("a"), None));
+    assert_eq!((worker, deadline), (w("a"), t(30_000)));
     f.finish(&lease);
     assert_eq!(placed(&f.grants()), [(op, w("a"))]);
 
     let (mut f, _, op) = marked(cfg(0, 2));
-    let passed = RestoredWhole {
+    let zero = RestoredWhole {
         mark: Some(RestoredMark {
             deadline: t(0),
             ..mark_on("a")
         }),
         ..restored(op, None)
     };
-    assert_eq!(f.s.restore_whole(passed), Ok(()));
+    assert_eq!(f.s.restore_whole(zero), Ok(()));
     assert!(f.grants().is_empty());
-    assert_eq!(f.s.whole_give_ups(op), 1);
-    assert_eq!(f.s.whole_mark(op), None);
-    let backoff = BTreeMap::from([(w("a"), Bar::Backoff(t(10_000)))]);
-    assert_eq!(f.s.whole_barred(op, t(0)), backoff);
+    assert_eq!(f.s.whole_mark(op).map(|m| m.worker.clone()), Some(w("a")));
+    assert_eq!(f.s.whole_barred(op, t(0)), BTreeMap::new());
 
     let one = WholeNodeConfig {
         max_whole_node: 1,
@@ -225,8 +217,8 @@ fn restored_counts_deadlines_and_marks_meet_the_caps() {
 /// Catches: `unplace_keeping_queued_at` undoing what it should refuse, or losing a
 /// restored history. A lease the scheduler does not hold, a running one and one already
 /// undone are refused with nothing changed. A request restored as queued at 20 s with a
-/// give-up and a bar, granted `b` and undone at 110 s, keeps all three: it marks the busy
-/// `a` at once (110 s is past 20 s plus `drain_after`, 30 s), its count and bar stand,
+/// bar, granted `b` and undone at 110 s, keeps both: it marks the busy
+/// `a` at once (110 s is past 20 s plus `drain_after`, 30 s), its bar stands,
 /// `b`'s booking is released, and the grant fed back late starts nothing.
 #[test]
 fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
@@ -240,7 +232,6 @@ fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     let bars = BTreeMap::from([(w("c"), Bar::ForLife)]);
     let state = RestoredWhole {
         queued_at: t(20_000),
-        give_ups: 1,
         bars: bars.clone(),
         mark: None,
         operation: op,
@@ -270,7 +261,6 @@ fn a_requeue_keeps_the_restored_history_and_refuses_what_unplace_refuses() {
     assert!(f.grants().is_empty());
     let mark = f.s.whole_mark(op).expect("marked");
     assert_eq!((&mark.worker, mark.made), (&w("a"), t(110_000)));
-    assert_eq!(f.s.whole_give_ups(op), 1);
     assert_eq!(f.s.whole_barred(op, t(110_000)), bars);
 }
 

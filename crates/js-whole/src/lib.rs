@@ -1,13 +1,13 @@
 //! The pure rules of whole-node placement: the caps on how many hosts may be reserved
-//! or held whole, the cost that orders the hosts to drain, the reservation deadline, and
-//! the pool settings of the class.
+//! or held whole, the cost that orders the hosts to drain, and the pool settings of the
+//! class.
 //!
 //! This is a pure crate: no clock, no sleep, no lock, no hashed collection, no socket.
 //! Each rule is a function of plain structs and plain integers (milliseconds), so a
 //! caller decides under its own lock on facts it has just read, and a test states a case
 //! without building a pool.
 //!
-//! - [`cost`]: which host a reservation drains first, and the deadline it gets.
+//! - [`cost`]: which host a reservation drains first, and the tail it drains to.
 //! - [`caps`]: the effective ceiling, the cap that blocks a reservation, the
 //!   reservations to drop when the ceiling falls, and the last-capable-host rule.
 //! - [`config`]: [`WholeNodeConfig`], the settings with their defaults.

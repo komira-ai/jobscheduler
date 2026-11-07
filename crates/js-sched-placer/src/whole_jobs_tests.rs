@@ -168,13 +168,12 @@ fn a_queued_whole_host_job_is_queued_once_from_its_submit_time() {
 }
 
 /// Catches: a mark made and never written, a written mark that is written again at every
-/// pass, a give-up that is not written (the table would keep the mark of a host the job
-/// gave up) or written without the back-off that keeps the job off that host. `j` marks `a`
-/// at 20 s with a deadline a minute on and the mark is written once; the next pass writes
-/// nothing; at the deadline the job gives `a` up and the mark on `b` is written, with `a`
-/// excluded for the back-off.
+/// pass, and a mark given up or moved at its deadline (a write of a mark on another host,
+/// or a back-off on `a`). `j` marks `a` at 20 s with a deadline a minute on and the mark is
+/// written once; the next pass writes nothing, and neither does a pass at the deadline or
+/// long past it.
 #[test]
-fn a_mark_is_written_when_made_and_when_it_changes_and_not_otherwise() {
+fn a_mark_is_written_when_made_and_not_rewritten_at_or_past_its_deadline() {
     let tables = Tables::new();
     let j = tables.whole("j");
     let mut e = engine(&[("a", &[1]), ("b", &[2])]);
@@ -190,14 +189,8 @@ fn a_mark_is_written_when_made_and_when_it_changes_and_not_otherwise() {
     assert!(first.exclusions.is_empty());
     let stored = [first];
     assert!(run(&mut e, (&queue, &stored), 25_000).is_empty());
-    let steps = run(&mut e, (&queue, &stored), 80_000);
-    assert_eq!(steps.len(), 1);
-    let moved = written(&steps[0]);
-    assert_eq!(moved.host, host("b"));
-    assert_eq!(moved.made, store(80_000));
-    assert_eq!(moved.deadline, store(140_000));
-    let backoff = Exclusion::Backoff(store(380_000));
-    assert_eq!(moved.exclusions, BTreeMap::from([(host("a"), backoff)]));
+    assert!(run(&mut e, (&queue, &stored), 80_000).is_empty());
+    assert!(run(&mut e, (&queue, &stored), 400_000).is_empty());
 }
 
 /// Catches: a stored mark taken back on a host that never said hello, a deadline or tail
@@ -420,6 +413,23 @@ fn a_job_is_marked_on_another_host_than_the_one_its_prepare_failed_on() {
     let marked = written(&steps[0]);
     assert_eq!(marked.host, host("b"));
     assert_eq!(marked.exclusions, BTreeMap::from([(host("a"), until)]));
+}
+
+/// Catches: a back-off a job's row carries (one an older build wrote when a hold could be
+/// given up) dropped, or written back as a hard exclusion: `j` is backed off `a` until
+/// 100 s, so it marks `b`, and the mark written keeps `a` as a back-off until then.
+#[test]
+fn a_back_off_on_a_jobs_row_is_kept_soft_in_the_mark_written() {
+    let tables = Tables::new();
+    let mut j = tables.whole("j");
+    let backoff = Exclusion::Backoff(store(100_000));
+    j.prepare_bars.insert(host("a"), backoff);
+    let mut e = engine(&[("a", &[1]), ("b", &[2])]);
+    let steps = run(&mut e, (&[j], &[]), 20_000);
+    assert_eq!(steps.len(), 1);
+    let marked = written(&steps[0]);
+    assert_eq!(marked.host, host("b"));
+    assert_eq!(marked.exclusions, BTreeMap::from([(host("a"), backoff)]));
 }
 
 /// Catches: a grant a round of another term made (a start or a job placed in it) kept for

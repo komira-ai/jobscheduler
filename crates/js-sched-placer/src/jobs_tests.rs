@@ -161,9 +161,10 @@ fn a_whole_host_job_granted_a_quiet_host_is_committed_in_the_pass() {
 }
 
 /// Catches: a mark the engine made and the pass never wrote, a mark written again at every
-/// pass (a commit each time), and a give-up that is not written. On busy hosts `j` marks
-/// `a` at 20 s: the mark is in the table with its times; a second pass at the same time
-/// commits nothing; at the deadline the job gives `a` up and the mark on `b` replaces it.
+/// pass (a commit each time), and a mark given up or moved at its deadline. On busy hosts
+/// `j` marks `a` at 20 s: the mark is in the table with its times; a second pass at the same
+/// time commits nothing; at the deadline and past it the mark on `a` stands as written and
+/// nothing is committed.
 #[test]
 fn the_marks_of_the_engine_are_written_to_the_table_once() {
     let rig = Rig::busy();
@@ -178,11 +179,13 @@ fn the_marks_of_the_engine_are_written_to_the_table_once() {
     let before = rig.tables.store.commit_stats().txns;
     rig.go(&recorder);
     assert_eq!(rig.tables.store.commit_stats().txns, before);
-    rig.at(80_000);
-    rig.go(&recorder);
-    let moved = rig.tables.jobs.get_mark(&j.id).unwrap().unwrap();
-    assert_eq!(moved.host, host("b"));
-    assert_eq!(moved.made, store(80_000));
+    for at in [80_000, 200_000] {
+        rig.at(at);
+        rig.go(&recorder);
+        assert_eq!(rig.tables.store.commit_stats().txns, before, "at {at}");
+        let kept = rig.tables.jobs.get_mark(&j.id).unwrap().unwrap();
+        assert_eq!(kept, marked, "at {at}");
+    }
 }
 
 /// Catches: a stored mark dropped at a pass before `claim_by` (the server's start plus the

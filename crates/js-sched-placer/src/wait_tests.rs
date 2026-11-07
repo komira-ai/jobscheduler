@@ -88,7 +88,7 @@ fn present(e: &mut Engine, name: &str, seq: u64, capable: bool, now: u64) -> Pre
 }
 
 /// The pass of the engine over `hosts`, standing as given, at `now`: a request waits ten
-/// seconds before it marks a busy host, a mark is given up after a minute, and two failed
+/// seconds before it marks a busy host, a mark's deadline is a minute after it is made, and two failed
 /// prepares make a request terminal.
 fn pass(e: &mut Engine, hosts: &[(&str, Standing)], now: u64) {
     let hosts = hosts.iter().map(|(name, standing)| WholeHost {
@@ -146,8 +146,8 @@ fn the_list_is_first_seen_order_and_a_repeat_is_a_poll() {
     let rows = e.whole_waiting();
     assert_eq!((rows[2].id.as_str(), rows[2].since.millis()), ("c", 300));
     assert_eq!(rows[2].request, request());
-    assert!(e.whole_cancel(&id("a"), at(500)));
-    assert!(!e.whole_cancel(&id("a"), at(500)));
+    assert!(e.whole_cancel(&id("a")));
+    assert!(!e.whole_cancel(&id("a")));
     assert_eq!(places(&e), ["b", "c"]);
     pass(&mut e, &[("h", Standing::Live)], 600);
     assert_eq!(held(&e, 600), ["b@h*"]);
@@ -220,7 +220,7 @@ fn the_cap_refuses_a_new_request_and_keeps_those_waiting() {
     assert_eq!(present(&mut e, "late", 5_000, true, 0), Presented::Full);
     assert_eq!(present(&mut e, "r7", 7, true, 0), Presented::Waiting(7));
     assert!(!e.whole_restore_place(&id("back"), stamp(0), at(0)));
-    assert!(e.whole_cancel(&id("r0"), at(0)));
+    assert!(e.whole_cancel(&id("r0")));
     let last = MAX_WAITING_REQUESTS - 1;
     assert_eq!(
         present(&mut e, "late", 5_000, true, 0),
@@ -235,12 +235,12 @@ fn a_stop_takes_off_the_request_its_lease_presented_last() {
     let mut e = engine(&[("h", &[9])]);
     present(&mut e, "r", 1, true, 0);
     present(&mut e, "r", 2, true, 10);
-    assert_eq!(e.whole_cancel_lease(&lease(1), at(20)), None);
+    assert_eq!(e.whole_cancel_lease(&lease(1)), None);
     assert_eq!(e.whole_waiter_of(&lease(2)).unwrap().id, id("r"));
     assert!(e.whole_bind(&id("r"), lease(3)));
     assert!(!e.whole_bind(&id("s"), lease(4)));
     assert_eq!(e.whole_waiter_of(&lease(2)), None);
-    assert_eq!(e.whole_cancel_lease(&lease(3), at(30)), Some(id("r")));
+    assert_eq!(e.whole_cancel_lease(&lease(3)), Some(id("r")));
     assert!(places(&e).is_empty());
 }
 
@@ -303,24 +303,26 @@ fn a_retired_host_is_let_go_at_once() {
     assert!(held(&e, 20_002).is_empty());
 }
 
-/// Catches a request that leaves the list losing the holds it gave up (its next
-/// presentation would make it wait a whole deadline again with `max_reserve_attempts`
-/// reset), and a cancel that leaves its mark held. `r` gives up the busy `a` once, is
-/// cancelled, and shows the give-up in its record and when presented again.
+/// Catches a request that leaves the list carrying anything over (a record of it, or a
+/// count on its next presentation), and a cancel that leaves its mark held. `r` holds the
+/// busy `a` past its deadline and keeps the mark; once cancelled it holds nothing and has
+/// no record, and presented again it is a fresh unmarked waiter.
 #[test]
-fn a_request_that_leaves_keeps_its_give_ups() {
+fn a_request_that_leaves_carries_nothing_over() {
     let mut e = engine(&[("a", &[1])]);
     present(&mut e, "r", 2, true, 0);
     pass(&mut e, &[("a", Standing::Live)], 10_000);
     assert_eq!(held(&e, 10_000), ["r@a"]);
     pass(&mut e, &[("a", Standing::Live)], 70_000);
-    assert_eq!(e.whole_waiter(&id("r")).unwrap().give_ups, 1);
-    assert!(e.whole_cancel(&id("r"), at(70_001)));
+    assert_eq!(held(&e, 70_000), ["r@a"]);
+    assert_eq!(e.whole_waiter(&id("r")).unwrap().give_ups, 0);
+    assert!(e.whole_cancel(&id("r")));
     assert!(held(&e, 70_001).is_empty());
     let key = RequestKey::Id(id("r"));
-    assert_eq!(e.whole_record(&key).unwrap().give_ups, 1);
+    assert_eq!(e.whole_record(&key), None);
     present(&mut e, "r", 3, true, 70_002);
-    assert_eq!(e.whole_waiter(&id("r")).unwrap().give_ups, 1);
+    let again = e.whole_waiter(&id("r")).unwrap();
+    assert_eq!((again.give_ups, again.marked), (0, false));
 }
 
 /// Catches the failed prepare of a lease the registry committed outside the queue counted
@@ -385,7 +387,7 @@ fn a_rebuild_does_not_queue_again_a_request_that_left() {
     present(&mut e, "r", 1, true, 0);
     pass(&mut e, &[("h", Standing::Live)], 100);
     assert_eq!(held(&e, 100), ["r@h*"]);
-    assert!(e.whole_cancel(&id("r"), at(200)));
+    assert!(e.whole_cancel(&id("r")));
     let mut rebuilt = e.rebuild(Settings::default(), &[candidate("h", &[])], at(300));
     // A host retired elsewhere ticks the queue of the new engine before any pass.
     rebuilt.whole_drop_host(&host("x"), at(300));
