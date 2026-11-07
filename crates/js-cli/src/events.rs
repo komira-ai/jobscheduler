@@ -23,8 +23,13 @@ pub struct ThreadWaiter;
 
 impl Waiter for ThreadWaiter {
     fn wait(&self, interval: Duration) {
-        std::thread::sleep(interval);
+        forward(interval, std::thread::sleep);
     }
+}
+
+/// Lets `interval` pass with `sleep`: the interval the waiter was given, unchanged.
+fn forward(interval: Duration, sleep: impl FnOnce(Duration)) {
+    sleep(interval);
 }
 
 /// A signal `job run` acts on.
@@ -143,11 +148,25 @@ mod tests {
         }
     }
 
-    /// Asserts that the program's waiter returns after the interval it is given (here none
-    /// at all, so the test does not wait), and that it is the `Waiter` the program's
-    /// services hold. It catches a waiter that does not return.
+    /// Asserts that the program's waiter sleeps for exactly the interval it is given: with
+    /// the sleep replaced by one that records what it was asked, each interval (zero, below
+    /// a second, the two-second poll, minutes) reaches the sleep unchanged and once. It
+    /// catches a waiter that ignores, shortens, rounds or repeats the interval. The real
+    /// sleep is then called through the program's own waiter and services with a zero
+    /// interval, so nothing waits and nothing is timed.
     #[test]
-    fn the_thread_waiter_returns_after_its_interval() {
+    fn the_thread_waiter_sleeps_for_the_interval_it_is_given() {
+        let asked = [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_secs(2),
+            Duration::from_secs(90),
+        ];
+        for interval in asked {
+            let mut slept = Vec::new();
+            forward(interval, |got| slept.push(got));
+            assert_eq!(slept, vec![interval]);
+        }
         ThreadWaiter.wait(Duration::ZERO);
         Services::system().waiter.wait(Duration::ZERO);
     }
