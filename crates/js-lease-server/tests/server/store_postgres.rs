@@ -29,7 +29,7 @@ use crate::store_support::{
     LIMIT, assert_unquoted, end_the_holder, holder, launch_ticking, revision, run_to_end,
     store_args, store_file, taken_address, unflushed, with_userinfo,
 };
-use crate::support::{Harness, Scratch, TOKEN, lease_body, replace, request};
+use crate::support::{Harness, Scratch, TOKEN, lease_file, replace, request};
 
 /// A role no test server has and a password for it: neither may ever be printed.
 const ROLE: &str = "js_store_no_such_role";
@@ -84,7 +84,7 @@ fn a_second_process_cannot_take_the_writer_lock() {
 
 /// Asserts that when the session holding the writer lock is ended from another connection,
 /// the next tick stops the server: `lock_lost` names the loss, the tick neither ticks the
-/// lease table (a lease whose time ran out is still in the lease file) nor anything else,
+/// lease table (a restored lease whose time ran out is still in the lease file) nor anything else,
 /// the shutdown runs no final tick (the lease file is unchanged) and answers the loss as an
 /// error, and the store's revision is unchanged. A tick before the loss runs as usual. It
 /// catches a server that keeps serving and writing after its session, and its lock, ended.
@@ -93,15 +93,11 @@ fn losing_the_writer_lock_stops_the_server() {
     let database = test_database();
     let url = database.url();
     let scratch = Scratch::new("store_pg_lost");
-    let args = store_args(&scratch, &url, &[]);
+    fs::write(scratch.state(), lease_file(&[(1, "held", Some("gpu-01"))])).unwrap();
+    let args = replace(store_args(&scratch, &url, &[]), "--boot", "resume");
     let runtime = Runtime::new().unwrap();
     let h = runtime.block_on(Harness::with(scratch, args, None));
-    runtime.block_on(async {
-        let body = lease_body().to_string().into_bytes();
-        let made = request(h.addr(), "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
-        assert_eq!(made.status, 201, "{}", made.body);
-        h.ticks.step().await;
-    });
+    runtime.block_on(h.ticks.step());
     let before = revision(&url);
     // Past the lease's wall end (7200 s): a tick of the table would now end it.
     h.clock.advance(Duration::from_secs(7201));

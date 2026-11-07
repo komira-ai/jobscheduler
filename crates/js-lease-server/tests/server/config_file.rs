@@ -9,7 +9,7 @@ use js_types::ExecMode;
 use crate::config_support::{
     PoolText, doc_block, file, load, oauth_file, server, server_with_agents,
 };
-use crate::support::{Harness, Scratch, T0, base_args, lease_body};
+use crate::support::{Harness, Scratch, base_args};
 
 /// Replaces the placeholder paths of a design example with files the test made, keeping
 /// everything else as written.
@@ -160,7 +160,7 @@ fn a_static_pool_alone_and_the_defaults_of_the_server_table() {
 
 /// Asserts that every key of the server table is read and reaches the server: the
 /// limits and timeouts are the ones the file gives, and a server started on the file
-/// grants a lease that ends at the wall time the request asks for. It catches a key that
+/// serves the host list. It catches a key that
 /// is parsed and dropped.
 #[tokio::test]
 async fn every_key_of_the_server_table_is_read() {
@@ -186,8 +186,8 @@ async fn every_key_of_the_server_table_is_read() {
     assert_eq!(config.limits(), wanted);
     let h = Harness::over(scratch, config).await;
     assert_eq!(h.running.agent_addr(), None);
-    let reply = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(reply.json()["ends_at_ms"], T0 + 7_200_000);
+    let reply = h.call("GET", "/v1/hosts", None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
 }
 
 /// Asserts that `--config` alone is a command line, that without it the flags that were

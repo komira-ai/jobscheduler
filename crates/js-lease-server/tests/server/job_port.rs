@@ -1,5 +1,5 @@
 //! The job service's port (`--job-listen`) over real sockets on 127.0.0.1, port 0: gRPC and
-//! the HTTP/JSON gateway on the one port, the bearer token in front of both, the lease
+//! the HTTP/JSON gateway on the one port, the bearer token in front of both, the client
 //! routes kept apart from it, TLS, and the stop. `GetJob` is served from the server's job
 //! store, and most of these tests ask it for a job that does not exist, which the store
 //! answers `unknown-job`. The fleet calls are served over the server's registry, pool
@@ -126,8 +126,8 @@ async fn get_job(client: &mut JobServiceClient<Channel>, token: Option<&str>) ->
 
 /// Asserts that one address serves both transports: a tonic client's `GetJob` (HTTP/2)
 /// reaches the gRPC service and an HTTP/1.1 `GET /v1/jobs/{id}` reaches the gateway, both
-/// answering `unknown-job` from the server's job store; that the job port is not the lease port and
-/// serves no lease route (`/v1/leases` and `/healthz` are 404 there); and that the lease
+/// answering `unknown-job` from the server's job store; that the job port is not the client port and
+/// serves none of the client port's routes (`/v1/leases` and `/healthz` are 404 there); and that the client
 /// port serves no job route and still serves its own. It catches a listener that routes
 /// one of the two protocols nowhere, or that mixes the two route tables.
 #[tokio::test]
@@ -148,10 +148,10 @@ async fn the_listener_serves_grpc_and_json_on_one_port() {
         let reply = request(job, "GET", path, Some(TOKEN), None).await;
         assert_eq!(reply.status, 404, "{path}");
     }
-    let lease_port = h.call("GET", GET_JOB, None).await;
-    assert_eq!(lease_port.status, 404);
-    assert_ne!(lease_port.body, UNKNOWN_JOB_BODY);
-    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    let client_port = h.call("GET", GET_JOB, None).await;
+    assert_eq!(client_port.status, 404);
+    assert_ne!(client_port.body, UNKNOWN_JOB_BODY);
+    assert_eq!(h.call("GET", "/v1/hosts", None).await.status, 200);
 }
 
 /// Asserts that the token is checked on both protocols through the real listener: with no
@@ -187,8 +187,8 @@ async fn the_listener_enforces_the_token_on_both_protocols() {
 }
 
 /// Asserts that without `--job-listen` the server is as it was: it serves no job port (no
-/// second address is bound), and no job route is on the lease port (404 with the token),
-/// whose own routes answer as before. The lease goldens (`gpu_path_pin`) are this
+/// second address is bound), and no job route is on the client port (404 with the token),
+/// whose own routes answer as before. The route goldens (`gpu_path_pin`) are this
 /// server's byte for byte. It catches the job service mounted, or a port bound, by a
 /// server that was not asked for it.
 #[tokio::test]
@@ -199,7 +199,7 @@ async fn job_listen_off_by_default_leaves_the_server_as_it_was() {
         assert_eq!(h.call("GET", path, None).await.status, 404, "{path}");
     }
     assert_eq!(h.call("POST", "/v1/jobs", None).await.status, 404);
-    assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    assert_eq!(h.call("GET", "/v1/hosts", None).await.status, 200);
 }
 
 /// Asserts that the server's stop ends the job port with the others: a keep-alive
@@ -310,12 +310,12 @@ async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
     assert_eq!(job_state(&h, "held-3").await, "JOB_STATE_CANCELLED");
 }
 
-/// Asserts that with `--tls-cert` and `--tls-key` the job port speaks TLS as the lease
+/// Asserts that with `--tls-cert` and `--tls-key` the job port speaks TLS as the client
 /// port does, over the same pair: a client that offers HTTP/2 and HTTP/1.1 settles on
-/// HTTP/2 there (and on HTTP/1.1 on the lease port, which speaks nothing else), gRPC over
+/// HTTP/2 there (and on HTTP/1.1 on the client port, which speaks nothing else), gRPC over
 /// TLS and HTTP/1.1 over TLS both reach the service, a plain request gets no answer, and
 /// after a reload a client that trusts only the renewed certificate is served there too.
-/// It catches a job port served in clear beside a TLS lease port, one that cannot carry
+/// It catches a job port served in clear beside a TLS client port, one that cannot carry
 /// gRPC over TLS, and one that keeps the old pair after a reload.
 #[tokio::test]
 async fn the_job_port_speaks_tls_over_the_reloaded_pair() {

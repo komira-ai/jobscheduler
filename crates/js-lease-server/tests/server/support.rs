@@ -1,7 +1,6 @@
 //! What the tests share: scratch directories, flags, a running server and a small
 //! HTTP/1.1 client.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -245,13 +244,6 @@ impl Harness {
 #[derive(Clone)]
 pub struct SharedPool {
     pool: Arc<std::sync::Mutex<StaticPool>>,
-    gate: Arc<std::sync::Mutex<Option<Gate>>>,
-}
-
-/// A provider's start that announces itself and then waits to be let go.
-pub struct Gate {
-    pub entered: std::sync::mpsc::Sender<()>,
-    pub go: std::sync::mpsc::Receiver<()>,
 }
 
 impl SharedPool {
@@ -260,26 +252,15 @@ impl SharedPool {
         let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
         Self {
             pool: Arc::new(std::sync::Mutex::new(pool)),
-            gate: Arc::new(std::sync::Mutex::new(None)),
         }
-    }
-
-    /// The same pool whose first provider blocks every start on `gate`.
-    pub fn gated(self, gate: Gate) -> Self {
-        *self.gate.lock().unwrap() = Some(gate);
-        self
     }
 }
 
-struct SharedProvider(Arc<std::sync::Mutex<StaticPool>>, Option<Gate>);
+struct SharedProvider(Arc<std::sync::Mutex<StaticPool>>);
 
 impl CapacitySource for SharedPool {
     fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
-        let gate = self.gate.lock().unwrap().take();
-        Ok(Seated::all(Box::new(SharedProvider(
-            self.pool.clone(),
-            gate,
-        ))))
+        Ok(Seated::all(Box::new(SharedProvider(self.pool.clone()))))
     }
 }
 
@@ -299,10 +280,6 @@ impl Pool for SharedProvider {
     }
 
     fn start(&mut self, spec: js_provider::StartSpec) -> js_provider::StartAck {
-        self.1.iter().for_each(|gate| {
-            gate.entered.send(()).unwrap();
-            gate.go.recv().unwrap();
-        });
         self.pool().start(spec)
     }
 
@@ -397,37 +374,6 @@ pub fn parse_reply(raw: &[u8]) -> Reply {
         head: head.to_ascii_lowercase(),
         body: body.to_string(),
     }
-}
-
-/// A request body that asks for one whole host of the shipped pool.
-pub fn lease_body() -> Value {
-    serde_json::json!({
-        "class": "gpu-host",
-        "resources": { "cpu_millis": 1000, "memory_bytes": 1024, "gpus": 1, "gpu_class": "nvidia-a100" },
-        "capabilities": { "isa": "x86-64-v3" },
-        "max_wall_seconds": 7200,
-        "labels": { "team": "infra" },
-    })
-}
-
-/// The ids of the leases in a list reply.
-pub fn ids(reply: &Reply) -> Vec<String> {
-    let value = reply.json();
-    let leases = value["leases"].as_array().unwrap();
-    leases
-        .iter()
-        .map(|l| l["id"].as_str().unwrap().to_string())
-        .collect()
-}
-
-/// The labels of the first lease of a list reply.
-pub fn first_labels(reply: &Reply) -> BTreeMap<String, String> {
-    let value = reply.json();
-    let labels = value["leases"][0]["labels"].as_object().unwrap();
-    labels
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-        .collect()
 }
 
 /// Starts a server on `config` with a ticker for its table and a ticker for pool checks

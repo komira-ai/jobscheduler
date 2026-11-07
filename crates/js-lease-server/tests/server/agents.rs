@@ -1,4 +1,4 @@
-//! Agents registering hosts: the routes, who may call them, what a leasing client sees,
+//! Agents registering hosts: the routes, who may call them, what a client of the host list sees,
 //! and what hostile input gets.
 
 use std::time::Duration;
@@ -10,7 +10,8 @@ use crate::agents_support::{
     JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
     post_raw, session, start_agents,
 };
-use crate::support::{Harness, LogCapture, TOKEN, guard_tasks, ids, lease_body, request};
+use crate::jobs_support::{JobBody, job_server};
+use crate::support::{Harness, LogCapture, TOKEN, guard_tasks, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -21,19 +22,15 @@ fn empty_reply() -> Value {
     json!({ "commands": [], "result_acks": [], "taint_ack": false })
 }
 
-/// Asserts the whole path of a registered host through the lease API: before any host
-/// has registered a request is refused `no-capable-host` at admission (no host could serve
-/// it, and the pool launches nothing);
-/// after hello and heartbeat the host takes a lease through `POST /v1/leases`, the
-/// listing shows the lease on it, a second request has no capacity, and release
-/// and a new lease on the freed host work as on a static host. It catches a registry that
-/// is not wired into the lease table, and a layer that loses the host after a release.
+/// Asserts the whole path of a registered host: the first hello is welcomed at epoch 1
+/// with a 64-digit session secret, a heartbeat of the session is answered with no
+/// command and nothing acknowledged, and the listing shows the host live and free. It
+/// catches a registry that is not wired into the listing, and a welcome that carries no
+/// session.
 #[tokio::test]
-async fn registered_host_is_leasable_through_post_leases() {
-    let h = start_agents("agents_leasable", false).await;
-    let none = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(none.status, 409, "{}", none.body);
-    assert_eq!(none.json(), json!({ "error": "no-capable-host" }));
+async fn a_registered_host_is_welcomed_heard_and_listed() {
+    let h = start_agents("agents_registered", false).await;
+    assert!(listed(&hosts(&h).await).is_empty());
 
     let me = join(&h, "burst-1").await;
     assert_eq!(me.epoch, 1);
@@ -42,70 +39,14 @@ async fn registered_host_is_leasable_through_post_leases() {
     assert_eq!(heard.status, 200, "{}", heard.body);
     assert_eq!(heard.json(), empty_reply());
 
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    assert_eq!(granted.json()["host"], "burst-1");
-    let id = granted.json()["id"].as_str().unwrap().to_string();
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["lease"], id);
-
-    let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(full.json(), json!({ "error": "no-capacity" }));
-    let released = h.call("DELETE", &format!("/v1/leases/{id}"), None).await;
-    assert_eq!(released.json(), json!({ "state": "freed" }));
-    assert!(entry(&hosts(&h).await, "burst-1").get("lease").is_none());
-
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.status, 201, "{}", again.body);
-    assert_eq!(again.json()["host"], "burst-1");
-}
-
-/// Asserts the layer's order: the two static hosts are taken first, then the registered
-/// one, then there is no capacity; a freed static host is taken again before the
-/// registered one. It catches a layer that prefers registered hosts or that never falls
-/// through to them.
-#[tokio::test]
-async fn static_preferred_then_registered_when_static_full() {
-    let h = start_agents("agents_layered", true).await;
-    join(&h, "burst-1").await;
-    let mut taken = Vec::new();
-    for _ in 0..3 {
-        let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        taken.push(granted.json()["host"].as_str().unwrap().to_string());
-    }
-    assert_eq!(taken, ["gpu-01", "gpu-02", "burst-1"]);
-    let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(full.json(), json!({ "error": "no-capacity" }));
-
-    h.call("DELETE", "/v1/leases/1-1", None).await;
-    let next = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(next.json()["host"], "gpu-01");
-}
-
-/// Asserts that a stop on a registered host's lease is felt by the whole layer: the
-/// lease is gone from the registered host and the static hosts stay as they were, and a
-/// lease on a static host is not touched by the registry. It catches a layered stop that
-/// reaches only the first child.
-#[tokio::test]
-async fn layered_stop_reaches_owning_child() {
-    let h = start_agents("agents_layered_stop", true).await;
-    join(&h, "burst-1").await;
-    for _ in 0..3 {
-        h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    }
-    let released = h.call("DELETE", "/v1/leases/1-3", None).await;
-    assert_eq!(released.json(), json!({ "state": "freed" }));
-    let listing = hosts(&h).await;
-    assert!(entry(&listing, "burst-1").get("lease").is_none());
-    assert_eq!(entry(&listing, "gpu-01")["lease"], "1-1");
-    assert_eq!(entry(&listing, "gpu-02")["lease"], "1-2");
-    let again = h.call("DELETE", "/v1/leases/1-3", None).await;
-    assert_eq!(again.status, 404, "{}", again.body);
+    let host = entry(&hosts(&h).await, "burst-1");
+    assert_eq!(host["state"], "live");
+    assert!(host.get("lease").is_none());
 }
 
 /// Asserts that an id the static pool lists cannot be registered: a hello for it is
-/// refused 403 `host-listed`, no registered host appears, and the static host stays
-/// leasable. It catches two hosts of one name in the table.
+/// refused 403 `host-listed`, and no registered host appears. It catches two hosts of one
+/// name in the table.
 #[tokio::test]
 async fn host_id_clash_refused() {
     let h = start_agents("agents_clash", true).await;
@@ -115,30 +56,28 @@ async fn host_id_clash_refused() {
     let listing = hosts(&h).await;
     assert_eq!(listed(&listing), ["gpu-01", "gpu-02"]);
     assert_eq!(entry(&listing, "gpu-01")["source"], "static");
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["host"], "gpu-01");
 }
 
-/// Asserts that the join token opens no lease route and no listing: every route of the
-/// client API answers 401 with an empty body to it, whatever the method, and nothing is
-/// leased. It catches the two secrets being one.
+/// Asserts that the join token opens no client route and no listing: every route of the
+/// client API, and the paths of the removed lease API, answer 401 with an empty body to
+/// it, whatever the method. It catches the two secrets being one.
 #[tokio::test]
-async fn join_token_does_not_open_lease_routes() {
-    let h = start_agents("agents_join_on_lease_routes", true).await;
+async fn join_token_does_not_open_client_routes() {
+    let h = start_agents("agents_join_on_client_routes", true).await;
     let routes = [
+        ("GET", "/v1/hosts"),
+        ("POST", "/v1/agent/join-tokens"),
+        ("GET", "/v1/usage/nodes/gpu-01"),
         ("GET", "/v1/leases"),
         ("POST", "/v1/leases"),
         ("DELETE", "/v1/leases/1-1"),
-        ("GET", "/v1/hosts"),
         ("GET", "/v1/unknown"),
     ];
     for (method, path) in routes {
-        let body = lease_body().to_string().into_bytes();
-        let reply = request(h.addr(), method, path, Some(JOIN), Some(&body)).await;
+        let reply = request(h.addr(), method, path, Some(JOIN), Some(b"{}")).await;
         assert_eq!(reply.status, 401, "{method} {path}");
         assert_eq!(reply.body, "", "{method} {path}");
     }
-    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
 }
 
 /// Asserts that the client token opens no agent route: both routes answer it 401 with an
@@ -188,7 +127,7 @@ async fn no_token_401_empty_body() {
 
 /// Asserts that a method the agent routes do not take is a 405 for a caller with a join
 /// token and a 401 for one without, and that an unknown path under the agent prefix is
-/// the lease API's 404 for the client token.
+/// a 404 for the client token.
 #[tokio::test]
 async fn agent_routes_take_post_only() {
     let h = start_agents("agents_methods", false).await;
@@ -228,11 +167,7 @@ async fn static_pool_alone_unchanged() {
     assert_eq!(entry(&listing, "gpu-01")["capabilities"]["driver"], "550");
     assert!(entry(&listing, "gpu-01").get("state").is_none());
 
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(
-        entry(&hosts(&h).await, "gpu-01")["lease"],
-        granted.json()["id"]
-    );
+    assert!(entry(&listing, "gpu-02").get("lease").is_none());
     h.ticks.step().await;
     let mut agent_file = h.scratch.state().into_os_string();
     agent_file.push(".agents");
@@ -425,46 +360,15 @@ async fn hosts_lists_registered_hosts_with_their_state() {
     assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "live");
 }
 
-/// Asserts that a lease on a host that went silent stays held (the table sees `Unknown`,
-/// not `Absent`) through ticks, however long the silence, a request cannot book the lost
-/// host, and the lease then ends at its wall end at a tick, after which the host, once it
-/// says hello again, takes a new lease. It catches a lost host whose lease is freed early
-/// (before its wall end), or never.
-#[tokio::test]
-async fn lost_registered_host_lease_ends_at_its_wall() {
-    let h = start_agents("agents_lost", false).await;
-    join(&h, "burst-1").await;
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["ends_at_ms"], crate::support::T0 + 7_200_000);
-
-    h.clock.advance(secs(30));
-    h.ticks.step().await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
-    assert_eq!(entry(&hosts(&h).await, "burst-1")["state"], "lost");
-
-    h.clock.advance(secs(3600));
-    h.ticks.step().await;
-    assert_eq!(ids(&h.call("GET", "/v1/leases", None).await), ["1-1"]);
-
-    h.clock.advance(secs(3570));
-    h.ticks.step().await;
-    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
-    assert!(entry(&hosts(&h).await, "burst-1").get("lease").is_none());
-
-    let back = join(&h, "burst-1").await;
-    assert_eq!(back.epoch, 2);
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.status, 201, "{}", again.body);
-}
-
-/// Asserts that heartbeats from several agents and lease calls and listings that take
-/// the table's lock run side by side on a multi-threaded runtime and all complete, with
-/// the answers they should have. The table's lock is taken before the registry's and the
-/// agent handlers take only the registry's; a handler that took them the other way round
-/// would deadlock here. It asserts completion and answers, never time.
+/// Asserts that heartbeats from several agents and job calls and listings run side by
+/// side on a multi-threaded runtime and all complete, with the answers they should have.
+/// The table's lock is taken before the registry's and the agent handlers take only the
+/// registry's; a handler that took them the other way round would deadlock here. It
+/// asserts completion and answers, never time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heartbeats_hammered_during_lease_calls_complete() {
-    let h = start_agents("agents_hammer", false).await;
+async fn heartbeats_hammered_during_job_calls_complete() {
+    let h = job_server("agents_hammer").await;
+    let jobs = h.running.job_addr().unwrap();
     let sessions = [join(&h, "burst-1").await, join(&h, "burst-2").await];
     let addr = h.addr();
     let mut tasks = Vec::new();
@@ -485,16 +389,18 @@ async fn heartbeats_hammered_during_lease_calls_complete() {
         ));
     }
     tasks.push((
-        "lease-calls",
+        "job-calls",
         tokio::spawn(async move {
-            for _ in 0..30 {
-                let body = lease_body().to_string().into_bytes();
-                let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
+            for n in 0..30 {
+                let id = format!("job-{n}");
+                let body = JobBody::new(&id).json().to_string().into_bytes();
+                let made = request(jobs, "POST", "/v1/jobs", Some(TOKEN), Some(&body)).await;
                 assert_eq!(made.status, 201, "{}", made.body);
-                let id = made.json()["id"].as_str().unwrap().to_string();
-                let path = format!("/v1/leases/{id}");
-                let freed = request(addr, "DELETE", &path, Some(TOKEN), None).await;
-                assert_eq!(freed.status, 200);
+                let read = request(jobs, "GET", &format!("/v1/jobs/{id}"), Some(TOKEN), None).await;
+                assert_eq!(read.status, 200, "{}", read.body);
+                let path = format!("/v1/jobs/{id}:cancel");
+                let freed = request(jobs, "POST", &path, Some(TOKEN), Some(b"{}")).await;
+                assert_eq!(freed.status, 200, "{}", freed.body);
             }
         }),
     ));
@@ -590,23 +496,16 @@ async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
 }
 
 /// Asserts that a static source supplied by the caller (a provider of its own, as the
-/// library allows) is layered under the registered hosts exactly as the pool file is:
-/// tried first, its ids refused to registering hosts. It catches a layer that works only
-/// for the source the flags build.
+/// library allows) is layered under the registered hosts exactly as the pool file is: its
+/// ids are refused to registering hosts. It catches a layer that works only for the source
+/// the flags build.
 #[tokio::test]
-async fn a_supplied_static_source_is_layered_like_the_pool_file() {
+async fn a_supplied_static_source_refuses_its_ids_to_registering_hosts() {
     let scratch = crate::support::Scratch::new("agents_supplied");
     let args = crate::agents_support::agent_args(&scratch, false);
     let supplied = Box::new(crate::support::SharedPool::new());
     let h = Harness::with(scratch, args, Some(supplied)).await;
     join(&h, "burst-1").await;
-    let mut taken = Vec::new();
-    for _ in 0..3 {
-        let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        taken.push(granted.json()["host"].as_str().unwrap().to_string());
-    }
-    assert_eq!(taken, ["gpu-01", "gpu-02", "burst-1"]);
     let clash = hello_with(&h, JOIN, "gpu-02").await;
     assert_eq!(clash.json(), json!({ "error": "host-listed" }));
 }

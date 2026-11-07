@@ -1,7 +1,7 @@
 //! The host-lifetime keys of the configuration file: what a pool with accelerators must say
 //! (`idle`, `max_age`, `min_host_lifetime`, and `server.max_lease_wall` beside it), the
-//! rules between them, what a pool without accelerators may leave out, and the ceiling on a
-//! lease's wall time on a running server. Nothing here waits.
+//! rules between them, and what a pool without accelerators may leave out. Nothing here
+//! waits.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -9,12 +9,9 @@ use std::time::Duration;
 use js_registry::{PoolConfig, Registry, WholeNodeConfig};
 use js_scaler::LaunchMode;
 use js_types::{ProviderId, ResourceClass, Resources, Shape};
-use serde_json::json;
 
-use crate::config_support::{
-    PoolText, clock, file, load, quote, refusal, server, server_with_agents,
-};
-use crate::support::{Harness, Scratch, ids, lease_body};
+use crate::config_support::{PoolText, clock, file, load, quote, refusal, server_with_agents};
+use crate::support::{Harness, Scratch};
 
 /// The reason a pool with accelerators is refused each of its required keys.
 const NEED: &str = "required of a pool with accelerators: an idle host costs money by the hour, so the file names how long it may live";
@@ -144,33 +141,6 @@ fn a_bad_lifetime_value_is_refused_by_name() {
         refusal(&scratch, &file(&zero, &[&pool])),
         format!("server.max_lease_wall: {duration}")
     );
-}
-
-/// Asserts, on a running server whose file sets `max_lease_wall` to two hours, that a
-/// lease asking for a second more is refused 422 `wall-time-above-ceiling` and books
-/// nothing, and that one asking for exactly the ceiling is granted. It catches a ceiling
-/// that is read and not enforced, and an off-by-one at the edge.
-#[tokio::test]
-async fn a_lease_above_the_servers_ceiling_is_refused() {
-    let scratch = Scratch::new("life_http");
-    let pool = PoolText::static_pool(&scratch, "hosts");
-    let head = server(&scratch, "listen = \"127.0.0.1:0\"");
-    let config = load(&scratch, &file(&head, &[&pool])).unwrap();
-    let h = Harness::over(scratch, config).await;
-
-    let mut body = lease_body();
-    body["max_wall_seconds"] = json!(7201);
-    let refused = h.call("POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(refused.status, 422, "{}", refused.body);
-    assert_eq!(
-        refused.json(),
-        json!({ "error": "wall-time-above-ceiling" })
-    );
-    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
-
-    body["max_wall_seconds"] = json!(7200);
-    let granted = h.call("POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(granted.status, 201, "{}", granted.body);
 }
 
 /// Asserts the upper bound of 30 days on `max_age` and on `server.max_lease_wall`, to the

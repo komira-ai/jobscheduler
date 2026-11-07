@@ -18,9 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use js_lease::Timestamp;
 
 use crate::binary::launch;
-use crate::support::{
-    Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard, lease_body,
-};
+use crate::support::{Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, guard};
 use crate::tls::{connector, tls_request};
 
 /// A self-signed certificate for 127.0.0.1 with this serial number and validity, and its
@@ -295,49 +293,42 @@ async fn a_server_without_tls_refuses_a_reload() {
     assert_eq!(err.flag(), "--tls-cert");
 }
 
-/// Asserts that the lease table survives a reload: a lease made before it is listed,
-/// with the same id, after it, over the renewed certificate.
+/// Asserts that the server's state survives a reload: the host list read before it is
+/// the same list, entry for entry, after it, over the renewed certificate.
 #[tokio::test]
-async fn leases_survive_a_reload() {
+async fn the_host_list_survives_a_reload() {
     let (h, files, first) = server("tls_reload_state").await;
-    let body = lease_body().to_string().into_bytes();
-    let made = tls_request(
+    let before = tls_request(
         h.addr(),
         &connector(&first.0),
-        "POST",
-        "/v1/leases",
+        "GET",
+        "/v1/hosts",
         Some(TOKEN),
-        Some(&body),
+        None,
     )
     .await;
-    assert_eq!(made.status, 201, "{}", made.body);
-    let id = made.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(before.status, 200, "{}", before.body);
+    assert!(!before.json()["hosts"].as_array().unwrap().is_empty());
 
     let second = current(2);
     files.put(&h.scratch, &second);
     h.running.reload_tls().unwrap();
 
-    let listed = tls_request(
+    let after = tls_request(
         h.addr(),
         &connector(&second.0),
         "GET",
-        "/v1/leases",
+        "/v1/hosts",
         Some(TOKEN),
         None,
     )
     .await;
-    assert_eq!(listed.status, 200);
-    let ids: Vec<String> = listed.json()["leases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l["id"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(ids, vec![id]);
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(after.json(), before.json());
 }
 
 /// Asserts that SIGHUP to the real program reloads: it serves the renewed certificate
-/// afterwards, the lease made before is still there, and the program is still running.
+/// afterwards, the host list read before is still the host list, and the program is still running.
 /// The signal is handled asynchronously, so the test waits for the program's log line
 /// that says it reloaded.
 #[tokio::test]
@@ -360,17 +351,16 @@ async fn sighup_reloads_the_program() {
         .map(Into::into),
     );
     let (mut child, addr) = launch(&args, Stdio::piped());
-    let body = lease_body().to_string().into_bytes();
-    let made = tls_request(
+    let before = tls_request(
         addr,
         &connector(&first.0),
-        "POST",
-        "/v1/leases",
+        "GET",
+        "/v1/hosts",
         Some(TOKEN),
-        Some(&body),
+        None,
     )
     .await;
-    assert_eq!(made.status, 201, "{}", made.body);
+    assert_eq!(before.status, 200, "{}", before.body);
 
     let second = current(2);
     files.put(&scratch, &second);
@@ -392,12 +382,12 @@ async fn sighup_reloads_the_program() {
         addr,
         &connector(&second.0),
         "GET",
-        "/v1/leases",
+        "/v1/hosts",
         Some(TOKEN),
         None,
     )
     .await;
-    assert_eq!(listed.json()["leases"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.json(), before.json());
 
     // An orderly stop, so the program flushes what it recorded.
     kill_process(Pid::from_child(&child.0), Signal::TERM).unwrap();

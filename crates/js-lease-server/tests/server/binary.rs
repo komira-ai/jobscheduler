@@ -1,15 +1,15 @@
 //! The program itself, run as a child process: it listens, serves, and exits 0 on
-//! SIGTERM after finishing; its refusals exit 2; a final save that fails exits 1.
+//! SIGTERM after finishing; its refusals exit 2.
 
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process};
 
-use crate::support::{Scratch, TOKEN, base_args, lease_body, request};
+use crate::support::{Scratch, TOKEN, base_args, request};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js-lease-server");
 
@@ -67,51 +67,15 @@ async fn the_program_serves_and_stops_on_sigterm() {
 
     let health = request(addr, "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
-    let body = lease_body().to_string().into_bytes();
-    let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
-    assert_eq!(made.status, 201, "{}", made.body);
+    let hosts = request(addr, "GET", "/v1/hosts", Some(TOKEN), None).await;
+    assert_eq!(hosts.status, 200, "{}", hosts.body);
 
     let pid = Pid::from_child(&child.0);
     kill_process(pid, Signal::TERM).unwrap();
     let status = child.0.wait().unwrap();
     assert!(status.success(), "{status:?}");
     let saved = std::fs::read_to_string(scratch.state()).unwrap();
-    assert!(saved.contains("lease_count = 1"));
-}
-
-/// Asserts that a program whose lease file cannot be written at the last tick exits 1
-/// and says why on standard error, instead of the 0 of an orderly stop. The file is
-/// made unwritable by putting a directory where its temporary file goes; a release
-/// then fails to save (a 500) and leaves the file behind the table, so the final tick has
-/// to write it and cannot.
-#[tokio::test]
-async fn the_program_exits_1_when_the_final_save_fails() {
-    let scratch = Scratch::new("binary_final_save");
-    let (mut child, addr) = launch(&base_args(&scratch), Stdio::piped());
-    let body = lease_body().to_string().into_bytes();
-    let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
-    assert_eq!(made.status, 201, "{}", made.body);
-    std::fs::create_dir(scratch.path("leases.toml.tmp")).unwrap();
-    let refused = request(addr, "DELETE", "/v1/leases/1-1", Some(TOKEN), None).await;
-    assert_eq!(refused.status, 500, "{}", refused.body);
-
-    let named = format!(
-        "js-lease-server: the final tick could not write the lease file {}: ",
-        scratch.state().display()
-    );
-    let pid = Pid::from_child(&child.0);
-    kill_process(pid, Signal::TERM).unwrap();
-    let status = child.0.wait().unwrap();
-    assert_eq!(status.code(), Some(1), "{status:?}");
-    let mut message = String::new();
-    child
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut message)
-        .unwrap();
-    assert!(message.contains(&named), "{message}");
+    assert!(saved.contains("lease_count = 0"));
 }
 
 /// Asserts that the real program exits 2 and names the flag when a start is refused.

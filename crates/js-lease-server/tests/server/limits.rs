@@ -14,7 +14,27 @@ use js_lease_server::Limits;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::support::{Harness, TOKEN, guard, lease_body, parse_reply, request, until};
+use crate::agents_support::agent_args;
+use crate::support::{
+    Harness, Scratch, TOKEN, config, guard, lease_file, parse_reply, replace, request, until,
+};
+
+/// A route behind the client token that reads a request body, so a body that stalls holds
+/// its handler.
+const BODY_ROUTE: &str = "/v1/agent/join-tokens";
+
+/// A server with agent registration on (which serves [`BODY_ROUTE`]) under these limits,
+/// resumed over the lease file text `seed` when given.
+async fn limited_with_agents(name: &str, limits: Limits, seed: Option<String>) -> Harness {
+    let scratch = Scratch::new(name);
+    let mut args = agent_args(&scratch, true);
+    if let Some(text) = seed {
+        std::fs::write(scratch.state(), text).unwrap();
+        args = replace(args, "--boot", "resume");
+    }
+    let config = config(args).unwrap().with_limits(limits);
+    Harness::over(scratch, config).await
+}
 
 /// One request for the health route, kept alive.
 const HEALTH: &str = "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n";
@@ -92,10 +112,10 @@ async fn a_client_that_stops_in_the_body_is_cut_and_its_slot_returned() {
         read_timeout: Duration::from_millis(20),
         ..Limits::default()
     };
-    let h = Harness::limited("limit_read", limits).await;
+    let h = limited_with_agents("limit_read", limits, None).await;
     let mut stalled = TcpStream::connect(h.addr()).await.unwrap();
     let head = format!(
-        "POST /v1/leases HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\n0123456789"
+        "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\n0123456789"
     );
     let _ = stalled.write_all(head.as_bytes()).await;
 
@@ -207,20 +227,20 @@ async fn an_oversized_request_head_is_refused() {
     let h = Harness::new("limit_head").await;
     let mut stream = TcpStream::connect(h.addr()).await.unwrap();
     let pad = "x".repeat(200 * 1024);
-    let head = format!("GET /v1/leases HTTP/1.1\r\nHost: t\r\nX-Pad: {pad}\r\n\r\n");
+    let head = format!("GET /v1/hosts HTTP/1.1\r\nHost: t\r\nX-Pad: {pad}\r\n\r\n");
     let _ = stream.write_all(head.as_bytes()).await;
     let mut raw = Vec::new();
     let _ = guard(stream.read_to_end(&mut raw)).await;
     assert_eq!(parse_reply(&raw).status, 431);
 }
 
-/// Sends the head of an authenticated lease request that expects `100 Continue` and
+/// Sends the head of an authenticated request to [`BODY_ROUTE`] that expects `100 Continue` and
 /// reads that answer: the server has taken the connection and its handler is waiting
 /// for the body, which is never sent. Returns the stream.
 async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let head = format!(
-        "POST /v1/leases HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"
+        "POST {BODY_ROUTE} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"
     );
     stream.write_all(head.as_bytes()).await.unwrap();
     let mut line = [0u8; 25];
@@ -231,8 +251,8 @@ async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
 
 /// Asserts that a stop is bounded by the drain timeout (the read timeout is long, so it
 /// is not what ends the stall): a request stalled in its body
-/// is cut, the stop still returns and the last tick still runs (a lease that fell due
-/// is gone from the file), and the client sees the connection end with no answer.
+/// is cut, the stop still returns and the last tick still runs (a restored lease that fell
+/// due is gone from the file), and the client sees the connection end with no answer.
 #[tokio::test]
 async fn a_stalled_request_cannot_hold_up_a_stop() {
     let limits = Limits {
@@ -240,8 +260,8 @@ async fn a_stalled_request_cannot_hold_up_a_stop() {
         read_timeout: Duration::from_secs(3600),
         ..Limits::default()
     };
-    let h = Harness::limited("limit_drain", limits).await;
-    h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let leases = lease_file(&[(1, "held", Some("gpu-01"))]);
+    let h = limited_with_agents("limit_drain", limits, Some(leases)).await;
     h.clock.advance(Duration::from_secs(7201));
     let mut stalled = stall_in_body(h.addr()).await;
     let state = h.scratch.state();
