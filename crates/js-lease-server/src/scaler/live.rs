@@ -11,7 +11,7 @@ use js_elastic::{
     ProviderError, Released, SchedulerId, Secret,
 };
 use js_jobs::JobStoreError;
-use js_registry::{Busy, HostView, Waiting};
+use js_registry::{Busy, HostView};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
@@ -68,8 +68,8 @@ impl Live {
 }
 
 impl Effects for Live {
-    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
-        self.agents.registry.snapshot()
+    fn hosts(&self) -> Vec<HostView> {
+        self.agents.registry.hosts()
     }
 
     /// The queued jobs first and the live allocations after, so that a job placed between
@@ -88,18 +88,12 @@ impl Effects for Live {
     }
 
     fn holds_work(&self, host: &str) -> bool {
-        let hosts = self.agents.registry.hosts();
-        let booked = |view: &HostView| [view.id.as_str() == host, view.lease.is_some()];
-        let leased = hosts
-            .iter()
-            .any(|view| booked(view).into_iter().all(|holds| holds));
-        let allocated = match (&self.agents.jobs, HostId::new(host)) {
+        match (&self.agents.jobs, HostId::new(host)) {
             (Some(jobs), Ok(id)) => jobs
                 .booked_on(&id)
                 .map_or(true, |booking| booking.allocations > 0),
             _ => false,
-        };
-        leased | allocated
+        }
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {
@@ -432,8 +426,8 @@ mod tests {
         }
     }
 
-    /// Asserts that the reads and the provider's calls pass through: no waiting request and
-    /// no host in a new registry, a pool not yet checked with no offers, the provider's
+    /// Asserts that the reads and the provider's calls pass through: no host in a new
+    /// registry, a pool not yet checked with no offers, the provider's
     /// list, release, acquire, unresolved acquire ids, by-id read and notices as the provider
     /// answers them. It catches a method wired to the wrong call.
     #[tokio::test]
@@ -450,9 +444,7 @@ mod tests {
         };
         let token = Secret::new("token".to_owned());
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
-        let (hosts, waiting) = live.registry();
-        assert!(hosts.is_empty());
-        assert!(waiting.is_empty());
+        assert!(live.hosts().is_empty());
         assert_eq!(live.jobs(), Ok(JobTables::default()));
         assert_eq!(live.whole_host(), floor());
         assert!(!live.holds_work("js-nobody"));
@@ -513,11 +505,11 @@ mod tests {
         assert!(live.jobs().is_err());
     }
 
-    /// Asserts that a host holds work while a live job allocation is on it, whatever the
-    /// registry books, and that one whose bookings cannot be read holds work too, while a
+    /// Asserts that a host holds work while a live job allocation is on it, however
+    /// little the registry books, and that one whose bookings cannot be read holds work too, while a
     /// host with none, and text that is no host id, hold none. It catches a release that
-    /// asks the registry's leases only, whose marks do not see jobs, and so terminates a
-    /// machine under a job placed after the tick read the tables.
+    /// does not read the job tables, whose allocations the registry's marks do not see, and
+    /// so terminates a machine under a job placed after the tick read the tables.
     #[test]
     fn a_host_with_a_job_allocation_holds_work() {
         let (live, store, jobs) = live_with_jobs("holds");

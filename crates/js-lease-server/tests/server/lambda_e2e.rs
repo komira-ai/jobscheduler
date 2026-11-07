@@ -1,30 +1,27 @@
-//! The Lambda path from a waiting request to a machine that is gone, through the real
+//! The Lambda path from a queued job to a machine that is gone, through the real
 //! server: the scaler, the registry, the join tokens, the Lambda provider over an account
 //! in memory, and the Tailscale mode against an HTTP server on 127.0.0.1. The agent is the
 //! test, saying the messages a real one says. Time is the test's clock and the ticks are
 //! stepped; nothing sleeps and nothing measures elapsed time.
 
-use js_provider::{Observed, Pool, StartAck, StopAck};
 use js_provider_lambdalabs::{Call, TerminateEffect};
 use js_scaler::Phase;
-use js_types::{HostId, LeaseId};
 
 use crate::joins::code;
 use crate::lambda_e2e_support::{DELETE_DEVICE, KEYS, OAUTH, Rig};
 use crate::support::request;
 use crate::tailnet::AUTH_KEY;
 
-/// Asserts the whole sequence of the design, each step through the real parts. A request
-/// waits and, once the scaler has read the pool's offers, is not refused. The next tick
+/// Asserts the whole sequence of the design, each step through the real parts. A job
+/// is queued and, once the scaler has read the pool's offers, is not refused. The next tick
 /// writes the Launching record, mints the join token, has the Tailscale API mint an auth
 /// key for the host's name, creates the no-inbound ruleset in the offer's region and
 /// launches with user data that holds the token, the key and the instance line; the record
 /// file holds the Launching record and no secret. The next tick reads the machine back and
 /// it is Booting. The agent says hello with the token and gets a host credential; the
 /// token is dead from then on and the credential carries the heartbeats. The record is
-/// Registered and the consumer's next poll places its request on the host; the host is
-/// not drained while the lease is held, however long that is. After the lease ends and the
-/// host has been quiet for `idle`, the record goes Draining and then Releasing, the registry
+/// Registered and the job stays queued; once it is cancelled and the host has been quiet
+/// for `idle`, the record goes Draining and then Releasing, the registry
 /// marks the host, the credential is revoked and the machine is terminated; while the read
 /// back says Terminating the record stays Releasing and the tailnet device stays; when the
 /// machine is gone the host is removed, the device is deleted and the record is Gone. At
@@ -33,15 +30,15 @@ use crate::tailnet::AUTH_KEY;
 /// the revoke and the terminate by `a_machine_is_not_terminated_before_its_token_is_revoked_and_a_restart_finishes_the_release`;
 /// here the credential is already refused when the first terminate is seen. It catches a
 /// launch that does not carry the token or the key, a token that outlives the
-/// first hello, a host released while it holds a lease, a machine terminated while its
+/// first hello, a machine terminated while its
 /// credential works, a record that reads Terminating as gone, and a device left behind.
 #[tokio::test]
-async fn a_waiting_request_is_served_by_a_launched_host_that_is_released_when_idle() {
+async fn a_queued_job_gets_a_launched_host_that_is_released_when_idle() {
     let rig = Rig::start("e2e_life").await;
     rig.account
         .set_terminate_effect(TerminateEffect::Terminating);
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     assert_eq!(rig.account.launched(), 0);
 
     rig.tick().await;
@@ -103,34 +100,16 @@ async fn a_waiting_request_is_served_by_a_launched_host_that_is_released_when_id
     assert_eq!(rig.phase(), Phase::Registered);
     assert_eq!(rig.registry().hosts().len(), 1);
 
-    // The consumer's poll commits the lease on the host; it stays pending until the
-    // agent reports the host ready, and then the same poll is answered Started.
-    assert!(matches!(rig.present(), StartAck::Unknown));
-    assert!(rig.registry().waiting().is_empty());
-    let lease = LeaseId::new(1, 1);
-    assert_eq!(rig.ready(&credential, &me).await, lease.to_string());
-    let ack = rig.present();
-    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
-    let host = HostId::new(&name).unwrap();
-    assert_eq!(
-        rig.registry().provider().observe(&lease),
-        Observed::Present { host }
-    );
-
-    for _ in 0..30 {
+    // The job is still queued and the host, which serves it, is not launched for again.
+    for _ in 0..3 {
         rig.advance(10);
         assert_eq!(rig.beat(&credential, &me).await.status, 200);
         rig.tick().await;
     }
-    assert_eq!(
-        rig.phase(),
-        Phase::Registered,
-        "a leased host is never drained"
-    );
+    assert_eq!(rig.account.launched(), 1);
     assert_eq!(rig.account.count(Call::Terminate), 0);
 
-    let stopped = rig.registry().provider().stop(&lease);
-    assert!(matches!(stopped, StopAck::Stopped { .. }));
+    rig.withdraw().await;
     for _ in 0..2 {
         assert_eq!(rig.beat(&credential, &me).await.status, 200);
     }
@@ -230,7 +209,7 @@ async fn a_default_mode_pool_whose_host_has_no_route_is_released_at_boot_timeout
     assert!(rig.tailnet.seen().is_empty(), "{:?}", rig.tailnet.seen());
 
     rig.advance(14 * 60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(
         rig.phase(),
@@ -239,12 +218,12 @@ async fn a_default_mode_pool_whose_host_has_no_route_is_released_at_boot_timeout
     );
     assert_eq!(rig.account.count(Call::Terminate), 0);
     rig.advance(60);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Releasing);
     assert_eq!(rig.account.count(Call::Terminate), 1);
     assert_eq!(rig.hello(&token, &name, &name).await.status, 401);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Gone);
     assert_eq!(rig.state().blocked["burst"], js_scaler::Blocked::BootFailed);
@@ -253,23 +232,19 @@ async fn a_default_mode_pool_whose_host_has_no_route_is_released_at_boot_timeout
 }
 
 /// Asserts the same pool when the host is there (the operator's own route): the hello is
-/// admitted with the token the user data holds, the record is Registered, the request is
-/// placed on the host and the lease is ready, the same path as with Tailscale, with no
+/// admitted with the token the user data holds, the record is Registered and stays so with
+/// the job queued, no second machine is launched, the same path as with Tailscale, with no
 /// Tailscale call at all. It catches a `default` path that needs the tailnet to serve.
 #[tokio::test]
-async fn a_default_mode_pool_whose_host_says_hello_serves_a_request() {
+async fn a_default_mode_pool_whose_host_says_hello_keeps_its_machine() {
     let rig = Rig::start_default("e2e_default_hello").await;
     let (name, token) = rig.launch().await;
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
-    assert!(matches!(rig.present(), StartAck::Unknown));
-    rig.ready(&credential, &me).await;
-    let ack = rig.present();
-    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
-    let host = HostId::new(&name).unwrap();
-    let observed = rig.registry().provider().observe(&LeaseId::new(1, 1));
-    assert_eq!(observed, Observed::Present { host });
+    assert_eq!(rig.beat(&credential, &me).await.status, 200);
+    rig.tick().await;
+    assert_eq!(rig.phase(), Phase::Registered);
     assert!(rig.tailnet.seen().is_empty(), "no Tailscale call at all");
     assert_eq!(rig.account.launched(), 1);
 }
@@ -277,11 +252,9 @@ async fn a_default_mode_pool_whose_host_says_hello_serves_a_request() {
 /// Asserts a refused OAuth client end to end. The Tailscale API answers 401 to the OAuth
 /// exchange at the first check: the server starts, the pool is unavailable with the
 /// network check failed and the cloud check passed, `/healthz` is 200, no secret is shown,
-/// and a request that only a launch could serve is refused at once (it does not wait on a
-/// dead network) with nothing launched. When the client is accepted again the next check
-/// makes the pool available and the request waits, is launched for, and the machine is
-/// launched. It catches a pool that launches over a network it cannot use, a server that
-/// stops, and a request left waiting on a pool that cannot serve it.
+/// and a job submitted then is queued with nothing launched for it. When the client is
+/// accepted again the next check makes the pool available and the job is launched for. It catches a pool that launches over a network it cannot use, a server that
+/// stops, and a job left waiting on a pool that cannot serve it.
 #[tokio::test]
 async fn a_refused_oauth_client_leaves_the_pool_unavailable_until_it_is_accepted() {
     let tailnet = crate::lambda_e2e_support::tailnet();
@@ -300,8 +273,8 @@ async fn a_refused_oauth_client_leaves_the_pool_unavailable_until_it_is_accepted
     assert_eq!((health.status, health.body.as_str()), (200, "ok"));
     rig.assert_status_is_clean(&[]).await;
     rig.tick().await;
-    assert!(!matches!(rig.present(), StartAck::Started { .. }));
-    assert!(rig.registry().waiting().is_empty());
+    let queued = crate::scaler_support::submit(&rig.h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     assert_eq!(rig.account.launched(), 0);
 
     rig.tailnet
@@ -311,7 +284,7 @@ async fn a_refused_oauth_client_leaves_the_pool_unavailable_until_it_is_accepted
     let reply = request(rig.h.running.addr(), "GET", "/v1/pools", None, None).await;
     assert_eq!(reply.json()["pools"][0]["state"], "available");
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(rig.account.launched(), 1);
     rig.assert_status_is_clean(&[]).await;

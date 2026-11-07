@@ -1,6 +1,6 @@
 //! The scaler, the registry and the join tokens of the real server against the elastic fake
-//! cloud, which keeps its own bill: a request waits, a machine is launched, a host says hello
-//! with the token in its user data, the lease ends, the host is released, and the cloud's
+//! cloud, which keeps its own bill: a job waits, a machine is launched, a host says hello
+//! with the token in its user data, the job ends, the host is released, and the cloud's
 //! bill for the machine is checked against the times the cloud saw. The refusals, the
 //! preemption, the stuck states and plan mode that the scaler tests run on the pure step are
 //! run here through the whole server. Time is the test's clock (the server's and the cloud's
@@ -9,14 +9,13 @@
 
 use js_elastic::{Offer, PriceUnit, RefusalCode};
 use js_elastic_fake::{Bill, Billing, Call, ElasticFake, FakeClock, Step};
-use js_provider::{Pool, StartAck, StopAck};
 use js_provider_lambdalabs::Call as LambdaCall;
 use js_registry::HostMark;
 use js_scaler::{Blocked, Phase};
-use js_types::{ExecMode, HostId, LeaseId, Model, accelerator_of};
+use js_types::{ExecMode, HostId, Model, accelerator_of};
 
 use crate::lambda_e2e_support::Rig;
-use crate::scaler_support::{account, elastic_cloud, spec, start, text_with};
+use crate::scaler_support::{account, elastic_cloud, start, submit, text_with};
 use crate::support::Scratch;
 
 /// The price of the cloud's one offer, in cents per hour: two cents a minute.
@@ -62,20 +61,14 @@ fn minutes_billed(minutes: u64) -> Bill {
     Bill(u128::from(PRICE) * u128::from(minutes) * 60_000)
 }
 
-/// Takes a rig through launch, hello and a placed lease to a host that is registered and
-/// idle once the lease ends: the machine's name, the host credential and the session.
+/// Takes a rig through launch and hello to a host that is registered and idle once the job
+/// is cancelled: the machine's name, the host credential and the session.
 async fn idle_host(rig: &Rig) -> (String, String, crate::agents_support::Session) {
     let (name, token) = rig.launch().await;
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
-    assert!(matches!(rig.present(), StartAck::Unknown));
-    let lease = LeaseId::new(1, 1);
-    assert_eq!(rig.ready(&credential, &me).await, lease.to_string());
-    let ack = rig.present();
-    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
-    let stopped = rig.registry().provider().stop(&lease);
-    assert!(matches!(stopped, StopAck::Stopped { .. }));
+    rig.withdraw().await;
     for _ in 0..2 {
         assert_eq!(rig.beat(&credential, &me).await.status, 200);
     }
@@ -105,9 +98,9 @@ async fn until_release_is_asked(
 }
 
 /// Asserts the whole life of a machine through the real server and the cloud's own bill. A
-/// request waits; the cloud refuses the first launch for capacity and makes nothing (the
+/// job waits; the cloud refuses the first launch for capacity and makes nothing (the
 /// bill is nothing); the next launch, `acquire_retry` later, succeeds; the host says hello with the token in the
-/// user data; the lease is placed and ends; the host is drained, marked and released; the
+/// user data; the job is cancelled; the host is drained, marked and released; the
 /// cloud answers `Terminating` and then the record goes `Gone` when the cloud says it no
 /// longer has the machine. The cloud's bill is then exactly the whole minutes between its
 /// launch and the release call it saw, at the price in its catalog: two cents a minute. The
@@ -121,16 +114,16 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
     cloud.script(Call::Acquire, &[Step::Refuse(RefusalCode::Capacity)]);
     let rig = Rig::elastic_metered("e2e_cloud_life", cloud.clone()).await;
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!((cloud.count(Call::Acquire), cloud.launched()), (1, 0));
     assert_eq!(cloud.bill(), Bill::default());
-    // The request every offer was refused for waits the pool's `acquire_retry` (60 seconds),
-    // presented again every ten seconds as a waiting consumer does, so the registry keeps it.
+    // The job every offer was refused for waits the pool's `acquire_retry` (60 seconds),
+    // still queued at every tick.
     for _ in 0..9 {
         if cloud.launched() == 0 {
             rig.advance(10);
-            assert!(matches!(rig.present(), StartAck::Unknown));
+            rig.wait().await;
             rig.tick().await;
         }
     }
@@ -154,19 +147,14 @@ async fn a_machine_launched_after_a_capacity_refusal_is_billed_to_the_minute_and
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
-    assert!(matches!(rig.present(), StartAck::Unknown));
-    let lease = LeaseId::new(1, 1);
-    assert_eq!(rig.ready(&credential, &me).await, lease.to_string());
-    let ack = rig.present();
-    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
+    assert_eq!(rig.beat(&credential, &me).await.status, 200);
     assert_eq!(
         cloud.count(Call::Release),
         0,
-        "a leased host is not released"
+        "a host that serves a queued job is not released"
     );
 
-    let stopped = rig.registry().provider().stop(&lease);
-    assert!(matches!(stopped, StopAck::Stopped { .. }));
+    rig.withdraw().await;
     for _ in 0..2 {
         assert_eq!(rig.beat(&credential, &me).await.status, 200);
     }
@@ -206,7 +194,7 @@ async fn a_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         cloud.script(Call::Acquire, &[Step::Refuse(code)]);
         let rig = Rig::elastic(&format!("e2e_cloud_refuse_{code:?}"), cloud.clone()).await;
         rig.tick().await;
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
         rig.tick().await;
         assert_eq!(rig.state().blocked["burst"], blocked, "{code:?}");
@@ -215,7 +203,7 @@ async fn a_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         assert!(rig.state().records.instances.is_empty());
 
         rig.advance(9 * 60);
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
         assert_eq!(
             cloud.count(Call::Acquire),
@@ -224,7 +212,7 @@ async fn a_denial_or_shape_refusal_holds_the_pool_for_the_cooldown() {
         );
         rig.advance(2 * 60);
         rig.h.checks.step().await;
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
         assert_eq!(cloud.launched(), 1, "{code:?}");
     }
@@ -243,7 +231,7 @@ async fn a_quota_refusal_passes_the_instance_type_over_for_the_backoff() {
     cloud.script(Call::Acquire, &[Step::Refuse(RefusalCode::Quota)]);
     let rig = Rig::elastic("e2e_cloud_refuse_quota", cloud.clone()).await;
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     rig.tick().await;
     assert!(!rig.state().blocked.contains_key("burst"));
@@ -254,14 +242,14 @@ async fn a_quota_refusal_passes_the_instance_type_over_for_the_backoff() {
 
     rig.advance(30 * 60);
     rig.h.checks.step().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(cloud.count(Call::Acquire), 1, "asked during the backoff");
     assert!(!rig.state().blocked.contains_key("burst"));
 
     rig.advance(31 * 60);
     rig.h.checks.step().await;
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(cloud.count(Call::Acquire), 2);
     assert_eq!(cloud.launched(), 1);
@@ -284,7 +272,7 @@ async fn a_preempted_machine_is_released_and_billed_only_until_it_was_taken() {
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
     let id = cloud.running()[0].clone();
-    rig.withdraw();
+    rig.withdraw().await;
 
     rig.advance(150);
     assert_eq!(rig.beat(&credential, &me).await.status, 200);
@@ -309,8 +297,8 @@ async fn a_preempted_machine_is_released_and_billed_only_until_it_was_taken() {
 /// still shows the machine active and no tick of the server's: once the reader has acted on
 /// the notice the host is cordoned and marked ending in the registry, the record is
 /// `Releasing`, the release has been sent and the brake counts one failure; a request
-/// presented then is not placed on the host but waits, and the next tick launches a
-/// replacement for it. It catches a notice nobody reads (the request would be booked on a
+/// submitted then is not placed on the host but waits, and the next tick launches a
+/// replacement for it. It catches a notice nobody reads (the job would be placed on a
 /// host that no longer exists until a list caught up), and a reclaim that skips the route
 /// a listed preemption takes.
 #[tokio::test]
@@ -327,7 +315,7 @@ async fn a_reclaim_notice_takes_the_host_out_before_any_list_shows_it() {
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
     let id = cloud.running()[0].clone();
-    rig.withdraw();
+    rig.withdraw().await;
     rig.advance(150);
     assert_eq!(rig.beat(&credential, &me).await.status, 200);
 
@@ -343,7 +331,8 @@ async fn a_reclaim_notice_takes_the_host_out_before_any_list_shows_it() {
     let scaler = rig.h.running.scaler().unwrap();
     assert_eq!(scaler.reclaims_ignored(), 0);
 
-    rig.wait();
+    let queued = submit(&rig.h, "j2").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     rig.tick().await;
     assert_eq!(rig.launched(), 2);
     assert_eq!(rig.state().records.brake["burst"].failures, 1);
@@ -397,7 +386,7 @@ async fn a_release_the_cloud_refuses_forever_alerts_at_boot_timeout_plus_unknown
     assert!(!alerts().iter().any(stuck), "{:?}", alerts());
 }
 
-/// Asserts a list that fails forever, through the server: with a request waiting, for 30
+/// Asserts a list that fails forever, through the server: with a job waiting, for 30
 /// minutes the pool launches nothing (no acquire reaches the cloud) and the scaler says why
 /// on every tick (`ListFailed`). When the list works the machine is launched. This is a
 /// block, not an alert: the server shows the reason only in the scaler's state and logs, and
@@ -409,10 +398,10 @@ async fn a_list_that_fails_forever_launches_nothing_and_the_scaler_says_why() {
     cloud.script_forever(Call::List, Step::Lost { landed: false });
     let rig = Rig::elastic("e2e_cloud_list_fails", cloud.clone()).await;
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     for minute in 0..30 {
         rig.advance(60);
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
         let blocked = rig.state().blocked["burst"];
         assert_eq!(blocked, Blocked::ListFailed, "minute {minute}");
@@ -420,18 +409,17 @@ async fn a_list_that_fails_forever_launches_nothing_and_the_scaler_says_why() {
     assert_eq!(cloud.count(Call::Acquire), 0);
     assert_eq!(cloud.launched(), 0);
     assert!(cloud.count(Call::List) >= 30);
-    assert_eq!(rig.registry().waiting().len(), 1);
 
     cloud.script_forever(Call::List, Step::Pass);
-    rig.wait();
+    rig.wait().await;
     rig.tick().await;
     assert_eq!(cloud.launched(), 1);
 }
 
 /// Asserts a 429 storm on launches, through the server: for twenty half-minutes every
-/// acquire is answered with a deferral, nothing is launched, the request still waits, the
+/// acquire is answered with a deferral, nothing is launched, the job still waits, the
 /// scaler keeps one record for it and asks again every other tick; when the storm ends the
-/// machine is launched. It catches a deferral that fails the request, and a retry that
+/// machine is launched. It catches a deferral that fails the job, and a retry that
 /// makes a record, and so a machine, per attempt.
 #[tokio::test]
 async fn a_429_storm_on_launches_keeps_one_record_and_launches_when_it_ends() {
@@ -439,21 +427,20 @@ async fn a_429_storm_on_launches_keeps_one_record_and_launches_when_it_ends() {
     cloud.script_forever(Call::Acquire, Step::Throttled);
     let rig = Rig::elastic("e2e_cloud_429", cloud.clone()).await;
     rig.tick().await;
-    rig.wait();
+    rig.wait().await;
     for _ in 0..20 {
         rig.advance(30);
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
     }
     assert_eq!(cloud.launched(), 0);
     assert_eq!(rig.state().records.instances.len(), 1);
-    assert_eq!(rig.registry().waiting().len(), 1);
     assert!(cloud.count(Call::Acquire) >= 5);
 
     cloud.script_forever(Call::Acquire, Step::Pass);
     for _ in 0..4 {
         rig.advance(30);
-        rig.wait();
+        rig.wait().await;
         rig.tick().await;
     }
     assert_eq!(cloud.launched(), 1);
@@ -461,7 +448,7 @@ async fn a_429_storm_on_launches_keeps_one_record_and_launches_when_it_ends() {
 }
 
 /// Asserts plan mode through the server, for each kind of provider the tests have: with a
-/// pool in `plan` mode and requests presented for thirty ticks, the cloud under it is
+/// pool in `plan` mode and jobs submitted over thirty ticks, the cloud under it is
 /// never asked to launch or to release (the elastic fake records no `acquire` and no
 /// `release`; the Lambda account records no launch and no terminate), and nothing is
 /// launched. It catches a plan pool that spends, through either provider.
@@ -483,11 +470,10 @@ async fn a_pool_in_plan_mode_makes_zero_create_calls_through_any_provider() {
         };
         let source = text_with(&scratch, "plan", "initialise", &[("exec", "\"container\"")]);
         let h = start(scratch, &source).await;
-        let registry = h.running.registry().unwrap();
         for n in 0..30 {
             h.clock.advance(std::time::Duration::from_secs(10));
-            let ack = registry.provider().start(spec(1 + n, &format!("r{n}")));
-            assert!(!matches!(ack, StartAck::Started { .. }));
+            let queued = submit(&h, &format!("j{n}")).await;
+            assert_eq!(queued.status, 201, "{}", queued.body);
             h.ticks.step().await;
         }
         let calls = cloud.calls();

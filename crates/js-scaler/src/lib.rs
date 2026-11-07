@@ -119,7 +119,7 @@
 //!   `max_age` ago is retired ([`Action::Retire`]) whether or not it is busy: the mark
 //!   takes no new start and cuts no work, adds no deadline, and is never undone for a
 //!   request. The release is asked, as for an idle host, only when the host is quiet, and
-//!   the machine is not released while the registry books a lease on it. A lease ends within the
+//!   the machine is not released while a live allocation is on it. A job ends within the
 //!   server's ceiling on `max_wall`, so the host empties within it. The age is counted from
 //!   [`Record::launched_at`], which is stored, so a restart neither resets it nor stops it
 //!   (the cloud bills through the time the scaler was down). A host the registry does not

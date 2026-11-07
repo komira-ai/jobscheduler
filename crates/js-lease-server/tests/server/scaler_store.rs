@@ -9,14 +9,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use js_lease_server::{RecordsFile, UnremovedFile};
-use js_provider::Pool;
 use js_scaler::Records;
 use js_state::{Revision, Store};
 use serde_json::{Value, json};
 
 use crate::scaler_support::{
-    RECORDS_KEY, UNREMOVED_KEY, account, open_store, peek, put_in_store, records_path, spec, start,
-    start_refused, text_in, unremoved_path,
+    RECORDS_KEY, UNREMOVED_KEY, account, open_store, peek, put_in_store, records_path, start,
+    start_refused, submit, text_in, unremoved_path,
 };
 use crate::support::{Harness, Kept, Scratch, T0, base_args, logged_with};
 
@@ -120,8 +119,8 @@ async fn scaler_records_are_committed_before_the_provider_is_called() {
     let h = start(scratch, &source).await;
     peek.watch(h.running.store().unwrap());
     h.ticks.step().await;
-    let registry = h.running.registry().unwrap();
-    registry.provider().start(spec(2, "r1"));
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
     assert_eq!(account.launched(), 1);
 
