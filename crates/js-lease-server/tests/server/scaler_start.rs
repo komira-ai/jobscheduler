@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
-use js_provider::{Pool, StartAck};
 use js_provider_lambdalabs::{Call, TerminateEffect};
 use js_scaler::{Blocked, Millis, Phase, Record, Records, StoredOffer};
 use js_state::Store;
@@ -18,8 +17,8 @@ use serde_json::json;
 
 use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    RECORDS_KEY, account, beat, hello, host_id_in, join, kept_records, name_of, open_store,
-    put_in_store, records_path, spec, start, start_refused, text, text_in, text_with, token_in,
+    RECORDS_KEY, account, beat, cancel, hello, host_id_in, join, kept_records, name_of, open_store,
+    put_in_store, records_path, start, start_refused, submit, text, text_in, text_with, token_in,
 };
 use crate::support::{Harness, Kept, Scratch, T0};
 
@@ -34,8 +33,7 @@ fn phase(h: &Harness) -> Phase {
 
 /// Asserts that a pool in `plan` mode launches nothing however often it ticks: the account
 /// sees reads and no launch, the scaler says it is in plan, no record is written, and a
-/// request that only a launch could serve is refused at once and not queued, because a
-/// plan pool answers "could a launch serve this" with no. It catches a launch from a pool
+/// queued job gets no machine. It catches a launch from a pool
 /// whose `launch` is not `live`.
 #[tokio::test]
 async fn a_plan_pool_launches_nothing() {
@@ -46,10 +44,8 @@ async fn a_plan_pool_launches_nothing() {
     for _ in 0..3 {
         h.ticks.step().await;
     }
-    let registry = h.running.registry().unwrap();
-    let ack = registry.provider().start(spec(1, "r1"));
-    assert!(!matches!(ack, StartAck::Started { .. }));
-    assert!(registry.waiting().is_empty());
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
 
     assert_eq!(account.launched(), 0);
@@ -75,16 +71,15 @@ async fn a_plan_pool_starts_without_an_agent_pin() {
     assert_eq!(state.blocked["burst"], Blocked::Plan);
 }
 
-/// Asserts that a `live` pool launches once for a request and not again after a restart:
-/// before the scaler has ticked a request is refused (no launch is known to be possible),
-/// after it the request waits; one tick later the machine is launched with a join token in
+/// Asserts that a `live` pool launches once for a queued job and not again after a restart:
+/// one tick after the job is queued the machine is launched with a join token in
 /// its user data, the records are in a file that only the owner can use (or, with a store, in
 /// the store and in no file), and the account holds one machine; the ticks that follow add
-/// none. The server is stopped and another started over the same files or store, the request
-/// is presented again, and the account still holds one machine, the scaler one record, and no
+/// none. The server is stopped and another started over the same files or store, the job
+/// is still queued, and the account still holds one machine, the scaler one record, and no
 /// second token is minted for it. It runs with the records in their file and in the state
 /// store. It catches a launch that is forgotten at a restart, a store mode that writes the
-/// records file, and a request queued before a launch is known to be possible.
+/// records file.
 #[tokio::test]
 async fn a_live_pool_launches_once_and_not_again_after_a_restart() {
     for kept in Kept::BOTH {
@@ -98,14 +93,9 @@ async fn launches_once_in(kept: Kept) {
     let first = text_in(&scratch, "live", "initialise", kept);
     let h = start(scratch, &first).await;
     assert_eq!(Kept::of(&h), kept);
-    let registry = h.running.registry().unwrap();
-    let early = registry.provider().start(spec(1, "early"));
-    assert!(!matches!(early, StartAck::Started { .. }));
-    assert!(registry.waiting().is_empty());
-
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
-    registry.provider().start(spec(2, "r1"));
-    assert_eq!(registry.waiting().len(), 1);
     h.ticks.step().await;
     assert_eq!(account.launched(), 1);
     let path = records_path(&h.scratch);
@@ -141,9 +131,6 @@ async fn launches_once_in(kept: Kept) {
     let again = text_in(&scratch, "live", "resume", kept);
     let h = start(scratch, &again).await;
     h.ticks.step().await;
-    let registry = h.running.registry().unwrap();
-    registry.provider().start(spec(3, "r1"));
-    assert_eq!(registry.waiting().len(), 1);
     for _ in 0..3 {
         h.ticks.step().await;
     }
@@ -155,9 +142,9 @@ async fn launches_once_in(kept: Kept) {
     assert_eq!(state.records.instances[0].phase, Phase::Booting);
 }
 
-/// Asserts a machine's whole life through the server: launched for a request, booted, its
-/// agent says hello with the token from the user data and is registered; the request goes
-/// away, and after `idle` of quiet the host is drained, marked releasing, its token revoked
+/// Asserts a machine's whole life through the server: launched for a queued job, booted, its
+/// agent says hello with the token from the user data and is registered; the job is
+/// cancelled, and after `idle` of quiet the host is drained, marked releasing, its token revoked
 /// and the machine terminated, in that order, with the host's own heartbeats accepted until
 /// the tick that terminates it and refused after; the next tick removes the host. It
 /// catches a token that outlives the machine and a host left in the registry.
@@ -170,7 +157,8 @@ async fn a_machine_is_launched_registered_idle_released_and_removed() {
     let h = start(scratch, &source).await;
     h.ticks.step().await;
     let registry = h.running.registry().unwrap();
-    registry.provider().start(spec(1, "r1"));
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
     let name = h.running.scaler().unwrap().state().records.instances[0]
         .name
@@ -186,6 +174,8 @@ async fn a_machine_is_launched_registered_idle_released_and_removed() {
     let me = join(&h, &token, &registers_as).await;
     h.ticks.step().await;
     assert_eq!(phase(&h), Phase::Registered);
+    let cancelled = cancel(&h, "j1").await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
 
     for _ in 0..40 {
         h.clock.advance(secs(10));
@@ -242,7 +232,7 @@ fn releasing(name: &str) -> Records {
 /// wrote `Releasing` for a machine and before its token was revoked, so the token still
 /// works. The server starts again; before any tick, and before any hello is admitted, the
 /// scaler marks the machine ending; the agent says hello again with the token, is admitted
-/// and is listed `releasing`, takes no lease and is reserved by no request; the first tick
+/// and is listed `releasing` and is reserved by no job; the first tick
 /// revokes the token and releases the machine, the second removes the host, and a hello
 /// with the token is then refused. It catches a host that rejoins unmarked and could be
 /// booked before its machine is terminated.
@@ -272,8 +262,8 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
     assert_eq!(entry(&listing, &name)["mark"], "releasing");
     assert!(entry(&listing, &name).get("lease").is_none());
     let registry = h.running.registry().unwrap();
-    let ack = registry.provider().start(spec(1, "r1"));
-    assert!(!matches!(ack, StartAck::Started { .. }));
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     let counts = registry.whole_counts();
     assert_eq!((counts.reserved, counts.held), (0, 0));
     assert_eq!(beat(&h, &token, &me).await.status, 200);
@@ -285,7 +275,7 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
     assert!(registry.hosts().is_empty());
     assert_eq!(hello(&h, &token, &name).await.status, 401);
 
-    // The request that could not be placed on the releasing host is served by a machine of
+    // The job that could not be placed on the releasing host is served by a machine of
     // its own, and the releasing machine is not launched again.
     assert_eq!(account.launched(), 1);
     let state = h.running.scaler().unwrap().state();

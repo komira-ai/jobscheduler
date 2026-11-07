@@ -387,8 +387,8 @@ async fn the_providers_list_reaches_the_step() {
 /// Asserts that hosts the scaler must leave alone are left alone, whatever the registry
 /// says of them: two machines of the pool whose hosts are silent (lost, and waiting to say
 /// hello again after a restart) and still hold a job allocation are held and never released
-/// on their silence, however long (silence frees no allocation), and hosts it did not launch (set aside for a request, held by a
-/// whole-node lease, finishing runs) are not drained or released. It catches a release on
+/// on their silence, however long (silence frees no allocation), and hosts it did not launch (set aside for a request, finishing
+/// runs) are not drained or released. It catches a release on
 /// silence alone, which would terminate a machine that may hold work the registry cannot
 /// see.
 #[tokio::test]

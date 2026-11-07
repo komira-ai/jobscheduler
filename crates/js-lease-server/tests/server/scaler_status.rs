@@ -6,11 +6,10 @@ use std::collections::BTreeMap;
 
 use js_elastic::AcquireId;
 use js_lease_server::RecordsFile;
-use js_provider::Pool;
 use js_scaler::{HelloDimension, Millis, OfferCooldown, Phase, Record, Records, StoredOffer};
 use serde_json::{Value, json};
 
-use crate::scaler_support::{account, records_path, spec, start, text, text_with, token_in};
+use crate::scaler_support::{account, records_path, start, submit, text, text_with, token_in};
 use crate::support::{Harness, Scratch, T0};
 
 /// The one pool of `GET /v1/pools`.
@@ -67,11 +66,8 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     assert_eq!(before["last_launch"], Value::Null);
     assert_eq!(before["instances"]["n"], 0);
 
-    h.running
-        .registry()
-        .unwrap()
-        .provider()
-        .start(spec(1, "r1"));
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
     h.ticks.step().await;
     let held = h.running.scaler().unwrap().state().records.instances[0].clone();
@@ -205,7 +201,7 @@ async fn the_alerts_are_on_the_status() {
 }
 
 /// Asserts that a launch a server-wide total refuses is shown, for each of the three totals:
-/// two requests wait, the first launches within a total of 50 cents (a launch is billed at
+/// two jobs wait, the first launches within a total of 50 cents (a launch is billed at
 /// least `boot_timeout`, 33 cents of an offer at 129 cents an hour), and the second would
 /// take it to 66, so the pool shows `max_spend_total` as what blocks it and has launched one
 /// machine, not two. It catches a total that is read and not enforced, and a cap the status
@@ -226,12 +222,9 @@ async fn a_launch_the_server_total_refuses_shows_max_spend_total() {
         );
         let h = start(scratch, &source).await;
         h.ticks.step().await;
-        for (lease, id) in [(1, "r1"), (2, "r2")] {
-            h.running
-                .registry()
-                .unwrap()
-                .provider()
-                .start(spec(lease, id));
+        for id in ["j1", "j2"] {
+            let queued = submit(&h, id).await;
+            assert_eq!(queued.status, 201, "{key}: {}", queued.body);
         }
         for _ in 0..3 {
             h.ticks.step().await;
@@ -265,12 +258,9 @@ async fn the_status_shows_a_go_that_has_ended() {
     assert_eq!(before["launch"], "live");
     assert_eq!(before["live_until_ms"], until);
 
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.clock.advance(std::time::Duration::from_secs(3601));
-    h.running
-        .registry()
-        .unwrap()
-        .provider()
-        .start(spec(1, "r1"));
     h.ticks.step().await;
     h.ticks.step().await;
     let (after, body) = pool(&h).await;

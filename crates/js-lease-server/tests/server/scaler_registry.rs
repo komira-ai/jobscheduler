@@ -4,11 +4,10 @@
 
 use std::time::Duration;
 
-use js_provider::Pool;
 use js_scaler::Phase;
 
 use crate::scaler_support::{
-    account, host_id_in, join, panic_on_list, spec, start, text, token_in,
+    account, cancel, host_id_in, join, panic_on_list, start, submit, text, token_in,
 };
 use crate::support::{Harness, request};
 
@@ -30,7 +29,8 @@ async fn the_host_of_a_machine_that_is_gone_leaves_the_registry() {
     let h = start(scratch, &source).await;
     h.ticks.step().await;
     let registry = h.running.registry().unwrap();
-    registry.provider().start(spec(1, "r1"));
+    let queued = submit(&h, "j1").await;
+    assert_eq!(queued.status, 201, "{}", queued.body);
     h.ticks.step().await;
     let script = account.launches()[0].user_data().unwrap().to_owned();
     let name = host_id_in(&script);
@@ -40,6 +40,7 @@ async fn the_host_of_a_machine_that_is_gone_leaves_the_registry() {
     let phase = |h: &Harness| h.running.scaler().unwrap().state().records.instances[0].phase;
     assert_eq!(phase(&h), Phase::Registered);
     assert_eq!(registry.hosts().len(), 1);
+    assert_eq!(cancel(&h, "j1").await.status, 200);
 
     let machine = account.instances()[0].id.clone();
     account.remove_instance(&machine);

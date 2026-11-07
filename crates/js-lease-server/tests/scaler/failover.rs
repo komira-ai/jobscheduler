@@ -7,7 +7,7 @@ use std::time::Duration;
 use js_elastic::{Acquired, Offer, Reason, Refusal, RefusalCode};
 use js_scaler::{Records, Settings};
 
-use crate::fakes::{START, live, logged, offer, request, rig};
+use crate::fakes::{START, job, live, logged, offer, rig};
 
 /// Settings that wait 60 seconds between attempts and pass an instance type over for an hour.
 fn settings() -> Settings {
@@ -33,11 +33,11 @@ fn acquires(log: &[String]) -> usize {
         .count()
 }
 
-/// A rig with one request waiting whose every acquire is refused for capacity, ticked until
+/// A rig with one job queued whose every acquire is refused for capacity, ticked until
 /// the first refusal is taken in; the clock has not moved.
 async fn refused_everywhere() -> crate::fakes::Rig {
     let rig = rig(Records::default(), settings());
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.world().acquire_answers = (0..8).map(|_| refused(RefusalCode::Capacity)).collect();
     for _ in 0..3 {
         rig.scaler.tick().await;
@@ -96,7 +96,7 @@ fn refusal_lines(id: &str) -> Vec<String> {
         .collect()
 }
 
-/// A rig with one request waiting, whose offer is `id` in the zone `zone` and which the
+/// A rig with one job queued, whose offer is `id` in the zone `zone` and which the
 /// provider refuses once with `code`; ticked three times with the clock still.
 async fn refused_once(id: &str, zone: &str, code: RefusalCode) {
     let rig = rig(Records::default(), settings());
@@ -106,7 +106,7 @@ async fn refused_once(id: &str, zone: &str, code: RefusalCode) {
         ..offer()
     };
     rig.world().offers = vec![one];
-    rig.world().waiting = vec![request("r1")];
+    rig.world().queued = vec![job("r1")];
     rig.world().acquire_answers = [refused(code)].into();
     for _ in 0..3 {
         rig.scaler.tick().await;
