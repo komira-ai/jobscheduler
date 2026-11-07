@@ -1,36 +1,12 @@
-//! What a command waits on: the injected waiters and the signals.
+//! What a command is given beyond HTTP: the job waiter, the dialer and the signals.
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_client::jobs::{Dialer, TokioWaiter};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::signals;
-
-/// How the client lets time pass. Nothing in `js` reads a clock or sleeps on its own: the
-/// poll of a pending start goes through a waiter, so a test drives it and nothing in it
-/// waits for real.
-pub trait Waiter: Send + Sync + 'static {
-    /// Returns once `interval` has passed.
-    fn wait(&self, interval: Duration);
-}
-
-/// The waiter of the program: the thread sleeps.
-#[derive(Debug, Clone, Copy)]
-pub struct ThreadWaiter;
-
-impl Waiter for ThreadWaiter {
-    fn wait(&self, interval: Duration) {
-        forward(interval, std::thread::sleep);
-    }
-}
-
-/// Lets `interval` pass with `sleep`: the interval the waiter was given, unchanged.
-fn forward(interval: Duration, sleep: impl FnOnce(Duration)) {
-    sleep(interval);
-}
 
 /// A signal `job run` acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +66,6 @@ pub type SignalSource = Box<dyn FnOnce(Signaller) -> io::Result<()> + Send>;
 
 /// The effects a command has beyond HTTP, injected so a test drives them.
 pub struct Services {
-    pub(crate) waiter: Arc<dyn Waiter>,
     /// The pauses of the job commands' loops (`job wait`, `job follow`, `job run`): tokio's
     /// timer unless a test hands in another.
     pub(crate) job_waiter: Arc<dyn js_client::jobs::Waiter>,
@@ -100,11 +75,10 @@ pub struct Services {
 }
 
 impl Services {
-    /// Services over this waiter and signal source; the job commands dial TCP and pause on
-    /// tokio's timer.
-    pub fn new(waiter: Arc<dyn Waiter>, signals: SignalSource) -> Self {
+    /// Services over this signal source; the job commands dial TCP and pause on tokio's
+    /// timer.
+    pub fn new(signals: SignalSource) -> Self {
         Self {
-            waiter,
             job_waiter: Arc::new(TokioWaiter),
             signals,
             dialer: Dialer::tcp(),
@@ -123,9 +97,9 @@ impl Services {
         Self { job_waiter, ..self }
     }
 
-    /// The program's own: a sleeping thread and tokio's signal handlers.
+    /// The program's own: tokio's signal handlers.
     pub fn system() -> Self {
-        Self::new(Arc::new(ThreadWaiter), Box::new(signals::install))
+        Self::new(Box::new(signals::install))
     }
 }
 
@@ -146,28 +120,5 @@ mod tests {
         for (signal, number, name) in all {
             assert_eq!((signal.number(), signal.name()), (number, name));
         }
-    }
-
-    /// Asserts that the program's waiter sleeps for exactly the interval it is given: with
-    /// the sleep replaced by one that records what it was asked, each interval (zero, below
-    /// a second, the two-second poll, minutes) reaches the sleep unchanged and once. It
-    /// catches a waiter that ignores, shortens, rounds or repeats the interval. The real
-    /// sleep is then called through the program's own waiter and services with a zero
-    /// interval, so nothing waits and nothing is timed.
-    #[test]
-    fn the_thread_waiter_sleeps_for_the_interval_it_is_given() {
-        let asked = [
-            Duration::ZERO,
-            Duration::from_millis(1),
-            Duration::from_secs(2),
-            Duration::from_secs(90),
-        ];
-        for interval in asked {
-            let mut slept = Vec::new();
-            forward(interval, |got| slept.push(got));
-            assert_eq!(slept, vec![interval]);
-        }
-        ThreadWaiter.wait(Duration::ZERO);
-        Services::system().waiter.wait(Duration::ZERO);
     }
 }

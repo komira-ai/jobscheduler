@@ -5,7 +5,7 @@ use std::path::Path;
 use prost_reflect::DynamicMessage;
 use serde_json::{Value, json};
 
-use crate::api::{Entry, Lease, Minted, Queued};
+use crate::api::Minted;
 use crate::cli::InstanceArgs;
 use crate::failure::Failure;
 
@@ -18,38 +18,6 @@ pub(crate) struct Render {
 impl Render {
     pub(crate) fn new(json: bool) -> Self {
         Self { json }
-    }
-
-    /// A lease that is held: `lease <id> host <host> ends <ms>`, `ends` being the server's
-    /// clock in milliseconds when the lease reaches its maximum wall time.
-    pub(crate) fn held(&self, lease: &Lease) -> String {
-        match self.json {
-            true => line(&json!({
-                "id": lease.id,
-                "host": lease.host,
-                "ends_at_ms": lease.ends_at_ms,
-            })),
-            false => format!(
-                "lease {} host {} ends {}\n",
-                lease.id, lease.host, lease.ends_at_ms
-            ),
-        }
-    }
-
-    /// A lease that was released: `state` is `freed` or `releasing`.
-    pub(crate) fn released(&self, id: &str, state: &str) -> String {
-        match self.json {
-            true => line(&json!({ "id": id, "state": state })),
-            false => format!("lease {id} {state}\n"),
-        }
-    }
-
-    /// A run that was queued.
-    pub(crate) fn queued(&self, run: &Queued) -> String {
-        match self.json {
-            true => line(&json!({ "run_id": run.run_id, "state": run.state })),
-            false => format!("run {} {}\n", run.run_id, run.state),
-        }
     }
 
     /// A minted join token on stdout: the token alone on a line, or `{"token",
@@ -96,21 +64,6 @@ impl Render {
                 "state": "revoked",
             })),
             false => format!("join tokens for {provider}:{id} revoked\n"),
-        }
-    }
-
-    /// The server's list: its own JSON, or a line per lease.
-    pub(crate) fn listing(&self, body: &Value, entries: &[Entry]) -> String {
-        let lines = entries.iter().map(|entry| {
-            let host = entry.host.as_deref().unwrap_or("-");
-            format!(
-                "{} {} host {host} ends {}\n",
-                entry.id, entry.state, entry.ends_at_ms
-            )
-        });
-        match self.json {
-            true => line(body),
-            false => lines.collect(),
         }
     }
 

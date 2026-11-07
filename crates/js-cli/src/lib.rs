@@ -1,12 +1,12 @@
-//! `js`: the command-line client of `js-lease-server`. It acquires and releases leases on
-//! whole GPU hosts; and it makes the calls
+//! `js`: the command-line client of `js-lease-server`. It makes the calls
 //! of the job service (`jobscheduler.v1.JobService`), one command per call, with three
 //! commands written by hand that loop over several calls: `job wait`, `job follow` and
-//! `job run` (see "Job commands" below).
+//! `job run` (see "Job commands" below); and it mints and revokes the join tokens that
+//! admit a launched machine's agent (`join-token`).
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
-//! to and the [`Services`] (the waiter and the signal source), and `main`
-//! calls [`main`], which supplies the program's own.
+//! to and the [`Services`] (the signal source, and the job commands' waiter and dialer),
+//! and `main` calls [`main`], which supplies the program's own.
 //!
 //! # Flags
 //!
@@ -18,33 +18,22 @@
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` (a bearer token never crosses a network in clear); no user, path or query |
 //! | `--token-file <path>` | required: a regular file owned by you, mode 0600 or 0400, holding one token of printable ASCII (the server checks its own token file the same way). On the job service it is the token of one of the server's clients (its `--token-file`, the client `default`, or one of its `--client-token` entries), and the jobs it submits carry that client's name |
 //! | `--ca-cert <path>` | optional for `https://`: a PEM file with the certificate to trust (the server's, or the authority that issued it; a system bundle such as `/etc/ssl/certs/ca-certificates.crt` works), and then only those are trusted. Without it the public roots bundled in the program (`webpki-roots`) are trusted, never the platform's store. Ignored for `http://` |
-//! | `--json` | machine output: one JSON object per line (for `list` the server's own body), errors on stderr as `{"error": kind, "message": text}` |
+//! | `--json` | machine output: one JSON object per line, errors on stderr as `{"error": kind, "message": text}` |
 //!
 //! No proxy setting is read, no redirect is followed and the token is sent to the one
 //! host named, over TLS unless that host is the machine itself.
 //!
-//! # Commands
+//! # Join tokens
 //!
 //! ```text
-//! js lease acquire --class gpu-host [--gpus N --gpu-class X --cpu-millis N --memory-bytes N]
-//!                  --max-wall <dur> [--label k=v ...] [--validation-run ID]
-//!                  [--probe-host HOST] [--request-id ID] [--wait-pending <dur>]
-//! js lease release <id>
-//! js lease list
-//! js lease native <id> --program <path|@bundle/entry> [--arg A ...] [--network off|loopback|on]
-//!                 [--bundle name[:tag]@sha256:<digest>] --cpu-millis N --memory-bytes N
-//!                 [--wall <dur>]
 //! js join-token mint --provider NAME --instance-id ID [--ttl <dur>] [--out FILE]
 //! js join-token revoke --provider NAME --instance-id ID
 //! ```
 //!
-//! A lease has no time to live: nothing a client does keeps it alive, and it ends when it
-//! is released or at its maximum wall time (`--max-wall`). `js lease acquire --ttl` and
-//! `js lease run` are refused (exit 2) with a message saying they were removed; nothing is
-//! sent to the server. `--ttl` of `join-token mint` is another thing, below.
+//! Durations are whole seconds: `90`, `90s`, `15m`, `2h`.
 //!
 //! `join-token mint` asks for a one-time join token (`POST /v1/agent/join-tokens`, behind
-//! the client token like the lease commands) for the machine a provider launched as
+//! the client token) for the machine a provider launched as
 //! `NAME:ID`; the agent that runs there names the same pair in its `--instance-file` and
 //! reads the token from its `--token-file`. `--ttl` is how long the token may be used
 //! (default 30 minutes, at most 24h). Without `--out` the token alone is printed on stdout
@@ -57,44 +46,6 @@
 //! the instance, used or not (idempotent). A server that admits no agents has no such route
 //! and answers `join-tokens-unsupported` (exit 3); a provider the pool does not admit, an
 //! id that is not valid or a `--ttl` above a day is exit 4.
-//!
-//! `native` queues a native job (a program run on the host, no image) on a held lease and
-//! prints `run <id> <state>`. The server refuses it (exit 3) when the lease's host does not
-//! run native jobs (`native-unsupported`) or holds no bundle store for `--bundle`
-//! (`bundle-unsupported`); a body that breaks a rule (a program that is not an absolute
-//! path, a bundle without a digest) is exit 4.
-//!
-//! `--probe-host HOST` asks for a probe: the lease is placed on that host alone, past the
-//! host's cordon, by a server that places with `js-sched` (`--placement js-sched`). A
-//! server that places no probe answers `probe-unsupported`, and one the host's state rules
-//! out `probe-host-unknown`, `-not-serving`, `-not-cordoned`, `-draining`, `-mismatch` or
-//! `-too-small` (all exit 3); a host with no room yet is `no-capacity`, as for any start.
-//! The flag is sent only when given, so a server that predates it takes every other start.
-//!
-//! `--request-id ID` names the start (1 to 63 of `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`, of
-//! your choosing). An `acquire` repeated with the same id and the same flags is answered
-//! with the lease the first one made (held, or still pending) and takes no second host,
-//! for as long as that lease is on the server; the same id with another request (any flag
-//! but `--wait-pending` changed) is refused `request-id-conflict` (exit 3). A `whole-node` start with an id waits on the server for
-//! a host instead of being refused `no-capacity`: it is pending until a host is set aside,
-//! drained and prepared for it, so give `--wait-pending` as long as you mean to wait (the
-//! pending lease is released when it runs out, which cancels the request). The flag is
-//! sent only when given.
-//!
-//! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
-//! `lease <id> host <host> ends <ms>` (`ends` is the server's clock, in milliseconds, when
-//! the lease reaches its maximum wall time; `--json` has it as `ends_at_ms`, and `list`
-//! prints `<id> <state> host <host> ends <ms>`). A start the provider has not confirmed (202) is looked at in the
-//! list every two seconds until it is held or gone, for at most `--wait-pending`
-//! (default 60s); the pause is asked of the [`Waiter`], the only thing that lets time
-//! pass. A lease still pending then is released, so it is not held later with nobody to
-//! release it.
-//!
-//! A start is sent once. When its answer is lost (the connection fails, the server
-//! answers 5xx or something this client does not know, or the body is unusable) the
-//! lease may exist, and `js` exits 1 saying so and telling you to run `js lease list`
-//! before trying again (the JSON kind is `acquire-unconfirmed`); an `acquire` that gave
-//! `--request-id` can instead be run again as it was. `acquire` does no more.
 //!
 //! # Job commands
 //!
@@ -115,7 +66,7 @@
 //! from the service definition in `js-proto` ([`jobs::surface`]), and [`jobs`] builds the
 //! command line from it, so a call added to the definition is a command with no hand-written
 //! code. `js <command> --help` shows each flag with the comment of its field. The global
-//! flags mean what they mean for the lease commands: the same `--server` rule, token file
+//! flags mean the same as for `join-token`: the same `--server` rule, token file
 //! and roots, over gRPC (HTTP/2) to the one origin.
 //!
 //! How a call is named: a call is a verb and a noun. When its request has exactly one
@@ -193,14 +144,12 @@
 //!
 //! | status | meaning |
 //! |---|---|
-//! | 0 | held, freed, listed; for `job wait` and `job run`, the job succeeded |
-//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`); a job command whose request was not sent (`not-sent`) |
+//! | 0 | the command succeeded; for `job wait` and `job run`, the job succeeded |
+//! | 1 | the server or the network failed, or the token was refused (401); a job command whose request was not sent (`not-sent`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `request-id-conflict`, `unknown-lease`, `not-held`, or a pending start that was dropped (`pending-dropped`) |
-//! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT`; a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
-//! | 5 | a pending start was not confirmed within `--wait-pending` |
-//! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
-//! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` and `job run` the job may exist and the same command with the same `--id` is safe to run again |
+//! | 3 | refused: a job command's definite refusal other than `INVALID_ARGUMENT` (`no-capable-host`, an unknown job); `join-tokens-unsupported`, a server that admits no agents |
+//! | 4 | the request itself was refused: a job command answered `INVALID_ARGUMENT`; a `join-token` body the server refuses (a provider the pool does not admit, an invalid id, a `--ttl` above a day) |
+//! //! //! | 9 | a job command sent its request and read no answer, so the call may have taken effect (`unconfirmed`); for `job submit` and `job run` the job may exist and the same command with the same `--id` is safe to run again |
 //! | 10 | `job wait`, `job run`: the job failed (a nonzero exit code, or stopped for its memory) |
 //! | 11 | `job wait`, `job run`: the job was cancelled |
 //! | 12 | `job wait`, `job run`: the job timed out (stopped at its wall limit) |
@@ -209,7 +158,7 @@
 //! | 15 | `job wait`, `job run`: how the job ended could not be told: a call failed, or the job is in a state this `js` does not know (`undetermined`) |
 //! | 129, 130, 143 | `job run`: a second SIGHUP, SIGINT or SIGTERM ended `js` before the job ended (`interrupted`) |
 //!
-//! The reason is on stderr (`js: refused: no-capacity`), and never holds the token.
+//! The reason is on stderr (`js: refused: join-tokens-unsupported`), and never holds the token.
 
 mod api;
 mod cli;
@@ -217,7 +166,6 @@ mod events;
 mod failure;
 pub mod jobs;
 mod join_token;
-mod leases;
 mod render;
 mod signals;
 
@@ -227,15 +175,15 @@ use std::process::ExitCode;
 
 use clap::{ArgMatches, FromArgMatches};
 
-use cli::{Action, Cli, Command};
+use cli::{Cli, Command};
 use failure::Failure;
 use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
 
-pub use events::{ForwardedSignal, Services, SignalSource, Signaller, ThreadWaiter, Waiter};
+pub use events::{ForwardedSignal, Services, SignalSource, Signaller};
 pub use failure::exit;
 
-/// The whole command line of `js`, as it parses: the lease commands, the job commands
+/// The whole command line of `js`, as it parses: the `join-token` commands, the job commands
 /// generated from the job service, and the global flags. Read-only: a caller that walks
 /// its subcommands and flags (a check that the documentation names only commands that
 /// exist) sees the tree [`run_with`] parses with.
@@ -279,7 +227,7 @@ fn usage_exit(usage: &clap::Error, out: &mut dyn Write, err: &mut dyn Write) -> 
     u8::try_from(usage.exit_code()).unwrap_or(exit::USAGE)
 }
 
-/// Runs a parsed command line, a job command or a lease command, and prints its failure,
+/// Runs a parsed command line, a job command or a `join-token` command, and prints its failure,
 /// if any.
 fn execute(
     matches: &ArgMatches,
@@ -290,7 +238,7 @@ fn execute(
     let render = Render::new(matches.get_flag("json"));
     let done = match jobs::chosen(matches) {
         Some(chosen) => jobs::execute(chosen, matches, render, out, err, services),
-        None => lease(matches, render, out, services),
+        None => join_token_command(matches, render, out),
     };
     match done {
         Ok(code) => code,
@@ -301,49 +249,25 @@ fn execute(
     }
 }
 
-/// Runs a lease command.
-fn lease(
+/// Runs a `join-token` command.
+fn join_token_command(
     matches: &ArgMatches,
     render: Render,
     out: &mut dyn Write,
-    services: Services,
 ) -> Result<u8, Failure> {
     // clap already checked `matches` against these commands, so this does not fail; its
     // error is made up front.
     let cli = Cli::from_arg_matches(matches)
         .ok()
-        .ok_or(Failure::Usage("not a lease command".to_owned()))?;
-    dispatch(cli, render, out, services)
+        .ok_or(Failure::Usage("not a join-token command".to_owned()))?;
+    dispatch(cli, render, out)
 }
 
-fn dispatch(
-    cli: Cli,
-    render: Render,
-    out: &mut dyn Write,
-    services: Services,
-) -> Result<u8, Failure> {
+fn dispatch(cli: Cli, render: Render, out: &mut dyn Write) -> Result<u8, Failure> {
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
     let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
     match cli.command {
-        Command::Lease(action) => lease_action(action, &client, render, out, &services),
         Command::JoinToken(action) => join_token::run(&client, render, action, out),
-    }
-}
-
-/// Runs a lease command over a connected client.
-fn lease_action(
-    action: Action,
-    client: &Client,
-    render: Render,
-    out: &mut dyn Write,
-    services: &Services,
-) -> Result<u8, Failure> {
-    match action {
-        Action::Acquire(args) => leases::acquire(client, render, &args, &*services.waiter, out),
-        Action::Release(args) => leases::release(client, render, &args, out),
-        Action::List => leases::list(client, render, out),
-        Action::Run { .. } => Err(Failure::Usage(cli::RUN_REMOVED.to_owned())),
-        Action::Native(args) => leases::native(client, render, &args, out),
     }
 }

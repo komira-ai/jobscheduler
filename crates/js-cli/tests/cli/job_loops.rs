@@ -24,7 +24,7 @@ use prost::Message as _;
 use tonic::Code;
 
 use crate::fake_jobs::{Answer, Fake};
-use crate::support::{Never, Outcome, Scratch, TOKEN, services};
+use crate::support::{Outcome, Scratch, TOKEN, services};
 
 /// A loopback origin over plain http; the in-memory dialer never dials it.
 const PLAIN: &str = "http://localhost:7070";
@@ -128,7 +128,7 @@ fn js(
     source: SignalSource,
     words: &[&str],
 ) -> Outcome {
-    let services = js_cli::Services::new(Arc::new(Never), source)
+    let services = js_cli::Services::new(source)
         .with_dialer(fake.dialer())
         .with_job_waiter(paces.clone());
     crate::support::run(args(scratch, words), services)
@@ -492,7 +492,7 @@ fn job_follow_ends_on_a_refusal_or_a_closed_stdout() {
         "GetLogs",
         vec![Answer::Message(page(0, b"abc", true).encode_to_vec())],
     );
-    let services = services(Arc::new(Never))
+    let services = services()
         .with_dialer(fake.dialer())
         .with_job_waiter(paces.clone());
     let mut err = Vec::new();
@@ -887,7 +887,7 @@ fn the_hand_written_commands_check_the_token_file_as_the_others_do() {
     let mut said = Vec::new();
     for words in commands {
         let fake = Fake::new();
-        let services = services(Arc::new(Never))
+        let services = services()
             .with_dialer(fake.dialer())
             .with_job_waiter(Arc::new(Paces::default()));
         let got = crate::support::run(with_token(&scratch, 0o644, words), services);

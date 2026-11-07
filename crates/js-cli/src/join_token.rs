@@ -13,7 +13,7 @@ use std::path::Path;
 
 use js_client::Client;
 
-use crate::api::Routes;
+use crate::api;
 use crate::cli::{InstanceArgs, JoinTokenAction, MintArgs};
 use crate::failure::{Failure, exit};
 use crate::render::Render;
@@ -77,7 +77,7 @@ fn mint(
     out: &mut dyn Write,
 ) -> Result<u8, Failure> {
     let reserved = args.out.as_deref().map(Reserved::create).transpose()?;
-    let made = client.mint_join_token(&args.body()).and_then(|minted| {
+    let made = api::mint_join_token(client, &args.body()).and_then(|minted| {
         let filled = reserved.as_ref().map_or(Ok(()), |r| r.fill(&minted.token));
         filled.map(|()| minted)
     });
@@ -100,7 +100,7 @@ fn revoke(
     args: &InstanceArgs,
     out: &mut dyn Write,
 ) -> Result<u8, Failure> {
-    client.revoke_join_tokens(&args.body())?;
+    api::revoke_join_tokens(client, &args.body())?;
     let _ = out.write_all(render.revoked(args).as_bytes());
     Ok(exit::OK)
 }

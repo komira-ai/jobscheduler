@@ -3,30 +3,26 @@
 
 use std::os::unix::fs::symlink;
 
-use crate::support::{Harness, Js, Scratch, TOKEN, acquire_words, against, hangup_port};
+use crate::support::{Harness, Js, REVOKE, Scratch, TOKEN, against, hangup_port, run, services};
 
 /// Asserts that `--help` and `--version` print on stdout and exit 0, and that every
 /// way of getting a command line wrong exits 2 with the usage on stderr: no
-/// subcommand, an unknown flag, a missing required flag of a start.
+/// subcommand, an unknown flag, a missing required flag of a join-token command.
 #[test]
 fn help_version_and_usage_errors() {
     let h = Harness::new("flags_usage");
     let help = h.js.go(&["--help"]);
     assert_eq!(help.code, 0);
-    assert!(
-        help.out.contains("Acquires and releases leases"),
-        "{}",
-        help.out
-    );
+    assert!(help.out.contains("mints the join tokens"), "{}", help.out);
     assert!(help.out.contains("--token-file"), "{}", help.out);
     let version = h.js.go(&["--version"]);
     assert_eq!((version.code, version.out.starts_with("js ")), (0, true));
 
     for words in [
         vec![],
-        vec!["lease"],
-        vec!["--no-such-flag", "lease", "list"],
-        vec!["lease", "acquire", "--class", "gpu-host"],
+        vec!["join-token"],
+        vec!["--no-such-flag", "join-token", "revoke"],
+        vec!["join-token", "mint", "--provider", "p"],
     ] {
         let got = h.js.go(&words);
         assert_eq!(got.code, 2, "{words:?}: {}", got.err);
@@ -43,21 +39,25 @@ fn help_version_and_usage_errors() {
 fn the_server_and_the_token_file_are_required() {
     let h = Harness::new("flags_required");
     let token = h.js.token_file.to_str().unwrap();
-    let no_server = crate::support::run(
-        ["js", "--token-file", token, "lease", "list"]
+    let no_server = run(
+        ["js", "--token-file", token]
+            .into_iter()
+            .chain(REVOKE)
             .map(Into::into)
-            .to_vec(),
-        crate::support::services(std::sync::Arc::new(crate::support::Never)),
+            .collect(),
+        services(),
     );
     assert_eq!(
         (no_server.code, no_server.err.as_str()),
         (2, "js: --server: is required\n")
     );
-    let no_token = crate::support::run(
-        ["js", "--server", &h.js.server, "lease", "list"]
+    let no_token = run(
+        ["js", "--server", &h.js.server]
+            .into_iter()
+            .chain(REVOKE)
             .map(Into::into)
-            .to_vec(),
-        crate::support::services(std::sync::Arc::new(crate::support::Never)),
+            .collect(),
+        services(),
     );
     assert_eq!(
         (no_token.code, no_token.err.as_str()),
@@ -65,27 +65,27 @@ fn the_server_and_the_token_file_are_required() {
     );
 }
 
-/// Asserts that durations and labels that are not what they say are usage errors, and
-/// that zero and overflow are refused.
+/// Asserts that a `--ttl` that is not a positive duration (zero, text, an unknown unit,
+/// an overflow) is a usage error, and that each unit (`s`, `m`, `h`, none) is accepted.
 #[test]
-fn durations_and_labels_are_checked() {
-    let h = Harness::new("flags_values");
-    for extra in [
-        ["--max-wall", "0"],
-        ["--max-wall", "soon"],
-        ["--max-wall", "5x"],
-        ["--max-wall", "99999999999999999999h"],
-        ["--wait-pending", "0s"],
-        ["--label", "novalue"],
-        ["--label", "=x"],
-    ] {
-        let mut words = acquire_words(&[]);
-        words.extend(extra);
-        let got = h.js.go(&words);
-        assert_eq!(got.code, 2, "{extra:?}: {}", got.err);
+fn durations_are_checked() {
+    let h = Harness::agents("flags_values");
+    for ttl in ["0", "soon", "5x", "99999999999999999999h"] {
+        let got = h.js.go(&mint_words(ttl));
+        assert_eq!(got.code, 2, "{ttl}: {}", got.err);
     }
-    let units = h.js.go(&acquire_words(&["--wait-pending", "1h"]));
-    assert_eq!(units.code, 0, "{}", units.err);
+    for ttl in ["90", "90s", "15m", "1h"] {
+        let got = h.js.go(&mint_words(ttl));
+        assert_eq!(got.code, 0, "{ttl}: {}", got.err);
+    }
+}
+
+/// The words of a mint with this `--ttl`.
+fn mint_words(ttl: &str) -> Vec<&str> {
+    let mut words = vec!["join-token", "mint"];
+    words.extend(&REVOKE[2..]);
+    words.extend(["--ttl", ttl]);
+    words
 }
 
 /// Asserts that a server URL the client must not use is refused before any connection:
@@ -106,12 +106,12 @@ fn a_bad_server_url_is_refused() {
         "https://example.com/?q=1",
         "not a url",
     ] {
-        let got = against(url, &scratch).go(&["lease", "list"]);
+        let got = against(url, &scratch).go(&REVOKE);
         assert_eq!(got.code, 2, "{url}: {}", got.err);
         assert!(got.err.starts_with("js: --server: "), "{url}: {}", got.err);
         assert!(got.err.contains(url), "{url}: {}", got.err);
     }
-    let plain = against("http://example.com", &scratch).go(&["lease", "list"]);
+    let plain = against("http://example.com", &scratch).go(&REVOKE);
     assert!(
         plain.err.contains("never crosses a network in clear"),
         "{}",
@@ -134,7 +134,7 @@ fn loopback_hosts_may_use_plain_http() {
         format!("http://[::1]:{closed}"),
         format!("http://LocalHost:{closed}"),
     ] {
-        let got = against(&url, &scratch).go(&["lease", "list"]);
+        let got = against(&url, &scratch).go(&REVOKE);
         assert_eq!(got.code, 1, "{url}: {}", got.err);
         assert!(
             got.err.starts_with("js: cannot talk to http://"),
@@ -179,7 +179,7 @@ fn a_bad_token_file_is_refused() {
             server: h.js.server.clone(),
             token_file: path.clone(),
         };
-        let got = js.go(&["lease", "list"]);
+        let got = js.go(&REVOKE);
         assert_eq!(got.code, 2, "{path:?}: {}", got.err);
         assert!(got.err.starts_with("js: --token-file: "), "{}", got.err);
         assert!(got.err.contains(&path.display().to_string()), "{}", got.err);
@@ -191,7 +191,7 @@ fn a_bad_token_file_is_refused() {
 /// links), with its trailing newline dropped, and that a read-only 0400 file is fine.
 #[test]
 fn a_linked_or_read_only_token_file_works() {
-    let h = Harness::new("flags_token_ok");
+    let h = Harness::agents("flags_token_ok");
     let target = h
         .scratch
         .write("token-target", &format!("{TOKEN}\n"), 0o400);
@@ -201,7 +201,7 @@ fn a_linked_or_read_only_token_file_works() {
         server: h.js.server.clone(),
         token_file: link,
     };
-    assert_eq!(js.go(&["lease", "list"]).code, 0);
+    assert_eq!(js.go(&REVOKE).code, 0);
 }
 
 /// Asserts that a token the server does not know is exit 1 (the server refused it with
@@ -214,7 +214,7 @@ fn a_wrong_token_is_a_server_failure() {
         server: h.js.server.clone(),
         token_file: other,
     };
-    let got = js.go(&["lease", "list"]);
+    let got = js.go(&REVOKE);
     assert_eq!(
         (got.code, got.err.as_str()),
         (1, "js: the server refused the token (401)\n")
@@ -234,9 +234,20 @@ fn a_bad_ca_file_is_refused() {
     ];
     for path in cases {
         let ca = path.to_str().unwrap();
-        let got = js.go(&["--ca-cert", ca, "lease", "list"]);
+        let got = js.go(&[&["--ca-cert", ca], &REVOKE[..]].concat());
         assert_eq!(got.code, 2, "{path:?}: {}", got.err);
         assert!(got.err.starts_with("js: --ca-cert: "), "{}", got.err);
         assert!(got.err.contains(ca), "{}", got.err);
     }
+}
+
+/// Asserts that the four global flags may stand after the subcommand as well as before it:
+/// a revoke with `--server` and `--token-file` last is answered as one with them first.
+#[test]
+fn the_global_flags_may_follow_the_subcommand() {
+    let h = Harness::agents("flags_last");
+    let first = h.js.go(&REVOKE);
+    let last = h.js.go_last(&REVOKE);
+    assert_eq!(first.code, 0, "{}", first.err);
+    assert_eq!((last.code, last.out), (0, first.out));
 }

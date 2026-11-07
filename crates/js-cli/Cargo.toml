@@ -32,10 +32,7 @@ js-conformance = { path = "../js-conformance" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
-js-provider = { path = "../js-provider" }
-js-provider-fake = { path = "../js-provider-fake" }
 js-testkit = { path = "../js-testkit" }
-js-types = { path = "../js-types" }
 rcgen.workspace = true
 # `signals`: the test sends the process the signal its handlers are installed for.
 rustix = { workspace = true, features = ["process"] }

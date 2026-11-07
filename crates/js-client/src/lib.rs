@@ -1,4 +1,4 @@
-//! The client side of the lease server's HTTP API, shared by the programs that call it:
+//! A client of the server's token-bearing HTTP API, shared by the programs that call it:
 //! a server address checked for the rule that a token crosses a network only inside TLS,
 //! the bearer token read from an owner-only file, and an HTTP client that trusts only
 //! the PEM file it is given or, without one, the public roots bundled in `webpki-roots`
@@ -18,12 +18,11 @@ mod client;
 mod error;
 #[cfg(feature = "jobs")]
 pub mod jobs;
-mod run;
 mod server_url;
 mod token;
 
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
-pub use run::{LogTail, Outcome, RunRead, RunReadError};
+pub use js_agent_wire::LogTail;
 pub use server_url::ServerUrl;
 pub use token::{bearer, bearer_of};
