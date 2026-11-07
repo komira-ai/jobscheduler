@@ -301,6 +301,7 @@ impl Node {
             egress: None,
             gpus: None,
             image_budget: None,
+            host_jobs: false,
         }
     }
 

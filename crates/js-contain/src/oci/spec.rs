@@ -17,11 +17,11 @@ use oci_spec::runtime::{
 
 use super::devices;
 use super::hardening::{MASKED_PATHS, READONLY_PATHS, SeccompError, seccomp};
-use crate::container::{ACTION_ID, ContainerSpec};
+use crate::container::{ACTION_ID, ContainerSpec, Isolation};
 use crate::subids::DaemonIds;
 
 /// The OCI version the file declares (what `crun spec` writes).
-const OCI_VERSION: &str = "1.0.0";
+pub(crate) const OCI_VERSION: &str = "1.0.0";
 
 /// The hostname of every job's container, the same on every node.
 pub(crate) const HOSTNAME: &str = "localhost";
@@ -59,6 +59,10 @@ pub enum SpecError {
         /// Its value.
         path: String,
     },
+    /// A host container ([`Isolation::Host`]) was given a mount, a shared tree or a
+    /// device: it sees the host's own, and none could be given without changing the host.
+    #[error("a host container is given no mount, shared tree or device")]
+    HostMounts,
     /// The seccomp profile could not be built.
     #[error(transparent)]
     Seccomp(#[from] SeccompError),
@@ -70,7 +74,7 @@ pub enum SpecError {
 /// Checks that `path` starts with `under` and continues with parts that are not empty,
 /// `.` or `..` (so it is not `under` alone, and has no trailing slash): a mount destination
 /// or working directory built from it cannot leave the place it names.
-fn normalized(what: &'static str, path: &str, under: &str) -> Result<(), SpecError> {
+pub(crate) fn normalized(what: &'static str, path: &str, under: &str) -> Result<(), SpecError> {
     let ok = path
         .strip_prefix(under)
         .is_some_and(|rest| rest.split('/').all(|p| !matches!(p, "" | "." | "..")));
@@ -120,7 +124,8 @@ pub(crate) fn filesystem(destination: &str, typ: &str, options: &[&str]) -> Moun
 
 /// Where a lease's container is made and what it sees of the node.
 pub(crate) struct Placement<'a> {
-    /// The unpacked image the container's root is.
+    /// The unpacked image the container's root is (unused for a host container, whose root
+    /// is the host's `/`).
     pub rootfs: &'a Path,
     /// The lease's cgroup, as the cgroup filesystem names it (`/.../lease-<n>`);
     /// the container's own cgroup is a child of it.
@@ -131,7 +136,8 @@ pub(crate) struct Placement<'a> {
     pub arch: &'a str,
     /// The container's first process (`init`), on the node.
     pub init: &'a Path,
-    /// Where the container sees the init: an absolute path inside its `/dev`.
+    /// Where the container sees the init: an absolute path inside its `/dev` (a host
+    /// container runs it at `init`, its path on the host).
     pub init_dest: &'a str,
     /// Whole seconds the init waits for a default route in the container's network
     /// namespace before it starts the job; 0 for not waiting.
@@ -255,7 +261,7 @@ fn init_argv(init_dest: &str, route_wait_secs: u64, argv: &[String]) -> Vec<Stri
     args
 }
 
-fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
+pub(crate) fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
     built(
         PosixRlimitBuilder::default()
             .typ(typ)
@@ -310,14 +316,20 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// No memory or CPU limit is set here: the lease cgroup carries them
 /// ([`LeasePolicy::Hard`](crate::cgroup::LeasePolicy::Hard)).
 ///
+/// A host container ([`Isolation::Host`]) is built by
+/// [`host_config`](super::host_spec::host_config), whose table says what differs.
+///
 /// # Errors
 /// `spec.exec_root` or the init's path is not a normalized absolute path, a device's path
-/// is not one below `/dev`, or the seccomp profile cannot be resolved for the node's
-/// architecture.
+/// is not one below `/dev`, the seccomp profile cannot be resolved for the node's
+/// architecture, or a host container has a mount ([`SpecError::HostMounts`]).
 pub(crate) fn action_config(
     spec: &ContainerSpec,
     placement: &Placement<'_>,
 ) -> Result<Spec, SpecError> {
+    if spec.isolation == Isolation::Host {
+        return super::host_spec::host_config(spec, placement);
+    }
     normalized("exec_root", &spec.exec_root, "/")?;
     normalized("init path", placement.init_dest, "/dev/")?;
     for host in &spec.mounts {

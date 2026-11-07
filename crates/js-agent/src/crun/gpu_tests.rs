@@ -497,6 +497,7 @@ fn container() -> ContainerSpec {
         image_digest: format!("sha256:{}", "ab".repeat(32)),
         dir: PathBuf::from("/s/js-x-r1"),
         cgroup_parent: "/actions/js-x-r1".to_owned(),
+        isolation: js_contain::Isolation::Contained,
         exec_root: "/work".to_owned(),
         input_root: PathBuf::from("/s/js-x-r1/root"),
         upper: PathBuf::from("/s/js-x-r1/upper"),

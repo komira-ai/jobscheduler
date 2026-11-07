@@ -76,6 +76,11 @@ impl JobDrop {
         })
     }
 
+    /// The job user's uid.
+    pub(crate) fn uid(&self) -> u32 {
+        self.uid
+    }
+
     /// Makes `command` start as the job user: `setgroups([])`, then the gid, then the uid
     /// (the order in which each call is still allowed), all three real, effective and saved.
     pub(crate) fn apply(&self, command: &mut std::process::Command) {
@@ -275,6 +280,17 @@ impl Crun {
     /// The drop to the job user every command of this driver gets, if any.
     pub(crate) fn job(&self) -> Option<&JobDrop> {
         self.job.as_ref()
+    }
+
+    /// This driver without the drop to the job user: its commands run as the daemon (with
+    /// the same environment scrub), for a host lease ([`Isolation::Host`]).
+    ///
+    /// [`Isolation::Host`]: crate::container::Isolation::Host
+    pub(crate) fn as_daemon(&self) -> Self {
+        Self {
+            job: None,
+            ..self.clone()
+        }
     }
 
     /// The `crun` program.

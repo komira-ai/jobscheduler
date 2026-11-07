@@ -164,6 +164,7 @@ impl ContainerHost {
             image_digest: self.image.digest.clone(),
             dir: lease.clone(),
             cgroup_parent: format!("{}/{name}", self.cgroup_parent),
+            isolation: js_contain::Isolation::Contained,
             exec_root: "/work".to_owned(),
             input_root: lease.join("root"),
             upper: lease.join("upper"),
