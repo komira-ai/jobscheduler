@@ -115,10 +115,11 @@ fn verb(flags: &[&str], pace: &mut FakePace<'_>) -> Ran {
 
 /// Asserts what the client does on the wire with the host's own credential: a read shows a
 /// live host with no cordon and no mark; a cordon of 120 s says it was not cordoned before,
-/// carries the server's expiry, and keeps the server from placing a lease (409 `no-capacity`);
-/// a second cordon of a shorter lease says it was cordoned already and does not shorten it; an
-/// uncordon says it lifted one and the server places a lease again, which the next read
-/// shows; a second uncordon says nothing was lifted. It catches a client that sends the wrong
+/// carries the server's expiry, which the server's host listing shows too; a second cordon
+/// of a shorter lease says it was cordoned already and does not shorten it; an uncordon says
+/// it lifted one and the listing shows none; a second uncordon says nothing was lifted. That
+/// a cordoned host is placed no job is asserted with a container agent in `jobs/e2e.rs`. It
+/// catches a client that sends the wrong
 /// path, drops `already_cordoned` or `lifted`, or reads the expiry wrong.
 #[test]
 fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
@@ -144,11 +145,6 @@ fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
         server.host("mac-1")["cordon"]["expires_at_ms"],
         T0 + 120_000
     );
-    let refused = server.lease();
-    assert_eq!(
-        (refused.status, refused.body),
-        (409, json!({ "error": "no-capacity" }))
-    );
 
     let again = lease.cordon(60).unwrap();
     assert!(again.already_cordoned);
@@ -159,11 +155,7 @@ fn the_client_cordons_reads_and_uncordons_a_real_host_with_its_credential() {
     assert!(lifted.lifted);
     assert!(lifted.host.cordon.is_none());
     assert!(server.host("mac-1").get("cordon").is_none());
-    let granted = server.lease();
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    let busy = lease.host().unwrap();
-    assert_eq!(busy.leases, 1);
-    assert_eq!(busy.lease.as_deref(), granted.body["id"].as_str());
+    assert!(lease.host().unwrap().cordon.is_none());
 
     assert!(!lease.uncordon().unwrap().lifted);
 }

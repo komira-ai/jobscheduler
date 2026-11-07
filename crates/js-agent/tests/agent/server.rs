@@ -1,5 +1,5 @@
-//! A lease server started in the test process with agent registration on, and an agent
-//! run on a thread of its own whose waits the test opens one at a time.
+//! A server started in the test process with agent registration and the job service on,
+//! and an agent run on a thread of its own whose waits the test opens one at a time.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -23,7 +23,7 @@ use crate::support::{Host, Lowest, Ran, Scratch, run_on, run_on_defaulted};
 /// The wall time the server's clock starts at.
 pub const T0: u64 = 1_000_000;
 
-/// The token of the lease routes.
+/// The client token of the server.
 pub const CLIENT_TOKEN: &str = "client-token-0123456789-abcdefghijkl";
 
 /// The pool's join token.
@@ -68,7 +68,9 @@ cpu_millis = 1
 memory_bytes = 1
 "#;
 
-/// The flags of a server with agents on, over `scratch`.
+/// The flags of a server with agents and the job service on, over `scratch`. A pool that
+/// states an `arch` capability, as `js-sched` needs of a pool it places on, also turns on
+/// that placement.
 fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec<String> {
     let client = scratch.write("client-token", CLIENT_TOKEN, 0o600);
     let join = scratch.write("join-token", JOIN, 0o600);
@@ -88,9 +90,14 @@ fn args(scratch: &Scratch, boot: &str, extra: &[String], pool_text: &str) -> Vec
         &path(&join),
         "--agent-pool-config",
         &path(&pool),
+        "--job-listen",
+        "127.0.0.1:0",
     ]
     .map(str::to_owned)
     .into();
+    if pool_text.contains("arch =") {
+        all.extend(["--placement".to_owned(), "js-sched".to_owned()]);
+    }
     all.extend_from_slice(extra);
     all
 }
@@ -143,6 +150,16 @@ impl Server {
     /// Stops the server and starts another over its files, as the program does after a
     /// restart: a new registry, nothing carried over but the files.
     pub fn restart(self) -> Self {
+        self.restart_over(false)
+    }
+
+    /// [`Server::restart`] with the job store's files removed while the server is down: the
+    /// restarted server holds no job.
+    pub fn restart_forgetting_jobs(self) -> Self {
+        self.restart_over(true)
+    }
+
+    fn restart_over(self, forget_jobs: bool) -> Self {
         let Self {
             runtime,
             running,
@@ -155,6 +172,17 @@ impl Server {
         let stopped =
             runtime.block_on(async { tokio::time::timeout(HANG_GUARD, running.shutdown()).await });
         stopped.expect("the server did not shut down").unwrap();
+        if forget_jobs {
+            let state = scratch.path("leases.toml");
+            let dir = state.parent().unwrap();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().and_then(|name| name.to_str());
+                if name.is_some_and(|name| name.starts_with("leases.toml.jobs")) {
+                    std::fs::remove_file(&path).unwrap();
+                }
+            }
+        }
         launch(runtime, scratch, clock, "resume", extra, pool)
     }
 
@@ -173,18 +201,64 @@ impl Server {
         Client::connect(&self.url(), &file, None, Duration::from_secs(10)).unwrap()
     }
 
-    /// `POST /v1/leases` for a macOS host, by capability.
-    pub fn lease(&self) -> Reply {
-        let body = json!({
-            "class": "mac",
-            "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },
-            "capabilities": { "os": "macos" },
-            "max_wall_seconds": 3600,
-        });
-        self.client().post("/v1/leases", &body).unwrap()
+    /// The job service's address as `--server` takes it.
+    pub fn job_url(&self) -> String {
+        let addr = self.running.job_addr().expect("the job service is on");
+        format!("http://{addr}")
     }
 
-    /// `GET path` with the lease token.
+    fn job_client(&self) -> Client {
+        let file = self.scratch.path("client-token");
+        Client::connect(&self.job_url(), &file, None, Duration::from_secs(10)).unwrap()
+    }
+
+    /// `POST /v1/jobs` of a job that runs `busybox` and needs `cpu` thousandths of a core,
+    /// pinned by digest and bounded to an hour.
+    pub fn submit(&self, cpu: u64) -> Reply {
+        let body = json!({
+            "spec": {
+                "image": "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "args": ["true"],
+                "needs": { "cpuMillis": cpu.to_string(), "memoryBytes": "1048576" },
+                "wallLimitSeconds": "3600",
+            }
+        });
+        self.job_post("/v1/jobs", &body)
+    }
+
+    /// `GET path` on the job port.
+    pub fn job_get(&self, path: &str) -> Reply {
+        self.job_client().get(path).unwrap()
+    }
+
+    /// `POST path` on the job port with `body`.
+    pub fn job_post(&self, path: &str, body: &Value) -> Reply {
+        self.job_client().post(path, body).unwrap()
+    }
+
+    /// The job `id` as `GET /v1/jobs/{id}` answers it.
+    pub fn job(&self, id: &str) -> Value {
+        let reply = self.job_get(&format!("/v1/jobs/{id}"));
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.body["job"].clone()
+    }
+
+    /// The state of the job `id`, as `JOB_STATE_*`.
+    pub fn job_state(&self, id: &str) -> String {
+        self.job(id)["state"].as_str().unwrap().to_owned()
+    }
+
+    /// The result of the job `id` as `GET /v1/jobs/{id}/result` answers it.
+    pub fn job_result(&self, id: &str) -> Reply {
+        self.job_get(&format!("/v1/jobs/{id}/result"))
+    }
+
+    /// `POST /v1/jobs/{id}:cancel`.
+    pub fn cancel(&self, id: &str) -> Reply {
+        self.job_post(&format!("/v1/jobs/{id}:cancel"), &json!({}))
+    }
+
+    /// `GET path` with the client token.
     pub fn get(&self, path: &str) -> Value {
         self.client().get(path).unwrap().body
     }
@@ -199,19 +273,14 @@ impl Server {
             .clone()
     }
 
-    /// `DELETE path` with the lease token.
-    pub fn delete(&self, path: &str) -> Reply {
-        self.client().delete(path).unwrap()
-    }
-
-    /// `POST path` with the lease token and `body`.
+    /// `POST path` with the client token and `body`.
     pub fn post_body(&self, path: &str, body: &Value) -> Reply {
         self.client().post(path, body).unwrap()
     }
 }
 
 /// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux: a machine
-/// that offers more joins it, and a lease on it holds runs up to that shape.
+/// that offers more joins it, and the jobs placed on it book up to that shape.
 pub const POOL_RUNS_TOML: &str = r#"
 name = "macs"
 class = "mac"
@@ -223,6 +292,7 @@ memory_bytes = 4294967296
 
 [capabilities]
 os = "linux"
+arch = "x86_64"
 "#;
 
 /// Opens the waits of an agent one at a time.
