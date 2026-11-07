@@ -58,6 +58,10 @@ pub enum CloudEvent {
     },
     /// The operator asked for the pool's brake to be reset ([`crate::Cell::reset_brake`]).
     BrakeReset,
+    /// The acquire recorded just before this crashed the server
+    /// ([`super::Cloud::crash_at_next_acquire`]): the server was answered as for a lost
+    /// answer and stopped at the end of the tick.
+    Crash,
 }
 
 /// What the cloud answered an acquire.

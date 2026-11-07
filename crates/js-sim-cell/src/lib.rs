@@ -60,7 +60,11 @@
 //!   server of [`ServerSpec::jobs`] also speaks the per-job messages.
 //! - [`server`]: the real lease server in process as a kernel node ([`ServerNode`]), built
 //!   from a [`ServerSpec`] by the server's own command-line parser, on the kernel's clock,
-//!   and started again over its own files with `--boot resume` ([`ServerNode::restart`]);
+//!   its state in the store `--store` names ([`Store`]: a SQLite file, or with the feature
+//!   `postgres` a Postgres database of its own), stopped between two inputs
+//!   ([`ServerNode::stop`]), started again over its own files and store with `--boot
+//!   resume` ([`ServerNode::restart`]), and with a second server beside it on the same
+//!   store ([`ServerNode::start_beside`]);
 //!   with [`ServerSpec::jobs`], its job service too, its job store minting ids from the
 //!   seed.
 //! - [`elastic`]: an elastic pool ([`ElasticPool`]): its cloud ([`Cloud`]), the elastic
@@ -102,7 +106,10 @@
 //!   families (`tests/whole_host.rs`, `tests/whole_host_faults.rs`) run the whole-host
 //!   path, and the ways its handshake fails, under every value of `--placement`; the
 //!   elastic family (`tests/elastic.rs`) runs pools whose machines the scaler launches on
-//!   demand and releases once idle, billed as EC2 and as Lambda bill.
+//!   demand and releases once idle, billed as EC2 and as Lambda bill; the store family
+//!   (`tests/store.rs`) runs the server's state in its store across a restart, a stop in a
+//!   burst of hellos, a second server on the store and a crash at the scaler's acquire,
+//!   over SQLite and, with the feature `postgres`, over Postgres.
 //! - [`agreement`]: one scenario run with every agent a fake and again with every agent
 //!   real, and the client's outcome of each item compared ([`Disagreement`]): how the fake
 //!   is held to the real agent.
@@ -151,7 +158,7 @@ pub use actions::Action;
 pub use agent::{AgentKind, AgentNode, AgentSpec, Prepare, SIM_RUN_IMAGE};
 pub use agreement::{Disagreement, ItemDifference, Outcome, Side, compare, differences};
 pub use bus::{CallId, Msg, Route};
-pub use cell::{Cell, Setup};
+pub use cell::{Cell, SecondServer, Setup, StoreRead};
 pub use counters::{Counter, Counters};
 pub use elastic::{
     AcquireAnswer, Cloud, CloudCall, CloudEvent, CloudFacts, ElasticPool, Machine, OfferSpec,
@@ -175,5 +182,5 @@ pub use scenario::{
     Booked, Call, Expect, HostIs, HostRef, Listed, Passed, RecordFact, Scenario, ScenarioFailure,
     SeedRun,
 };
-pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, WHOLE_CLASS};
+pub use server::{EPOCH_MS, JOBS_PATH, ServerNode, ServerSpec, Shape, Store, WHOLE_CLASS};
 pub use work::Work;
