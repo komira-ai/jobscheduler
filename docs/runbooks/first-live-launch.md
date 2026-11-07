@@ -78,7 +78,8 @@ client_token_file = "<path>"
 tls_cert          = "<path>"
 tls_key           = "<path>"
 require_host_credential = true
-max_lease_wall    = "1h"                        # required with a pool with GPUs: no lease may ask for more
+job_listen        = "<tailnet address>:7302"    # the job service, which js job calls
+max_lease_wall    = "1h"                        # required with a pool with GPUs: part of the lifetime a launch carries
 
 [[pool]]
 name               = "gpu"
@@ -119,7 +120,7 @@ The reader refuses an unknown key, a `launch` other than `plan` or `live`, a day
 | 1.7 | The pinned Tailscale static build (`network.binary`): url and sha256. | Same check as 1.6 against the url in the config. | CI (shape, required with `live`), LIVE (the digest matches the file) |
 | 1.8 | Caps. `max_instances = 1`; `max_spend_per_hour` set to the smallest GPU type's price for one instance for one hour, and `max_spend_per_day` to about twice that. | The config has all three. `/v1/pools` shows `instances.max` 1 and `instances.max_spend_cents_per_hour` equal to your figure in cents. Read the type's price on Lambda's page and confirm it is above zero (#329: the cap does not bind on a zero price until it lands). | CI (they are required and the step enforces them), LIVE (the prices the catalog returns are the ones you budgeted) |
 | 1.9 | `launch = "plan"` in the pool. A second lock: the provider is built disabled and in dry run unless `launch = "live"`. | `grep launch <config>` prints `plan`; `/v1/pools` shows `launch: plan`. | CI (`a_plan_pool_launches_nothing`) |
-| 1.10 | A client token file for the lease routes, and the `js` CLI on a machine that can reach `listen`. | `js --server https://js.example.ts.net:<port> --token-file <file> --ca-cert <pem> lease list` prints an empty list. | CI (CLI), LIVE (the route) |
+| 1.10 | A client token file for the job service, and the `js` CLI on a machine that can reach `job_listen`. | `js job list --server https://js.example.ts.net:<job port> --token-file <file> --ca-cert <pem>` prints an empty list. | CI (CLI), LIVE (the route) |
 | 1.11 | `server.require_host_credential = true`: the first hello of a one-time join token must ask for a host credential, or it is refused (`join-token-credential-required`, 403) and the token stays unused. The pinned agent asks. | The line is in the config. A launched host's token is dead after its first hello (5.3). | CI (`the_switch_refuses_an_unasked_first_hello_of_a_one_time_token`), LIVE (the pinned agent asks) |
 | 1.12 | Where the records file will be: `<state_file>.scaler`, beside the lease file, in a directory only the service user can write. Back it up with the lease file. | `ls -l` of the directory. Nothing in the directory is deleted by hand during the run. | LIVE |
 
@@ -254,17 +255,17 @@ the Lambda console during the run, and the decisions of "Must land" that are not
    release a host or a machine as missing or silent until the registry view is complete: at least
    5 minutes after the listeners bind, and until every known host has been heard or 10 minutes have
    passed (**CI**, `scaler/complete.rs`). Launching needs the checks to pass.
-3. Request one lease:
+3. Submit one job that needs the whole host:
 
    ```sh
-   js --server https://js.example.ts.net:<port> --token-file <client token> --ca-cert <pem> \
-      lease acquire --class whole-node --gpus 1 --gpu-class <gpu model> --max-wall 30m
+   js job submit --server https://js.example.ts.net:<job port> --token-file <client token> --ca-cert <pem> \
+      --spec.image <image>@sha256:<digest> --spec.command nvidia-smi --spec.needs.whole-host true \
+      --spec.needs.gpus 1 --spec.needs.gpu-class <gpu model> --spec.wall-limit-seconds 30m
    ```
 
    Use the GPU model of the pool's instance type: its family (`nvidia-a10` for `gpu_1x_a10`), as the
-   provider's catalog table (`crates/js-provider-lambdalabs/src/catalog.rs`) gives it. The answer is 202 `pending`: the machine
-   does not exist yet. (`acquire` waits `--wait-pending`, 60 s by default, for a start to settle; a boot
-   takes longer, so poll `lease list`.)
+   provider's catalog table (`crates/js-provider-lambdalabs/src/catalog.rs`) gives it. The answer is the job, `queued`: the machine
+   does not exist yet. Poll `js job get --job-id <id>`; the submit never waits for placement.
 4. Watch `/v1/pools` every 10 s. `machines[].state` goes `booting`, then `registered` (the record
    begins `planned`/`launching` for the length of a tick). Also watch the Lambda console list.
 5. Leave `boot = "initialise"` until the run is over. When the machine is gone (section 6), check that
@@ -277,7 +278,7 @@ the Lambda console during the run, and the decisions of "Must land" that are not
 | `booting` within one tick of the request | **CI** for the order (record written before the call, one launch per request: `a_waiting_request_is_launched_once_with_its_records_written_first`, `a_live_pool_launches_once_and_not_again_after_a_restart`) |
 | A tailnet device named like the host appears, then `registered` once the host says hello, within `boot_timeout` (default 15 min). The unit starts the agent with `--host-id <name>`, which is how the scaler finds the host of the record. | **LIVE.** Time it: the Tailscale key lives 10 minutes (Q11); the join token lives `boot_timeout` plus 5 minutes. |
 | `instances.n` is 1 and `spend_cents_per_hour` is the catalog price | **CI** (arithmetic), **LIVE** (price is Lambda's) |
-| The lease moves from 202 `pending` to held on `js lease list` | **CI** (flow), **LIVE** (a real host) |
+| The job moves from `queued` to `running` on `js job get --job-id <id>` | **CI** (flow), **LIVE** (a real host) |
 
 The watch rule: a machine `registered` for longer than `boot_timeout` whose host does not appear in
 `/v1/hosts` as `state: live` with a recent heartbeat is the lost-Welcome case (#387). Terminate it by hand
@@ -308,9 +309,9 @@ On fail:
 
 ## 5. On the live host, while it runs
 
-You cannot ssh in: that is the point. Run each of these as a container job on the leased host (the
-run routes), or from outside, as stated. Do them in order,
-while the lease is held. Keep the `max_wall` short.
+You cannot ssh in: that is the point. Run each of these as a container job on the launched host (`js job run`),
+or from outside, as stated. Do them in order,
+before the host has been idle for the pool's `idle` time. Keep each job's wall limit short.
 
 ### 5.1 Containers cannot reach the metadata address (D§7.3 step 8, F12b)
 
@@ -370,7 +371,7 @@ credential: `/v1/hosts` lists the host with `source: registered`, and the agent 
 From the launched host (a job in a container that tries `curl`): 
 
 - connect to another node of the tailnet: must fail;
-- connect to the scheduler's `listen` port (`/v1/pools`, `/v1/leases`): must fail;
+- connect to the scheduler's `listen` port (`/v1/pools`, `/v1/hosts`): must fail;
 - the agent port (heartbeats, `/v1/agent/hello` with no token answering 401): must succeed.
 
 Pass: only the agent port answers. **LIVE.** This is the only test that the operator's policy and the
@@ -385,18 +386,18 @@ From a machine outside the tailnet and from the scheduler host, try the instance
 
 Pass: both time out or are refused. **LIVE.** This supports 3.1; it does not replace it.
 
-### 5.6 The lease ran
+### 5.6 The job ran
 
-Run a short job on the lease (a run of `nvidia-smi` on the lease through the run routes, or a container job as the pool allows).
+The job of step 3 runs `nvidia-smi` on the host (`js job wait --job-id <id>`, then `js job logs --job-id <id>`).
 
-Pass: exit status 0 and the GPU listed; the host in `/v1/hosts` shows the lease and `state: live`.
+Pass: exit status 0 and the GPU listed; the host in `/v1/hosts` shows `state: live` while the job runs.
 **LIVE** (the GPU, the state root, the loop-mounted device the agent needs; Q5). **CI** covers the
-lease flow against a fake agent.
+job flow against a fake agent.
 On fail: read the agent unit's output through the job, or the console output in Lambda.
 
 ## 6. Teardown
 
-1. Release the lease (`js lease release <id>`) or let `max_wall` end.
+1. Cancel the job (`js job cancel --job-id <id>`) or let it end.
 2. The scaler holds the host while it works and drains it once it has been idle for the pool's `idle` time
    (set it short for this run). `machines[].state` goes `registered`, then
    `draining`, then `releasing`. **CI**: a host is released only while it has no lease, run or stream
@@ -423,7 +424,7 @@ On fail: read the agent unit's output through the job, or the console output in 
    and restart, so the next spend is a new go. Keep the records file: a live pool does not start without
    it, and it holds the day's spend.
 
-Pass for the run: from Lambda's list and status: our tags and name; a hello arrived; the lease ran; the
+Pass for the run: from Lambda's list and status: our tags and name; a hello arrived; the job ran; the
 instance terminated and read back gone; the device gone from the tailnet; the token revoked;
 `instances.n` is 0; no spend after the release. **LIVE.**
 Open the Lambda billing page after an hour and compare the charge with `max_spend_per_hour`.
@@ -438,8 +439,8 @@ last.
 | situation | action |
 |---|---|
 | Before the flip (steps 1 to 3) | Nothing was launched. Leave `launch = "plan"`. |
-| Any time after the flip, before a launch | Set `launch = "plan"` in the config and restart. Nothing launches. Also release the lease request (`js lease release`). |
-| An instance exists and the scheduler is healthy | Release the lease; let the teardown of section 6 run. Watch it. |
+| Any time after the flip, before a launch | Set `launch = "plan"` in the config and restart. Nothing launches. Also cancel the job (`js job cancel`). |
+| An instance exists and the scheduler is healthy | Cancel the job; let the teardown of section 6 run. Watch it. |
 | A registered host that has never heartbeated past `boot_timeout` (a lost Welcome, #387), or an `alerts` entry about a machine | Terminate the instance in the Lambda console (or `first_launch --teardown-only` if it launched it). Instances are found by the tags `jobscheduler:scheduler=<id>`, `jobscheduler:pool=<pool>` and the name. Then delete the tailnet device in the admin console and restart the scheduler: it lists the account, finds no instance, and its record for the machine ends. Restart with `boot = "resume"` and the records file in place; never delete the records file or start with `initialise` to clear a record. |
 | An instance exists and the scheduler is wedged, unreachable or restarted badly | The same action. `/healthz` answers 503 `tick loop stopped` once the tick loop or the scaler task has stopped; the supervisor must restart the process, which reads its records back, and launches nothing twice (**CI**). While it is down nothing releases the instance; the lifetime the launch carries (`max_age` plus `max_lease_wall` plus the waits of a retire) is for a cloud that can enforce one, and Lambda cannot, so on Lambda only `max_age` with a live scheduler bounds the cost, and with the scheduler down the bound is the supervisor's restart and your watch. Outside the lifetime sum, to fit in its 10 minute margin: the lease and regain grace before a silent host's lease is given up, the release retry loop, the gap between the recorded launch time and the machine's creation, a tick, and (after a registry restart, until the next tick) an aged host being bookable again. A run the host keeps listing after its lease ended keeps `release_host` refused with no deadline: a lifetime-enforcing cloud cuts it at the lifetime, Lambda does not, so there you terminate by hand. |
 | A secret may have leaked (5.1 or 5.2 failed) | Terminate first. Then delete the Tailscale OAuth client or the key's tag permission, rotate the Lambda API key, and remove the token file entries for the pool. |

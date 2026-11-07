@@ -11,17 +11,18 @@ The gateway is a library: a server mounts its router (`js_api_gateway::router`) 
 own routes and puts its bearer layer in front. The router matches the whole request path, so
 it is merged at the root, not nested under a prefix. The gateway itself
 authenticates nothing; an unauthenticated request is the mounting server's 401 with an empty
-body. The lease routes (`/v1/leases`, `/v1/agent`, `/healthz`, `/status`) are not part of it,
-and its build fails if an option names a path under `/v1/leases` or `/v1/agent`.
+body. The server's own routes (`/v1/agent`, `/healthz`, `/status`) are not part of it,
+and its build fails if an option names a path under `/v1/leases` (the prefix of the lease routes the
+server no longer serves) or `/v1/agent`.
 
-Today's lease server has routes of its own under the same resources, with other bodies and
+The lease server has routes of its own under the same resources, with other bodies and
 other authentication: `GET /v1/hosts`, `GET` and `POST /v1/hosts/{target}` (which serves
 `POST /v1/hosts/{id}:cordon` and `:uncordon`), `GET /v1/pools`,
 `POST /v1/pools/{pool}/brake/reset`, `GET /v1/usage/nodes/{id}` and `GET /v1/usage/keys/{key}`.
 The gateway's router holds `/v1/hosts`, `/v1/pools` and `/v1/usage` and every path below each
 (`/v1/hosts/{*rest}` and so on), so the two routers cannot be merged as they are: axum refuses
-the overlapping routes. The server that mounts the gateway beside the lease routes has to
-decide which one answers those paths. The lease server therefore does not mount the gateway beside its lease routes: it serves
+the overlapping routes. The server that mounts the gateway beside those routes has to
+decide which one answers those paths. The lease server therefore does not mount the gateway beside its own routes: it serves
 the gateway and the gRPC service together on a port of their own, `--job-listen`, behind the bearer tokens of its clients
 ([configuration.md](design/configuration.md)).
 
@@ -173,7 +174,7 @@ object that both transports call, gRPC (the generated `JobService` server) and t
 with one bearer layer in front of both. A request that does not present
 `Authorization: Bearer <token>` with the token of one of the server's clients reaches no call:
 over gRPC it is answered `UNAUTHENTICATED`, over the gateway 401 with an empty body. The
-clients are `default`, whose token is the one the lease routes take (`--token-file`), and each
+clients are `default`, whose token is the one the server's own guarded routes take (`--token-file`), and each
 `--client-token` of the server; a presented token is compared with every client's. A request
 that passes goes to its call as that client: `SubmitJob` records the client's name on the job,
 and every answer that carries a job shows it as `client` (absent on a job recorded before
@@ -215,7 +216,7 @@ upgrade, every named client that calls the fleet calls or cancels other clients'
 operator's console or admin tooling, for example) must be given `role = "operator"` in the
 deployment's configuration. Clients that only submit and follow their own jobs (CI, a build
 farm) keep the default. The client `default`, whose token is the one in `--token-file`
-(`server.client_token_file`), is always an `operator`. That token already opens the lease
+(`server.client_token_file`), is always an `operator`. That token already opens the host
 routes, the join-token routes and the brake reset, so a narrower role on the job service would
 restrict nothing its holder cannot already do.
 
@@ -229,8 +230,8 @@ of the agent side, the whole set in force is kept and one warning line names the
 the token). A good set is never replaced by an empty or partial one. A reload that changes a
 token logs one info line. Names, roles and paths come from the configuration and are read once
 at start, like every other key: adding or removing a client, or changing its role, takes a
-restart. The token of `default` is the lease routes' token and is read once at start along with
-them.
+restart. The token of `default` is the token of the server's own guarded routes and is read once at start
+along with them.
 
 **Audit.** Each call writes exactly one info line, `job service call`, with these fields:
 
@@ -403,7 +404,7 @@ answer from what the commit returned; neither holds anything of its own outside 
    refused naming `spec.image`). The needs are a share of a host or the whole host alone; a
    GPU count needs a class, from `gpuClass` or else the accelerator's model, which the alias
    table resolves (an unknown model passes through). The constraints are in the capability
-   vocabulary a lease request speaks: `os` `linux` or `macos`, any `arch` (`aarch64` is
+   vocabulary the hosts report: `os` `linux` or `macos`, any `arch` (`aarch64` is
    recorded as `arm64`), an execution mode, an ISA level, an accelerator that does not
    contradict the class, and an isolation (`contained`, or unspecified, which reads as
    contained, and `host`, which is refused as `no-capable-host` unless a registered host
@@ -412,8 +413,8 @@ answer from what the commit returned; neither holds anything of its own outside 
    job's capabilities, where placement reads them. The wall limit is present, above 0 and at most
    the ceiling, `--max-job-wall` (30 days unless given). The network level is a known one;
    each port is 1 to 65535 and no host port is given twice (refused naming
-   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's run
-   files are; the labels as a lease's are. The job id is empty (the service mints one) or 1
+   `spec.ports[<i>].hostPort` or `.containerPort`); the files are checked as a start's
+   files are; the labels as a caller's labels are (`Labels::from_caller`). The job id is empty (the service mints one) or 1
    to 63 bytes of letters, digits, `.`, `_` and `-`, else refused naming `spec.jobId`. A
    refusal never repeats a value of the request. Every check runs before the id is looked
    up, so a retry of a job the ceiling now refuses is refused, not answered.
@@ -427,7 +428,7 @@ answer from what the commit returned; neither holds anything of its own outside 
 3. **Admission**, only for a job that would be made: a job that no registered host (busy and
    silent hosts count, tainted and departing hosts do not) and no catalog of the pool's
    launching provider could ever serve is refused `no-capable-host`, and nothing is
-   recorded. The catalogs are read from the server's catalog cache, as for a lease, so a
+   recorded. The catalogs are read from the server's catalog cache, so a
    submit calls no provider; a catalog the cache has not read (never fetched, or its fetch
    failed) may offer, so the job is admitted.
 4. **Commit, then answer.** The job is inserted as queued in one transaction; the answer is
@@ -455,7 +456,7 @@ generated paragraph above.
 - `ListHosts` lists every host, by id, as `GET /v1/hosts` does (one function reads both), with
   the resources booked on it in `booked`: one `HostBooking` per live allocation (booked or
   releasing, until the host confirms the job's container gone), in the order they were booked,
-  then one per lease still held through the lease routes, under the lease id's text. A
+  then one per lease the server restored from its lease file and still holds, under the lease id's text. A
   whole-host booking is the host's whole shape. `booked` is read-only: no call creates or ends
   a booking.
 - `CordonHost` takes a registered host out of placement for `cordon_secs` (300 when absent,
@@ -490,5 +491,4 @@ but the gateway's error table does not name the fleet calls' other refusals yet:
 (`UNAVAILABLE`), each answer 500 `internal`.
 
 None of the reads takes a write lock, writes a row or counts anything. The hand-written
-`GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies; the
-removal of the lease routes does not remove them.
+`GET /v1/hosts` and `GET /v1/pools` routes stay beside these calls with their own bodies.

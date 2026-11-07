@@ -88,7 +88,7 @@ On fail: fix the item. Nothing has been spent.
 ## 2. Plan mode
 
 Start the service with `launch = "plan"`. Read `/v1/pools`: the pool is `available` once the catalog has
-been read. The catalog reads are the only calls made in plan mode, and they spend nothing. Request a lease
+been read. The catalog reads are the only calls made in plan mode, and they spend nothing. Submit a job
 and check that the status shows what would be launched (the type, the zone, the term) and that the EC2
 console lists no new instance. **CI** (`a_plan_pool_launches_nothing`), **LIVE** (the console).
 
@@ -99,7 +99,7 @@ console during the run, and that the CEO has given the go for this live launch.
 
 1. Set `launch = "live"` in the pool and `boot = "initialise"` for this start only, as in step 4 of
    `first-live-launch.md`. These two lines are the only changes. Restart the service.
-2. Request one lease (`js lease acquire --class whole-node --max-wall 30m`). The answer is 202 `pending`.
+2. Submit one job that needs a whole host (`js job submit --spec.image <image>@sha256:<digest> --spec.command <program> --spec.needs.whole-host true --spec.wall-limit-seconds 30m`) to the job service (`job_listen`). The answer is the job, `queued`.
 3. Watch `/v1/pools` every 10 s and the EC2 console.
 
 | what you see | pass |
@@ -108,7 +108,7 @@ console during the run, and that the CEO has given the go for this live launch.
 | A retry of the same request, or a restart, does not start a second instance: the launch carries a client token derived from the acquire id and the scheduler id. | one instance in the console (**CI**: the fake keeps the token; **LIVE**) |
 | `last_launch.outcome` is `accepted`, then the machine is `booting`, then `registered` once the agent says hello within `boot_timeout`. | **CI** for the order, **LIVE** for the real boot |
 | `instances.n` is 1 and `spend_cents_per_hour` is the catalog price. | **CI** (arithmetic), **LIVE** (the price is the cloud's) |
-| The lease moves from 202 `pending` to held. GPU jobs on EC2 run on the fallback runtime until GPU passthrough exists; this run does not test one. | **LIVE** |
+| The job moves from `queued` to `running` (`js job get --job-id <id>`). GPU jobs on EC2 run on the fallback runtime until GPU passthrough exists; this run does not test one. | **LIVE** |
 
 A launch the cloud refused leaves no record and no instance; the reason is in the log (a quota or capacity
 refusal is held back for the offer's cool-down, an authorisation refusal is not retried). If the launch call
@@ -117,12 +117,12 @@ was lost and the scheduler cannot tell whether an instance exists, it holds the 
 
 ## 4. Teardown
 
-Release the lease (`js lease release <id>`) or let `max_wall` end. The host drains after the pool's `idle`
+Cancel the job (`js job cancel --job-id <id>`) or let its wall limit end. The host drains after the pool's `idle`
 time, its token is revoked before the release is sent, and the instance is terminated, then read back until
 the cloud reports it `terminated`. The order is the one in section 6 of `first-live-launch.md`. **CI**
 (release and read-back against the fake), **LIVE** (the console agrees).
 
-Pass for the run: the instance carried our tags and name; a hello arrived; the lease ran; the instance is
+Pass for the run: the instance carried our tags and name; a hello arrived; the job ran; the instance is
 `terminated` in the console; `instances.n` is 0; no spend after the release. Open the billing page after an
 hour and compare the charge with `max_spend_per_hour`. Then return the pool to `launch = "plan"`, set
 `boot = "resume"` (check `<state file>.scaler` exists first), and restart, so the next spend is a new go.
@@ -134,8 +134,8 @@ Stop spend at the first doubt.
 | situation | action |
 |---|---|
 | Before the flip | Nothing was launched. Leave `launch = "plan"`. |
-| After the flip, before a launch | Set `launch = "plan"` and restart. Release the lease request. |
-| An instance exists and the scheduler is healthy | Release the lease; let the teardown run. Watch it. |
+| After the flip, before a launch | Set `launch = "plan"` and restart. Cancel the job. |
+| An instance exists and the scheduler is healthy | Cancel the job; let the teardown run. Watch it. |
 | An `alerts` entry about a machine, or a registered host that never heartbeated past `boot_timeout` | Terminate the instance in the EC2 console. Instances are found by the tag `js-scheduler=<scheduler id>`. |
 | The scheduler is wedged or unreachable | The same action. Stopping the service does not terminate instances; they bill until terminated. |
 | A secret may have leaked | Terminate first. Then rotate the access key, or detach the instance role's policy, and rotate any join token. |
