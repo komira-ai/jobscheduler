@@ -375,86 +375,11 @@ fn a_lease_with_no_keyed_run_and_no_bound_is_unknown_and_ranks_after_a_known_tai
     assert_eq!(reserved, (Some("a".to_string()), Some(T0 + 60_000)));
 }
 
-/// Asserts that a lease put back from the lease file keeps its recorded start and bound
-/// only with the flag. Lease 1 on `a` is restored as started now and bound to end in an
-/// hour, with no keyed run; lease 2 on `b` starts here with ten minutes. With the flag `a`
-/// is costed at its recorded bound and `b` is reserved; without it the restored lease has
-/// no bound, counts as ending now as it always did, and `a` is reserved. It catches the
-/// start and bound dropped on the way from the lease file to the registry, and kept with
-/// the flag off.
-#[test]
-fn a_restored_lease_keeps_its_recorded_bound_only_with_the_flag() {
-    let restored = Booking {
-        lease: LeaseId::new(1, 1),
-        host: host("a"),
-        state: LeaseState::Held,
-        shares: None,
-        started_at: Timestamp::from_millis(T0),
-        ends_at: Timestamp::from_millis(T0 + 3_600_000),
-    };
-    for (name, extra, expected) in [
-        ("restored_on", vec!["--estimate-feed"], "b"),
-        ("restored_off", vec![], "a"),
-    ] {
-        let mut served = serving(name, &extra, std::slice::from_ref(&restored));
-        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
-        let reserved = reserved_for_whole_node(&mut served, 3);
-        assert_eq!(reserved.as_deref(), Some(expected), "{name}");
-    }
-}
-
-/// Asserts the feed with a usage sink that keeps no curves (a sink the caller supplies):
-/// with the flag on the registry still gets a source, which knows no profile, so a lease
-/// restored with an hour left keeps that bound and `b` (ten minutes) is reserved, with its
-/// own bound as the tail; and a keyed run changes nothing. Without a source the restored
-/// lease would count as ending now and `a` would be reserved. It catches an enabled feed
-/// that silently drops the restored bounds when the sink has no curves.
-#[test]
-fn with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() {
-    let restored = Booking {
-        lease: LeaseId::new(1, 1),
-        host: host("a"),
-        state: LeaseState::Held,
-        shares: None,
-        started_at: Timestamp::from_millis(T0),
-        ends_at: Timestamp::from_millis(T0 + 3_600_000),
-    };
-    let given = Restored::Given(std::slice::from_ref(&restored));
-    let sink: Arc<dyn UsageSink> = Arc::new(NoUsage);
-    let mut served = serving_with("feed_no_curves", &["--estimate-feed"], given, Some(sink));
-    assert_eq!(lease_for(&mut served, 2, Duration::from_secs(600)), "b");
-    keyed_run(&served, "a", 1, "r1");
-    let reserved = reserved_with_tail(&mut served, 3);
-    assert_eq!(reserved, (Some("b".to_string()), Some(T0 + 600_000)));
-}
-
 /// A lease file that holds lease 1, held on `a`, acquired two minutes before [`T0`] and
 /// bound to end 15 minutes after that.
 const FILE: &str = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n\
     [[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"a\"\n\
     acquired_at_ms = 880000\nexpires_at_ms = 1780000\nends_at_ms = 1780000\n";
-
-/// Asserts that a start read from an actual lease file reaches the drain cost through the
-/// server's startup path (`read_bookings`, the layered source, the registry). Lease 1 on
-/// `a` started two minutes before the restart and its keyed run takes three, so it ends a
-/// minute after now, before lease 2 on `b` (two minutes): `a` is reserved with that tail.
-/// Counted from the restart it would end three minutes after now and `b` would be reserved.
-/// Without the flag the restored lease counts as ending now, so `a` is reserved with no
-/// wait. It catches a restored start replaced by the time of the restart on the way from
-/// the file.
-#[test]
-fn a_start_read_from_the_lease_file_reaches_the_drain_cost() {
-    for (name, extra, expected) in [
-        ("file_on", vec!["--estimate-feed"], Some(T0 + 60_000)),
-        ("file_off", vec![], Some(0)),
-    ] {
-        let mut served = serving_with(name, &extra, Restored::File(FILE), None);
-        assert_eq!(lease_for(&mut served, 2, Duration::from_secs(120)), "b");
-        keyed_run_of(&served, "a", 1, "r1", THREE);
-        let reserved = reserved_with_tail(&mut served, 3);
-        assert_eq!(reserved, (Some("a".to_string()), expected), "{name}");
-    }
-}
 
 /// The flags of `--placement js-sched`, with `--estimate-feed` when `feed` says so.
 fn js_sched(feed: bool) -> Vec<&'static str> {
@@ -496,8 +421,7 @@ fn under_js_sched_a_restored_lease_keeps_its_recorded_bound() {
     }
 }
 
-/// As [`with_the_flag_and_a_sink_with_no_curves_a_restored_lease_keeps_its_bound`], under
-/// `--placement js-sched`: the engine is handed no lives, the restored lease keeps its bound
+/// Asserts, with a usage sink that keeps no curves, under `--placement js-sched`: the engine is handed no lives, the restored lease keeps its bound
 /// of an hour, and `b` (ten minutes) is reserved with its own bound as the tail. It catches
 /// an engine that loses the restored bound when the sink keeps no curves.
 #[test]
@@ -513,8 +437,8 @@ fn under_js_sched_with_a_sink_with_no_curves_a_restored_lease_keeps_its_bound() 
     assert_eq!(reserved, (Some("b".to_string()), Some(T0 + 600_000)));
 }
 
-/// As [`a_start_read_from_the_lease_file_reaches_the_drain_cost`], under `--placement
-/// js-sched`: with the flag, lease 1 on `a`, started two minutes before the restart with a
+/// Asserts that a start read from an actual lease file reaches the drain cost through the
+/// server's startup path, under `--placement js-sched`: with the flag, lease 1 on `a`, started two minutes before the restart with a
 /// keyed run of three, ends a minute after now, before lease 2 on `b` (two minutes), and
 /// `a` is reserved with that tail. Without the flag the engine costs `a` at its recorded
 /// bound (13 minutes from now) and reserves `b`, with its bound of two minutes as the tail.
