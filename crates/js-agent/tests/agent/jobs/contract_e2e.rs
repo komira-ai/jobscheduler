@@ -23,6 +23,7 @@ memory_bytes = 4294967296
 
 [capabilities]
 os = "linux"
+arch = "x86_64"
 "#;
 
 /// The same pool, declaring `sandbox-exec`.
@@ -38,6 +39,7 @@ memory_bytes = 4294967296
 
 [capabilities]
 os = "linux"
+arch = "x86_64"
 "#;
 
 /// A pool of container hosts with one A100 each.
@@ -55,6 +57,7 @@ gpu_class = "nvidia-a100"
 
 [capabilities]
 os = "linux"
+arch = "x86_64"
 "#;
 
 /// The toolkit check of [`toolkit_host`].

@@ -5,14 +5,15 @@
 //! The scenarios (in `cell/elastic.rs`, shared with the replay tests that pin their trace
 //! hashes) are the two that need no scripted fault of the cloud: demand scales a pool up
 //! to its instance limit and back to no machine, billed as EC2 bills and as Lambda bills,
-//! each under the default placement and under `--placement js-sched`. Each expects only
+//! each placed by `js-sched`, which knows each machine by the `arch` its agent reports at
+//! hello. Each expects only
 //! what the server as built and the design both promise. The other tests drive one cell
 //! by hand: how a launched machine boots and joins, how the recording wrapper times its
 //! calls, and what the cell does with a machine that never joins, that the cloud preempts
 //! or drops, or that the scheduler did not launch.
 //!
 //! Sizes, in agent requests a seed: the scenarios about 19,200 heartbeats
-//! (`cell/elastic.rs`), over [`SEEDS`] seeds each ([`JS_SCHED_SEEDS`] under js-sched); a
+//! (`cell/elastic.rs`), over [`SEEDS`] seeds each; a
 //! cell driven by hand, one or two machines for at most [`LOOK_AT`].
 
 #[path = "cell/elastic.rs"]
@@ -24,7 +25,6 @@ use std::time::Duration;
 use js_agent_wire::InstanceIdentity;
 use js_elastic_fake::{Billing, Knobs};
 use js_lease::{ManualClock, Timestamp};
-use js_lease_server::Placement;
 use js_sim::Faults;
 use js_sim_cell::elastic::offer;
 use js_sim_cell::{
@@ -35,14 +35,10 @@ use js_testkit::dir::TestDir;
 use js_types::HostId;
 use js_types::sched::FarmTime;
 
-/// How many seeds each scenario runs.
-const SEEDS: u64 = 16;
-
-/// How many seeds each scenario runs under `--placement js-sched`: fewer than [`SEEDS`],
-/// since a seed under js-sched costs about twice one under the registry and the sixteen
-/// seeds of both would double the family. The registry's seeds keep the scenarios' own
-/// statements at size; these prove that js-sched places every run of them.
-const JS_SCHED_SEEDS: u64 = 2;
+/// How many seeds each scenario runs: a seed under js-sched costs about two of the removed
+/// registry placement's, and eight keep the family within what its sixteen registry seeds
+/// and two js-sched seeds cost before.
+const SEEDS: u64 = 8;
 
 /// How long a cell driven by hand runs: past the first launch (the second tick, at 10 s),
 /// the machine's boot ([`Knobs::boot`], 120 s, later) and its hello.
@@ -55,7 +51,7 @@ const TICK_MS: u64 = 5_000;
 const LONG_RUN: Duration = Duration::from_secs(600);
 
 /// Proves the elastic pool end to end at size, billed as EC2 bills (per second, at least
-/// a minute), over sixteen seeds: a hundred whole-host runs against an empty pool of at
+/// a minute), over eight seeds: a hundred whole-host runs against an empty pool of at
 /// most forty machines all succeed, the cloud never runs more than forty of the
 /// scheduler's machines (`instances-within-limits`), every machine is released once idle
 /// and none runs at the end (`launched-machines-settle`), and the cloud's own bill equals
@@ -64,14 +60,16 @@ const LONG_RUN: Duration = Duration::from_secs(600);
 /// by one machine, never two), and section 6.5's idle release; the bill check is a check
 /// of the cell's one clock, not a claim about the scheduler's cost. Red for a scaler that
 /// launches past `max_instances`, one that leaves an idle machine running, and a cell
-/// whose cloud clock drifts from the server's.
+/// whose cloud clock drifts from the server's; and for a server that builds each host's
+/// node from the pool's floor, which names no architecture (no node, so the runs queue
+/// for ever and the seed never settles).
 #[test]
 fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
     elastic::an_ec2_like_pool().run_seeds(SEEDS);
 }
 
 /// Proves the same shape over a cloud billed as Lambda bills (each started minute whole,
-/// at least one), over sixteen seeds, with the same invariants and the same bill check:
+/// at least one), over eight seeds, with the same invariants and the same bill check:
 /// every machine is released once idle, so none bills on past the minute its release
 /// fell in. Covers section 6.5's idle release and section 7's "Scaler double launch".
 /// Red as the EC2-like scenario is, and for a recomputation that bills a part of a
@@ -79,31 +77,6 @@ fn an_ec2_like_pool_scales_up_to_demand_and_back_to_zero() {
 #[test]
 fn a_lambda_like_pool_bills_whole_minutes_and_releases_idle_machines() {
     elastic::a_lambda_like_pool().run_seeds(SEEDS);
-}
-
-/// Proves the EC2-like scenario under `--placement js-sched`, over two seeds, with the
-/// same expectations: the pool's floor names no architecture, so each machine becomes a
-/// node of the scheduler by the `arch` its agent reports at hello, and every one of the
-/// hundred whole-host runs, which ask for that `arch`, is placed on one. Red for a server
-/// that refuses js-sched for an elastic pool at start, and for one that builds each host's
-/// node from the pool's floor (no node, so the runs queue for ever and the seed never
-/// settles).
-#[test]
-fn an_ec2_like_pool_places_its_runs_under_js_sched() {
-    elastic::an_ec2_like_pool()
-        .under(Placement::JsSched)
-        .run_seeds(JS_SCHED_SEEDS);
-}
-
-/// Proves the Lambda-like scenario under `--placement js-sched`, over two seeds, as the
-/// EC2-like one is proven: every run placed on a machine the scheduler knows by the `arch`
-/// its agent reported, every machine released once idle and billed whole minutes. Red as
-/// the EC2-like one under js-sched is.
-#[test]
-fn a_lambda_like_pool_places_its_runs_under_js_sched() {
-    elastic::a_lambda_like_pool()
-        .under(Placement::JsSched)
-        .run_seeds(JS_SCHED_SEEDS);
 }
 
 /// A cell of seed `seed` with an elastic pool of at most two machines of `pool`'s kind,

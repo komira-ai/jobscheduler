@@ -11,7 +11,8 @@ use serde_json::json;
 use crate::native::recording;
 use crate::support::{Harness, Js, Scratch, T0, against, http};
 
-/// A pool that asks nothing of a host, for the server's `--agent-pool-config`.
+/// A pool that asks nothing of a host but an `arch` (the scheduler describes a host by
+/// it), for the server's `--agent-pool-config`. No host says hello here.
 const POOL: &str = r#"
 name = "macs"
 class = "mac"
@@ -20,6 +21,9 @@ max_machines = 4
 [shape]
 cpu_millis = 1
 memory_bytes = 1
+
+[capabilities]
+arch = "x86_64"
 "#;
 
 /// A real server whose agents register hosts, so the join-token route exists.

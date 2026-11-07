@@ -32,7 +32,7 @@ js-testkit = { path = "../js-testkit" }
 js-types = { path = "../js-types" }
 # Requests and bodies for the server's routers (`axum::http`, `axum::body`).
 axum.workspace = true
-# `ValueEnum`, through which the server's `--placement` values are listed and spelled.
+# `Parser`, through which the sweep reads its flags (src/sweep.rs).
 clap.workspace = true
 serde_json.workspace = true
 # The table the server hands a provider kind (src/elastic/config.rs).

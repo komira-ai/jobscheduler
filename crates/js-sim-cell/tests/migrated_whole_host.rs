@@ -13,8 +13,7 @@
 //! time of every decision, counted from [`ASK`], the moment the first request is made
 //! (the old tests' `T0`).
 //!
-//! Each runs in the old world first and then at [`SCALE_HOSTS`] hosts, each under every
-//! value of `--placement`, over [`SEEDS`] seeds: the old test plus more. An expectation
+//! Each runs in the old world first and then at [`SCALE_HOSTS`] hosts, over [`SEEDS`] seeds: the old test plus more. An expectation
 //! that names a host, or holds only because the old world has one host, is added to the
 //! old world alone, by [`World::Old`], and its doc comment says so; every other one, and
 //! every invariant, holds at every scale.
@@ -30,8 +29,6 @@
 
 use std::time::Duration;
 
-use clap::ValueEnum;
-use js_lease_server::Placement;
 use js_registry::Exclusion;
 use js_sim_cell::actions::{
     agent_prepare_delay, agent_silent_on_prepare, agents, cancel_work, items, submit_work,
@@ -85,43 +82,25 @@ fn after_ms(n: u64) -> Duration {
 /// A world a moved scenario runs in.
 #[derive(Clone, Copy, Debug)]
 enum World {
-    /// The old test's host count, under this placement.
-    Old(Placement),
-    /// [`SCALE_HOSTS`] hosts, under this placement.
-    Scale(Placement),
+    /// The old test's host count.
+    Old,
+    /// [`SCALE_HOSTS`] hosts.
+    Scale,
 }
 
 impl World {
     /// The host count, `old` in the old world.
     fn hosts(self, old: usize) -> usize {
         match self {
-            World::Old(_) => old,
-            World::Scale(_) => SCALE_HOSTS,
-        }
-    }
-
-    fn placement(self) -> Placement {
-        match self {
-            World::Old(placement) | World::Scale(placement) => placement,
+            World::Old => old,
+            World::Scale => SCALE_HOSTS,
         }
     }
 }
 
-/// Every world, the old one first: the old host count under every placement the server
-/// accepts, then [`SCALE_HOSTS`] under every one.
+/// Every world, the old one first: the old host count, then [`SCALE_HOSTS`].
 fn worlds() -> Vec<World> {
-    let placements = Placement::value_variants();
-    let old = placements.iter().map(|p| World::Old(*p));
-    old.chain(placements.iter().map(|p| World::Scale(*p)))
-        .collect()
-}
-
-/// `placement` as the server's command line spells it.
-fn spelled(placement: Placement) -> String {
-    let value = placement
-        .to_possible_value()
-        .expect("every placement has a name");
-    value.get_name().to_owned()
+    vec![World::Old, World::Scale]
 }
 
 /// How the scenario's agents answer a prepare.
@@ -133,9 +112,9 @@ enum Answering {
     Ready,
 }
 
-/// A whole-node pool of `hosts` hosts under `world`'s placement.
-fn whole_pool(hosts: usize, world: World) -> ServerSpec {
-    ServerSpec::whole_node_pool("burst", Shape::gpu_host(), hosts).placement(world.placement())
+/// A whole-node pool of `hosts` hosts.
+fn whole_pool(hosts: usize) -> ServerSpec {
+    ServerSpec::whole_node_pool("burst", Shape::gpu_host(), hosts)
 }
 
 /// The scenario `name` in `world`: the server `spec` and `hosts` hosts, whose agents
@@ -147,10 +126,10 @@ fn base(
     answering: Answering,
 ) -> Scenario {
     let label = match world {
-        World::Old(_) => "old",
-        World::Scale(_) => "scale",
+        World::Old => "old",
+        World::Scale => "scale",
     };
-    let named = format!("{name}-{label}-{}", spelled(world.placement()));
+    let named = format!("{name}-{label}");
     let scenario = Scenario::new(&named)
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
@@ -280,7 +259,7 @@ fn the_retry_goes_elsewhere() -> Expect {
 /// `max_replace` and the client is refused: one item failed.
 fn silent_retry(world: World, answering: Answering) -> Scenario {
     let hosts = world.hosts(SILENT_RETRY_HOSTS);
-    let spec = whole_pool(hosts, world)
+    let spec = whole_pool(hosts)
         .prepare_timeout(PREPARE_TIMEOUT)
         .reserve_backoff(secs(120));
     let key = content(&spec, OLD_WALL);
@@ -301,7 +280,7 @@ fn silent_retry(world: World, answering: Answering) -> Scenario {
 }
 
 /// Proves `a_silent_agent_fails_the_prepare_and_the_retry_goes_elsewhere` on the cell, in
-/// the old world and at scale under every placement: a silent agent fails the prepare at
+/// the old world and at scale: a silent agent fails the prepare at
 /// exactly `prepare_timeout`, the registry records it (one failure, not terminal, the
 /// host excluded until `reserve_backoff` after the deadline, `prepare-timeout`), and the
 /// retry goes to another host. Catches a lease the table stops at its deadline without
@@ -378,7 +357,7 @@ fn placed_there_once_the_backoff_ends() -> Expect {
 /// the backoff runs out (placed there).
 fn backoff(world: World, answering: Answering) -> Scenario {
     let hosts = world.hosts(BACKOFF_HOSTS);
-    let spec = whole_pool(hosts, world)
+    let spec = whole_pool(hosts)
         .prepare_timeout(PREPARE_TIMEOUT)
         .reserve_backoff(secs(120));
     let name = "a_silent_host_is_left_out_of_the_retry_for_reserve_backoff";
@@ -393,14 +372,14 @@ fn backoff(world: World, answering: Answering) -> Scenario {
         .expect_at(after(60), backoff_lease_dropped_at_the_deadline())
         .expect(Expect::all_items_terminal());
     match world {
-        World::Old(_) => scenario
+        World::Old => scenario
             .expect_at(after(1), backoff_first_try_on_the_host())
             .expect(refused_at_the_deadline())
             .expect(refused_a_second_before_the_backoff_ends())
             .expect_at(after_ms(179_001), nothing_listed_while_excluded())
             .expect(Expect::answer(ask(3), 202, None))
             .expect_at(after(181), placed_there_once_the_backoff_ends()),
-        World::Scale(_) => scenario,
+        World::Scale => scenario,
     }
 }
 
@@ -408,7 +387,7 @@ fn backoff(world: World, answering: Answering) -> Scenario {
 /// exclusion is what keeps the request off the silent host. In the old world the one host
 /// is refused `no-capacity` (nothing placed, nothing pending) from the deadline until
 /// `reserve_backoff` has passed, and is placed there from the first moment it has; at
-/// scale, under every placement, the first try is still dropped at the deadline. Catches
+/// scale the first try is still dropped at the deadline. Catches
 /// a failed prepare that excludes nothing (the ask at the deadline would be placed) and
 /// an exclusion that lasts longer or shorter than `reserve_backoff`.
 #[test]
@@ -476,7 +455,7 @@ fn the_refusal_clears_the_record(key: &Request) -> Expect {
 /// second deadline, once its exclusion has run out (refused, which clears the record).
 fn terminal(world: World, answering: Answering) -> Scenario {
     let hosts = world.hosts(TERMINAL_HOSTS);
-    let spec = whole_pool(hosts, world)
+    let spec = whole_pool(hosts)
         .prepare_timeout(PREPARE_TIMEOUT)
         .reserve_backoff(secs(10))
         .max_replace(2);
@@ -505,18 +484,17 @@ fn terminal(world: World, answering: Answering) -> Scenario {
         )
         .expect(Expect::all_items_terminal());
     match world {
-        World::Old(_) => scenario
+        World::Old => scenario
             .expect_at(after(1), try_on_the_host(0))
             .expect_at(after(SECOND_TRY + 1), try_on_the_host(1)),
-        World::Scale(_) => scenario,
+        World::Scale => scenario,
     }
 }
 
 /// Proves `a_request_is_terminal_after_max_replace_silent_prepares` on the cell: with
 /// `max_replace = 2` and agents that never report ready, the second missed deadline makes
 /// the request terminal with two failures, and the next ask is refused 409 and clears the
-/// record, after the exclusion has run out; in the old world and at scale under every
-/// placement. Catches a deadline that is never counted (the request would be placed on
+/// record, after the exclusion has run out; in the old world and at scale. Catches a deadline that is never counted (the request would be placed on
 /// silent hosts without bound).
 #[test]
 fn a_request_is_terminal_after_max_replace_silent_prepares() {
@@ -608,7 +586,7 @@ fn release(world: World, answering: Answering) -> Scenario {
     let holders = u32::try_from(hosts).expect("a host count fits in an item number");
     let (waiter, again) = (holders, holders + 1);
     let named = Work::whole_host(HOLD).with_request_id(ID);
-    let spec = whole_pool(hosts, world);
+    let spec = whole_pool(hosts);
     let name = "release_of_a_pending_whole_node_lease_drops_the_reservation";
     let released = after_ms(RELEASE_AT_MS);
     let after_release = after_ms(RELEASE_AT_MS + 1);
@@ -639,11 +617,11 @@ fn release(world: World, answering: Answering) -> Scenario {
         .expect(Expect::terminal_count(hosts + 1, HowEnded::Succeeded))
         .expect(Expect::terminal_count(1, HowEnded::Cancelled));
     match world {
-        World::Old(_) => scenario
+        World::Old => scenario
             .expect_at(released, the_host_is_reserved_for_the_request())
             .expect_at(after_release, the_host_is_no_longer_set_aside())
             .expect_at(after(AGAIN + 1), the_new_lease_takes_the_host(again)),
-        World::Scale(_) => scenario,
+        World::Scale => scenario,
     }
 }
 
@@ -652,8 +630,7 @@ fn release(world: World, answering: Answering) -> Scenario {
 /// listed with no mark and no `reserved_for` in the next call with no tick between, the
 /// wait list no longer holds the id, the registry holds no reservation and nothing is
 /// listed; a new ask under the same id is a new lease that takes the host at once; in
-/// the old world and at scale (every host held, so the request waits) under every
-/// placement. Catches a release that frees the lease and leaves the request waiting (the
+/// the old world and at scale (every host held, so the request waits). Catches a release that frees the lease and leaves the request waiting (the
 /// host would stay set aside for no one), and an id remembered after its lease.
 #[test]
 fn release_of_a_pending_whole_node_lease_drops_the_reservation() {
@@ -666,7 +643,7 @@ fn release_of_a_pending_whole_node_lease_drops_the_reservation() {
 type MovedScenario = fn(World, Answering) -> Scenario;
 
 /// Asserts that each moved scenario keeps the sensitivity of the test it replaced: its
-/// old-world case, under every placement, run with agents that answer the prepare the
+/// old-world case, run with agents that answer the prepare the
 /// wrong way (the three silent-prepare scenarios with agents that report ready, the
 /// release scenario with agents that never do) fails a named expectation or invariant
 /// instead of passing. Catches a moved scenario whose expectations hold whatever the
@@ -679,16 +656,14 @@ fn the_old_world_case_fails_when_the_decision_is_wrong() {
         ("terminal", terminal, Answering::Ready),
         ("release", release, Answering::Silent),
     ];
-    for placement in Placement::value_variants() {
-        for (name, scenario, answering) in defective {
-            let failure = scenario(World::Old(*placement), answering)
-                .try_run_seeds(1)
-                .expect_err(name);
-            let named = matches!(
-                failure,
-                ScenarioFailure::Unmet { .. } | ScenarioFailure::Violated(_)
-            );
-            assert!(named, "{name}: {failure}");
-        }
+    for (name, scenario, answering) in defective {
+        let failure = scenario(World::Old, answering)
+            .try_run_seeds(1)
+            .expect_err(name);
+        let named = matches!(
+            failure,
+            ScenarioFailure::Unmet { .. } | ScenarioFailure::Violated(_)
+        );
+        assert!(named, "{name}: {failure}");
     }
 }

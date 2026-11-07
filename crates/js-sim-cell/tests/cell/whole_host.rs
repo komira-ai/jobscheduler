@@ -1,5 +1,5 @@
-//! The first whole-host scenario, shared by the whole-host family (`whole_host.rs`), which
-//! runs it under every placement, and the replay tests, which pin its trace hashes in the
+//! The first whole-host scenario, shared by the whole-host family (`whole_host.rs`) and
+//! the replay tests, which pin its trace hashes in the
 //! golden file (family `whole_host`).
 //!
 //! Size: [`HOSTS`] agents beating every 5 s (the server's default) for [`SETTLE`], which
@@ -12,8 +12,6 @@
 
 use std::time::Duration;
 
-use clap::ValueEnum;
-use js_lease_server::Placement;
 use js_sim_cell::{Expect, HowEnded, Scenario, ServerSpec, Shape, Work};
 
 /// How many hosts.
@@ -27,14 +25,8 @@ pub const RUN: Duration = Duration::from_secs(60);
 /// How long the cell runs after the requests are made, before the end check.
 pub const SETTLE: Duration = Duration::from_secs(1_200);
 
-/// The name of the scenario, before the placement it runs under.
+/// The name of the scenario.
 const NAME: &str = "fifty_whole_host_requests_over_twenty_hosts_are_each_held_once_and_released";
-
-/// `placement` as the server's command line spells it.
-pub fn spelled(placement: Placement) -> String {
-    let value = placement.to_possible_value();
-    value.map_or_else(String::new, |value| value.get_name().to_owned())
-}
 
 /// Proves the whole-host path end to end over many hosts (design section 5.4 as built; it
 /// runs through the wait list of section 8, rows 11 and 12, and pins neither): fifty
@@ -48,12 +40,10 @@ pub fn spelled(placement: Placement) -> String {
 /// released, and that every host is serving at the end. Red for a server that books a
 /// held host to a second lease (`whole-host-is-exclusive`, `no-double-booking`), grants
 /// a lease before its host reported ready (`held-means-ready`), drops a waiting request
-/// or leaves a host marked, held or restoring (the expects), and for a placement under
-/// which any of these differs from the registry's.
-pub fn fifty_whole_host_requests(placement: Placement) -> Scenario {
-    let name = format!("{NAME}-{}", spelled(placement));
-    let spec = ServerSpec::whole_node_pool("burst", Shape::gpu_host(), HOSTS).placement(placement);
-    Scenario::new(&name)
+/// or leaves a host marked, held or restoring (the expects).
+pub fn fifty_whole_host_requests() -> Scenario {
+    let spec = ServerSpec::whole_node_pool("burst", Shape::gpu_host(), HOSTS);
+    Scenario::new(NAME)
         .scratch(env!("CARGO_TARGET_TMPDIR"))
         .server(spec)
         .hosts("burst", HOSTS)
