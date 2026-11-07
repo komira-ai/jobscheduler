@@ -1,22 +1,15 @@
-# hosts.toml: one host, listed by hand; there is no agent
-[[host]]
-id = "gpu-01"
-gpu_class = "nvidia-a100"
+# pool.toml: the pool agents would join; no agent has
+name = "gpu"
+class = "gpu-host"
+max_machines = 1
 
-[host.resources]
+[shape]
 cpu_millis = 64000
 memory_bytes = 549755813888
 gpus = 8
-
-[host.capabilities]
-isa = "x86-64-v3"
-driver = "550"
+gpu_class = "nvidia-a100"
 $ printf 'a-local-token-of-at-least-32-bytes\n' > client-token && chmod 600 client-token
-$ js-lease-server --state-file leases.toml --boot initialise --token-file client-token --pool-config hosts.toml &
-$ js --server http://127.0.0.1:7300 --token-file client-token lease acquire --class gpu-host --gpus 1 --gpu-class nvidia-a100 --max-wall 1h
-lease 1-1 host gpu-01 ends 1793617960284
-$ js --server http://127.0.0.1:7300 --token-file client-token lease list
-1-1 held host gpu-01 ends 1793617960284
-$ js --server http://127.0.0.1:7300 --token-file client-token lease release 1-1
-lease 1-1 freed
-$ js --server http://127.0.0.1:7300 --token-file client-token lease list
+$ js-lease-server --state-file state --boot initialise --token-file client-token --agent-pool-config pool.toml --job-listen 127.0.0.1:7301 &
+$ js --server http://127.0.0.1:7301 --token-file client-token job submit --id demo-1 --spec.image registry.example/train@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 --spec.needs.gpus 1 --spec.needs.gpu-class nvidia-a100 --spec.wall-limit-seconds 1h
+js: refused: no-capable-host: no host and no catalog could ever serve the job
+$ js --server http://127.0.0.1:7301 --token-file client-token job list

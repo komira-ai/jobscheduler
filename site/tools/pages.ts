@@ -37,13 +37,13 @@ export const PAGES: readonly Page[] = [
   {
     route: '/',
     source: 'index',
-    title: 'Leases on whole hosts, placement by CPU and memory',
-    description: 'jobscheduler is a scheduler for jobs and compute: a lease server, an agent on each host, and a pure placement core. Open source, Apache 2.0.',
+    title: 'Jobs on whole hosts, placement by CPU and memory',
+    description: 'jobscheduler is a scheduler for jobs and compute: a server with a job service, an agent on each host, and a pure placement core. Open source, Apache 2.0.',
     scripts: ['copy.js'],
     bands: true,
   },
-  { route: '/concepts/', source: 'concepts', title: 'Concepts', description: 'Leases, whole-node leases and placement by CPU and memory, as the code has them.', nav: 'concepts', scripts: ['copy.js'], bands: false },
-  { route: '/install/', source: 'install', title: 'Install', description: 'Get the lease server, the client and the agent from a release, and what the agent needs on a host.', nav: 'install', scripts: ['copy.js'], bands: false },
+  { route: '/concepts/', source: 'concepts', title: 'Concepts', description: 'Jobs, whole-host jobs and placement by CPU and memory, as the code has them.', nav: 'concepts', scripts: ['copy.js'], bands: false },
+  { route: '/install/', source: 'install', title: 'Install', description: 'Get the server, the client and the agent from a release, and what the agent needs on a host.', nav: 'install', scripts: ['copy.js'], bands: false },
   { route: '/kbf/', source: 'kbf', title: 'kbf on jobscheduler', description: 'What kbf takes from jobscheduler today, and the design for running kbf actions on the agent, which is not built.', nav: 'kbf', scripts: ['copy.js'], bands: false },
   {
     route: '/404.html',

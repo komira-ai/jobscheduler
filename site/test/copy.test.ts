@@ -143,7 +143,7 @@ function page(inner: string, clipboard: CopyClipboard | undefined = new ManualCl
   return { block, button: block.buttons[0], clipboard: clipboard as ManualClipboard, timer };
 }
 
-const INSTALL = '<span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS\n<span class="p">$</span> js lease acquire --max-wall 2h';
+const INSTALL = '<span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS\n<span class="p">$</span> js job list --states failed';
 
 // ---- what is copied ---------------------------------------------------------------------------------------------
 
@@ -151,7 +151,7 @@ test('a successful copy writes exactly the commands, one per line, without the p
   const { button, clipboard } = page(INSTALL);
   button.click();
   await clipboard.resolve(0);
-  assert.deepEqual(clipboard.written, ['sha256sum -c --ignore-missing SHA256SUMS\njs lease acquire --max-wall 2h\n']);
+  assert.deepEqual(clipboard.written, ['sha256sum -c --ignore-missing SHA256SUMS\njs job list --states failed\n']);
 });
 
 test('a multiline command with continuation lines is copied whole, and its inner indentation is only trimmed at the line start', async () => {
@@ -165,11 +165,11 @@ test('a multiline command with continuation lines is copied whole, and its inner
 
 test('the comment spans, the p spans and the prompt spans are removed and the entities are decoded', async () => {
   const { button, clipboard } = page(
-    '<span class="c"># the pool</span>\n<span class="prompt">$ </span>js --token-file ~/.t lease acquire &gt; out &amp;&amp; true',
+    '<span class="c"># the pool</span>\n<span class="prompt">$ </span>js --token-file ~/.t job list &gt; out &amp;&amp; true',
   );
   button.click();
   await clipboard.resolve(0);
-  assert.deepEqual(clipboard.written, ['js --token-file ~/.t lease acquire > out && true\n']);
+  assert.deepEqual(clipboard.written, ['js --token-file ~/.t job list > out && true\n']);
 });
 
 test('blank lines left by removed comments are collapsed and a plain block is copied as it reads', async () => {
@@ -295,9 +295,10 @@ const EXPECTED: Record<string, (string | null)[]> = {
   index: ["gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS\n", null],
   concepts: [
     [
-      'js lease acquire --class <class> --max-wall <dur> [--label k=v ...]',
-      'js lease release <id>',
-      'js lease list',
+      'js job submit [--id ID] --spec.image REF [--spec.args A ...] [--spec.env K=V ...]',
+      'js job get --job-id ID',
+      'js job cancel --job-id ID',
+      'js job list [--states S ...] [--labels K=V ...]',
       '',
     ].join('\n'),
   ],
@@ -313,15 +314,16 @@ const EXPECTED: Record<string, (string | null)[]> = {
     ].join('\n'),
     ['name = "hosts"', 'class = "whole-node"', 'max_machines = 4', '[shape]', 'cpu_millis = 8000', 'memory_bytes = 17179869184', ''].join('\n'),
     [
-      'js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/leases.toml --boot initialise \\',
+      'js-lease-server --listen 127.0.0.1:7300 --state-file /var/lib/jobscheduler/state --boot initialise \\',
       '--token-file /etc/jobscheduler/client-token \\',
+      '--job-listen 127.0.0.1:7301 \\',
       '--agent-pool-config /etc/jobscheduler/agent-pool.toml \\',
       '--agent-token-file /etc/jobscheduler/join-tokens',
       '',
     ].join('\n'),
     [
-      'js --server http://127.0.0.1:7300 --token-file ~/.js-token lease acquire --class whole-node --max-wall 2h',
-      'js --server http://127.0.0.1:7300 --token-file ~/.js-token lease list',
+      'js --server http://127.0.0.1:7301 --token-file ~/.js-token job submit --id build-1 --spec.image registry.example/app@sha256:<64 hex digits> --spec.wall-limit-seconds 2h',
+      'js --server http://127.0.0.1:7301 --token-file ~/.js-token job wait --job-id build-1',
       '',
     ].join('\n'),
   ],
@@ -350,11 +352,11 @@ test('the demo of the landing page is a transcript with no Copy button', async (
 test('a changed copied text, or a transcript given a button, is caught (the check can fail)', async () => {
   // Negative: the real install page with one command changed no longer copies the table's text.
   const install = contentOf('install');
-  const edited = install.replace('lease list</pre>', 'lease list --all</pre>');
+  const edited = install.replace('job wait --job-id build-1</pre>', 'job wait --job-id build-2</pre>');
   assert.notEqual(edited, install, 'the edit lands');
   assert.notDeepEqual(await copiedFrom(realBlocks('install', edited).map((r) => r.block)), EXPECTED.install);
   // Negative: a block written another way (another class first, an attribute) is still discovered, with the same text.
-  const reshaped = install.replace('<div class="code"><pre><span class="p">$</span> js --server', '<div id="lease" class="wide code" ><pre><span class="p">$</span> js --server');
+  const reshaped = install.replace('<div class="code"><pre><span class="p">$</span> js --server', '<div id="submit" class="wide code" ><pre><span class="p">$</span> js --server');
   assert.notEqual(reshaped, install, 'the reshape lands');
   assert.equal(blockCount(reshaped), blockCount(install));
   assert.deepEqual(await copiedFrom(realBlocks('install', reshaped).map((r) => r.block)), EXPECTED.install);
@@ -567,7 +569,7 @@ test('the browser entry adds a Copy button to each command block of the page, an
     assert.equal(block.buttons[0].textContent, 'Copy');
     block.buttons[0].click();
     await clipboard.resolve(0);
-    assert.deepEqual(clipboard.written, ['sha256sum -c --ignore-missing SHA256SUMS\njs lease acquire --max-wall 2h\n']);
+    assert.deepEqual(clipboard.written, ['sha256sum -c --ignore-missing SHA256SUMS\njs job list --states failed\n']);
     assert.equal(block.buttons[0].textContent, 'Copied');
     assert.deepEqual(timers.map((t) => t.ms), [DONE_MS], 'the reset runs on the page\'s own setTimeout');
     timers[0].fn();
