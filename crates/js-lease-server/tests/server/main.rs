@@ -49,6 +49,7 @@ mod job_listen;
 mod job_port;
 mod job_retention;
 mod job_wall;
+mod jobs_support;
 mod joins;
 mod joins_credential;
 mod joins_revoke;

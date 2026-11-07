@@ -35,9 +35,12 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Status};
 
-use crate::agents_support::{JOIN, hello_body, session, start_agents};
+use crate::agents_support::{JOIN, POOL, hello_body, session, start_agents};
 use crate::config_support::{PoolText, clock, file, kinds, quote, quoted, server};
-use crate::job_listen::job_args;
+use crate::jobs_support::{
+    JobBody, beat_with, cancel, commands, exited, job_agent, job_args, job_server, job_state,
+    one_start, per_job_hello, running, submit_body,
+};
 use crate::support::{Harness, Reply, Scratch, TOKEN, guard, request};
 use crate::tls::{connector, test_identity, tls_request};
 
@@ -49,13 +52,6 @@ const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 
 /// A gateway route of the job service: `GetJob` of `job-1`, which no test submits.
 const GET_JOB: &str = "/v1/jobs/job-1";
-
-/// A server with agent registration on and the job service on a loopback port.
-async fn job_server(name: &str) -> Harness {
-    let scratch = Scratch::new(name);
-    let args = job_args(&scratch, "127.0.0.1:0");
-    Harness::with(scratch, args, None).await
-}
 
 /// A gRPC client of the job service at `addr`, over plain HTTP/2.
 async fn client(addr: SocketAddr) -> JobServiceClient<Channel> {
@@ -237,6 +233,81 @@ async fn the_listener_stops_with_the_server() {
     let mut rest = Vec::new();
     let _ = open.read_to_end(&mut rest).await;
     assert_eq!(String::from_utf8_lossy(&rest), "");
+}
+
+/// Asserts that a job holds its host until its agent reports it ended: with one host of
+/// 8 cores registered, a job of 6 cores is queued (201) and, after a tick, the agent's
+/// next heartbeat reply carries its one `job_start`; the agent lists it running and the
+/// job reads `JOB_STATE_RUNNING`; a second job of 6 cores is queued and, while the first
+/// runs, a heartbeat carries no command and the second still reads `JOB_STATE_QUEUED`;
+/// once the agent reports the first exited the result is accepted, and after a heartbeat
+/// that no longer lists it and a tick the next heartbeat reply carries the second job's start, while the first reads
+/// `JOB_STATE_SUCCEEDED`. A job that wants a GPU is refused 422 `no-capable-host`, and a whole-host job cancelled
+/// while queued reads `JOB_STATE_CANCELLED`.
+/// It catches a host given to a second job while the first still runs, and one that stays
+/// held after the first job ended.
+#[tokio::test]
+async fn a_job_holds_its_host_until_its_agent_reports_it_ended() {
+    let scratch = Scratch::new("job_port_holds_host");
+    let mut args = job_args(&scratch, "127.0.0.1:0");
+    // A pool of CPU hosts that names an arch: the scheduler takes a pool as a node only
+    // then, and starts no job on a host with GPUs.
+    let pool = POOL
+        .replace("gpus = 1\ngpu_class = \"nvidia-a100\"\n", "")
+        .replace("[capabilities]", "[capabilities]\narch = \"x86_64\"");
+    scratch.write("agent-pool.toml", &pool, 0o644);
+    args.push("--placement".into());
+    args.push("js-sched".into());
+    let h = Harness::with(scratch, args, None).await;
+    let mut hello = per_job_hello("host-1");
+    hello["shape"] = json!({ "cpu_millis": 8000, "memory_bytes": 17179869184u64, "gpus": 0 });
+    let agent = job_agent(&h, &hello).await;
+    let wide = |id: &str| JobBody::new(id).needs(6000, 1 << 30).wall(900);
+
+    let first = submit_body(&h, &wide("held-1").json()).await;
+    assert_eq!(first.status, 201, "{}", first.body);
+    assert_eq!(first.json()["job"]["state"], "JOB_STATE_QUEUED");
+    h.ticks.step().await;
+    let (started, allocation) = one_start(&beat_with(&h, &agent, &[]).await);
+    assert_eq!(started, "held-1");
+    let held = beat_with(&h, &agent, &[running("held-1")]).await;
+    assert_eq!(commands(&held), (vec![], vec![]), "{held}");
+    assert_eq!(job_state(&h, "held-1").await, "JOB_STATE_RUNNING");
+
+    let second = submit_body(&h, &wide("held-2").json()).await;
+    assert_eq!(second.status, 201, "{}", second.body);
+    h.ticks.step().await;
+    let busy = beat_with(&h, &agent, &[running("held-1")]).await;
+    assert_eq!(commands(&busy), (vec![], vec![]), "{busy}");
+    assert_eq!(job_state(&h, "held-2").await, "JOB_STATE_QUEUED");
+
+    let ended = beat_with(&h, &agent, &[exited("held-1", &allocation)]).await;
+    assert_eq!(
+        ended["job_acks"],
+        json!([{ "job_id": "held-1", "ack": "ACCEPTED" }]),
+        "{ended}"
+    );
+    // The host is free once a heartbeat no longer lists the first job.
+    let freed = beat_with(&h, &agent, &[]).await;
+    assert_eq!(commands(&freed), (vec![], vec![]), "{freed}");
+    h.ticks.step().await;
+    let (started, _) = one_start(&beat_with(&h, &agent, &[]).await);
+    assert_eq!(started, "held-2");
+    assert_eq!(job_state(&h, "held-1").await, "JOB_STATE_SUCCEEDED");
+
+    let gpu = JobBody::new("held-gpu")
+        .disk(1 << 30)
+        .gpus(1, "nvidia-a100")
+        .constraints(json!({ "isaLevel": "x86-64-v3" }));
+    let refused = submit_body(&h, &gpu.json()).await;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+    assert_eq!(refused.json(), json!({ "error": "no-capable-host" }));
+
+    let third = submit_body(&h, &JobBody::new("held-3").whole_host().json()).await;
+    assert_eq!(third.status, 201, "{}", third.body);
+    let cancelled = cancel(&h, "held-3").await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    assert_eq!(job_state(&h, "held-3").await, "JOB_STATE_CANCELLED");
 }
 
 /// Asserts that with `--tls-cert` and `--tls-key` the job port speaks TLS as the lease
