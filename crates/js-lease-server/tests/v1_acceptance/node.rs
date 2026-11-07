@@ -133,12 +133,12 @@ fn set_mode(path: &Path, mode: u32) {
 }
 
 impl Node {
-    /// A node of its own for the case `name`, made the current one.
+    /// A node of its own for the case `name`, made the current one. It is made in the
+    /// system's temporary directory, not the target directory: the start check needs every
+    /// directory above the scratch root searchable by the job user, and a target directory
+    /// below a home directory others cannot search (a CI runner's) would fail it.
     pub fn new(name: &str) -> Self {
-        let dir = TestDir::under(
-            Path::new(env!("CARGO_TARGET_TMPDIR")).join("v1-acceptance"),
-            name,
-        );
+        let dir = TestDir::under(std::env::temp_dir().join("v1-acceptance"), name);
         let root = dir.path().to_owned();
         set_mode(&root, 0o755);
         let (uid, gid) = (
