@@ -167,12 +167,12 @@ fn a_reserved_request_stays_on_its_host_past_its_deadline() {
     w.share(2, 3_600);
     w.ask(3, "r1");
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
-    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
     w.step(100_000);
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
     // Host b is the dearer of the two and stays unreserved well past the deadline.
     w.step(40_000);
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
+    assert_eq!(w.fx.registry.request_record(&id("r1")), None);
 }
 
 /// Asserts the default deadline: with no `drain_deadline` it is the request's wall time

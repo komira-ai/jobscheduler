@@ -246,11 +246,12 @@ pub struct Waiter {
 /// that crate's own conversions; it learns the registry's books from the three calls that
 /// do not place ([`Placer::host_up`], [`Placer::heard`], [`Placer::ended`]). That crate
 /// depends on this one, so the registry cannot name that placer; it can only hold
-/// something the server hands it, which is this seam. A boxed `Fn` would be the same seam with the same one
-/// call; the trait is used instead so that the contract of the call (the index, the order
-/// of `open`, never asked with no candidate) is written once on [`Placer::pick`], and so
-/// that an implementation can carry state of its own, as `SchedPlacer` keeps its scheduler
-/// and its counters. The registry's own tests place with small implementations of it.
+/// something the server hands it, which is this seam. A boxed `Fn` would be the same seam
+/// with the same one call; the trait is used instead so that the contract of the call (the
+/// index, the order of `open`, never asked with no candidate) is written once on
+/// [`Placer::pick`], and so that an implementation can carry state of its own, as
+/// `SchedPlacer` keeps its scheduler and its counters. A test of the seam itself places
+/// with a small implementation of it.
 pub trait Placer: Send + Sync {
     /// The index in `open` of the candidate to book for `spec`, or `None` to book none (the
     /// start then answers `NoCapacity`). `open` is in host id order and is never empty: with
@@ -494,8 +495,7 @@ pub trait Placer: Send + Sync {
     /// and is [`Presented::Unservable`] at once if not `capable`; one on the list keeps its
     /// place, is seen again now and belongs to `lease` from now on, and once no host has
     /// been capable for `regain_grace` it is `Unservable` and leaves the list. Asked under
-    /// the registry's lock. The default enters
-    /// nothing: `Full`.
+    /// the registry's lock. The default enters nothing: `Full`.
     fn whole_present(
         &self,
         id: &RequestId,
@@ -512,14 +512,15 @@ pub trait Placer: Send + Sync {
     /// reservations put back by a restart were dropped since this was last asked: requests
     /// put back that were never presented again, and marks whose host never said hello
     /// within `regain_grace` of the restart ([`crate::Registry::dropped_reservations`]).
-    /// Told under the registry's lock, whenever it locks,  The default drops nothing.
+    /// Told under the registry's lock, whenever it locks. The default drops nothing.
     fn whole_expire(&self, regain_grace: Duration) -> u64 {
         let _ = regain_grace;
         0
     }
 
     /// Takes request `id` off the wait list at once, and the host set aside for it with it;
-    /// whether it was waiting. Its record stays. Told under the registry's lock. The default takes nothing.
+    /// whether it was waiting. Its record stays. Told under the registry's lock. The default
+    /// takes nothing.
     fn whole_cancel(&self, id: &RequestId) -> bool {
         let _ = id;
         false
@@ -527,8 +528,7 @@ pub trait Placer: Send + Sync {
 
     /// Takes off the wait list, at once, the request `lease` presented last; its id, if one
     /// waited. Told under the registry's lock at a stop of `lease`, before
-    /// [`Placer::whole_forget`] of that id,. The default
-    /// takes nothing.
+    /// [`Placer::whole_forget`] of that id. The default takes nothing.
     fn whole_cancel_lease(&self, lease: &LeaseId) -> Option<RequestId> {
         let _ = lease;
         None
@@ -542,7 +542,8 @@ pub trait Placer: Send + Sync {
         false
     }
 
-    /// How waiting request `id` waits, if it does. Asked under the registry's lock. The default knows of none.
+    /// How waiting request `id` waits, if it does. Asked under the registry's lock. The
+    /// default knows of none.
     fn whole_waiter(&self, id: &RequestId) -> Option<Waiter> {
         let _ = id;
         None
@@ -557,7 +558,7 @@ pub trait Placer: Send + Sync {
 
     /// Every request on the wait list, front first, presented or put back by a restart and
     /// not presented since: its id and when it was first presented. A request's place is
-    /// its index here. Asked under the registry's lock  The default lists none.
+    /// its index here. Asked under the registry's lock. The default lists none.
     fn whole_places(&self) -> Vec<(RequestId, Timestamp)> {
         Vec::new()
     }
@@ -571,8 +572,7 @@ pub trait Placer: Send + Sync {
     /// Puts request `id`, first presented at `since`, back at the back of the wait list
     /// from a restart's ledger, as if seen now; what it asks for is filled in by its next
     /// presentation. `false` when the list is full. Told under the registry's lock, in
-    /// queue order and before any host says hello,.
-    /// The default puts nothing back.
+    /// queue order and before any host says hello. The default puts nothing back.
     fn whole_restore_place(&self, id: &RequestId, since: Timestamp) -> bool {
         let _ = (id, since);
         false
@@ -581,7 +581,8 @@ pub trait Placer: Send + Sync {
     /// Puts back from a restart's ledger `mark`, a host set aside for a request put back on
     /// the wait list: it stands while its host is unknown until `claim_by`, after which it
     /// is dropped and counted ([`Placer::whole_expire`]). `false` when the host is set
-    /// aside already. Told under the registry's lock, after the request's place,. The default puts nothing back.
+    /// aside already. Told under the registry's lock, after the request's place. The default
+    /// puts nothing back.
     fn whole_revive(&self, mark: &Reservation, claim_by: Timestamp) -> bool {
         let _ = (mark, claim_by);
         false
@@ -595,15 +596,13 @@ pub trait Placer: Send + Sync {
 
     /// The registry committed `lease`, a whole-node lease, for the request under `key`:
     /// it stands for the request until it ends ([`Placer::ended`]) or its prepare fails.
-    /// Told under the registry's lock. The default
-    /// does nothing.
+    /// Told under the registry's lock. The default does nothing.
     fn whole_commit(&self, lease: LeaseId, key: &RequestKey) {
         let _ = (lease, key);
     }
 
     /// Whether a lease other than `lease` is committed for request `id`: a start of it
-    /// then waits. Asked under the registry's lock.
-    /// The default holds none.
+    /// then waits. Asked under the registry's lock. The default holds none.
     fn whole_held_by_other(&self, id: &RequestId, lease: &LeaseId) -> bool {
         let _ = (id, lease);
         false

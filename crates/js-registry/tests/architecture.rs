@@ -23,45 +23,111 @@ const BANNED: &[(&str, &str)] = &[
     ("reserve_deadline", "the give-up cap"),
 ];
 
-/// `text` with its comments and the insides of its string and character literals blanked,
-/// line for line: what is left is code.
+/// `text` with its comments, its string literals (raw ones included) and its character
+/// literals blanked, line for line: what is left is code. A lifetime (`'a`) is code.
 fn code_of(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    let mut in_string = false;
-    let mut block = 0usize;
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied();
-        match (block > 0, in_string, c, next) {
-            (true, _, '*', Some('/')) => {
-                chars.next();
-                block -= 1;
+    let mut at = 0;
+    while at < chars.len() {
+        let c = chars[at];
+        let next = chars.get(at + 1).copied();
+        let ident_before = at > 0 && is_ident(chars[at - 1]);
+        let end = match (c, next) {
+            ('/', Some('/')) => Some(line_end(&chars, at)),
+            ('/', Some('*')) => Some(block_end(&chars, at)),
+            ('"', _) => Some(string_end(&chars, at + 1)),
+            ('r', Some('"' | '#')) if !ident_before => raw_end(&chars, at + 1),
+            ('\'', _) => char_end(&chars, at),
+            _ => None,
+        };
+        match end {
+            Some(end) => {
+                let blanked = chars[at..end].iter().filter(|c| **c == '\n');
+                out.extend(blanked);
+                at = end;
             }
-            (_, false, '/', Some('*')) => {
-                chars.next();
-                block += 1;
+            None => {
+                out.push(c);
+                at += 1;
             }
-            (true, _, '\n', _) => out.push('\n'),
-            (true, _, _, _) => {}
-            (false, true, '\\', _) => {
-                chars.next();
-            }
-            (false, true, '"', _) => in_string = false,
-            (false, true, '\n', _) => out.push('\n'),
-            (false, true, _, _) => {}
-            (false, false, '"', _) => in_string = true,
-            (false, false, '/', Some('/')) => {
-                for skipped in chars.by_ref() {
-                    if skipped == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            (false, false, _, _) => out.push(c),
         }
     }
     out
+}
+
+/// Where the line comment at `from` ends: at the line break, which stays code.
+fn line_end(chars: &[char], from: usize) -> usize {
+    let rest = chars[from..].iter().position(|c| *c == '\n');
+    rest.map_or(chars.len(), |offset| from + offset)
+}
+
+/// Just past the block comment opened at `from`, nested comments included.
+fn block_end(chars: &[char], from: usize) -> usize {
+    let mut depth = 0usize;
+    let mut at = from;
+    while at + 1 < chars.len() {
+        match (chars[at], chars[at + 1]) {
+            ('/', '*') => {
+                depth += 1;
+                at += 2;
+            }
+            ('*', '/') => {
+                depth -= 1;
+                at += 2;
+                if depth == 0 {
+                    return at;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Just past the string whose contents start at `from`.
+fn string_end(chars: &[char], from: usize) -> usize {
+    let mut at = from;
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => at += 2,
+            '"' => return at + 1,
+            _ => at += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Just past the raw string whose hashes start at `from` (after the `r`), or `None` when
+/// what follows is no raw string (a raw identifier, `r#name`).
+fn raw_end(chars: &[char], from: usize) -> Option<usize> {
+    let hashes = chars[from..].iter().take_while(|c| **c == '#').count();
+    let open = from + hashes;
+    if chars.get(open) != Some(&'"') {
+        return None;
+    }
+    let mut at = open + 1;
+    while at < chars.len() {
+        let closes =
+            chars[at] == '"' && (1..=hashes).all(|offset| chars.get(at + offset) == Some(&'#'));
+        if closes {
+            return Some(at + 1 + hashes);
+        }
+        at += 1;
+    }
+    Some(chars.len())
+}
+
+/// Just past the character literal opened at `from`, or `None` for a lifetime.
+fn char_end(chars: &[char], from: usize) -> Option<usize> {
+    match (chars.get(from + 1), chars.get(from + 2)) {
+        (Some('\\'), _) => {
+            let rest = chars[from + 2..].iter().skip(1).position(|c| *c == '\'');
+            Some(rest.map_or(chars.len(), |offset| from + 3 + offset + 1))
+        }
+        (Some(_), Some('\'')) => Some(from + 3),
+        _ => None,
+    }
 }
 
 fn is_ident(c: char) -> bool {
@@ -179,4 +245,25 @@ fn a_banned_name_in_prose_or_inside_a_longer_name_is_not_found() {
                 book.start_over(spec, gate, &eligible, &choose); // not start_where\n\
                 start_where();\n";
     assert_eq!(violations(text), vec![(8, "start_where")]);
+}
+
+/// Asserts that a character literal holding a quote or an escaped quote, and a raw string,
+/// are skipped as literals and blank nothing after them, while a lifetime is code: a banned
+/// name after each is still found, and one inside the raw string is not. Catches a quote in
+/// a character literal read as the start of a string, which would hide the rest of a file.
+#[test]
+fn a_quote_in_a_character_literal_hides_no_code_after_it() {
+    let text = "let q = '\"'; start_where();\n\
+                let e = '\\''; class_gate();\n\
+                let r = r#\"keep_or_move \" give_up\"#; gives_up();\n\
+                fn f<'a>(x: &'a str) { reserve_deadline(x) }\n";
+    assert_eq!(
+        violations(text),
+        vec![
+            (1, "start_where"),
+            (2, "class_gate"),
+            (3, "gives_up"),
+            (4, "reserve_deadline"),
+        ]
+    );
 }

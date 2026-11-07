@@ -181,8 +181,9 @@ fn a_quiet_host_is_granted_at_once_and_the_start_commits_there() {
     assert!(e.sched.leases_on(&b).is_empty());
 }
 
-/// Catches: the drain cost read without the registry's lives (the engine would drain the
-/// host the registry's own pass would not), or a mark made before `drain_after`. Both
+/// Catches: the drain cost read without the registry's lives (the engine would drain a host
+/// by its bound where the lives say another ends first), or a mark made before
+/// `drain_after`. Both
 /// hosts are busy with leases of unknown end. Without lives the mark goes to the first by
 /// name, `a`, with no known tail; with `b`'s lease expected to last a minute from its
 /// start, the mark goes to `b`, its tail ending then. Before `drain_after` nothing is

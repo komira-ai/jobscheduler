@@ -1,5 +1,5 @@
-//! A placer that keeps the whole-node queue (`Placer::whole_round` and the `whole_*` calls,
-//! the engine of `--placement js-sched`): the registry hands it its view of the hosts at
+//! The placer keeps the whole-node queue (`Placer::whole_round` and the `whole_*` calls, as
+//! the engine of js-sched-placer does): the registry hands it its view of the hosts at
 //! every pass, shows the marks it holds ([`Placer::whole_reservations`]) as its
 //! reservations, commits a request on the host set aside for it and tells it when a
 //! request leaves the wait list. The registry is driven on a manual clock; the placer here

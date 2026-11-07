@@ -93,10 +93,10 @@ impl Registry {
         &self,
         state: &State,
         settings: &WholeNodeConfig,
+        facts: &[HostFacts],
         now: Timestamp,
     ) -> WholeRound {
         let grace = self.grace_ms();
-        let facts = self.host_facts(state, now);
         let open: BTreeSet<&HostId> = facts.iter().filter(|f| f.open).map(|f| &f.id).collect();
         let hosts = state.records.iter().map(|(id, record)| WholeHost {
             id: id.clone(),
@@ -227,8 +227,10 @@ impl Registry {
             placer.whole_present(id, lease, wanted, capable, grace)
         });
         let settings = whole_settings(&self.shared.config);
-        self.run_pass(state, &settings, now);
+        // The pass changes neither the records nor the book: the facts it reads stand for
+        // the start's caps after it.
         let hosts = self.host_facts(state, now);
+        self.run_pass(state, &settings, &hosts, now);
         // The hosts set aside after the pass, read once: the start's gates, backfill and
         // the record of the lease read them as they stand before the booking.
         let set_aside = self.marks_now(state);
@@ -420,5 +422,46 @@ fn may_start(
         (Some(_), _, _) | (None, true, Some(_)) => false,
         (None, true, None) => room,
         (None, false, _) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn mark(host: &str, tail_end: Option<u64>) -> Reservation {
+        let at = Timestamp::from_millis(1_000);
+        Reservation {
+            request: RequestId::new(&format!("for-{host}")).unwrap(),
+            host: HostId::new(host).unwrap(),
+            at,
+            deadline: at,
+            assigned: tail_end.is_none(),
+            tail_end,
+        }
+    }
+
+    /// Asserts what a start that may backfill is shown of the hosts set aside: each with the
+    /// time left from now until the end of its tail as the mark took it, zero for a tail that
+    /// has ended, and none for a mark whose tail is not known. Catches a tail shown from the
+    /// mark's instant instead of now, one past its end that underflows, or an unknown tail
+    /// shown as a known one.
+    #[test]
+    fn a_marked_host_is_shown_with_the_time_left_until_its_tail_ends() {
+        let now = Timestamp::from_millis(60_000);
+        let marks = [
+            mark("a", Some(3_660_000)),
+            mark("b", Some(30_000)),
+            mark("c", None),
+        ];
+        let shown = tails_left(&marks, now);
+        let expected = crate::MarkedTails::from([
+            (HostId::new("a").unwrap(), Some(Duration::from_secs(3_600))),
+            (HostId::new("b").unwrap(), Some(Duration::ZERO)),
+            (HostId::new("c").unwrap(), None),
+        ]);
+        assert_eq!(shown, expected);
     }
 }

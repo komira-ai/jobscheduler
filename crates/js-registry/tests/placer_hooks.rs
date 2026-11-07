@@ -215,8 +215,8 @@ fn a_placer_may_read_every_listed_host_at_a_start() {
 }
 
 /// Catches: the placer's slack not handed to the book (a host whose cores are booked
-/// refuses one more), or handed for memory too. At 250 thousandths a 4-core host takes five one-core leases and not a sixth;
-/// with no slack (the default of a placer) it takes four.
+/// refuses one more), or handed for memory too. At 250 thousandths a 4-core host takes five
+/// one-core leases and not a sixth; with no slack (the default of a placer) it takes four.
 #[test]
 fn the_book_lets_shared_cpu_go_over_by_the_placers_slack() {
     let told = Arc::new(Told {

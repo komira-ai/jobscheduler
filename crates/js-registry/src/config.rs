@@ -304,10 +304,10 @@ impl PoolConfig {
         Ok(self)
     }
 
-    /// The same pool, whose hosts also take leases of `class`, a class that books part of
-    /// a host (`Book`), beside its own class: leases of `class` share a host that has room,
-    /// placed by the registry's placer ([`crate::Placer::pick`]). Its provider ([`crate::Registry::provider`])
-    /// serves both classes.
+    /// The same pool, whose hosts also take leases of `class`, a class that books part of a
+    /// host (`Book`), beside its own class: leases of `class` share a host that has room,
+    /// placed by the registry's placer ([`crate::Placer::pick`]). Its provider
+    /// ([`crate::Registry::provider`]) serves both classes.
     ///
     /// # Errors
     /// [`ConfigError::ShareClass`] when `class` books whole hosts or has the pool's own id.

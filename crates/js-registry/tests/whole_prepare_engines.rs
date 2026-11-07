@@ -1,5 +1,5 @@
 //! The prepare, ready and failure path of a whole-node lease, and the record its request
-//! keeps, under js-sched, which keeps the deadline, the failed-prepare count, the bars and
+//! keeps, under the placer, which keeps the deadline, the failed-prepare count, the bars and
 //! the record of a request it commits from its queue, on the World harness: hosts that
 //! beat every five seconds on a manual clock and a consumer that polls its whole-node
 //! requests by id. The registry's tick (`Registry::advance`) is the only place a deadline

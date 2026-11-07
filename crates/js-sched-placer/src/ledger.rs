@@ -1,7 +1,8 @@
-//! What the engine keeps of the registry's whole-node requests across a restart: it hands the registry's reservation ledger (design
-//! `whole-node.md`, D55) the failed prepares and bars of its requests
-//! ([`Engine::whole_ledger`]) and the marks they hold ([`Engine::whole_held`]), and
-//! takes them back from the ledger a restart read ([`Engine::whole_restore`]).
+//! What the engine keeps of the registry's whole-node requests across a restart: it hands
+//! the registry's reservation ledger (design `whole-node.md`, D55) the failed prepares and
+//! bars of its requests ([`Engine::whole_ledger`]) and the marks they hold
+//! ([`Engine::whole_held`]), and takes them back from the ledger a restart read
+//! ([`Engine::whole_restore`]).
 //!
 //! - **Out.** A request the engine queues gives the bars the scheduler keeps for it; a
 //!   request whose prepare failed, or whose lease is committed and not yet ready, gives the

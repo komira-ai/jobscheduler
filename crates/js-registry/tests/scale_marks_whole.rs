@@ -237,8 +237,9 @@ fn a_request_reserved_on_a_retired_host_is_let_go() {
 /// Asserts that `retire` lets go of a quiet host already granted to a waiting request: `r1`
 /// waits on the busy `a`; the quiet `b` joins and, with `r1` not presented meanwhile, the
 /// next pass grants it `b`; retiring `b` takes the grant back at once, `r1` is placed again
-/// on the busy `a`, and its next start books nothing on the retired host. Catches a grant that outlives the retire of its host
-/// and commits a whole-node lease on a machine being given back.
+/// on the busy `a`, and its next start books nothing on the retired host. Catches a grant
+/// that outlives the retire of its host and commits a whole-node lease on a machine being
+/// given back.
 #[test]
 fn a_quiet_host_granted_to_a_request_is_let_go_when_it_is_retired() {
     let mut w = World::new(&["a"], plain);

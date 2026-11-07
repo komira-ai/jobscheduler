@@ -18,7 +18,7 @@ use crate::Placer;
 use crate::whole::ending::Ending;
 use crate::whole::reasons::Cause;
 use crate::whole::requests::{Rules, whole_settings};
-use crate::whole::reserve::Reservation;
+use crate::whole::reserve::{HostFacts, Reservation};
 
 impl Registry {
     /// The placer given at construction: it picks the host of a start and keeps the
@@ -82,7 +82,8 @@ impl Registry {
             }
         }
         let settings = whole_settings(&self.shared.config);
-        self.run_pass(state, &settings, now);
+        let hosts = self.host_facts(state, now);
+        self.run_pass(state, &settings, &hosts, now);
     }
 
     /// One pass of the whole-node queue: the placer's, handed the hosts, the lives and the
@@ -92,9 +93,10 @@ impl Registry {
         &self,
         state: &State,
         settings: &crate::WholeNodeConfig,
+        hosts: &[HostFacts],
         now: Timestamp,
     ) {
-        let round = self.hosts_round(state, settings, now);
+        let round = self.hosts_round(state, settings, hosts, now);
         let _ = self.placer().whole_round(&round);
     }
 

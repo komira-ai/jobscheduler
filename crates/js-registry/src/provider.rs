@@ -20,17 +20,16 @@ use crate::registry::Registry;
 ///   those live (heard from within the grace period), serving, with room for the request
 ///   and whose booked shape fits it. A class that books part of a host is leasable: its
 ///   leases share a host that has room, and a host running its first lease takes a second.
-///   A host that
-///   is lost, awaiting, draining, quarantined, tainted or in any other phase than
-///   serving takes no new lease. With no host to book it answers `NoCapacity` for a
+///   A host that is lost, awaiting, draining, quarantined, tainted or in any other phase
+///   than serving takes no new lease. With no host to book it answers `NoCapacity` for a
 ///   request the pool's shape fits, `NoFit` for one it cannot. A whole-node request
 ///   (`Admission::Whole`) that fits the pool answers `NoCapableHost` when no known host
-///   could ever be given whole (none is untainted and of a fitting shape), and
-///   `Unknown` (accepted, waiting) when its start carries a request id and some host
-///   could, however busy; see [`crate::Registry::queue_position`]. Without a request
-///   id it answers `NoCapacity` and the consumer retries. A request that used up its
-///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
-///   record, so the next start of the request is a fresh one).
+///   could ever be given whole (none is untainted and of a fitting shape), and `Unknown`
+///   (accepted, waiting) when its start carries a request id and some host could, however
+///   busy; see [`crate::Registry::queue_position`]. Without a request id it answers
+///   `NoCapacity` and the consumer retries. A request that used up its tries to get a host
+///   ready answers `ExclusiveNotReady` once (that start removes its record, so the next
+///   start of the request is a fresh one).
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease. A whole-node request the lease
 ///   presented and that still waits leaves the wait list, and the host set aside for it is
@@ -57,9 +56,9 @@ impl RegisteredProvider {
         }
     }
 
-    /// The same provider serving `classes` instead of the pool's one. As for the static
-    /// pool, `start` refuses, with `UnsupportedClass`, a class whose admission does
-    /// not book a whole host (`BookAll` or `Whole`), because every lease holds one.
+    /// The same provider serving `classes` instead of the pool's one: `start` refuses a
+    /// class not among them with `UnsupportedClass`, and leases one that books part of a
+    /// host beside the leases already there.
     pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
         self.classes = classes;
         self

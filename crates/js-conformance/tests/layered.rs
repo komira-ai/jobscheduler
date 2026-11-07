@@ -99,10 +99,10 @@ impl Subject for Layered {
 }
 
 /// Asserts that the layer passes every check except the three it cannot take part in (it
-/// never answers Unknown to a call, and its registry leases every class that books part
-/// of a host, so it has no unleasable class to refuse), which are reported as not
-/// applicable and not skipped silently. A start that lands a lease on both children, a stop that one child
-/// does not hear, or a capacity list that repeats or drops a host fails here.
+/// never answers Unknown to a call, and its registry leases every class that books part of
+/// a host, so it has no unleasable class to refuse), which are reported as not applicable
+/// and not skipped silently. A start that lands a lease on both children, a stop that one
+/// child does not hear, or a capacity list that repeats or drops a host fails here.
 #[test]
 fn the_layered_provider_conforms() {
     let report = run(layered);

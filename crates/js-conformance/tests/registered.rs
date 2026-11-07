@@ -74,9 +74,9 @@ impl Subject for Registered {
 /// Asserts that the registered provider passes every check except the three it cannot take
 /// part in (it never answers Unknown to a call, and it leases every class that books part
 /// of a host, so it has no unleasable class to refuse), which are reported as not
-/// applicable and not skipped silently. A breach of the provider contract in the registry (a start that
-/// is not idempotent, a stopped lease that restarts, a read-back that disagrees with the
-/// booking table) fails here.
+/// applicable and not skipped silently. A breach of the provider contract in the registry
+/// (a start that is not idempotent, a stopped lease that restarts, a read-back that
+/// disagrees with the booking table) fails here.
 #[test]
 fn the_registered_provider_conforms() {
     let report = run(registered);

@@ -2,8 +2,8 @@
 //! keep, and what a new registry does with it. A restart is a second registry on the same
 //! manual clock, given the ledger of the first before any host says hello again. Nothing
 //! sleeps and no test asserts how long anything takes on a wall clock. Each test runs on the
-//! production placer; where a count or an exclusion is kept in different places (the
-//! registry's record, or the engine) the test reads it from the ledger, which writes both.
+//! production placer, which keeps the counts and the exclusions; a test reads them from the
+//! ledger or from the request's record.
 
 mod support;
 
@@ -535,8 +535,8 @@ fn a_restored_request_is_no_demand_until_it_is_presented_again() {
 
 /// Asserts the wait list's size cap at a restore. A ledger of 1026 records, each with a
 /// place, is given: the first 1024 by place are put back in order, the last two are
-/// dropped and counted, and the registry's own cap on the list is the same constant. It
-/// catches a restore that loads a list the live path would never hold.
+/// dropped and counted, and the cap is the live wait list's own
+/// ([`js_registry::MAX_WAITING_REQUESTS`]). It catches a restore that loads a list the live path would never hold.
 #[test]
 fn a_ledger_past_the_wait_list_cap_is_trimmed_and_counted() {
     let w = World::of(pool(), &[]);

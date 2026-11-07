@@ -287,7 +287,7 @@ impl Placer for SchedPlacer {
     /// When the scheduler cannot take these hosts or this request (a shape that does not
     /// describe a node, a capability that is not a platform requirement), the first host
     /// not in `marked` with room for it within the engine's share of its memory is booked,
-    /// as a registry with no placer books the first host, and the start is counted as
+    /// and the start is counted as
     /// unmappable and logged: the registry's check of the room stands (CPU up to the
     /// slack), the share is held here, and the engine takes the lease up on that host
     /// ([`Engine::adopt`]). With no such host none is booked. When the
