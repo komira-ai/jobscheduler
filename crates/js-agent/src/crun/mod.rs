@@ -149,8 +149,10 @@
 //! still gives its program and environment. Its cgroup is `ctr` below the lease's, which the
 //! booking limits, so it is accounted as a contained run is, and a stop's or a removal's write
 //! to the lease's `cgroup.kill` ends it whole. Its lease directory and cgroup are the agent's
-//! own, and `crun` and its supervisor run as the agent for it (`Oci::lease_user`): a
-//! contained lease's are the job user's. It is not wired (it has the host's network), and a
+//! own, the bundle writes a host-lease marker of the agent's into the directory, and `crun`
+//! and its supervisor run as the agent for a lease whose directory and marker are both the
+//! agent's (`Oci::lease_user`): every other lease's are the job user's, whoever made its
+//! directory. It is not wired (it has the host's network), and a
 //! host run that names a mount, run files or a GPU is refused, as is every host run of a
 //! runtime opened without host jobs.
 //!
@@ -632,8 +634,8 @@ impl CrunRuntime {
     /// A host lease ([`Isolation::Host`](js_contain::Isolation::Host)) is the agent's own:
     /// only its directory is made (no overlay, home or input root), and it, the run's scratch
     /// directory and the cgroup's files are given to the agent itself, not to the job user or
-    /// the job's ids, so `crun` runs as the agent for it ([`Oci::lease_user`]). Its bundle is
-    /// the loopback one: a host job is never wired.
+    /// the job's ids; its bundle adds the host-lease marker, so `crun` runs as the agent for
+    /// it ([`Oci::lease_user`]). Its bundle is the loopback one: a host job is never wired.
     fn make_resources(
         &self,
         spec: &RunSpec,

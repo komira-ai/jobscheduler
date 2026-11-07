@@ -250,16 +250,23 @@ fn a_host_containers_exec_root_and_init_must_be_normalized() {
 }
 
 /// Proves who `crun` runs as for a lease: the job user for a root daemon that drops to one,
-/// unless the lease's directory is the daemon's own (a host lease's), and the daemon
-/// itself when it drops to nobody; a lease whose directory is missing is the job user's.
-/// Catches a host container's `crun` run as the job user (it cannot make a container with
-/// no user namespace), and a contained lease's run as the daemon.
+/// unless both the lease's directory and its host-lease marker are the daemon's own (a host
+/// lease's), and the daemon itself when it drops to nobody; a lease whose directory is
+/// missing, or is the daemon's with no marker or a marker of another owner, is the job
+/// user's. Catches a host container's `crun` run as the job user (it cannot make a
+/// container with no user namespace), and a contained lease's run as the daemon because the
+/// daemon made its directory.
 #[test]
 fn crun_runs_as_the_job_user_unless_the_lease_is_the_daemons() {
     use super::runs_as;
-    assert_eq!(runs_as(Some(1500), 0, Some(1500)), 1500);
-    assert_eq!(runs_as(Some(1500), 0, None), 1500);
-    assert_eq!(runs_as(Some(1500), 0, Some(0)), 0);
-    assert_eq!(runs_as(None, 1000, Some(1500)), 1000);
-    assert_eq!(runs_as(None, 1000, None), 1000);
+    assert_eq!(runs_as(Some(1500), 0, (Some(1500), None)), 1500);
+    assert_eq!(runs_as(Some(1500), 0, (None, None)), 1500);
+    assert_eq!(runs_as(Some(1500), 0, (Some(0), Some(0))), 0);
+    // A daemon's directory with no marker (a contained lease the daemon made) or one the job
+    // user planted: the job user.
+    assert_eq!(runs_as(Some(1500), 0, (Some(0), None)), 1500);
+    assert_eq!(runs_as(Some(1500), 0, (Some(0), Some(1500))), 1500);
+    assert_eq!(runs_as(Some(1500), 0, (Some(1500), Some(0))), 1500);
+    assert_eq!(runs_as(None, 1000, (Some(1500), None)), 1000);
+    assert_eq!(runs_as(None, 1000, (None, None)), 1000);
 }

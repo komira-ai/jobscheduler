@@ -110,9 +110,39 @@ async fn a_host_lease_of_the_daemons_gets_its_config_alone_and_the_daemons_crun(
     assert_eq!(config["root"]["path"], "/");
     assert_eq!(config["linux"]["namespaces"], serde_json::json!([]));
     assert!(!lease.join("etc").exists());
+    let marker = std::fs::symlink_metadata(lease.join(HOST_LEASE_MARKER)).expect("the marker");
+    assert!(marker.is_file());
+    assert_eq!(std::os::unix::fs::MetadataExt::uid(&marker), me);
     let mut running = oci.start(&spec, None).expect("started");
     running.wait().await;
     assert_eq!(running.run_end(), crun::RunEnd::Exited(0));
     oci.terminate("js-x-r1").await.expect("kill");
     oci.remove("js-x-r1").expect("delete");
+}
+
+/// Proves the owners the lease rule reads are of the right kind of file, never through a
+/// link: a directory for the lease and a regular file for the marker; a file where the
+/// lease should be, a directory where the marker should be, a link to either and a missing
+/// path have no owner. Catches a marker a link points at, which could name a file the
+/// daemon owns elsewhere.
+#[test]
+fn the_owners_of_a_lease_are_read_of_a_directory_and_a_regular_file_only() {
+    let dir = scratch("host-lease-owners");
+    let me = rustix::process::getuid().as_raw();
+    let lease = dir.join("lease");
+    std::fs::create_dir_all(lease.join("sub")).expect("a lease");
+    std::fs::write(lease.join("file"), b"").expect("a file");
+    std::os::unix::fs::symlink(lease.join("file"), lease.join("link")).expect("a link");
+    std::os::unix::fs::symlink(&lease, dir.join("lease-link")).expect("a link");
+    assert_eq!(owner_of(&lease, true), Some(me));
+    assert_eq!(owner_of(&lease.join("file"), false), Some(me));
+    for (path, dir) in [
+        (lease.join("file"), true),
+        (lease.join("sub"), false),
+        (lease.join("link"), false),
+        (dir.join("lease-link"), true),
+        (lease.join("missing"), false),
+    ] {
+        assert_eq!(owner_of(&path, dir), None, "{}", path.display());
+    }
 }

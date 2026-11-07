@@ -166,18 +166,21 @@ impl Oci {
     /// [`RESOLV_CONF`] and no wait.
     ///
     /// A host container ([`Isolation::Host`]) gets `config.json` alone (it binds no file and
-    /// its root is the host's `/`), and only in a lease directory that is the daemon's own
-    /// ([`Oci::lease_user`]): `crun` then runs as the daemon for it.
+    /// its root is the host's `/`) and the [`HOST_LEASE_MARKER`](super::HOST_LEASE_MARKER),
+    /// and only in a lease directory that is the daemon's own: `crun` then runs as the daemon
+    /// for it ([`Oci::lease_user`]).
     async fn write_bundle(&self, spec: &ContainerSpec, wired: bool) -> Result<(), JobError> {
         open_dir(&spec.dir).await?;
         if spec.isolation == Isolation::Host {
-            if self.lease_user(&spec.dir) != self.own_ids().0 {
+            if super::owner_of(&spec.dir, true) != Some(self.own_ids().0) {
                 let why = "a host container's lease directory is not the daemon's own";
                 return Err(JobError::Io {
                     path: spec.dir.clone(),
                     source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, why),
                 });
             }
+            let marker = spec.dir.join(super::HOST_LEASE_MARKER);
+            write_open(&marker, b"").await?;
             return self.write_config(spec, Path::new("/"), 0).await;
         }
         let etc = spec.dir.join("etc");

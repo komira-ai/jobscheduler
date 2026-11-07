@@ -363,6 +363,18 @@ pub fn at<T>(path: &Path, result: std::io::Result<T>) -> Result<T, JobError> {
     })
 }
 
+/// The owner of `path`, not followed through a link, when it is a directory (`dir`) or a
+/// regular file; none otherwise or when it is not there.
+fn owner_of(path: &Path, dir: bool) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let kind = match dir {
+        true => meta.is_dir(),
+        false => meta.is_file(),
+    };
+    kind.then(|| meta.uid())
+}
+
 /// The OCI backend.
 #[derive(Debug)]
 pub struct Oci {
@@ -395,15 +407,28 @@ pub struct Oci {
     own: (u32, u32),
 }
 
+/// The file a host lease's directory holds ([`Isolation::Host`]): written by the daemon with
+/// the host container's bundle, into a lease directory of its own.
+///
+/// [`Isolation::Host`]: crate::container::Isolation::Host
+pub const HOST_LEASE_MARKER: &str = "host-lease";
+
 /// The uid `crun` runs as for a lease: the job user's (`job`) when the daemon drops to one,
-/// unless the lease's directory is the daemon's own (`own`; `lease_owner` is the owner of
-/// the directory, none when it is not there), which only a host lease's is; the daemon's
-/// own otherwise. The job user cannot make a directory the daemon owns, so it cannot have
-/// `crun` run as the daemon for a lease it controls.
-fn runs_as(job: Option<u32>, own: u32, lease_owner: Option<u32>) -> u32 {
+/// unless the lease is a host lease, whose directory (owned by `lease_owner`) and
+/// [`HOST_LEASE_MARKER`] in it (owned by `marker_owner`) are both the daemon's own (`own`);
+/// the daemon's own otherwise. Each owner is none when the file is not there. The job user
+/// cannot make a file in a directory the daemon owns, so it cannot have `crun` run as the
+/// daemon for a lease it controls, and a contained lease's directory runs the job user's
+/// `crun` whoever made it.
+fn runs_as(
+    job: Option<u32>,
+    own: u32,
+    (lease_owner, marker_owner): (Option<u32>, Option<u32>),
+) -> u32 {
     match job {
-        Some(job) if lease_owner != Some(own) => job,
-        Some(_) | None => own,
+        Some(_) if (lease_owner, marker_owner) == (Some(own), Some(own)) => own,
+        Some(job) => job,
+        None => own,
     }
 }
 
@@ -539,15 +564,21 @@ impl Oci {
     }
 
     /// The uid `crun` and the lease's supervisor run as for the lease directory `lease`: the
-    /// job user's for a root daemon, unless the directory is the daemon's own, as a host
-    /// lease's is ([`Oci::own_ids`]), and then the daemon's; the daemon's for a daemon that
-    /// is not root. Every call by a lease's name (a kill, a delete, a state ask) and the
+    /// job user's for a root daemon, unless `lease` is a host lease (the directory and its
+    /// [`HOST_LEASE_MARKER`], a regular file, are both the daemon's own, [`Oci::own_ids`]),
+    /// and then the daemon's; the daemon's for a daemon that is not root. Neither is followed
+    /// through a link. Every call by a lease's name (a kill, a delete, a state ask) and the
     /// start of a host container run `crun` as this user.
     #[must_use]
     pub fn lease_user(&self, lease: &Path) -> u32 {
-        use std::os::unix::fs::MetadataExt as _;
-        let owner = std::fs::symlink_metadata(lease).ok().map(|meta| meta.uid());
-        runs_as(self.crun.job().map(JobDrop::uid), self.own.0, owner)
+        runs_as(
+            self.crun.job().map(JobDrop::uid),
+            self.own.0,
+            (
+                owner_of(lease, true),
+                owner_of(&lease.join(HOST_LEASE_MARKER), false),
+            ),
+        )
     }
 
     /// The driver whose commands run as [`Oci::lease_user`] for `lease`.
