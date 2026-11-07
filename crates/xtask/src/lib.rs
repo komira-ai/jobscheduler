@@ -15,6 +15,14 @@
 //!   js-agent for one platform, the same bytes on every run, and the release index of the three
 //!   packages (packaging/js-agent/hostkeeper/README.md).
 //!
+//! - `release macos-leg --target <triple> --builds "<package>:<bin> ..." --min-macos <x.y> --out
+//!   <dir>` ([`release::macos_leg`]): on a pull request, the release's macOS leg from that commit:
+//!   the release build of each binary, its archive directory, its minimum macOS and its
+//!   `--version`, then the hostkeeper package of js-agent; nothing is uploaded.
+//! - `postgres-for-tests --bin-dir <dir> --data-dir <dir> --socket-dir <dir> --github-env <file>`
+//!   ([`postgres_for_tests`]): a Postgres server for the tests that need one, on a runner with
+//!   no service container (the macOS job), and its URL for the later steps.
+//!
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
@@ -84,6 +92,7 @@ pub mod job_surface;
 pub mod layering;
 pub mod macpkg;
 pub mod pkg;
+pub mod postgres_for_tests;
 pub mod release;
 pub mod site_changed;
 pub mod site_demo;
@@ -120,6 +129,9 @@ pub enum Error {
     /// The site decision could not be written.
     #[error(transparent)]
     SiteChanged(#[from] site_changed::Error),
+    /// The Postgres server for the tests could not be started.
+    #[error(transparent)]
+    PostgresForTests(#[from] postgres_for_tests::Error),
     /// The real-crun tests, or the build of their targets, failed.
     #[error(transparent)]
     CrunTests(#[from] test_build::Error),
@@ -238,6 +250,9 @@ enum Verb {
     /// Whether the site steps of the `lint` job run: always off a pull request, and on one when a
     /// changed file matches `site/ci-paths` (writes `run=true` or `run=false`).
     SiteChanged(site_changed::Args),
+    /// Start a Postgres server for the tests that need one, from an installed Postgres's
+    /// programs, and append its URL (`KBF_TEST_POSTGRES_URL`) to the workflow's environment file.
+    PostgresForTests(postgres_for_tests::Args),
     /// Render the job commands of js and the job client's methods from the job service's
     /// descriptor set, or with `--check` fail when the checked-in files differ.
     GenJobSurface(job_surface::Args),
@@ -282,6 +297,8 @@ enum ReleaseVerb {
     HostkeeperPackage(release::hostkeeper_package::PackageArgs),
     /// Write the release index of the three hostkeeper packages.
     HostkeeperIndex(release::hostkeeper_index::IndexArgs),
+    /// Build, stage, check and package the darwin leg of a release.
+    MacosLeg(release::macos_leg::LegArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -349,6 +366,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             })?)
         }
         Verb::SiteChanged(args) => Ok(site_changed::run(&args)?),
+        Verb::PostgresForTests(args) => Ok(postgres_for_tests::run(&args)?),
         Verb::GenJobSurface(args) => Ok(job_surface::run(&args)?),
         Verb::ImageRecipe(args) => Ok(image::run(&args)?),
         Verb::Pkg { verb } => Ok(match verb {
@@ -362,6 +380,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             ReleaseVerb::Stage(args) => release::stage::run(&args)?,
             ReleaseVerb::HostkeeperPackage(args) => release::hostkeeper_package::run(&args)?,
             ReleaseVerb::HostkeeperIndex(args) => release::hostkeeper_index::run(&args)?,
+            ReleaseVerb::MacosLeg(args) => release::macos_leg::run(&args)?,
         }),
     }
 }

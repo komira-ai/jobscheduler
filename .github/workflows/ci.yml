@@ -20,7 +20,7 @@
 # macOS package for it; both are to be required checks of main
 # (tools/held/required-checks/require_macos_checks.sh). No macOS job that runs on a pull
 # request names a secret or holds a write permission, and a newer push to a pull request cancels
-# its older macOS runs (crates/xtask/tests/pr_macos_jobs.rs holds every workflow to that).
+# its older macOS runs (crates/xtask/tests/pr_macos_jobs holds every workflow to that).
 name: ci
 
 on:
@@ -217,7 +217,7 @@ jobs:
   # leg's checks (each binary's minos is at most the pinned macOS and its --version prints
   # the version). The version is the workspace's, not stamped, and nothing is uploaded. A push
   # to main skips those steps: the release's own leg makes the same files from that commit.
-  # crates/xtask/tests/pr_macos_jobs.rs pins that the step builds the leg's binaries.
+  # crates/xtask/tests/pr_macos_jobs pins that the step builds the leg's binaries.
   macos:
     runs-on: macos-15
     # Pushes to main share one group with cancel-in-progress false: one run executes, one
@@ -261,15 +261,12 @@ jobs:
       # the server fails, and does not skip, when it is not there.
       - name: Add the loopback address 127.0.0.2
         run: sudo ifconfig lo0 alias 127.0.0.2 up
+      - name: Install Postgres from Homebrew
+        run: brew install --quiet postgresql@17
+      # crates/xtask/src/postgres_for_tests.rs: initdb, start and wait, then the URL in
+      # GITHUB_ENV for the steps after this one.
       - name: Start a Postgres server for the tests that need one
-        run: |
-          set -euo pipefail
-          brew install --quiet postgresql@17
-          bin="$(brew --prefix postgresql@17)/bin"
-          "$bin/initdb" --username postgres --auth trust --encoding UTF8 -D "$RUNNER_TEMP/pg" > /dev/null
-          "$bin/pg_ctl" -D "$RUNNER_TEMP/pg" -l "$RUNNER_TEMP/pg.log" -o "-h 127.0.0.1 -p 5432 -k $RUNNER_TEMP" -w start
-          "$bin/pg_isready" -h 127.0.0.1 -p 5432
-          echo "KBF_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/postgres" >> "$GITHUB_ENV"
+        run: cargo xtask postgres-for-tests --bin-dir /opt/homebrew/opt/postgresql@17/bin --data-dir "$RUNNER_TEMP/pg" --socket-dir "$RUNNER_TEMP" --github-env "$GITHUB_ENV"
       - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step --exclude js-mdm
       - name: Check the minimum macOS of the built binaries
         run: |
@@ -289,46 +286,18 @@ jobs:
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
       # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
       - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step --exclude js-mdm
+      - name: Add the release's macOS target
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        run: rustup target add aarch64-apple-darwin
+      # crates/xtask/src/release/macos_leg.rs: for each binary, the release build, `release
+      # stage`, its minos against the pinned macOS and its --version; then the hostkeeper
+      # package of js-agent.
       - name: Build, stage and package the release's macOS binaries
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           TARGET: aarch64-apple-darwin
           BUILDS: js-cli:js js-agent:js-agent js-bundle-cli:js-bundle js-mac-session:js-mac-session js-mac-provision:js-mac-provision
-        run: |
-          set -euo pipefail
-          rustup target add "$TARGET"
-          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "js-agent") | .version')"
-          out="$RUNNER_TEMP/release-leg"
-          mkdir -p "$out"
-          for entry in $BUILDS; do
-            package="${entry%%:*}"
-            bin="${entry##*:}"
-            path="target/$TARGET/release/$bin"
-            cargo build --locked --release --target "$TARGET" -p "$package" --bin "$bin"
-            cargo xtask release stage --bin "$bin" --target "$TARGET" --version "$version" --out "$out/stage-$bin"
-            file "$path"
-            minos="$(otool -l "$path" | awk '/LC_BUILD_VERSION/ {b=1} b && $1 == "minos" {print $2; exit}')"
-            echo "$bin minos $minos"
-            if [ -z "$minos" ]; then
-              echo "::error::$bin has no LC_BUILD_VERSION minos to check"
-              exit 1
-            fi
-            if [ "$(printf '%s\n%s\n' "$minos" "$MACOSX_DEPLOYMENT_TARGET" | sort -V | tail -n 1)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
-              echo "::error::$bin needs macOS $minos, above the pinned $MACOSX_DEPLOYMENT_TARGET"
-              exit 1
-            fi
-            printed="$("$path" --version | sed -n 1p)"
-            echo "$printed"
-            case "$printed" in
-              *" $version") ;;
-              *)
-                echo "::error::$bin prints '$printed', not the version $version"
-                exit 1
-                ;;
-            esac
-          done
-          cargo xtask release hostkeeper-package --binary "target/$TARGET/release/js-agent" --target "$TARGET" --version "$version" --out "$out"
-          ls -lR "$out"
+        run: cargo xtask release macos-leg --target "$TARGET" --builds "$BUILDS" --min-macos "$MACOSX_DEPLOYMENT_TARGET" --out "$RUNNER_TEMP/release-leg"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
