@@ -279,7 +279,7 @@ fn placed_in(
             placer
                 .iter()
                 .for_each(|placer| registry.set_placer(placer.clone()));
-            let usage = usage.build(clock, limits, &registry)?;
+            let usage = usage.build(clock, limits)?;
             // Each lease booking that ends leaves its record in the usage store's history.
             usage
                 .iter()

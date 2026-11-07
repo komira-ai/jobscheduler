@@ -153,3 +153,40 @@ async fn a_taint_survives_a_restart_in(kept: Kept) {
         assert!(!agent_file(&h).exists());
     }
 }
+
+/// Asserts that a start the agent refused as `host-tainted` taints the host here too, and
+/// that the state file is made current before the reply: the beat carries no taint report,
+/// so the reply says `taint_ack` false, `GET /v1/hosts` shows a `host-tainted` taint naming
+/// the run, and the bindings file holds that taint. A beat whose result carries another
+/// detail leaves the host clean and its file without a taint. It catches a refused start
+/// that taints the host in memory only, which a restart would make clean.
+#[tokio::test]
+async fn a_start_refused_as_host_tainted_taints_the_host_and_is_written() {
+    let h = placing_server("host_taint_refused", Kept::Files).await;
+    let me = job_agent(&h, &cpu_hello("burst-1")).await;
+    let ended = |detail: &str| {
+        let result = json!({
+            "run_id": "run-1-1",
+            "lease_id": "1-1",
+            "outcome": "failed_to_start",
+            "detail": detail,
+        });
+        json!({ "results": [result] })
+    };
+
+    let other = beat_with(&h, &me, ended("quota-unavailable")).await;
+    assert_eq!(other["taint_ack"], false);
+    assert_eq!(entry(&hosts(&h).await, "burst-1").get("taint"), None);
+    let clean = fs::read_to_string(agent_file(&h)).unwrap_or_default();
+    assert!(!clean.contains("taint_reason"), "{clean}");
+
+    let reply = beat_with(&h, &me, ended("host-tainted")).await;
+    assert_eq!(reply["taint_ack"], false);
+    let shown = entry(&hosts(&h).await, "burst-1");
+    assert_eq!(
+        shown["taint"],
+        json!({ "reason": "host-tainted", "run_id": "run-1-1" })
+    );
+    let text = fs::read_to_string(agent_file(&h)).unwrap();
+    assert!(text.contains("taint_reason = \"host-tainted\""), "{text}");
+}

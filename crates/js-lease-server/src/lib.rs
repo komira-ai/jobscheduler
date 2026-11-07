@@ -623,9 +623,8 @@
 //! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
 //! outcome `succeeded` or `failed`) are handed to the sink with their series once the
 //! host has sent two more beats, so the lease's last partial minute is not lost, if a
-//! [`KeySource`] names the work they did; by default that is the `profile` name the client
-//! supplied when it queued the run, so a run queued without one is not learned from and
-//! `runs_without_key` counts it. The seam types and
+//! [`KeySource`] names the work they did; without one no run has a key, so none is learned
+//! from and `runs_without_key` counts each. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
 //! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
 //! the server records into the SQLite file `--usage-db` names (beside the lease file by

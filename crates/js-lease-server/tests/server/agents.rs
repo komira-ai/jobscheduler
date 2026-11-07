@@ -495,6 +495,22 @@ async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
     assert_eq!(logs.text().matches(held).count(), 3, "{}", logs.text());
 }
 
+/// Asserts that a static source supplied by the caller replaces the pool file of a server
+/// that has no agent flags: the host list names the supplied source's one host,
+/// `supplied-1`, as a static host, and none of the file's `gpu-01` and `gpu-02`. It catches
+/// a supplied source that is dropped for the file the flags name.
+#[tokio::test]
+async fn a_supplied_source_replaces_the_pool_file_of_a_static_server() {
+    let scratch = crate::support::Scratch::new("agents_supplied_alone");
+    let args = crate::support::base_args(&scratch);
+    let one = "[[host]]\nid = \"supplied-1\"\n[host.resources]\ncpu_millis = 8000\nmemory_bytes = 17179869184\ngpus = 0\n";
+    let supplied = Box::new(crate::support::SharedPool::of(one));
+    let h = Harness::with(scratch, args, Some(supplied)).await;
+    let listing = hosts(&h).await;
+    assert_eq!(listed(&listing), ["supplied-1"]);
+    assert_eq!(entry(&listing, "supplied-1")["source"], "static");
+}
+
 /// Asserts that a static source supplied by the caller (a provider of its own, as the
 /// library allows) is layered under the registered hosts exactly as the pool file is: its
 /// ids are refused to registering hosts. It catches a layer that works only for the source

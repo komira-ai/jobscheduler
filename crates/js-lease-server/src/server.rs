@@ -814,9 +814,8 @@ impl Running {
 
     /// The curves learned from runs that ended cleanly, for admission to read as its
     /// `CurveSource`. A curve is kept under the profile name the caller supplied for the runs,
-    /// not under the work key, so admission finds it through the names the caller gave
-    /// (`Config::with_curve_names`); without them every work key is charged flat.
-    /// `None` without agent registration, with `--usage-off`, or with a sink that learns
+    /// not under the work key, and the server maps no work key to a profile name, so every
+    /// work key is charged flat. `None` without agent registration, with `--usage-off`, or with a sink that learns
     /// none.
     pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
         self.shared.usage_curves()

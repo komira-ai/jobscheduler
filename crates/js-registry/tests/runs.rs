@@ -308,7 +308,9 @@ fn every_refusal_has_its_code() {
     let stranger = fx
         .registry
         .queue_run(&host("static-1"), &lease(1), job("r1", 1));
-    assert_eq!(stranger.unwrap_err(), RunRefusal::HostNotRegistered);
+    let stranger = stranger.unwrap_err();
+    assert_eq!(stranger, RunRefusal::HostNotRegistered);
+    assert_eq!(code(stranger), "host-not-registered");
 
     let mut bad = job("r1", 1000);
     bad.image = "oci:thing".into();

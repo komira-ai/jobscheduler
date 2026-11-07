@@ -11,7 +11,6 @@ use js_jobs::Retention;
 use js_lease::{Boot, Monotonic, Settings, SystemClock, SystemMonotonic};
 
 use js_registry::{OsSessions, SessionSource};
-use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
@@ -27,7 +26,7 @@ use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::store_health::DEFAULT_UNREACHABLE_AFTER;
-use crate::usage::{KeySource, ProfileKey, UsageSink};
+use crate::usage::{KeySource, UsageSink};
 use crate::usage_setup::{UsageSetup, usage_setup};
 
 mod agent_setup;
@@ -872,23 +871,10 @@ impl Config {
         self
     }
 
-    /// The same configuration naming the key of a run with `keys` instead of the profile
-    /// name the client gave when it queued the run (the default).
+    /// The same configuration naming the key of a run with `keys`; without it no run has a
+    /// key, and none is learned from.
     pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
         self.usage.keys = Some(keys);
-        self
-    }
-
-    /// The same configuration telling admission's curve reads (`usage_curves`) which
-    /// profile a work key has. The server never derives a profile name from a work key:
-    /// the name is the one the caller supplied for the run (see [`KeySource`]), so only
-    /// the caller knows which work key has which. Without it every work key is charged
-    /// flat.
-    pub fn with_curve_names(
-        mut self,
-        names: impl Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync + 'static,
-    ) -> Self {
-        self.usage.names = Some(Arc::new(names));
         self
     }
 }

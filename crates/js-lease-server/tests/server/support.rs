@@ -248,8 +248,13 @@ pub struct SharedPool {
 
 impl SharedPool {
     pub fn new() -> Self {
+        Self::of(EXAMPLE_CONFIG)
+    }
+
+    /// A source whose hosts are the ones `config`, the text of a pool file, lists.
+    pub fn of(config: &str) -> Self {
         let id = ProviderId::new("shared").unwrap();
-        let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
+        let pool = StaticPool::from_toml(id, config).unwrap();
         Self {
             pool: Arc::new(std::sync::Mutex::new(pool)),
         }

@@ -20,7 +20,7 @@ use js_registry::{Busy, Credential, HostView, PoolConfig, Registry, SequentialSe
 use js_scaler::{AcquirePlan, Health, Phase as Stage, Records};
 use js_testkit::dir::TestDir;
 use js_types::{
-    Capabilities, ClassId, ExecMode, HostId, LeaseId, ProviderId, Request, ResourceClass,
+    Capabilities, ExecMode, HostId, LeaseId, ProviderId, RefusalCode, Request, ResourceClass,
     Resources, Shape,
 };
 
@@ -170,8 +170,17 @@ fn lease() -> LeaseId {
 
 /// A start of one a10 host under [`lease`].
 fn spec() -> StartSpec {
+    start_of(ResourceClass::gpu_host())
+}
+
+/// A start of one a10 host as a whole node under [`lease`].
+fn whole_spec() -> StartSpec {
+    start_of(ResourceClass::whole_node())
+}
+
+fn start_of(class: ResourceClass) -> StartSpec {
     let request = Request {
-        class: ClassId::new("gpu-host").unwrap(),
+        class: class.id().clone(),
         resources: resources(1000, 1 << 30),
         capabilities: Capabilities::new(),
         max_wall: Duration::from_secs(3600),
@@ -179,7 +188,7 @@ fn spec() -> StartSpec {
         validation_run: None,
         probe_host: None,
     };
-    StartSpec::new(lease(), request, &[ResourceClass::gpu_host()]).unwrap()
+    StartSpec::new(lease(), request, &[class]).unwrap()
 }
 
 /// A registry with the host `HOST` joined and booked under [`lease`], and then silent for
@@ -312,4 +321,32 @@ async fn without_the_file_a_restart_leaves_the_host() {
         second.tick().await;
     }
     assert_eq!(held(&registry), [HOST]);
+}
+
+/// Asserts that the registry asks the scaler whether a launch could serve a whole-node
+/// start that no listed host takes, and that the scaler answers from what its last tick
+/// saw: before any tick the answer is no and the start is refused `no-capable-host`; after
+/// a tick, with the pool live and an offer that fits, it is yes and the start is refused
+/// `no-capacity`, which is the refusal of a request that can wait. It catches a scaler that
+/// answers yes before it has seen anything (a start held for a pool that was never
+/// looked at) and one that never answers yes (every start refused for lack of a host while
+/// the pool could launch one).
+#[tokio::test]
+async fn the_registry_asks_the_scaler_whether_a_launch_could_serve_a_start() {
+    let dir = dir("launchable");
+    let path = dir.path().join("state.scaler.unremoved");
+    let clock = ManualClock::new(Timestamp::from_millis(START));
+    let shape = Shape::new(resources(1000, 1 << 30), BTreeMap::new());
+    let pool = ProviderId::new("gpu").unwrap();
+    let config = PoolConfig::new(pool, ResourceClass::whole_node(), shape, 4);
+    let registry = Registry::with_sessions(config, clock.clone(), SequentialSessions::new());
+    let (scaler, _) = scaler((&registry, &clock), (&path, records(vec![])), None);
+    registry.set_launchable(Some(scaler.launchable()));
+
+    let unseen = registry.provider().start(whole_spec());
+    assert_eq!(unseen, StartAck::Refused(RefusalCode::NoCapableHost));
+
+    scaler.tick().await;
+    let seen = registry.provider().start(whole_spec());
+    assert_eq!(seen, StartAck::Refused(RefusalCode::NoCapacity));
 }
