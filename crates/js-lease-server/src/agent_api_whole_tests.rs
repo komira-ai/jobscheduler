@@ -211,6 +211,7 @@ async fn cancel_while_preparing_frees_after_preparing_ends() {
     assert_eq!(agent.phase, Phase::Restoring);
 
     let queued = queue_share(&rig, "job-q", 600);
+    let before = rig.commits();
     let reply = beat(&rig, &mut agent).await;
     assert_eq!(rig.commits(), before + 1);
     assert_eq!(
