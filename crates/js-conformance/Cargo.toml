@@ -32,6 +32,8 @@ js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
 js-registry = { path = "../js-registry" }
+# The production placer every registry here is built with.
+js-sched-placer = { path = "../js-sched-placer" }
 js-testkit = { path = "../js-testkit" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 

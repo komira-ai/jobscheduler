@@ -91,8 +91,8 @@ impl Rig {
             Shape::new(resources, caps()),
             2,
         );
-        let registry = Registry::with_sessions(pool, clock, SequentialSessions::new());
-        registry.set_placer(Arc::new(SchedPlacer::default()));
+        let placer = Arc::new(SchedPlacer::default());
+        let registry = Registry::with_sessions(pool, clock, SequentialSessions::new(), placer);
         for host in ["a", "b"] {
             registry
                 .hello(&hello(host), &Credential::of_token(JOIN))

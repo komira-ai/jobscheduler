@@ -9,7 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use js_lease::Timestamp;
 use js_provider::{Candidate, Held, SeatError, StartSpec};
-use js_registry::{LeaseTimes, MarkedTails, Placer, SeatedLease};
+use js_registry::{
+    LeaseTimes, MarkedTails, Placer, PoolConfig, Registry, SeatedLease, SequentialSessions,
+    WholeNodeConfig,
+};
+use js_types::{ProviderId, ResourceClass};
 use support::world::*;
 use support::*;
 
@@ -28,11 +32,19 @@ impl Placer for Recorder {
     }
 }
 
-/// `world` with a recorder set as its placer.
-fn recorded(world: &World) -> Arc<Recorder> {
+/// A world over `config` whose registry has a recorder as its placer, `hosts` joined.
+fn recorded(config: PoolConfig, hosts: &[&str]) -> (World, Arc<Recorder>) {
     let recorder = Arc::new(Recorder::default());
-    world.fx.registry.set_placer(recorder.clone());
-    recorder
+    let mut world = World::of(config.clone(), &[]);
+    world.fx.registry = Registry::with_sessions(
+        config.booking_whole_memory(),
+        world.fx.clock.clone(),
+        SequentialSessions::new(),
+        recorder.clone(),
+    );
+    world.provider = world.fx.registry.provider();
+    hosts.iter().for_each(|host| world.join(host));
+    (world, recorder)
 }
 
 fn told(recorder: &Recorder) -> Vec<SeatedLease> {
@@ -47,8 +59,12 @@ fn told(recorder: &Recorder) -> Vec<SeatedLease> {
 /// and a refused put-back the placer would book.
 #[test]
 fn a_whole_node_lease_put_back_is_told_with_its_times() {
-    let w = World::new(&["a"], |settings| settings);
-    let recorder = recorded(&w);
+    let name = ProviderId::new("builders").unwrap();
+    let config = PoolConfig::new(name, ResourceClass::whole_node(), pool_shape(), 4);
+    let config = config
+        .with_whole_node(WholeNodeConfig::dedicated(4))
+        .unwrap();
+    let (w, recorder) = recorded(config, &["a"]);
     let booking = booking_at("a", 1, None, 1_000, 61_000);
     assert_eq!(w.provider.seat_booked(&booking, None), Ok(()));
     let unheard = booking_at("z", 2, None, 2_000, 3_000);
@@ -63,7 +79,7 @@ fn a_whole_node_lease_put_back_is_told_with_its_times() {
         host: host(on),
         held: Held {
             lease: lease(sequence),
-            resources: world_shape().resources().clone(),
+            resources: pool_shape().resources().clone(),
             whole: true,
         },
         times: Some(LeaseTimes {
@@ -91,8 +107,7 @@ fn a_lease_put_back_without_times_is_told_with_none() {
         js_types::Admission::Book(js_types::Dims::new()),
         0,
     );
-    let w = World::of(world_config(4).with_share_class(book).unwrap(), &["a"]);
-    let recorder = recorded(&w);
+    let (w, recorder) = recorded(config(4).with_share_class(book).unwrap(), &["a"]);
     assert_eq!(w.provider.seat(&host("a"), lease(1), None), Ok(()));
     let shares = js_types::Resources::new(1000, 1 << 20, 0, None).unwrap();
     let shared = booking_at("b", 2, Some(shares.clone()), 5, 10);
@@ -100,7 +115,7 @@ fn a_lease_put_back_without_times_is_told_with_none() {
     let told = told(&recorder);
     let whole = Held {
         lease: lease(1),
-        resources: world_shape().resources().clone(),
+        resources: pool_shape().resources().clone(),
         whole: true,
     };
     assert_eq!(

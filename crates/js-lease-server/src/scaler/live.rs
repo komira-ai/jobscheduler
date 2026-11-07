@@ -360,10 +360,18 @@ mod tests {
         let clock = ManualClock::new(Timestamp::from_millis(5_000_000));
         let shared = SharedClock::new(clock.clone());
         let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a10".to_string()));
-        let shape = Shape::new(resources.unwrap(), BTreeMap::new());
+        let shape = Shape::new(
+            resources.unwrap(),
+            BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+        );
         let pool = ProviderId::new("burst").unwrap();
         let config = PoolConfig::new(pool.clone(), ResourceClass::gpu_host(), shape, 4);
-        let registry = Registry::with_sessions(config, clock, SequentialSessions::new());
+        let registry = Registry::with_sessions(
+            config,
+            clock,
+            SequentialSessions::new(),
+            Arc::new(js_sched_placer::place::SchedPlacer::default()),
+        );
         let agents = Arc::new(Agents::over(registry, &shared, &dir));
         let launcher = Launcher::new(
             Arc::new(Stub),

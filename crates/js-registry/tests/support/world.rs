@@ -90,31 +90,18 @@ pub struct World {
 }
 
 impl World {
+    /// A dedicated pool of up to four hosts with `settings`, `hosts` joined.
     pub fn new(hosts: &[&str], settings: impl FnOnce(WholeNodeConfig) -> WholeNodeConfig) -> Self {
-        Self::new_in(Placement::Registry, hosts, settings)
-    }
-
-    /// A dedicated pool of up to four hosts with `settings`, `hosts` joined, its queue
-    /// decided under `placement`.
-    pub fn new_in(
-        placement: Placement,
-        hosts: &[&str],
-        settings: impl FnOnce(WholeNodeConfig) -> WholeNodeConfig,
-    ) -> Self {
         let name = ProviderId::new("builders").unwrap();
-        let config = PoolConfig::new(name, whole(), world_shape(), 4);
+        let config = PoolConfig::new(name, whole(), pool_shape(), 4);
         let settings = settings(WholeNodeConfig::dedicated(4));
-        Self::of_in(placement, config.with_whole_node(settings).unwrap(), hosts)
+        Self::of(config.with_whole_node(settings).unwrap(), hosts)
     }
 
+    /// A world over `config`, `hosts` joined.
     pub fn of(config: PoolConfig, hosts: &[&str]) -> Self {
-        Self::of_in(Placement::Registry, config, hosts)
-    }
-
-    /// A world over `config`, `hosts` joined, its queue decided under `placement`.
-    pub fn of_in(placement: Placement, config: PoolConfig, hosts: &[&str]) -> Self {
         let max_draining = config.whole_node().map_or(1, |w| w.max_draining);
-        let fx = fixture_in(config, placement);
+        let fx = fixture_of(config);
         let provider = fx
             .registry
             .provider()
@@ -135,9 +122,9 @@ impl World {
         world
     }
 
-    /// Admits `host`, reporting the World's architecture ([`WORLD_ARCH`]).
+    /// Admits `host`, reporting the pool's architecture ([`ARCH`]).
     pub fn join(&mut self, host: &str) {
-        let epoch = self.fx.join_world(host);
+        let epoch = self.fx.join(host, "t");
         self.epochs.insert(host.to_string(), epoch);
         self.check();
     }

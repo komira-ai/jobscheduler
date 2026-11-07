@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
@@ -21,6 +22,8 @@ use js_conformance::agent::memory::{Memory as Fake, Time};
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Observed, Pool, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
+use js_sched_placer::engine::Settings;
+use js_sched_placer::place::SchedPlacer;
 use js_testkit::dir::TestDir;
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
@@ -38,7 +41,10 @@ fn shape() -> Shape {
     let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
     Shape::new(
         resources,
-        BTreeMap::from([("os".to_string(), "macos".to_string())]),
+        BTreeMap::from([
+            ("os".to_string(), "macos".to_string()),
+            ("arch".to_string(), "arm64".to_string()),
+        ]),
     )
 }
 
@@ -49,7 +55,9 @@ fn registry() -> Registry {
 fn registry_of(class: ResourceClass) -> Registry {
     let name = ProviderId::new("pool").unwrap();
     let config = PoolConfig::new(name, class, shape(), 2);
-    Registry::new(config, ManualClock::new(Timestamp::from_millis(1_000_000)))
+    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
+    let placer = SchedPlacer::new(Settings::default(), clock.clone());
+    Registry::new(config, clock, Arc::new(placer))
 }
 
 fn start_spec(sequence: u64) -> StartSpec {

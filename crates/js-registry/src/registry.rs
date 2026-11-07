@@ -16,12 +16,9 @@ use crate::load;
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, quota_default, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
-use crate::whole::calls::Calls;
 use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
-use crate::whole::queue::WaitList;
-use crate::whole::requests::{FailedPrepare, Requests, Rules};
-use crate::whole::reserve::Marks;
+use crate::whole::requests::{FailedPrepare, Rules};
 
 mod beat;
 mod cordon;
@@ -155,7 +152,7 @@ pub struct WholeCounts {
     pub reserved: usize,
     /// Hosts with a whole-node lease committed.
     pub held: usize,
-    /// Whole-node requests on the wait list.
+    /// Whole-node requests on the placer's wait list.
     pub queued: usize,
 }
 
@@ -166,20 +163,11 @@ struct State {
     reserved: BTreeSet<HostId>,
     /// The container runs queued for hosts. In memory only.
     runs: Runs,
-    /// The whole-node requests' failed prepares and the leases committed for them.
-    requests: Requests,
-    /// The whole-node requests that found no free host and wait for one.
-    waiting: WaitList,
-    /// The hosts set aside for waiting requests.
-    marks: Marks,
     /// The committed whole-node leases whose prepare failed since the lock was last released,
     /// for the record of each one's end ([`Registry::release`]).
     failed: Vec<FailedPrepare>,
-    /// The passes of the registry's own over the wait list ([`Registry::machine_calls`]).
-    passes: Calls,
-    /// How many restored reservations were dropped: a request not presented again within
-    /// the regain grace, a mark on a host that never came back, a record that could not
-    /// stand ([`Registry::dropped_reservations`]).
+    /// How many restored reservations were dropped: a record that could not stand at the
+    /// restore, and those the placer dropped since ([`Registry::dropped_reservations`]).
     dropped: u64,
     /// Whether a request that finds no host could be served by a launch.
     launchable: Option<Launchable>,
@@ -224,8 +212,9 @@ struct Shared {
     state: Mutex<State>,
     /// The source of the expected life of a profile ([`Registry::set_lives`]).
     lives: OnceLock<Arc<dyn crate::ProfileLives>>,
-    /// The placer that picks the host of a start ([`Registry::set_placer`]).
-    placer: OnceLock<Arc<dyn crate::Placer>>,
+    /// The placer that picks the host of a start and keeps the whole-node queue, given at
+    /// construction ([`Registry::new`]).
+    placer: Arc<dyn crate::Placer>,
     log: OnceLock<Arc<dyn js_usage::AllocationLog>>,
 }
 
@@ -262,9 +251,22 @@ pub struct Registry {
 
 impl Registry {
     /// An empty registry for the pool `config` describes, reading time from `clock` and
-    /// session secrets from the operating system ([`OsSessions`]).
-    pub fn new(config: PoolConfig, clock: impl Clock + Send + Sync + 'static) -> Self {
-        Self::with_sessions(config, clock, OsSessions)
+    /// session secrets from the operating system ([`OsSessions`]), placing with `placer`.
+    ///
+    /// The placer picks the host of every start among the hosts that could take it, and
+    /// keeps the whole-node queue: the wait list, the request records and the hosts set
+    /// aside ([`crate::Placer`]). The registry keeps the booking, the room, the gates of a
+    /// start and every refusal. A class that books part of a host is admitted: the leases
+    /// of such a class share a host that has room for them, and a host that still lists the
+    /// runs of its first lease takes the second. The book lets the leases that share a host
+    /// book together as much CPU above its cores as the placer says
+    /// ([`crate::Placer::cpu_slack_permille`], read once, here).
+    pub fn new(
+        config: PoolConfig,
+        clock: impl Clock + Send + Sync + 'static,
+        placer: Arc<dyn crate::Placer>,
+    ) -> Self {
+        Self::with_sessions(config, clock, OsSessions, placer)
     }
 
     /// As [`Registry::new`], drawing session secrets from `sessions`. A deterministic
@@ -274,17 +276,16 @@ impl Registry {
         config: PoolConfig,
         clock: impl Clock + Send + Sync + 'static,
         sessions: impl SessionSource + 'static,
+        placer: Arc<dyn crate::Placer>,
     ) -> Self {
+        let mut book = HostBook::new();
+        book.set_cpu_slack(placer.cpu_slack_permille());
         let state = State {
-            book: HostBook::new(),
+            book,
             records: BTreeMap::new(),
             reserved: BTreeSet::new(),
             runs: Runs::default(),
-            requests: Requests::default(),
-            waiting: WaitList::default(),
-            marks: Marks::default(),
             failed: Vec::new(),
-            passes: Calls::default(),
             dropped: 0,
             launchable: None,
             ending: BTreeSet::new(),
@@ -297,7 +298,7 @@ impl Registry {
                 sessions: Box::new(sessions),
                 state: Mutex::new(state),
                 lives: OnceLock::new(),
-                placer: OnceLock::new(),
+                placer,
                 log: OnceLock::new(),
             }),
         }
@@ -311,21 +312,6 @@ impl Registry {
     /// per pool. A registry with no source costs a lease by its max-wall bound alone.
     pub fn set_lives(&self, lives: Arc<dyn crate::ProfileLives>) {
         let _ = self.shared.lives.set(lives);
-    }
-
-    /// Gives the registry the placer that picks the host of a start. From then on a start
-    /// is shown every host that could take it and books the one the placer picks, and a
-    /// class that books part of a host is admitted: the leases of such a class share a
-    /// host that has room for them, and a host that still lists the runs of its first
-    /// lease takes the second. Without a placer the registry books the first host by id,
-    /// leases whole hosts only, and refuses a class that does not book one with
-    /// `UnsupportedClass`. Only the first call takes effect.
-    /// The book lets the leases that share a host book together as much CPU above its
-    /// cores as the placer says ([`crate::Placer::cpu_slack_permille`]).
-    pub fn set_placer(&self, placer: Arc<dyn crate::Placer>) {
-        let slack = placer.cpu_slack_permille();
-        let first = self.shared.placer.set(placer).is_ok();
-        first.then(|| self.lock().book.set_cpu_slack(slack));
     }
 
     /// The provider the lease table runs on, serving the pool's class and its share class
@@ -611,12 +597,10 @@ impl Registry {
         let host = beat::parse(heartbeat)?;
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
-        let keeps = self.keeper().is_some();
         let State {
             book,
             records,
             runs,
-            requests,
             failed,
             ..
         } = &mut *guard;
@@ -638,24 +622,18 @@ impl Registry {
         record.exclusive = plan.exclusive;
         if heartbeat.exclusive_ready.is_some() {
             let granted = record.exclusive.ready_lease();
-            granted.iter().for_each(|lease| {
-                // A placer that keeps the records lets the request's go itself.
-                if !keeps {
-                    requests.granted(lease);
-                }
-                self.tell_ready(lease);
-            });
+            // The placer keeps the request's records and lets them go itself.
+            granted.iter().for_each(|lease| self.tell_ready(lease));
         }
         if let Some((lease, cause, detail)) = plan.refused {
             let rules = Rules::of(&self.shared.config);
             let mut ending = Ending {
                 book: &mut *book,
                 runs: &mut *runs,
-                requests: (!keeps).then_some(&mut *requests),
                 failed: &mut *failed,
                 rules,
                 now,
-                placer: self.shared.placer.get().map(|placer| &**placer),
+                placer: self.placer(),
             };
             ending.fail(
                 (&mut record.taint, &mut record.exclusive),

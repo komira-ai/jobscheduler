@@ -55,16 +55,16 @@ fn request(class: &str, wall_s: u64) -> Request {
 
 /// A server over one registered host, `a`, in a pool whose reservations are due thirty
 /// seconds after they are made (a deadline that gives nothing up) and which keeps a request
-/// that is not presented again on its wait list for ten minutes.
+/// that is not presented again on its wait list for ten minutes. The registry is set up as
+/// the server sets it up: it books each host's whole memory and js-sched's engine, on the
+/// rig's clock, keeps the whole-node queue. The pool's shape and the host name an `arch`, so
+/// the engine can describe the host.
 pub(super) struct Rig {
     pub(super) shared: Arc<Shared>,
     name: String,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
     pub(super) registry: Registry,
-    /// Whether the registry's queue is decided by js-sched's engine (`--placement
-    /// js-sched`), as [`Rig::sched`] builds it.
-    sched: bool,
     /// The epoch and session of the host's last hello, for its heartbeats ([`Rig::beat`]).
     agent: Option<(u64, String)>,
 }
@@ -82,26 +82,18 @@ enum Start {
 
 impl Rig {
     pub(super) async fn new(name: &str) -> Self {
-        Self::build(name, false, Start::Fresh, None, false).await
-    }
-
-    /// A rig whose registry is set up as the server sets it up for `--placement js-sched`:
-    /// it books each host's whole memory and js-sched's engine, on the rig's clock, keeps its
-    /// whole-node queue. The pool's shape and the host name an `arch`, so the engine can
-    /// describe the host.
-    pub(super) async fn sched(name: &str) -> Self {
-        Self::build(name, false, Start::Fresh, None, true).await
+        Self::build(name, false, Start::Fresh, None).await
     }
 
     /// A rig whose server serves the status routes (to private peers).
     pub(super) async fn serving_status(name: &str) -> Self {
-        Self::build(name, true, Start::Fresh, None, false).await
+        Self::build(name, true, Start::Fresh, None).await
     }
 
     /// A rig whose server serves the status routes (to private peers), with the counters of
     /// the host credentials of live logs that `logs` holds.
     pub(super) async fn serving_status_with_logs(name: &str, logs: Arc<LogGrants>) -> Self {
-        Self::build(name, true, Start::Fresh, Some(logs), false).await
+        Self::build(name, true, Start::Fresh, Some(logs)).await
     }
 
     /// The server started again over the files of this one, on the same clock, with
@@ -109,19 +101,14 @@ impl Rig {
     /// file. With `host_back` the host `a` says hello again holding the lease it held;
     /// without it the host never returns.
     pub(super) async fn restart(self, host_back: bool) -> Self {
-        let (name, clock, sched) = (self.name.clone(), self.clock.clone(), self.sched);
+        let (name, clock) = (self.name.clone(), self.clock.clone());
         drop(self);
-        Self::build(&name, false, Start::Again { clock, host_back }, None, sched).await
+        Self::build(&name, false, Start::Again { clock, host_back }, None).await
     }
 
     /// A server resumed over a lease file whose text is `text`, on a fresh clock, with
     /// the host `a` back.
     pub(super) async fn over_file(name: &str, text: &str) -> Self {
-        Self::over_file_in(name, text, false).await
-    }
-
-    /// [`Rig::over_file`], under `--placement js-sched` when `sched` ([`Rig::sched`]).
-    pub(super) async fn over_file_in(name: &str, text: &str, sched: bool) -> Self {
         let dir = Self::dir(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -131,7 +118,7 @@ impl Rig {
             clock,
             host_back: true,
         };
-        Self::build(name, false, start, None, sched).await
+        Self::build(name, false, start, None).await
     }
 
     fn dir(name: &str) -> std::path::PathBuf {
@@ -140,13 +127,7 @@ impl Rig {
             .join(name)
     }
 
-    async fn build(
-        name: &str,
-        status: bool,
-        start: Start,
-        logs: Option<Arc<LogGrants>>,
-        sched: bool,
-    ) -> Self {
+    async fn build(name: &str, status: bool, start: Start, logs: Option<Arc<LogGrants>>) -> Self {
         let dir = Self::dir(name);
         let (clock, boot, host_back) = match start {
             Start::Fresh => {
@@ -160,9 +141,7 @@ impl Rig {
         let shared_clock = SharedClock::new(clock.clone());
         let resources = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let mut host_caps = caps();
-        if sched {
-            host_caps.insert("arch".to_string(), "arm64".to_string());
-        }
+        host_caps.insert("arch".to_string(), "arm64".to_string());
         let shape = Shape::new(resources, host_caps.clone());
         let pool = PoolConfig::new(
             ProviderId::new("builders").unwrap(),
@@ -177,17 +156,14 @@ impl Rig {
             ..WholeNodeConfig::dedicated(1)
         };
         let pool = pool.with_whole_node(whole.clone()).unwrap();
-        let pool = if sched {
-            pool.booking_whole_memory()
-        } else {
-            pool
-        };
-        let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
-        if sched {
-            let placer =
-                SchedPlacer::new(js_sched_placer::engine::Settings::default(), clock.clone());
-            registry.set_placer(Arc::new(placer));
-        }
+        let pool = pool.booking_whole_memory();
+        let placer = SchedPlacer::new(js_sched_placer::engine::Settings::default(), clock.clone());
+        let registry = Registry::with_sessions(
+            pool,
+            clock.clone(),
+            SequentialSessions::new(),
+            Arc::new(placer),
+        );
         let hello = Hello {
             protocol: ProtocolRange { min: 1, max: 1 },
             host_id: "a".into(),
@@ -258,7 +234,6 @@ impl Rig {
             clock,
             asker,
             registry,
-            sched,
             agent,
         }
     }
@@ -375,7 +350,7 @@ async fn a_committed_host_lists_as_held() {
     assert!(!body.contains("reserved_for") && !body.contains("drain_deadline_ms"));
 }
 
-pub(super) const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
+pub(super) const GOLDEN: &str = r#"{"hosts":[{"id":"a","source":"registered","state":"live","lost":false,"phase":"serving","lease":"1-1","shape":{"cpu_millis":4000,"memory_bytes":8589934592,"gpus":0},"memory":{"configured_bytes":8589934592,"schedulable_percent":100,"bookable_bytes":8589934592},"capabilities":{"arch":"arm64","os":"macos"},"labels":{},"agent_version":"0.1.0","releasing":false,"mark":"reserved","reserved_for":"r1","drain_deadline_ms":1030000}]}"#;
 
 /// A writer the log lines of a test go to.
 #[derive(Clone, Default)]

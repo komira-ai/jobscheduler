@@ -35,39 +35,20 @@ impl Registry {
         // Read once: the record of the end and the tail counters see the same estimate.
         let estimate = self.estimate_of(&guard, lease);
         let ended = self.ended_row(&guard, lease, (ended_at, estimate));
-        let keeper = self.keeper();
+        let placer = self.placer();
         let State {
             book,
             records,
             runs,
-            requests,
             tail,
-            waiting,
-            marks,
             ..
         } = &mut *guard;
         // A cancelled request leaves no trace: no mark, and no record of its failures, so
-        // the id names a fresh request if it is used again. A placer that keeps the wait
-        // list takes it off its own, and forgets it with the rest.
-        let cancelled = match keeper {
-            Some(keeper) => keeper.whole_cancel_lease(lease),
-            None => waiting.cancel_lease(lease),
-        };
-        let placer = self.shared.placer.get();
-        cancelled.iter().for_each(|id| {
-            if keeper.is_none() {
-                marks.drop_request(id);
-                requests.forget(id);
-            }
-            placer
-                .into_iter()
-                .for_each(|placer| placer.whole_forget(id));
-        });
+        // the id names a fresh request if it is used again. The placer takes it off its
+        // wait list and forgets it with the rest.
+        let cancelled = placer.whole_cancel_lease(lease);
+        cancelled.iter().for_each(|id| placer.whole_forget(id));
         runs.stop_lease(lease);
-        // A placer that keeps the records lets the lease go when it is told of its end.
-        if keeper.is_none() {
-            requests.release(lease);
-        }
         if let Observed::Present { host } = book.read(lease) {
             let record = records.get_mut(&host);
             record.into_iter().for_each(|record| {
@@ -83,9 +64,8 @@ impl Registry {
             });
         }
         let read_back = book.stop(lease);
-        if let Some(placer) = self.shared.placer.get() {
-            placer.ended(*lease);
-        }
+        // The placer lets the lease go as its request's when it is told of its end.
+        placer.ended(*lease);
         drop(guard);
         self.log_ended(ended);
         read_back
@@ -96,23 +76,19 @@ impl Registry {
     /// again. Call it once at a start, after [`Registry::restore_reservations`]. A request
     /// that is not waiting is left alone. How many were bound.
     pub fn bind_waiting(&self, held: &[(LeaseId, RequestId)]) -> usize {
-        let mut state = self.lock();
-        let keeper = self.keeper();
-        let bound = held.iter().filter(|(lease, id)| match keeper {
-            Some(keeper) => keeper.whole_bind(id, *lease),
-            None => state.waiting.bind(id, *lease),
-        });
+        let _state = self.lock();
+        let placer = self.placer();
+        let bound = held
+            .iter()
+            .filter(|(lease, id)| placer.whole_bind(id, *lease));
         bound.count()
     }
 
     /// Whether the whole-node request lease `lease` presented last waits for a host
     /// (see [`js_provider::Pool::waits`]).
     pub(crate) fn waits(&self, lease: &LeaseId) -> bool {
-        let state = self.lock();
-        match self.keeper() {
-            Some(keeper) => keeper.whole_waiter_of(lease).is_some(),
-            None => state.waiting.holds_lease(lease),
-        }
+        let _state = self.lock();
+        self.placer().whole_waiter_of(lease).is_some()
     }
 
     /// Ends every committed whole-node lease that was not reported ready within
@@ -207,7 +183,7 @@ impl Registry {
         let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
         // The placer books the lease as the registry does from now on, as it was started
         // and bound: it drains by bounds with or without a source of lives.
-        let placer = self.shared.placer.get().filter(|_| seated.is_ok());
+        let placer = Some(self.placer()).filter(|_| seated.is_ok());
         let told = placer.zip(book.held(&lease)).map(|(placer, held)| {
             let seated = SeatedLease {
                 host: host.clone(),
@@ -237,43 +213,33 @@ impl Registry {
         seated
     }
 
-    /// Tells the placer, if there is one, that `host` said hello, listed in the book as
+    /// Tells the placer that `host` said hello, listed in the book as
     /// `shape`: the pool's booked shape with what of the host's claim the pool places by
     /// (`PoolConfig::list_claimed`).
     pub(super) fn tell_up(&self, host: &HostId, shape: &Shape) {
-        if let Some(placer) = self.shared.placer.get() {
-            placer.host_up(host, shape);
-        }
+        self.placer().host_up(host, shape);
     }
 
-    /// Tells the placer, if there is one, that `host` is no longer listed.
+    /// Tells the placer that `host` is no longer listed.
     pub(super) fn tell_gone(&self, host: &HostId) {
-        if let Some(placer) = self.shared.placer.get() {
-            placer.host_gone(host);
-        }
+        self.placer().host_gone(host);
     }
 
-    /// Tells the placer, if there is one, that a heartbeat of `host` was accepted, with
+    /// Tells the placer that a heartbeat of `host` was accepted, with
     /// the reading it brought ([`crate::Placer::heard`]).
     pub(super) fn tell_heard(&self, host: &HostId, reading: Option<&NodeLoad>) {
-        if let Some(placer) = self.shared.placer.get() {
-            placer.heard(host, reading);
-        }
+        self.placer().heard(host, reading);
     }
 
-    /// Tells the placer, if there is one, that the agent reported `lease` ready on a clean
+    /// Tells the placer that the agent reported `lease` ready on a clean
     /// host committed to it ([`crate::Placer::prepare_ready`]).
     pub(super) fn tell_ready(&self, lease: &LeaseId) {
-        if let Some(placer) = self.shared.placer.get() {
-            placer.prepare_ready(lease);
-        }
+        self.placer().prepare_ready(lease);
     }
 
-    /// Tells the placer, if there is one, that the host of `lease`, ready, said hello again,
+    /// Tells the placer that the host of `lease`, ready, said hello again,
     /// so the lease waits for ready again ([`crate::Placer::prepare_again`]).
     pub(super) fn tell_again(&self, lease: &LeaseId) {
-        if let Some(placer) = self.shared.placer.get() {
-            placer.prepare_again(lease);
-        }
+        self.placer().prepare_again(lease);
     }
 }

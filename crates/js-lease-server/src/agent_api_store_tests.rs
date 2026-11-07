@@ -50,6 +50,7 @@ fn body(host: &str, pool: &str, asking: bool) -> Bytes {
             "gpus": 1,
             "gpu_class": "nvidia-a100",
         },
+        "capabilities": { "arch": "x86_64" },
         "phase": "serving",
         "accepts_host_credential": asking,
     });
@@ -111,10 +112,18 @@ fn rig(name: &str) -> Rig {
 fn over(dir: TestDir, store: Arc<Interfere<Fake>>, clock: ManualClock) -> Rig {
     let shared = SharedClock::new(clock.clone());
     let resources = Resources::new(8000, 17179869184, 1, Some("nvidia-a100".to_string())).unwrap();
-    let shape = Shape::new(resources, BTreeMap::new());
+    let shape = Shape::new(
+        resources,
+        BTreeMap::from([("arch".to_string(), "x86_64".to_string())]),
+    );
     let name = ProviderId::new("burst").unwrap();
     let pool = PoolConfig::new(name, ResourceClass::gpu_host(), shape, 4);
-    let registry = Registry::with_sessions(pool, clock.clone(), SequentialSessions::new());
+    let registry = Registry::with_sessions(
+        pool,
+        clock.clone(),
+        SequentialSessions::new(),
+        Arc::new(js_sched_placer::place::SchedPlacer::default()),
+    );
     let kept: Arc<dyn Store> = store.clone();
     let agents = Agents::over(registry, &shared, dir.path()).kept_in(kept);
     let pool = agents.tokens.identify(&"j".repeat(40)).unwrap();

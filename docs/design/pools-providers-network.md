@@ -657,7 +657,7 @@ again at every tick, and alerted. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
 the pool until the injected clock passes it.
 
-Demand. As built, the scaler's demand is the registry's wait list (below) followed by the
+Demand. As built, the scaler's demand is the whole-node wait list the placer keeps (below) followed by the
 job tables' queued jobs (`crates/js-lease-server/src/scaler/jobs.rs`): each queued job
 without a live allocation is one `Waiting`, in queue order. The wait list stays an input
 until the lease API is deleted. A share job asks for its resources and constraints as admission
@@ -770,7 +770,7 @@ Rules, each tied to a requirement or to existing behaviour:
   Matching is greedy in queue order, one request to one host or record. With a whole-host
   class one uncovered request needs one machine: uncovered = waiting requests with no match.
   At most `max_step` (default 1) launches per tick. Registered capacity is tried first: that
-  is the registry's own start path, which runs before a request reaches the wait list
+  is the registry's start path, which runs before a request reaches the wait list
   (requirement 14). PROPOSAL (Open questions 21): a reservation counts as covering however long
   its `drain_deadline` is. The cost of that choice is a request waiting on a long drain while a
   launch would have served it sooner; the benefit is that no paid machine is bought for a
@@ -980,7 +980,7 @@ Rules, each tied to a requirement or to existing behaviour:
 
 ### 6.3 Registry additions (crate `js-registry`)
 
-- `Registry::waiting(&self) -> Vec<Waiting>` (reads `WaitList`).
+- `Registry::waiting(&self) -> Vec<Waiting>` (reads the placer's wait list).
 - Drain and release marks. The registry already marks hosts: `HostMark::{Reserved, Held}` with a
   `drain_deadline` (`crates/js-registry/src/registry.rs`, `HostView`), used when a waiting
   whole-node request reserves a busy host. That is a different thing: it serves one named

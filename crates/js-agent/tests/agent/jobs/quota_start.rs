@@ -234,21 +234,41 @@ fn a_default_above_the_offered_disk_is_warned_about() {
     assert!(!ran.err.contains("--scratch-default-gib"), "{}", ran.err);
 }
 
+/// The production placer, as the server gives it to a registry.
+fn placer(clock: &ManualClock) -> std::sync::Arc<js_sched_placer::place::SchedPlacer> {
+    let settings = js_sched_placer::engine::Settings::default();
+    std::sync::Arc::new(js_sched_placer::place::SchedPlacer::new(
+        settings,
+        clock.clone(),
+    ))
+}
+
+/// The architecture the agent of `hello` reports: the pool names it because the production
+/// placer describes only hosts that have one.
+fn arch_of(hello: &Hello) -> &str {
+    &hello.capabilities["arch"]
+}
+
 /// How many runs without `disk_bytes` the server admits onto the host that said `hello`, in
 /// a pool that books the hello's disk and names `scratch-quota`.
 fn server_admits(hello: &Hello) -> usize {
     let resources = Resources::new(1000, 1 << 30, 0, None)
         .unwrap()
         .with_disk_bytes(hello.shape.disk_bytes);
-    let caps: BTreeMap<String, String> = [("os", "linux"), ("scratch-quota", "project")]
-        .into_iter()
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect();
+    let caps: BTreeMap<String, String> = [
+        ("os", "linux"),
+        ("arch", arch_of(hello)),
+        ("scratch-quota", "project"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect();
     let class = ResourceClass::new(ClassId::new("box").unwrap(), Admission::BookAll, 0);
     let name = ProviderId::new(&hello.pool).unwrap();
     let config = PoolConfig::new(name, class.clone(), Shape::new(resources, caps), 2);
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let registry = Registry::with_sessions(config, clock, SequentialSessions::new());
+    let placer = placer(&clock);
+    let registry = Registry::with_sessions(config, clock, SequentialSessions::new(), placer);
     registry.hello(hello, &Credential::of_token("t")).unwrap();
     let request = Request {
         class: class.id().clone(),
@@ -278,12 +298,17 @@ fn server_admits(hello: &Hello) -> usize {
 /// at its default, so the server would admit what the agent refuses.
 fn plain_pool_refuses(hello: &Hello) {
     let resources = Resources::new(1000, 1 << 30, 0, None).unwrap();
-    let caps: BTreeMap<String, String> = [("os".to_owned(), "linux".to_owned())].into();
+    let caps: BTreeMap<String, String> = [
+        ("os".to_owned(), "linux".to_owned()),
+        ("arch".to_owned(), arch_of(hello).to_owned()),
+    ]
+    .into();
     let class = ResourceClass::new(ClassId::new("box").unwrap(), Admission::BookAll, 0);
     let name = ProviderId::new(&hello.pool).unwrap();
     let config = PoolConfig::new(name, class, Shape::new(resources, caps), 2);
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let registry = Registry::with_sessions(config, clock, SequentialSessions::new());
+    let placer = placer(&clock);
+    let registry = Registry::with_sessions(config, clock, SequentialSessions::new(), placer);
     let refused = registry
         .hello(hello, &Credential::of_token("t"))
         .unwrap_err();
