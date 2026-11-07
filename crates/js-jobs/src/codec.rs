@@ -332,7 +332,12 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     let constraints = &spec.constraints;
     row.put_opt(t::OS, constraints.os.as_deref().map(text));
     row.put_opt(t::ARCH, constraints.arch.as_deref().map(text));
-    row.put_opt(t::EXEC, constraints.exec.map(|exec| vec![host_fields::exec_code(exec)]));
+    row.put_opt(
+        t::EXEC,
+        constraints
+            .exec
+            .map(|exec| vec![host_fields::exec_code(exec)]),
+    );
     row.put(t::CAPABILITIES, text_map(&constraints.capabilities));
     host_fields::put_isolation(row, constraints.isolation);
     row.put(t::WALL_LIMIT_SECS, spec.wall_limit_secs.to_be_bytes());

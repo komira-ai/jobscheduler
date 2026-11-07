@@ -17,7 +17,7 @@ use serde_json::json;
 
 use super::tests::{clock, host, on_the_machine, queue_spec, sized};
 use crate::adapt::SharedClock;
-use crate::agent_api::job_rig::{FakeAgent, Rig, placing_rig, starts};
+use crate::agent_api::job_rig::{FakeAgent, placing_rig, starts};
 use crate::agent_state::{self, BindingStore};
 use crate::agents::{Agents, assemble_placed, state_path};
 use crate::hosts::HostList;

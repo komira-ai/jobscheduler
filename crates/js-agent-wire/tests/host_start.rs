@@ -65,11 +65,14 @@ fn isolation_is_additive_on_the_wire_and_in_the_proto() {
     assert_eq!(old.isolation, Isolation::Contained);
     assert_eq!(old.validate(), Ok(()));
     assert_eq!(old, start(Isolation::Contained));
-    assert_eq!(serde_json::to_vec(&old).unwrap(), serde_json::to_vec(&old_body()).unwrap());
+    assert_eq!(serde_json::to_value(&old).unwrap(), old_body());
 
     let mut host_body = old_body();
     host_body["isolation"] = json!("host");
-    assert_eq!(serde_json::to_value(start(Isolation::Host)).unwrap(), host_body);
+    assert_eq!(
+        serde_json::to_value(start(Isolation::Host)).unwrap(),
+        host_body
+    );
     let host: JobStartSpec = serde_json::from_value(host_body).unwrap();
     assert_eq!(host, start(Isolation::Host));
     assert_eq!(host.validate(), Ok(()));

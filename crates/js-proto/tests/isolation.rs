@@ -50,7 +50,8 @@ fn isolation_is_additive_on_the_wire_and_in_the_proto() {
     }
 
     let set = FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).expect("the descriptor set decodes");
-    let constraints = set.file
+    let constraints = set
+        .file
         .iter()
         .flat_map(|file| &file.message_type)
         .find(|message| message.name() == "Constraints")
@@ -61,7 +62,8 @@ fn isolation_is_additive_on_the_wire_and_in_the_proto() {
         .find(|field| field.name() == "isolation")
         .expect("Constraints.isolation is in the schema");
     assert_eq!(field.number(), 6);
-    let isolation = set.file
+    let isolation = set
+        .file
         .iter()
         .flat_map(|file| &file.enum_type)
         .find(|one| one.name() == "Isolation")

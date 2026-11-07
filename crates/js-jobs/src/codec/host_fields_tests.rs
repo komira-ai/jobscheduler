@@ -41,7 +41,10 @@ fn isolation_reads_back_as_written() {
 // and a host job written with another value than 1.
 #[test]
 fn only_a_host_job_writes_the_isolation_tag() {
-    assert_eq!(field_of(&job_row(&full_job()), job_host_tag::ISOLATION), None);
+    assert_eq!(
+        field_of(&job_row(&full_job()), job_host_tag::ISOLATION),
+        None
+    );
     assert_eq!(
         field_of(&job_row(&host_job()), job_host_tag::ISOLATION),
         Some(vec![1])

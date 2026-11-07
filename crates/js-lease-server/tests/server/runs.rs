@@ -528,7 +528,10 @@ async fn the_run_api_still_refuses_host_isolation() {
     let h = start_agents("runs_host_isolation", false).await;
     let mut hello = hello_body("burst-1");
     hello["capabilities"]["host-jobs"] = json!("true");
-    let me = session(&post(&h, "/v1/agent/hello", Some(JOIN), &hello).await, "burst-1");
+    let me = session(
+        &post(&h, "/v1/agent/hello", Some(JOIN), &hello).await,
+        "burst-1",
+    );
     beat(&h, &me, &[], &[]).await;
     let lease = lease(&h).await;
 

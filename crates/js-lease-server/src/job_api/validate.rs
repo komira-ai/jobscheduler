@@ -34,7 +34,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_agent_wire::{RunFile, validate_files};
-use js_jobs::{Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy};
+use js_jobs::{
+    Constraints, DeclaredPort, Isolation, JobFiles, JobId, JobSpec, Needs, NetworkPolicy,
+};
 use js_proto::v1;
 use js_types::{
     ACCEL_COUNT_KEY, ACCEL_FORM_FACTOR_KEY, ACCEL_INTERCONNECT_KEY, ACCEL_MEMORY_GIB_KEY,

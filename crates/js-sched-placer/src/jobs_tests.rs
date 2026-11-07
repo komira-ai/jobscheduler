@@ -384,7 +384,10 @@ fn a_host_isolation_job_is_told_as_a_taint_and_a_whole_host_one_waits() {
     assert_eq!(rig.go(&recorder), std::slice::from_ref(&h.id));
     let placed = rig.tables.jobs.get_job(&h.id).unwrap().unwrap();
     let on = placed.host.unwrap();
-    assert_eq!(*recorder.tainted.lock().unwrap(), [(on.clone(), h.id.clone())]);
+    assert_eq!(
+        *recorder.tainted.lock().unwrap(),
+        [(on.clone(), h.id.clone())]
+    );
     assert_eq!(*recorder.started.lock().unwrap(), [(h.id.clone(), on)]);
     let waiting = rig.tables.jobs.get_job(&w.id).unwrap().unwrap();
     assert_eq!(waiting.state, JobState::Queued);

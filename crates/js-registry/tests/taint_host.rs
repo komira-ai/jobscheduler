@@ -45,7 +45,10 @@ fn a_taint_is_set_once_and_the_first_reason_stands() {
 #[test]
 fn an_unknown_host_is_not_tainted() {
     let fx = fixture(2);
-    assert!(!fx.registry.taint_host(&host("a"), taint("host-job", Some("job-1"))));
+    assert!(
+        !fx.registry
+            .taint_host(&host("a"), taint("host-job", Some("job-1")))
+    );
     assert!(fx.registry.hosts().is_empty());
 }
 

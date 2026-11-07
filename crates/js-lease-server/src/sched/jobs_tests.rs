@@ -10,8 +10,8 @@ use std::time::Duration;
 use js_agent_wire::{Command, HeldJob, HeldState, NetworkCeiling};
 use js_jobs::interfere::Interfere;
 use js_jobs::{
-    AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs, NewJob,
-    Output,
+    AllocationStep, Booked, Constraints, Isolation, JobEnd, JobId, JobSpec, JobState, Needs,
+    NewJob, Output,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Candidate, Pool};

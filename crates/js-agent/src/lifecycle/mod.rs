@@ -591,9 +591,11 @@ impl Local {
             None => DirLayout::Private,
         };
         if cli.allow_host_jobs {
-            return Err("--allow-host-jobs: no runtime of this agent launches a host job yet: \
+            return Err(
+                "--allow-host-jobs: no runtime of this agent launches a host job yet: \
                         crun and docker run contained jobs only"
-                .to_owned());
+                    .to_owned(),
+            );
         }
         let egress = egress_of(cli, crun.is_some())?;
         let mounts = MountRoots::with_read_only(&cli.mount_roots, &cli.mount_roots_ro)?;

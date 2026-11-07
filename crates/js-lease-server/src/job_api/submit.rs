@@ -217,7 +217,13 @@ pub(super) async fn submit_job(
         None => false,
     };
     let isolation = valid.spec.constraints.isolation;
-    if !held && !served.admission.0.can_ever_serve(&valid.wanted, isolation).await {
+    if !held
+        && !served
+            .admission
+            .0
+            .can_ever_serve(&valid.wanted, isolation)
+            .await
+    {
         return Err(no_capable_host());
     }
     let new = NewJob {

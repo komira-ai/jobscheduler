@@ -161,7 +161,10 @@ fn a_taint_table_that_cannot_be_read_or_bindings_that_cannot_be_committed_refuse
 
     jobs_store.fail_next();
     let undeleted = restore_job_taints(&jobs, &store, &mut held, FLAG).unwrap_err();
-    assert!(undeleted.to_string().starts_with("--job-listen: "), "{undeleted}");
+    assert!(
+        undeleted.to_string().starts_with("--job-listen: "),
+        "{undeleted}"
+    );
     assert_eq!(jobs.host_taints().unwrap().len(), 3);
 
     restore_job_taints(&jobs, &store, &mut held, FLAG).unwrap();

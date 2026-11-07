@@ -72,7 +72,10 @@ where
         "{name}: the placement and the taint took other than one commit"
     );
     for key in ["job/t-host", "alloc/t-host", "taint/host-a"] {
-        assert!(rig.raw(key).is_some(), "{name}: the commit did not write {key}");
+        assert!(
+            rig.raw(key).is_some(),
+            "{name}: the commit did not write {key}"
+        );
     }
     assert_eq!(
         rig.jobs.host_taints(),
