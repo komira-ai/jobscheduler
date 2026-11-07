@@ -57,7 +57,7 @@ use crate::front::{FrontFactory, LeaseFront};
 use crate::jobs::JobFront;
 use crate::observe::ItemId;
 use crate::replay::{self, Failure, FailureReport, REPORT_LINES};
-use crate::server::{ServerSpec, Shape};
+use crate::server::{ServerSpec, Shape, Store};
 use crate::work::Work;
 
 mod answer;
@@ -260,6 +260,17 @@ impl Scenario {
         let spelled = spelled.map(|value| value.get_name().to_owned());
         self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
         self.server = self.server.placement(placement);
+        self
+    }
+
+    /// This scenario, its server keeping its state in `store` ([`ServerSpec::store`]), its
+    /// name followed by `-` and the store's name ([`Store::name`]), so that the runs of one
+    /// scenario over each store are named apart in a failure and in the golden file. After
+    /// [`Scenario::server`], which would put the default store back.
+    #[must_use]
+    pub fn over_store(mut self, store: Store) -> Self {
+        self.name = format!("{}-{}", self.name, store.name());
+        self.server = self.server.store(store);
         self
     }
 

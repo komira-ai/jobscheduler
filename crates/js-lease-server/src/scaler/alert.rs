@@ -28,6 +28,10 @@ use std::collections::{BTreeMap, BTreeSet};
 ///   and it stays there until an operator resets it (`POST /v1/pools/{pool}/brake/reset`).
 /// - A host in `unremoved`: the registry still holds the host of a machine that is gone
 ///   and refuses to remove it (a lease is booked on it), which keeps the host's slot.
+/// - An offer in `cooled_offers`: the hello of a machine acquired for it did not match it,
+///   so the machine was released and the offer is cooled down; the provider's catalog or
+///   the alias table likely names a machine it does not deliver. It holds while the
+///   cool-down holds and names the offer and the dimensions that failed.
 pub(super) fn alerts(
     (state, input): (&State, &Input),
     now: Millis,
@@ -97,6 +101,22 @@ pub(super) fn alerts(
                 ),
             )
         });
+    let cooled = state.records.cooled_offers.iter().map(|cooled| {
+        let zone = cooled.zone.as_deref().unwrap_or("-");
+        let failed: Vec<&str> = cooled.failed.iter().map(|each| each.name()).collect();
+        (
+            format!("offer:{}:{}:{zone}", cooled.provider, cooled.offer),
+            format!(
+                "offer {:?} of provider {:?} in zone {zone:?} is cooled down until {} ms: the hello of host {:?} of pool {:?} did not match it in {}; the machine was released and a failed boot counted toward the pool's brake, so check the provider's catalog row and the accelerator alias for the offer",
+                cooled.offer,
+                cooled.provider,
+                cooled.until.as_millis(),
+                cooled.host,
+                cooled.pool,
+                failed.join(", ")
+            ),
+        )
+    });
     let bound = settings.boot_timeout.saturating_add(hold);
     let all = state.records.instances.iter();
     let releasing = all
@@ -116,6 +136,7 @@ pub(super) fn alerts(
         .chain(unremoved)
         .chain(releasing)
         .chain(tripped)
+        .chain(cooled)
         .collect()
 }
 

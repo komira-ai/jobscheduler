@@ -1,5 +1,6 @@
 //! A machine from hello to gone: idle, drain, release, the read-back of a release, a hello
-//! below the offer, a boot that does not finish, and a machine the provider lost.
+//! that does not match its offer, a boot that does not finish, and a machine the provider
+//! lost.
 
 mod common;
 
@@ -180,49 +181,65 @@ fn short(change: fn(&mut HostFacts)) -> (Rig, js_scaler::AcquirePlan) {
     (rig, plan)
 }
 
-/// Asserts that a hello below the offer in cpu, memory, accelerator count or accelerator
-/// model (or with no accelerator) condemns the host: it is drained, and marked for release,
-/// as soon as it is quiet, the pool waits out
-/// `boot_fail_cooldown`, and a hello that meets or exceeds the offer does neither.
+/// Asserts that a hello below the offer in cpu or memory past the size tolerance (10 percent
+/// by default), in accelerator count or accelerator model (or with no accelerator) condemns
+/// the host and releases its machine in that step (the token revoked, the release asked),
+/// the pool waits out `boot_fail_cooldown`, and a hello that meets the offer, exceeds it, or
+/// is short of it by less than the tolerance does neither. Catches a short host left
+/// registered, and a measured size a little under the nominal one read as short.
 #[test]
 fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
     let below: [fn(&mut HostFacts); 5] = [
-        |h| shape(h).cpu_millis = 7999,
-        |h| shape(h).memory_bytes = (64 << 30) - 1,
+        |h| shape(h).cpu_millis = 7199,
+        |h| shape(h).memory_bytes = 32 << 30,
         |h| shape(h).accelerator = accel("nvidia-a10", 0),
         |h| shape(h).accelerator = accel("nvidia-h100", 1),
         |h| shape(h).accelerator = None,
     ];
     for change in below {
         let (rig, _) = short(change);
-        assert_eq!(rig.phase(0), Phase::Draining);
+        assert_eq!(rig.phase(0), Phase::Releasing);
         assert!(rig.record(0).condemned);
         assert!(rig.record(0).registered);
         let cooldown = rig.state.records.cooldowns["gpu"];
         assert_eq!(cooldown.reason, CooldownReason::BootFailed);
         assert_eq!(cooldown.until, at(2 * SECOND + 10 * MINUTE));
         assert_eq!(rig.state.blocked["gpu"], Blocked::BootFailed);
+        assert_eq!(rig.state.records.cooled_offers.len(), 1);
     }
-    let enough: [fn(&mut HostFacts); 2] = [|h| h.busy = false, |h| shape(h).cpu_millis = 16_000];
+    let enough: [fn(&mut HostFacts); 4] = [
+        |h| h.busy = false,
+        |h| shape(h).cpu_millis = 16_000,
+        |h| shape(h).cpu_millis = 7999,
+        |h| shape(h).memory_bytes = (64 << 30) - 1,
+    ];
     for change in enough {
         let (rig, _) = short(change);
         assert_eq!(rig.phase(0), Phase::Registered);
         assert!(!rig.record(0).condemned);
         assert!(rig.state.records.cooldowns.is_empty());
+        assert!(rig.state.records.cooled_offers.is_empty());
     }
 }
 
-/// Asserts that a condemned host is released without waiting for `idle` and is never
-/// taken back for a request, though the request fits it.
+/// Asserts that a condemned host is never taken back for a request: at the step after its
+/// hello, with the registry showing it marked ending and a request waiting, nothing undrains
+/// it, nothing is launched while the pool cools down, and its machine's release is asked
+/// again.
 #[test]
 fn a_condemned_host_is_never_taken_back_for_a_request() {
-    let (mut rig, plan) = short(|h| shape(h).cpu_millis = 7999);
-    rig.input.hosts[0].mark = Some(Mark::Draining);
+    let (mut rig, plan) = short(|h| shape(h).cpu_millis = 4000);
+    rig.input.hosts[0].mark = Some(Mark::Releasing);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["ReleaseHost"]);
-    assert_eq!(actions[0], Action::ReleaseHost(plan.name.clone()));
-    assert_eq!(rig.phase(0), Phase::Draining);
+    assert_eq!(count(&actions, "Undrain"), 0);
+    assert_eq!(count(&actions, "Acquire"), 0);
+    let release = Action::Release {
+        host: plan.name.clone(),
+        id: HostRef("i-1".to_owned()),
+    };
+    assert!(actions.contains(&release), "{:?}", kinds(&actions));
+    assert_eq!(rig.phase(0), Phase::Releasing);
 }
 
 /// Asserts the boot timeout at its edge, counted from the launch as the join token is: a

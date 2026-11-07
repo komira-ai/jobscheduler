@@ -7,7 +7,7 @@ use js_elastic::{AcquireId, Dimension, HostRef, Offer};
 use js_sched::failover::{AcquireMemory, Refused};
 use js_types::RequestId;
 
-use crate::record::Records;
+use crate::record::{OfferCooldown, Records};
 use crate::settings::Blocked;
 use crate::time::Millis;
 
@@ -129,6 +129,16 @@ pub struct State {
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
     /// a paid machine was released on silence.
     pub silent_released: Vec<String>,
+    /// The machines whose hello this step found not to match their offer (design 5.6.1,
+    /// step 6), each as the offer cool-down it recorded: the host, the offer, the zone, until
+    /// when, and every dimension that failed. Each machine was released at the step and
+    /// counted as a failed boot toward its pool's brake. The shell logs each.
+    pub mismatched: Vec<OfferCooldown>,
+    /// The machines whose first hello this step registered with no offer to compare it with
+    /// (a record made by [`StoredOffer::nothing`](crate::StoredOffer::nothing)): the
+    /// registry held the hello to the pool's shape floor, and nothing else was judged. The
+    /// shell logs each, since it means the offer record was lost.
+    pub unverified: Vec<String>,
     /// The acquires refused for `capacity` or `quota` whose answers this step took in, with
     /// what each recorded (for `quota`, the instance type and region passed over and until
     /// when). The shell logs each.

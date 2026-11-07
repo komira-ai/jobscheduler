@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    DaemonInstance, Event, Input, LoadConfig, PlacementLoad, Recovered, RecoveredLease, Scheduler,
+    DaemonInstance, Event, FINISHED_RETENTION, Input, LoadConfig, OpState, PlacementLoad,
+    Recovered, RecoveredLease, Scheduler,
 };
 use js_types::sched::usage::{Curve, CurveSource, LeaseCost, MinutePoint, key_hash};
 use js_types::sched::{
@@ -851,4 +852,40 @@ fn a_blocked_request_that_holds_nothing_leaves_the_pool_hold_to_the_next() {
     assert!(r.tick().is_empty());
     assert_eq!(r.s.head_hold(big), None);
     assert_eq!(r.s.head_hold(next), Some(&w("a")));
+}
+
+/// Catches: a prediction that outlives its operation, or one dropped when the operation
+/// finishes instead of when the finished operation is retired. An operation fed no
+/// prediction holds none; one fed a prediction holds it while it runs, after it finishes
+/// for as long as the scheduler keeps it ([`FINISHED_RETENTION`]), and not once it is
+/// retired.
+#[test]
+fn a_prediction_is_held_until_its_finished_operation_is_retired() {
+    let mut r = Rig::on();
+    r.up("a", node());
+    r.baseline("a");
+    let bare = r.action(1_000, GIB, None);
+    let op = r.action(1_000, GIB, Some(warm(500, GIB)));
+    assert!(!r.s.has_cost(bare));
+    assert!(r.s.has_cost(op));
+
+    let starts = r.tick();
+    let start = starts
+        .iter()
+        .find(|s| s.operation == op)
+        .expect("the predicted action starts");
+    assert!(r.s.has_cost(op), "held while it runs");
+    r.finish(start);
+    assert!(r.s.state(op).is_some_and(OpState::is_done));
+    assert!(
+        r.s.has_cost(op),
+        "held while the finished operation is kept"
+    );
+
+    let retention = u64::try_from(FINISHED_RETENTION.as_millis()).expect("millis");
+    r.round(retention - 1);
+    assert!(r.s.has_cost(op), "held until the retention is up");
+    r.round(1);
+    assert_eq!(r.s.state(op), None, "retired");
+    assert!(!r.s.has_cost(op), "gone with the retired operation");
 }

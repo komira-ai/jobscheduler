@@ -1,5 +1,5 @@
-//! What the cell's server is: the pool file, the token files and the flags of a lease
-//! server whose hosts register themselves, read by the server's own [`Cli`] and
+//! What the cell's server is: the pool file, the token files, the store file and the flags
+//! of a lease server whose hosts register themselves, read by the server's own [`Cli`] and
 //! [`Config`].
 
 use std::collections::BTreeMap;
@@ -17,6 +17,7 @@ use js_lease_server::{Cli, Config, Placement, SharedClock, StartupError};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, SessionSource};
 use js_types::Resources;
 
+use super::store::{STORE_LINE_FILE, Store, StoreAt};
 use crate::elastic::{self, Cloud, ElasticPool};
 
 /// The client token of every cell's server: the bearer of [`super::ServerNode::client_call`].
@@ -102,7 +103,8 @@ impl Shape {
 /// and commits on a thread of its own, so a run would depend on both. The pool's class is
 /// [`POOL_CLASS`] ([`WHOLE_CLASS`] for [`ServerSpec::whole_node_pool`]), and placement
 /// (`--placement`) is the default, `registry`, unless [`ServerSpec::placement`] says
-/// otherwise.
+/// otherwise. The server keeps its state in a SQLite store in its directory unless
+/// [`ServerSpec::store`] says otherwise (module `store`).
 #[derive(Clone, Debug)]
 pub struct ServerSpec {
     pool: String,
@@ -123,6 +125,8 @@ pub struct ServerSpec {
     jobs: bool,
     /// The elastic pool, for a server of [`ServerSpec::elastic_pool`].
     elastic: Option<ElasticPool>,
+    /// Which store the server keeps its state in (`--store`).
+    store: Store,
 }
 
 impl ServerSpec {
@@ -144,6 +148,7 @@ impl ServerSpec {
             resume: false,
             jobs: false,
             elastic: None,
+            store: Store::default(),
         }
     }
 
@@ -264,6 +269,21 @@ impl ServerSpec {
         self
     }
 
+    /// This server, keeping its state in a store of the kind `store` (`--store`): a SQLite
+    /// file in its directory ([`Store::Sqlite`], the default), or a Postgres database of its
+    /// own for each server node ([`Store::Postgres`], feature `postgres`).
+    #[must_use]
+    pub fn store(mut self, store: Store) -> Self {
+        self.store = store;
+        self
+    }
+
+    /// Which store the server keeps its state in.
+    #[must_use]
+    pub fn kept_in(&self) -> Store {
+        self.store
+    }
+
     /// This server, allowing the join token `burst` hellos before it holds the token to
     /// one a second.
     #[must_use]
@@ -340,15 +360,26 @@ impl ServerSpec {
         )
     }
 
-    /// Writes the pool file and the two token files into `dir` and returns the server's
-    /// command line: the lease file in `dir`, a first boot (or a resumed one, for a
-    /// server started again), registration into the pool with [`JOIN_TOKEN`], the hello
-    /// burst, the placement, the job service's address when it is on, and usage off.
+    /// Writes the pool file, the two token files and the store file into `dir` and returns
+    /// the server's command line: the lease file in `dir`, a first boot (or a resumed one,
+    /// for a server started again), registration into the pool with [`JOIN_TOKEN`], the
+    /// hello burst, the placement, the job service's address when it is on, the store
+    /// (`--store`, a SQLite file in `dir` with `--allow-sqlite-store`), and usage off.
     ///
     /// # Errors
     ///
-    /// When a file cannot be written, naming the flag of the file.
+    /// When a file cannot be written, naming the flag of the file; and for a spec of
+    /// [`Store::Postgres`], whose database the server node makes.
     pub fn args(&self, dir: &Path) -> Result<Vec<OsString>, StartupError> {
+        self.args_over(dir, &self.store_in(dir)?)
+    }
+
+    /// [`ServerSpec::args`] over the store `at`.
+    pub(crate) fn args_over(
+        &self,
+        dir: &Path,
+        at: &StoreAt,
+    ) -> Result<Vec<OsString>, StartupError> {
         let pool = write(
             dir,
             "agent-pool.toml",
@@ -362,6 +393,7 @@ impl ServerSpec {
             &format!("{JOIN_TOKEN}\n"),
             "--agent-token-file",
         )?;
+        let store = write_store(dir, at, "--store")?;
         let placement = self.placement_spelled();
         let mut flags: Vec<(&str, OsString)> = vec![
             ("--state-file", dir.join("leases.toml").into_os_string()),
@@ -371,6 +403,7 @@ impl ServerSpec {
             ("--agent-pool-config", pool),
             ("--agent-hello-burst", self.hello_burst.to_string().into()),
             ("--placement", placement.into()),
+            ("--store", store),
         ];
         let job = self
             .jobs
@@ -380,8 +413,28 @@ impl ServerSpec {
             .into_iter()
             .flat_map(|(flag, value)| [flag.into(), value]);
         let head = std::iter::once(OsString::from("js-lease-server"));
+        let gate = at
+            .is_sqlite()
+            .then(|| OsString::from("--allow-sqlite-store"));
         let tail = std::iter::once(OsString::from("--usage-off"));
-        Ok(head.chain(pairs).chain(tail).collect())
+        Ok(head.chain(pairs).chain(gate).chain(tail).collect())
+    }
+
+    /// The store a server of this spec whose files are in `dir` keeps its state in, when no
+    /// server node made one: the SQLite file in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// For [`Store::Postgres`]: its database is the server node's.
+    fn store_in(&self, dir: &Path) -> Result<StoreAt, StartupError> {
+        match self.store {
+            Store::Sqlite => Ok(StoreAt::make(Store::Sqlite, dir)),
+            #[cfg(feature = "postgres")]
+            Store::Postgres => Err(StartupError::new(
+                "--store",
+                "a Postgres store's database is made by the server node that starts the server",
+            )),
+        }
     }
 
     /// The `--placement` value, as the server spells it.
@@ -396,17 +449,27 @@ impl ServerSpec {
     ///
     /// # Errors
     ///
-    /// When a file cannot be written, or the server refuses its command line; and for a
-    /// spec of [`ServerSpec::elastic_pool`], whose server the server node configures over
-    /// the cloud it owns.
+    /// When a file cannot be written, or the server refuses its command line; for a spec of
+    /// [`ServerSpec::elastic_pool`], whose server the server node configures over the cloud
+    /// it owns; and as [`ServerSpec::args`].
     pub fn config(&self, dir: &Path, clock: &ManualClock) -> Result<Config, StartupError> {
         if self.elastic.is_some() {
             let reason =
                 "an elastic pool's server is configured by the server node, over its cloud";
             return Err(StartupError::new("elastic", reason));
         }
-        let cli =
-            Cli::try_parse_from(self.args(dir)?).map_err(StartupError::because("command line"))?;
+        self.config_over(dir, clock, &self.store_in(dir)?)
+    }
+
+    /// [`ServerSpec::config`] over the store `at`.
+    pub(crate) fn config_over(
+        &self,
+        dir: &Path,
+        clock: &ManualClock,
+        at: &StoreAt,
+    ) -> Result<Config, StartupError> {
+        let args = self.args_over(dir, at)?;
+        let cli = Cli::try_parse_from(args).map_err(StartupError::because("command line"))?;
         let config = Config::from_cli(cli)?;
         Ok(config.with_monotonic(Arc::new(Virtual(clock.clone()))))
     }
@@ -414,10 +477,10 @@ impl ServerSpec {
 
 impl ServerSpec {
     /// The configuration of the server of `cloud`'s elastic pool, with this spec's
-    /// placement: the client token file and the configuration file written into `dir`
-    /// ([`elastic::config::text`]), read by the server with the cell's `sim-cloud` kind
-    /// over `cloud`, on `clock`, the lease table timing its saves on `clock`, and the
-    /// scaler drawing its acquire ids from `entropy`.
+    /// placement, over the store `at`: the client token file, the store file and the
+    /// configuration file written into `dir` ([`elastic::config::text`]), read by the
+    /// server with the cell's `sim-cloud` kind over `cloud`, on `clock`, the lease table
+    /// timing its saves on `clock`, and the scaler drawing its acquire ids from `entropy`.
     ///
     /// # Errors
     ///
@@ -428,11 +491,18 @@ impl ServerSpec {
         clock: &ManualClock,
         cloud: &Cloud,
         entropy: Arc<dyn SessionSource>,
+        at: &StoreAt,
     ) -> Result<Config, StartupError> {
         let token = write(dir, "token", CLIENT_TOKEN, "client_token_file")?;
+        let store = write_store(dir, at, "server.store")?;
         let state = dir.join("leases.toml");
-        let text =
-            elastic::config::text(cloud, &state, Path::new(&token), &self.placement_spelled());
+        let files = elastic::config::Files {
+            state: &state,
+            token: Path::new(&token),
+            store: Path::new(&store),
+            allow_sqlite: at.is_sqlite(),
+        };
+        let text = elastic::config::text(cloud, &files, &self.placement_spelled());
         let file = write(dir, "js.toml", &text, "--config")?;
         let shared = SharedClock::new(clock.clone());
         let config = elastic::config::read(Path::new(&file), cloud, shared)?;
@@ -455,6 +525,12 @@ fn millis(duration: Duration) -> String {
 /// `text` as a TOML basic string, which the JSON string grammar is a part of.
 fn quoted(text: &str) -> String {
     serde_json::Value::from(text).to_string()
+}
+
+/// Writes the store file of `at` (its one line) into `dir` as `flag` names it, and returns
+/// its path.
+fn write_store(dir: &Path, at: &StoreAt, flag: &'static str) -> Result<OsString, StartupError> {
+    write(dir, STORE_LINE_FILE, &format!("{}\n", at.line()), flag)
 }
 
 /// Writes `text` to the owner-only file `name` in `dir`, and returns its path.

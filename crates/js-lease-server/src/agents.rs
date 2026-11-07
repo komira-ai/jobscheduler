@@ -107,6 +107,9 @@ pub(crate) struct Agents {
     /// The job store's change feed, trimmed on each tick ([`Agents::job_pass`]); held with
     /// the job tables.
     pub(crate) job_feed: Option<FeedTrim>,
+    /// The state store under the job tables, held with them: `GetUsage` reads the
+    /// `usage/ended/` row each free of a job's allocation writes there.
+    pub(crate) job_state: Option<Arc<dyn js_state::Store>>,
     /// The registry's placer under `--placement js-sched`, which also places the queued jobs
     /// when the job tables are held ([`Agents::place_jobs`]); `None` under the registry's
     /// placement, which places no job.
@@ -296,13 +299,13 @@ fn placed_in(
             // the taint (a crash between the placement and the binding's write) gets it from
             // the job store's row first. Its commit failing refuses the start, as a store
             // that cannot be read does.
-            let (jobs, job_feed) = match jobs {
+            let (jobs, job_feed, job_state) = match jobs {
                 Some(setup) => {
                     let opened = job_store::open(state_file, setup, &job_sources)?;
                     restore_job_taints(&opened.jobs, &store, &mut bindings, setup.flag)?;
-                    (Some(opened.jobs), Some(opened.feed))
+                    (Some(opened.jobs), Some(opened.feed), Some(opened.store))
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
@@ -322,6 +325,7 @@ fn placed_in(
                 usage,
                 jobs,
                 job_feed,
+                job_state,
                 placer: placer.clone(),
                 unclean: Mutex::default(),
                 logs,
@@ -373,6 +377,7 @@ impl Agents {
             usage: None,
             jobs: None,
             job_feed: None,
+            job_state: None,
             placer: None,
             unclean: Mutex::default(),
             logs: None,

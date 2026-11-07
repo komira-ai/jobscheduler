@@ -196,3 +196,32 @@ fn a_reading_is_judged_plausible_against_the_reported_memory() {
     r.window("a", 1_000, 4 * 251 * GIB + 1, &[]);
     assert_eq!(r.s.load_counters().readings_dropped, 1, "a byte more");
 }
+
+/// Catches: a getter that does not return the share the scheduler was built with, or a
+/// default other than the whole capacity.
+#[test]
+fn the_scheduler_reports_the_share_it_was_built_with() {
+    assert_eq!(Scheduler::new(1).memory_percent(), MemoryPercent::FULL);
+    let p = MemoryPercent::new(90).expect("in range");
+    assert_eq!(Scheduler::new(1).with_memory_percent(p).memory_percent(), p);
+}
+
+/// Catches: a worker another scheduler holds judged against its raw memory. A request for
+/// exactly the cut capacity of a 251 GiB worker is runnable at 90% and one byte more is not,
+/// while 100% takes that byte; and a worker whose drivers do not serve the lease kind runs
+/// nothing at any share, so the cut is the only thing the share changes.
+#[test]
+fn a_request_is_runnable_on_another_schedulers_worker_only_within_the_cut() {
+    let mut r = rig(90);
+    let ninety_percent = MemoryPercent::new(90).expect("in range");
+    let fits = r.request(LeaseKind::Action, 1_000, ninety());
+    let over = r.request(LeaseKind::Action, 1_000, ninety() + 1);
+    assert!(ninety_percent.runnable_on(&fits, &caps(), &node()));
+    assert!(!ninety_percent.runnable_on(&over, &caps(), &node()));
+    assert!(MemoryPercent::FULL.runnable_on(&over, &caps(), &node()));
+
+    let vm = r.request(LeaseKind::Vm, 1_000, GIB);
+    let containers_only = load_rig::caps("container");
+    assert!(MemoryPercent::FULL.runnable_on(&vm, &caps(), &node()));
+    assert!(!MemoryPercent::FULL.runnable_on(&vm, &containers_only, &node()));
+}

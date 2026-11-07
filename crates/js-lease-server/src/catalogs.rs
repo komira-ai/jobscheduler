@@ -18,11 +18,14 @@
 //!   refresh completed and asks again for a request every offer was refused for.
 //! - A catalog never fetched reads as [`CatalogView::Unread`], which admission counts as
 //!   "may offer"; a stale catalog is still the offers it holds. A restart starts with every
-//!   catalog never fetched and no cool-down.
+//!   catalog never fetched, and with only the cool-downs the scaler's records hold.
 //! - [`Catalogs::cool_down`] and [`Catalogs::offers_for_pass2`] are the cool-down and the
-//!   view of the catalog the pick of an offer (design 5.6, pass 2) is to read; nothing in
-//!   the server enters a cool-down yet, and the scaler's pick reads the offers of the pool's
-//!   checks, not this view.
+//!   view of the catalog the pick of an offer (design 5.6, pass 2) is to read. The scaler
+//!   cools an offer down when the hello of a machine acquired for it does not match it
+//!   (design 5.6.1, step 6): it writes the cool-down into its records, and the records'
+//!   cool-downs are handed to [`Catalogs::hold`] when the scaler is built and after every
+//!   write of them, so a restart keeps them. The scaler's pick reads the offers of the pool's checks, not this
+//!   view.
 //!
 //! Caches are keyed by [`CapacityProvider::id`]. The server has at most one launching
 //! provider today (one elastic pool); two providers of one kind would share an id.
@@ -135,6 +138,14 @@ impl Catalogs {
         let mut cooldowns = self.cooldowns();
         cooldowns.forget_expired(now);
         cooldowns.cool_down(key, now, entry.offer_cooldown);
+    }
+
+    /// Takes in the cool-downs `cooled`, each until its end (decided earlier and kept in the
+    /// scaler's records, [`js_scaler::Records::offer_cooldowns`]); a key already cooling down
+    /// keeps the later end. A key of a provider that is not one of these is kept and never
+    /// read: none of its offers is read here.
+    pub fn hold(&self, cooled: &Cooldowns) {
+        self.cooldowns().merge(cooled);
     }
 
     /// How many fetches of `provider`'s catalog have completed (a failed one is not

@@ -54,6 +54,12 @@
 //! requests a seed) over [`ELASTIC_SEEDS`] seed, so a change to a decision of the scaler,
 //! to how the cell boots, joins or ends a launched machine, or a machine name that does
 //! not follow the seed, moves a hash.
+//!
+//! And one store scenario, family `store`: the restart over the store, over SQLite
+//! (`cell/store.rs`, nine hosts, about 600 agent requests a seed) over two seeds, so a
+//! change to what the server keeps in its store across a restart, to how the cell mints
+//! tokens and joins hosts with them, or a store that reaches the trace, moves a hash.
+//! `tests/store.rs` holds the same seeds over Postgres to these lines.
 
 #[path = "cell/elastic.rs"]
 #[allow(
@@ -69,6 +75,12 @@ mod lossy_wire;
 mod real_agents;
 #[path = "cell/server_restart.rs"]
 mod server_restart;
+#[path = "cell/store.rs"]
+#[allow(
+    dead_code,
+    reason = "the store scenarios are shared with tests/store.rs, which runs the ones this binary does not pin"
+)]
+mod store;
 #[path = "cell/support.rs"]
 mod support;
 #[path = "cell/whole_host.rs"]
@@ -90,7 +102,7 @@ use js_sim_cell::replay::REPORT_LINES;
 use js_sim_cell::server::seeded;
 use js_sim_cell::{
     Cell, Failure, FailureReport, Invariant, JOB_PREFIX, JobFront, Observations, ServerSpec, Setup,
-    Shape, Side, Violation, Work, run,
+    Shape, Side, Store, Violation, Work, run,
 };
 
 use crate::support::{lease, ms, scratch, start_run};
@@ -237,7 +249,8 @@ fn report(seed: u64, seen: &Rc<RefCell<Vec<u64>>>) -> FailureReport {
 /// whole-host scenario and one of the cancelled whole-host request, each run twice under
 /// each placement, and for one seed of the job smoke scenario (`cell/jobs.rs`), run twice,
 /// whose items end alike, and for one seed of the EC2-like elastic scenario
-/// (`cell/elastic.rs`), run twice, whose items end alike. Catches a handler path that reads a
+/// (`cell/elastic.rs`), run twice, whose items end alike, and for one seed of the restart
+/// over a SQLite store (`cell/store.rs`), run twice. Catches a handler path that reads a
 /// clock, iterates a hashed collection to decide an outcome, or lets a random value reach
 /// the trace (in the server, the fake agent node or the real agent lifecycle); and a trace
 /// whose lines depend on whether they are kept. Also that a seed of the fault scenario of
@@ -299,6 +312,12 @@ fn a_seed_replays_to_the_same_trace_hash() {
     assert_eq!(once.hash, again.hash);
     assert_eq!(once.outcomes, again.outcomes);
     assert_eq!(once.outcomes.len(), elastic::RUNS as usize);
+
+    let once = store::restart(Store::Sqlite).run_seeds(1).runs[0].hash;
+    assert_eq!(
+        store::restart(Store::Sqlite).run_seeds(1).runs[0].hash,
+        once
+    );
 }
 
 /// The cell whose job and allocation ids are compared, for `setup`: [`JOB_HOSTS`] hosts
@@ -541,6 +560,22 @@ fn the_real_agent_scenario_matches_the_golden_file() {
     golden_of(REAL_FAMILY).assert_matches(&real_runs());
 }
 
+/// The hash of each pinned seed of the restart over a SQLite store, which must pass.
+fn store_runs() -> Vec<(String, TraceHash)> {
+    let passed = store::restart(Store::Sqlite).run_seeds(store::GOLDEN_SEEDS);
+    store::golden_names(&passed.runs)
+}
+
+/// Asserts that the hashes of the pinned seeds of the restart over a SQLite store equal the
+/// golden file's (family `store`). Catches any change to what the server keeps in its
+/// store and reads back at a restart, to how the cell mints join tokens and joins hosts
+/// with them, or to the trace text, and a run over the store that differs between
+/// processes (a store file, a token or a digest that reaches the trace).
+#[test]
+fn the_store_scenario_matches_the_golden_file() {
+    golden_of(store::FAMILY).assert_matches(&store_runs());
+}
+
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
@@ -556,6 +591,7 @@ fn regenerate_golden_hashes() {
     golden_of(ELASTIC_FAMILY)
         .regenerate(&elastic_runs())
         .unwrap();
+    golden_of(store::FAMILY).regenerate(&store_runs()).unwrap();
 }
 
 /// The hash of each pinned seed of the whole-host scenario under each placement, which

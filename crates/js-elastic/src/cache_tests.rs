@@ -347,3 +347,53 @@ fn forget_expired_drops_only_ended_cooldowns() {
     assert!(!cooldowns.is_cooled_down(&short, at(10)));
     assert!(!cooldowns.is_cooled_down(&exact, at(10)));
 }
+
+/// Asserts that a cool-down held until an end written down earlier cools its key down to
+/// that end and not past it, and that holding a key again keeps the later end whichever
+/// comes first, as a fresh cool-down does. Catches an end read back after a restart that
+/// is ignored, moved or shortened.
+#[test]
+fn a_held_cooldown_lasts_to_its_end_and_is_never_shortened() {
+    let mut cooldowns = Cooldowns::new();
+    let a10 = key("cloud", "gpu_1x_a10", Some("z1"));
+    cooldowns.hold_until(a10.clone(), at(100));
+    assert!(cooldowns.is_cooled_down(&a10, at(0)));
+    assert!(cooldowns.is_cooled_down(&a10, at(99)));
+    assert!(!cooldowns.is_cooled_down(&a10, at(100)));
+    cooldowns.hold_until(a10.clone(), at(50));
+    assert!(cooldowns.is_cooled_down(&a10, at(99)));
+    cooldowns.hold_until(a10.clone(), at(200));
+    assert!(cooldowns.is_cooled_down(&a10, at(199)));
+    assert!(!cooldowns.is_cooled_down(&a10, at(200)));
+    cooldowns.cool_down(a10.clone(), at(0), Duration::from_millis(10));
+    assert!(cooldowns.is_cooled_down(&a10, at(199)));
+    assert_eq!(cooldowns.len(), 1);
+}
+
+/// Asserts that merging takes in every cool-down of the other store to its end, keeps the
+/// later end of a key both hold whichever side has it, and leaves the other store as it
+/// was. Catches a merge that drops a key, or that lets the earlier end win.
+#[test]
+fn a_merge_keeps_every_key_and_the_later_end() {
+    let (a10, h100, a100) = (
+        key("cloud", "gpu_1x_a10", Some("z1")),
+        key("cloud", "gpu_8x_h100", Some("z1")),
+        key("cloud", "gpu_8x_a100", Some("z1")),
+    );
+    let mut held = Cooldowns::new();
+    held.hold_until(a10.clone(), at(100));
+    held.hold_until(h100.clone(), at(10));
+    let mut read = Cooldowns::new();
+    read.hold_until(a10.clone(), at(50));
+    read.hold_until(h100.clone(), at(70));
+    read.hold_until(a100.clone(), at(30));
+    held.merge(&read);
+    assert_eq!(held.len(), 3);
+    assert!(held.is_cooled_down(&a10, at(99)));
+    assert!(held.is_cooled_down(&h100, at(69)));
+    assert!(!held.is_cooled_down(&h100, at(70)));
+    assert!(held.is_cooled_down(&a100, at(29)));
+    assert!(!held.is_cooled_down(&a100, at(30)));
+    assert_eq!(read.len(), 3);
+    assert!(!read.is_cooled_down(&a10, at(50)));
+}

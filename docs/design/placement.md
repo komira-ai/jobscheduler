@@ -95,7 +95,7 @@ took before.
   probe refusal is final there: the probe is never placed by a child that did not judge its host. A probe of a whole-node class is
   refused `probe-unsupported` too, because its host would be prepared and held as the whole-node queue decides, and no probe rule judges
   that.
-- `js-server-core` queues no probe (`NotQueued::Probe`). Its state-store rows do not keep the pin, so a probe taken up after a restart or
+- `js-server-core` (removed from this repository) queues no probe (`NotQueued::Probe`). Its state-store rows do not keep the pin, so a probe taken up after a restart or
   by another frontend would run as ordinary work anywhere. And the cordon a closed intake puts on its nodes is a plain cordon, which a
   probe would pass.
 

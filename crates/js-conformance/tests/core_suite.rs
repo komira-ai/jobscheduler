@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use js_conformance::Verdict;
-use js_conformance::core::{self, CoreHarness, Defect, ReferenceCore, Scenario, UNPLACEABLE_JOB};
+use js_conformance::core::{
+    self, CoreHarness, Defect, ReferenceCore, Scenario, Stream, UNPLACEABLE_JOB,
+};
 
 #[test]
 fn the_reference_core_passes_every_scenario() {
@@ -106,4 +108,15 @@ fn the_reference_core_answers_a_refusal_after_writing_it() {
         answered,
         "refused work is not taken up again"
     );
+}
+
+/// Catches: a harness over a real core that cannot number its registrations the way the
+/// scenarios compare them. `Stream::new` keeps the number: the same number is the same
+/// stream, a later registration orders after an earlier one, and the default is the first.
+#[test]
+fn a_harness_numbers_its_streams_in_registration_order() {
+    assert_eq!(Stream::new(3), Stream::new(3));
+    assert_ne!(Stream::new(3), Stream::new(4));
+    assert!(Stream::new(3) < Stream::new(4));
+    assert_eq!(Stream::default(), Stream::new(0));
 }

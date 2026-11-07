@@ -26,7 +26,18 @@
 //! through the seam (`Config::with_job_sources`); the node keeps the one source across a
 //! restart. So a seed replays with the job service on too (module `ids`).
 //!
-//! The lease file, the pool file and the token files live in a [`TestDir`] the node owns.
+//! The lease file, the pool file, the token files and the store file live in a [`TestDir`]
+//! the node owns.
+//!
+//! # The store
+//!
+//! The server keeps its host bindings, its join tokens and its scaler's records in the store
+//! `--store` names (`server.store` for an elastic pool's server), which the node makes when
+//! it starts, as [`ServerSpec::store`] says (module `store`): a SQLite file in its directory,
+//! or a Postgres database of its own (feature `postgres`), dropped with the node. The node
+//! keeps the store across a restart, and a second server started beside it
+//! ([`ServerNode::start_beside`]) is handed the same store file line. While the server is
+//! down the cell may read the store's keys ([`ServerNode::stored`]).
 //!
 //! # An elastic pool
 //!
@@ -40,14 +51,16 @@
 //!
 //! # A restart
 //!
-//! [`ServerNode::restart`] stops the server and starts it again over the same directory,
-//! as an operator restarts the process: it drops the routers and the in-process server
-//! ([`InProcess::shutdown`]), which unlocks the lease file, and starts a new one with
-//! `--boot resume` on the same clock, keeping the node, its runtime, its tick and its
-//! count of calls. What the new server holds is what the old one wrote. A server that
-//! refuses to start again leaves the node down: a call from an agent goes unanswered, a
-//! client's call is answered 503, a tick does nothing, and the listing is empty, until a
-//! restart succeeds.
+//! [`ServerNode::restart`] stops the server and starts it again over the same directory and
+//! store, as an operator restarts the process: it drops the routers and the in-process
+//! server ([`InProcess::shutdown`]), which unlocks the lease file and gives up the store's
+//! writer lock, and starts a new one with `--boot resume` on the same clock, keeping the
+//! node, its runtime, its tick and its count of calls. What the new server holds is what the
+//! old one wrote. A server that refuses to start again leaves the node down: a call from an
+//! agent goes unanswered, a client's call is answered 503, a tick does nothing, and the
+//! listing is empty, until a restart succeeds. [`ServerNode::stop`] leaves it down the same
+//! way, as a process killed between two inputs; so does a tick in which the elastic pool's
+//! cloud was told to crash the server at an acquire ([`Cloud::crash_at_next_acquire`]).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -59,7 +72,7 @@ use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request, Response, StatusCode};
 use js_jobs::ScriptedIds;
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Clock as _, ManualClock, Timestamp};
 use js_lease_server::in_process::InProcess;
 use js_lease_server::{Config, SharedClock, StartupError};
 use js_registry::{HostMark, HostState, HostView, Registry, SessionSource};
@@ -76,11 +89,14 @@ use crate::observe::{ServerHost, ServerView};
 
 mod ids;
 mod spec;
+mod store;
 
 pub use ids::{SCRIPT_LEN, StoreClock, seeded};
 pub use spec::{
     ARCH, ARCH_KEY, CLIENT_TOKEN, JOIN_TOKEN, POOL_CLASS, ServerSpec, Shape, WHOLE_CLASS,
 };
+use store::StoreAt;
+pub use store::{SQLITE_FILE, STORE_LINE_FILE, Store};
 
 /// The wall time, in milliseconds since the Unix epoch, that virtual time zero stands
 /// for: 2027-01-01 00:00 UTC. Every clock of the cell counts from it.
@@ -180,6 +196,9 @@ pub struct ServerNode {
     cloud: Option<Cloud>,
     /// What the scaler draws its acquire ids from, kept across a restart.
     entropy: Arc<dyn SessionSource>,
+    /// The store the server keeps its state in, kept across a restart; dropped after the
+    /// server, which holds it.
+    store: StoreAt,
     /// Dropped last: the server's files, which a restart starts over.
     dir: TestDir,
 }
@@ -202,10 +221,41 @@ impl ServerNode {
     ///
     /// As [`ServerNode::start`].
     pub fn start_seeded(spec: &ServerSpec, dir: TestDir, seed: u64) -> Result<Self, StartupError> {
-        let clock = ManualClock::new(wall_time(FarmTime::default()));
+        let store = StoreAt::make(spec.kept_in(), dir.path());
+        Self::boot(spec, dir, seed, store, FarmTime::default())
+    }
+
+    /// A second server node, as [`ServerNode::start_seeded`] starts one, its files in `dir`,
+    /// over this node's store and at this node's virtual time: a second process an operator
+    /// starts on the same store. The store's writer lock decides whether it starts.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServerNode::start`]: while this node's server holds the store's writer lock, the
+    /// refusal of `--store` that names the lock.
+    pub fn start_beside(
+        &self,
+        spec: &ServerSpec,
+        dir: TestDir,
+        seed: u64,
+    ) -> Result<Self, StartupError> {
+        let now = virtual_time(self.clock.now().millis());
+        Self::boot(spec, dir, seed, self.store.clone(), now)
+    }
+
+    /// Starts the server `spec` describes over `store`, its files in `dir`, at virtual time
+    /// `now`, its job store minting the ids of `seed`.
+    fn boot(
+        spec: &ServerSpec,
+        dir: TestDir,
+        seed: u64,
+        store: StoreAt,
+        now: FarmTime,
+    ) -> Result<Self, StartupError> {
+        let clock = ManualClock::new(wall_time(now));
         let cloud = spec.elastic().map(|pool| Cloud::new(pool, spec.shape()));
         let entropy: Arc<dyn SessionSource> = Arc::new(SeededEntropy::new(seed));
-        let config = configure(spec, dir.path(), &clock, cloud.as_ref(), &entropy)?;
+        let config = configure(spec, dir.path(), &clock, cloud.as_ref(), &entropy, &store)?;
         let tick = config.tick_period();
         let mut build = tokio::runtime::Builder::new_current_thread();
         let runtime = build.build().map_err(StartupError::because("runtime"))?;
@@ -221,6 +271,7 @@ impl ServerNode {
             ids,
             cloud,
             entropy,
+            store,
             dir,
         })
     }
@@ -234,14 +285,44 @@ impl ServerNode {
     /// When the new server refuses to start, naming the flag at fault; the node is then
     /// down.
     pub fn restart(&mut self, spec: &ServerSpec) -> Result<(), StartupError> {
+        self.stop();
+        let spec = spec.clone().resuming();
+        let (cloud, dir) = (self.cloud.as_ref(), self.dir.path());
+        let config = configure(&spec, dir, &self.clock, cloud, &self.entropy, &self.store)?;
+        self.up = Some(Up::start(config, &self.clock, &self.ids, &self.runtime)?);
+        Ok(())
+    }
+
+    /// Stops the server, as a process killed between two inputs: it is dropped with no last
+    /// tick ([`InProcess::shutdown`]), so what its files and its store keep is what its last
+    /// tick or request wrote, and the node is down (as after a refused restart) until
+    /// [`ServerNode::restart`]. Stopping a node that is down does nothing.
+    pub fn stop(&mut self) {
         if let Some(up) = self.up.take() {
             up.shutdown();
         }
-        let spec = spec.clone().resuming();
-        let cloud = self.cloud.as_ref();
-        let config = configure(&spec, self.dir.path(), &self.clock, cloud, &self.entropy)?;
-        self.up = Some(Up::start(config, &self.clock, &self.ids, &self.runtime)?);
-        Ok(())
+    }
+
+    /// Every key of the store under `prefix` with its value, read while the server is down,
+    /// with a store the node opens for the read and closes before this returns (a SQLite
+    /// store on the node's clock).
+    ///
+    /// # Errors
+    ///
+    /// While the server is up (it holds the store), or when the store cannot be opened or
+    /// read, as text.
+    pub fn stored(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        match &self.up {
+            Some(_) => Err("the server is up, and holds its store".to_owned()),
+            None => self.store.scan(prefix, &self.clock),
+        }
+    }
+
+    /// The name of the node's Postgres database, for a server of [`Store::Postgres`].
+    #[cfg(feature = "postgres")]
+    #[must_use]
+    pub fn database(&self) -> Option<&str> {
+        self.store.database()
     }
 
     /// Whether the server runs: `false` after a restart it refused.
@@ -420,6 +501,9 @@ impl StateMachine for ServerNode {
                     self.runtime.block_on(up.server.tick());
                 }
                 self.read_brake();
+                if self.cloud.as_ref().is_some_and(Cloud::take_crashed) {
+                    self.stop();
+                }
                 self.arm();
             }
             Event::Message { from, msg } => self.on_message(from, msg),
@@ -435,19 +519,20 @@ impl ServerNode {
     }
 }
 
-/// The configuration of the server `spec` describes, its files in `dir`, on `clock`: over
-/// `cloud` and drawing the scaler's acquire ids from `entropy` for a node with an elastic
-/// pool's cloud, else from the spec's command line.
+/// The configuration of the server `spec` describes, its files in `dir`, its state in
+/// `store`, on `clock`: over `cloud` and drawing the scaler's acquire ids from `entropy` for
+/// a node with an elastic pool's cloud, else from the spec's command line.
 fn configure(
     spec: &ServerSpec,
     dir: &std::path::Path,
     clock: &ManualClock,
     cloud: Option<&Cloud>,
     entropy: &Arc<dyn SessionSource>,
+    store: &StoreAt,
 ) -> Result<Config, StartupError> {
     match cloud {
-        Some(cloud) => spec.elastic_config(dir, clock, cloud, entropy.clone()),
-        None => spec.config(dir, clock),
+        Some(cloud) => spec.elastic_config(dir, clock, cloud, entropy.clone(), store),
+        None => spec.config_over(dir, clock, store),
     }
 }
 

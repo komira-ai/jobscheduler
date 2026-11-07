@@ -130,23 +130,20 @@ fn a_host_in_a_block_is_not_retired_at_max_age_before_the_block_ends() {
     assert_eq!(rig.phase(0), Phase::Draining);
 }
 
-/// Asserts that a host whose hello was below its offer is drained and marked for release at
-/// once though its block has not ended: it cannot serve, so keeping it serves nothing.
+/// Asserts that a machine whose hello does not match its offer is released at once though
+/// its block has not ended: it cannot serve, so keeping it serves nothing. Catches a block's
+/// running time that holds back the release of a machine that came up wrong.
 #[test]
-fn a_condemned_host_in_a_block_is_still_drained() {
+fn a_condemned_host_in_a_block_is_still_released() {
     let (mut rig, plan) = booting_in_block(settings("gpu"), HOUR);
     let mut small = host(&plan.name, "gpu");
     shape(&mut small).cpu_millis = 1000;
     rig.input.hosts = vec![small];
     rig.pool().held = Some(vec![in_block(&plan, HostStatus::Active, HOUR)]);
     let actions = rig.tick(at(2 * SECOND));
-    assert_eq!(
-        actions[1..],
-        [
-            Action::Drain(plan.name.clone()),
-            Action::ReleaseHost(plan.name.clone())
-        ]
-    );
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(actions[1], Action::Revoke(plan.name.clone()));
+    assert_eq!(rig.phase(0), Phase::Releasing);
     assert!(rig.record(0).condemned);
 }
 
