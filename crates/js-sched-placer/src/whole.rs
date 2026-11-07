@@ -6,7 +6,8 @@
 //! stands each host and the expected life of each lease ([`Engine::whole_pass`]); the engine
 //! adds the presented requests of its own wait list (first presentation first) and the hosts
 //! held for requests put back by a restart and not queued since ([`super::wait`]), and
-//! takes the [`WholeRound`] that makes. While no request waits and the engine queues none, the round is not taken: the
+//! takes the [`WholeRound`] that makes. While no request waits and the engine queues none,
+//! and no whole-host job is queued ([`super::whole_jobs`]), the round is not taken: the
 //! engine lets go of the cordons and phases it set for the queue and places as it does for a
 //! pool with no whole-node request. Otherwise it:
 //!
@@ -51,16 +52,23 @@
 //! committed, the lease is the registry's: it is held as any lease is and ended with
 //! [`Scheduler::cancel_whole`].
 //!
+//! The whole-host jobs the engine queues ([`super::whole_jobs`]) are operations of the same
+//! scheduler, in the same term and rounds: the helpers that walk the queue's operations
+//! (the grants put back, the hosts held, the grants a heartbeat lists) walk theirs too. The
+//! reservations shown to the registry, the give-ups it is told of, the ceiling's drop and the
+//! ledger stay those of the registry's requests.
+//!
 //! A rebuild of the engine keeps the queue: the last round is handed to the new engine with
 //! the marks, give-ups and bars of the old one ([`Engine::carry_whole`]). A restart keeps it
-//! through the registry's reservation ledger ([`super::ledger`]).
+//! through the registry's reservation ledger ([`super::ledger`]). It does not carry the
+//! whole-host jobs: the next pass over the job tables queues them again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_lease::Timestamp;
 use js_provider::Candidate;
 use js_provider::StartSpec;
-use js_registry::{Reservation, Standing, WaitingWhole, WholeRound};
+use js_registry::{Reservation, Standing, WaitingWhole, WholeNodeConfig, WholeRound};
 use js_sched::{Bar, Event, NodePhase, OpState, Request, RestoredMark, RestoredWhole, Scheduler};
 use js_types::sched::{
     FarmTime, LeaseId as SchedLeaseId, LeaseKind, OperationId, Qos, Resources, WaiterId, WorkKey,
@@ -94,9 +102,10 @@ impl Engine {
         let rules = &round.settings;
         self.prepare
             .take_rules(rules.prepare_timeout_ms, rules.max_replace);
-        // Nothing waits and nothing is queued: the engine takes nothing of the round, and
-        // places as it does for a pool with no whole-node request.
-        if round.waiting.is_empty() & self.whole.is_empty() {
+        // Nothing waits and nothing is queued, for the registry or for a job: the engine
+        // takes nothing of the round, and places as it does for a pool with no whole-node
+        // request.
+        if round.waiting.is_empty() & self.whole.is_empty() & self.whole_jobs.is_empty() {
             self.round = None;
             self.stand_down(now);
             return Vec::new();
@@ -136,11 +145,7 @@ impl Engine {
     /// Takes `round` (steps 1 to 5 of the module documentation) and keeps it for a rebuild.
     pub(super) fn apply_round(&mut self, round: WholeRound, now: FarmTime) {
         self.now = self.now.max(now);
-        let settings = self.round.as_ref().map(|kept| &kept.settings);
-        if settings != Some(&round.settings) {
-            let sched = std::mem::replace(&mut self.sched, Scheduler::new(TERM));
-            self.sched = sched.with_whole_node(round.settings.clone());
-        }
+        self.take_settings(&round.settings);
         self.take_lives(&round.lives);
         let rules = &round.settings;
         self.prepare
@@ -173,6 +178,18 @@ impl Engine {
             }
         }
         self.round = Some(round);
+    }
+
+    /// Gives the scheduler the whole-node `settings`, when they are not the ones it has: its
+    /// queue, marks and holds are kept. The registry's round and a pass over the whole-host
+    /// jobs both take them here.
+    pub(super) fn take_settings(&mut self, settings: &WholeNodeConfig) {
+        if self.whole_settings.as_ref() == Some(settings) {
+            return;
+        }
+        let sched = std::mem::replace(&mut self.sched, Scheduler::new(TERM));
+        self.sched = sched.with_whole_node(settings.clone());
+        self.whole_settings = Some(settings.clone());
     }
 
     /// Sets the lives of the leases the engine holds from `lives`, the registry's, by the
@@ -327,11 +344,11 @@ impl Engine {
         operation
     }
 
-    /// One placement round in [`WHOLE_TERM`], for the whole-node requests the engine
-    /// queues: none when it queues none. The newest pending grants beyond the whole-node
-    /// ceiling are put back first. The term and the sequence are as they were after.
+    /// One placement round in [`WHOLE_TERM`], for the whole-node requests and the whole-host
+    /// jobs the engine queues: none when it queues none. The newest pending grants beyond the
+    /// whole-node ceiling are put back first. The term and the sequence are as they were after.
     pub(super) fn whole_tick(&mut self, now: FarmTime) {
-        if self.whole.is_empty() {
+        if self.whole.is_empty() & self.whole_jobs.is_empty() {
             return;
         }
         self.drop_over_ceiling(now);
@@ -348,9 +365,8 @@ impl Engine {
     /// again, numbered in its own term.
     pub(super) fn settle_whole(&mut self) {
         let stray: Vec<SchedLeaseId> = self
-            .whole
-            .values()
-            .filter_map(|operation| self.pending(*operation))
+            .whole_operations()
+            .filter_map(|operation| self.pending(operation))
             .filter(|(lease, _)| lease.term != WHOLE_TERM)
             .map(|(lease, _)| lease)
             .collect();
@@ -363,9 +379,8 @@ impl Engine {
     /// again, keeping their queue time.
     pub(super) fn unplace_whole_where(&mut self, off: impl Fn(&WorkerId) -> bool) {
         let on: Vec<SchedLeaseId> = self
-            .whole
-            .values()
-            .filter_map(|operation| self.pending(*operation))
+            .whole_operations()
+            .filter_map(|operation| self.pending(operation))
             .filter(|(_, worker)| off(worker))
             .map(|(lease, _)| lease)
             .collect();
@@ -374,9 +389,14 @@ impl Engine {
         }
     }
 
-    /// The lease and the worker of the grant `operation`, a queued whole-node request, has
-    /// and the registry has not committed, if it has one.
-    fn pending(&self, operation: OperationId) -> Option<(SchedLeaseId, WorkerId)> {
+    /// The operations of every whole-node request and whole-host job the engine queues.
+    pub(super) fn whole_operations(&self) -> impl Iterator<Item = OperationId> + '_ {
+        self.whole.values().chain(self.whole_jobs.values()).copied()
+    }
+
+    /// The lease and the worker of the grant `operation`, a queued whole-node request or
+    /// whole-host job, has and has not been committed, if it has one.
+    pub(super) fn pending(&self, operation: OperationId) -> Option<(SchedLeaseId, WorkerId)> {
         match self.sched.state(operation) {
             Some(OpState::Leased { lease, worker, .. }) => Some((*lease, worker.clone())),
             _ => None,
@@ -386,7 +406,7 @@ impl Engine {
     /// The pending grants on `worker`: a heartbeat of its host lists them as running, so
     /// none is given up for a start it has not been sent.
     pub(super) fn pending_on(&self, worker: &WorkerId) -> Vec<SchedLeaseId> {
-        let pending = self.whole.values().filter_map(|op| self.pending(*op));
+        let pending = self.whole_operations().filter_map(|op| self.pending(op));
         let here = pending.filter(|(_, on)| on == worker);
         here.map(|(lease, _)| lease).collect()
     }
@@ -430,11 +450,12 @@ impl Engine {
         }
     }
 
-    /// The hosts the engine's whole-node requests hold: marked, or granted and pending.
+    /// The hosts the engine's whole-node requests and whole-host jobs hold: marked, or granted
+    /// and pending.
     pub(super) fn whole_hosts(&self) -> BTreeSet<HostId> {
-        let held = self.whole.values().filter_map(|operation| {
-            let marked = self.sched.whole_mark(*operation).map(|mark| &mark.worker);
-            let pending = self.pending(*operation).map(|(_, worker)| worker);
+        let held = self.whole_operations().filter_map(|operation| {
+            let marked = self.sched.whole_mark(operation).map(|mark| &mark.worker);
+            let pending = self.pending(operation).map(|(_, worker)| worker);
             let worker = pending.or_else(|| marked.cloned())?;
             map::host_id(&worker).ok()
         });

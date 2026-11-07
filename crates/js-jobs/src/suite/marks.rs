@@ -24,12 +24,12 @@ use crate::{
 const LATER_TAG: u16 = 902;
 
 /// The store's clock now.
-fn now<S: Store>(rig: &Rig<S>) -> StoreTime {
+pub(super) fn now<S: Store>(rig: &Rig<S>) -> StoreTime {
     rig.store.now()
 }
 
 /// `secs` seconds after `from`.
-fn after(from: StoreTime, secs: u64) -> StoreTime {
+pub(super) fn after(from: StoreTime, secs: u64) -> StoreTime {
     from.saturating_add(Duration::from_secs(secs))
 }
 
@@ -49,7 +49,7 @@ fn full_mark<S: Store>(rig: &Rig<S>, id: &JobId, on: &str) -> MarkRecord {
 }
 
 /// Records the queued whole-host job `text` and puts [`full_mark`] for it on `host-a`.
-fn marked<S: Store>(rig: &Rig<S>, text: &str) -> (JobId, MarkRecord) {
+pub(super) fn marked<S: Store>(rig: &Rig<S>, text: &str) -> (JobId, MarkRecord) {
     let id = rig.queue_spec(text, whole_host_spec());
     let mark = rig
         .jobs
@@ -60,7 +60,10 @@ fn marked<S: Store>(rig: &Rig<S>, text: &str) -> (JobId, MarkRecord) {
 
 /// A hook that rewrites the row `key` with the bytes it holds now: the same value at a new
 /// version, as any other writer's commit leaves it.
-fn rewrite<S: Store + 'static>(rig: &Rig<S>, key: &str) -> impl FnOnce() + Send + 'static {
+pub(super) fn rewrite<S: Store + 'static>(
+    rig: &Rig<S>,
+    key: &str,
+) -> impl FnOnce() + Send + 'static {
     let store = rig.store.inner();
     let value = rig.raw(key).expect("written").value;
     let key = key.to_owned();
@@ -73,7 +76,7 @@ fn rewrite<S: Store + 'static>(rig: &Rig<S>, key: &str) -> impl FnOnce() + Send 
 }
 
 /// The state of the job `id` as stored.
-fn state_of<S: Store>(jobs: &JobStore<S>, id: &JobId) -> Option<JobState> {
+pub(super) fn state_of<S: Store>(jobs: &JobStore<S>, id: &JobId) -> Option<JobState> {
     jobs.get_job(id).expect("reads").map(|job| job.state)
 }
 

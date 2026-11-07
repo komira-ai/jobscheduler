@@ -734,22 +734,21 @@
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
-//! The whole-node reservations of the registry (the host set aside for a waiting request,
-//! the wait list's order, the give-up and failed-prepare counts, the hosts a request is
-//! kept off and until when) are kept in the lease file, as the table's reservation
-//! ledger: each tick hands the table the registry's ledger when it changed and the table
-//! writes it in the same replace as the leases, so the file is at most one tick behind and
-//! the final tick of a shutdown brings it level. With `--boot resume` the registry is
-//! given the ledger before any agent says hello. A restored mark stands while its host has
-//! not yet said hello, a restored request waits in its place until its consumer presents
-//! the same request id again (the file does not hold what the request asks for), and a
-//! reservation whose deadline had passed, or would pass sooner, gets the boot plus
-//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain instead of being given up at once.
-//! What is not presented again, or not heard from again, within the pool's `regain_grace`
-//! is dropped and counted ([`js_registry::Registry::dropped_reservations`]); the count
-//! of failed prepares and give-ups is kept, so a restart does not reset
-//! `max_reserve_attempts` or `max_replace`. Estimates are not kept. The format is
-//! additive: the rows and their keys are read past by a build that does not know them.
+//! The whole-node reservations of the registry (the host set aside for a waiting request, the wait
+//! list's order, the give-up and failed-prepare counts, the hosts a request is kept off and until
+//! when) are kept in the lease file, as the table's reservation ledger: each tick hands the table
+//! the registry's ledger when it changed and the table writes it in the same replace as the leases,
+//! so the file is at most one tick behind and the final tick of a shutdown brings it level. With
+//! `--boot resume` the registry is given the ledger before any agent says hello. A restored mark
+//! stands while its host has not yet said hello, a restored request waits in its place until its
+//! consumer presents the same request id again (the file does not hold what the request asks for),
+//! and a reservation whose deadline had passed, or would pass sooner, gets the boot plus
+//! [`RESERVATION_BOOT_GRACE`] (two minutes) to drain instead of being given up at once. What is not
+//! presented again, or not heard from again, within the pool's `regain_grace` is dropped and
+//! counted ([`js_registry::Registry::dropped_reservations`]); the count of failed prepares and
+//! give-ups is kept, so a restart does not reset `max_reserve_attempts` or `max_replace`. Estimates
+//! are not kept. The format is additive: the rows and their keys are read past by a build that does
+//! not know them.
 //! A reservation is made through `POST /v1/leases` with a `request_id` (see "Request ids"
 //! above). The lease file keeps that lease's request with it, so after a `--boot resume`
 //! the first tick presents the pending lease's request again under its id: that is the
@@ -861,6 +860,7 @@ mod job_loss;
 mod job_pass;
 mod job_start;
 mod job_store;
+mod job_whole;
 mod join_api;
 mod join_tokens;
 mod kinds;

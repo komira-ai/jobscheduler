@@ -35,11 +35,13 @@ mod logs;
 mod marks;
 mod paging;
 mod placement;
+mod prepare;
 mod queue;
 mod races;
 mod retention;
 mod rows;
 mod scrub;
+mod whole;
 
 pub use clock::*;
 pub use collect::*;
@@ -53,11 +55,13 @@ pub use logs::*;
 pub use marks::*;
 pub use paging::*;
 pub use placement::*;
+pub use prepare::*;
 pub use queue::*;
 pub use races::*;
 pub use retention::*;
 pub use rows::*;
 pub use scrub::*;
+pub use whole::*;
 
 /// Runs every check of the suite against `backend`, one after another.
 pub fn run_job_store_suite<B: Backend>(backend: &B)
@@ -152,6 +156,16 @@ where
     end_and_unmark_deletes_both_or_neither(backend);
     delete_mark_removes_the_mark_it_read(backend);
     a_mark_that_loses_to_an_end_or_another_mark_is_stale(backend);
+    place_with_writes_the_prepare_deadline_and_drops_the_mark(backend);
+    a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark(backend);
+    a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit(backend);
+    a_failed_prepare_requeues_the_job_with_its_count_and_bars(backend);
+    the_last_failed_prepare_ends_the_job_failed_to_start(backend);
+    a_failed_prepare_refuses_what_the_requeue_refuses(backend);
+    a_failed_prepare_loses_to_a_change_of_either_row(backend);
+    a_failed_prepare_drops_its_mark_or_writes_nothing(backend);
+    a_restarted_prepare_moves_only_the_deadline(backend);
+    a_restarted_prepare_loses_to_a_change_of_either_row(backend);
 }
 
 /// One `#[test]` per check of the suite, named as the check is, each on a fresh backend from
@@ -258,6 +272,16 @@ macro_rules! job_store_tests {
             end_and_unmark_deletes_both_or_neither,
             delete_mark_removes_the_mark_it_read,
             a_mark_that_loses_to_an_end_or_another_mark_is_stale,
+            place_with_writes_the_prepare_deadline_and_drops_the_mark,
+            a_placement_that_drops_a_mark_loses_to_a_change_of_the_job_or_the_mark,
+            a_cancel_of_a_queued_job_drops_its_mark_in_the_same_commit,
+            a_failed_prepare_requeues_the_job_with_its_count_and_bars,
+            the_last_failed_prepare_ends_the_job_failed_to_start,
+            a_failed_prepare_refuses_what_the_requeue_refuses,
+            a_failed_prepare_loses_to_a_change_of_either_row,
+            a_failed_prepare_drops_its_mark_or_writes_nothing,
+            a_restarted_prepare_moves_only_the_deadline,
+            a_restarted_prepare_loses_to_a_change_of_either_row,
         );
     };
 }

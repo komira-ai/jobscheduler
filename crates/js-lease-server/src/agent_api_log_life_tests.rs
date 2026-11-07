@@ -441,6 +441,7 @@ async fn the_log_lengths_are_stored_with_the_result_and_swept_with_it() {
     let context = BeatContext {
         host: &host,
         ceiling: &NetworkCeiling::default(),
+        shape: None,
         logs: Some(&*logs.grants),
         metrics: &NoMetrics,
     };
@@ -478,6 +479,7 @@ async fn a_sink_the_agent_would_refuse_is_left_out_of_the_start() {
     let context = BeatContext {
         host: &host,
         ceiling: &NetworkCeiling::default(),
+        shape: None,
         logs: Some(&*grants),
         metrics: &NoMetrics,
     };

@@ -1,6 +1,7 @@
 //! A failed read, and the schema row raced or unreadable at open: each answers the store's
 //! error and writes nothing.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -10,7 +11,10 @@ use js_state::{Cond, ManualClock, Store, StoreError, Txn};
 use super::{full_spec, host, rig, share, whole_host_spec};
 use crate::interfere::{INJECTED, Interfere};
 use crate::keys;
-use crate::{Booked, EndReason, JobState, JobStore, JobStoreError, NewJob, RandomIds};
+use crate::{
+    Booked, EndReason, FailedPrepare, JobState, JobStore, JobStoreError, NewJob, Placement,
+    RandomIds,
+};
 
 /// The error an operation answers when its read fails.
 fn injected() -> JobStoreError {
@@ -37,7 +41,7 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
     type Operation<'a> = Box<dyn Fn() -> Result<(), JobStoreError> + 'a>;
     let jobs = &rig.jobs;
     let one = NonZeroUsize::MIN;
-    let operations: [(&str, usize, Operation<'_>); 14] = [
+    let operations: [(&str, usize, Operation<'_>); 17] = [
         (
             "an insert",
             1,
@@ -76,8 +80,34 @@ pub fn a_failed_read_changes_nothing<B: Backend>(backend: &B) {
         ),
         (
             "a cancel",
-            2,
+            3,
             Box::new(|| jobs.request_cancel(&queued).map(drop)),
+        ),
+        (
+            "a placement that drops a mark",
+            3,
+            Box::new(|| {
+                jobs.place_with(&queued, host("host-a"), share(), Placement::default())
+                    .map(drop)
+            }),
+        ),
+        (
+            "a failed prepare",
+            3,
+            Box::new(|| {
+                let failed = FailedPrepare {
+                    failed_prepares: 1,
+                    prepare_bars: BTreeMap::new(),
+                    terminal: false,
+                };
+                jobs.fail_prepare_with(&whole, failed, &|_| Vec::new())
+                    .map(drop)
+            }),
+        ),
+        (
+            "a restart of a prepare",
+            2,
+            Box::new(|| jobs.restart_prepare(&whole, rig.store.now()).map(drop)),
         ),
         (
             "a release",

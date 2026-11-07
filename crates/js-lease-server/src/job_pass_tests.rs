@@ -16,6 +16,7 @@ use js_proto::v1::job_service_server::JobService;
 use js_proto::v1::{
     self, GetJobRequest, GetLogsRequest, GetResultRequest, JobResult, StartFailureCode,
 };
+use js_registry::WholeNodeConfig;
 use js_state::Store;
 use js_types::{HostId, Resources};
 use tonic::{Request, Status};
@@ -133,7 +134,7 @@ impl Observe for Provider {
 fn pass(rig: &Rig, limits: JobLimits, provider: &Provider) -> Passed {
     run(
         &rig.jobs,
-        limits,
+        (limits, &WholeNodeConfig::dedicated(1)),
         (provider, &NoMetrics),
         store_time(now_ms(rig)),
     )

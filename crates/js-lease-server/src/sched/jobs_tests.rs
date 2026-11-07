@@ -299,6 +299,7 @@ fn a_crash_between_placement_and_the_host_call_resolves_by_observation() {
     let context = BeatContext {
         host: &host("host-a"),
         ceiling: &ceiling,
+        shape: None,
         logs: None,
         metrics: &NoMetrics,
     };
@@ -378,6 +379,7 @@ fn only_absent_frees_an_allocation() {
                 let context = BeatContext {
                     host: &host("host-a"),
                     ceiling: &ceiling,
+                    shape: None,
                     logs: None,
                     metrics: &NoMetrics,
                 };
@@ -488,11 +490,12 @@ fn lease_and_job_bookings_cannot_overbook_a_host() {
     assert_eq!(memory(&rig), 12 * GIB);
 }
 
-/// Asserts that a job that books the whole host, and one whose constraints are no platform
-/// requirement, are not placed and hold no host back from the jobs behind them; that a job
-/// naming its `arch` is placed on a host of that arch; and that a live allocation of the
-/// whole host books it whole. It catches a pass that places a whole-host job as a share,
-/// that stops at a job it cannot describe, or that offers the room of a host held whole.
+/// Asserts that, for a pool with no whole-node settings (`place_jobs` passes none), a job that
+/// books the whole host, and one whose constraints are no platform requirement, are not placed
+/// and hold no host back from the jobs behind them; that a job naming its `arch` is placed on
+/// a host of that arch; and that a live allocation of the whole host books it whole. It
+/// catches a pass that places a whole-host job as a share or under no settings, that stops at
+/// a job it cannot describe, or that offers the room of a host held whole.
 #[test]
 fn a_whole_host_job_or_one_no_host_could_describe_holds_back_no_one() {
     let placer = placer_on(&clock(), &["host-a", "host-b"]);

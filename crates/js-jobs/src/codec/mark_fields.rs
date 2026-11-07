@@ -6,7 +6,8 @@
 //!
 //! The exclusions are a map of host to a value of one kind byte (0 a back-off, 1 a hard
 //! exclusion until an instant, 2 one for life) followed, for the first two, by the time it
-//! ends.
+//! ends. The same encoding of a map of exclusions is the value of a job row's prepare bars
+//! (`whole_fields`).
 
 use std::collections::BTreeMap;
 
@@ -70,8 +71,22 @@ fn exclusion_of(tag: u16, value: &[u8]) -> Result<Exclusion, DecodeError> {
     }
 }
 
+/// The value of a map of exclusions: the host and the exclusion's value in turn, in key order.
+pub(super) fn exclusions_value(exclusions: &BTreeMap<HostId, Exclusion>) -> Vec<u8> {
+    let values: Vec<(&str, Vec<u8>)> = exclusions
+        .iter()
+        .map(|(host, excluded)| (host.as_str(), exclusion(*excluded)))
+        .collect();
+    map(values
+        .iter()
+        .map(|(host, value)| (host.as_bytes(), value.as_slice())))
+}
+
 /// The exclusions of a row, no host twice.
-fn exclusions_of(tag: u16, value: Vec<u8>) -> Result<BTreeMap<HostId, Exclusion>, DecodeError> {
+pub(super) fn exclusions_of(
+    tag: u16,
+    value: Vec<u8>,
+) -> Result<BTreeMap<HostId, Exclusion>, DecodeError> {
     let pairs = pairs_of(tag, &value)?;
     let count = pairs.len();
     let mut by_name = BTreeMap::new();
@@ -95,17 +110,7 @@ pub(crate) fn encode_mark(mark: &MarkRecord) -> Result<Vec<u8>, JobStoreError> {
     row.put(t::MADE, time(mark.made));
     row.put(t::DEADLINE, time(mark.deadline));
     row.put_opt(t::TAIL_END, mark.tail_end.map(time));
-    let values: Vec<(&str, Vec<u8>)> = mark
-        .exclusions
-        .iter()
-        .map(|(host, excluded)| (host.as_str(), exclusion(*excluded)))
-        .collect();
-    row.put(
-        t::EXCLUSIONS,
-        map(values
-            .iter()
-            .map(|(host, value)| (host.as_bytes(), value.as_slice()))),
-    );
+    row.put(t::EXCLUSIONS, exclusions_value(&mark.exclusions));
     row.finish(&mark.carried)
 }
 

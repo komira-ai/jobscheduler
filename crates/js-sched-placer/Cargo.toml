@@ -23,8 +23,15 @@ js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
+js-whole = { path = "../js-whole" }
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# The whole-host job tests run the job tables on the in-memory fake, behind the wrapper that
+# fails or races a commit.
+js-jobs = { path = "../js-jobs", features = ["test-support"] }
+js-state = { path = "../js-state", features = ["test-support"] }
 
 [lints]
 workspace = true
