@@ -46,6 +46,7 @@ gpus = 1
 gpu_class = "nvidia-a100"
 
 [capabilities]
+arch = "x86_64"
 isa = "x86-64-v3"
 "#;
 
@@ -311,7 +312,7 @@ pub fn hello_body(host: &str) -> Value {
             "gpus": 1,
             "gpu_class": "nvidia-a100",
         },
-        "capabilities": { "isa": "x86-64-v3" },
+        "capabilities": { "arch": "x86_64", "isa": "x86-64-v3" },
         "labels": { "rack": "r1" },
         "phase": "serving",
     })

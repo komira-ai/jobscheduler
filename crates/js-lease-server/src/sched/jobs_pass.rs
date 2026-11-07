@@ -71,9 +71,9 @@ impl Agents {
     /// One pass over the queued jobs
     /// ([`SchedPlacer::place_jobs_with`](super::place::SchedPlacer::place_jobs_with)) on the
     /// hosts the registry would let take a job now and whose last job listing was clean
-    /// ([`Agents::listing_clean`]), when this server holds the job tables and places with
-    /// `js-sched` (`--placement js-sched`); otherwise nothing, so no job is placed under the
-    /// registry's placement. The hosts that said hello to this server (those the registry
+    /// ([`Agents::listing_clean`]), when this server holds the job tables and its registry
+    /// has the placer; otherwise nothing (an agent side a test built without a placer
+    /// places no job). The hosts that said hello to this server (those the registry
     /// holds a claim of) and the pool's whole-node settings go with them: a queued job that
     /// books the whole host is marked, placed and prepared only under those settings. A failed
     /// read of the tables is logged; the next pass reads them again, unless the store said it
