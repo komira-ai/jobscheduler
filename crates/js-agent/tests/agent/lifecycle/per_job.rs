@@ -4,10 +4,12 @@
 //! keying shows in the lease and run listing or the other way round.
 
 use js_agent::lifecycle::{Clock, RETIRED_LISTED, label};
-use js_agent_wire::{BookedResources, Command, HeldJob, HeldState, JobStartSpec, Outcome, refusal};
+use js_agent_wire::{
+    BookedResources, Command, HeldJob, HeldState, Isolation, JobStartSpec, Outcome, refusal,
+};
 use serde_json::json;
 
-use super::{Harness, job, names, reply, reply_json};
+use super::{Harness, Options, job, names, reply, reply_json};
 
 const IMAGE: &str = "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -34,6 +36,7 @@ fn start(job_id: &str) -> JobStartSpec {
         ports: Vec::new(),
         log_sink: None,
         kind: Default::default(),
+        isolation: Default::default(),
     }
 }
 
@@ -561,4 +564,38 @@ fn a_job_start_is_held_to_the_network_ceiling() {
     assert_eq!(names(&h.apply(vec![job_start(listed)])), ["started j3"]);
     let created: Vec<JobNetwork> = h.fake.created().iter().map(|run| run.network).collect();
     assert_eq!(created, [JobNetwork::AllowList]);
+}
+
+/// Asserts that a job start with `isolation = host` on an agent without `--allow-host-jobs`
+/// is refused `host-jobs-not-allowed`, creates nothing and leaves the host untainted; and
+/// that on an agent that allows host jobs the same start taints the host (`host-job`) and
+/// reaches the runtime as a host job. Catches a per-job start that always runs contained
+/// (so a host job is confined without the server knowing), and one that runs on the host
+/// without the agent's consent or without the taint.
+#[test]
+fn a_host_job_without_the_flag_is_still_refused() {
+    let host_start = |job_id: &str| {
+        let mut spec = start(job_id);
+        spec.isolation = Isolation::Host;
+        job_start(spec)
+    };
+    let mut refused = Harness::new("job-host-refused");
+    let events = refused.apply(vec![host_start("j1")]);
+    assert_eq!(names(&events), ["refused j1 host-jobs-not-allowed"]);
+    assert!(refused.fake.created().is_empty());
+    assert!(!refused.life.is_tainted());
+
+    let mut allowed = Harness::with(
+        "job-host-allowed",
+        Options {
+            allow_host_jobs: true,
+            ..Options::default()
+        },
+    );
+    let events = allowed.apply(vec![host_start("j1")]);
+    assert_eq!(names(&events), ["tainted j1 host-job", "started j1"]);
+    assert!(allowed.life.is_tainted());
+    let created = allowed.fake.created();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].isolation, Isolation::Host);
 }

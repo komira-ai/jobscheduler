@@ -484,6 +484,55 @@ async fn a_job_nothing_could_serve_is_refused_and_nothing_is_recorded() {
     assert_eq!(rows(&rig.jobs), 1);
 }
 
+/// A spec that asks for `isolation`.
+fn isolated(id: &str, isolation: v1::Isolation) -> v1::JobSpec {
+    v1::JobSpec {
+        constraints: Some(v1::Constraints {
+            isolation: isolation.into(),
+            ..v1::Constraints::default()
+        }),
+        ..wire(id)
+    }
+}
+
+/// Asserts admission of a host-isolation job over the registry's hosts: a host whose hello
+/// does not report `host-jobs`, or reports it as anything but `true`, does not admit it
+/// (`no-capable-host`, nothing recorded) while it admits a contained job and one with
+/// unspecified isolation; a host that reports `host-jobs` as `true` admits it, and the job is
+/// recorded as queued. It catches a host job admitted on any host, which would taint a host
+/// that cannot run it, and a contained job refused for the want of a capability it does not
+/// need.
+#[tokio::test]
+async fn a_host_isolation_job_is_admitted_only_when_a_host_reports_host_jobs() {
+    let mut rig = clocked_rig("submit_host_jobs", false, NEVER);
+    let writes = served(&rig).await;
+    let refused = (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({ "error": "no-capable-host" }),
+    );
+    rig.register("host-a", true);
+    rig.register_host_jobs("host-b", "false");
+    for via in Via::BOTH {
+        let host = isolated("job-h", v1::Isolation::Host);
+        assert_eq!(writes.submit(via, &host).await.unwrap_err(), refused);
+    }
+    assert_eq!(rows(&rig.jobs), 0);
+    for (named, isolation) in [
+        ("job-c", v1::Isolation::Contained),
+        ("job-u", v1::Isolation::Unspecified),
+    ] {
+        let made = writes.submit(Via::Json, &isolated(named, isolation)).await;
+        assert_eq!(made.unwrap().state(), v1::JobState::Queued, "{named}");
+    }
+    rig.register_host_jobs("host-c", "true");
+    let made = writes
+        .submit(Via::Json, &isolated("job-h", v1::Isolation::Host))
+        .await
+        .unwrap();
+    assert_eq!(made.state(), v1::JobState::Queued);
+    assert_eq!(rows(&rig.jobs), 3);
+}
+
 /// Asserts the job id's grammar at submit: an empty id is minted (32 hex digits); 64 bytes,
 /// a space, a slash and a non-ASCII letter are refused `INVALID_ARGUMENT` naming
 /// `spec.jobId` over gRPC and 400 over JSON, and no answer repeats the offered id; 63 bytes
@@ -595,6 +644,7 @@ async fn the_answer_shows_the_job_as_recorded() {
                     interconnect: Some("nvlink>=8".to_owned()),
                     form_factor: Some("sxm".to_owned()),
                 }),
+                isolation: v1::Isolation::Unspecified.into(),
             }),
             priority: 3,
             ..conflicted()

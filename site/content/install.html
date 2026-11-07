@@ -82,6 +82,6 @@ memory_bytes = 17179869184</pre></div>
   <li><span class="tag tag-planned">none</span> A lease server for macOS.</li>
   <li><span class="tag tag-planned">not proven</span> That the macOS archives come out byte-identical when a partly published release is re-run, nor that the Linux arm64 ones do when built again on a hosted arm64 runner.</li>
   <li><span class="tag tag-planned">none</span> A Debian package of the agent for arm64: the package is built for x86_64 only.</li>
-  <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start.</li>
+  <li><span class="tag tag-planned">not available yet</span> The agent flag <code>--allow-host-jobs</code>: it is refused at start in every configuration, because no runtime launches a host job yet (crun and docker run contained jobs only).</li>
 </ul>
 <p class="source-note">Sources: <code>docs/release.md</code> ("What is released", "Assets" and the note on the macOS archives), the headers of <code>.github/workflows/js-agent-deb.yml</code> and <code>.github/workflows/js-agent-macos-pkg.yml</code> (the packages are not published), <code>crates/js-mdm/src/lib.rs</code> (what <code>js-mdm</code> is) and the flags table of <code>crates/js-agent/src/lib.rs</code>.</p>

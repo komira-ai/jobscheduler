@@ -17,6 +17,11 @@ pub const ALLOCATION: &str = "alloc/";
 /// a scan. No `idx/` space names it.
 pub const MARK: &str = "mark/";
 
+/// `taint/<host>`: the taint a host-isolation job's placement put on the host, written in the
+/// transaction that places the job and deleted only by [`crate::JobStore::drop_taints`]. No
+/// `idx/` space names it.
+pub const TAINT: &str = "taint/";
+
 /// `meta/jobs/schema`: the schema version of the job, allocation and mark rows, four bytes,
 /// big-endian, written once by the first store to open.
 pub const SCHEMA: &str = "meta/jobs/schema";
@@ -37,6 +42,12 @@ pub fn allocation(id: &JobId) -> String {
 #[must_use]
 pub fn mark(id: &JobId) -> String {
     format!("{MARK}{id}")
+}
+
+/// The key of the taint of `host`.
+#[must_use]
+pub fn taint(host: &HostId) -> String {
+    format!("{TAINT}{host}")
 }
 
 /// `idx/`: the secondary key spaces. Each entry is a key with an empty value, written in the
@@ -208,11 +219,19 @@ mod tests {
             "idx/alloc/host/host-a",
             "job/j-1",
             "mark/j-1",
+            "taint/host-a",
         ] {
             assert_eq!(indexed_row(other), None, "{other}");
         }
         assert_eq!(unread("meta/jobs/schema"), None);
         assert_eq!(mark(&job), "mark/j-1");
+        assert_eq!(taint(&host), "taint/host-a");
+        assert_eq!(indexed_row(&taint(&host)), None);
+        assert_eq!(
+            unread(&taint(&host)),
+            None,
+            "a taint row has no unread entry"
+        );
         assert_eq!(unread(&mark(&job)), None, "a mark row has no unread entry");
     }
 }

@@ -148,14 +148,18 @@ fn constraints() -> impl Strategy<Value = Constraints> {
         variant(3),
         text(),
         proptest::option::of(accelerator()),
+        variant(3),
     )
-        .prop_map(|(os, arch, exec, isa_level, accelerator)| Constraints {
-            os,
-            arch,
-            exec,
-            isa_level,
-            accelerator,
-        })
+        .prop_map(
+            |(os, arch, exec, isa_level, accelerator, isolation)| Constraints {
+                os,
+                arch,
+                exec,
+                isa_level,
+                accelerator,
+                isolation,
+            },
+        )
 }
 
 fn job_spec() -> impl Strategy<Value = JobSpec> {

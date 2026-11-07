@@ -10,8 +10,8 @@ mod common;
 
 use common::{heartbeat, job};
 use js_agent_wire::{
-    Ack, BookedResources, Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, Hello, JobResult,
-    JobResultAck, JobStartSpec, LogGrant, LogGrantState, LogReport, LogSink, Outcome,
+    Ack, BookedResources, Command, Heartbeat, HeartbeatReply, HeldJob, HeldState, Hello, Isolation,
+    JobResult, JobResultAck, JobStartSpec, LogGrant, LogGrantState, LogReport, LogSink, Outcome,
     PER_JOB_CAPABILITY, ResultAck, StartKind,
 };
 use serde::{Deserialize, Deserializer};
@@ -239,6 +239,7 @@ fn job_start(id: &str) -> Command {
         ports: Vec::new(),
         log_sink: None,
         kind: Default::default(),
+        isolation: Default::default(),
     }))
 }
 
@@ -488,5 +489,40 @@ fn an_old_agent_skips_the_kind_of_a_vm_start() {
     );
     assert!(
         matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "vm-41")
+    );
+}
+
+/// Asserts that an agent from before the `isolation` of a job start reads a host start with
+/// the start and the stop beside it intact: the field is skipped, never a decode error. (Such
+/// an agent would run it contained, which is why a server sends `isolation: host` only to a
+/// host whose hello reports `host-jobs`.) Catches a host start that costs an old agent the
+/// reply.
+#[test]
+fn an_old_agent_skips_the_isolation_of_a_host_start() {
+    let Command::JobStart(mut spec) = job_start("host-42") else {
+        unreachable!("job_start makes a job start");
+    };
+    spec.isolation = Isolation::Host;
+    let reply = HeartbeatReply {
+        commands: vec![
+            Command::JobStart(spec),
+            Command::JobStop {
+                job_id: "host-41".into(),
+            },
+        ],
+        ..HeartbeatReply::default()
+    };
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["commands"][0]["isolation"], "host");
+    let old: previous::JobReply = serde_json::from_value(wire).unwrap();
+    let previous::JobCommand::JobStart(start) = &old.commands[0] else {
+        panic!("the job start is lost: {:?}", old.commands);
+    };
+    assert_eq!(
+        (start.job_id.as_str(), start.command.clone(), start.wall_ms),
+        ("host-42", vec!["make".to_owned()], 60_000)
+    );
+    assert!(
+        matches!(&old.commands[1], previous::JobCommand::JobStop { job_id } if job_id == "host-41")
     );
 }

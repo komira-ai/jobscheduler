@@ -20,6 +20,7 @@ use js_types::{Arch, JobNetwork, Os, PortMap};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
+use crate::command::Isolation;
 use crate::error::{Rule, ValidationError};
 use crate::files::{self, RunFile};
 use crate::heartbeat::{Ack, HeldState, LogTail, Outcome};
@@ -50,6 +51,14 @@ pub const PER_JOB_CAPABILITY: &str = "per-job";
 /// limits. A server tells the two apart by this capability; nothing else on the wire
 /// changes.
 pub const START_FENCE_CAPABILITY: &str = "start-fence";
+
+/// The hello capability of an agent that can launch a job with [`Isolation::Host`] from a
+/// [`JobStartSpec`]. Its value is `true`. No agent reports it yet: no runtime launches a host
+/// job, and `js-agent` refuses `--allow-host-jobs` at start until one does. An agent without
+/// it would run a start's `isolation: host` as a contained job, since it ignores the field,
+/// so a server sends a host start only to a host that reports it. Nothing else on the wire
+/// changes.
+pub const HOST_JOBS_CAPABILITY: &str = "host-jobs";
 
 /// What the job's allocation booked on the host, which the agent enforces as the job's
 /// limits. The ranges are those of [`crate::Limits`].
@@ -107,7 +116,7 @@ impl BookedResources {
 /// The `run`, `os` and `arch` of the one job definition are here as on a run start
 /// ([`crate::JobSpec::run`]); a native body and a bundle are not carried. Fields a later
 /// change adds, as optional fields: the network policy and the declared ports (the job
-/// network change).
+/// network change), the kind of start, and the isolation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStartSpec {
     /// The job's id; the key of every idempotent step. The grammar of every id here
@@ -185,6 +194,13 @@ pub struct JobStartSpec {
     /// it, so a server sends `vm` only to a host whose hello reports `vm.slots`.
     #[serde(default, skip_serializing_if = "StartKind::is_action")]
     pub kind: StartKind,
+    /// How the job is confined ([`Isolation`]): absent for `contained`, `host` for a job that
+    /// runs on the machine itself; an unknown value fails to decode, so inside a reply that
+    /// one start reads as [`crate::Command::Unknown`]. An agent that predates the field
+    /// ignores it and would run the job contained, so a server sends `host` only to a host
+    /// whose hello reports [`HOST_JOBS_CAPABILITY`].
+    #[serde(default, skip_serializing_if = "Isolation::is_contained")]
+    pub isolation: Isolation,
 }
 
 impl JobStartSpec {

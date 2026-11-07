@@ -32,6 +32,7 @@ fn start(kind: StartKind) -> JobStartSpec {
         ports: Vec::new(),
         log_sink: None,
         kind,
+        isolation: Default::default(),
     }
 }
 

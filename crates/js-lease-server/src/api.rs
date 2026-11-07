@@ -266,7 +266,8 @@ impl Shared {
     /// retention and settles the allocations of hosts read absent ([`Agents::job_pass`]); then
     /// advances the agent registry (when the server has one) so its reservations and prepare
     /// deadlines act on this tick, logs what changed and counts a failed write; then runs a pass
-    /// over the queued jobs ([`Agents::place_jobs`]): the order of design section 6.1. The
+    /// over the queued jobs ([`Agents::place_jobs`]), after which the binding of each host a
+    /// host job tainted is written ([`Agents::keep_taints`]): the order of design section 6.1. The
     /// table's lock is held for the tick alone. How the lease file's write and the job pass
     /// went is recorded as one reading of the store's health ([`StoreHealth::record`]).
     pub(crate) async fn tick(&self) -> TickReport {
@@ -309,7 +310,9 @@ impl Shared {
             // The tick is a pass over the queued jobs too, whatever else freed room; it reads
             // and writes the job tables, so it runs on the pool for blocking calls.
             let placing = Arc::clone(agents);
-            crate::util::blocking(move || placing.place_jobs()).await;
+            let tainted = crate::util::blocking(move || placing.place_jobs()).await;
+            // A host job the pass placed has tainted its host; the binding is written now.
+            agents.keep_taints(tainted).await;
         }
         report
     }
