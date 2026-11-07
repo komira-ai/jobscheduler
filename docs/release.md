@@ -9,7 +9,7 @@ changes code that ships is released as the next version, after the jobs of `ci` 
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
 2. `ci-passed` waits for the jobs of the `ci` run of that commit, all but the one named `macos` (it polls every 120 s, for up to four hours; ten failed reads of the runs or their jobs in a row, about twenty minutes, fail it too)
-   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed. (`macos-pkg` and `macos-result` run only on pull requests, so on main they are skipped.)
+   and passes when every other job succeeded or was skipped, even while `macos` is still queued or after it failed.
    If any other job failed, was cancelled or timed out, the release fails with an error naming those jobs and the `ci`
    run, and nothing is released. It holds `actions: read` and nothing else, and checks out no code.
    A release therefore does not wait for macOS `ci`: that job queues for hours on the hosted macOS runners, so
@@ -253,7 +253,11 @@ until it is set.
   counts from.
 - **Branch protection for `main`**: require a pull request. A push to `main` that passes `ci` is a
   release, so whoever can push to `main` can cut one. The workflow does not depend on this, but the
-  guarantee that a release is a reviewed change does.
+  guarantee that a release is a reviewed change does. Its required status checks include the two
+  macOS checks every pull request runs, `macos` (ci.yml) and `js-agent-macos-pkg`
+  (js-agent-macos-pkg.yml), so a change that breaks the Mac build or package cannot merge;
+  `tools/held/required-checks/require_macos_checks.sh` adds them (a dry run by default,
+  `--apply` to change the protection).
 - **No environment** is used by `release`, so no environment needs approvers or secrets.
 
 Not proven until the first real run on `main`, and fixed there if it differs:

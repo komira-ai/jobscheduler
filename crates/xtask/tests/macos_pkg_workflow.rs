@@ -1,6 +1,5 @@
 //! The workflow that builds the macOS package (`.github/workflows/js-agent-macos-pkg.yml`)
-//! read as it is in the repository. Two jobs: `build` runs when ci.yml calls the workflow (on
-//! a pull request its filter selects) and by hand,
+//! read as it is in the repository. Two jobs: `build` runs on every pull request and by hand,
 //! holds no secret and signs nothing; `sign` runs only by hand from main, in the protected
 //! environment `macos-signing`, takes the checked unsigned package from `build` without
 //! rebuilding, and is the only place a secret is named, on the steps that sign and
@@ -90,40 +89,25 @@ fn on_block(text: &str) -> Vec<&str> {
 }
 
 #[test]
-fn the_workflow_starts_when_ci_calls_it_and_by_hand_only() {
+fn the_workflow_starts_on_every_pull_request_and_by_hand_only() {
     let text = read(WORKFLOW);
-    let on: Vec<&str> = on_block(&text)
-        .into_iter()
-        .filter(|l| !l.starts_with("   "))
-        .map(str::trim)
-        .collect();
-    assert_eq!(on, ["workflow_call:", "workflow_dispatch:"]);
-    // No trigger of its own on a pull request: ci.yml's filter decides when it runs there.
-    assert!(!text.contains("pull_request:"));
-    assert!(!text.contains("pull_request_target"));
-}
-
-#[test]
-fn a_call_takes_an_optional_version_and_no_secret() {
-    let text = read(WORKFLOW);
-    let call: Vec<&str> = on_block(&text)
-        .into_iter()
-        .skip_while(|l| l.trim() != "workflow_call:")
-        .skip(1)
-        .take_while(|l| l.starts_with("   "))
-        .map(str::trim)
-        .collect();
+    let on: Vec<&str> = on_block(&text).into_iter().map(str::trim).collect();
+    // No paths and no types under `pull_request`: every pull request runs the build.
     assert_eq!(
-        call,
+        on,
         [
+            "pull_request:",
+            "workflow_dispatch:",
             "inputs:",
             "version:",
-            "description: The package version, MAJOR.MINOR.PATCH; 0.0.0 when not given",
-            "required: false",
+            "description: The package version, MAJOR.MINOR.PATCH",
+            "required: true",
             "type: string",
         ]
     );
-    // An absent version is 0.0.0, for a call and for nothing else.
+    assert!(!text.contains("pull_request_target"));
+    assert!(!text.contains("workflow_call"));
+    // A pull request builds version 0.0.0.
     assert!(
         text.contains("  VERSION: ${{ inputs.version || '0.0.0' }}\n"),
         "the version"

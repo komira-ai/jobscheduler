@@ -172,12 +172,9 @@ pub fn dir_with_mode(path: &Path, mode: u32) {
 
 /// A named pipe at `path`.
 pub fn fifo(path: &Path) -> PathBuf {
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
+    nix::unistd::mkfifo(
         path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
     path.to_owned()

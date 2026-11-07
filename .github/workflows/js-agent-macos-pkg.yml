@@ -4,8 +4,7 @@
 # refuses anything but the files, modes, owners and script the package is meant to have. It
 # publishes nothing: the packages and their SHA256SUMS are workflow artifacts for seven days.
 #
-# Two jobs. `build` runs when ci.yml calls this workflow (its `macos-pkg` job, on a pull request
-# that touches the Mac surface) and by hand: it builds, checks and sums the package
+# Two jobs. `build` (its check is `js-agent-macos-pkg`) runs on every pull request and by hand: it builds, checks and sums the package
 # unsigned, and no secret is named anywhere in it, so no code of a branch (a build script, a
 # macro, xtask) can see one. `sign` runs only by hand from main, in the environment
 # `macos-signing`, which a repository administrator creates with its secrets and a rule that
@@ -20,20 +19,12 @@
 # No command expands an expression: a script reads its environment. The version, which goes
 # into file names, is checked as MAJOR.MINOR.PATCH before anything uses it.
 #
-# A pull request that ci.yml's filter selects (the package, its checker, the Mac crates, the
-# toolchain; the filter's comment lists them) builds it as version 0.0.0, through ci.yml, which
-# passes no secret; this workflow has no trigger of its own on a pull request. A manual run
+# Every pull request builds it as version 0.0.0; it is a required check of main. A manual run
 # builds the version typed. crates/xtask/tests/macos_pkg_workflow.rs pins these rules.
 name: js-agent-macos-pkg
 
 on:
-  # ci.yml's `macos-pkg` job, which passes no input (the version is then 0.0.0) and no secret.
-  workflow_call:
-    inputs:
-      version:
-        description: The package version, MAJOR.MINOR.PATCH; 0.0.0 when not given
-        required: false
-        type: string
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -43,9 +34,8 @@ on:
 
 permissions: {}
 
-# A manual run of one version on one ref waits for the one before it. Called from ci.yml, the
-# group is the pull request's own, and a newer push to it cancels the older run (ci.yml's
-# group cancels the calling run too).
+# A newer push to a pull request cancels its older run, so a burst of pushes does not queue
+# macOS runners; a manual run of one version on one ref waits for the one before it.
 concurrency:
   group: js-agent-macos-pkg-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -59,6 +49,9 @@ env:
 
 jobs:
   build:
+    # The check's name, which main's branch protection requires (`build` alone is also a job
+    # of js-agent-deb.yml).
+    name: js-agent-macos-pkg
     runs-on: macos-15
     timeout-minutes: 60
     permissions:

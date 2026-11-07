@@ -15,18 +15,18 @@
 # site/.node-version. The network is touched by `npm ci` alone, with install scripts off.
 # The site steps build and test; they hold no cloud access and put nothing anywhere.
 #
-# macOS runs on a pull request only in `macos` and `macos-pkg`, and only when the `changes`
-# job's filter selects the pull request (see its comment); `macos-result` is the one check of
-# them that every pull request gets. No macOS job that runs on a pull request names a secret
-# or holds a write permission (crates/xtask/tests/pr_macos_jobs.rs holds every workflow to
-# that; the package workflow's `sign` job, which does, runs only by hand from main).
+# Every pull request runs the `macos` job on GitHub's hosted macos-15 runner (the workspace's
+# tests on Apple silicon, then the release's macOS build), and js-agent-macos-pkg.yml builds the
+# macOS package for it; both are to be required checks of main
+# (tools/held/required-checks/require_macos_checks.sh). No macOS job that runs on a pull
+# request names a secret or holds a write permission, and a newer push to a pull request cancels
+# its older macOS runs (crates/xtask/tests/pr_macos_jobs.rs holds every workflow to that).
 name: ci
 
 on:
   pull_request:
     # No `labeled` type: a label-only run would show skipped checks under the names of the
-    # real run's checks and could hide a red run. The label `macos` is read at the next push
-    # or reopen.
+    # real run's checks and could hide a red run.
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
@@ -193,86 +193,13 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # Whether a pull request touches the Mac and service-manager surface. A pull request that
-  # does not skips every macOS job of this workflow (the hosted macOS runners are scarce, and
-  # a queue of pull request jobs held up the macos job of main), and `macos-result` passes
-  # for it; a push to main always runs the `macos` job: main's run is the backstop for what a
-  # pull request did not check. A pull request runs the macOS jobs (`macos`, `macos-pkg`)
-  # when any of these holds:
-  #   - the pull request carries the label `macos`;
-  #   - a changed path contains darwin, apple, macos or seatbelt (any case);
-  #   - a changed path is under a js-mac-* crate (crates/js-mac-), js-bundle, js-bundle-cli,
-  #     js-oci, js-contain or js-update-hook (the launchd units, the step runner and the
-  #     hook contract the agent's self-update runs on); under js-agent's native runtime
-  #     (src/native: the sandbox-exec pool users) or its update hook (src/update_hook), or
-  #     their tests; under js-treestore's macOS code or tests; or under xtask's package code
-  #     and the release code the two jobs run (stage, stamp, the hostkeeper package and its
-  #     index), or their tests;
-  #   - a changed path is rust-toolchain.toml, LICENSE (a file of the package), this file,
-  #     release.yml or a manual macOS
-  #     workflow (js-mac-*, js-agent-native-*, js-treestore-privileged-tests; the others
-  #     have macos in their names);
-  #   - the diff adds or removes a line with `target_os = "macos"` or `target_vendor = "apple"`
-  #     (the cfg( ), cfg!( ), cfg(any( ... )) and no-space spellings all contain it).
-  # Cargo.toml, Cargo.lock and the portable code of the crates the jobs build are left out on
-  # purpose (they are most pull requests): main's run of `macos` is their backstop.
-  # If the diff cannot be computed the jobs run (fail closed). The label is read
-  # from the pull request at each push and reopen (adding it starts no run).
-  # crates/xtask/tests/macos_filter.rs runs this script on built repositories and pins each
-  # trigger.
-  changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      macos: ${{ steps.filter.outputs.macos }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - id: filter
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.base_ref }}
-          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}
-        run: |
-          if [ "$EVENT" != pull_request ] || [ "$LABELED" = true ]; then
-            echo "macos=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Fail closed: if the diff cannot be computed, run the macOS job. Renames count as
-          # both the old and the new path, and names are not quoted.
-          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "origin/$BASE...HEAD") ||
-            ! patch=$(git diff --no-renames --no-color -U0 "origin/$BASE...HEAD"); then
-            echo "macos=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          macos=false
-          surface='darwin|apple|macos|seatbelt'
-          surface+='|^crates/js-mac-|^crates/js-(bundle|bundle-cli|oci|contain|update-hook)/'
-          surface+='|^crates/js-agent/src/(native|update_hook)/'
-          surface+='|^crates/js-agent/tests/(agent/(native|update_hook)/|native_|update_hook_fakes/|bin/update_hook_fake\.rs$)'
-          surface+='|^crates/js-treestore/(src/mac/|tests/(privileged|treestore/mac_))'
-          surface+='|^crates/xtask/src/(macpkg\.rs$|pkg\.rs$|release/(hostkeeper_|stage|stamp))'
-          surface+='|^crates/xtask/tests/(hostkeeper_package|release_stage|pkg\.rs$)'
-          surface+='|^rust-toolchain\.toml$|^LICENSE$'
-          surface+='|^\.github/workflows/(ci|release|js-mac-[a-z-]+|js-agent-native-[a-z-]+|js-treestore-privileged-tests)\.yml$'
-          if printf '%s\n' "$files" | grep -Eiq "$surface"; then
-            macos=true
-          elif printf '%s\n' "$patch" | grep -Ev '^(\+\+\+|---) ' | grep -Eq '^[+-].*target_(os[[:space:]]*=[[:space:]]*"macos"|vendor[[:space:]]*=[[:space:]]*"apple")'; then
-            macos=true
-          fi
-          echo "macos=$macos" >> "$GITHUB_OUTPUT"
-
-  # The macOS crates build and pass their tests on Apple silicon: js-agent (with the native
-  # runtime and its sandbox-exec pool users, and the update hook), js-cli, js-oci,
-  # js-treestore, js-mac-pool, js-mac-session, js-mac-provision, js-bundle, js-bundle-cli and
-  # js-update-hook (the launchd units and the step runner), with the crates their tests start.
-  # Tests that need Linux (pidfds, /proc) are cfg-gated, not removed; the coverage and the
-  # Postgres tests stay on Linux. js-mac-pool's Seatbelt profile builder also runs its
-  # generated profile under the real `sandbox-exec` here (tests/runner.rs).
+  # The workspace builds and passes its tests on Apple silicon, on every pull request and every
+  # push to main, but for the two crates that are Linux code and are not built for macOS:
+  # js-contain (the crun runtime, cgroups) and js-host-step (the Linux host steps). Tests that
+  # need Linux (pidfds, /proc, crun) are cfg-gated, not removed; the coverage and the Postgres
+  # tests stay on Linux. js-mac-pool's Seatbelt profile builder also runs its generated profile
+  # under the real `sandbox-exec` here (tests/runner.rs), and xtask's macOS package tests build
+  # a package with Apple's pkgbuild.
   #
   # On a pull request the job then makes, from the pull request's commit, what the release's
   # macOS leg makes after a merge (release.yml, `build` for aarch64-apple-darwin): the release
@@ -283,10 +210,6 @@ jobs:
   # to main skips those steps: the release's own leg makes the same files from that commit.
   # crates/xtask/tests/pr_macos_jobs.rs pins that the step builds the leg's binaries.
   macos:
-    needs: changes
-    # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
-    # run cancelled by a newer push to the same pull request does not.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-15
     # Pushes to main share one group with cancel-in-progress false: one run executes, one
     # waits, and a newer waiting run replaces an older one, so the hosted macOS pool never
@@ -317,12 +240,7 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
-      # Whether every crate's tests build on macOS, and how long that takes: a measurement for
-      # choosing between the whole workspace and the crate list below. It does not fail the job.
-      - name: Build the whole workspace's tests on macOS (measured, not required)
-        continue-on-error: true
-        run: cargo build --workspace --tests --locked --keep-going
-      - run: cargo build --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-mac-session -p js-bundle -p js-bundle-cli -p js-mac-provision -p js-update-hook
+      - run: cargo build --workspace --locked --exclude js-contain --exclude js-host-step
       - name: Check the minimum macOS of the built binaries
         run: |
           set -euo pipefail
@@ -339,10 +257,8 @@ jobs:
             checked=$((checked + 1))
           done
           [ "$checked" -gt 0 ] || { echo "::error::no Mach-O binary found to check"; exit 1; }
-      - run: cargo test --locked -p js-agent -p js-cli -p js-oci -p js-treestore -p js-mac-pool -p js-mac-session -p js-bundle -p js-bundle-cli -p js-mac-provision -p js-update-hook
-      # The package of the agent, built with Apple's pkgbuild from stand-in files and read back.
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p xtask --test macos_pkg --test macos_pkg_real
+      # --no-fail-fast: a red run names every failing test, as in the Linux `test` job.
+      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step
       - name: Build, stage and package the release's macOS binaries
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
@@ -391,53 +307,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
-
-  # The macOS installer package of js-agent, built from the pull request's commit and checked
-  # unsigned: the `build` job of js-agent-macos-pkg.yml, called as a reusable workflow on a
-  # pull request the filter selects (the same condition as `macos`). No secret is passed and
-  # the job holds no permission beyond reading the repository, so the called jobs hold no
-  # more; the called `sign` job runs only by hand from main and is skipped here. A push to
-  # main does not run it: the release waits for every job of this workflow but `macos`, and
-  # this one would wait for a macOS runner.
-  macos-pkg:
-    needs: changes
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/js-agent-macos-pkg.yml
-
-  # The one check of a pull request's macOS jobs, for branch protection to require: it runs on
-  # every pull request, on Linux, and passes when the filter ran and `macos` and `macos-pkg`
-  # both succeeded, or the filter said no and both were skipped. Anything else fails it: a
-  # failed filter, a failed, cancelled or timed-out macOS job, or a macOS job skipped although
-  # the filter said yes. It holds no permission and checks out nothing. A push to main skips
-  # it (main's `macos` job is the backstop, which the release does not wait for).
-  macos-result:
-    needs: [changes, macos, macos-pkg]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: The macOS jobs passed, or the filter skipped them
-        env:
-          CHANGES: ${{ needs.changes.result }}
-          WANTED: ${{ needs.changes.outputs.macos }}
-          MACOS: ${{ needs.macos.result }}
-          PKG: ${{ needs.macos-pkg.result }}
-        run: |
-          echo "changes: $CHANGES (macos=$WANTED), macos: $MACOS, macos-pkg: $PKG"
-          if [ "$CHANGES" != success ]; then
-            echo "::error::the changes job did not succeed: $CHANGES"
-            exit 1
-          fi
-          case "$WANTED/$MACOS/$PKG" in
-            true/success/success | false/skipped/skipped) ;;
-            *)
-              echo "::error::the macOS jobs did not pass: the filter said macos=$WANTED, macos is $MACOS, macos-pkg is $PKG"
-              exit 1
-              ;;
-          esac
 
   # js-state's Postgres backend against a real server: its conformance suite, the schema
   # and boot tests, js-jobs's job store suite on it (tests/postgres_jobs.rs), and clippy

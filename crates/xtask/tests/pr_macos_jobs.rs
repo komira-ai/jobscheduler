@@ -32,13 +32,12 @@
 //! line changed.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The pull request macOS jobs of the repository: `<file>/<job>`, and for a called workflow's
 /// job `<file>/<calling job> -> <called file>/<job>`.
 const EXPECTED: [&str; 4] = [
     "ci.yml/macos",
-    "ci.yml/macos-pkg -> js-agent-macos-pkg.yml/build",
+    "js-agent-macos-pkg.yml/build",
     "macos-probe.yml/probe",
     "release.yml/build",
 ];
@@ -514,9 +513,9 @@ fn the_repository_s_macos_job_with_a_secret_added_is_refused() {
 }
 
 #[test]
-fn the_package_s_sign_job_called_on_a_pull_request_is_refused() {
+fn the_package_s_sign_job_on_a_pull_request_is_refused() {
     // The sign job holds the signing secrets and the environment; only its `if:` keeps it off
-    // the pull request that ci.yml's macos-pkg job runs it for.
+    // the pull requests the workflow runs on.
     let mut workflows = repository_workflows();
     let pkg = workflows
         .iter_mut()
@@ -526,7 +525,7 @@ fn the_package_s_sign_job_called_on_a_pull_request_is_refused() {
     assert_eq!(pkg.1.matches(gate).count(), 1);
     pkg.1 = pkg.1.replace(gate, "");
     let (jobs, problems) = lint(&workflows);
-    let sign = "ci.yml/macos-pkg -> js-agent-macos-pkg.yml/sign";
+    let sign = "js-agent-macos-pkg.yml/sign";
     assert!(jobs.iter().any(|j| j == sign), "{jobs:?}");
     assert_eq!(
         problems,
@@ -780,98 +779,72 @@ fn every_spelling_of_the_trigger_and_of_the_runner_is_seen() {
     assert_eq!(lint(&one("t.yml", &pr_workflow(&job))).1, refused);
 }
 
-/// The script of the step of `macos-result`, with its indentation removed.
-fn result_script() -> String {
-    let text = read("ci.yml");
-    let start = text.find("\n  macos-result:\n").expect("macos-result job");
-    let job = &text[start..];
-    let mut lines = job.lines().skip_while(|l| l.trim() != "run: |");
-    let header = lines.next().expect("run block");
-    let pad = " ".repeat(indent(header) + 2);
-    let body: Vec<&str> = lines
-        .take_while(|l| l.is_empty() || l.starts_with(&pad))
-        .map(|l| l.get(pad.len()..).unwrap_or(""))
-        .collect();
-    assert!(body.len() > 5, "{body:?}");
-    body.join("\n") + "\n"
-}
-
-/// Runs `macos-result`'s script with the results of the jobs it needs and returns whether it
-/// passed.
-fn result(changes: &str, wanted: &str, macos: &str, pkg: &str) -> bool {
-    Command::new("bash")
-        .arg("-c")
-        .arg(result_script())
-        .env("CHANGES", changes)
-        .env("WANTED", wanted)
-        .env("MACOS", macos)
-        .env("PKG", pkg)
-        .stdout(std::process::Stdio::null())
-        .status()
-        .expect("run bash")
-        .success()
-}
-
 #[test]
-fn the_result_job_passes_only_when_the_macos_jobs_did_what_the_filter_said() {
-    // Passed: the filter said yes and both jobs succeeded, or it said no and both were skipped.
-    assert!(result("success", "true", "success", "success"));
-    assert!(result("success", "false", "skipped", "skipped"));
-    // A macOS job that failed, was cancelled or timed out (a failure to Actions).
-    for bad in ["failure", "cancelled"] {
-        assert!(!result("success", "true", bad, "success"), "{bad}");
-        assert!(!result("success", "true", "success", bad), "{bad}");
-    }
-    // A macOS job skipped although the filter said yes.
-    assert!(!result("success", "true", "skipped", "success"));
-    assert!(!result("success", "true", "success", "skipped"));
-    // Jobs that ran although the filter said no.
-    assert!(!result("success", "false", "success", "skipped"));
-    // A filter that failed or was cancelled fails it, whatever the macOS jobs did.
-    for bad in ["failure", "cancelled", "skipped"] {
-        assert!(!result(bad, "", "success", "success"), "{bad}");
-    }
-}
-
-#[test]
-fn the_result_job_runs_on_every_pull_request_after_the_macos_jobs_and_holds_nothing() {
-    let w = Workflow::parse("ci.yml", &read("ci.yml"));
-    let job = &w
-        .jobs
-        .iter()
-        .find(|(n, _)| n == "macos-result")
-        .expect("macos-result")
-        .1;
+fn every_pull_request_runs_the_two_macos_checks_whatever_it_changes() {
+    // ci.yml's macos job: no filter job, no condition, no paths on the trigger.
+    let ci = Workflow::parse("ci.yml", &read("ci.yml"));
+    assert!(!ci.jobs.iter().any(|(n, _)| n == "changes"), "a filter job");
+    let macos = &ci.jobs.iter().find(|(n, _)| n == "macos").expect("macos").1;
+    assert_eq!(block(macos, 4, "if"), None);
+    assert_eq!(block(macos, 4, "needs"), None);
+    assert_eq!(block(macos, 4, "runs-on").expect("runs-on"), ["macos-15"]);
     assert_eq!(
-        block(job, 4, "needs").expect("needs"),
-        ["[changes, macos, macos-pkg]"]
-    );
-    assert_eq!(
-        block(job, 4, "if").expect("if"),
-        ["${{ !cancelled() && github.event_name == 'pull_request' }}"]
-    );
-    assert_eq!(block(job, 4, "permissions").expect("permissions"), ["{}"]);
-    assert_eq!(
-        block(job, 4, "runs-on").expect("runs-on"),
-        ["ubuntu-latest"]
-    );
-    assert!(!job.iter().any(|l| l.contains("actions/checkout")));
-    // The two macOS jobs run on the filter's yes; the package job only on a pull request.
-    let macos_pkg = &w
-        .jobs
-        .iter()
-        .find(|(n, _)| n == "macos-pkg")
-        .expect("macos-pkg")
-        .1;
-    assert_eq!(
-        block(macos_pkg, 4, "if").expect("if"),
+        ci.top_block("on").expect("on"),
         [
-            "${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}"
+            "pull_request:",
+            "types: [opened, synchronize, reopened]",
+            "push:",
+            "branches: [main]",
         ]
     );
+    // It runs the workspace's tests, all but the two Linux-only crates.
+    let text = read("ci.yml");
+    assert!(text.contains(
+        "      - run: cargo test --workspace --locked --no-fail-fast --exclude js-contain --exclude js-host-step\n"
+    ));
+    // The package build: a pull request trigger with no paths, a job with no condition, and the
+    // check name the branch protection requires.
+    let pkg = Workflow::parse("js-agent-macos-pkg.yml", &read("js-agent-macos-pkg.yml"));
     assert_eq!(
-        block(macos_pkg, 4, "uses").expect("uses"),
-        ["./.github/workflows/js-agent-macos-pkg.yml"]
+        pkg.top_block("on").expect("on")[..2],
+        ["pull_request:", "workflow_dispatch:"]
+    );
+    let build = &pkg
+        .jobs
+        .iter()
+        .find(|(n, _)| n == "build")
+        .expect("build")
+        .1;
+    assert_eq!(block(build, 4, "if"), None);
+    assert_eq!(
+        block(build, 4, "name").expect("name"),
+        ["js-agent-macos-pkg"]
+    );
+}
+
+#[test]
+fn the_required_checks_are_the_names_the_two_macos_jobs_report() {
+    // The held script makes main require these two names, and they are the check names of the
+    // two macOS jobs every pull request runs.
+    let script =
+        std::fs::read_to_string(repo().join("tools/held/required-checks/require_macos_checks.sh"))
+            .expect("held script");
+    assert!(script.contains("checks=(macos js-agent-macos-pkg)\n"));
+    assert!(script.contains(r#""contexts":["macos","js-agent-macos-pkg"]"#));
+    let ci = Workflow::parse("ci.yml", &read("ci.yml"));
+    let macos = &ci.jobs.iter().find(|(n, _)| n == "macos").expect("macos").1;
+    // A job with no `name:` reports its key.
+    assert_eq!(block(macos, 4, "name"), None);
+    let pkg = Workflow::parse("js-agent-macos-pkg.yml", &read("js-agent-macos-pkg.yml"));
+    let build = &pkg
+        .jobs
+        .iter()
+        .find(|(n, _)| n == "build")
+        .expect("build")
+        .1;
+    assert_eq!(
+        block(build, 4, "name").expect("name"),
+        ["js-agent-macos-pkg"]
     );
 }
 
