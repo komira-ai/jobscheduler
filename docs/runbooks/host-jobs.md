@@ -49,8 +49,36 @@ pool's `max_machines`.
 
 ## What the agent needs
 
-**No runtime of `js-agent` launches a host job yet.** Until one does, `js-agent` refuses
-`--allow-host-jobs` at start with an error that names the missing launch path, no agent reports
-`host-jobs`, and `--capability host-jobs=...` is refused as a detected key. Every host job is
-therefore refused `no-capable-host` at submit, and no host is tainted for a job it cannot start.
-The server's side above is in place for the agent that will report the capability.
+Start the agent with `--runtime crun --allow-host-jobs`. Only the `crun` runtime launches a host
+job, so `js-agent` refuses `--allow-host-jobs` at start on every other runtime (the container
+engine of `--container-bin` and the native runtime of a Mac run contained jobs only). An agent
+that took the flag reports `host-jobs` in its hello; no other agent does, and
+`--capability host-jobs=...` is refused as a detected key. Without an agent that reports it, every
+host job is refused `no-capable-host` at submit, and no host is tainted for a job it cannot start.
+An agent started without the flag refuses a host start it is sent (`host-jobs-not-allowed`) and
+creates nothing.
+
+## What host isolation means
+
+A host job is an OCI container that `crun` runs as root and that shares the machine:
+
+- **The host's namespaces.** Its processes are in the host's pid, network, mount, IPC, UTS and
+  cgroup namespaces, with no user namespace: its root is the machine's root, it sees and can signal
+  every process, and it has the machine's network whatever the agent's `--egress` ceiling.
+- **The host's `/`.** Its root is the machine's own file system, as it is mounted, writable, and it
+  is given no mount of its own: it starts in the run's scratch directory and reaches every other
+  path at its place on the host. A host job that asks for a mount, run files or a GPU is refused (it
+  sees the host's own paths and devices).
+- **Every privilege.** It runs as uid 0 with every capability, no seccomp filter and no masked
+  path, so it can install packages, load a kernel module or write anywhere.
+- **Its own cgroup.** It runs in `ctr` below its lease's cgroup, which the booking limits as it
+  does a contained job's: its CPU, memory and pids are accounted and bounded there, and a stop
+  (SIGTERM, then the lease's `cgroup.kill` once the grace is spent) or a cancel ends it whole,
+  whatever it started. Being root, a host job can move a process of its own out of that cgroup;
+  that is one of the reasons the machine is tainted for good.
+
+The image's config still gives the program and the environment (its entrypoint and the start's
+arguments, run from the host's root), and the image is pulled when the job's container is made.
+
+The scheduler's taint is permanent: the machine takes no other job or lease, and it must be
+reimaged before it is used again (see "Taking a host out of service afterwards" above).

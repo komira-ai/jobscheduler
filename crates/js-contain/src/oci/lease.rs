@@ -11,7 +11,9 @@ use super::image::{ImageCheckError, PinnedImage, hex_of};
 use super::logs::{self, Capture, Launch};
 use super::words::{crun_words, init_words};
 use super::{JobError, Mapping, Oci, at, helper, init, mounts, spec};
-use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended, own_nproc_hard_limit};
+use crate::container::{
+    CONTAINER_OWNER, ContainerSpec, Dirs, Ended, Isolation, own_nproc_hard_limit,
+};
 use crate::running::Running;
 
 /// The files in which `crun` and the container's init say why a container did not run.
@@ -162,8 +164,22 @@ impl Oci {
     /// ([`OciConfig::resolv_conf`](super::OciConfig::resolv_conf),
     /// [`OciConfig::route_wait`](super::OciConfig::route_wait)); one that is not gets
     /// [`RESOLV_CONF`] and no wait.
+    ///
+    /// A host container ([`Isolation::Host`]) gets `config.json` alone (it binds no file and
+    /// its root is the host's `/`), and only in a lease directory that is the daemon's own
+    /// ([`Oci::lease_user`]): `crun` then runs as the daemon for it.
     async fn write_bundle(&self, spec: &ContainerSpec, wired: bool) -> Result<(), JobError> {
         open_dir(&spec.dir).await?;
+        if spec.isolation == Isolation::Host {
+            if self.lease_user(&spec.dir) != self.own_ids().0 {
+                let why = "a host container's lease directory is not the daemon's own";
+                return Err(JobError::Io {
+                    path: spec.dir.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, why),
+                });
+            }
+            return self.write_config(spec, Path::new("/"), 0).await;
+        }
         let etc = spec.dir.join("etc");
         open_dir(&etc).await?;
         write_open(&etc.join("hosts"), HOSTS.as_bytes()).await?;
@@ -175,8 +191,19 @@ impl Oci {
         };
         write_open(&etc.join("resolv.conf"), resolv_conf.as_bytes()).await?;
         let rootfs = self.images.rootfs_of(&spec.image_digest);
+        self.write_config(spec, &rootfs, route_wait_secs).await
+    }
+
+    /// Writes `bundle/config.json` of `spec` over `rootfs`, the init waiting
+    /// `route_wait_secs` for a route.
+    async fn write_config(
+        &self,
+        spec: &ContainerSpec,
+        rootfs: &Path,
+        route_wait_secs: u64,
+    ) -> Result<(), JobError> {
         let placement = spec::Placement {
-            rootfs: &rootfs,
+            rootfs,
             cgroup: &spec.cgroup_parent,
             ids: &self.ids,
             arch: self.arch,
@@ -287,7 +314,7 @@ impl Oci {
     /// # Errors
     /// The init's report file, a log file or the thread could not be made.
     pub fn start(&self, spec: &ContainerSpec, file_cap: Option<u64>) -> Result<Running, String> {
-        let crun = self.crun.clone();
+        let crun = self.crun_of(spec);
         let (dir, name) = (spec.dir.clone(), spec.name.clone());
         let bundle = dir.join("bundle");
         let thread = format!("crun-{name}");
@@ -366,7 +393,7 @@ impl Oci {
 
     /// [`Oci::verify_mounts`] with its errors typed.
     fn read_back(&self, spec: &ContainerSpec) -> Result<(), JobError> {
-        let pid = self.crun.pid(&spec.dir, &spec.name)?;
+        let pid = self.crun_for(&spec.dir).pid(&spec.dir, &spec.name)?;
         let info = PathBuf::from(format!("/proc/{pid}/mountinfo"));
         let mountinfo = at(&info, std::fs::read_to_string(&info))?;
         let path = spec.dir.join("bundle/config.json");
@@ -388,27 +415,40 @@ impl Oci {
     /// # Errors
     /// `crun state` failed (the container is not made yet, or is gone) or named no pid.
     pub fn container_pid(&self, spec: &ContainerSpec) -> Result<u32, String> {
-        let pid = self.crun.pid(&spec.dir, &spec.name)?;
+        let pid = self.crun_for(&spec.dir).pid(&spec.dir, &spec.name)?;
         u32::try_from(pid).map_err(|_| format!("crun state: pid {pid} is not a pid"))
     }
 
-    /// Sends `SIGTERM` to the container `name`.
+    /// Sends `SIGTERM` to the container `name`, with `crun` run as [`Oci::lease_user`].
     ///
     /// # Errors
     /// `crun kill` failed.
     pub async fn terminate(&self, name: &str) -> Result<(), String> {
-        self.crun.kill(&self.lease(name), name, 15).await
+        let lease = self.lease(name);
+        self.crun_for(&lease).kill(&lease, name, 15).await
     }
 
     /// `crun delete --force`: nothing to do when `crun run` ended normally (it deletes
     /// its container as it exits), and the removal of the container, its cgroup and
     /// its state when it did not. Always run rather than guessed from the state
-    /// directory's layout, which is `crun`'s to change.
+    /// directory's layout, which is `crun`'s to change. `crun` runs as
+    /// [`Oci::lease_user`].
     ///
     /// # Errors
     /// `crun delete` failed and the state did not go away.
     pub fn remove(&self, name: &str) -> Result<(), String> {
-        self.crun.delete_blocking(&self.lease(name), name)
+        let lease = self.lease(name);
+        self.crun_for(&lease).delete_blocking(&lease, name)
+    }
+
+    /// The driver that starts the container of `spec`: the job user's for a contained one,
+    /// and for a host one the driver of its lease directory ([`Oci::crun_for`]), which
+    /// [`Oci::create`] made sure is the daemon's.
+    pub(crate) fn crun_of(&self, spec: &ContainerSpec) -> super::crun::Crun {
+        match spec.isolation {
+            Isolation::Contained => self.crun.clone(),
+            Isolation::Host => self.crun_for(&spec.dir),
+        }
     }
 
     /// Removes `dir` whatever ids own what is in it ([`Oci::remove_dir_blocking`]).

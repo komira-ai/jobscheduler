@@ -235,6 +235,7 @@ async fn run_container(label: &str, runtime: &Path) -> Run {
         image_digest: image.digest.clone(),
         dir: lease.clone(),
         cgroup_parent: format!("{cgroup_parent}/lease1"),
+        isolation: js_contain::Isolation::Contained,
         exec_root: "/work".to_owned(),
         input_root: lease.join("root"),
         upper: lease.join("upper"),

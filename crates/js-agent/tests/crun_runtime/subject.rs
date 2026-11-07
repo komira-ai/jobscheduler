@@ -166,6 +166,7 @@ fn subject_in(name: &str, parent: &Path, beside: bool) -> CrunSubject {
         egress: None,
         gpus: None,
         image_budget: None,
+        host_jobs: false,
     };
     let crun = CrunRuntime::open(settings.clone(), registry(&scratch))
         .unwrap_or_else(|e| panic!("open: {e}"));
@@ -207,6 +208,22 @@ impl CrunSubject {
         settings.gpus = Some(gpus);
         CrunRuntime::open(settings, registry(&self.settings.scratch))
             .unwrap_or_else(|e| panic!("open with GPUs as {host_id}: {e}"))
+    }
+
+    /// Another runtime over the same store and cgroup, registered as `host_id`, that
+    /// launches host jobs (an agent started with `--allow-host-jobs`).
+    pub fn open_allowing_host_jobs(&self, host_id: &str) -> CrunRuntime {
+        let mut settings = self.settings.clone();
+        settings.host_id = host_id.to_owned();
+        settings.host_jobs = true;
+        CrunRuntime::open(settings, registry(&self.settings.scratch))
+            .unwrap_or_else(|e| panic!("open allowing host jobs as {host_id}: {e}"))
+    }
+
+    /// The directory the job and the test meet in for the run `run_id`, made with its ready
+    /// pipe ([`Subject::sync`]): a host job writes to it at this path.
+    pub fn sync_dir(&mut self, run_id: &str) -> PathBuf {
+        self.sync(run_id)
     }
 
     /// A directory `name` below the subject's that the job's ids can read: `0755`.

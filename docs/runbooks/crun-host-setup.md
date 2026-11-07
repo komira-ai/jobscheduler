@@ -1,7 +1,8 @@
 # Setting up a Linux host to run js-agent with crun (`crun_host_setup.sh`)
 
 `js-agent --runtime crun` runs jobs with `crun` as an unprivileged job user, without a container
-engine. `crun` is the default Linux runtime: an agent given no `--runtime` (and no `--native-*`
+engine (a host job, which only `--allow-host-jobs` admits, runs as root: see
+[host-jobs.md](host-jobs.md)). `crun` is the default Linux runtime: an agent given no `--runtime` (and no `--native-*`
 flag) runs it too. Before it can start, the host needs a handful of pieces; the agent's own start
 check names each one that is missing and exits 2. `crun_host_setup.sh` makes the pieces, once per
 host.

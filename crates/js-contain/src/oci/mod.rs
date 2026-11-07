@@ -21,6 +21,11 @@
 //! 5. a helper container gives the directories back, the driver collects outputs from
 //!    the upper layer, and the lease is removed.
 //!
+//! A host container ([`Isolation::Host`](crate::container::Isolation::Host)) is the
+//! exception: `crun` runs it as the daemon (which must be root), in the host's namespaces,
+//! with the host's `/` as its root and no mount, image root, helper or hand-over
+//! (`host_spec`); only its cgroup, `<lease cgroup>/ctr`, is its own.
+//!
 //! **What the container sees:** the unpacked image, read-only, as `/`; the input root
 //! as an overlay at [`ContainerSpec::exec_root`](crate::container::ContainerSpec::exec_root) (lower: the lease's input root; upper: the lease's
 //! upper directory, which outputs are read from); shared read-only trees
@@ -56,6 +61,7 @@ mod devices;
 mod gc;
 pub(crate) mod hardening;
 pub mod helper;
+mod host_spec;
 pub mod image;
 pub mod init;
 mod install;
@@ -70,6 +76,10 @@ pub mod words;
 
 #[cfg(test)]
 mod gc_tests;
+#[cfg(test)]
+mod host_lease_tests;
+#[cfg(test)]
+mod host_spec_tests;
 #[cfg(test)]
 mod loopback_tests;
 #[cfg(test)]
@@ -381,6 +391,20 @@ pub struct Oci {
     resolv_conf: String,
     /// Whole seconds the init waits for a default route; 0 for not at all.
     route_wait_secs: u64,
+    /// The daemon's own uid and gid.
+    own: (u32, u32),
+}
+
+/// The uid `crun` runs as for a lease: the job user's (`job`) when the daemon drops to one,
+/// unless the lease's directory is the daemon's own (`own`; `lease_owner` is the owner of
+/// the directory, none when it is not there), which only a host lease's is; the daemon's
+/// own otherwise. The job user cannot make a directory the daemon owns, so it cannot have
+/// `crun` run as the daemon for a lease it controls.
+fn runs_as(job: Option<u32>, own: u32, lease_owner: Option<u32>) -> u32 {
+    match job {
+        Some(job) if lease_owner != Some(own) => job,
+        Some(_) | None => own,
+    }
 }
 
 impl Oci {
@@ -484,6 +508,7 @@ impl Oci {
             route_wait_secs: config
                 .route_wait
                 .map_or(0, |limit| limit.as_secs().clamp(1, 3600)),
+            own: (daemon_uid, daemon_gid),
         });
         // The stages of an unpack under way in another agent are not leftovers: only a
         // backend that has the directory to itself sweeps them.
@@ -504,6 +529,34 @@ impl Oci {
     #[must_use]
     pub fn job_drop(&self) -> Option<&JobDrop> {
         self.crun.job()
+    }
+
+    /// The daemon's own uid and gid: the owner of a host lease's directories
+    /// ([`Isolation::Host`](crate::container::Isolation::Host)).
+    #[must_use]
+    pub fn own_ids(&self) -> (u32, u32) {
+        self.own
+    }
+
+    /// The uid `crun` and the lease's supervisor run as for the lease directory `lease`: the
+    /// job user's for a root daemon, unless the directory is the daemon's own, as a host
+    /// lease's is ([`Oci::own_ids`]), and then the daemon's; the daemon's for a daemon that
+    /// is not root. Every call by a lease's name (a kill, a delete, a state ask) and the
+    /// start of a host container run `crun` as this user.
+    #[must_use]
+    pub fn lease_user(&self, lease: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        let owner = std::fs::symlink_metadata(lease).ok().map(|meta| meta.uid());
+        runs_as(self.crun.job().map(JobDrop::uid), self.own.0, owner)
+    }
+
+    /// The driver whose commands run as [`Oci::lease_user`] for `lease`.
+    pub(crate) fn crun_for(&self, lease: &Path) -> crun::Crun {
+        if self.lease_user(lease) == self.own.0 {
+            self.crun.as_daemon()
+        } else {
+            self.crun.clone()
+        }
     }
 
     /// The source the image store fetches with.

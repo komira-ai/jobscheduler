@@ -1,5 +1,6 @@
 //! The hello of a whole `--runtime crun` agent: `gpu-passthrough` is reported by an agent
-//! given a device list and by no other, and an operator cannot claim it. Each run of the agent
+//! given a device list and by no other, `host-jobs` by an agent given `--allow-host-jobs` and
+//! by no other, and an operator cannot claim either. Each run of the agent
 //! has a host of its own: the stand-in files of the crun start check in a directory of the
 //! test (`Fixture`), and the fake machine's runtime, so nothing is shared with another test.
 //! `/dev/null` stands for a GPU's node: a character device every Linux host has, so the start
@@ -162,4 +163,24 @@ fn the_hello_reports_gpu_passthrough_only_with_a_device_list() {
     let said = "--capability: gpu-passthrough is detected and cannot be set";
     assert!(ran.err.contains(said), "{}", ran.err);
     assert_eq!(hello, Value::Null);
+}
+
+/// Proves a crun agent started with `--allow-host-jobs` takes the flag and reports
+/// `host-jobs=true` beside its runtime, and that one started without it reports no
+/// `host-jobs`. Catches a crun agent that refuses the flag its runtime honours, and one that
+/// reports host jobs it was not allowed to run (the server would taint the host for a job the
+/// agent then refuses).
+#[test]
+fn the_hello_reports_host_jobs_only_with_allow_host_jobs() {
+    let (ran, hello) = crun_hello("hello-host-jobs", &["--allow-host-jobs"]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(caps["host-jobs"], "true", "{hello}");
+    assert_eq!(caps["runtime"], "container", "{hello}");
+
+    let (ran, hello) = crun_hello("hello-host-jobs-none", &[]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    let caps = &hello["capabilities"];
+    assert_eq!(caps["runtime"], "container", "{hello}");
+    assert!(caps.get("host-jobs").is_none(), "{hello}");
 }
