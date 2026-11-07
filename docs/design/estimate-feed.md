@@ -24,14 +24,14 @@ The feed reads the raw P90, not the life admission charges a lease (`lives.rs` h
 
 - `js_whole::cost::tail` (`crates/js-whole/src/cost.rs`) works out a host's tail. Each lease's end is its estimate cut to its max-wall bound, else the bound, else unknown (`lease_end`). The tail is the latest of those ends.
 - `drain_cost` ranks the hosts a whole-node request could mark. Hosts with a known tail come first, then the smaller wait, then fewer leases, then the lower host id. A mark keeps the tail it was made with (test `a_mark_keeps_the_end_of_the_tail_it_was_made_with`).
-- Backfill on the marked host, under `--placement js-sched`. A start of the pool's share class is shown the marked host with the time left until that tail. It is booked there only if `fits_in_tail(now, duration, tail_end, DEFAULT_BACKFILL_MARGIN_MS)` holds, that is `now + duration + margin <= tail_end`, with `DEFAULT_BACKFILL_MARGIN_MS` = 60 000 ms (`js_sched::backfill::fits`, `crates/js-sched/src/backfill.rs`).
+- Backfill on the marked host. A start of the pool's share class is shown the marked host with the time left until that tail. It is booked there only if `fits_in_tail(now, duration, tail_end, DEFAULT_BACKFILL_MARGIN_MS)` holds, that is `now + duration + margin <= tail_end`, with `DEFAULT_BACKFILL_MARGIN_MS` = 60 000 ms (`js_sched::backfill::fits`, `crates/js-sched/src/backfill.rs`).
 
 `fits_in_tail` fails closed: unknown work, an unknown tail, or a sum that overflows all mean no. In the lease server, a backfilled start's duration is its max wall time. The server's engine is given no learned curves (`crates/js-sched-placer/src/engine.rs`), and it trusts a wall time only up to `server.max_lease_wall`. So the feed changes the tail that backfill must fit in, not the duration of the start being backfilled.
 
 **What changes when it is off.** `crates/js-lease-server/src/agents.rs` gives the registry its source of profile lives only when the flag is on: `estimate_feed.then(|| registry.set_lives(lives))`. With the flag off:
 
 - No estimate is computed for any lease. Every lease is costed at its bound. A lease whose bound saturates (no max wall) has an unknown tail, and its host ranks after every host with a known tail.
-- Backfill still runs under `--placement js-sched`, inside the latest bound on the marked host.
+- Backfill still runs inside the latest bound on the marked host.
 - A lease put back from the lease file keeps its recorded start and bound only with the flag on. With the flag off it has no bound and counts as ending now (tests `a_restored_lease_keeps_its_recorded_bound_only_with_the_flag`, `without_a_source_of_lives_a_restored_lease_counts_as_ending_now`; design section 8, row 10).
 - There is nothing to measure: every stop the counters count is `ended_unestimated` (a restored lease's stop counts nothing), and no ended row has an `estimated_end` (section 2).
 

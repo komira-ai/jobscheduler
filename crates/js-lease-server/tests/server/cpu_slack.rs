@@ -10,7 +10,7 @@ use crate::agents_support::JOIN;
 use crate::config_support::{PoolText, file, load, refusal, server};
 use crate::support::{Scratch, base_args, config};
 
-/// A pool of up to two machines whose capabilities name an `arch`, as `js-sched` needs.
+/// A pool of up to two machines whose capabilities name an `arch`, as the scheduler needs.
 const POOL: &str = r#"
 name = "burst"
 class = "burst-host"
@@ -59,15 +59,12 @@ fn out_of_range(given: &str) -> String {
 #[test]
 fn the_flag_is_read_and_defaults_to_the_engines_slack() {
     let scratch = Scratch::new("cpu_slack_flag");
-    let sched = ["--placement", "js-sched"];
-    let none = config(args(&scratch, &sched)).unwrap();
+    let none = config(args(&scratch, &[])).unwrap();
     let default = js_sched::LoadConfig::default().s_cpu_permille;
     assert_eq!(none.cpu_slack().permille(), default);
     assert_eq!(none.cpu_slack(), CpuSlack::default());
     for (given, permille) in [("1.0", 0), ("1.25", 250), ("2.0", 1000)] {
-        let mut extra = sched.to_vec();
-        extra.extend(["--cpu-slack", given]);
-        let read = config(args(&scratch, &extra)).unwrap();
+        let read = config(args(&scratch, &["--cpu-slack", given])).unwrap();
         assert_eq!(read.cpu_slack().permille(), permille, "{given}");
     }
     let flagless = config(base_args(&scratch)).unwrap();
@@ -75,59 +72,41 @@ fn the_flag_is_read_and_defaults_to_the_engines_slack() {
 }
 
 /// Asserts that a slack below 1.0, above js-sched's ceiling of 2.0, not a number or empty
-/// is refused at start, by the flag and by the key, each error naming `cpu_slack`; that
-/// the flag without `--placement js-sched` is refused naming that flag, and without
-/// `--agent-pool-config` naming that one; and that the key beside a placement that is not
-/// `js-sched` is refused naming `server.placement`. It catches a parse that accepts any of
-/// them, a value clamped instead of refused, and a slack accepted where nothing reads it.
+/// is refused at start, by the flag and by the key, each error naming `cpu_slack`; and that
+/// the flag without `--agent-pool-config` is refused naming that one. It catches a parse
+/// that accepts any of them, a value clamped instead of refused, and a slack accepted
+/// where nothing reads it.
 #[test]
 fn cpu_slack_values_outside_the_range_are_refused() {
     let scratch = Scratch::new("cpu_slack_refused");
     for bad in ["0.9", "2.5", "abc", ""] {
-        let said = parsed(args(
-            &scratch,
-            &["--placement", "js-sched", "--cpu-slack", bad],
-        ))
-        .err()
-        .unwrap();
+        let said = parsed(args(&scratch, &["--cpu-slack", bad])).err().unwrap();
         assert!(said.contains("'--cpu-slack <CPU_SLACK>'"), "{bad}: {said}");
         assert!(said.contains(&out_of_range(bad)), "{bad}: {said}");
     }
-    let said = parsed(args(&scratch, &["--cpu-slack", "1.1"]))
-        .err()
-        .unwrap();
-    assert_eq!(said, "--cpu-slack: requires --placement js-sched");
-    let registry = ["--placement", "registry", "--cpu-slack", "1.1"];
-    let said = parsed(args(&scratch, &registry)).err().unwrap();
-    assert_eq!(said, "--cpu-slack: requires --placement js-sched");
     let mut bare = base_args(&scratch);
     bare.extend(["--cpu-slack", "1.1"].map(OsString::from));
     let said = parsed(bare).err().unwrap();
     assert_eq!(said, "--cpu-slack: requires --agent-pool-config");
 
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
-    let pool = PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    let pool = PoolText::joined("burst");
     let text_of = |scratch: &Scratch, extra: &str| {
         let table = server(scratch, &format!("{listeners}\n{extra}"));
         file(&table, &[&pool])
     };
-    let sched = "placement = \"js-sched\"";
     for (value, given) in [("0.9", "0.9"), ("2.5", "2.5"), ("3", "3"), ("nan", "NaN")] {
         let scratch = Scratch::new("cpu_slack_key_range");
-        let text = text_of(&scratch, &format!("{sched}\ncpu_slack = {value}"));
+        let text = text_of(&scratch, &format!("cpu_slack = {value}"));
         let expected = format!("server.cpu_slack: {}", out_of_range(given));
         assert_eq!(refusal(&scratch, &text), expected, "{value}");
     }
     for value in ["\"abc\"", "\"\"", "\"1.1\"", "true"] {
         let scratch = Scratch::new("cpu_slack_key_type");
-        let text = text_of(&scratch, &format!("{sched}\ncpu_slack = {value}"));
+        let text = text_of(&scratch, &format!("cpu_slack = {value}"));
         let expected = "server.cpu_slack: must be a number such as 1.1";
         assert_eq!(refusal(&scratch, &text), expected, "{value}");
     }
-    let scratch = Scratch::new("cpu_slack_key_registry");
-    let text = text_of(&scratch, "cpu_slack = 1.1");
-    let expected = "server.cpu_slack: requires server.placement = \"js-sched\"";
-    assert_eq!(refusal(&scratch, &text), expected);
 }
 
 /// Asserts the file's key: absent it is js-sched's default; `1.1`, `1.0` and `2` are read,
@@ -135,7 +114,7 @@ fn cpu_slack_values_outside_the_range_are_refused() {
 #[test]
 fn the_key_is_read_from_the_file() {
     let listeners = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"";
-    let pool = PoolText::joined("burst").set("capabilities", "{ arch = \"x86_64\" }");
+    let pool = PoolText::joined("burst");
     let default = CpuSlack::default().permille();
     for (name, extra, permille) in [
         ("cpu_slack_key_off", "", default),
@@ -144,7 +123,7 @@ fn the_key_is_read_from_the_file() {
         ("cpu_slack_key_2", "cpu_slack = 2", 1000),
     ] {
         let scratch = Scratch::new(name);
-        let extra = format!("{listeners}\nplacement = \"js-sched\"\n{extra}");
+        let extra = format!("{listeners}\n{extra}");
         let text = file(&server(&scratch, &extra), &[&pool]);
         let config = load(&scratch, &text).unwrap();
         assert_eq!(config.cpu_slack().permille(), permille, "{name}");

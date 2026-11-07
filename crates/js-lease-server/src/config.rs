@@ -51,6 +51,8 @@ pub(crate) use feed_retention::{
 pub(crate) use job_wall::{MAX_JOB_WALL_MUST, parse_max_job_wall};
 pub(crate) use listen::{JobListen, MetricsListen, clear_text, not_private};
 pub use placement::Placement;
+use placement::check_pool;
+pub(crate) use placement::{checked, placer, split};
 pub(crate) use private::{read_private, read_private_reason};
 pub(crate) use retention::{
     DEFAULT_JOB_ALLOCATION_RETENTION, DEFAULT_JOB_RETENTION, JOB_RETENTION_MUST,
@@ -151,20 +153,15 @@ pub struct Cli {
     /// pool join tokens are not affected. Needs `--agent-pool-config`.
     #[arg(long)]
     pub require_host_credential: bool,
-    /// Who picks the host of a lease on a host that registered itself: `registry` (the
-    /// default) books the first free host by id, one lease to a host, and refuses a class
-    /// that books part of a host; `js-sched` has the scheduler choose among the hosts with
-    /// room, and lets leases of a class that books part of a host share one. A lease of
-    /// such a class goes to the host it fits most tightly, so the most booked first, equal
-    /// hosts by a hash of the lease and the host; a lease that books a whole host is not
-    /// scored and takes the first free host by id, as with `registry`. Needs `--agent-pool-config`, and a pool whose capabilities name an
-    /// `arch`.
-    #[arg(long, value_enum, default_value = "registry")]
-    pub placement: Placement,
+    /// Deprecated, and does nothing: `js-sched` places every lease on a host that
+    /// registered itself, choosing among the hosts with room. `js-sched` is accepted with a
+    /// warning; `registry`, the removed first-free placement, is refused at start. Needs
+    /// `--agent-pool-config`.
+    #[arg(long, value_enum)]
+    pub placement: Option<Placement>,
     /// How far above a host's cores the placement engine may charge it, as a multiplier
     /// of the cores from 1.0 to 2.0 with at most three decimals, such as `1.1`. Without
-    /// the flag the engine's own default is used, which is 1.1. Needs `--placement
-    /// js-sched`.
+    /// the flag the engine's own default is used, which is 1.1.
     #[arg(long, value_parser = CpuSlack::parse)]
     pub cpu_slack: Option<CpuSlack>,
     /// Feeds each lease's estimated end to the drain cost of a whole-node request: the
@@ -525,6 +522,9 @@ impl Config {
             return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
         }
         flags::need_agent_pool(&cli)?;
+        // The deprecated `--placement` first: a removed `registry` is refused before the
+        // pool is read, naming the flag to drop.
+        let mut warnings = Vec::from_iter(Placement::given(cli.placement, "--placement")?);
         let settings = Settings::new();
         let tls = listen::tls_files(&cli)?;
         let token_file = required(cli.token_file.as_ref(), "--token-file")?;
@@ -542,7 +542,6 @@ impl Config {
         };
         let usage = usage_setup(keys, &state_file);
         let store = store::from_flags(&cli)?;
-        let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
             listen: cli.listen,
@@ -625,21 +624,15 @@ impl Config {
                     mint_provider,
                     job_limits,
                 } = *registering;
-                server.agents.placement().check(&pool, "server.placement")?;
-                let given = server.agents.cpu_slack();
-                let needs = "server.placement = \"js-sched\"";
-                let cpu_slack =
-                    server
-                        .agents
-                        .placement()
-                        .slack(given, "server.cpu_slack", needs)?;
+                let placed = Placement::given(server.agents.placement(), "server.placement")?;
+                warnings.extend(placed);
+                let cpu_slack = server.agents.cpu_slack().unwrap_or_default();
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
                     mint_provider,
                     hello_limit: server.agents.hello_limit(),
                     require_host_credential: server.agents.require_host_credential(),
-                    placement: server.agents.placement(),
                     estimate_feed: server.agents.estimate_feed(),
                     cpu_slack,
                     max_lease_wall: server.max_lease_wall,
@@ -829,15 +822,6 @@ impl Config {
         self.usage.db.as_deref()
     }
 
-    /// Who places a lease on a registered host (`--placement`, or `server.placement`):
-    /// `registry` for a server with no agent registration.
-    pub fn placement(&self) -> Placement {
-        match &self.hosts {
-            Hosts::Layered { agents, .. } => agents.placement,
-            Hosts::Static(_) => Placement::Registry,
-        }
-    }
-
     /// Whether each lease's estimated end is fed to the drain cost (`--estimate-feed`, or
     /// `server.estimate_feed`): off for a server with no agent registration.
     pub fn estimate_feed(&self) -> bool {
@@ -849,7 +833,7 @@ impl Config {
 
     /// The CPU slack of the placement engine (`--cpu-slack`, or `server.cpu_slack`): the
     /// value given, or the engine's default, 1.1x, which is also the answer for a server
-    /// with no agent registration. Only `--placement js-sched` reads it.
+    /// with no agent registration.
     pub fn cpu_slack(&self) -> CpuSlack {
         match &self.hosts {
             Hosts::Layered { agents, .. } => agents.cpu_slack,
@@ -942,9 +926,8 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                 None => AgentTokens::none(clients),
             };
             let pool = agent_pool::read(pool)?;
-            cli.placement.check(&pool, "--placement")?;
-            let needs = "--placement js-sched";
-            let cpu_slack = cli.placement.slack(cli.cpu_slack, "--cpu-slack", needs)?;
+            check_pool(&pool, "--agent-pool-config")?;
+            let cpu_slack = cli.cpu_slack.unwrap_or_default();
             Ok(Hosts::Layered {
                 static_pool,
                 agents: Box::new(AgentSetup {
@@ -956,7 +939,6 @@ fn hosts(cli: &Cli, clients: &LiveClients) -> Result<Hosts, StartupError> {
                         interval: cli.agent_hello_interval,
                     },
                     require_host_credential: cli.require_host_credential,
-                    placement: cli.placement,
                     estimate_feed: cli.estimate_feed,
                     cpu_slack,
                     max_lease_wall: None,

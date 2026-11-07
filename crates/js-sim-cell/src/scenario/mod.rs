@@ -41,9 +41,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use clap::ValueEnum;
 use js_conformance::agent::Defect;
-use js_lease_server::{Placement, StartupError};
+use js_lease_server::StartupError;
 use js_sim::text::list;
 use js_sim::{Faults, TraceHash};
 use js_testkit::dir::TestDir;
@@ -250,20 +249,6 @@ impl Scenario {
         self
     }
 
-    /// This scenario under the server's `placement` (`--placement`, as
-    /// [`ServerSpec::placement`] sets it), its name followed by `-` and the placement as
-    /// the server's command line spells it, so that the runs of one scenario under each
-    /// placement are named apart in a failure and in the golden file. After
-    /// [`Scenario::server`], which would put the default back.
-    #[must_use]
-    pub fn under(mut self, placement: Placement) -> Self {
-        let spelled = placement.to_possible_value();
-        let spelled = spelled.map(|value| value.get_name().to_owned());
-        self.name = format!("{}-{}", self.name, spelled.unwrap_or_default());
-        self.server = self.server.placement(placement);
-        self
-    }
-
     /// This scenario, its server keeping its state in `store` ([`ServerSpec::store`]), its
     /// name followed by `-` and the store's name ([`Store::name`]), so that the runs of one
     /// scenario over each store are named apart in a failure and in the golden file. After
@@ -276,11 +261,11 @@ impl Scenario {
     }
 
     /// This scenario over the job service: its server also serves jobs
-    /// ([`ServerSpec::jobs`], which places as `js-sched`), its agents speak the per-job
+    /// ([`ServerSpec::jobs`]), its agents speak the per-job
     /// messages, and its client is a [`crate::JobFront`], which submits each unit of work as
     /// a job. Its name is followed by `-jobs`, so its runs are named apart from the same
-    /// scenario's over the lease front. After [`Scenario::server`] and [`Scenario::under`],
-    /// which would put the lease routes' server back.
+    /// scenario's over the lease front. After [`Scenario::server`], which would put the
+    /// lease routes' server back.
     #[must_use]
     pub fn over_jobs(mut self) -> Self {
         self.name = format!("{}-jobs", self.name);

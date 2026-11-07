@@ -35,10 +35,12 @@ memory_bytes = 17179869184
 arch = "x86_64"
 "#;
 
-/// A joined pool for the file, so `server.job_listen` is allowed.
+/// A joined pool for the file, so `server.job_listen` is allowed, of `x86_64` hosts (the
+/// scheduler describes a host by its `arch`).
 const JOINED: &str = "[[pool]]\nkind = \"joined\"\nname = \"burst\"\nclass = \"whole-node\"\n\
                       exec = \"none\"\nmax_machines = 6\n\
-                      shape = { cpu_millis = 8000, memory_bytes = 17179869184 }\n";
+                      shape = { cpu_millis = 8000, memory_bytes = 17179869184 }\n\
+                      capabilities = { arch = \"x86_64\" }\n";
 
 /// A directory of a test's own, removed when the rig is dropped, and the number of token
 /// files written in it, which names the next one.
