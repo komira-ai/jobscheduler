@@ -1433,6 +1433,7 @@ name = "js-lease-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "clap",
  "hyper",
  "hyper-util",
@@ -1441,7 +1442,9 @@ dependencies = [
  "js-alert",
  "js-api-gateway",
  "js-caps",
+ "js-cli",
  "js-conformance",
+ "js-contain",
  "js-elastic",
  "js-elastic-fake",
  "js-jobs",
