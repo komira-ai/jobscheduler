@@ -52,7 +52,9 @@ mod test_dir;
 
 pub use cgroup::{LeasePolicy, SwapKill, cpu_max, cpu_weight, hard_memory_max, memory_max};
 pub use cgroup_usage::{CgroupUsage, NumaNodeBytes};
-pub use container::{ContainerLimits, ContainerSpec, Dirs, Ended, HostMount, SharedMount};
+pub use container::{
+    ContainerLimits, ContainerSpec, Dirs, Ended, HostMount, Isolation, SharedMount,
+};
 pub use delegate::Capacity;
 pub use numa::Spot;
 pub use oci::{Oci, OciConfig, OciError};

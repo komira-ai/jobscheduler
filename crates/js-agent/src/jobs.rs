@@ -82,6 +82,7 @@ pub fn start(
         egress: _,
         silence_stop,
         vm,
+        allow_host_jobs,
     } = local;
     // `Local` holds at most one of the two, and a state root and a scratch root with it.
     let (backend, scratch, state) = match (container, native, scratch, state) {
@@ -101,7 +102,7 @@ pub fn start(
     };
     let config = Config {
         capacity: Capacity::of(hello),
-        allow_host_jobs: false,
+        allow_host_jobs,
         mounts,
         scratch,
         files,

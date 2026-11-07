@@ -505,7 +505,7 @@ Elastic pool keys (Built): `max_instances`, `max_spend_per_hour`, `max_spend_per
 
 Flags only; no environment variables (`js-agent/src/lib.rs` flag table). Required: server address, pool, and a token file or a stored host credential. The choices that change behaviour: `--runtime docker|crun` (without the flag the agent uses the container engine of `--container-bin`; step 22 makes `crun` the Linux default and `docker` an explicit opt-in, section 5.7; macOS selects the native runtime with the `--native-*` flags), `--drain-wait` (default the stop grace, at most 3600 s), `--scratch-quota`, `--image-allow` prefixes, `--egress` (the ceiling of job networking, section 5.8), `--log-file-cap` (Planned: the local file of each stream of a job with a log sink, default 64 MiB, from 1 MiB to 1 GiB; it bounds what is uploaded live, and there is no other backlog, `live-logs.md`), and the `--native-*` flags on macOS. Four modes: the agent, `image-pull`, `update-hook`, `cordon`.
 
-The start check refuses to start rather than run half-configured. With `--runtime crun` it refuses container-engine flags, `--egress` other than `none`, mount roots, and native flags (the `--egress` refusal goes with step 12). `--allow-host-jobs` is refused in every configuration.
+The start check refuses to start rather than run half-configured. With `--runtime crun` it refuses container-engine flags, `--egress` other than `none`, mount roots, and native flags (the `--egress` refusal goes with step 12). `--allow-host-jobs` is taken with `--runtime crun` only, the one runtime that launches a host job (a `crun` container in the host's namespaces, `docs/runbooks/host-jobs.md`), and refused on every other runtime.
 
 ### 4.4 How a host reaches the scheduler
 
@@ -677,9 +677,9 @@ Purpose: run a job on a host that cannot run `crun`. Docker or Podman runs a job
 
 Purpose: a job must not be able to harm the host, another job or the object store (`js-agent/src/crun/`, `js-contain`).
 
-- The agent stays root; every container is started by `crun` as the job user, whose subordinate id range maps the job's namespace.
+- The agent stays root; every container of a contained job is started by `crun` as the job user, whose subordinate id range maps the job's namespace. A host job (`isolation = host`, only with `--allow-host-jobs`) is the exception the next bullets do not cover: `crun` runs it as root in the host's namespaces with every capability, and the scheduler taints its host for good (`docs/runbooks/host-jobs.md`, `docs/design/machines.md` 5.12).
 - The image must be pinned by digest and come from an allowed prefix. Private registry credentials, if configured, go only to the token realm the registry names, over https.
-- Capability sets empty, no new privileges, a pinned seccomp profile, masked and read-only paths, a private cgroup namespace, core dumps off.
+- For a contained job: capability sets empty, no new privileges, a pinned seccomp profile, masked and read-only paths, a private cgroup namespace, core dumps off.
 - A per-job cgroup with the allocation as limit; out-of-memory is reported only if the job's cgroup says so.
 - A per-job scratch directory owned by the job identity, with an optional filesystem project quota.
 - Network: the per-job policy of section 5.8.
@@ -1040,7 +1040,7 @@ Today's file rules, for the as-built reader: the lease file format is additive; 
 18. **Measure launch.** Time from a start command received to the job process running on a reference node, for `crun` with and without network wiring, from the agent-egress CI path; publish the number. A `pasta` comparison only if the veth cost is a problem. *Needs: 12.*
 19. **EC2 machine provider (GCP Compute Engine after it).** AWS EC2 (the recommendation of question 4) behind `CapacityProvider`, starting a VM that boots `js-agent`: its `catalog()` reads the instance types, their GPU information and the zones where each is offered, translates GPU names in code to the canonical names, adds price, purchase option and quota, and `acquire` launches the machine image the configuration selects for the offer's architecture with the agent build for that architecture. Check how the newest GPU types are actually purchasable (on-demand, spot, or a reservation or capacity block) and add that purchase option to `Offer` if needed. Add the Linux arm64 archive to the release (section 13, question 18), because the first accelerator offers are `arm64`. GPU jobs on these machines run on the fallback runtime until step 23. *Needs: 5, 7, 25, 26.*
 20. **Agent wire.** Decide whether `hello` and heartbeat move from JSON polling to the protobuf toolchain of step 1. *Needs: 1.*
-21. **Safety work that stands apart.** An agent self-fence on silence and a fencing token on a start (section 8, rows 5 and 6); adoption of `crun` jobs after an agent restart (row 4); per-client tokens; a lease-server update hook; `--allow-host-jobs` with taint recording. *Needs: 28 for the fence and adoption, 4 for the update hook; the rest nothing.*
+21. **Safety work that stands apart.** An agent self-fence on silence and a fencing token on a start (section 8, rows 5 and 6); adoption of `crun` jobs after an agent restart (row 4); per-client tokens; a lease-server update hook; `--allow-host-jobs` with taint recording (built: the scheduler taints a host when it places a host job, and the `crun` runtime launches it). *Needs: 28 for the fence and adoption, 4 for the update hook; the rest nothing.*
 22. **`crun` is the default Linux runtime.** Make `crun` the default `--runtime`; the start check refuses a host that cannot run `crun` instead of using Docker; `--runtime docker` is accepted only with an explicit opt-in flag and then runs with `network = none` (section 5.7). *Needs: 12, 16.*
 23. **GPUs for `crun`.** Pass GPU devices into a `crun` job, or state in section 2.2 that GPU jobs stay on the fallback. This gates dropping the fallback (section 13, question 7). *Needs: nothing.*
 

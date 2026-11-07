@@ -70,7 +70,7 @@ pub(crate) fn held_capabilities() -> HashSet<Capability> {
 }
 
 /// The capability `name` (`CAP_...`) names, if `oci-spec` knows it.
-fn capability(name: &str) -> Option<Capability> {
+pub(crate) fn capability(name: &str) -> Option<Capability> {
     serde_json::from_value(Value::String(name.to_owned())).ok()
 }
 

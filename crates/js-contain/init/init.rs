@@ -7,8 +7,8 @@
 //! reap; without this program the job itself was the container's first process and
 //! did not.
 //!
-//! Usage: `js-init [--wait-route <seconds>] -- <program> [argument...]`, with the working
-//! directory and the environment the program is to have.
+//! Usage: `js-init [--wait-route <seconds>] [--end-descendants] -- <program> [argument...]`,
+//! with the working directory and the environment the program is to have.
 //!
 //! - With `--wait-route` the program is not started until the container's network namespace
 //!   has a default route (a line of `/proc/net/route` with destination and mask 0 and the
@@ -25,6 +25,11 @@
 //!   program does, with its exit code, or `128 + n` if signal `n` ended it (what `crun`
 //!   reported when the program was the container's first process). The container's other
 //!   processes die with it, as the kernel ends a namespace whose first process has gone.
+//! - With `--end-descendants` (a host container, which has no PID namespace of its own for
+//!   the kernel to end), once the program has ended every process left below this one is
+//!   killed (SIGKILL) and reaped before it exits: its children, then the orphans that are
+//!   handed to it as they die, until it has none. Without it, what the program left would
+//!   outlive the job, and `crun run`, which waits for the container's processes, with it.
 //! - This program's stdin is not the program's: it is a file the driver opened, which
 //!   only this program holds. When the program cannot be started, one line saying why,
 //!   in `crun`'s words, is written to it, and the exit code is 127 (not found) or 126
@@ -55,6 +60,7 @@ struct SigSet([u64; 16]);
 
 const SIG_SETMASK: i32 = 2;
 const SIGCHLD: i32 = 17;
+const SIGKILL: i32 = 9;
 const WNOHANG: i32 = 1;
 const PR_SET_DUMPABLE: i32 = 4;
 const PR_SET_CHILD_SUBREAPER: i32 = 36;
@@ -101,6 +107,10 @@ fn main() {
                 .filter(|secs| (1..=3600).contains(secs))
                 .unwrap_or_else(|| usage()),
         );
+        first = args.next();
+    }
+    let end_descendants = first.as_deref() == Some(OsStr::new("--end-descendants"));
+    if end_descendants {
         first = args.next();
     }
     let (Some(dashes), Some(program)) = (first, args.next()) else {
@@ -171,6 +181,9 @@ fn main() {
             continue;
         }
         if let Some(status) = reap(pid) {
+            if end_descendants {
+                end_all_below();
+            }
             std::process::exit(
                 status
                     .code()
@@ -221,7 +234,9 @@ fn has_default_route(table: &str) -> bool {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: js-init [--wait-route <seconds>] -- <program> [argument...]");
+    eprintln!(
+        "usage: js-init [--wait-route <seconds>] [--end-descendants] -- <program> [argument...]"
+    );
     std::process::exit(2);
 }
 
@@ -239,6 +254,44 @@ fn reap(program: i32) -> Option<ExitStatus> {
             found = Some(ExitStatus::from_raw(raw));
         }
     }
+}
+
+/// Kills and reaps every process below this one: each child (SIGKILL), then, one end at a
+/// time, the orphans the kernel hands to this subreaper as their parents die, until no child
+/// is left. A child that has ended and is not reaped yet is still listed; the kill does
+/// nothing to it, and the wait reaps it.
+fn end_all_below() {
+    let me = std::process::id();
+    loop {
+        let children = children_of(me);
+        if children.is_empty() {
+            return;
+        }
+        for child in children {
+            // SAFETY: a plain system call on a pid and a signal number.
+            unsafe { kill(child, SIGKILL) };
+        }
+        let mut raw = 0;
+        // SAFETY: `raw` is a valid int. Blocks until one child has ended.
+        unsafe { waitpid(-1, &mut raw, 0) };
+    }
+}
+
+/// The processes whose parent is `parent`, from `/proc/<pid>/stat` (the field after the
+/// state, which follows the last `)`: a command name may hold one).
+fn children_of(parent: u32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let after = stat.rsplit_once(')').map_or("", |(_, rest)| rest);
+            after.split_whitespace().nth(1) == Some(parent.to_string().as_str())
+        })
+        .collect()
 }
 
 /// Starts `program`, with the mask of signals a process starts with.

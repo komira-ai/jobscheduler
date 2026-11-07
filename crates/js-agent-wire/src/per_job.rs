@@ -53,8 +53,8 @@ pub const PER_JOB_CAPABILITY: &str = "per-job";
 pub const START_FENCE_CAPABILITY: &str = "start-fence";
 
 /// The hello capability of an agent that can launch a job with [`Isolation::Host`] from a
-/// [`JobStartSpec`]. Its value is `true`. No agent reports it yet: no runtime launches a host
-/// job, and `js-agent` refuses `--allow-host-jobs` at start until one does. An agent without
+/// [`JobStartSpec`]. Its value is `true`. `js-agent` reports it when it was started with
+/// `--allow-host-jobs`, which only its crun runtime takes. An agent without
 /// it would run a start's `isolation: host` as a contained job, since it ignores the field,
 /// so a server sends a host start only to a host that reports it. Nothing else on the wire
 /// changes.

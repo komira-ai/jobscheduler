@@ -90,6 +90,22 @@ pub fn own_nproc_hard_limit() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// How far a job's container is set apart from the host.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// Namespaces of its own, the image's root read-only, a user namespace onto the job
+    /// user's subordinate range, no capability: every job but a host job.
+    #[default]
+    Contained,
+    /// The host's own namespaces (pid, network, mount, IPC, UTS, cgroup; no user namespace),
+    /// the host's `/` as its root, root with every capability, no seccomp filter: a job that
+    /// may change the machine. Only its cgroup is its own, `<lease cgroup>/ctr`, so its
+    /// resources are accounted and limited in the lease's and the lease's `cgroup.kill` ends
+    /// it whole. `crun` runs it as the daemon, which must be root
+    /// ([`Oci::lease_user`](crate::oci::Oci::lease_user)).
+    Host,
+}
+
 /// The container to run for one job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerSpec {
@@ -103,8 +119,13 @@ pub struct ContainerSpec {
     pub dir: PathBuf,
     /// The lease cgroup, relative to the cgroup mount.
     pub cgroup_parent: String,
+    /// Whether the container is a job's own sandbox or shares the host
+    /// ([`Isolation::Host`]).
+    pub isolation: Isolation,
     /// Where the input root appears inside the container: an absolute path. The
     /// overlay is mounted there, the shared trees and the working directory are under it.
+    /// For a host container, the host directory the job starts in (no overlay, no input
+    /// root).
     pub exec_root: String,
     /// The input root on the host: the overlay's read-only lower layer.
     pub input_root: PathBuf,
@@ -220,6 +241,7 @@ pub(crate) mod tests {
             image_digest: format!("sha256:{}", "a".repeat(64)),
             dir: PathBuf::from("/scratch/lease-1-2"),
             cgroup_parent: "/js.slice/actions/lease-1-2".to_owned(),
+            isolation: Isolation::Contained,
             input_root: PathBuf::from("/scratch/lease-1-2/root"),
             upper: PathBuf::from("/scratch/lease-1-2/upper"),
             overlay_work: PathBuf::from("/scratch/lease-1-2/work"),

@@ -23,6 +23,7 @@ mod budget;
 mod egress;
 mod env;
 mod gpus;
+mod host;
 mod images;
 mod logs;
 mod node;
