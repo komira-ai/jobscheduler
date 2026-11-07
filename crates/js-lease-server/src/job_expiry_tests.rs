@@ -3,8 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_jobs::{JobEnd, JobId, JobRecord, JobState, JobStoreError, NewJob, Retention, StartFailure};
-use js_state::{ManualClock, StoreError, StoreTime};
+use js_jobs::{
+    Booked, JobEnd, JobId, JobRecord, JobSpec, JobState, JobStoreError, MarkRecord, Needs, NewJob,
+    Placement, Retention, StartFailure,
+};
+use js_state::{ManualClock, Store, StoreError, StoreTime};
 
 use super::{JobLimits, deadline, due, expire};
 use crate::agent_api::job_rig::{BOOKED, spec, tables_on};
@@ -88,7 +91,7 @@ fn each_deadline_counts_from_its_stored_instant_and_is_held_to_the_floor() {
         let placed_at = record(&jobs, id).placed_at.unwrap();
         placed_at.saturating_add(LIMITS.start_timeout)
     };
-    let of = |id| deadline(&record(&jobs, id), LIMITS);
+    let of = |id| deadline(&record(&jobs, id), None, LIMITS);
     assert_eq!(of(&queued), Some((queue_end, StartFailure::NoCapacity)));
     assert_eq!(
         of(&placed),
@@ -101,11 +104,15 @@ fn each_deadline_counts_from_its_stored_instant_and_is_held_to_the_floor() {
     assert_eq!((of(&running), of(&ended)), (None, None));
 
     let job = record(&jobs, &queued);
-    assert_eq!(due(&job, LIMITS, before(queue_end, SECOND)), None);
-    assert_eq!(due(&job, LIMITS, queue_end), Some(StartFailure::NoCapacity));
+    assert_eq!(due(&job, None, LIMITS, before(queue_end, SECOND)), None);
+    assert_eq!(
+        due(&job, None, LIMITS, queue_end),
+        Some(StartFailure::NoCapacity)
+    );
     assert_eq!(
         due(
             &record(&jobs, &running),
+            None,
             LIMITS,
             StoreTime::from_duration(Duration::MAX)
         ),
@@ -125,7 +132,7 @@ fn each_deadline_counts_from_its_stored_instant_and_is_held_to_the_floor() {
     other.raise_at_boot(early).unwrap();
     let job = record(&other, &late);
     assert_eq!(
-        deadline(&job, LIMITS),
+        deadline(&job, None, LIMITS),
         Some((
             job.submitted_at.saturating_add(LIMITS.max_queue_wait),
             StartFailure::NoCapacity
@@ -218,5 +225,85 @@ fn the_limits_are_the_pools_settings() {
             max_queue_wait: Duration::from_secs(3600),
             start_timeout: Duration::from_secs(900),
         }
+    );
+}
+
+/// Records the whole-host job `text`, queued.
+fn queue_whole(jobs: &ServerJobs, text: &str) -> JobId {
+    let id = JobId::parse(text).unwrap();
+    let new = NewJob {
+        id: Some(id.clone()),
+        spec: JobSpec {
+            needs: Needs::WholeHost,
+            ..spec()
+        },
+        priority: 0,
+        client: None,
+    };
+    jobs.insert_queued(new).unwrap();
+    id
+}
+
+// Catches a start timeout that ends a whole-host job while its host prepares (its prepare
+// deadline governs it), and a starting whole-host job whose start counts from the placement
+// instead of the allocation's prepare deadline.
+#[test]
+fn a_whole_host_job_has_no_start_timeout_while_placed_and_counts_from_its_prepare_deadline() {
+    let (clock, _, jobs) = tables();
+    let id = queue_whole(&jobs, "job-w");
+    let placement = Placement {
+        prepare_timeout: Some(Duration::from_secs(600)),
+        wall_limit_secs: None,
+    };
+    let (_, allocation) = jobs
+        .place_with(&id, host(), Booked::WholeHost, placement)
+        .unwrap();
+    let prepared = allocation.prepare_deadline;
+    let far = StoreTime::from_duration(Duration::MAX);
+    let job = record(&jobs, &id);
+    assert_eq!(deadline(&job, prepared, LIMITS), None);
+    assert_eq!(due(&job, prepared, LIMITS, far), None);
+
+    clock.advance(Duration::from_secs(100));
+    jobs.transition(&id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    let job = record(&jobs, &id);
+    let counted = prepared.unwrap().saturating_add(LIMITS.start_timeout);
+    assert_eq!(
+        deadline(&job, prepared, LIMITS),
+        Some((counted, StartFailure::StartTimeout))
+    );
+    let from_placement = job.placed_at.unwrap().saturating_add(LIMITS.start_timeout);
+    assert_ne!(counted, from_placement);
+    assert_eq!(
+        deadline(&job, None, LIMITS),
+        Some((from_placement, StartFailure::StartTimeout))
+    );
+}
+
+// Catches a queued whole-host job that ends and leaves its mark behind (or deletes it in a
+// commit of its own), and a queued job that is not a whole-host job ended with the mark's
+// delete or not ended with its own commit.
+#[test]
+fn a_queued_whole_host_job_past_its_queue_wait_ends_with_its_mark_in_one_commit() {
+    let (clock, store, jobs) = tables();
+    let id = queue_whole(&jobs, "job-w");
+    let plain = queue(&jobs, "job-q");
+    let made = jobs_now(&clock);
+    let give_up = made.saturating_add(Duration::from_secs(600));
+    jobs.put_mark(MarkRecord::new(id.clone(), host(), made, give_up))
+        .unwrap();
+    clock.advance(LIMITS.max_queue_wait);
+    let before = store.commit_stats().txns;
+
+    let ended = expire(&jobs, LIMITS, jobs_now(&clock), &NoMetrics).unwrap();
+    assert_eq!(ended.len(), 2);
+    assert!(ended.contains(&(id.clone(), StartFailure::NoCapacity)));
+    assert!(ended.contains(&(plain, StartFailure::NoCapacity)));
+    assert_eq!(store.commit_stats().txns, before + 2);
+    assert_eq!(jobs.get_mark(&id).unwrap(), None);
+    assert_eq!(
+        record(&jobs, &id).state,
+        JobState::FailedToStart(StartFailure::NoCapacity)
     );
 }

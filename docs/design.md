@@ -615,8 +615,10 @@ placed, its allocation booked) before the host is told; a failed commit books no
 job allocations and lease bookings side by side, so the two never overbook a host, and an allocation is freed only by the host's
 confirmation or the provider's absence (`crates/js-lease-server/src/job_alloc.rs`), which writes its usage history row in the same
 commit. A large share job has no mark, by design: work that is not behind it in the queue (a lease, or a more urgent job submitted
-later) can keep a host from ever having room for it, and it is placed the first time there is room. A whole-host job is not placed
-by this pass.
+later) can keep a host from ever having room for it, and it is placed the first time there is room. A whole-host job is placed
+by the same pass, before the walk, under the pool's whole-node settings: it is marked on the host that drains cheapest (the mark
+is a row of the store's mark table), committed placed with the whole host booked when that host is quiet, and requeued when its
+prepare fails (`crates/js-sched-placer/src/whole_jobs.rs`, `crates/js-lease-server/src/job_whole.rs`).
 
 ## 7. Request history and sizing
 

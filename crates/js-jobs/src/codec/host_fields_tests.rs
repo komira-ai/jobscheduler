@@ -4,7 +4,7 @@
 use super::taint_tag as t;
 use super::{decode_taint, encode_taint};
 use crate::codec::tests::{full_job, job_row, with, without};
-use crate::codec::{DecodeError, FORMAT, decode_job, field_of, job_tag};
+use crate::codec::{DecodeError, FORMAT, decode_job, field_of, job_host_tag};
 use crate::ids::JobId;
 use crate::record::{HostTaint, Isolation, JobRecord};
 use crate::suite::host_spec;
@@ -23,7 +23,7 @@ fn host_job() -> JobRecord {
 }
 
 // Catches isolation written and not read back: a host job and a contained one read back as
-// written, and a host job's row differs from the contained row only by tag 45.
+// written, and a host job's row differs from the contained row only by tag 47.
 #[test]
 fn isolation_reads_back_as_written() {
     let host = host_job();
@@ -34,16 +34,16 @@ fn isolation_reads_back_as_written() {
         decode_job(&job_row(&contained)).map(|job| job.spec.constraints.isolation),
         Ok(Isolation::Contained)
     );
-    assert_eq!(without(&row, job_tag::ISOLATION), job_row(&contained));
+    assert_eq!(without(&row, job_host_tag::ISOLATION), job_row(&contained));
 }
 
 // Catches a contained job whose row gains a field (an older build then reads a changed row)
 // and a host job written with another value than 1.
 #[test]
 fn only_a_host_job_writes_the_isolation_tag() {
-    assert_eq!(field_of(&job_row(&full_job()), job_tag::ISOLATION), None);
+    assert_eq!(field_of(&job_row(&full_job()), job_host_tag::ISOLATION), None);
     assert_eq!(
-        field_of(&job_row(&host_job()), job_tag::ISOLATION),
+        field_of(&job_row(&host_job()), job_host_tag::ISOLATION),
         Some(vec![1])
     );
 }
@@ -52,10 +52,10 @@ fn only_a_host_job_writes_the_isolation_tag() {
 // and an explicit zero refused.
 #[test]
 fn a_row_without_the_isolation_tag_reads_contained() {
-    let row = without(&job_row(&host_job()), job_tag::ISOLATION);
+    let row = without(&job_row(&host_job()), job_host_tag::ISOLATION);
     let job = decode_job(&row).expect("reads");
     assert_eq!(job.spec.constraints.isolation, Isolation::Contained);
-    let zero = with(&row, job_tag::ISOLATION, &[0]);
+    let zero = with(&row, job_host_tag::ISOLATION, &[0]);
     assert_eq!(
         decode_job(&zero).map(|job| job.spec.constraints.isolation),
         Ok(Isolation::Contained)
@@ -68,13 +68,13 @@ fn a_row_without_the_isolation_tag_reads_contained() {
 fn an_isolation_value_this_build_does_not_know_is_newer() {
     let row = job_row(&full_job());
     assert_eq!(
-        decode_job(&with(&row, job_tag::ISOLATION, &[2])),
+        decode_job(&with(&row, job_host_tag::ISOLATION, &[2])),
         Err(DecodeError::Newer)
     );
     assert_eq!(
-        decode_job(&with(&row, job_tag::ISOLATION, &[1, 1])),
+        decode_job(&with(&row, job_host_tag::ISOLATION, &[1, 1])),
         Err(DecodeError::BadLength {
-            tag: job_tag::ISOLATION,
+            tag: job_host_tag::ISOLATION,
         })
     );
 }

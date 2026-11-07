@@ -598,8 +598,8 @@ model:
   (`crates/js-lease-server/tests/server/elastic_fake_e2e.rs`).
 - **Usage recording.** Its store reads the system's clock, so the cell turns it off.
 - **Jobs that book GPUs, and whole-host jobs.** The server sends no start for a job that
-  books GPUs (it records no device indices), and places no whole-host job, so the job
-  front asks for a work's cpu and memory only, and a whole-host job stays queued. The job
+  books GPUs (it records no device indices), so the job front asks for a work's cpu and
+  memory only and submits no whole-host job; a whole-host item is asked for as a lease. The job
   service's gRPC transport is covered where it lives (`crates/js-lease-server`); the cell
   reaches the HTTP/JSON gateway.
 

@@ -1,15 +1,16 @@
 //! The queued jobs placed by the engine, and the job allocations it books (design sections
-//! 5.3, steps 5 and 6, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
+//! 5.3, steps 5 and 6, 5.4, 6.2 and 6.7, and section 8, rows 11, 12, 17 and 25).
 //!
 //! Under `--placement js-sched`, with the job tables, the server runs a **pass** over the
 //! queue on each tick and after each heartbeat of a host that speaks the per-job messages
-//! (the server's `Agents::place_jobs`): a job end, a cancel, a confirmed container, a host that joins
-//! and a heartbeat that changes a host's load all come to the server as one of those. A pass
-//! ([`SchedPlacer::place_jobs`]):
+//! (the server's `Agents::place_jobs`): a job end, a cancel, a confirmed container, a host that
+//! joins and a heartbeat that changes a host's load all come to the server as one of those. A
+//! pass ([`SchedPlacer::place_jobs_with`]):
 //!
-//! 1. **Reads the tables as they stand**: every live (booked or releasing) allocation and
-//!    every queued job in queue order. The engine holds no list of its own that a job must
-//!    stay on, so no timer can drop a queued job and none is ever presented again (row 12).
+//! 1. **Reads the tables as they stand**: every live (booked or releasing) allocation, every
+//!    queued job in queue order and every mark. The engine holds no list of its own that a job
+//!    must stay on, so no timer can drop a queued job and none is ever presented again (row
+//!    12).
 //! 2. **Brings the engine's bookings to the allocation table** ([`Engine::sync_jobs`]): the
 //!    allocation table is the one record of what a job books on a host: its resources and
 //!    its host ports. A booking freed (by the host's confirmation or the provider's absence,
@@ -17,7 +18,17 @@
 //!    (after a restart) is taken up before anything is placed, with the ports the table
 //!    records for it, so it is never offered again and its job is never placed twice. Booked
 //!    and releasing allocations both book, and both hold their ports until freed.
-//! 3. **Walks the queue** ([`Engine::walk_jobs`]) in the binding order of
+//! 3. **Queues the jobs that need the whole host** ([`Engine::whole_jobs`], design section
+//!    5.4) and writes what the engine decides for them, step by step in its order: a mark
+//!    made or changed ([`js_jobs::JobStore::put_mark`]), a mark deleted
+//!    ([`js_jobs::JobStore::delete_mark`]), and a job committed on the quiet host it was
+//!    granted ([`js_jobs::JobStore::place_with`]: the job placed, the whole host booked, the
+//!    mark deleted and the prepare deadline set in one transaction). Only after the store
+//!    reports a commit does the engine hold the allocation ([`Engine::whole_job_placed`]); a
+//!    commit that failed puts the grant back and the job stays queued
+//!    ([`Engine::whole_job_failed`]). A host that holds such a job's mark takes no other job,
+//!    except as backfill, which the walk below decides.
+//! 4. **Walks the queue** ([`Engine::walk_jobs`]) in the binding order of
 //!    [`js_sched::walk_in_order`], one placement round of the scheduler per job, over the
 //!    hosts the registry would let take a job now ([`open_to_jobs`]), each as an [`OpenHost`]:
 //!    the network ceiling its hello advertises and whether it reported that it runs host jobs,
@@ -34,14 +45,18 @@
 //!    engine holds already has a port the job declares has no room for it, so one host never
 //!    holds a port twice, and the job waits as for room. Each placement is held in the
 //!    engine at once, with its ports, so a job or a lease placed while the pass commits does
-//!    not take its room or its port.
-//! 4. **Commits each placement** with [`js_jobs::JobStore::place`]: in one transaction the job
-//!    becomes placed on the host and its allocation is written as booked, with the host ports the
-//!    job declares. Only after the store reports the commit is the host's start handed on
-//!    ([`JobStarts::placed`]), and for a host-isolation job the host's taint after it
-//!    ([`JobStarts::tainted`]); the taint itself is a row of the same transaction (written by
-//!    the job store). A failed commit lets the engine's hold go ([`Engine::job_failed`]): nothing
-//!    is booked, the job stays queued and the next pass places it.
+//!    not take its room or its port. A job placed on a host a whole-host job marks (backfill)
+//!    gets the wall limit of the time left in the mark's tail less the backfill margin, when
+//!    that is shorter than its own ([`super::whole_jobs::backfill_wall`]).
+//! 5. **Commits each placement** with [`js_jobs::JobStore::place_with`]: in one transaction the
+//!    job becomes placed on the host and its allocation is written as booked, with the host
+//!    ports the job declares and the wall limit of step 4. Only after the store reports the
+//!    commit is the host's start handed on ([`JobStarts::placed`]), and for a host-isolation
+//!    job the host's taint after it ([`JobStarts::tainted`]); the taint itself is a row of the
+//!    same transaction (written by the job store). A failed commit lets the engine's hold go
+//!    ([`Engine::job_failed`]): nothing is booked, the job stays queued and the next pass
+//!    places it. A job that books the whole host and runs on the host itself is not marked or
+//!    committed by the whole-host pass: it stays queued.
 //!
 //! The start rides on the host's next heartbeat reply, built from the job table
 //! (the server's `per_job`): so the server's [`JobStarts`] hands no start on (it only collects
@@ -49,10 +64,9 @@
 //! whose start was never delivered (the server stopped after the commit) is started from the
 //! table after a restart all the same.
 //!
-//! A job that books the whole host is not placed by a pass, nor by anything else yet, and
-//! holds back no other job; a whole-host booking books the whole host in the scheduler, so no
-//! job with a port is placed beside it and a request for the whole host waits for every
-//! holder. A lease is never in the queue: it
+//! A job that books the whole host is not walked: step 3 places it, and the allocation it
+//! books holds the whole host in the scheduler, so no job with a port is placed beside it
+//! and a request for the whole host waits for every holder. A lease is never in the queue: it
 //! is placed on arrival by the registry's placer, which sees the job allocations too.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,16 +75,17 @@ use std::time::Duration;
 use js_agent_wire::{NetworkCeiling, Phase};
 use js_jobs::{
     AllocationRecord, Booked, IdSource, Isolation, JobId, JobRecord, JobStore, JobStoreError,
-    Needs, NetworkPolicy,
+    Needs, NetworkPolicy, Placement,
 };
 use js_lease::Timestamp;
-use js_registry::{HostState, HostView};
+use js_registry::{HostState, HostView, WholeNodeConfig};
 use js_sched::ceiling::within_ceiling;
 use js_sched::{Event, Prediction, Request};
 use js_types::sched::{FarmTime, LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey};
 use js_types::{HostId, JobNetwork, Resources};
 use tracing::warn;
 
+use super::whole_jobs::{WholeJobStep, WholeJobs, backfill_wall};
 use super::{Engine, Placed, recovered_as};
 use crate::map::{self, MapError};
 use crate::place::SchedPlacer;
@@ -85,11 +100,12 @@ pub fn job_network(policy: NetworkPolicy) -> JobNetwork {
 }
 
 /// What a pass tells the server's metrics: each committed placement, with how long its job
-/// waited since its submit, and each placement whose commit failed.
+/// waited since its submit, and each write of the pass whose commit failed.
 pub trait PassMetrics {
     /// A queued job was placed, `waited` after it was submitted.
     fn job_placed(&self, waited: Duration);
-    /// A placement's commit failed: its write did not land.
+    /// A write of the pass failed (a placement's commit, or a whole-host job's mark): it did
+    /// not land.
     fn store_write_failed(&self);
 }
 
@@ -192,7 +208,13 @@ impl Engine {
     /// Records that the engine holds the allocation of `job` on `host` as `placed`, booking
     /// `booked` (what it books of the host and its host ports), and holds its operation to
     /// no host.
-    fn hold_job(&mut self, job: &JobId, host: &HostId, booked: (Booked, Vec<u16>), placed: Placed) {
+    pub(super) fn hold_job(
+        &mut self,
+        job: &JobId,
+        host: &HostId,
+        booked: (Booked, Vec<u16>),
+        placed: Placed,
+    ) {
         let (booked, host_ports) = booked;
         self.sched.place_only_on(placed.operation, BTreeSet::new());
         let hold = JobHold {
@@ -252,9 +274,10 @@ impl Engine {
 
     /// One walk of `queued`, the queued jobs in queue order, over `open`, the hosts that may take a
     /// job now with the network ceiling each advertises and whether it runs host jobs, at `now`:
-    /// the placements it decides, each as the job, its host and what it books, in queue order. Each
-    /// is held in the engine from here on, so it books its host for whatever is placed after it,
-    /// until its commit answers.
+    /// the placements it decides, each as the job, its host, what it books and what else the
+    /// commit writes (the wall limit of a job placed on a host a whole-host job marks), in queue
+    /// order. Each is held in the engine from here on, so it books its host for whatever is
+    /// placed after it, until its commit answers.
     ///
     /// Each open host the engine knows by a shape it can describe is heard from now, with its
     /// capacity, as at a lease's start; the others are left out. The walk is
@@ -274,7 +297,7 @@ impl Engine {
         queued: &[JobRecord],
         open: &BTreeMap<HostId, OpenHost>,
         now: FarmTime,
-    ) -> Vec<(JobId, HostId, Booked)> {
+    ) -> Vec<(JobId, HostId, Booked, Placement)> {
         let nodes: BTreeMap<HostId, (super::Node, &OpenHost)> = open
             .iter()
             .filter_map(|(host, offer)| {
@@ -324,9 +347,28 @@ impl Engine {
             },
         );
         let decided = walkers.into_iter().zip(placed);
-        decided
-            .filter_map(|(walker, host)| host.map(|host| (walker.job, host, walker.booked)))
-            .collect()
+        let mut placements = Vec::new();
+        for (walker, host) in decided.filter_map(|(walker, host)| Some((walker, host?))) {
+            let placement = self.backfill_placement(walker.wall, &host, now);
+            placements.push((walker.job, host, walker.booked, placement));
+        }
+        placements
+    }
+
+    /// What the commit of a job placed on `host` writes beside its booking: when a whole-host job
+    /// marks `host` and the mark's tail ends, the wall limit is cut to the time left in the tail
+    /// less the backfill margin ([`backfill_wall`]), if that is shorter than the job's own
+    /// `wall`; otherwise nothing.
+    fn backfill_placement(&self, wall: Duration, host: &HostId, now: FarmTime) -> Placement {
+        let marked = self.sched.whole_room(&map::worker(host)).marked_for;
+        let mark = marked.and_then(|operation| self.sched.whole_mark(operation));
+        let tail = mark.and_then(|mark| mark.tail_end);
+        let cut = tail.map(|end| backfill_wall(wall, end, now));
+        let cut = cut.filter(|cut| *cut < wall);
+        Placement {
+            wall_limit_secs: cut.map(|cut| cut.as_secs()),
+            ..Placement::default()
+        }
     }
 
     /// One placement round for `walker`, held to `room`, the hosts the walk leaves open to
@@ -369,7 +411,8 @@ impl Engine {
 }
 
 /// The queued `job` as a pass offers it to the engine; `None` for a job that books the whole
-/// host, and for one whose constraints are no platform requirements (logged).
+/// host (the pass queues it with [`Engine::whole_jobs`]), and for one whose constraints are no
+/// platform requirements (logged).
 fn walker(job: &JobRecord) -> Option<Walker> {
     let Needs::Shape(resources) = &job.spec.needs else {
         return None;
@@ -470,59 +513,186 @@ impl JobStarts for NoStarts {
     fn tainted(&self, _: &HostId, _: &JobId) {}
 }
 
+/// The hosts a pass places on, as the server reads them from the registry.
+#[derive(Debug, Clone, Copy)]
+pub struct JobHosts<'a> {
+    /// The hosts that may take a job now, each with the network ceiling it advertises and
+    /// whether it runs host jobs.
+    pub open: &'a BTreeMap<HostId, OpenHost>,
+    /// The hosts that said hello to this server.
+    pub hello: &'a BTreeSet<HostId>,
+    /// The pool's whole-node settings, if it has any.
+    pub whole: Option<&'a WholeNodeConfig>,
+}
+
 impl SchedPlacer {
-    /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now, each
-    /// with the network ceiling it advertises and whether it runs host jobs, handing each
-    /// committed placement to `starts` (the steps of the module docs; a committed host-isolation
-    /// placement is also told as a taint): the jobs it placed, in queue order. A placement whose
-    /// commit fails is logged and let go; its job stays queued for the next pass. Each committed
-    /// placement, with how long its job waited since its submit, and each placement that did
-    /// not commit, are told to `metrics`.
+    /// One pass over the queued jobs of `jobs`, on `open`, the hosts that may take a job now,
+    /// each with the network ceiling it advertises and whether it runs host jobs:
+    /// [`SchedPlacer::place_jobs_with`] for a pool with no whole-node settings and no host that
+    /// said hello, so no job that needs the whole host is placed.
     ///
     /// # Errors
-    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A commit the
-    /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
-    /// there: a store with a newer writer commits nothing more.
+    /// As [`SchedPlacer::place_jobs_with`].
     pub fn place_jobs<S: js_state::Store, I: IdSource>(
         &self,
         jobs: &JobStore<S, I>,
         open: &BTreeMap<HostId, OpenHost>,
         (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
     ) -> Result<Vec<JobId>, JobStoreError> {
+        let hello = BTreeSet::new();
+        let hosts = JobHosts {
+            open,
+            hello: &hello,
+            whole: None,
+        };
+        self.place_jobs_with(jobs, &hosts, (starts, metrics))
+    }
+
+    /// One pass over the queued jobs of `jobs`, on `hosts`, handing each committed placement to
+    /// `starts` (the steps of the module docs): the jobs it placed, in queue order, those that
+    /// need the whole host first. A write that fails is logged and let go, and a placement whose
+    /// commit fails leaves its job queued for the next pass. Each committed placement, with how
+    /// long its job waited since its submit, and each write that did not commit, are told to
+    /// `metrics`.
+    ///
+    /// The marks of the whole-host jobs wait for their hosts to say hello until the server's
+    /// start plus the pool's `regain_grace` (design section 6.7, step 3). A job that needs the
+    /// whole host is committed with the pool's `prepare_timeout` as its allocation's prepare
+    /// deadline.
+    ///
+    /// # Errors
+    /// The [`JobStoreError`] of a failed read of the tables: nothing is placed. A write the
+    /// store answers with [`js_state::StoreError::Fenced`] is answered too, and the pass ends
+    /// there: a store with a newer writer commits nothing more.
+    pub fn place_jobs_with<S: js_state::Store, I: IdSource>(
+        &self,
+        jobs: &JobStore<S, I>,
+        hosts: &JobHosts<'_>,
+        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
+    ) -> Result<Vec<JobId>, JobStoreError> {
         let _pass = self.pass();
         let live = jobs.live_allocations()?;
         let queued = jobs.queued()?;
+        let marks = jobs.marks()?;
         let now = self.now();
-        let decided = {
+        let grace = hosts.whole.map_or(0, |whole| whole.regain_grace_ms);
+        let open: BTreeSet<HostId> = hosts.open.keys().cloned().collect();
+        // The whole-host engine marks and commits only the jobs that book the whole host and
+        // run contained: it does not yet hold a job to the hosts that run host jobs, so a
+        // whole-host job with host isolation stays queued.
+        let whole: Vec<JobRecord> = queued
+            .iter()
+            .filter(|job| {
+                let needs_whole = matches!(job.spec.needs, Needs::WholeHost);
+                needs_whole & (job.spec.constraints.isolation != Isolation::Host)
+            })
+            .cloned()
+            .collect();
+        let input = WholeJobs {
+            queued: &whole,
+            marks: &marks,
+            hello: hosts.hello,
+            open: &open,
+            settings: hosts.whole,
+            claim_by: self.boot().saturating_add(Duration::from_millis(grace)),
+        };
+        let steps = {
             let mut engine = self.engine();
             engine.sync_jobs(&live);
-            engine.walk_jobs(&queued, open, now)
+            engine.whole_jobs(&input, now)
         };
         let mut placed = Vec::new();
-        for (job, host, booked) in decided {
-            match jobs.place(&job, host.clone(), booked) {
+        for step in steps {
+            match self.write_step(jobs, &step, hosts.whole, (starts, metrics)) {
+                Ok(job) => placed.extend(job),
+                Err(error) => {
+                    warn!(?step, %error, "a write for a whole-host job was not committed; the job stays queued");
+                    failed_write(error, metrics)?;
+                }
+            }
+        }
+        let decided = self.engine().walk_jobs(&queued, hosts.open, now);
+        for (job, host, booked, placement) in decided {
+            match jobs.place_with(&job, host.clone(), booked, placement) {
                 Ok((record, _)) => {
-                    let at = record.placed_at.unwrap_or(record.submitted_at);
-                    metrics.job_placed(at.since(record.submitted_at));
-                    starts.placed(&job, &host);
-                    if record.spec.constraints.isolation == Isolation::Host {
-                        starts.tainted(&host, &job);
-                    }
+                    told(&record, &host, (starts, metrics));
                     placed.push(job);
                 }
                 Err(error) => {
-                    metrics.store_write_failed();
                     self.engine().job_failed(&job);
                     warn!(%job, %host, %error, "a queued job's placement was not committed; it stays queued");
                     // A store with a newer writer commits nothing more: the pass ends here
                     // and answers the error, for the caller to trip the fence on.
-                    if is_fenced(&error) {
-                        return Err(error);
-                    }
+                    failed_write(error, metrics)?;
                 }
             }
         }
         Ok(placed)
+    }
+
+    /// Writes `step`, one decision of the engine for a whole-host job: the job a commit placed,
+    /// after the engine holds its allocation and `metrics` and `starts` are told. A commit that
+    /// fails puts the job's grant back in the engine.
+    fn write_step<S: js_state::Store, I: IdSource>(
+        &self,
+        jobs: &JobStore<S, I>,
+        step: &WholeJobStep,
+        settings: Option<&WholeNodeConfig>,
+        (starts, metrics): (&dyn JobStarts, &dyn PassMetrics),
+    ) -> Result<Option<JobId>, JobStoreError> {
+        match step {
+            WholeJobStep::Mark(mark) => {
+                jobs.put_mark(mark.clone())?;
+                Ok(None)
+            }
+            WholeJobStep::Unmark(job) => {
+                jobs.delete_mark(job)?;
+                Ok(None)
+            }
+            WholeJobStep::Commit { job, host } => {
+                let prepare_timeout =
+                    settings.map(|whole| Duration::from_millis(whole.prepare_timeout_ms));
+                let placement = Placement {
+                    prepare_timeout,
+                    wall_limit_secs: None,
+                };
+                let placed = jobs.place_with(job, host.clone(), Booked::WholeHost, placement);
+                let (record, allocation) = match placed {
+                    Ok(placed) => placed,
+                    Err(error) => {
+                        self.engine().whole_job_failed(job);
+                        return Err(error);
+                    }
+                };
+                let mut engine = self.engine();
+                engine.whole_job_placed(job, host, allocation.host_ports);
+                drop(engine);
+                told(&record, host, (starts, metrics));
+                Ok(Some(job.clone()))
+            }
+        }
+    }
+}
+
+/// Tells `metrics` and `starts` of the placement of the job `record` shows on `host`, which the
+/// store committed: its start, and for a job that runs on the host itself the host's taint.
+fn told(record: &JobRecord, host: &HostId, (starts, metrics): (&dyn JobStarts, &dyn PassMetrics)) {
+    let at = record.placed_at.unwrap_or(record.submitted_at);
+    metrics.job_placed(at.since(record.submitted_at));
+    starts.placed(&record.id, host);
+    if record.spec.constraints.isolation == Isolation::Host {
+        starts.tainted(host, &record.id);
+    }
+}
+
+/// Tells `metrics` that a write of the pass failed with `error`. The error again when the store
+/// has a newer writer, for the pass to end with.
+fn failed_write(error: JobStoreError, metrics: &dyn PassMetrics) -> Result<(), JobStoreError> {
+    metrics.store_write_failed();
+    if is_fenced(&error) {
+        Err(error)
+    } else {
+        Ok(())
     }
 }
 
@@ -555,3 +725,7 @@ impl SchedPlacer {
         self.engine().sched.queued_len()
     }
 }
+
+#[cfg(test)]
+#[path = "jobs_tests.rs"]
+mod tests;

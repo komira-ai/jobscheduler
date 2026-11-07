@@ -1,6 +1,6 @@
 //! [`JobStore`]: the job, allocation, mark and taint tables over a state [`Store`].
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use crate::ids::{AllocationId, ClientName, IdSource, JobId, RandomIds};
 use crate::keys;
 use crate::record::{
     AllocationRecord, AllocationStep, Booked, EndReason, HostBooking, JobRecord, JobSpec, JobState,
-    Needs, may_move,
+    may_move,
 };
 use crate::result::{JobEnd, Output, Retention};
 
@@ -23,10 +23,13 @@ mod index;
 mod marks;
 mod queue;
 mod taints;
+mod whole;
 
 pub use index::Backfill;
 
 pub use queue::queue_order;
+
+pub use whole::{FailedPrepare, Placement};
 
 /// The schema version of the rows this build writes.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -271,6 +274,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
             retention_ends: None,
             deadline_floor: None,
             client,
+            failed_prepares: 0,
+            prepare_bars: BTreeMap::new(),
             carried: Carried::default(),
         }
     }
@@ -342,9 +347,11 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// the version read, and its allocation row must still be absent, or freed (a requeued job's
     /// earlier allocation, which the new one overwrites), at the version read. The new allocation
     /// id differs from the freed row's: a source that repeats it is drawn again, at most
-    /// [`MINT_TRIES`] times. For a job that runs on the host itself ([`crate::Isolation::Host`])
-    /// the same transaction also puts `taint/<host>`, which must be absent, so a host a host job
-    /// already tainted makes the placement stale.
+    /// [`MINT_TRIES`] times. The job's mark, if it has one, is left as it is:
+    /// [`JobStore::place_with`] places a job and drops its mark in the same transaction. For a
+    /// job that runs on the host itself ([`crate::Isolation::Host`]) the same transaction also
+    /// puts `taint/<host>`, which must be absent, so a host a host job already tainted makes
+    /// the placement stale.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::UnexpectedState`] when the job is not
@@ -358,54 +365,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         host: HostId,
         booked: Booked,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
-        let (job, job_version) = self.job_row(id)?;
-        ensure(
-            job.state == JobState::Queued,
-            JobStoreError::UnexpectedState {
-                id: id.clone(),
-                expected: JobState::Queued,
-                found: job.state,
-            },
-        )?;
-        let earlier = self.read_allocation(id)?;
-        let (allocation_cond, earlier_id) = match &earlier {
-            None => (Cond::Absent, None),
-            Some((earlier, version)) => {
-                ensure(
-                    earlier.step == AllocationStep::Freed,
-                    JobStoreError::AllocationHeld {
-                        id: id.clone(),
-                        step: earlier.step,
-                    },
-                )?;
-                (Cond::Version(*version), Some(earlier.allocation_id))
-            }
-        };
-        let allocation_id = self.fresh_allocation_id(earlier_id)?;
-        let now = self.store.now();
-        let host_ports: BTreeSet<u16> = job.spec.ports.iter().map(|port| port.host).collect();
-        let allocation = AllocationRecord {
-            job: id.clone(),
-            allocation_id,
-            host: host.clone(),
-            booked,
-            host_ports: host_ports.into_iter().collect(),
-            step: AllocationStep::Booked,
-            created_at: now,
-            freed_at: None,
-            end_reason: None,
-            carried: Carried::default(),
-        };
-        let placed = JobRecord {
-            state: JobState::Placed,
-            host: Some(host),
-            placed_at: Some(now),
-            ..job.clone()
-        };
-        let txn = index::put_job(Txn::new(), Some(&job), &placed, Cond::Version(job_version))?;
-        let earlier = earlier.as_ref().map(|(record, _)| record);
-        let txn = index::put_allocation(txn, earlier, &allocation, allocation_cond)?;
-        let txn = taints::with_taint(txn, &placed, &allocation.host)?;
+        let (txn, placed, allocation) =
+            self.placement_txn(id, host, booked, Placement::default())?;
         self.commit(id, txn)?;
         Ok((placed, allocation))
     }
@@ -459,7 +420,10 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
     /// The one requeue (design section 5.4): a placed whole-host job whose prepare failed goes
     /// back to queued, with no host, and its allocation is freed with
     /// [`EndReason::FailedPrepare`] in the same transaction (no container was made, so there
-    /// is nothing for the host to confirm). Its next placement gets a new allocation id.
+    /// is nothing for the host to confirm). Its next placement gets a new allocation id. The
+    /// job's failed-prepare count and bars are kept as they are, and its mark is not touched:
+    /// [`JobStore::fail_prepare_with`] is the requeue that counts the failure, bars the host and
+    /// drops the mark, and can end the job instead.
     ///
     /// # Errors
     /// [`JobStoreError::UnexpectedState`] when the job is not placed;
@@ -472,31 +436,7 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
         &self,
         id: &JobId,
     ) -> Result<(JobRecord, AllocationRecord), JobStoreError> {
-        let (job, job_version) = self.job_row(id)?;
-        ensure(
-            job.state == JobState::Placed,
-            JobStoreError::UnexpectedState {
-                id: id.clone(),
-                expected: JobState::Placed,
-                found: job.state,
-            },
-        )?;
-        ensure(
-            (job.spec.needs == Needs::WholeHost) & !job.cancel_requested,
-            JobStoreError::IllegalTransition {
-                id: id.clone(),
-                from: job.state,
-                to: JobState::Queued,
-            },
-        )?;
-        let (allocation, allocation_version) = self.allocation_row(id)?;
-        ensure(
-            allocation.step == AllocationStep::Booked,
-            JobStoreError::AllocationNotBooked {
-                id: id.clone(),
-                step: allocation.step,
-            },
-        )?;
+        let ((job, job_version), (allocation, allocation_version)) = self.prepare_rows(id)?;
         let now = self.store.now();
         let queued = JobRecord {
             state: JobState::Queued,
@@ -523,10 +463,12 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
 
     /// The client's cancel (design section 5.3): a queued job is cancelled at once (it has no
     /// allocation to release), ended as [`JobStore::end_job`] ends it, with a result of
-    /// reason cancelled and no exit code or output, and its retention end; a placed, starting
-    /// or running job gets the cancel intent and nothing else, the job ending when the host
-    /// reports it stopped; an ended job, or one whose cancel was already asked for, is
-    /// returned as it is, unwritten.
+    /// reason cancelled and no exit code or output, and its retention end, and its mark, if it
+    /// has one, deleted in the same transaction (at the version read, or its absence a
+    /// precondition when there is none, so a mark written in between makes the cancel stale);
+    /// a placed, starting or running job gets the cancel intent and nothing else, the job
+    /// ending when the host reports it stopped; an ended job, or one whose cancel was already
+    /// asked for, is returned as it is, unwritten.
     ///
     /// # Errors
     /// [`JobStoreError::NotFound`]; [`JobStoreError::Stale`]; as for any read and write.
@@ -546,7 +488,8 @@ impl<S: Store, I: IdSource> JobStore<S, I> {
                 exit_code: None,
                 output: Output::default(),
             };
-            self.end_txn(asked, job_version, cancelled, now)?
+            let (txn, next) = self.end_txn(asked, job_version, cancelled, now)?;
+            (self.without_mark(txn, id)?, next)
         } else {
             let txn = index::put_job(Txn::new(), Some(&job), &asked, Cond::Version(job_version))?;
             (txn, asked)

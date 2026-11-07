@@ -6,7 +6,7 @@ use js_agent_wire::{
     BookedResources, EGRESS_CAPABILITY, EGRESS_PORTS_CAPABILITY, Isolation, NetworkCeiling, RunFile,
 };
 use js_jobs::{AllocationRecord, Booked, DeclaredPort, JobFiles, JobId, JobRecord, NetworkPolicy};
-use js_types::{HostId, JobNetwork as Level, PortMap};
+use js_types::{HostId, JobNetwork as Level, PortMap, Resources};
 
 use super::{Unsendable, start_of};
 use crate::agent_api::job_rig::{BOOKED, image, placed, spec, tables};
@@ -37,15 +37,26 @@ fn build(
     allocation: &AllocationRecord,
     ceiling: &NetworkCeiling,
 ) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
-    build_for(job, allocation, (ceiling, false))
+    build_on(job, allocation, ceiling, None)
+}
+
+/// [`build`], for a host the registry books as `shape`.
+fn build_on(
+    job: &JobRecord,
+    allocation: &AllocationRecord,
+    ceiling: &NetworkCeiling,
+    shape: Option<&Resources>,
+) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
+    build_for(job, allocation, (ceiling, false), shape)
 }
 
 /// The start of `job` for `allocation` to `host-a`, whose agent reports `ceiling` and, when
-/// `host_jobs`, that it runs host jobs.
+/// `host_jobs`, that it runs host jobs, and which the registry books as `shape`.
 fn build_for(
     job: &JobRecord,
     allocation: &AllocationRecord,
     (ceiling, host_jobs): (&NetworkCeiling, bool),
+    shape: Option<&Resources>,
 ) -> Result<js_agent_wire::JobStartSpec, Unsendable> {
     let host = HostId::new("host-a").unwrap();
     start_of(
@@ -55,6 +66,7 @@ fn build_for(
             host: &host,
             ceiling,
             host_jobs,
+            shape,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -127,17 +139,18 @@ fn a_start_carries_the_job_and_what_its_allocation_booked() {
     );
 }
 
-/// Each start the wire cannot carry is refused with its reason: a whole-host booking, GPUs
-/// booked by count, a network level or a port above the host's ceiling, a file that is not
-/// text, a wall limit that overflows, and a job id the wire's grammar refuses. It catches a
-/// start sent with something the host would refuse or misread.
+/// Each start the wire cannot carry is refused with its reason: a whole-host booking when the
+/// host's shape is not known, GPUs booked by count, a network level or a port above the
+/// host's ceiling, a file that is not text, a wall limit that overflows, and a job id the
+/// wire's grammar refuses. It catches a start sent with something the host would refuse or
+/// misread.
 #[test]
 fn a_start_the_wire_cannot_carry_says_why() {
     let (job, allocation) = records();
     let ceiling = allow_list();
     let mut whole = allocation.clone();
     whole.booked = Booked::WholeHost;
-    assert_eq!(build(&job, &whole, &ceiling), Err(Unsendable::WholeHost));
+    assert_eq!(build(&job, &whole, &ceiling), Err(Unsendable::NoHostShape));
     let mut gpus = allocation.clone();
     gpus.booked = Booked::Shape {
         cpu_millis: 1000,
@@ -204,18 +217,55 @@ fn a_start_the_wire_cannot_carry_says_why() {
 fn a_host_job_start_carries_its_isolation_and_goes_only_to_a_host_that_reports_host_jobs() {
     let (job, allocation) = records();
     let ceiling = allow_list();
-    let contained = build_for(&job, &allocation, (&ceiling, true)).unwrap();
+    let contained = build_for(&job, &allocation, (&ceiling, true), None).unwrap();
     assert_eq!(contained.isolation, Isolation::Contained);
     let mut on_the_machine = job.clone();
     on_the_machine.spec.constraints.isolation = js_jobs::Isolation::Host;
-    let host = build_for(&on_the_machine, &allocation, (&ceiling, true)).unwrap();
+    let host = build_for(&on_the_machine, &allocation, (&ceiling, true), None).unwrap();
     assert_eq!(host.isolation, Isolation::Host);
     assert_eq!(
-        build_for(&on_the_machine, &allocation, (&ceiling, false)),
+        build_for(&on_the_machine, &allocation, (&ceiling, false), None),
         Err(Unsendable::HostJobsNotReported)
     );
     assert_eq!(
         Unsendable::HostJobsNotReported.to_string(),
         "the job runs on the machine itself and the host does not report host-jobs"
+    );
+}
+
+/// A start of an allocation that books the whole host books the host's shape as the registry
+/// holds it (CPU, memory and, when it books any, disk), with no device indices; its wall limit
+/// is the allocation's when it records one and the job's otherwise. A host with GPUs cannot be
+/// started on, since a start names each device by its index. It catches a whole-host start
+/// that books nothing or a share, one that drops the disk, one that names invented devices,
+/// and a wall limit cut for a backfill that the start does not carry.
+#[test]
+fn a_whole_host_start_books_the_hosts_shape_and_the_allocations_wall_limit() {
+    let (job, mut allocation) = records();
+    allocation.booked = Booked::WholeHost;
+    let ceiling = allow_list();
+    let host = Resources::new(8000, 16 << 30, 0, None).unwrap();
+    let start = build_on(&job, &allocation, &ceiling, Some(&host)).unwrap();
+    assert_eq!(
+        start.booked,
+        BookedResources {
+            cpu_millis: 8000,
+            memory_bytes: 16 << 30,
+            disk_bytes: None,
+            gpu_indices: Vec::new(),
+        }
+    );
+    assert_eq!(start.wall_ms, 600_000);
+
+    let with_disk = host.clone().with_disk_bytes(5 << 30);
+    allocation.wall_limit_secs = Some(90);
+    let start = build_on(&job, &allocation, &ceiling, Some(&with_disk)).unwrap();
+    assert_eq!(start.booked.disk_bytes, Some(5 << 30));
+    assert_eq!(start.wall_ms, 90_000);
+
+    let gpus = Resources::new(8000, 16 << 30, 2, Some("a100".to_owned())).unwrap();
+    assert_eq!(
+        build_on(&job, &allocation, &ceiling, Some(&gpus)),
+        Err(Unsendable::GpuIndices(2))
     );
 }

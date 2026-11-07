@@ -109,6 +109,11 @@ pub fn a_row_without_the_newest_tag_reads_with_defaults<B: Backend>(backend: &B)
         ),
         "{name}: a field the row lacks did not read as its default"
     );
+    assert_eq!(
+        (job.failed_prepares, job.prepare_bars.clone()),
+        (0, BTreeMap::new()),
+        "{name}: a row from before failed prepares did not read as having none"
+    );
     let image = ImageDigestRef::parse(&format!("team/app:1@{}", digest('c'))).expect("an image");
     let needs = Needs::Shape(Resources::new(1000, 1 << 30, 0, None).expect("resources"));
     assert_eq!(

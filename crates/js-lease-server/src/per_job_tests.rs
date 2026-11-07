@@ -3,9 +3,9 @@
 //! start the wire cannot carry, the room for commands).
 
 use js_agent_wire::{HeartbeatReply, HeldJob, HeldState, JobResult, NetworkCeiling, Outcome};
-use js_jobs::{Booked, JobState, JobStoreError};
+use js_jobs::{Booked, JobEnd, JobSpec, JobState, JobStoreError, Needs};
 use js_state::StoreError;
-use js_types::HostId;
+use js_types::{HostId, Resources};
 
 use js_state::Store;
 
@@ -39,6 +39,7 @@ fn a_retired_id_that_is_no_job_id_is_acknowledged() {
             host: &host(),
             ceiling: &ceiling,
             host_jobs: false,
+            shape: None,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -71,6 +72,7 @@ fn a_listed_state_that_names_no_step_moves_nothing() {
             host: &host(),
             ceiling: &ceiling,
             host_jobs: false,
+            shape: None,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -111,6 +113,7 @@ fn a_failed_end_commit_is_an_error() {
             host: &host(),
             ceiling: &ceiling,
             host_jobs: false,
+            shape: None,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -152,6 +155,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             host: &host(),
             ceiling: &ceiling,
             host_jobs: false,
+            shape: None,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -175,6 +179,7 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
             host: &host(),
             ceiling: &ceiling,
             host_jobs: false,
+            shape: None,
             logs: None,
             metrics: &NoMetrics,
         },
@@ -189,4 +194,78 @@ fn an_unsendable_start_is_not_sent_and_starts_stop_at_the_room() {
         jobs.get_job(&gpu.id).unwrap().unwrap().state,
         JobState::Placed
     );
+}
+
+/// A job that books the whole host is, while it is placed, sent no stop (the agent holds no
+/// container for it, so a stop would be answered retired and free a host still preparing) and
+/// no start, and the reply names its allocation unless a cancel intent lets the host go; once
+/// it is starting it is sent its start, with the CPU, memory and disk the registry books for
+/// the host, until the host lists it, and the reply goes on naming it while it runs; with a
+/// cancel intent a running one is stopped. It catches a stop for a preparing host, a start
+/// before the host is ready, a start with the booking of a share, a start resent after it is
+/// listed, and a reply that names a cancelled job's host.
+#[test]
+fn a_whole_host_job_is_started_only_once_ready_and_never_stopped_while_preparing() {
+    let (_store, jobs) = tables();
+    let whole = || JobSpec {
+        needs: Needs::WholeHost,
+        ..spec()
+    };
+    let (job, allocation) = placed(&jobs, "job-w", "host-a", whole(), Booked::WholeHost);
+    let leased = allocation.allocation_id.to_string();
+    let ceiling = NetworkCeiling::default();
+    let booked = Resources::new(8000, 16 << 30, 0, None)
+        .unwrap()
+        .with_disk_bytes(3 << 30);
+    let context = BeatContext {
+        host: &host(),
+        ceiling: &ceiling,
+        host_jobs: false,
+        shape: Some(&booked),
+        logs: None,
+        metrics: &NoMetrics,
+    };
+    let beat = |listed: &[HeldJob]| serve(&jobs, &context, listed, &[], 8).unwrap();
+
+    let reply = beat(&[]);
+    assert_eq!((reply.commands.len(), reply.exclusive), (0, Some(leased)));
+
+    jobs.request_cancel(&job.id).unwrap();
+    let reply = beat(&[]);
+    assert_eq!((reply.commands.len(), reply.exclusive), (0, None));
+
+    jobs.end_job(&job.id, JobEnd::Lost).unwrap();
+    let (second, next) = placed(&jobs, "job-x", "host-a", whole(), Booked::WholeHost);
+    let next_lease = next.allocation_id.to_string();
+    jobs.transition(&second.id, JobState::Placed, JobState::Starting)
+        .unwrap();
+    let reply = beat(&[]);
+    assert_eq!(reply.exclusive, Some(next_lease.clone()));
+    let sent = starts(&HeartbeatReply {
+        commands: reply.commands,
+        ..HeartbeatReply::default()
+    });
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].job_id, "job-x");
+    assert_eq!(sent[0].allocation_id, next_lease);
+    assert_eq!(sent[0].booked.cpu_millis, 8000);
+    assert_eq!(sent[0].booked.memory_bytes, 16 << 30);
+    assert_eq!(sent[0].booked.disk_bytes, Some(3 << 30));
+
+    let held = [listed("job-x", HeldState::Running, None)];
+    let reply = beat(&held);
+    assert_eq!(
+        (reply.commands.len(), reply.exclusive),
+        (0, Some(next_lease.clone()))
+    );
+
+    jobs.request_cancel(&second.id).unwrap();
+    let reply = beat(&held);
+    assert_eq!(reply.exclusive, Some(next_lease));
+    let asked = HeartbeatReply {
+        commands: reply.commands,
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(stops(&asked), ["job-x"]);
+    assert!(starts(&asked).is_empty());
 }

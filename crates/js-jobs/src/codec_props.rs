@@ -9,13 +9,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use js_types::ExecMode;
 use proptest::collection::{btree_map, vec};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
 use super::tests::{allocation, at, bare_job, full_job, full_result, shape};
 use super::*;
-use crate::record::{FileDigest, Isolation, JobFiles};
+use crate::record::{Exclusion, FileDigest, Isolation, JobFiles};
 use crate::result::{JobResult, JobTiming, LogLengths, ResourceUsage, ResultReason};
 use crate::rows;
 use crate::suite::{digest, full_spec};
@@ -238,6 +239,18 @@ fn job_result() -> impl Strategy<Value = JobResult> {
         )
 }
 
+fn host_id() -> impl Strategy<Value = HostId> {
+    ident().prop_map(|host| HostId::new(&host).expect("a host"))
+}
+
+fn exclusion() -> impl Strategy<Value = Exclusion> {
+    prop_oneof![
+        store_time().prop_map(Exclusion::Backoff),
+        store_time().prop_map(Exclusion::Until),
+        Just(Exclusion::ForLife),
+    ]
+}
+
 fn job() -> impl Strategy<Value = JobRecord> {
     (
         (ident(), spec(), any::<i32>(), state(), store_time()),
@@ -255,12 +268,14 @@ fn job() -> impl Strategy<Value = JobRecord> {
             proptest::option::of(store_time()),
             proptest::option::of(ident()),
         ),
+        (any::<u32>(), btree_map(host_id(), exclusion(), 0..4)),
     )
         .prop_map(
             |(
                 (id, spec, priority, state, submitted_at),
                 (placed_at, started_at, ended_at, host, cancel_requested, cancel_requested_at),
                 (result, retention_ends, deadline_floor, client),
+                (failed_prepares, prepare_bars),
             )| JobRecord {
                 id: JobId::parse(&id).expect("an id"),
                 spec,
@@ -277,6 +292,8 @@ fn job() -> impl Strategy<Value = JobRecord> {
                 retention_ends,
                 deadline_floor,
                 client: client.map(|name| ClientName::parse(&name).expect("a client name")),
+                failed_prepares,
+                prepare_bars,
                 carried: Carried::default(),
             },
         )
@@ -320,9 +337,18 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                 EndReason::Refused,
             ])),
         ),
+        (
+            proptest::option::of(store_time()),
+            proptest::option::of(any::<u64>()),
+        ),
     )
         .prop_map(
-            |((job, bits, host, booked), ports, (step, created_at, freed_at, end_reason))| {
+            |(
+                (job, bits, host, booked),
+                ports,
+                (step, created_at, freed_at, end_reason),
+                (prepare_deadline, wall_limit_secs),
+            )| {
                 AllocationRecord {
                     job: JobId::parse(&job).expect("an id"),
                     allocation_id: AllocationId::from_bits(bits),
@@ -333,6 +359,8 @@ fn allocation_record() -> impl Strategy<Value = AllocationRecord> {
                     created_at,
                     freed_at,
                     end_reason,
+                    prepare_deadline,
+                    wall_limit_secs,
                     carried: Carried::default(),
                 }
             },
@@ -405,7 +433,7 @@ fn framed_row(fields: &[(u16, Vec<u8>)]) -> Vec<u8> {
 }
 
 fn field_soup() -> impl Strategy<Value = Vec<u8>> {
-    vec((1..=45u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
+    vec((1..=47u16, vec(any::<u8>(), 0..14)), 0..10).prop_map(|fields| framed_row(&fields))
 }
 
 proptest! {

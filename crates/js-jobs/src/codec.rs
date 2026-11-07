@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use js_state::StoreTime;
-use js_types::{ExecMode, HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
+use js_types::{HostId, ImageDigestRef, Labels, RESERVED_PREFIX, ReservedKey, Resources};
 
 use crate::error::JobStoreError;
 use crate::ids::{AllocationId, ClientName, JobId};
@@ -43,14 +43,18 @@ mod file_fields;
 mod host_fields;
 mod mark_fields;
 mod result_fields;
+mod whole_fields;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use host_fields::job_host_tag;
 pub(crate) use host_fields::{decode_taint, encode_taint};
 pub(crate) use mark_fields::{decode_mark, encode_mark};
 
 /// The format byte of the rows this build writes.
 pub(crate) const FORMAT: u8 = 1;
 
-/// The tags of a job row.
+/// The tags of a job row (the whole-host tags 45 and 46 are in `whole_fields`, the isolation
+/// tag 47 in `host_fields`).
 pub(crate) mod job_tag {
     /// The job's id (text).
     pub const ID: u16 = 1;
@@ -145,11 +149,9 @@ pub(crate) mod job_tag {
     /// in place of [`FILES`], so a row with it holds no contents. A row a build before this
     /// field rewrote holds it beside an empty [`FILES`].
     pub const FILE_DIGESTS: u16 = 44;
-    /// Present (one byte, 1) when the job runs on the host itself.
-    pub const ISOLATION: u16 = 45;
 }
 
-/// The tags of an allocation row.
+/// The tags of an allocation row (the whole-host tags 14 and 15 are in `whole_fields`).
 pub(crate) mod alloc_tag {
     /// The job (text).
     pub const JOB: u16 = 1;
@@ -330,7 +332,7 @@ fn put_spec(row: &mut Writer, spec: &JobSpec) {
     let constraints = &spec.constraints;
     row.put_opt(t::OS, constraints.os.as_deref().map(text));
     row.put_opt(t::ARCH, constraints.arch.as_deref().map(text));
-    row.put_opt(t::EXEC, constraints.exec.map(|exec| vec![exec_code(exec)]));
+    row.put_opt(t::EXEC, constraints.exec.map(|exec| vec![host_fields::exec_code(exec)]));
     row.put(t::CAPABILITIES, text_map(&constraints.capabilities));
     host_fields::put_isolation(row, constraints.isolation);
     row.put(t::WALL_LIMIT_SECS, spec.wall_limit_secs.to_be_bytes());
@@ -380,6 +382,7 @@ pub(crate) fn encode_job(job: &JobRecord) -> Result<Vec<u8>, JobStoreError> {
         t::CLIENT,
         job.client.as_ref().map(|name| text(name.as_str())),
     );
+    whole_fields::put_job(&mut row, job);
     row.finish(&job.carried)
 }
 
@@ -426,6 +429,7 @@ pub(crate) fn encode_allocation(allocation: &AllocationRecord) -> Result<Vec<u8>
             .end_reason
             .map(|reason| vec![reason_code(reason)]),
     );
+    whole_fields::put_allocation(&mut row, allocation);
     row.finish(&allocation.carried)
 }
 
@@ -742,21 +746,6 @@ fn state_of(tag: u16, value: Vec<u8>) -> Result<JobState, DecodeError> {
     }
 }
 
-fn exec_code(exec: ExecMode) -> u8 {
-    match exec {
-        ExecMode::Container => 0,
-        ExecMode::SandboxExec => 1,
-    }
-}
-
-fn exec_of(tag: u16, value: Vec<u8>) -> Result<ExecMode, DecodeError> {
-    match byte_of(tag, &value)? {
-        0 => Ok(ExecMode::Container),
-        1 => Ok(ExecMode::SandboxExec),
-        _ => Err(DecodeError::Newer),
-    }
-}
-
 fn network_code(network: NetworkPolicy) -> u8 {
     match network {
         NetworkPolicy::None => 0,
@@ -846,7 +835,7 @@ fn take_spec(fields: &mut Fields) -> Result<JobSpec, DecodeError> {
     let constraints = Constraints {
         os: fields.opt(t::OS, text_of)?,
         arch: fields.opt(t::ARCH, text_of)?,
-        exec: fields.opt(t::EXEC, exec_of)?,
+        exec: fields.opt(t::EXEC, host_fields::exec_of)?,
         capabilities: fields
             .opt(t::CAPABILITIES, text_map_of)?
             .unwrap_or_default(),
@@ -895,6 +884,7 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
     let result = result_fields::take_result(&mut fields)?;
     let deadline_floor = fields.opt(t::DEADLINE_FLOOR, time_of)?;
     let client = fields.opt(t::CLIENT, client_of)?;
+    let (failed_prepares, prepare_bars) = whole_fields::take_job(&mut fields)?;
     Ok(JobRecord {
         id,
         spec,
@@ -911,6 +901,8 @@ pub(crate) fn decode_job(row: &[u8]) -> Result<JobRecord, DecodeError> {
         retention_ends,
         deadline_floor,
         client,
+        failed_prepares,
+        prepare_bars,
         carried: fields.carried(),
     })
 }
@@ -942,6 +934,7 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
     let created_at = fields.need(t::CREATED_AT, time_of)?;
     let freed_at = fields.opt(t::FREED_AT, time_of)?;
     let end_reason = fields.opt(t::END_REASON, reason_of)?;
+    let (prepare_deadline, wall_limit_secs) = whole_fields::take_allocation(&mut fields)?;
     Ok(AllocationRecord {
         job,
         allocation_id,
@@ -952,6 +945,8 @@ pub(crate) fn decode_allocation(row: &[u8]) -> Result<AllocationRecord, DecodeEr
         created_at,
         freed_at,
         end_reason,
+        prepare_deadline,
+        wall_limit_secs,
         carried: fields.carried(),
     })
 }
