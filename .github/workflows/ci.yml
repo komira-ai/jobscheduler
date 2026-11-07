@@ -178,6 +178,13 @@ jobs:
           JS_TEST_S3_URL: http://jsciroot:js-ci-throwaway@127.0.0.1:${{ job.services.s3.ports['9000'] }}/js-live-logs
           JS_TEST_S3_REGION: js-test-1
         run: 'cargo test --workspace --locked --no-fail-fast --tests -- --ignored s3_compat:: logs_round_trip::'
+      # The v1 job path over the real server binary, an agent and `js` on loopback, on a
+      # SQLite and a Postgres store (js-lease-server's v1_acceptance). The workspace run
+      # above runs it too; this step names it, so a break of the path between the binaries
+      # is a red step of its own. Nothing is compiled again.
+      - name: v1 acceptance over the server binary, an agent and js
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p js-lease-server --test v1_acceptance
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

@@ -1433,6 +1433,7 @@ name = "js-lease-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "clap",
  "hyper",
  "hyper-util",
@@ -1441,7 +1442,9 @@ dependencies = [
  "js-alert",
  "js-api-gateway",
  "js-caps",
+ "js-cli",
  "js-conformance",
+ "js-contain",
  "js-elastic",
  "js-elastic-fake",
  "js-jobs",
@@ -1827,23 +1830,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-server-core"
-version = "0.1.0"
-dependencies = [
- "js-caps",
- "js-conformance",
- "js-sched",
- "js-sim",
- "js-state",
- "js-store",
- "js-types",
- "js-whole",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "js-sim"
 version = "0.1.0"
 dependencies = [
@@ -1899,20 +1885,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
-]
-
-[[package]]
-name = "js-store"
-version = "0.1.0"
-dependencies = [
- "js-caps",
- "js-sched",
- "js-state",
- "js-store",
- "js-types",
- "thiserror",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
