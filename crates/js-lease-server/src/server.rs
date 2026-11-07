@@ -503,7 +503,6 @@ pub(crate) fn open(
         store,
         store_health,
     } = prepared;
-    let registry = agents.as_ref().map(|agents| agents.registry.clone());
     let logs = agents.as_ref().and_then(|agents| agents.logs.clone());
     if let Some(scaler) = &scaler {
         scaler.listening(Some(2 * tick), &bookings);
@@ -535,7 +534,7 @@ pub(crate) fn open(
     }
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
     let store_health = Arc::new(store_health);
-    let pools = Status::new(pool, registry, scaler.clone(), warnings, clock.clone());
+    let pools = Status::new(pool, scaler.clone(), warnings, clock.clone());
     let pools = Arc::new(
         pools
             .with_logs(logs)

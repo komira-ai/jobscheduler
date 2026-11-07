@@ -1,7 +1,8 @@
 //! Pins what the server does today with no scheduler flag: the flags and their defaults,
 //! the status of every documented route for a request with no token, a wrong token and
-//! the right one, the files the server leaves in its state directory, and the bytes of the
-//! lease file after an acquire and a release under a fixed clock.
+//! the right one, and the files the server leaves in its state directory. The lease and run
+//! routes of earlier releases stay among the probes: the golden pins them as paths the
+//! router does not have.
 //!
 //! The expected text is `golden/gpu_path.txt`, in sections. A change that alters any of
 //! it edits the golden in its own diff, where a reviewer sees it. Regenerate on purpose
@@ -18,8 +19,7 @@
 //! documented routes and a list of paths a later change might add; any of those that
 //! starts answering shows up as a changed line.
 //!
-//! Nothing here measures time: the clock is a `ManualClock` that only the test moves, and
-//! the tick loop runs on a `ChannelTicker` that only the test steps.
+//! Nothing here measures time.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -27,13 +27,12 @@ use std::fmt::Write as _;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use clap::CommandFactory;
 use js_lease_server::Cli;
 
 use crate::agents_support::{agent_args, join};
-use crate::support::{Harness, Scratch, TOKEN, base_args, lease_body, replace};
+use crate::support::{Harness, Scratch, TOKEN, base_args, replace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -47,13 +46,12 @@ const REGENERATE: &str = "JS_REGENERATE_GOLDEN=1 cargo test -p js-lease-server -
 const WRONG_TOKEN: &str = "wrong-token-0123456789-abcdefghijklmnop";
 
 /// The sections of the golden file, in file order.
-const SECTIONS: [&str; 6] = [
+const SECTIONS: [&str; 5] = [
     "flags",
     "routes",
     "routes-with-agents",
     "keep-alive",
     "state-files",
-    "lease-file",
 ];
 
 /// Every flag by name with its default and whether it is required, sorted. A hidden flag
@@ -96,18 +94,16 @@ fn flags() -> String {
 /// One request of the route table: method, path, and a body for the right token.
 type Probe = (&'static str, &'static str, Option<serde_json::Value>);
 
-/// The client routes of the documentation table, the run routes and the agent routes
-/// (which do not exist without the agent flags), a path under `/v1/sched/` and two
-/// wrong-method requests. Order matters: the valid-token requests change the table.
+/// The client routes of the documentation table, the lease and run routes of earlier
+/// releases (which are not routes now), the agent routes (which do not exist without the
+/// agent flags), a path under `/v1/sched/` and two wrong-method requests.
 fn probes() -> Vec<Probe> {
-    let acquire = || Some(lease_body());
     let mut probes = vec![
         ("GET", "/healthz", None),
-        ("POST", "/v1/leases", acquire()),
-        ("POST", "/v1/leases", acquire()),
-        ("POST", "/v1/leases", acquire()),
+        ("POST", "/v1/leases", Some(serde_json::json!({}))),
         ("GET", "/v1/leases", None),
         ("GET", "/v1/hosts", None),
+        ("POST", "/v1/leases/1-1/renew", Some(serde_json::json!({}))),
         ("POST", "/v1/leases/1-1/runs", Some(serde_json::json!({}))),
         ("GET", "/v1/leases/1-1/runs", None),
         ("GET", "/v1/leases/1-1/runs/r1", None),
@@ -120,8 +116,7 @@ fn probes() -> Vec<Probe> {
         ("DELETE", "/v1/sched/jobs/1", None),
         ("GET", "/v1/nothing", None),
         ("DELETE", "/v1/leases/1-1", None),
-        ("DELETE", "/v1/leases/1-1", None),
-        ("PUT", "/v1/leases", None),
+        ("PUT", "/v1/hosts", None),
     ];
     for path in UNKNOWN_PATHS {
         for method in ["GET", "POST"] {
@@ -280,10 +275,10 @@ async fn keep_alive(tag: &str) -> String {
     let mut stream = BufReader::new(TcpStream::connect(harness.addr()).await.unwrap());
     let steps = [
         ("GET", "/healthz", None, false),
-        ("GET", "/v1/leases", Some(TOKEN), false),
-        ("GET", "/v1/leases", Some(WRONG_TOKEN), false),
         ("GET", "/v1/hosts", Some(TOKEN), false),
-        ("GET", "/v1/leases", Some(TOKEN), true),
+        ("GET", "/v1/hosts", Some(WRONG_TOKEN), false),
+        ("GET", "/v1/hosts", Some(TOKEN), false),
+        ("GET", "/v1/hosts", Some(TOKEN), true),
     ];
     let mut out = String::new();
     for (method, path, token, close) in steps {
@@ -318,7 +313,7 @@ async fn routes_with_agents(tag: &str) -> String {
     matrix(&harness, TOKEN).await
 }
 
-/// The base flags with the lease file in a directory of its own, which holds nothing else.
+/// The base flags with the state file in a directory of its own, which holds nothing else.
 fn args_with_state_dir(scratch: &Scratch, agents: bool) -> (Vec<OsString>, PathBuf) {
     let dir = scratch.path("state");
     fs::create_dir_all(&dir).unwrap();
@@ -356,7 +351,7 @@ fn tree(root: &Path) -> String {
     found.into_iter().collect::<Vec<_>>().join(" ")
 }
 
-/// Every file under the scratch root (flag files, state directory) after a start, after an acquire and after a
+/// Every file under the scratch root (flag files, state directory) after a start and after a
 /// shutdown, with and without the agent flags (where an agent also joins).
 async fn state_files(tag: &str) -> String {
     let mut out = String::new();
@@ -367,11 +362,6 @@ async fn state_files(tag: &str) -> String {
         let _ = writeln!(out, "{label}\n  before start: {}", tree(&dir));
         let harness = Harness::with(scratch, args, None).await;
         let _ = writeln!(out, "  after start: {}", tree(&dir));
-        let granted = harness
-            .call("POST", "/v1/leases", Some(&lease_body()))
-            .await;
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        let _ = writeln!(out, "  after acquire: {}", tree(&dir));
         if agents {
             join(&harness, "node-a").await;
             let _ = writeln!(out, "  after an agent joins: {}", tree(&dir));
@@ -380,44 +370,6 @@ async fn state_files(tag: &str) -> String {
         running.shutdown().await.unwrap();
         let _ = writeln!(out, "  after shutdown: {}", tree(&dir));
     }
-    out
-}
-
-/// The lease file after an acquire, a tick, a release, a second acquire whose wall end passes before a tick, and the shutdown, with
-/// the clock moved by hand between them.
-async fn lease_file(tag: &str) -> String {
-    let scratch = Scratch::new(&format!("gpu_path_{tag}_bytes"));
-    let (args, dir) = args_with_state_dir(&scratch, false);
-    let harness = Harness::with(scratch, args, None).await;
-    let file = dir.join("leases.toml");
-    let mut out = String::new();
-    let mut note = |step: &str| {
-        let text = fs::read_to_string(&file).unwrap();
-        let _ = writeln!(out, "after {step}\n{text}");
-    };
-    note("start");
-    let granted = harness
-        .call("POST", "/v1/leases", Some(&lease_body()))
-        .await;
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    note("acquire");
-    harness.clock.advance(Duration::from_secs(110));
-    harness.ticks.step().await;
-    note("tick");
-    let released = harness.call("DELETE", "/v1/leases/1-1", None).await;
-    assert_eq!(released.status, 200, "{}", released.body);
-    note("release");
-    let second = harness
-        .call("POST", "/v1/leases", Some(&lease_body()))
-        .await;
-    assert_eq!(second.status, 201, "{}", second.body);
-    note("second acquire");
-    harness.clock.advance(Duration::from_secs(7201));
-    harness.ticks.step().await;
-    note("a tick after the wall end");
-    let Harness { running, .. } = harness;
-    running.shutdown().await.unwrap();
-    note("shutdown");
     out
 }
 
@@ -430,7 +382,6 @@ async fn current(tag: &str) -> Vec<(&'static str, String)> {
         ("routes-with-agents", routes_with_agents(tag).await),
         ("keep-alive", keep_alive(tag).await),
         ("state-files", state_files(tag).await),
-        ("lease-file", lease_file(tag).await),
     ]
 }
 

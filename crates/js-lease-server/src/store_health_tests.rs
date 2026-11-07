@@ -179,8 +179,8 @@ fn bed(name: &str, sink: Option<Arc<FakeSink>>) -> Bed {
         Some(sink) => health.with_sink(sink, Duration::from_secs(3600)),
         None => health,
     });
-    let status = Status::new(None, None, None, Vec::new(), server_clock)
-        .with_store_health(Arc::clone(&health));
+    let status =
+        Status::new(None, None, Vec::new(), server_clock).with_store_health(Arc::clone(&health));
     let token = parse_token(&[b'c'; 40]).unwrap();
     let shared = Shared::new(table, token, Some(Arc::new(agents)))
         .with_status(Some(Arc::new(status)))

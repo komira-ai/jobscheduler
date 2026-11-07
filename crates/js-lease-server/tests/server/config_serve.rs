@@ -51,7 +51,7 @@ async fn call(addr: SocketAddr, method: &str, path: &str, token: &str, body: &Va
 }
 
 /// Asserts the route split against a real server with both ports bound: `hello` and
-/// heartbeat answer on `agent_listen` and are 404 on `listen`; the lease, host and
+/// heartbeat answer on `agent_listen` and are 404 on `listen`; the host and
 /// operator routes and `/healthz` answer on `listen` and are 404 on `agent_listen`. With
 /// one port the same checks cannot fail, so the server binds two. It catches a route left
 /// on the wrong port, which would let a tag that may reach only the agent port reach
@@ -84,10 +84,6 @@ async fn agent_routes_answer_on_the_agent_port_only() {
     let hosts = call(listen, "GET", "/v1/hosts", TOKEN, &none).await;
     assert_eq!(hosts.status, 200, "{}", hosts.body);
     assert_eq!(hosts.json()["hosts"][0]["id"], "h1");
-    assert_eq!(
-        call(listen, "GET", "/v1/leases", TOKEN, &none).await.status,
-        200
-    );
     let health = request(listen, "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
     let minted = call(listen, "POST", "/v1/agent/join-tokens", TOKEN, &none).await;
@@ -95,12 +91,82 @@ async fn agent_routes_answer_on_the_agent_port_only() {
 
     for (method, path) in [
         ("GET", "/v1/hosts"),
-        ("GET", "/v1/leases"),
         ("GET", "/healthz"),
         ("POST", "/v1/agent/join-tokens"),
     ] {
         let reply = call(agent, method, path, JOIN, &none).await;
         assert_eq!(reply.status, 404, "{path}: {}", reply.body);
+    }
+}
+
+/// The lease and run routes of earlier releases, as method and path.
+const REMOVED_ROUTES: [(&str, &str); 8] = [
+    ("POST", "/v1/leases"),
+    ("GET", "/v1/leases"),
+    ("DELETE", "/v1/leases/x"),
+    ("POST", "/v1/leases/x/renew"),
+    ("POST", "/v1/leases/x/runs"),
+    ("GET", "/v1/leases/x/runs"),
+    ("GET", "/v1/leases/x/runs/y"),
+    ("DELETE", "/v1/leases/x/runs/y"),
+];
+
+/// Asserts that the lease and run routes of earlier releases are not routes: with the
+/// client token on `listen` and with the join token on `agent_listen`, each answers 404
+/// with exactly the status and body that an unknown path gets from the same listener and
+/// token; with no token on `listen` each stays the 401 with an empty body that every path
+/// gets, and on `agent_listen` each gets the 401 with an empty body that an unknown path
+/// gets with no token there. Catches
+/// a lease or run route that is served again, or one that answers differently from a path
+/// the router does not have.
+#[tokio::test]
+async fn the_lease_routes_answer_404() {
+    let h = serving("serve_no_lease_routes", Some("none")).await;
+    let (listen, agent) = (h.addr(), h.running.agent_addr().unwrap());
+    let none = json!({});
+    let unknown = call(listen, "GET", "/v1/nothing", TOKEN, &none).await;
+    assert_eq!(unknown.status, 404);
+    assert_eq!(unknown.json(), json!({ "error": "not-found" }));
+    let unknown_on_agent = call(agent, "GET", "/v1/nothing", JOIN, &none).await;
+    assert_eq!(unknown_on_agent.status, 404);
+    let unsigned = request(listen, "GET", "/v1/nothing", None, None).await;
+    assert_eq!(
+        (unsigned.status, unsigned.body.as_str()),
+        (401, ""),
+        "an unknown path with no token on the client listener"
+    );
+    let unsigned_on_agent = request(agent, "GET", "/v1/nothing", None, None).await;
+    assert_eq!(
+        (unsigned_on_agent.status, unsigned_on_agent.body.as_str()),
+        (401, ""),
+        "an unknown path with no token on the agent listener"
+    );
+
+    for (method, path) in REMOVED_ROUTES {
+        let reply = call(listen, method, path, TOKEN, &none).await;
+        assert_eq!(
+            (reply.status, &reply.body),
+            (404, &unknown.body),
+            "{method} {path} on the client listener"
+        );
+        let reply = call(agent, method, path, JOIN, &none).await;
+        assert_eq!(
+            (reply.status, &reply.body),
+            (404, &unknown_on_agent.body),
+            "{method} {path} on the agent listener"
+        );
+        let reply = request(listen, method, path, None, None).await;
+        assert_eq!(
+            (reply.status, reply.body.as_str()),
+            (401, ""),
+            "{method} {path} with no token on the client listener"
+        );
+        let reply = request(agent, method, path, None, None).await;
+        assert_eq!(
+            (reply.status, reply.body.as_str()),
+            (401, ""),
+            "{method} {path} with no token on the agent listener"
+        );
     }
 }
 

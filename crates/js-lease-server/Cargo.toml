@@ -11,7 +11,6 @@ publish.workspace = true
 js-alert = { path = "../js-alert" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-api-gateway = { path = "../js-api-gateway" }
-js-caps = { path = "../js-caps" }
 js-elastic = { path = "../js-elastic" }
 js-jobs = { path = "../js-jobs" }
 js-lease = { path = "../js-lease" }

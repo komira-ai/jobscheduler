@@ -2,28 +2,24 @@
 //! held to the memory percent, a rebuild that keeps the load it measured, readings that
 //! stop coming, a host that comes back or goes silent past the engine's own grace, hosts
 //! the registry forgets, a restart from the lease file, a joined pool of the configuration
-//! file, usage off, starts, beats and stops from several threads, and the lease routes.
+//! file, usage off, and starts, beats and stops from several threads.
 //! Everything runs in process on a manual clock; no listener is bound.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request as HttpRequest, StatusCode};
 use js_agent_wire::Hello;
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Pool, StartSpec};
 use js_registry::{Credential, HostState};
 use js_types::{LeaseId, Resources};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use serde_json::json;
 
 use super::engine_rig::*;
 use super::place::Fallbacks;
 use super::wiring_tests::{
     JOIN, config_booted, config_result, host_of, scratch, sharing, sharing_spec, write,
 };
-use crate::api::{Shared, router};
 
 /// What 90 percent of 16 GiB books, rounded down.
 const NINETY: u64 = 16 * GIB / 100 * 90 + 16 * GIB % 100 * 90 / 100;
@@ -538,87 +534,4 @@ fn starts_beats_and_stops_from_threads_keep_the_engine_agreed() {
     assert_eq!(left, 20);
     assert!(r.provider.capacity().iter().all(|c| c.leases.len() <= 8));
     assert_eq!(r.counted(), (NONE, 0, 1));
-}
-
-/// `method path` with `body` and the client token of [`super::wiring_tests::config_of`],
-/// through the server's router over `table` and the rig's agent side: the status and the
-/// JSON body.
-async fn call(
-    shared: &Arc<Shared>,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-) -> (StatusCode, Value) {
-    let token = "t".repeat(40);
-    let request = HttpRequest::builder()
-        .method(method)
-        .uri(path)
-        .header("authorization", format!("Bearer {token}"));
-    let body = body.map_or_else(Body::empty, |b| Body::from(b.to_string()));
-    let reply = router(shared.clone(), true)
-        .oneshot(request.body(body).unwrap())
-        .await
-        .unwrap();
-    let status = reply.status();
-    let bytes = to_bytes(reply.into_body(), 1 << 20).await.unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
-}
-
-/// Asserts, through the lease routes of a server under `--placement js-sched`, what only
-/// the engine does: leases of the class that shares a host are granted (201) beside each
-/// other, and the hosts' load readings choose where the next one goes (away from the host
-/// whose cores are all busy). Without the engine installed in the registry such a class
-/// is refused, and the registry places by no reading. It catches the server's placer not
-/// given to its registry.
-#[tokio::test]
-async fn the_routes_place_shared_leases_by_load() {
-    let hosts = ["h1", "h2"];
-    let r = rig(
-        "routes",
-        &shared_pool(2, 8000, ""),
-        &hosts,
-        &["--placement", "js-sched"],
-    );
-    let token = crate::config::parse_token("t".repeat(40).as_bytes()).unwrap();
-    let shared = Arc::new(Shared::new(r.table(), token, Some(r.agents.clone())));
-    let body = json!({
-        "class": "share",
-        "resources": { "cpu_millis": 1000, "memory_bytes": 1 << 20 },
-        "max_wall_seconds": 600,
-    });
-    let (status, first) = call(&shared, "POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(status, StatusCode::CREATED, "{first}");
-    let busy = first["host"].as_str().unwrap().to_owned();
-    let (status, second) = call(&shared, "POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(status, StatusCode::CREATED, "{second}");
-    assert_eq!(second["host"], busy.as_str());
-    let idle = hosts.iter().find(|h| **h != busy).unwrap().to_string();
-    let ids: Vec<String> = [&first, &second]
-        .iter()
-        .map(|l| l["id"].as_str().unwrap().to_owned())
-        .collect();
-    let covered: Vec<&str> = ids.iter().map(String::as_str).collect();
-    for seq in 1..=2 {
-        r.advance(5_000);
-        r.beat(&busy, Some(reading(seq, 8_000, GIB, &covered)));
-        r.beat(&idle, Some(reading(seq, 0, GIB, &[])));
-    }
-    let (status, third) = call(&shared, "POST", "/v1/leases", Some(&body)).await;
-    assert_eq!(status, StatusCode::CREATED, "{third}");
-    assert_eq!(third["host"], idle.as_str());
-    let (status, listed) = call(&shared, "GET", "/v1/hosts", None).await;
-    assert_eq!(status, StatusCode::OK, "{listed}");
-    let entry = |host: &str| {
-        let hosts = listed["hosts"].as_array().unwrap();
-        hosts.iter().find(|h| h["id"] == host).unwrap().clone()
-    };
-    let on_busy: Vec<Value> = entry(&busy)["leases"].as_array().unwrap().clone();
-    assert_eq!(on_busy, [first["id"].clone(), second["id"].clone()]);
-    // A host with one lease names it as `lease` alone.
-    assert_eq!(entry(&idle)["lease"], third["id"]);
-    assert!(entry(&idle).get("leases").is_none());
-    assert_eq!(entry(&idle)["shape"]["memory_bytes"], json!(16 * GIB));
 }
