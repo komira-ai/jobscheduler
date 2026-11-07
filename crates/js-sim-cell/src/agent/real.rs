@@ -19,9 +19,11 @@
 //! It is for small host counts: each process writes its held list into its state root at
 //! every step. The fake is the agent a cell runs by the hundred.
 //!
-//! The lifecycle books GPU devices by index, and the lease front names the indices
-//! `0..gpus` for every run, so on a host of more than one GPU a second run that asks for
-//! one is refused `no-capacity` where the fake runs it. The cell's hosts have one GPU.
+//! The lifecycle books GPU devices by index, and a run that asks for GPUs names the indices
+//! `0..gpus`, so on a host of more than one GPU a second run that asks for one is refused
+//! `no-capacity` where the fake runs it. The cell's hosts have one GPU. This node speaks
+//! the per-run messages only: it does not report the per-job capability, so the job
+//! service places nothing on it.
 
 use std::collections::BTreeSet;
 use std::fs;

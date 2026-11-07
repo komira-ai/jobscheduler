@@ -15,8 +15,8 @@ use js_sim_cell::{
     CallKind, ClientEvent, ClientPort, Front, HowEnded, ItemId, JobFront, SIM_RUN_IMAGE,
     ServerSpec, Shape, Work,
 };
-use js_types::HostId;
 use js_types::sched::FarmTime;
+use js_types::{HostId, Resources};
 use serde_json::{Value, json};
 
 /// How long each item's run lasts.
@@ -334,4 +334,39 @@ fn the_job_front_cancels_and_gives_up_as_its_module_doc_says() {
     front.submit(ItemId(0), &Work::whole_host(RUN), FarmTime::default());
     let (_, _, bodies) = poll(&mut front, 0, vec![status(422)]);
     assert_eq!(bodies[0]["spec"]["needs"], json!({ "wholeHost": true }));
+}
+
+/// Asserts that the job front sends an item's own resources: the submit asks for the work's
+/// cpu and memory (as decimal strings, and no GPU) with its give-up time in whole seconds
+/// as the wall limit, and runs `sim-run` for the work's duration in milliseconds under the
+/// item's own job id. Catches a front that sends the default share, or the default give-up
+/// time, in place of what the work asks for.
+#[test]
+fn the_job_front_sends_the_works_own_resources_in_the_submit() {
+    let needs = Resources::new(500, 512, 2, Some("nvidia-h100".to_owned())).expect("resources");
+    let work = Work::run_for(RUN)
+        .needs(needs)
+        .give_up_after(Duration::from_secs(900));
+    let mut front = JobFront::new();
+    front.submit(ItemId(0), &work, FarmTime::default());
+    let (_, calls, bodies) = poll(&mut front, 0, vec![status(422)]);
+    assert_eq!(calls, ["POST /v1/jobs"]);
+    let spec = &bodies[0]["spec"];
+    assert_eq!(spec["jobId"], "sim-job-0", "{spec}");
+    assert_eq!(spec["image"], SIM_RUN_IMAGE, "{spec}");
+    assert_eq!(spec["args"], json!([RUN.as_millis().to_string()]), "{spec}");
+    let needs = json!({ "cpuMillis": "500", "memoryBytes": "512" });
+    assert_eq!(spec["needs"], needs, "{spec}");
+    assert_eq!(spec["wallLimitSeconds"], "900", "{spec}");
+}
+
+/// Asserts that each kind of call a front keeps an answer for has its own stable name:
+/// `queue` for the submit, `read` for a read of the job or its result, `cancel` for the
+/// stop. Catches two kinds that share a name, which a report of the answers would then
+/// run together.
+#[test]
+fn each_kind_of_call_has_its_own_name() {
+    let kinds = [CallKind::Queue, CallKind::Read, CallKind::Cancel];
+    let names: Vec<&str> = kinds.into_iter().map(CallKind::name).collect();
+    assert_eq!(names, ["queue", "read", "cancel"]);
 }

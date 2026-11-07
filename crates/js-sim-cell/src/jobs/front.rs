@@ -1,5 +1,5 @@
 //! The job front: one unit of work as a job, through the job service's HTTP/JSON gateway
-//! (`/v1/jobs`), which a server of [`crate::ServerSpec::jobs`] serves in process.
+//! (`/v1/jobs`), which every cell's server serves in process.
 //!
 //! An item submits one job under an id of its own, `sim-job-<n>` ([`JOB_PREFIX`] and the
 //! item's number), so a submit sent again is the same job (the service answers a repeat
@@ -63,9 +63,6 @@ use crate::front::{Answer, CallKind, ClientPort, Front, FrontFactory, POLL_EVERY
 use crate::observe::{ClientEvent, HowEnded, ItemId};
 use crate::server::CLIENT_TOKEN;
 use crate::work::Work;
-
-#[cfg(doc)]
-use crate::ServerSpec;
 
 /// What the id of an item's job starts with; the item's number follows.
 pub const JOB_PREFIX: &str = "sim-job-";
@@ -318,8 +315,8 @@ impl JobFront {
         Self::default()
     }
 
-    /// The factory of job fronts, for [`crate::Scenario::front`]: its server must be one of
-    /// [`ServerSpec::jobs`] ([`crate::Scenario::over_jobs`] sets both).
+    /// The factory of job fronts, for [`crate::Scenario::front`]: the default front of a
+    /// scenario.
     #[must_use]
     pub fn factory() -> FrontFactory {
         FrontFactory::new(|_| Box::new(JobFront::new()))

@@ -15,9 +15,7 @@
 //!   ([`ReadyReport`]), each start delivered ([`StartSeen`]) and each stop or cancel that
 //!   reached a running run ([`StopSeen`]);
 //! - the server's list of hosts ([`ServerView`]), as the cell last read it. The cell
-//!   fills it from the registry's host views, never through the JSON route, and keeps
-//!   beside it each booking the listing showed, from the read that first showed it to
-//!   the read that no longer did ([`Booking`]).
+//!   fills it from the registry's host views, never through the JSON route.
 //!
 //! Some facts are carried for invariants that later parts add and no check here reads
 //! yet: [`Ask::gives_up_at`], [`AgentTruth::completed`], [`AgentTruth::acknowledged`]
@@ -32,8 +30,8 @@
 //! [`Observations::with_ready`] and the rest) is public test support: the negative tests of every invariant family
 //! build their histories with it.
 
+use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use js_jobs::{AllocationId, JobId};
@@ -374,21 +372,6 @@ pub struct ServerHost {
     pub tail_end: Option<FarmTime>,
 }
 
-/// One lease the server's listing booked on one host, from the read of the listing that
-/// first showed it there to the read that no longer did: how long the server booked it,
-/// to within the time between two reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Booking {
-    /// The host.
-    pub host: HostId,
-    /// The lease booked there.
-    pub lease: LeaseId,
-    /// The first read that showed it.
-    pub from: FarmTime,
-    /// The first read that no longer showed it; `None` while it is booked.
-    pub until: Option<FarmTime>,
-}
-
 /// The server's own list of hosts, as the cell last read it from the registry.
 ///
 /// The cell re-reads it at every client call and once per virtual second, not at
@@ -421,15 +404,6 @@ impl ServerView {
     }
 }
 
-/// Each lease `view` books, with its host.
-fn booked(view: &ServerView) -> BTreeSet<(HostId, LeaseId)> {
-    let pairs = view.hosts.iter().flat_map(|(host, listed)| {
-        let leases = listed.leases.iter();
-        leases.map(move |lease| (host.clone(), *lease))
-    });
-    pairs.collect()
-}
-
 /// Everything the cell observes at one virtual time.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Observations {
@@ -455,9 +429,6 @@ pub struct Observations {
     pub kills: Vec<Killed>,
     /// The server's list of hosts.
     pub server: ServerView,
-    /// Every booking the server's listing showed, in the order the reads first showed
-    /// them; only ever appended to, and ended.
-    pub bookings: Vec<Booking>,
     /// Every ready report an agent process sent, oldest first; only ever appended.
     pub ready: Vec<ReadyReport>,
     /// Every start that reached an agent process, oldest first; only ever appended.
@@ -487,27 +458,6 @@ pub struct Observations {
 }
 
 impl Observations {
-    /// Takes `view` as the server's listing read at `now`: each booking it shows that the
-    /// listing before did not is appended to [`Observations::bookings`] from `now`, and
-    /// each one the listing before showed that it does not is ended at `now`.
-    pub(crate) fn read_listing(&mut self, view: ServerView, now: FarmTime) {
-        let old = std::mem::replace(&mut self.server, view);
-        let (was, is) = (booked(&old), booked(&self.server));
-        let new = is.difference(&was).map(|(host, lease)| Booking {
-            host: host.clone(),
-            lease: *lease,
-            from: now,
-            until: None,
-        });
-        self.bookings.extend(new);
-        for (host, lease) in was.difference(&is) {
-            let mut open = self.bookings.iter_mut().rev();
-            let open = open.find(|booking| (&booking.host, booking.lease) == (host, *lease));
-            open.into_iter()
-                .for_each(|booking| booking.until = Some(now));
-        }
-    }
-
     /// Nothing observed, at virtual time zero, with no fault ever active.
     #[must_use]
     pub fn quiet() -> Self {

@@ -473,7 +473,8 @@ impl Process {
     /// server cannot have seen it listed.
     pub(super) fn runs_unlisted(&self) -> bool {
         let running = self.agent.running();
-        running.iter().any(|run| !self.book.listed.contains(run))
+        let runs = running.iter().any(|run| !self.book.listed.contains(run));
+        runs || self.jobs.as_ref().is_some_and(PerJob::runs_unlisted)
     }
 
     fn reconnect(&mut self) {

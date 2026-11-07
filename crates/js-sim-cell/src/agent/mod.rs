@@ -121,7 +121,7 @@
 //! # Jobs
 //!
 //! A fake agent whose hello reports [`js_agent_wire::PER_JOB_CAPABILITY`] (the cell's fake
-//! agents do for a server of [`crate::ServerSpec::jobs`]) also speaks the per-job messages:
+//! agents do) also speaks the per-job messages:
 //! it acts on `JobStart` and `JobStop`, lists its jobs with their state in every heartbeat,
 //! sends each result until an answer acknowledges it, and lists the ids it retired until
 //! an answer acknowledges them, with a second [`FakeAgent`], keyed by job id, as the
@@ -157,7 +157,6 @@ mod process;
 mod real;
 
 pub use exclusive::Prepare;
-pub(crate) use process::lease_id;
 use process::{Answer, Process};
 
 /// The image of a run that ends by itself: its first argument is how long it runs, in

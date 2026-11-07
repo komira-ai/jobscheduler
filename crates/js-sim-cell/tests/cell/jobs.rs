@@ -50,5 +50,4 @@ pub fn jobs_on_a_lossy_wire() -> Scenario {
         .at(LOSSY_FOR, set_bus_faults(Faults::default()))
         .expect(Expect::all_items_terminal())
         .settle_within(SETTLE)
-        .over_jobs()
 }
